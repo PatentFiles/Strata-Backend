@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { db, pool, v13StrategyParameterSetTable } from "@workspace/db";
 import {
   V13_CHAMPION_PARAMETER_HASH,
+  V13_ENTRY_POLICY_VERSION,
   V13_CHAMPION_PARAMETER_SET,
   V13_RESEARCH_PRESETS,
   assertV13HistoricalTuningCandidate,
@@ -199,6 +200,27 @@ test("later recrosses never manufacture another challenger entry", () => {
   assert.equal(challenger.qualifyingTrigger, true);
   assert.equal(challenger.firstCross, false);
   assert.equal(challenger.wouldEnter, false);
+});
+
+test("v2 later qualified champion crossing is visible to zero-authority research without relabeling first cross", () => {
+  const input = { ...source(.49, 10), entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
+    qualifyingTrigger: true, strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
+    strategyParameterHash: V13_CHAMPION_PARAMETER_HASH };
+  const prior = { signedBuffer: -1, crossingKey: "KXBTC15M-TEST:first", crossingConsumed: false };
+  const set = shadowSet("v2-C50", { ...V13_CHAMPION_PARAMETER_SET.parameters,
+    scoutMaxOffer: .50, confirmMaxOffer: .50 });
+  const candidate = buildV13ShadowOpportunity(input, prior, set);
+  assert.equal(candidate.firstCross, false);
+  assert.equal(candidate.wouldEnter, true);
+  for (const changed of [
+    { qualifyingTrigger: false }, { freshCross: false }, { secondsRemaining: 0 },
+    { strategyParameterSetId: null }, { strategyParameterHash: null },
+    { entryPolicyVersion: "unreviewed" }, { downOffer: null },
+  ]) {
+    assert.equal(buildV13ShadowOpportunity({ ...input, ...changed }, prior, set).wouldEnter, false);
+  }
+  assert.equal(buildV13ShadowOpportunity(input, { ...prior, crossingConsumed: true }, set).wouldEnter, false);
+  assert.equal(buildV13ShadowOpportunity(input, { ...prior, signedBuffer: 1 }, set).wouldEnter, false);
 });
 
 test("research parameter hash mismatch fails closed", () => {

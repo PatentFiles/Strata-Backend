@@ -13,6 +13,7 @@ import {
 } from "../lib/v13-production/liveControl";
 import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
 import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
+import { createDatabaseStakePort } from "../lib/strata/configuredStakeStore";
 import { createStrataRouter } from "./strataRouter";
 
 let keys: ReturnType<typeof remoteJwks> | null = null;
@@ -50,6 +51,7 @@ export default createStrataRouter({
   fills: readProductionFills,
   trades: readProductionTrades,
   latestTrade: readLatestProductionTrade,
+  stake: createDatabaseStakePort(() => supervisor().view().workerRunning),
   forwardTestStatus: () => readForwardTestStatus(),
   forwardTestHistory: () => readForwardTestHistory(),
   phase4State: () => getPhase4State(),

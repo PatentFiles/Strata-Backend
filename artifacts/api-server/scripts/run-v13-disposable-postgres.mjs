@@ -1,6 +1,6 @@
-import { mkdtempSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, delimiter } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -10,10 +10,13 @@ import { fileURLToPath } from "node:url";
 const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
-const candidates = ["/usr/lib/postgresql/16/bin", "/usr/lib/postgresql/17/bin", "/usr/lib/postgresql/15/bin"];
-if (existsSync("/nix/store")) candidates.push(...readdirSync("/nix/store")
+const candidates = [...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
+  "/usr/lib/postgresql/16/bin", "/usr/lib/postgresql/17/bin", "/usr/lib/postgresql/15/bin"];
+const available = p => existsSync(join(p, "initdb")) && existsSync(join(p, "pg_ctl"));
+// Prefer installed tools; enumerating a large Nix store can stall before initdb.
+if (!candidates.some(available) && existsSync("/nix/store")) candidates.push(...readdirSync("/nix/store")
   .filter(n => /-postgresql-16\./.test(n)).map(n => `/nix/store/${n}/bin`));
-const bin = candidates.find(p => existsSync(join(p, "initdb")) && existsSync(join(p, "pg_ctl")));
+const bin = candidates.find(available);
 if (!bin) throw new Error("PostgreSQL binaries required; no connected-database fallback exists");
 const root = mkdtempSync(join(tmpdir(), "v13-disposable-"));
 const server = createServer();
@@ -22,7 +25,29 @@ const port = server.address().port;
 await new Promise(resolve => server.close(resolve));
 const db = fullSuite ? "v13_ci" : `v13_disposable_${Date.now()}`;
 const url = `postgresql://${user}@127.0.0.1:${port}/${db}`;
+const fence = join(root, "offline-network-fence.cjs");
+writeFileSync(fence, `
+const net = require("node:net");
+const connect = net.Socket.prototype.connect;
+const local = h => ["127.0.0.1", "::1", "[::1]", "localhost"].includes(h);
+net.Socket.prototype.connect = function(...args) {
+  let o = args[0]; if (Array.isArray(o)) o = o[0];
+  const host = (typeof o === "object" && o !== null ? o.host || o.hostname : null)
+    || (typeof args[1] === "string" ? args[1] : "localhost");
+  if (!local(host)) throw Error("offline_external_socket_denied");
+  return connect.apply(this, args);
+};
+const realFetch = globalThis.fetch;
+globalThis.fetch = (...args) => {
+  const u = new URL(typeof args[0] === "string" || args[0] instanceof URL ? args[0] : args[0].url);
+  if (!local(u.hostname)) throw Error("offline_external_fetch_denied");
+  return realFetch(...args);
+};
+`);
 const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
+  // Avoid host timezone autodetection during initdb in restricted containers.
+  TZ: "UTC", PGTZ: "UTC",
+  NODE_OPTIONS: `--require=${fence}`,
   PGOPTIONS: "-c statement_timeout=30000 -c lock_timeout=10000",
   MICRO_LIVE_TEST_TIMEOUT_MS: "45000",
   NODE_PATH: join(api, "node_modules"),
@@ -36,7 +61,8 @@ function run(command, args, options = {}) {
 }
 let started = false;
 try {
-  run(join(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync"]);
+  run(join(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
+    "--set=shared_buffers=16MB"]);
   run(join(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
     `-h 127.0.0.1 -p ${port} -k ${root}`, "-w", "start"]);
   started = true;

@@ -1,4 +1,5 @@
 export * from "./v13Production";
+export * from "./strataConfiguredStake";
 // Export your models here. Add one export per file
 // export * from "./posts";
 //

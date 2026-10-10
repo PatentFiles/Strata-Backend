@@ -43,6 +43,8 @@ export type V13LiveMoneyEntryPreflightInput = {
   openPositions: number;
   realizedDailyLossCents: number;
   realizedTotalLossCents: number;
+  /** Operator target. The approved policy maximum stays the hard ceiling. */
+  configuredStakeCents?: number;
 };
 
 export type V13LiveMoneyEntryPreflightResult =
@@ -89,11 +91,18 @@ export function preflightV13LiveMoneyEntry(
   ) {
     return { ok: false, reason: "live_money_strategy_identity_not_champion" };
   }
+  const configured = input.configuredStakeCents;
+  if (configured !== undefined && (
+    !Number.isSafeInteger(configured) || configured < 1 ||
+    configured > input.policy.maxEntryStakeCents
+  )) {
+    return { ok: false, reason: "live_money_configured_stake_invalid" };
+  }
   const plan = planV13IocEntry({
     signal: input.signal,
     direction: input.direction,
     referenceOffer: input.referenceOffer,
-    maxStakeCents: input.policy.maxEntryStakeCents,
+    maxStakeCents: configured ?? input.policy.maxEntryStakeCents,
     bestAskDollars: input.bestAskDollars,
     askLevels: input.askLevels,
   });
@@ -134,6 +143,9 @@ export function preflightV13LiveMoneyEntry(
     fullDepthProven: true,
   });
   if (!risk.ok) return risk;
+  if (configured !== undefined && plan.plan.worstCaseGrossCents > configured) {
+    return { ok: false, reason: "live_money_configured_stake_exceeded" };
+  }
 
   return {
     ok: true,

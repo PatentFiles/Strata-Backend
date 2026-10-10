@@ -74,6 +74,7 @@ function ready(): CommissioningSnapshot {
     exists: true, id: "policy-1", approved: true,
     strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
     strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
+    entryPolicyVersion: null,
     hashMatches: true, missingFields: [],
   };
   snapshot.approvedMinimumExitMicros = 400000;
@@ -229,6 +230,7 @@ function memoryPort(initial: CommissioningSnapshot) {
         exists: true, id: "policy-1", approved: true,
         strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
         strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
+        entryPolicyVersion: null,
         hashMatches: true, missingFields: [],
       };
       return { status: "APPROVED", reason: "policy_hash_recomputed", policyHash };

@@ -11,6 +11,8 @@ export const forwardTestWindowTable = pgTable("forward_test_windows", {
   previousSide: text("previous_side"),
   currentSide: text("current_side"),
   previousBuffer: doublePrecision("previous_buffer"),
+  // No default/backfill: existing windows retain historical/unversioned policy.
+  entryPolicyVersion: text("entry_policy_version"),
   firstCrossOccurred: boolean("first_cross_occurred").notNull().default(false),
   crossingConsumed: boolean("crossing_consumed").notNull().default(false),
   crossingKey: text("crossing_key"),

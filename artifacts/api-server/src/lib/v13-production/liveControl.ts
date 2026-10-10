@@ -9,7 +9,8 @@ import {
   v13ProductionIntentTable,
   v13ProductionPositionTable,
 } from "@workspace/db";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { entryPolicyRuntimeState } from "../strata/configuredStake";
 import { fundingAnchorFromRow } from "../microLivePairBoundary";
 import { ProductionExecutor } from "./executor";
 import { ProductionLedger } from "./ledger";
@@ -174,12 +175,11 @@ export async function readProductionStatus(control: ProductionView) {
     unresolvedIntentCount: blockers?.unresolvedIntentCount ?? 0,
     unknownIntentCount: blockers?.unknownIntentCount ?? 0,
     lastProductionError: view.lastProductionError,
-    championId: V13_CHAMPION_PARAMETER_SET.id,
-    parameterHash: V13_CHAMPION_PARAMETER_HASH,
     reviewedCommit: REVIEWED_RELEASE.commit,
     reviewedRepository: REVIEWED_RELEASE.repository,
     reviewedBranch: REVIEWED_RELEASE.branch,
     maxEntryStakeCents,
+    ...entryPolicyRuntimeState(),
     scoutMaxCents: V13_CHAMPION_PARAMETER_SET.parameters.scoutMaxOffer * 100,
     confirmMaxCents: V13_CHAMPION_PARAMETER_SET.parameters.confirmMaxOffer * 100,
     asOf: new Date().toISOString(),

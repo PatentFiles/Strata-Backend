@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, evaluateV13Strategy } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION,
+  V13_LEGACY_ENTRY_POLICY, previousBufferFromSide, evaluateV13Strategy } from "@workspace/v13-strategy";
 import { preflightV13LiveMoneyEntry } from "../v13LiveMoneyEntryPreflight";
 import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
@@ -15,6 +16,30 @@ export class ProductionExecutor {
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
   constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
+
+  private async assertEntryPolicyWindow(tx: PoolClient, source: {
+    market_ticker: string; target: number; crossing_key: string;
+  }): Promise<void> {
+    const w = (await tx.query(`SELECT entry_policy_version,target,crossing_key,
+      crossing_consumed,starts_at,ends_at FROM forward_test_windows
+      WHERE ticker=$1 FOR SHARE`, [source.market_ticker])).rows[0];
+    requireProof(w && w.entry_policy_version === V13_ENTRY_POLICY_VERSION &&
+      w.target === source.target && w.crossing_key === source.crossing_key &&
+      w.crossing_consumed === true &&
+      w.starts_at instanceof Date && w.starts_at.getTime() <= this.now() &&
+      w.ends_at instanceof Date && w.ends_at.getTime() > this.now(),
+      "production_entry_window_or_claim_not_current");
+  }
+
+  private async readConfiguredStake(tx: PoolClient): Promise<{ cents: number; revision: number }> {
+    const row = (await tx.query(`SELECT configured_stake_cents, revision
+      FROM strata_configured_stake WHERE id='production' FOR UPDATE`)).rows[0];
+    const cents = Number(row?.configured_stake_cents);
+    const revision = Number(row?.revision);
+    requireProof(Number.isSafeInteger(cents) && cents >= 1 &&
+      Number.isSafeInteger(revision) && revision >= 1, "configured_stake_missing");
+    return { cents, revision };
+  }
 
   async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false): Promise<void> {
     requireProof(a.commissioned && !a.kill_switch && a.execution_enabled &&
@@ -74,6 +99,18 @@ export class ProductionExecutor {
       if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
       await this.gate(tx, a);
       const p = await this.ledger.policy(tx, a);
+      const sourcePolicy = source.entry_policy_version ?? V13_LEGACY_ENTRY_POLICY;
+      requireProof(
+        (sourcePolicy === V13_ENTRY_POLICY_VERSION || sourcePolicy === V13_LEGACY_ENTRY_POLICY) &&
+        sourcePolicy === (p.entryPolicyVersion ?? V13_LEGACY_ENTRY_POLICY),
+        "production_entry_policy_revision_not_approved",
+      );
+      if (sourcePolicy === V13_ENTRY_POLICY_VERSION) {
+        requireProof(source.crossing_consumed &&
+          source.crossing_key === `${source.market_ticker}:first`,
+          "production_entry_policy_claim_not_proven");
+        await this.assertEntryPolicyWindow(tx, source);
+      }
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
       requireProof(sourceAge >= 0 && sourceAge <= p.maxQuoteAgeMs, "production_evaluation_stale");
       const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
@@ -83,7 +120,7 @@ export class ProductionExecutor {
           source[k] + sourceAge <= p.maxQuoteAgeMs), "production_source_feed_stale_or_changed");
       const classified = evaluateV13Strategy({
         marketTicker: source.market_ticker, btcPrice: source.btc_price, target: source.target,
-        previousBuffer: source.previous_side === "UP" ? 1 : source.previous_side === "DOWN" ? -1 : null,
+        previousBuffer: previousBufferFromSide(source.previous_side),
         velocity: source.velocity, upOffer: source.up_offer, downOffer: source.down_offer,
         freshness: "current", position: null,
       });
@@ -102,6 +139,8 @@ export class ProductionExecutor {
       const b = balances.rows[0];
       const capital = BigInt(p.capitalLimitCents) * 10_000n - money(b.basis) - money(a.reserved_micros) - money(b.total_loss);
       requireProof(capital >= 0n, "production_capital_exhausted");
+      const stake = await this.readConfiguredStake(tx);
+      requireProof(stake.cents <= p.maxEntryStakeCents, "configured_stake_above_approved_maximum");
       const pf = preflightV13LiveMoneyEntry({
         policy: p, strategyParameterSetId: source.strategy_parameter_set_id, strategyParameterHash: source.strategy_parameter_hash,
         signal: source.signal, direction: source.direction, referenceOffer: source.entry_offer,
@@ -111,12 +150,16 @@ export class ProductionExecutor {
         capitalRemainingCents: cents(capital), openPositions: Number(b.open),
         realizedDailyLossCents: Math.ceil(Number(money(b.daily_loss)) / 10_000),
         realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
+        configuredStakeCents: stake.cents,
       });
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
       const id = randomUUID(), clientOrderId = `v13p-${id}`;
       const request: Request = { market: source.market_ticker, side, action: "BUY", contracts: pf.plan.contracts,
         limitMicros: Math.round(pf.plan.limitPrice * 1_000_000), timeInForce: "IOC", reduceOnly: false, clientOrderId };
-      const decision = { source, book, preflight: pf, policy: p, identity: identity(a) };
+      const decision = {
+        source, book, preflight: pf, policy: p, identity: identity(a),
+        configuredStakeCents: stake.cents, stakeRevision: stake.revision,
+      };
       const cap = digest({ id, request, decision, policyHash: pf.policyHash, fee: pf.feeEvidenceFingerprint });
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
       a.reserved_micros = String(money(a.reserved_micros) + reservation);
@@ -224,10 +267,20 @@ export class ProductionExecutor {
             this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
             this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs,
           "production_final_fee_or_quote_changed");
+          let entryStake = p.maxEntryStakeCents;
+          if (i.kind === "ENTRY") {
+            const pinnedStake = i.decision.configuredStakeCents;
+            const pinnedRevision = i.decision.stakeRevision;
+            const stake = await this.readConfiguredStake(tx);
+            requireProof(typeof pinnedStake === "number" && pinnedStake === stake.cents &&
+              typeof pinnedRevision === "number" && pinnedRevision === stake.revision &&
+              stake.cents <= p.maxEntryStakeCents, "production_pinned_stake_changed_or_unproven");
+            entryStake = pinnedStake;
+          }
           const plan = i.kind === "ENTRY" ? planV13IocEntry({
             signal: (i.decision.source as { signal: "SCOUT" | "CONFIRM" }).signal,
             direction: i.side === "YES" ? "UP" : "DOWN", referenceOffer: (i.decision.source as { entry_offer: number }).entry_offer,
-            maxStakeCents: p.maxEntryStakeCents, bestAskDollars: book.bestAskDollars, askLevels: book.asks,
+            maxStakeCents: entryStake, bestAskDollars: book.bestAskDollars, askLevels: book.asks,
           }) : planV13IocExit({ ownedContracts: i.request.contracts,
             bestBidDollars: book.bestBidDollars, bidLevels: book.bids,
             minimumExitPrice: (i.decision.minimumExitPrice as number) });
@@ -262,6 +315,9 @@ export class ProductionExecutor {
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
                 source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
             "production_final_source_changed_or_expired");
+            if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
+              await this.assertEntryPolicyWindow(tx, source);
+            }
           }
         };
         await final();

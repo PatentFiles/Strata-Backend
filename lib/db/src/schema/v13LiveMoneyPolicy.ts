@@ -18,6 +18,8 @@ export const v13LiveMoneyPolicyTable = pgTable("v13_live_money_policy", {
   supersedesPolicyId: text("supersedes_policy_id"),
   state: text("state").notNull().default("DRAFT"),
   strategyVersion: text("strategy_version").notNull().default("V1.3"),
+  // New entry behavior needs explicit separately hashed approval; no auto-upgrade.
+  entryPolicyVersion: text("entry_policy_version"),
   strategyParameterSetId: text("strategy_parameter_set_id").notNull()
     .default("v13-champion-2-c52-confirm53"),
   strategyParameterHash: text("strategy_parameter_hash").notNull()

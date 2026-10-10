@@ -1,3 +1,4 @@
+export * from "./entryPolicy";
 import {
   V13_CHAMPION_PARAMETER_SET,
   assertV13StrategyParameters,

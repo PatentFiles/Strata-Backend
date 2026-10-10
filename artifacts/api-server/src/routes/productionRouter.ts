@@ -10,6 +10,10 @@ export interface ProductionHttpDeps {
   fills: () => Promise<unknown>;
   trades: () => Promise<unknown>;
   latestTrade: () => Promise<unknown>;
+  stake?: {
+    read: () => Promise<unknown>;
+    update: (body: unknown) => Promise<{ status: number; body: unknown }>;
+  };
 }
 
 const requireProductionAdmin: RequestHandler = (req, res, next) => {
@@ -79,6 +83,26 @@ export function createProductionRouter(
   router.get("/production/trades", authorize, async (_req, res) => {
     try { res.json(await deps.trades()); }
     catch { res.status(503).json({ error: "Production trades are unavailable" }); }
+  });
+  router.get("/production/stake", authorize, async (_req, res) => {
+    if (!deps.stake) {
+      res.status(503).json({ error: "Configured stake is unavailable" });
+      return;
+    }
+    try { res.json(await deps.stake.read()); }
+    catch { res.status(503).json({ error: "Configured stake is unavailable" }); }
+  });
+  router.put("/production/stake", authorize, async (req, res) => {
+    if (!deps.stake) {
+      res.status(503).json({ error: "Configured stake is unavailable" });
+      return;
+    }
+    try {
+      const result = await deps.stake.update(req.body);
+      res.status(result.status).json(result.body);
+    } catch {
+      res.status(503).json({ error: "Configured stake is unavailable" });
+    }
   });
   router.get("/production/latest-trade", authorize, async (_req, res) => {
     try { res.json(await deps.latestTrade()); }

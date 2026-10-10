@@ -5,6 +5,7 @@ import { clerkMiddleware } from "@clerk/express";
 import { publishableKeyFromHost } from "@clerk/shared/keys";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { v13DevelopmentStagingMiddleware } from "./lib/v13DevelopmentStaging";
 import {
   CLERK_PROXY_PATH,
   clerkProxyMiddleware,
@@ -22,6 +23,7 @@ import {
 } from "./routes/pairCommissioningApproval";
 
 const app: Express = express();
+app.use(v13DevelopmentStagingMiddleware);
 
 // This development-only route must run before the reflected CORS policy and
 // pino-http. Neither its rendered secret page nor its response is logged.

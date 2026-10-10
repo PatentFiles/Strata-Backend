@@ -7,6 +7,7 @@ import {
 } from "@workspace/db";
 import {
   evaluateV13Strategy,
+  V13_ENTRY_POLICY_VERSION, entryCrossAvailable,
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
 } from "@workspace/v13-strategy";
@@ -83,6 +84,9 @@ function feedError(
     return "Kalshi market ticker, target, end time, or snapshot is missing or stale";
   }
   if (!hasOpenPosition && (
+    market.startsAt === null || !Number.isFinite(market.startsAt.getTime()) ||
+    market.startsAt.getTime() > now.getTime() ||
+    market.startsAt.getTime() >= market.endsAt.getTime() ||
     (market.status !== "open" && market.status !== "active") ||
     market.endsAt.getTime() <= now.getTime() ||
     !validOffer(market.yesAsk) || !validOffer(market.noAsk)
@@ -215,6 +219,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     }
     await tx.insert(forwardTestWindowTable).values({
       ticker: market.ticker, target, startsAt: market.startsAt, endsAt: market.endsAt,
+      entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
     }).onConflictDoNothing();
     const [persistedWindow] = await tx.select().from(forwardTestWindowTable)
       .where(eq(forwardTestWindowTable.ticker, market.ticker)).for("update").limit(1);
@@ -261,7 +266,9 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         crossingAt: now,
       }).where(eq(forwardTestWindowTable.ticker, market.ticker));
     }
-    const actionable = !openPosition && firstCross && decision.qualifyingTrigger &&
+    const actionable = !openPosition &&
+      entryCrossAvailable(persistedWindow.entryPolicyVersion, persistedWindow, decision.freshCross) &&
+      decision.qualifyingTrigger &&
       decision.entrySideOffer !== null && validOffer(market.yesAsk) && validOffer(market.noAsk) &&
       (decision.signal === "SCOUT" || decision.signal === "CONFIRM");
     const evaluationId = randomUUID();
@@ -269,6 +276,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       id: evaluationId, evaluatedAt: now, strategyVersion: "V1.3",
       strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
       strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
+      entryPolicyVersion: persistedWindow.entryPolicyVersion,
       marketTicker: market.ticker, btcPrice: btc.price, target,
       signedBuffer: decision.buffer, absoluteBuffer: Math.abs(decision.buffer),
       velocity, upBid: market.yesBid, upOffer: market.yesAsk,
@@ -343,6 +351,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         strategyVersion: "V1.3",
         strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
         strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
+        entryPolicyVersion: persistedWindow.entryPolicyVersion,
         direction: side, triggerType: decision.signal,
         enteredAt: now, entryOffer: decision.entrySideOffer,
         entryBid,
@@ -410,7 +419,10 @@ export function isForwardTestWorkerEnabled(
 
 export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicForwardTestFeeds) {
   const production = process.env.NODE_ENV === "production";
-  if (!isForwardTestWorkerEnabled(
+  // Staged source must remain inert across an incidental process restart.
+  // A separate reviewed schema/runtime rollout must explicitly opt in.
+  if (process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED !== V13_ENTRY_POLICY_VERSION ||
+      !isForwardTestWorkerEnabled(
     process.env.NODE_ENV,
     process.env.FORWARD_TEST_WORKER_ENABLED,
     process.env.FORWARD_TEST_PRODUCTION_WORKER_ENABLED,

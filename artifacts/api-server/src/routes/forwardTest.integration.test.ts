@@ -34,6 +34,7 @@ function historyFixture(index: number, pnl: number, status: "CLOSED" | "SETTLED"
     strategyVersion: "V1.3",
     strategyParameterSetId: "v13-champion-2-c52-confirm53",
     strategyParameterHash: "314e7b49f5cd9782175dbb88fb7a05bbf80bb4c5e1458d0d48a15348b35f6161",
+    entryPolicyVersion: null,
     direction: index % 2 ? "UP" : "DOWN",
     triggerType: index % 2 ? "SCOUT" : "CONFIRM",
     enteredAt: new Date(`2026-09-24T05:${String(index).padStart(2, "0")}:00Z`),

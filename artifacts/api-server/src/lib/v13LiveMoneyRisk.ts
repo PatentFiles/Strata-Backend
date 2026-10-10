@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
+  V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY,
 } from "@workspace/v13-strategy";
 
 export const V13_MAX_ENTRY_STAKE_CENTS = 500_000;
@@ -14,6 +15,7 @@ export type V13ApprovedLiveMoneyPolicy = {
   strategyVersion: string;
   strategyParameterSetId: string;
   strategyParameterHash: string;
+  entryPolicyVersion?: string | null;
   championSelectionReviewId: string | null;
   championSelectionEvidenceHash: string | null;
   championSelectedBy: string | null;
@@ -72,6 +74,8 @@ export function computeV13LiveMoneyPolicyHash(
     strategyVersion: policy.strategyVersion,
     strategyParameterSetId: policy.strategyParameterSetId,
     strategyParameterHash: policy.strategyParameterHash,
+    // Preserve historical policy hashes byte-for-byte; v2 is explicitly bound.
+    ...(policy.entryPolicyVersion == null ? {} : { entryPolicyVersion: policy.entryPolicyVersion }),
     championSelectionReviewId: policy.championSelectionReviewId,
     championSelectionEvidenceHash: policy.championSelectionEvidenceHash,
     championSelectedBy: policy.championSelectedBy,
@@ -109,6 +113,8 @@ export function evaluateV13LiveMoneyRisk(
 ): V13LiveMoneyRiskDecision {
   const p = input.policy;
   if (p.state !== "APPROVED" || p.strategyVersion !== "V1.3" ||
+      (p.entryPolicyVersion != null && p.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION &&
+       p.entryPolicyVersion !== V13_LEGACY_ENTRY_POLICY) ||
       p.strategyParameterSetId !== V13_CHAMPION_PARAMETER_SET.id ||
       p.strategyParameterHash !== V13_CHAMPION_PARAMETER_HASH ||
       p.entryTimeInForce !== "IOC" ||

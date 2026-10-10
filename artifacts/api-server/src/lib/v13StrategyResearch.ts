@@ -10,6 +10,8 @@ import {
 } from "@workspace/db";
 import {
   V13_RESEARCH_PRESETS,
+  V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY,
+  V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   assertV13StrategyParameters,
   canonicalV13StrategyParameters,
   evaluateV13StrategyWithParameters,
@@ -33,11 +35,16 @@ export type V13ShadowOpportunitySource = {
   freshCross: boolean;
   crossingKey: string | null;
   evaluationSource: string;
+  entryPolicyVersion?: string | null;
+  qualifyingTrigger?: boolean;
+  strategyParameterSetId?: string | null;
+  strategyParameterHash?: string | null;
 };
 
 export type V13ShadowOpportunityPrevious = {
   signedBuffer: number;
   crossingKey: string | null;
+  crossingConsumed?: boolean;
 } | null;
 
 export type V13ShadowOpportunity = {
@@ -311,8 +318,19 @@ export function buildV13ShadowOpportunity(
   }
 
   const firstCross = Boolean(source.freshCross && previous?.crossingKey == null);
+  // v2 shadows remain subsets of a qualified champion paper entry, never
+  // independent authority. Previous consumption survives close/restart.
+  const policy = source.entryPolicyVersion ?? V13_LEGACY_ENTRY_POLICY;
+  const entryAvailable = policy === V13_ENTRY_POLICY_VERSION
+    ? source.qualifyingTrigger === true && previous?.crossingConsumed === false &&
+      source.strategyParameterSetId === V13_CHAMPION_PARAMETER_SET.id &&
+      source.strategyParameterHash === V13_CHAMPION_PARAMETER_HASH
+    : policy === V13_LEGACY_ENTRY_POLICY && firstCross;
   const wouldEnter = Boolean(
-    firstCross &&
+    entryAvailable && source.freshCross && decision.freshCross &&
+    source.secondsRemaining !== null && source.secondsRemaining > 0 &&
+    source.upOffer !== null && source.upOffer > 0 && source.upOffer <= 1 &&
+    source.downOffer !== null && source.downOffer > 0 && source.downOffer <= 1 &&
     decision.qualifyingTrigger &&
     (decision.signal === "SCOUT" || decision.signal === "CONFIRM") &&
     decision.entrySideOffer !== null &&
@@ -388,10 +406,15 @@ export async function recordV13ShadowOpportunities(
         freshCross: source.freshCross,
         crossingKey: source.crossingKey,
         evaluationSource: source.evaluationSource,
+        entryPolicyVersion: source.entryPolicyVersion,
+        qualifyingTrigger: source.qualifyingTrigger,
+        strategyParameterSetId: source.strategyParameterSetId,
+        strategyParameterHash: source.strategyParameterHash,
       },
       previous ? {
         signedBuffer: previous.signedBuffer,
         crossingKey: previous.crossingKey,
+        crossingConsumed: previous.crossingConsumed,
       } : null,
       parameterSet,
     );
@@ -405,6 +428,7 @@ export async function recordV13ShadowOpportunities(
       sourceEvaluationId: source.id,
       parameterSetId: opportunity.parameterSetId,
       parameterHash: opportunity.parameterHash,
+      entryPolicyVersion: source.entryPolicyVersion,
       evaluatedAt: source.evaluatedAt,
       marketTicker: source.marketTicker,
       btcPrice: source.btcPrice,

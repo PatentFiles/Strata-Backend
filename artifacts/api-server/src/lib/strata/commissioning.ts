@@ -2,7 +2,9 @@ import { createHash, createPrivateKey } from "node:crypto";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
+  V13_ENTRY_POLICY_VERSION,
 } from "@workspace/v13-strategy";
+import { ENTRY_POLICY_REVIEW_BLOCKER, entryPolicyRuntimeState } from "./configuredStake";
 import { V13_MAX_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {
   canonicalInventory,
@@ -95,6 +97,7 @@ export interface CommissioningSnapshot {
     approved: boolean;
     strategyParameterSetId: string | null;
     strategyParameterHash: string | null;
+    entryPolicyVersion: string | null;
     hashMatches: boolean;
     missingFields: string[];
   };
@@ -154,6 +157,12 @@ export interface CommissioningStatus {
   killSwitch: boolean | null;
   readyForCommissioning: boolean;
   readyForArming: boolean;
+  championId: string;
+  parameterHash: string;
+  entryPolicyVersion: string;
+  entryPolicyRuntimeApproved: boolean;
+  entryPolicyLiveBlocked: boolean;
+  entryPolicyBlockReason: string | null;
   blockers: string[];
   requiredOperatorEvidence: string[];
   kalshiConnectionStatus: KalshiConnectionStatus;
@@ -197,7 +206,7 @@ export function emptySnapshot(asOf = new Date(0).toISOString()): CommissioningSn
     transportReady: false,
     policy: {
       exists: false, id: null, approved: false, strategyParameterSetId: null,
-      strategyParameterHash: null, hashMatches: false, missingFields: [...OPERATOR_POLICY_FIELDS],
+      strategyParameterHash: null, entryPolicyVersion: null, hashMatches: false, missingFields: [...OPERATOR_POLICY_FIELDS],
     },
     account: {
       count: 0, id: null, subaccount: null, exchangeIndex: null, fingerprint: null,
@@ -265,6 +274,11 @@ export function commissioningBlockers(snapshot: CommissioningSnapshot): string[]
     blockers.push("live_money_policy_strategy_mismatch");
   } else if (!snapshot.policy.hashMatches) blockers.push("live_money_policy_hash_mismatch");
   else if (snapshot.policy.missingFields.length > 0) blockers.push("live_money_policy_operator_values_required");
+  const entryPolicy = entryPolicyRuntimeState();
+  if (!entryPolicy.entryPolicyRuntimeApproved ||
+      snapshot.policy.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION) {
+    blockers.push(ENTRY_POLICY_REVIEW_BLOCKER);
+  }
 
   if (!snapshot.cash.precisionVerified) blockers.push("cash_precision_unverified");
   if (!snapshot.minimumExit.approved || snapshot.minimumExit.source !== "operator_approved" ||
@@ -304,7 +318,8 @@ export function transportGatesReady(env: NodeJS.ProcessEnv = process.env): boole
 
 export function commissioningStatus(snapshot: CommissioningSnapshot): CommissioningStatus {
   const blockers = commissioningBlockers(snapshot);
-  const prerequisite = blockers.filter((item) => item !== "live_arming_not_part_of_commissioning");
+  const prerequisite = blockers.filter((item) =>
+    item !== "live_arming_not_part_of_commissioning" && item !== ENTRY_POLICY_REVIEW_BLOCKER);
   const accountReady = snapshot.account.count === 0 || (
     snapshot.account.count === 1 &&
     snapshot.account.commissioned !== true &&
@@ -354,6 +369,7 @@ export function commissioningStatus(snapshot: CommissioningSnapshot): Commission
     kalshiConnectionStatus: deriveKalshiConnectionStatus(snapshot, prerequisite.length === 0 && accountReady),
     asOf: snapshot.asOf,
     workerRunning: snapshot.workerRunning,
+    ...entryPolicyRuntimeState(),
   };
 }
 
@@ -367,7 +383,10 @@ export function deriveKalshiConnectionStatus(
     snapshot.account.killSwitch === false &&
     snapshot.transportReady &&
     !snapshot.workerRunning;
-  if (armed) return "READY_TO_START";
+  const entryPolicy = entryPolicyRuntimeState();
+  if (armed && entryPolicy.entryPolicyRuntimeApproved &&
+      snapshot.policy.entryPolicyVersion === V13_ENTRY_POLICY_VERSION) return "READY_TO_START";
+  if (armed) return "BLOCKED";
   if (snapshot.account.commissioned === true &&
       snapshot.account.executionEnabled === false &&
       snapshot.account.killSwitch === true) return "COMMISSIONED_DISARMED";
@@ -808,7 +827,7 @@ export function planArm(snapshot: CommissioningSnapshot, confirmation: unknown):
     ...snapshot,
     account: { ...snapshot.account, executionEnabled: false, killSwitch: true, commissioned: true },
     workerRunning: false,
-  }).filter((item) => item !== "production_account_already_armed");
+  }).filter((item) => item !== "production_account_already_armed" && item !== ENTRY_POLICY_REVIEW_BLOCKER);
   if (blockers.length > 0) return { ok: false, reason: blockers[0] ?? "stale_evidence" };
   if (snapshot.account.executionEnabled === true && snapshot.account.killSwitch === false) {
     return { ok: false, reason: "already_armed" };

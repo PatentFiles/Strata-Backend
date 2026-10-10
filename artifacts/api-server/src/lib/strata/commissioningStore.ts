@@ -170,6 +170,7 @@ export async function readCommissioningSnapshot(
       approved: decoded.state === "APPROVED",
       strategyParameterSetId: decoded.strategyParameterSetId,
       strategyParameterHash: decoded.strategyParameterHash,
+      entryPolicyVersion: decoded.entryPolicyVersion ?? null,
       hashMatches: decoded.policyHash === hash &&
         decoded.strategyParameterSetId === V13_CHAMPION_PARAMETER_SET.id &&
         decoded.strategyParameterHash === V13_CHAMPION_PARAMETER_HASH,

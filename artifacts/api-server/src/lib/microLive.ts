@@ -5727,6 +5727,12 @@ export async function executeQualifiedV13Trigger(
     !evaluation.positionWasOpen &&
     evaluation.livePositionId === null &&
     evaluation.sourcePaperEvaluationId === null;
+  // Existing micro-live approvals do not bind the revised worker entry policy.
+  // Block only new entry; actual-position exit/recovery above is unchanged.
+  if (isInitialEntry && evaluation.entryPolicyVersion != null &&
+      evaluation.entryPolicyVersion !== "v13-first-observed-cross-v1") {
+    return block("entry_policy_revision_requires_separate_review");
+  }
   if (!isChampionV13Evaluation(evaluation) || !evaluation.qualifyingTrigger ||
       !isInitialEntry ||
       (evaluation.direction !== "UP" && evaluation.direction !== "DOWN") ||

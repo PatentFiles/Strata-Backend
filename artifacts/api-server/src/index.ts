@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
+import { isV13DevelopmentStaged } from "./lib/v13DevelopmentStaging";
 import { startServerForwardTestWorker } from "./lib/forwardTestWorker";
 import { startShadowObserver } from "./lib/shadowLive";
 import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
@@ -29,6 +30,10 @@ app.listen(port, "0.0.0.0", (err) => {
 
   logger.info({ port, reviewedCommit: REVIEWED_RELEASE.commit, instances: 1 },
     "Server listening. Run one instance only so a second process cannot trade the same account.");
+  if (isV13DevelopmentStaged()) {
+    logger.info("Development staged: all background workers and exchange startup reads disabled pending revision review");
+    return;
+  }
   startFeeArtifactMonitor();
   if (process.env.NODE_ENV === "production" &&
       process.env.SHADOW_LIVE_PRODUCTION_PREFLIGHT_ENABLED === "true" &&

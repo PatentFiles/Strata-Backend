@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
 import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
+  V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { ProductionLedger, identity } from "./ledger";
 import { ProductionExecutor } from "./executor";
@@ -84,7 +85,7 @@ class SimulatedExchange implements Exchange {
 async function fixture(fault?: (stage: string) => void) {
   assert.equal((await pool.query("SHOW fsync")).rows[0].fsync, "on");
   assert.equal((await pool.query("SHOW synchronous_commit")).rows[0].synchronous_commit, "on");
-  await pool.query("TRUNCATE v13_production_observation,v13_production_event,v13_production_position,v13_production_intent,v13_production_account,forward_test_evaluations,v13_live_money_policy CASCADE");
+  await pool.query("TRUNCATE v13_production_observation,v13_production_event,v13_production_position,v13_production_intent,v13_production_account,forward_test_evaluations,forward_test_windows,v13_live_money_policy,strata_configured_stake CASCADE");
   const p = policy(), keys = Object.keys(p);
   await pool.query(`INSERT INTO v13_live_money_policy(${keys.map(k => k.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`)).join(",")})
     VALUES(${keys.map((_, i) => `$${i + 1}`).join(",")})`, Object.values(p));
@@ -92,6 +93,8 @@ async function fixture(fault?: (stage: string) => void) {
     commissioning_digest,minimum_exit_micros,fee_artifact_digest,cash_precision_verified,commissioned,
     kill_switch,execution_enabled,cash_micros,initial_cash_micros)
     VALUES('test-account',$1,1,2,$2,$3,400000,$3,true,true,false,true,100000000,100000000)`, [p.id, "b".repeat(64), "c".repeat(64)]);
+  await pool.query(`INSERT INTO strata_configured_stake(id,configured_stake_cents,revision,updated_at)
+    VALUES('production',$1,1,now())`, [p.maxEntryStakeCents]);
   const exchange = new SimulatedExchange();
   const ledger = new ProductionLedger(pool, "test-account");
   const executor = new ProductionExecutor(ledger, exchange, () => exchange.now, fault);
@@ -395,4 +398,145 @@ test("NO-side owned exit uses the actual NO position, not a YES paper signal", a
   await new ProductionWorker(f.executor).tick();
   assert.equal(f.exchange.posts[1]!.side, "NO"); assert.equal(f.exchange.posts[1]!.action, "SELL");
   f.exchange.fill(f.exchange.posts[1]!); await f.executor.reconcile(); await invariant(f.ledger);
+});
+
+test("zero departure matches shared classifier for UP and DOWN; zero touch/opening/drift never reserve", async () => {
+  for (const side of ["UP", "DOWN"]) {
+    const f = await fixture(), id = await f.source();
+    await pool.query(`UPDATE forward_test_evaluations SET previous_side='AT',
+      btc_price=$2,signed_buffer=$3,velocity=$4,direction=$5 WHERE id=$1`,
+      [id, side === "UP" ? 100010 : 99990, side === "UP" ? 10 : -10, side === "UP" ? 1 : -1, side]);
+    await f.executor.prepareEntry(id);
+    assert.ok(BigInt((await f.ledger.readAccount()).reserved_micros) > 0n);
+    assert.equal(f.exchange.posts.length, 0);
+  }
+  for (const mutation of [
+    "previous_side=NULL",
+    "previous_side='UP'",
+    "btc_price=100000,signed_buffer=0,absolute_buffer=0",
+  ]) {
+    const f = await fixture(), id = await f.source();
+    await pool.query(`UPDATE forward_test_evaluations SET ${mutation} WHERE id=$1`, [id]);
+    await assert.rejects(f.executor.prepareEntry(id), /classification_mismatch/);
+    assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+  }
+});
+test("v2 source requires separately hashed entry-policy approval and stable consumed market claim", async () => {
+  const f = await fixture(), id = await f.source(randomUUID(), "TEST-MARKET:first");
+  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2 WHERE id=$1",
+    [id, V13_ENTRY_POLICY_VERSION]);
+  await assert.rejects(f.executor.prepareEntry(id), /entry_policy_revision_not_approved/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+  const p = { ...policy(), entryPolicyVersion: V13_ENTRY_POLICY_VERSION };
+  p.policyHash = computeV13LiveMoneyPolicyHash(p);
+  await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,policy_hash=$2", [p.entryPolicyVersion, p.policyHash]);
+  await pool.query(`INSERT INTO forward_test_windows(ticker,target,entry_policy_version,
+    crossing_key,crossing_consumed,starts_at,ends_at)
+    VALUES('TEST-MARKET',100000,$1,'TEST-MARKET:first',true,$2,$3)
+    ON CONFLICT(ticker) DO UPDATE SET entry_policy_version=EXCLUDED.entry_policy_version,
+      crossing_key=EXCLUDED.crossing_key,crossing_consumed=true,
+      starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at`,
+    [V13_ENTRY_POLICY_VERSION, new Date(f.exchange.now - 1000), new Date(f.exchange.now + 900000)]);
+  await pool.query("UPDATE forward_test_windows SET crossing_consumed=false WHERE ticker='TEST-MARKET'");
+  await assert.rejects(f.executor.prepareEntry(id), /window_or_claim_not_current/);
+  await pool.query("UPDATE forward_test_windows SET crossing_consumed=true WHERE ticker='TEST-MARKET'");
+  await pool.query("UPDATE forward_test_evaluations SET crossing_consumed=false WHERE id=$1", [id]);
+  await assert.rejects(f.executor.prepareEntry(id), /claim_not_proven/);
+  await pool.query("UPDATE forward_test_evaluations SET crossing_consumed=true,crossing_key='wrong-event-key' WHERE id=$1", [id]);
+  await assert.rejects(f.executor.prepareEntry(id), /claim_not_proven/);
+  await pool.query("UPDATE forward_test_evaluations SET crossing_key='TEST-MARKET:first' WHERE id=$1", [id]);
+  const intent = await f.executor.prepareEntry(id);
+  const duplicate = await f.source(randomUUID(), "TEST-MARKET:first");
+  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2 WHERE id=$1", [duplicate, V13_ENTRY_POLICY_VERSION]);
+  assert.equal(await f.executor.prepareEntry(duplicate), intent);
+  // Approval tampering remains fenced before any simulated POST.
+  await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=NULL");
+  await assert.rejects(f.executor.dispatch(intent));
+  assert.equal(f.exchange.posts.length, 0);
+});
+test("v2 window expiry at the final fence aborts locally without POST or leaked funds", async () => {
+  const f = await fixture(), id = await f.source(randomUUID(), "TEST-MARKET:first");
+  const p = { ...policy(), entryPolicyVersion: V13_ENTRY_POLICY_VERSION };
+  p.policyHash = computeV13LiveMoneyPolicyHash(p);
+  await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,policy_hash=$2", [p.entryPolicyVersion, p.policyHash]);
+  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2 WHERE id=$1", [id, p.entryPolicyVersion]);
+  await pool.query(`INSERT INTO forward_test_windows(ticker,target,entry_policy_version,
+    crossing_key,crossing_consumed,starts_at,ends_at)
+    VALUES('TEST-MARKET',100000,$1,'TEST-MARKET:first',true,$2,$3)
+    ON CONFLICT(ticker) DO UPDATE SET entry_policy_version=EXCLUDED.entry_policy_version,
+      crossing_key=EXCLUDED.crossing_key,crossing_consumed=true,
+      starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at`,
+    [p.entryPolicyVersion, new Date(f.exchange.now - 1000), new Date(f.exchange.now + 1000)]);
+  const intent = await f.executor.prepareEntry(id);
+  f.exchange.now += 1500; // quotes/account still inside existing 15-second bound
+  await assert.rejects(f.executor.dispatch(intent), /window_or_claim_not_current/);
+  assert.equal(f.exchange.posts.length, 0);
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+});
+test("approved v2 Scout and Confirm complete simulated entry/owned exit without permitting market re-entry", async () => {
+  for (const [side, signal, buffer] of [["YES", "SCOUT", 10], ["NO", "CONFIRM", -25]] as const) {
+    const f = await fixture(), id = await f.source(randomUUID(), "TEST-MARKET:first");
+    const p = { ...policy(), entryPolicyVersion: V13_ENTRY_POLICY_VERSION };
+    p.policyHash = computeV13LiveMoneyPolicyHash(p);
+    await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,policy_hash=$2", [p.entryPolicyVersion, p.policyHash]);
+    await pool.query(`UPDATE forward_test_evaluations SET entry_policy_version=$2,
+      btc_price=$3,signed_buffer=$4,absolute_buffer=$5,velocity=$6,signal=$7,
+      direction=$8,previous_side=$9 WHERE id=$1`,
+      [id, p.entryPolicyVersion, 100000 + buffer, buffer, Math.abs(buffer),
+        Math.sign(buffer), signal, side === "YES" ? "UP" : "DOWN", side === "YES" ? "DOWN" : "UP"]);
+    await pool.query(`INSERT INTO forward_test_windows(ticker,target,entry_policy_version,
+      crossing_key,crossing_consumed,starts_at,ends_at)
+      VALUES('TEST-MARKET',100000,$1,'TEST-MARKET:first',true,$2,$3)
+      ON CONFLICT(ticker) DO UPDATE SET entry_policy_version=EXCLUDED.entry_policy_version,
+        crossing_key=EXCLUDED.crossing_key,crossing_consumed=true,
+        starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at`,
+      [p.entryPolicyVersion, new Date(f.exchange.now - 1000), new Date(f.exchange.now + 900000)]);
+    const intent = await f.executor.prepareEntry(id);
+    await f.executor.dispatch(intent);
+    assert.equal(f.exchange.posts.length, 1); assert.equal(f.exchange.posts[0]!.side, side);
+    f.exchange.fill(f.exchange.posts[0]!); await f.executor.reconcile();
+    await f.exitFeed();
+    if (side === "NO") await pool.query(`UPDATE forward_test_evaluations
+      SET btc_price=100001,signed_buffer=1,velocity=1 WHERE crossing_key='owned-exit-cross'`);
+    const exit = await f.executor.prepareExit(intent, .4);
+    await f.executor.dispatch(exit);
+    assert.equal(f.exchange.posts[1]!.side, side); assert.equal(f.exchange.posts[1]!.reduceOnly, true);
+    f.exchange.fill(f.exchange.posts[1]!); await f.executor.reconcile();
+    const duplicate = await f.source(randomUUID(), "TEST-MARKET:first");
+    await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2 WHERE id=$1", [duplicate, p.entryPolicyVersion]);
+    assert.equal(await f.executor.prepareEntry(duplicate), intent);
+    await new ProductionExecutor(f.ledger, f.exchange, () => f.exchange.now).dispatch(intent);
+    assert.equal(f.exchange.posts.length, 2);
+    assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+    await invariant(f.ledger);
+  }
+});
+test("unknown policy revision and champion-hash approval mismatch cannot reserve production funds", async () => {
+  const f = await fixture(), id = await f.source();
+  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version='unreviewed' WHERE id=$1", [id]);
+  await assert.rejects(f.executor.prepareEntry(id), /entry_policy_revision_not_approved/);
+  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=NULL WHERE id=$1", [id]);
+  await pool.query("UPDATE v13_live_money_policy SET policy_hash=$1", ["d".repeat(64)]);
+  await assert.rejects(f.executor.prepareEntry(id));
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+  assert.equal(f.exchange.posts.length, 0);
+});
+test("configured stake is pinned and a later revision cannot resize a prepared entry", async () => {
+  const f = await fixture();
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=50, revision=2 WHERE id='production'");
+  const id = await f.executor.prepareEntry(await f.source());
+  const prepared = (await pool.query("SELECT decision, request FROM v13_production_intent WHERE id=$1", [id])).rows[0];
+  assert.equal(prepared.decision.configuredStakeCents, 50);
+  assert.equal(prepared.decision.stakeRevision, 2);
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=100, revision=3 WHERE id='production'");
+  await assert.rejects(f.executor.dispatch(id), /production_pinned_stake_changed_or_unproven/);
+  assert.equal(f.exchange.posts.length, 0);
+  const still = (await pool.query("SELECT request FROM v13_production_intent WHERE id=$1", [id])).rows[0];
+  assert.equal(still.request.contracts, prepared.request.contracts);
+});
+test("configured stake above the approved maximum cannot enter", async () => {
+  const f = await fixture();
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=101 WHERE id='production'");
+  await assert.rejects(f.executor.prepareEntry(await f.source()), /configured_stake_above_approved_maximum/);
+  assert.equal(f.exchange.posts.length, 0);
 });

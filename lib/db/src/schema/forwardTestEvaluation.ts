@@ -10,6 +10,7 @@ export const forwardTestEvaluationTable = pgTable("forward_test_evaluations", {
   // Unknown historical identity stays NULL. Only new evaluations supply it.
   strategyParameterSetId: text("strategy_parameter_set_id"),
   strategyParameterHash: text("strategy_parameter_hash"),
+  entryPolicyVersion: text("entry_policy_version"),
   marketTicker: text("market_ticker").notNull(),
   btcPrice: doublePrecision("btc_price").notNull(),
   target: doublePrecision("target").notNull(),

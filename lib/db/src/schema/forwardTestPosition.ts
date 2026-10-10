@@ -12,6 +12,7 @@ export const forwardTestPositionTable = pgTable("forward_test_positions", {
   // Never relabel old positions as the new champion during a schema upgrade.
   strategyParameterSetId: text("strategy_parameter_set_id"),
   strategyParameterHash: text("strategy_parameter_hash"),
+  entryPolicyVersion: text("entry_policy_version"),
   direction: text("direction").notNull(),
   triggerType: text("trigger_type").notNull(),
   enteredAt: timestamp("entered_at", { withTimezone: true }).notNull(),

@@ -19,6 +19,7 @@ export const v13StrategyShadowEvaluationTable = pgTable(
     sourceEvaluationId: text("source_evaluation_id").notNull(),
     parameterSetId: text("parameter_set_id").notNull(),
     parameterHash: text("parameter_hash").notNull(),
+    entryPolicyVersion: text("entry_policy_version"),
     evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).notNull(),
     marketTicker: text("market_ticker").notNull(),
     btcPrice: doublePrecision("btc_price").notNull(),
@@ -57,7 +58,14 @@ export const v13StrategyShadowEvaluationTable = pgTable(
       sql`${table.executionAuthority} = false`),
     check("v13_strategy_shadow_eval_entry_check", sql`
       ${table.wouldEnter} = false OR (
-        ${table.firstCross} = true AND
+        (
+          ${table.firstCross} = true OR (
+            COALESCE(${table.entryPolicyVersion} = 'v13-first-qualifying-cross-v2', false) AND
+            ${table.previousBuffer} IS NOT NULL AND
+            ((${table.previousBuffer} <= 0 AND ${table.signedBuffer} > 0) OR
+             (${table.previousBuffer} >= 0 AND ${table.signedBuffer} < 0))
+          )
+        ) AND
         ${table.qualifyingTrigger} = true AND
         ${table.signal} IN ('SCOUT','CONFIRM') AND
         ${table.direction} IN ('UP','DOWN') AND

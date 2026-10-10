@@ -1,6 +1,6 @@
 import { EmergencyStopMicroLiveBody } from "@workspace/api-zod";
 import { Router, type IRouter } from "express";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { entryPolicyRuntimeState } from "../lib/strata/configuredStake";
 import { REVIEWED_RELEASE } from "../lib/strata/reviewedRelease";
 import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabaseAuth";
 import { emptySnapshot } from "../lib/strata/commissioning";
@@ -96,8 +96,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.get("/release", (_req, res) => {
     res.json({
       ...REVIEWED_RELEASE,
-      championId: V13_CHAMPION_PARAMETER_SET.id,
-      parameterHash: V13_CHAMPION_PARAMETER_HASH,
+      ...entryPolicyRuntimeState(),
     });
   });
   router.get("/forward-test/status", access.requireUser, async (_req, res) => {
