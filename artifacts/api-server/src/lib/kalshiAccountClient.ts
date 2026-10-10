@@ -507,6 +507,7 @@ export async function verifyKalshiRestrictedTradingKeyForSubaccount(
     const key = payload.api_keys.map(object).find((record) =>
       record.api_key_id === targetKeyId);
     if (!key || key.subaccount !== subaccount || !Array.isArray(key.scopes)) return false;
+    if (source === "index2" && key.name !== "Strata INDEX2") return false;
     const scopes = key.scopes;
     const exactScopes = scopes.length === 2 && scopes.includes("read") &&
       scopes.includes("write::trade") && scopes.every((scope) =>

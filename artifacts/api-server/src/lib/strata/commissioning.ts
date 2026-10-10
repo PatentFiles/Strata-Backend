@@ -11,6 +11,10 @@ export const PRODUCTION_EXCHANGE_INDEX = 2;
 /** Reviewed one-shot transfer. Not a default the server may invent. */
 export const REVIEWED_FUNDING_CENTS = 2500;
 export const REVIEWED_FUNDING_MICROS = "25000000";
+/** Restricted trading key created once for the Railway pair. */
+export const STRATA_INDEX2_KEY_NAME = "Strata INDEX2";
+export const STRATA_INDEX2_KEY_CONFIRMATION = "GENERATE_RESTRICTED_INDEX2_KEY";
+export const STRATA_INDEX2_KEY_SCOPES = ["read", "write::trade"] as const;
 
 export const OPERATOR_POLICY_FIELDS = [
   "championSelectionReviewId",
@@ -434,6 +438,53 @@ export function fundingAuthorizationDecision(input: {
     return { proceed: false, reason: "funding_attempt_already_exists" };
   }
   return { proceed: true, reason: "authorized_one_shot" };
+}
+
+export type Index2AttemptState = "none" | "attempted" | "uncertain" | "response_received";
+
+export interface Index2GenerationFacts {
+  confirmation: unknown;
+  nodeEnv: string | undefined;
+  provisioningKeyIdPresent: boolean;
+  provisioningPrivateKeyPresent: boolean;
+  verifierKeyIdPresent: boolean;
+  verifierPrivateKeyPresent: boolean;
+  kalshiEnvironment: string | undefined;
+  provisioningCredentialValid: boolean;
+  provisioningUnrestricted: boolean;
+  provisioningScopesExact: boolean;
+  verifierCredentialValid: boolean;
+  existingIndex2Name: boolean;
+  priorAttempt: Index2AttemptState;
+  workerRunning: boolean;
+  productionAccountExists: boolean;
+  liveExecutionEnabled: string | undefined;
+  v13ProductionExecutionEnabled: string | undefined;
+}
+
+/** Fail closed. A false result means no Kalshi key POST. */
+export function index2GenerationDecision(facts: Index2GenerationFacts): { proceed: boolean; reason: string } {
+  if (facts.confirmation !== STRATA_INDEX2_KEY_CONFIRMATION) {
+    return { proceed: false, reason: "explicit_index2_generation_confirmation_required" };
+  }
+  if (!facts.provisioningKeyIdPresent) return { proceed: false, reason: "provisioning_key_id_missing" };
+  if (!facts.provisioningPrivateKeyPresent) return { proceed: false, reason: "provisioning_private_key_missing" };
+  if (!facts.verifierKeyIdPresent) return { proceed: false, reason: "verifier_key_id_missing" };
+  if (!facts.verifierPrivateKeyPresent) return { proceed: false, reason: "verifier_private_key_missing" };
+  if (facts.kalshiEnvironment !== "production") return { proceed: false, reason: "kalshi_environment_not_production" };
+  if (facts.nodeEnv !== "production") return { proceed: false, reason: "node_environment_not_production" };
+  if (!facts.provisioningCredentialValid) return { proceed: false, reason: "provisioning_credential_invalid" };
+  if (!facts.provisioningUnrestricted) return { proceed: false, reason: "provisioning_key_not_unrestricted" };
+  if (!facts.provisioningScopesExact) return { proceed: false, reason: "provisioning_scopes_not_exact" };
+  if (!facts.verifierCredentialValid) return { proceed: false, reason: "verifier_credential_invalid" };
+  if (facts.existingIndex2Name) return { proceed: false, reason: "index2_key_name_already_exists" };
+  if (facts.priorAttempt === "uncertain") return { proceed: false, reason: "index2_generation_uncertain_no_retry" };
+  if (facts.priorAttempt !== "none") return { proceed: false, reason: "index2_generation_attempt_exists" };
+  if (facts.workerRunning) return { proceed: false, reason: "production_worker_running" };
+  if (facts.productionAccountExists) return { proceed: false, reason: "production_account_exists" };
+  if (facts.liveExecutionEnabled === "true") return { proceed: false, reason: "live_execution_enabled" };
+  if (facts.v13ProductionExecutionEnabled === "true") return { proceed: false, reason: "v13_production_execution_enabled" };
+  return { proceed: true, reason: "preflight_passed" };
 }
 
 export interface PolicyLimits {

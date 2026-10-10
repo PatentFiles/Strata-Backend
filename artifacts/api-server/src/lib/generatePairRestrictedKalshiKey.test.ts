@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   preflightPairKeyProvisioning,
   generatePairRestrictedKalshiKey,
+  generateStrataIndex2Key,
+  inspectStrataIndex2Credentials,
   verifyPairKeyMetadata,
 } from "./generatePairRestrictedKalshiKey";
 import { PAIR_KEY_NAME } from "./microLivePairKeyProvisioningAttempt";
@@ -271,5 +273,90 @@ test("metadata verifier uses only unrestricted GET and matches exact ID/name/N/s
   for (const record of invalidCases) {
     globalThis.fetch = (async () => response({ api_keys: [record] })) as typeof fetch;
     assert.equal(await verifyPairKeyMetadata(generatedId), false);
+  }
+});
+
+test("Strata INDEX2 generation posts the restricted payload once and does not trade", async () => {
+  const saved = {
+    nodeEnv: process.env.NODE_ENV,
+    apiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    live: process.env.LIVE_EXECUTION_ENABLED,
+    v13: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+  };
+  const provisioning = rsa();
+  const verifier = rsa();
+  process.env.NODE_ENV = "production";
+  process.env.KALSHI_API_ENVIRONMENT = "production";
+  delete process.env.LIVE_EXECUTION_ENABLED;
+  delete process.env.V13_PRODUCTION_EXECUTION_ENABLED;
+  process.env.KALSHI_PROVISIONING_API_KEY_ID = ownerId;
+  process.env.KALSHI_PROVISIONING_PRIVATE_KEY =
+    provisioning.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  process.env.KALSHI_VERIFIER_API_KEY_ID = "independent-verifier-id";
+  process.env.KALSHI_VERIFIER_API_PRIVATE_KEY =
+    verifier.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const calls: Array<{ method: string; path: string; body?: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    calls.push({ method: init?.method ?? "", path: url.pathname, body: typeof init?.body === "string" ? init.body : undefined });
+    if (init?.method === "GET") {
+      return response({
+        api_keys: [{ api_key_id: ownerId, name: "provisioning", subaccount: null, scopes: ["read", "write"] }],
+      });
+    }
+    return response({ api_key_id: generatedId, private_key: privatePem }, 201);
+  }) as typeof fetch;
+  try {
+    const inspection = await inspectStrataIndex2Credentials();
+    assert.equal(inspection.provisioningCredentialValid, true);
+    assert.equal(inspection.provisioningUnrestricted, true);
+    assert.equal(inspection.provisioningScopesExact, true);
+    assert.equal(inspection.verifierCredentialValid, true);
+    assert.equal(inspection.existingIndex2Name, false);
+    const generated = await generateStrataIndex2Key();
+    assert.equal(generated.id.toString(), generatedId);
+    generated.id.fill(0);
+    generated.pem.fill(0);
+    assert.equal(calls.filter((item) => item.method === "POST").length, 1);
+    assert.deepEqual(JSON.parse(calls.find((item) => item.method === "POST")?.body ?? "{}"), {
+      name: "Strata INDEX2",
+      key_type: "rsa",
+      subaccount: 1,
+      scopes: ["read", "write::trade"],
+    });
+    assert.equal(calls.every((item) => item.path === "/trade-api/v2/api_keys" || item.path === "/trade-api/v2/api_keys/generate"), true);
+    assert.equal(calls.some((item) => item.path.includes("transfer") || item.path.includes("order")), false);
+    globalThis.fetch = (async (_input, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "", path: "/trade-api/v2/api_keys" });
+      return response({
+        api_keys: [{ api_key_id: ownerId, name: "provisioning", subaccount: 1, scopes: ["read", "write::trade"] }],
+      });
+    }) as typeof fetch;
+    const wrongScope = await inspectStrataIndex2Credentials();
+    assert.equal(wrongScope.provisioningScopesExact, false);
+    assert.equal(wrongScope.provisioningUnrestricted, false);
+    globalThis.fetch = (async (_input, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "", path: "/trade-api/v2/api_keys" });
+      return response({
+        api_keys: [{
+          api_key_id: ownerId, name: "Strata INDEX2", subaccount: null, scopes: ["read", "write"],
+        }],
+      });
+    }) as typeof fetch;
+    assert.equal((await inspectStrataIndex2Credentials()).existingIndex2Name, true);
+    process.env.LIVE_EXECUTION_ENABLED = "true";
+    const postsBefore = calls.filter((item) => item.method === "POST").length;
+    await assert.rejects(generateStrataIndex2Key(), /closed/);
+    assert.equal(calls.filter((item) => item.method === "POST").length, postsBefore);
+  } finally {
+    for (const [name, value] of [
+      ["NODE_ENV", saved.nodeEnv],
+      ["KALSHI_API_ENVIRONMENT", saved.apiEnvironment],
+      ["LIVE_EXECUTION_ENABLED", saved.live],
+      ["V13_PRODUCTION_EXECUTION_ENABLED", saved.v13],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 });

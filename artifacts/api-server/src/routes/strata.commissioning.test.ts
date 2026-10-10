@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
@@ -17,7 +18,11 @@ import {
   dedicatedSignerFingerprint,
   emptySnapshot,
   fundingAuthorizationDecision,
+  index2GenerationDecision,
   planArm,
+  STRATA_INDEX2_KEY_CONFIRMATION,
+  STRATA_INDEX2_KEY_NAME,
+  type Index2GenerationFacts,
   planCommission,
   planDisarm,
   validatePolicyLimits,
@@ -76,12 +81,67 @@ function memoryPort(initial: CommissioningSnapshot) {
   let emergencyStops = 0;
   let posts = 0;
   let attemptState: "none" | "attempted" | "uncertain" | "reconciled" = "none";
+  let index2Attempt: "none" | "attempted" | "uncertain" | "response_received" = "none";
+  let index2Posts = 0;
+  let index2Overlay: Partial<Index2GenerationFacts> = {};
+  let index2Outcome: "generated" | "uncertain" = "generated";
+  const index2Payloads: unknown[] = [];
+  const index2Stored: Array<Record<string, unknown>> = [];
+  const index2Pem = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----";
   let reviewedFeeAccepted = false;
   let reviewedCashMicros: string | null = null;
   let draft: PolicyLimits | null = null;
   const envBefore = () => Object.fromEntries(FLAG_NAMES.map((name) => [name, process.env[name]]));
   const port: CommissioningPort = {
     read: async () => structuredClone(snapshot),
+    generateIndex2Key: async (confirmation) => {
+      const decision = index2GenerationDecision({
+        nodeEnv: "production",
+        provisioningKeyIdPresent: true,
+        provisioningPrivateKeyPresent: true,
+        verifierKeyIdPresent: true,
+        verifierPrivateKeyPresent: true,
+        kalshiEnvironment: "production",
+        provisioningCredentialValid: true,
+        provisioningUnrestricted: true,
+        provisioningScopesExact: true,
+        verifierCredentialValid: true,
+        existingIndex2Name: false,
+        workerRunning: snapshot.workerRunning,
+        productionAccountExists: snapshot.account.count > 0,
+        liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+        v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+        ...index2Overlay,
+        confirmation,
+        priorAttempt: index2Attempt === "none" ? (index2Overlay.priorAttempt ?? "none") : index2Attempt,
+      });
+      if (!decision.proceed) {
+        return {
+          state: "blocked", reason: decision.reason, posts: index2Posts,
+          privateKeyPersisted: false, verified: false, workerStarted: false, environmentChanged: false,
+        };
+      }
+      index2Attempt = "attempted";
+      index2Posts += 1;
+      index2Payloads.push({
+        name: STRATA_INDEX2_KEY_NAME, key_type: "rsa", subaccount: 1, scopes: ["read", "write::trade"],
+      });
+      calls.push({ method: "POST", path: "/trade-api/v2/api_keys/generate" });
+      if (index2Outcome === "uncertain") {
+        index2Attempt = "uncertain";
+        return {
+          state: "uncertain", reason: "index2_generation_uncertain_no_retry", posts: index2Posts,
+          privateKeyPersisted: false, verified: false, workerStarted: false, environmentChanged: false,
+        };
+      }
+      index2Attempt = "response_received";
+      index2Stored.push({ apiKeyId: "strata-index2-test-key", state: "response_received" });
+      return {
+        state: "generated", reason: "handed_off_once", apiKeyId: "strata-index2-test-key",
+        privateKey: index2Pem, posts: index2Posts, privateKeyPersisted: false, verified: false,
+        workerStarted: false, environmentChanged: false,
+      };
+    },
     verifySigner: async () => ({ snapshot: structuredClone(snapshot), calls: [...calls] }),
     verifyBoundary: async () => structuredClone(snapshot),
     captureBoundary: async () => {
@@ -230,6 +290,13 @@ function memoryPort(initial: CommissioningSnapshot) {
     set(next: CommissioningSnapshot) { snapshot = structuredClone(next); },
     calls,
     posts: () => posts,
+    index2Posts: () => index2Posts,
+    index2Payloads: () => index2Payloads,
+    index2Stored: () => index2Stored,
+    setIndex2(next: Partial<Index2GenerationFacts>, outcome: "generated" | "uncertain" = "generated") {
+      index2Overlay = next;
+      index2Outcome = outcome;
+    },
     noteGet(path: string) { calls.push({ method: "GET", path }); },
     acceptReviewedFee() { reviewedFeeAccepted = true; },
     proveCash(micros: string) { reviewedCashMicros = micros; },
@@ -275,7 +342,12 @@ function listen(app: express.Express) {
 }
 
 function call(port: number, path: string, method: string, bearer?: string, body?: unknown) {
-  return new Promise<{ status: number; body: Record<string, unknown>; raw: string }>((resolve, reject) => {
+  return new Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    raw: string;
+    headers: import("node:http").IncomingHttpHeaders;
+  }>((resolve, reject) => {
     const payload = body === undefined ? null : JSON.stringify(body);
     const req = httpRequest({
       hostname: "127.0.0.1", port, path, method,
@@ -291,6 +363,7 @@ function call(port: number, path: string, method: string, bearer?: string, body?
         resolve({
           status: res.statusCode ?? 0,
           raw,
+          headers: res.headers,
           body: raw.startsWith("{") ? JSON.parse(raw) as Record<string, unknown> : {},
         });
       });
@@ -538,4 +611,198 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal(commissioned.emergencyStops(), 0);
   assert.equal(commissioned.current().account.killSwitch, true);
   assert.equal(commissioned.current().account.executionEnabled, false);
+});
+
+test("INDEX2 generation is one authenticated POST and never stores or logs the private key", async () => {
+  const readyFacts = (): Index2GenerationFacts => ({
+    confirmation: STRATA_INDEX2_KEY_CONFIRMATION,
+    nodeEnv: "production",
+    provisioningKeyIdPresent: true,
+    provisioningPrivateKeyPresent: true,
+    verifierKeyIdPresent: true,
+    verifierPrivateKeyPresent: true,
+    kalshiEnvironment: "production",
+    provisioningCredentialValid: true,
+    provisioningUnrestricted: true,
+    provisioningScopesExact: true,
+    verifierCredentialValid: true,
+    existingIndex2Name: false,
+    priorAttempt: "none",
+    workerRunning: false,
+    productionAccountExists: false,
+    liveExecutionEnabled: undefined,
+    v13ProductionExecutionEnabled: undefined,
+  });
+  for (const [reason, patch] of [
+    ["provisioning_key_id_missing", { provisioningKeyIdPresent: false }],
+    ["provisioning_private_key_missing", { provisioningPrivateKeyPresent: false }],
+    ["verifier_key_id_missing", { verifierKeyIdPresent: false }],
+    ["verifier_private_key_missing", { verifierPrivateKeyPresent: false }],
+    ["kalshi_environment_not_production", { kalshiEnvironment: "demo" }],
+    ["provisioning_credential_invalid", { provisioningCredentialValid: false }],
+    ["provisioning_key_not_unrestricted", { provisioningUnrestricted: false }],
+    ["provisioning_scopes_not_exact", { provisioningScopesExact: false }],
+    ["verifier_credential_invalid", { verifierCredentialValid: false }],
+    ["index2_key_name_already_exists", { existingIndex2Name: true }],
+    ["index2_generation_attempt_exists", { priorAttempt: "attempted" as const }],
+    ["index2_generation_uncertain_no_retry", { priorAttempt: "uncertain" as const }],
+    ["production_worker_running", { workerRunning: true }],
+    ["production_account_exists", { productionAccountExists: true }],
+    ["live_execution_enabled", { liveExecutionEnabled: "true" }],
+    ["v13_production_execution_enabled", { v13ProductionExecutionEnabled: "true" }],
+  ] as const) {
+    const decision = index2GenerationDecision({ ...readyFacts(), ...patch });
+    assert.equal(decision.proceed, false);
+    assert.equal(decision.reason, reason);
+  }
+  const sql = readFileSync("../../lib/db/drizzle/0002_strata_index2_key_attempt.sql", "utf8");
+  assert.equal(/private_key/i.test(sql), false);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const generator = store.slice(
+    store.indexOf("export async function generateRailwayIndex2Key"),
+    store.indexOf("export function createDatabaseCommissioningPort"),
+  );
+  assert.equal(generator.includes("private_key"), false);
+  assert.equal(generator.includes("postOneShotPairFunding"), false);
+  assert.equal(generator.includes("/portfolio/orders"), false);
+  assert.equal(generator.includes("/portfolio/fills"), false);
+  assert.equal(generator.includes("LIVE_EXECUTION_ENABLED ="), false);
+
+  const { privateKey, keys } = await signingKeys();
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("live kalshi fetch is not allowed in tests"); }) as typeof fetch;
+  const logged: string[] = [];
+  const methods = ["log", "info", "warn", "error", "debug"] as const;
+  const originals = methods.map((method) => console[method]);
+  for (const method of methods) {
+    console[method] = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  }
+  const gate = memoryPort(emptySnapshot());
+  const app = express();
+  app.use(express.json());
+  app.use("/api/strata", createStrataRouter({
+    verifyToken: (value) => verifySupabaseAccessToken(value, { supabaseUrl: SUPABASE_URL, keys }),
+    roleOf,
+    control: { start: async () => { gate.startWorker(); }, stop() {}, view: () => ({ runtimeStatus: "STOPPED", workerRunning: false, blockedReason: null, lastProductionError: null, refused: false }), isScheduled: () => false } as never,
+    status: async () => ({ runtimeStatus: "STOPPED" }),
+    positions: async () => ({ positions: [] }),
+    orders: async () => ({ orders: [] }),
+    fills: async () => ({ fills: [] }),
+    trades: async () => ({ trades: [] }),
+    latestTrade: async () => ({ unresolved: false, latestCompleted: null }),
+    forwardTestStatus: async () => ({}),
+    forwardTestHistory: async () => ({}),
+    phase4State: async () => ({}),
+    microLiveState: async () => ({}),
+    emergencyStop: async () => ({ killSwitch: "ON" }),
+    commissioning: gate.port,
+  }));
+  const server = await listen(app);
+  const savedLive = process.env.LIVE_EXECUTION_ENABLED;
+  const savedV13 = process.env.V13_PRODUCTION_EXECUTION_ENABLED;
+  try {
+    const developer = await token(privateKey, DEVELOPER_ID);
+    const admin = await token(privateKey, ADMIN_ID);
+    const standard = await token(privateKey, STANDARD_ID);
+    const aal1 = await token(privateKey, DEVELOPER_ID, "aal1");
+    const path = "/api/strata/commissioning/generate-index2-key";
+    const body = { confirm: STRATA_INDEX2_KEY_CONFIRMATION };
+    assert.equal((await call(server.port, path, "POST", undefined, body)).status, 401);
+    assert.equal((await call(server.port, path, "POST", aal1, body)).status, 401);
+    assert.equal((await call(server.port, path, "POST", standard, body)).status, 403);
+    const wrong = await call(server.port, path, "POST", developer, { confirm: "GENERATE" });
+    assert.equal(wrong.status, 400);
+    assert.equal(wrong.raw.includes("not-a-key"), false);
+    for (const [reason, patch] of [
+      ["provisioning_key_id_missing", { provisioningKeyIdPresent: false }],
+      ["verifier_key_id_missing", { verifierKeyIdPresent: false }],
+      ["provisioning_scopes_not_exact", { provisioningScopesExact: false }],
+      ["index2_key_name_already_exists", { existingIndex2Name: true }],
+      ["index2_generation_attempt_exists", { priorAttempt: "attempted" as const }],
+      ["live_execution_enabled", { liveExecutionEnabled: "true" }],
+      ["v13_production_execution_enabled", { v13ProductionExecutionEnabled: "true" }],
+    ] as const) {
+      gate.setIndex2(patch);
+      const blocked = await call(server.port, path, "POST", developer, body);
+      assert.equal(blocked.status, 409);
+      assert.equal(blocked.body.reason, reason);
+      assert.equal(blocked.body.keyMaterialReturned, false);
+      assert.equal(blocked.raw.includes("not-a-key"), false);
+    }
+    assert.equal(gate.index2Posts(), 0);
+    gate.setIndex2({}, "uncertain");
+    const uncertain = await call(server.port, path, "POST", developer, body);
+    assert.equal(uncertain.status, 409);
+    assert.equal(uncertain.body.reason, "index2_generation_uncertain_no_retry");
+    assert.equal(uncertain.raw.includes("not-a-key"), false);
+    const retry = await call(server.port, path, "POST", admin, body);
+    assert.equal(retry.status, 409);
+    assert.equal(retry.body.reason, "index2_generation_uncertain_no_retry");
+    assert.equal(gate.index2Posts(), 1);
+    assert.deepEqual(gate.index2Payloads(), [{
+      name: "Strata INDEX2", key_type: "rsa", subaccount: 1, scopes: ["read", "write::trade"],
+    }]);
+    assert.deepEqual(gate.calls.filter((item) => item.method === "POST").map((item) => item.path), [
+      "/trade-api/v2/api_keys/generate",
+    ]);
+    assert.equal(gate.calls.some((item) => item.path.includes("transfer")), false);
+    assert.equal(gate.calls.some((item) => item.path.includes("order")), false);
+
+    const fresh = memoryPort(emptySnapshot());
+    const freshApp = express();
+    freshApp.use(express.json());
+    freshApp.use("/api/strata", createStrataRouter({
+      verifyToken: (value) => verifySupabaseAccessToken(value, { supabaseUrl: SUPABASE_URL, keys }),
+      roleOf,
+      control: { start: async () => undefined, stop() {}, view: () => ({ runtimeStatus: "STOPPED", workerRunning: false, blockedReason: null, lastProductionError: null, refused: false }), isScheduled: () => false } as never,
+      status: async () => ({ runtimeStatus: "STOPPED" }),
+      positions: async () => ({ positions: [] }),
+      orders: async () => ({ orders: [] }),
+      fills: async () => ({ fills: [] }),
+      trades: async () => ({ trades: [] }),
+      latestTrade: async () => ({ unresolved: false, latestCompleted: null }),
+      forwardTestStatus: async () => ({}),
+      forwardTestHistory: async () => ({}),
+      phase4State: async () => ({}),
+      microLiveState: async () => ({}),
+      emergencyStop: async () => ({ killSwitch: "ON" }),
+      commissioning: fresh.port,
+    }));
+    const freshServer = await listen(freshApp);
+    try {
+      const created = await call(freshServer.port, path, "POST", developer, body);
+      assert.equal(created.status, 201);
+      assert.equal(created.headers["cache-control"], "no-store");
+      assert.equal(created.headers.pragma, "no-cache");
+      assert.equal(created.body.apiKeyId, "strata-index2-test-key");
+      assert.equal(created.body.privateKey, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----");
+      assert.equal(created.body.keyType, "rsa");
+      assert.equal(created.body.subaccount, 1);
+      assert.deepEqual(created.body.scopes, ["read", "write::trade"]);
+      assert.match(String(created.body.instructions), /KALSHI_INDEX2_API_KEY_ID/);
+      assert.match(String(created.body.instructions), /KALSHI_INDEX2_PRIVATE_KEY/);
+      assert.equal(created.body.verified, false);
+      const adminCreated = await call(freshServer.port, path, "POST", admin, body);
+      assert.equal(adminCreated.status, 409);
+      assert.equal(adminCreated.raw.includes("not-a-key"), false);
+      assert.equal(fresh.index2Posts(), 1);
+      assert.equal(JSON.stringify(fresh.index2Stored()).includes("not-a-key"), false);
+      const status = await call(freshServer.port, "/api/strata/commissioning/status", "GET", developer);
+      assert.equal(status.raw.includes("not-a-key"), false);
+      assert.equal(status.raw.includes("BEGIN RSA PRIVATE KEY"), false);
+    } finally {
+      await freshServer.close();
+    }
+    assert.equal(logged.some((line) => line.includes("not-a-key") || line.includes("BEGIN RSA PRIVATE KEY")), false);
+    assert.equal(process.env.LIVE_EXECUTION_ENABLED, savedLive);
+    assert.equal(process.env.V13_PRODUCTION_EXECUTION_ENABLED, savedV13);
+  } finally {
+    methods.forEach((method, index) => { console[method] = originals[index]!; });
+    globalThis.fetch = previousFetch;
+    if (savedLive === undefined) delete process.env.LIVE_EXECUTION_ENABLED;
+    else process.env.LIVE_EXECUTION_ENABLED = savedLive;
+    if (savedV13 === undefined) delete process.env.V13_PRODUCTION_EXECUTION_ENABLED;
+    else process.env.V13_PRODUCTION_EXECUTION_ENABLED = savedV13;
+    await server.close();
+  }
 });

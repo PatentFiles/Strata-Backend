@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { captureCleanPairSnapshot, verifyKalshiRestrictedTradingKeyForSubaccount } from "../kalshiAccountClient";
+import { generateStrataIndex2Key, inspectStrataIndex2Credentials } from "../generatePairRestrictedKalshiKey";
 import { configuredKey } from "../microLivePairBoundary";
 import { postOneShotPairFunding, readPairTransferHistory, readPrimaryIndex2Balance } from "../kalshiPairFundingClient";
 import {
@@ -26,7 +27,9 @@ import {
   approvedExitFloor,
   emptySnapshot,
   fundingAuthorizationDecision,
+  index2GenerationDecision,
   maskKeyId,
+  type Index2AttemptState,
   planArm,
   planCommission,
   planDisarm,
@@ -35,7 +38,7 @@ import {
   type CommissioningSnapshot,
   type PolicyLimits,
 } from "./commissioning";
-import type { CommissioningPort, ExchangeCall } from "../../routes/strataCommissioning";
+import type { CommissioningPort, ExchangeCall, Index2GenerationResult } from "../../routes/strataCommissioning";
 
 type QueryRows = { rows: Array<Record<string, unknown>> };
 
@@ -466,11 +469,170 @@ async function reconcileRailwayFunding(workerRunning: () => boolean) {
   }
 }
 
+function index2Closed(reason: string, posts = 0): Index2GenerationResult {
+  return {
+    state: "blocked",
+    reason,
+    posts,
+    privateKeyPersisted: false,
+    verified: false,
+    workerStarted: false,
+    environmentChanged: false,
+  };
+}
+
+function index2Facts(
+  confirmation: unknown,
+  workerRunning: boolean,
+  accountExists: boolean,
+  priorAttempt: Index2AttemptState,
+  remote: {
+    provisioningCredentialValid: boolean;
+    provisioningUnrestricted: boolean;
+    provisioningScopesExact: boolean;
+    verifierCredentialValid: boolean;
+    existingIndex2Name: boolean;
+  },
+) {
+  const present = (name: string) => Boolean(process.env[name]?.trim());
+  return index2GenerationDecision({
+    confirmation,
+    nodeEnv: process.env.NODE_ENV,
+    provisioningKeyIdPresent: present("KALSHI_PROVISIONING_API_KEY_ID"),
+    provisioningPrivateKeyPresent: present("KALSHI_PROVISIONING_PRIVATE_KEY"),
+    verifierKeyIdPresent: present("KALSHI_VERIFIER_API_KEY_ID"),
+    verifierPrivateKeyPresent: present("KALSHI_VERIFIER_API_PRIVATE_KEY"),
+    kalshiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    ...remote,
+    priorAttempt,
+    workerRunning,
+    productionAccountExists: accountExists,
+    liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+    v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+  });
+}
+
+/** Commits one attempt row, then allows one key POST. The private key is not written. */
+export async function generateRailwayIndex2Key(
+  confirmation: unknown,
+  workerRunning: boolean,
+): Promise<Index2GenerationResult> {
+  let priorAttempt: Index2AttemptState = "none";
+  let accountExists = false;
+  try {
+    const [attempt, account, micro] = await Promise.all([
+      query("SELECT state FROM strata_index2_key_attempt WHERE singleton_id = 'singleton'"),
+      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query("SELECT 1 FROM micro_live_pair_key_provisioning_attempts LIMIT 1"),
+    ]);
+    accountExists = account.rows.length > 0;
+    if (micro.rows.length > 0) priorAttempt = "attempted";
+    else if (attempt.rows[0]) {
+      const state = attempt.rows[0].state;
+      priorAttempt = state === "uncertain" || state === "response_received" || state === "attempted"
+        ? state
+        : "attempted";
+    }
+  } catch {
+    return index2Closed("index2_preflight_unproven");
+  }
+  const local = index2Facts(confirmation, workerRunning, accountExists, priorAttempt, {
+    provisioningCredentialValid: true,
+    provisioningUnrestricted: true,
+    provisioningScopesExact: true,
+    verifierCredentialValid: true,
+    existingIndex2Name: false,
+  });
+  if (!local.proceed) return index2Closed(local.reason);
+  let remote;
+  try {
+    remote = await inspectStrataIndex2Credentials();
+  } catch {
+    return index2Closed("provisioning_credential_invalid");
+  }
+  const inspected = index2Facts(confirmation, workerRunning, accountExists, priorAttempt, remote);
+  if (!inspected.proceed) return index2Closed(inspected.reason);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const locked = await client.query(
+      "SELECT state FROM strata_index2_key_attempt WHERE singleton_id = 'singleton' FOR UPDATE",
+    );
+    if (locked.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return index2Closed("index2_generation_attempt_exists");
+    }
+    await client.query(`INSERT INTO strata_index2_key_attempt
+      (singleton_id, key_name, subaccount, key_type, scopes, state)
+      VALUES ('singleton', 'Strata INDEX2', 1, 'rsa', ARRAY['read', 'write::trade']::text[], 'attempted')`);
+    await client.query("COMMIT");
+  } catch {
+    try { await client.query("ROLLBACK"); } catch { /* the insert did not commit */ }
+    return index2Closed("index2_attempt_not_durable");
+  } finally {
+    client.release();
+  }
+
+  try {
+    const generated = await generateStrataIndex2Key();
+    const apiKeyId = generated.id.toString("utf8");
+    const privateKey = generated.pem.toString("utf8");
+    generated.id.fill(0);
+    generated.pem.fill(0);
+    const saved = await pool.query(`UPDATE strata_index2_key_attempt
+      SET state = 'response_received', api_key_id = $1, response_received_at = now()
+      WHERE singleton_id = 'singleton' AND state = 'attempted' AND api_key_id IS NULL
+      RETURNING singleton_id`, [apiKeyId]);
+    if (saved.rowCount !== 1) {
+      await pool.query(`UPDATE strata_index2_key_attempt
+        SET state = 'uncertain'
+        WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+      return {
+        state: "uncertain",
+        reason: "index2_generation_uncertain_no_retry",
+        posts: 1,
+        privateKeyPersisted: false,
+        verified: false,
+        workerStarted: false,
+        environmentChanged: false,
+      };
+    }
+    return {
+      state: "generated",
+      reason: "handed_off_once",
+      apiKeyId,
+      privateKey,
+      posts: 1,
+      privateKeyPersisted: false,
+      verified: false,
+      workerStarted: false,
+      environmentChanged: false,
+    };
+  } catch {
+    try {
+      await pool.query(`UPDATE strata_index2_key_attempt
+        SET state = 'uncertain'
+        WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+    } catch { /* an attempted row still refuses a second POST */ }
+    return {
+      state: "uncertain",
+      reason: "index2_generation_uncertain_no_retry",
+      posts: 1,
+      privateKeyPersisted: false,
+      verified: false,
+      workerStarted: false,
+      environmentChanged: false,
+    };
+  }
+}
+
 export function createDatabaseCommissioningPort(
   workerRunning: () => boolean = () => false,
 ): CommissioningPort {
   return {
     read: () => readCommissioningSnapshot(workerRunning()),
+    generateIndex2Key: (confirmation) => generateRailwayIndex2Key(confirmation, workerRunning()),
     async verifySigner() {
       const probe = await probeDedicatedSigner();
       const snapshot = await readCommissioningSnapshot(workerRunning(), {

@@ -3,6 +3,10 @@ import {
   PAIR_KEY_NAME, PAIR_SCOPES, PAIR_SUBACCOUNT,
 } from "./microLivePairKeyProvisioningAttempt";
 import { captureCleanPairSnapshot } from "./kalshiAccountClient";
+import {
+  STRATA_INDEX2_KEY_NAME,
+  STRATA_INDEX2_KEY_SCOPES,
+} from "./strata/commissioning";
 
 const HOST = "https://external-api.kalshi.com";
 const PREFIX = "/trade-api/v2";
@@ -113,20 +117,37 @@ export async function preflightPairKeyProvisioning(
   await verifyCleanPair();
 }
 
-/** The only permitted key POST, called after the durable attempted transition. */
-export async function generatePairRestrictedKalshiKey(): Promise<GeneratedPairKey> {
-  if (process.env.NODE_ENV !== "development" ||
-      process.env.REPLIT_DEPLOYMENT === "1" ||
-      process.env.KALSHI_API_ENVIRONMENT !== "production" ||
-      process.env.KALSHI_INDEX2_KEY_PROVISIONING_ENABLED !== "true" ||
-      process.env.KALSHI_INDEX2_KEY_GENERATION_AUTHORIZED !== "true") {
-    throw new Error("Dedicated pair key generation is disabled");
-  }
-  const response = await request("provisioning", "POST", `${PREFIX}/api_keys/generate`,
-    JSON.stringify({
-      name: PAIR_KEY_NAME, key_type: "rsa", subaccount: PAIR_SUBACCOUNT,
-      scopes: [...PAIR_SCOPES],
-    }));
+const STRATA_INDEX2_GENERATION_BODY = {
+  name: STRATA_INDEX2_KEY_NAME,
+  key_type: "rsa" as const,
+  subaccount: 1 as const,
+  scopes: [...STRATA_INDEX2_KEY_SCOPES],
+};
+
+/** Read-only inventory. A failed GET is not a generation attempt. */
+export async function inspectStrataIndex2Credentials(): Promise<{
+  provisioningCredentialValid: boolean;
+  provisioningUnrestricted: boolean;
+  provisioningScopesExact: boolean;
+  verifierCredentialValid: boolean;
+  existingIndex2Name: boolean;
+}> {
+  const provisioningId = process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim();
+  const provisioning = await keyInventory("provisioning");
+  const owner = provisioning.filter((item) => item.api_key_id === provisioningId);
+  const verifier = await keyInventory("verifier");
+  const named = [...provisioning, ...verifier].some((item) => item.name === STRATA_INDEX2_KEY_NAME);
+  return {
+    provisioningCredentialValid: owner.length === 1,
+    provisioningUnrestricted: owner.length === 1 &&
+      (!Object.hasOwn(owner[0]!, "subaccount") || owner[0]!.subaccount === null),
+    provisioningScopesExact: owner.length === 1 && exactScopes(owner[0]?.scopes, ["read", "write"]),
+    verifierCredentialValid: true,
+    existingIndex2Name: named,
+  };
+}
+
+async function generatedKey(response: Response): Promise<GeneratedPairKey> {
   if (response.status !== 201) {
     await response.body?.cancel();
     throw new Error("Dedicated pair key generation did not return HTTP 201");
@@ -145,6 +166,41 @@ export async function generatePairRestrictedKalshiKey(): Promise<GeneratedPairKe
   } finally {
     bytes.fill(0);
   }
+}
+
+/** The reviewed development POST. Its body and gate stay unchanged. */
+export async function generatePairRestrictedKalshiKey(): Promise<GeneratedPairKey> {
+  if (process.env.NODE_ENV !== "development" ||
+      process.env.REPLIT_DEPLOYMENT === "1" ||
+      process.env.KALSHI_API_ENVIRONMENT !== "production" ||
+      process.env.KALSHI_INDEX2_KEY_PROVISIONING_ENABLED !== "true" ||
+      process.env.KALSHI_INDEX2_KEY_GENERATION_AUTHORIZED !== "true") {
+    throw new Error("Dedicated pair key generation is disabled");
+  }
+  return generatedKey(await request("provisioning", "POST", `${PREFIX}/api_keys/generate`,
+    JSON.stringify({
+      name: PAIR_KEY_NAME, key_type: "rsa", subaccount: PAIR_SUBACCOUNT,
+      scopes: [...PAIR_SCOPES],
+    })));
+}
+
+/**
+ * One Kalshi POST for the Railway key. Callers must commit an attempt first
+ * and must not call this again after an uncertain result.
+ */
+export async function generateStrataIndex2Key(): Promise<GeneratedPairKey> {
+  if (process.env.NODE_ENV !== "production" ||
+      process.env.KALSHI_API_ENVIRONMENT !== "production" ||
+      process.env.LIVE_EXECUTION_ENABLED === "true" ||
+      process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true") {
+    throw new Error("Strata INDEX2 key generation is closed");
+  }
+  return generatedKey(await request(
+    "provisioning",
+    "POST",
+    `${PREFIX}/api_keys/generate`,
+    JSON.stringify(STRATA_INDEX2_GENERATION_BODY),
+  ));
 }
 
 /** Independent unrestricted metadata GET, not an assertion of shard isolation. */

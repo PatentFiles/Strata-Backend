@@ -1,6 +1,7 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import {
+  STRATA_INDEX2_KEY_SCOPES,
   commissioningStatus,
   fundingAuthorizationDecision,
   planCommission,
@@ -12,8 +13,21 @@ export interface ExchangeCall {
   path: string;
 }
 
+export interface Index2GenerationResult {
+  state: "blocked" | "generated" | "uncertain";
+  reason: string;
+  apiKeyId?: string;
+  privateKey?: string;
+  posts: number;
+  privateKeyPersisted: false;
+  verified: false;
+  workerStarted: false;
+  environmentChanged: false;
+}
+
 export interface CommissioningPort {
   read(): Promise<CommissioningSnapshot>;
+  generateIndex2Key(confirmation: unknown): Promise<Index2GenerationResult>;
   verifySigner(): Promise<{ snapshot: CommissioningSnapshot; calls: ExchangeCall[] }>;
   verifyBoundary(): Promise<CommissioningSnapshot>;
   captureBoundary(): Promise<{ snapshot: CommissioningSnapshot; calls: ExchangeCall[]; blocked: boolean; reason: string }>;
@@ -211,6 +225,38 @@ export function createStrataCommissioningRouter(
       res.status(result.status === "APPROVED" ? 200 : 400).json(sanitizePublic(result));
     } catch {
       res.status(503).json({ error: "Minimum exit approval is unavailable" });
+    }
+  });
+
+  router.post("/generate-index2-key", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+    try {
+      const result = await port.generateIndex2Key(req.body?.confirm);
+      if (result.state === "generated" && result.apiKeyId && result.privateKey) {
+        res.status(201).json({
+          apiKeyId: result.apiKeyId,
+          privateKey: result.privateKey,
+          keyType: "rsa",
+          subaccount: 1,
+          scopes: [...STRATA_INDEX2_KEY_SCOPES],
+          verified: false,
+          workerStarted: false,
+          environmentChanged: false,
+          instructions: "Save apiKeyId in Railway as KALSHI_INDEX2_API_KEY_ID and privateKey as KALSHI_INDEX2_PRIVATE_KEY. This private key is shown once and is not stored. After Railway redeploys, POST /api/strata/commissioning/verify-signer must prove name Strata INDEX2, subaccount 1, scopes read and write::trade, a signed GET, and the balance on subaccount 1 exchange index 2. This response does not verify the key.",
+        });
+        return;
+      }
+      res.status(result.reason === "explicit_index2_generation_confirmation_required" ? 400 : 409).json(sanitizePublic({
+        state: result.state,
+        reason: result.reason,
+        verified: false,
+        keyMaterialReturned: false,
+        workerStarted: false,
+        environmentChanged: false,
+      }));
+    } catch {
+      res.status(503).json({ error: "INDEX2 key generation is unavailable" });
     }
   });
 
