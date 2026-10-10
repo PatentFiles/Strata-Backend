@@ -349,8 +349,20 @@ function assertDevelopmentProductionGuard(): void {
   }
 }
 
-export async function postOneShotPairFunding(attemptId: string): Promise<void> {
-  assertDevelopmentProductionGuard();
+export async function postOneShotPairFunding(
+  attemptId: string,
+  authorization: "development" | "strata-production" = "development",
+): Promise<void> {
+  if (authorization === "strata-production") {
+    if (process.env.NODE_ENV !== "production" ||
+        process.env.KALSHI_API_ENVIRONMENT !== "production" ||
+        process.env.LIVE_EXECUTION_ENABLED === "true" ||
+        process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true") {
+      fail("strata_production_funding_gate_closed");
+    }
+  } else {
+    assertDevelopmentProductionGuard();
+  }
   if (typeof attemptId !== "string" || attemptId.length === 0 ||
       attemptId.length > 128 || attemptId.trim() !== attemptId) {
     fail("Invalid Kalshi funding attempt identifier.");

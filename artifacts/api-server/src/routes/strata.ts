@@ -12,6 +12,7 @@ import {
   readProductionTrades,
 } from "../lib/v13-production/liveControl";
 import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
+import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
 import { createStrataRouter } from "./strataRouter";
 
 let keys: ReturnType<typeof remoteJwks> | null = null;
@@ -54,4 +55,5 @@ export default createStrataRouter({
   phase4State: () => getPhase4State(),
   microLiveState: () => getMicroLiveState(),
   emergencyStop: () => emergencyStopMicroLive(),
+  commissioning: createDatabaseCommissioningPort(() => supervisor().view().workerRunning),
 });

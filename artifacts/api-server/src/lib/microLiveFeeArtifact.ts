@@ -273,3 +273,43 @@ export async function verifyCurrentFeeArtifact(
     digest, formulaVersion: parsed.formulaVersion, verifiedAt: Date.now(), reason: null,
   };
 }
+
+/**
+ * Hash the official PDF only after the reviewed parser accepts the formula.
+ * A mismatched placeholder digest is not a successful verification.
+ */
+export async function establishOfficialFeeDigest(
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<{ ok: true; digest: string } | { ok: false; reason: string }> {
+  let response: Response;
+  try {
+    response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
+      method: "GET",
+      headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
+      redirect: "error",
+      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+    });
+  } catch {
+    return { ok: false, reason: "official_fee_schedule_unavailable" };
+  }
+  if (!response.ok || response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/pdf") {
+    return { ok: false, reason: "official_fee_schedule_unreadable" };
+  }
+  const bytes = await readPdfWithinLimit(response);
+  if (!bytes) return { ok: false, reason: "official_fee_schedule_size_or_body_invalid" };
+  const parsed = await parseFeeSchedulePdf(bytes).catch(() => null);
+  if (!parsed || parsed.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return { ok: false, reason: "official_fee_schedule_formula_unverifiable" };
+  }
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const verified = await verifyCurrentFeeArtifact({
+    digest,
+    policyVersion: STANDING_FEE_POLICY_VERSION,
+    sourceUrl: CANONICAL_FEE_SCHEDULE_URL,
+    formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  }, fetchImpl);
+  if (!verified.valid || verified.digest !== digest) {
+    return { ok: false, reason: verified.reason ?? "official_fee_schedule_not_verified" };
+  }
+  return { ok: true, digest };
+}

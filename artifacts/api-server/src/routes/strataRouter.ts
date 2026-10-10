@@ -3,7 +3,9 @@ import { Router, type IRouter } from "express";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 import { REVIEWED_RELEASE } from "../lib/strata/reviewedRelease";
 import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabaseAuth";
+import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
+import { createStrataCommissioningRouter, type CommissioningPort } from "./strataCommissioning";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -11,6 +13,43 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   phase4State: () => Promise<unknown>;
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
+  commissioning?: CommissioningPort;
+}
+
+function blockedCommissioningPort(): CommissioningPort {
+  const read = async () => emptySnapshot();
+  return {
+    read,
+    verifySigner: async () => ({ snapshot: emptySnapshot(), calls: [] }),
+    verifyBoundary: read,
+    reconcileFunding: async () => ({
+      state: "blocked", reason: "funding_anchor_missing", transferAttempted: false,
+    }),
+    fund: async () => ({
+      state: "blocked", reason: "reviewed_funding_not_invoked", transferAttempted: false, attempts: 0,
+    }),
+    verifyFee: read,
+    verifyCash: read,
+    captureBoundary: async () => ({
+      snapshot: emptySnapshot(), calls: [], blocked: true, reason: "boundary_capture_unavailable",
+    }),
+    readPolicy: async () => ({ state: "ABSENT" }),
+    proposePolicy: async () => ({ status: "BLOCKED", reason: "policy_proposal_unavailable" }),
+    approvePolicy: async () => ({ status: "BLOCKED", reason: "policy_approval_unavailable" }),
+    approveMinimumExit: async () => ({ status: "BLOCKED", reason: "minimum_exit_approval_unavailable" }),
+    arm: async () => ({ status: "BLOCKED", reason: "arm_unavailable", workerStarted: false, environmentChanged: false }),
+    disarm: async () => ({ status: "BLOCKED", reason: "disarm_unavailable", emergencyStop: false }),
+    commission: async () => ({
+      status: "BLOCKED",
+      blockers: ["live_money_policy_missing"],
+      executionEnabled: null,
+      killSwitch: null,
+      commissioned: null,
+      workerStarted: false,
+      environmentChanged: false,
+      accountCount: 0,
+    }),
+  };
 }
 
 /** Supabase-authenticated launch routes. Legacy Clerk routes stay on their own router. */
@@ -18,6 +57,10 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const access = createStrataAccess(deps);
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
+  router.use("/commissioning", createStrataCommissioningRouter(
+    access.requireDeveloper,
+    deps.commissioning ?? blockedCommissioningPort(),
+  ));
   router.get("/release", (_req, res) => {
     res.json({
       ...REVIEWED_RELEASE,

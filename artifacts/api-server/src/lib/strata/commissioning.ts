@@ -1,0 +1,500 @@
+import { createHash, createPrivateKey } from "node:crypto";
+import {
+  V13_CHAMPION_PARAMETER_HASH,
+  V13_CHAMPION_PARAMETER_SET,
+} from "@workspace/v13-strategy";
+import { V13_MAX_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
+
+/** Reviewed dedicated pair. Production rows cannot name any other pair. */
+export const PRODUCTION_SUBACCOUNT = 1;
+export const PRODUCTION_EXCHANGE_INDEX = 2;
+/** Reviewed one-shot transfer. Not a default the server may invent. */
+export const REVIEWED_FUNDING_CENTS = 2500;
+export const REVIEWED_FUNDING_MICROS = "25000000";
+
+export const OPERATOR_POLICY_FIELDS = [
+  "championSelectionReviewId",
+  "championSelectionEvidenceHash",
+  "championSelectedBy",
+  "championSelectedAt",
+  "capitalLimitCents",
+  "maxEntryStakeCents",
+  "maxEntryAllInCents",
+  "maxDailyLossCents",
+  "maxTotalLossCents",
+  "maxQuoteAgeMs",
+  "maxFeeEvidenceAgeMs",
+  "feePolicyVersion",
+  "feeSourceUrl",
+  "feeFormulaVersion",
+  "approvedBy",
+  "approvedAt",
+  "policyHash",
+] as const;
+
+export interface CommissioningSnapshot {
+  asOf: string;
+  signer: {
+    configured: boolean;
+    syntacticallyUsable: boolean;
+    fingerprint: string | null;
+    signedGetSucceeded: boolean;
+    restrictedToPair: boolean;
+    historyComplete: boolean;
+    keyIdMasked: string | null;
+  };
+  boundary: {
+    exists: boolean;
+    subaccount: number | null;
+    exchangeIndex: number | null;
+    state: string | null;
+    cleanZero: boolean;
+    verified: boolean;
+    fingerprintMatches: boolean;
+    historyComplete: boolean;
+    ambiguous: boolean;
+  };
+  funding: {
+    anchorExists: boolean;
+    amountCents: number | null;
+    balanceMicros: string | null;
+    verified: boolean;
+    uncertain: boolean;
+  };
+  fee: {
+    digest: string | null;
+    verified: boolean;
+    cashPrecisionVerified: boolean;
+  };
+  cash: {
+    precisionVerified: boolean;
+    micros: string | null;
+    source: "authenticated_kalshi_micros" | null;
+  };
+  minimumExit: {
+    approved: boolean;
+    micros: number | null;
+    source: "operator_approved" | null;
+  };
+  openPositionCount: number;
+  unresolvedIntentCount: number;
+  transportReady: boolean;
+  policy: {
+    exists: boolean;
+    id: string | null;
+    approved: boolean;
+    strategyParameterSetId: string | null;
+    strategyParameterHash: string | null;
+    hashMatches: boolean;
+    missingFields: string[];
+  };
+  account: {
+    count: number;
+    id: string | null;
+    subaccount: number | null;
+    exchangeIndex: number | null;
+    fingerprint: string | null;
+    commissioned: boolean | null;
+    executionEnabled: boolean | null;
+    killSwitch: boolean | null;
+  };
+  /** Persisted operator approval only. Never taken from the request body. */
+  approvedMinimumExitMicros: number | null;
+  workerRunning: boolean;
+}
+
+export interface AccountPlan {
+  id: string;
+  policyId: string;
+  subaccount: 1;
+  exchangeIndex: 2;
+  keyFingerprint: string;
+  commissioningDigest: string;
+  minimumExitMicros: number;
+  feeArtifactDigest: string;
+  cashPrecisionVerified: true;
+  cashMicros: typeof REVIEWED_FUNDING_MICROS;
+  initialCashMicros: typeof REVIEWED_FUNDING_MICROS;
+  commissioned: true;
+  executionEnabled: false;
+  killSwitch: true;
+}
+
+export interface CommissioningStatus {
+  productionAccountExists: boolean;
+  productionAccountId: string | null;
+  policyExists: boolean;
+  policyApproved: boolean;
+  subaccount: 1;
+  exchangeIndex: 2;
+  dedicatedSignerConfigured: boolean;
+  dedicatedSignerVerified: boolean;
+  keyFingerprintVerified: boolean;
+  cleanBoundaryExists: boolean;
+  cleanBoundaryVerified: boolean;
+  fundingAnchorExists: boolean;
+  fundingVerified: boolean;
+  feeArtifactVerified: boolean;
+  cashPrecisionVerified: boolean;
+  minimumExitApproved: boolean;
+  minimumExitMicros: number | null;
+  minimumExitSource: "operator_approved" | "not_approved";
+  commissioned: boolean | null;
+  executionEnabled: boolean | null;
+  killSwitch: boolean | null;
+  readyForCommissioning: boolean;
+  readyForArming: boolean;
+  blockers: string[];
+  requiredOperatorEvidence: string[];
+  kalshiConnectionStatus: KalshiConnectionStatus;
+  asOf: string;
+  workerRunning: boolean;
+}
+
+export type KalshiConnectionStatus =
+  | "NOT_CONFIGURED"
+  | "VERIFYING"
+  | "BLOCKED"
+  | "READY_TO_COMMISSION"
+  | "COMMISSIONED_DISARMED"
+  | "READY_TO_START"
+  | "RUNNING";
+
+const FINGERPRINT = /^[0-9a-f]{64}$/;
+
+export function emptySnapshot(asOf = new Date(0).toISOString()): CommissioningSnapshot {
+  return {
+    asOf,
+    signer: {
+      configured: false, syntacticallyUsable: false, fingerprint: null,
+      signedGetSucceeded: false, restrictedToPair: false, historyComplete: false,
+      keyIdMasked: null,
+    },
+    boundary: {
+      exists: false, subaccount: null, exchangeIndex: null, state: null,
+      cleanZero: false, verified: false, fingerprintMatches: false,
+      historyComplete: false, ambiguous: false,
+    },
+    funding: {
+      anchorExists: false, amountCents: null, balanceMicros: null,
+      verified: false, uncertain: false,
+    },
+    fee: { digest: null, verified: false, cashPrecisionVerified: false },
+    cash: { precisionVerified: false, micros: null, source: null },
+    minimumExit: { approved: false, micros: null, source: null },
+    openPositionCount: 0,
+    unresolvedIntentCount: 0,
+    transportReady: false,
+    policy: {
+      exists: false, id: null, approved: false, strategyParameterSetId: null,
+      strategyParameterHash: null, hashMatches: false, missingFields: [...OPERATOR_POLICY_FIELDS],
+    },
+    account: {
+      count: 0, id: null, subaccount: null, exchangeIndex: null, fingerprint: null,
+      commissioned: null, executionEnabled: null, killSwitch: null,
+    },
+    approvedMinimumExitMicros: null,
+    workerRunning: false,
+  };
+}
+
+/** Same fingerprint ProductionExchange recomputes from the Railway secrets. */
+export function dedicatedSignerFingerprint(keyId: string, privateKey: string): string | null {
+  const id = keyId.trim();
+  const pem = privateKey.trim().replaceAll("\\n", "\n")
+    .replace(/(-----BEGIN [A-Z ]+-----)\s*/, "$1\n")
+    .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
+  if (!id || !pem) return null;
+  try {
+    const key = createPrivateKey(pem);
+    if (key.asymmetricKeyType !== "rsa" && key.asymmetricKeyType !== "rsa-pss") return null;
+  } catch {
+    return null;
+  }
+  return createHash("sha256").update(`${id}\u001f${pem}`).digest("hex");
+}
+
+export function maskKeyId(keyId: string | null | undefined): string | null {
+  const trimmed = keyId?.trim();
+  if (!trimmed) return null;
+  return `****${trimmed.slice(-4)}`;
+}
+
+export function commissioningBlockers(snapshot: CommissioningSnapshot): string[] {
+  const blockers: string[] = [];
+  if (!snapshot.signer.configured) blockers.push("dedicated_signer_missing");
+  else if (!snapshot.signer.syntacticallyUsable || !snapshot.signer.fingerprint ||
+      !FINGERPRINT.test(snapshot.signer.fingerprint)) blockers.push("dedicated_signer_unusable");
+  else if (!snapshot.signer.signedGetSucceeded) blockers.push("dedicated_signer_unverified");
+  else if (!snapshot.signer.restrictedToPair) blockers.push("dedicated_signer_wrong_pair");
+  else if (!snapshot.signer.historyComplete) blockers.push("dedicated_signer_history_incomplete");
+
+  if (!snapshot.boundary.exists) blockers.push("clean_boundary_missing");
+  else if (snapshot.boundary.ambiguous) blockers.push("clean_boundary_ambiguous");
+  else if (snapshot.boundary.subaccount !== PRODUCTION_SUBACCOUNT ||
+      snapshot.boundary.exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) blockers.push("clean_boundary_wrong_pair");
+  else if (!snapshot.boundary.cleanZero) blockers.push("clean_boundary_not_zero");
+  else if (!snapshot.boundary.historyComplete) blockers.push("clean_boundary_history_incomplete");
+  else if (!snapshot.boundary.verified || !snapshot.boundary.fingerprintMatches) {
+    blockers.push("clean_boundary_unverified");
+  }
+
+  if (snapshot.funding.uncertain) blockers.push("funding_uncertain_no_retry");
+  else if (!snapshot.funding.anchorExists) blockers.push("funding_anchor_missing");
+  else if (snapshot.funding.amountCents !== REVIEWED_FUNDING_CENTS ||
+      snapshot.funding.balanceMicros !== REVIEWED_FUNDING_MICROS) blockers.push("funding_amount_not_reviewed");
+  else if (!snapshot.funding.verified) blockers.push("funding_unverified");
+
+  if (!snapshot.fee.digest || !FINGERPRINT.test(snapshot.fee.digest)) blockers.push("fee_artifact_digest_absent");
+  else if (!snapshot.fee.verified) blockers.push("fee_artifact_unverified");
+
+  if (!snapshot.policy.exists) blockers.push("live_money_policy_missing");
+  else if (!snapshot.policy.approved) blockers.push("live_money_policy_not_approved");
+  else if (snapshot.policy.strategyParameterSetId !== V13_CHAMPION_PARAMETER_SET.id ||
+      snapshot.policy.strategyParameterHash !== V13_CHAMPION_PARAMETER_HASH) {
+    blockers.push("live_money_policy_strategy_mismatch");
+  } else if (!snapshot.policy.hashMatches) blockers.push("live_money_policy_hash_mismatch");
+  else if (snapshot.policy.missingFields.length > 0) blockers.push("live_money_policy_operator_values_required");
+
+  if (!snapshot.cash.precisionVerified) blockers.push("cash_precision_unverified");
+  if (!snapshot.minimumExit.approved || snapshot.minimumExit.source !== "operator_approved" ||
+      !approvedExitFloor(snapshot.minimumExit.micros)) {
+    blockers.push("minimum_exit_floor_unapproved");
+  }
+
+  if (snapshot.account.count > 1) blockers.push("production_account_ambiguous");
+  else if (snapshot.account.count === 1) {
+    if (snapshot.account.subaccount !== PRODUCTION_SUBACCOUNT ||
+        snapshot.account.exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) {
+      blockers.push("production_account_wrong_pair");
+    } else if (snapshot.signer.fingerprint &&
+        snapshot.account.fingerprint !== snapshot.signer.fingerprint) {
+      blockers.push("production_account_fingerprint_mismatch");
+    }
+    if (snapshot.account.executionEnabled === true || snapshot.account.killSwitch === false) {
+      blockers.push("production_account_already_armed");
+    }
+  }
+  if (snapshot.workerRunning) blockers.push("production_worker_already_running");
+  return blockers;
+}
+
+export function approvedExitFloor(value: number | null): value is number {
+  return value !== null && Number.isSafeInteger(value) && value >= 1 && value <= 999999;
+}
+
+export function transportGatesReady(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV === "production" &&
+    env.LIVE_EXECUTION_ENABLED === "true" &&
+    env.V13_PRODUCTION_EXECUTION_ENABLED === "true" &&
+    env.KALSHI_API_ENVIRONMENT === "production" &&
+    env.MICRO_LIVE_ACCOUNT_MODE === "exclusive" &&
+    env.KALSHI_BOT_SUBACCOUNT === "1";
+}
+
+export function commissioningStatus(snapshot: CommissioningSnapshot): CommissioningStatus {
+  const blockers = commissioningBlockers(snapshot);
+  const prerequisite = blockers.filter((item) => item !== "live_arming_not_part_of_commissioning");
+  const accountReady = snapshot.account.count === 0 || (
+    snapshot.account.count === 1 &&
+    snapshot.account.commissioned !== true &&
+    snapshot.account.executionEnabled !== true &&
+    snapshot.account.killSwitch !== false &&
+    snapshot.account.fingerprint === snapshot.signer.fingerprint
+  );
+  return {
+    productionAccountExists: snapshot.account.count === 1,
+    productionAccountId: snapshot.account.count === 1 ? snapshot.account.id : null,
+    policyExists: snapshot.policy.exists,
+    policyApproved: snapshot.policy.approved && snapshot.policy.hashMatches,
+    subaccount: PRODUCTION_SUBACCOUNT,
+    exchangeIndex: PRODUCTION_EXCHANGE_INDEX,
+    dedicatedSignerConfigured: snapshot.signer.configured && snapshot.signer.syntacticallyUsable,
+    dedicatedSignerVerified: snapshot.signer.signedGetSucceeded && snapshot.signer.restrictedToPair &&
+      snapshot.signer.historyComplete,
+    keyFingerprintVerified: !!snapshot.signer.fingerprint &&
+      /^[0-9a-f]{64}$/.test(snapshot.signer.fingerprint) && snapshot.signer.syntacticallyUsable,
+    cleanBoundaryExists: snapshot.boundary.exists,
+    cleanBoundaryVerified: snapshot.boundary.verified && snapshot.boundary.cleanZero &&
+      !snapshot.boundary.ambiguous && snapshot.boundary.historyComplete,
+    fundingAnchorExists: snapshot.funding.anchorExists,
+    fundingVerified: snapshot.funding.verified && !snapshot.funding.uncertain,
+    feeArtifactVerified: snapshot.fee.verified,
+    cashPrecisionVerified: snapshot.cash.precisionVerified,
+    minimumExitApproved: snapshot.minimumExit.approved,
+    minimumExitMicros: snapshot.minimumExit.approved ? snapshot.minimumExit.micros : null,
+    minimumExitSource: snapshot.minimumExit.source ?? "not_approved",
+    commissioned: snapshot.account.commissioned,
+    executionEnabled: snapshot.account.executionEnabled,
+    killSwitch: snapshot.account.killSwitch,
+    readyForCommissioning: prerequisite.length === 0 && accountReady,
+    readyForArming: snapshot.account.commissioned === true &&
+      snapshot.account.executionEnabled === false &&
+      snapshot.account.killSwitch === true &&
+      prerequisite.filter((item) => item !== "production_account_already_armed").length === 0 &&
+      !snapshot.workerRunning,
+    blockers,
+    requiredOperatorEvidence: [
+      ...snapshot.policy.missingFields,
+      ...(snapshot.minimumExit.approved ? [] : ["minimumExitMicros"]),
+      "official fee artifact digest matching the Kalshi fee schedule",
+      "authenticated exact-micro cash evidence",
+      `operator-approved capitalLimitCents, maxEntryStakeCents (<= ${V13_MAX_ENTRY_STAKE_CENTS}), maxEntryAllInCents, maxDailyLossCents, and maxTotalLossCents`,
+    ],
+    kalshiConnectionStatus: deriveKalshiConnectionStatus(snapshot, prerequisite.length === 0 && accountReady),
+    asOf: snapshot.asOf,
+    workerRunning: snapshot.workerRunning,
+  };
+}
+
+export function deriveKalshiConnectionStatus(
+  snapshot: CommissioningSnapshot,
+  readyToCommission: boolean,
+): KalshiConnectionStatus {
+  if (snapshot.workerRunning) return "RUNNING";
+  const armed = snapshot.account.commissioned === true &&
+    snapshot.account.executionEnabled === true &&
+    snapshot.account.killSwitch === false &&
+    snapshot.transportReady &&
+    !snapshot.workerRunning;
+  if (armed) return "READY_TO_START";
+  if (snapshot.account.commissioned === true &&
+      snapshot.account.executionEnabled === false &&
+      snapshot.account.killSwitch === true) return "COMMISSIONED_DISARMED";
+  if (readyToCommission) return "READY_TO_COMMISSION";
+  if (!snapshot.signer.configured) return "NOT_CONFIGURED";
+  if (snapshot.signer.configured && !snapshot.signer.signedGetSucceeded) return "VERIFYING";
+  return "BLOCKED";
+}
+
+export function planCommission(snapshot: CommissioningSnapshot): {
+  blockers: string[];
+  plan: AccountPlan | null;
+} {
+  const status = commissioningStatus(snapshot);
+  if (!status.readyForCommissioning || !snapshot.policy.id || !snapshot.signer.fingerprint ||
+      !snapshot.fee.digest || !snapshot.cash.precisionVerified ||
+      !approvedExitFloor(snapshot.minimumExit.micros)) {
+    return { blockers: status.blockers, plan: null };
+  }
+  const commissioningDigest = createHash("sha256").update(JSON.stringify({
+    policyId: snapshot.policy.id,
+    fingerprint: snapshot.signer.fingerprint,
+    fee: snapshot.fee.digest,
+    fundingMicros: REVIEWED_FUNDING_MICROS,
+    minimumExitMicros: snapshot.minimumExit.micros,
+    asOf: snapshot.asOf,
+  })).digest("hex");
+  return {
+    blockers: status.blockers,
+    plan: {
+      id: snapshot.account.id ?? "v13-production-1-2",
+      policyId: snapshot.policy.id,
+      subaccount: 1,
+      exchangeIndex: 2,
+      keyFingerprint: snapshot.signer.fingerprint,
+      commissioningDigest,
+      minimumExitMicros: snapshot.minimumExit.micros,
+      feeArtifactDigest: snapshot.fee.digest,
+      cashPrecisionVerified: true,
+      cashMicros: REVIEWED_FUNDING_MICROS,
+      initialCashMicros: REVIEWED_FUNDING_MICROS,
+      commissioned: true,
+      executionEnabled: false,
+      killSwitch: true,
+    },
+  };
+}
+
+export const FUNDING_CONFIRMATION = "AUTHORIZE_ONE_SHOT_25_USD_TRANSFER";
+export const ARM_CONFIRMATION = "ARM_V13_PRODUCTION";
+export const DISARM_CONFIRMATION = "DISARM_V13_PRODUCTION";
+export const EXIT_FLOOR_CONFIRMATION = "APPROVE_MINIMUM_EXIT_FLOOR";
+
+/**
+ * Explicit confirmation is required. Live-execution flags must still be off.
+ * The reviewed transfer body is unchanged; this only authorizes calling it.
+ */
+export function fundingAuthorizationDecision(input: {
+  confirmation: unknown;
+  liveExecutionEnabled?: string;
+  v13ProductionExecutionEnabled?: string;
+  attemptState?: "none" | "attempted" | "uncertain" | "reconciled";
+}): { proceed: boolean; reason: string } {
+  if (input.confirmation !== FUNDING_CONFIRMATION) {
+    return { proceed: false, reason: "explicit_authorization_required" };
+  }
+  if (input.liveExecutionEnabled === "true" || input.v13ProductionExecutionEnabled === "true") {
+    return { proceed: false, reason: "funding_refused_while_execution_enabled" };
+  }
+  if (input.attemptState === "uncertain") {
+    return { proceed: false, reason: "funding_uncertain_no_retry" };
+  }
+  if (input.attemptState === "attempted" || input.attemptState === "reconciled") {
+    return { proceed: false, reason: "funding_attempt_already_exists" };
+  }
+  return { proceed: true, reason: "authorized_one_shot" };
+}
+
+export interface PolicyLimits {
+  capitalLimitCents: number;
+  maxEntryStakeCents: number;
+  maxEntryAllInCents: number;
+  maxDailyLossCents: number;
+  maxTotalLossCents: number;
+  maxQuoteAgeMs: number;
+  maxFeeEvidenceAgeMs: number;
+}
+
+export function validatePolicyLimits(input: Partial<PolicyLimits> | null): { ok: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (!input) return { ok: false, errors: ["policy_values_required"] };
+  const keys = Object.keys(input);
+  const allowed = new Set([
+    "capitalLimitCents", "maxEntryStakeCents", "maxEntryAllInCents",
+    "maxDailyLossCents", "maxTotalLossCents", "maxQuoteAgeMs", "maxFeeEvidenceAgeMs",
+  ]);
+  if (keys.some((key) => !allowed.has(key)) || keys.length !== allowed.size) {
+    errors.push("policy_fields_must_be_exactly_the_operator_limits");
+  }
+  const n = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+  const capital = n(input.capitalLimitCents);
+  const stake = n(input.maxEntryStakeCents);
+  const allIn = n(input.maxEntryAllInCents);
+  const daily = n(input.maxDailyLossCents);
+  const total = n(input.maxTotalLossCents);
+  const quote = n(input.maxQuoteAgeMs);
+  const feeAge = n(input.maxFeeEvidenceAgeMs);
+  if (capital === null || capital <= 0 || capital > 2_000_000_000) errors.push("capitalLimitCents");
+  if (stake === null || stake <= 0 || stake > V13_MAX_ENTRY_STAKE_CENTS) errors.push("maxEntryStakeCents");
+  if (allIn === null || stake === null || capital === null || allIn < stake || allIn > capital) errors.push("maxEntryAllInCents");
+  if (daily === null || capital === null || daily <= 0 || daily > capital) errors.push("maxDailyLossCents");
+  if (total === null || capital === null || total <= 0 || total > capital) errors.push("maxTotalLossCents");
+  if (quote === null || quote <= 0 || quote > 15_000) errors.push("maxQuoteAgeMs");
+  if (feeAge === null || feeAge <= 0 || feeAge > 15_000) errors.push("maxFeeEvidenceAgeMs");
+  return { ok: errors.length === 0, errors };
+}
+
+export function planArm(snapshot: CommissioningSnapshot, confirmation: unknown): { ok: boolean; reason: string } {
+  if (confirmation !== ARM_CONFIRMATION) return { ok: false, reason: "explicit_arm_confirmation_required" };
+  if (snapshot.account.commissioned !== true) return { ok: false, reason: "arm_cannot_commission" };
+  if (snapshot.workerRunning) return { ok: false, reason: "worker_already_running" };
+  const blockers = commissioningBlockers({
+    ...snapshot,
+    account: { ...snapshot.account, executionEnabled: false, killSwitch: true, commissioned: true },
+    workerRunning: false,
+  }).filter((item) => item !== "production_account_already_armed");
+  if (blockers.length > 0) return { ok: false, reason: blockers[0] ?? "stale_evidence" };
+  if (snapshot.account.executionEnabled === true && snapshot.account.killSwitch === false) {
+    return { ok: false, reason: "already_armed" };
+  }
+  return { ok: true, reason: "arm_database_flags_only" };
+}
+
+export function planDisarm(snapshot: CommissioningSnapshot, confirmation: unknown): { ok: boolean; reason: string } {
+  if (confirmation !== DISARM_CONFIRMATION) return { ok: false, reason: "explicit_disarm_confirmation_required" };
+  if (snapshot.openPositionCount > 0 || snapshot.unresolvedIntentCount > 0) {
+    return { ok: false, reason: "disarm_refused_while_position_or_intent_open" };
+  }
+  return { ok: true, reason: "disarm_database_flags_only" };
+}
