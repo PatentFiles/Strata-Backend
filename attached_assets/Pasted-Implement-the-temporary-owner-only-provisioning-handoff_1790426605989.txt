@@ -1,0 +1,70 @@
+Implement the temporary owner-only provisioning handoff, but DO NOT generate the Kalshi key yet.
+
+Implement the reviewed design with these requirements:
+
+* Development workspace only. The route must be impossible to mount in the published/production environment.
+* Require an explicit provisioning enable flag that defaults OFF.
+* Require authenticated Clerk session and exact PHASE4_ADMIN_USER_ID.
+* Mount before permissive CORS and general request/response logging middleware.
+* Same-origin only; CSRF protection required.
+* No React and no client-side JavaScript.
+* Cache-Control: no-store, private, Pragma: no-cache, and restrictive CSP including script-src 'none', frame-ancestors 'none', and no external resources.
+* Never place credentials or provisioning state in URLs.
+* Never log Kalshi response bodies, PEM material, form bodies containing credentials, or rendered secret HTML.
+
+Implement a durable non-secret one-attempt record containing only:
+
+* attempt UUID;
+* intended key name MICRO_LIVE_SUBACCOUNT_1;
+* intended subaccount 1;
+* intended scopes read, write::trade;
+* creation timestamp;
+* state such as prepared, attempted, response_received, handoff_confirmed, or uncertain.
+
+The transition to attempted must commit atomically before the Kalshi generation POST crosses the network boundary.
+
+Once attempted, no reload, restart, concurrent request, timeout, or owner action may automatically issue another generation POST for that attempt.
+
+The private key itself must exist only in server memory and the single authenticated server-rendered handoff response. Never persist it in PostgreSQL, filesystem, evidence records, application state, telemetry, exception reporting, or logs.
+
+The eventual generation request must remain exactly:
+
+* RSA;
+* name MICRO_LIVE_SUBACCOUNT_1;
+* subaccount 1;
+* scopes exactly read and write::trade.
+
+After generation, the one-time handoff page should instruct the owner to manually create:
+
+KALSHI_MICRO_LIVE_API_KEY_ID
+
+KALSHI_MICRO_LIVE_PRIVATE_KEY
+
+in Replit Secrets.
+
+Do not expose the generated credentials to the normal dashboard.
+
+Add an owner-only confirmation operation that clears the retained in-memory response after manual secret entry. Do not claim guaranteed physical erasure from the JS runtime/browser/clipboard.
+
+Add focused tests proving:
+
+* unauthenticated request denied;
+* authenticated non-owner denied;
+* production environment cannot mount the route;
+* enable flag OFF blocks it;
+* CSRF failure blocks POST;
+* concurrent submissions cannot produce two generation calls;
+* attempted state commits before mocked network call;
+* restart after attempted state cannot resubmit;
+* uncertain network result cannot automatically retry;
+* response/private key never enters durable storage or test logs;
+* requested subaccount/scopes are exactly 1 and read + write::trade.
+
+Run typechecks and focused tests.
+
+Do not execute the provisioning operation.
+Do not generate an API key.
+Do not fund subaccount 1.
+Do not alter MICRO_LIVE or existing credentials.
+
+Report the implementation, tests, and remaining issues, then stop.

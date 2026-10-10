@@ -1,0 +1,53 @@
+Final CREATE authorization checkpoint.
+
+First, commit and tag the exact development code/schema state that just passed:
+
+* MICRO_LIVE database-backed suite: 181/181
+* focused creation/boundary/account/trading tests: 95/95
+* typecheck/build PASS
+
+Create a new descriptive pre-live-create tag and report the commit SHA/tag. Do not modify production.
+
+Then perform a fresh GET-only Kalshi inventory immediately before creation and verify:
+
+* no numbered subaccount currently exists on exchange index 2;
+* primary (0,2) remains unchanged;
+* current KXBTC15M remains on exchange index 2;
+* Advanced tier remains effective;
+* unrestricted provisioning credential remains valid;
+* development creation-attempt table contains zero rows;
+* micro_live_pair_boundary contains zero rows;
+* execution remains OFF;
+* both kill switches remain engaged;
+* current historical run remains FROZEN.
+
+If every condition passes, I explicitly authorize exactly one live Kalshi mutation:
+
+POST /trade-api/v2/portfolio/subaccounts
+
+body:
+{"exchange_index":2}
+
+Use the tested durable one-shot creation workflow. Persist the pre-POST inventory and attempted latch before network I/O.
+
+Do not retry the POST under any circumstance after the attempted latch is committed.
+
+On a definitive HTTP 201:
+
+* persist the returned subaccount_number as N;
+* verify the response does not contradict exchange index 2 if index identity is supplied;
+* use GET-only evidence to verify exactly (N,2);
+* verify $0 balance/$0 portfolio value and no orders, positions, fills or settlements;
+* capture and persist the CREATED_CLEAN prospective boundary.
+
+Then STOP.
+
+Do not generate the restricted key yet.
+Do not transfer the $25.
+Do not initialize/arm a run.
+Do not enable execution.
+Do not place or cancel an order.
+
+If the POST response is timeout/unknown/malformed/contradictory, do not retry. Preserve the uncertain state, perform only the tested GET-only recovery procedure, and report the result.
+
+Report the HTTP outcome, assigned N if definitively established, creation-attempt state, clean-boundary state, and unchanged safety gates. Never display credentials.

@@ -1,0 +1,28 @@
+Keep production completely unchanged. Do not publish or apply the 47-statement migration yet.
+
+Review the proposed production schema against the tested MICRO_LIVE runtime before asking for approval again.
+
+Specifically:
+
+1. Resolve the run-cap inconsistency. micro_live_run_archive_unused_frozen_v2_check currently hardcodes cap_micros = 1000000, while micro_live_config permits run caps from 1000000 through 5000000.
+    * Confirm the exact unit conversion for these values.
+    * Confirm what value represents the intended $5 all-in cap.
+    * Prove that an unused/frozen run using the intended production cap can be archived and transitioned without violating the archive constraint.
+    * Do not weaken the overall maximum-risk ceiling.
+2. Audit the durable fee-verification gate.
+    * A row with status='verified' must have valid, fresh verification evidence and a usable checked_at.
+    * Prove that the final entry and exit submission barriers require the verification row to match the currently approved approval ID, digest, policy version, source URL, and formula version.
+    * A stale, mismatched, unavailable, invalid, pending, or missing row must block submission.
+3. Audit new live-order provenance.
+    * Prove that any newly created MICRO_LIVE real-order record cannot proceed to a submission barrier without its run identity, fee reservations, fee-evidence fingerprint, and verification timestamp.
+    * Existing historical rows may remain nullable if necessary for migration compatibility.
+4. Explain why all 47 statements are required now. Separate the statements into:
+    * fee-verification changes,
+    * run/archive changes,
+    * order-provenance changes,
+    * other previously pending changes.
+        Do not silently include unrelated schema work.
+5. Re-run the full MICRO_LIVE, recovery, fee, trading-client, typecheck, build, and schema-diff verification after any correction.
+6. Show me the revised exact production SQL diff and verification results.
+
+Keep MICRO_LIVE OFF, live execution OFF, kill switch ON, fee approval OFF. Do not restart production, arm a run, approve fees, submit/cancel an order, or modify production data.

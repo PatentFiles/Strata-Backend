@@ -1,0 +1,1502 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: history
+    description: Private per-user trading history
+  - name: forward-test
+    description: Read-only server forward-test status
+  - name: phase4
+    description: Admin-only Kalshi account and shadow trading operations
+  - name: micro-live
+    description: Admin-only micro-live status, emergency stop, and uncertain-order identity recovery
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /history:
+    get:
+      operationId: getHistory
+      tags: [history]
+      summary: Get the authenticated user's history
+      responses:
+        "200":
+          description: User history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/History"
+        "401":
+          description: Unauthorized
+  /forward-test/status:
+    get:
+      operationId: getForwardTestStatus
+      tags: [forward-test]
+      summary: Inspect persistent server forward-test status
+      description: Authenticated, read-only. Does not start or advance the engine.
+      responses:
+        "200":
+          description: Persistent engine status and aggregate forward-test statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForwardTestStatus"
+        "401":
+          description: Unauthorized
+  /forward-test/history:
+    get:
+      operationId: getForwardTestHistory
+      tags: [forward-test]
+      summary: List read-only server forward-test positions
+      description: >
+        Authenticated, read-only. Reads only positions created by the
+        production V1.3 paper engine and does not advance the worker.
+      responses:
+        "200":
+          description: Server forward-test positions and their summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForwardTestHistory"
+        "401":
+          description: Unauthorized
+  /phase4/account:
+    get:
+      operationId: getPhase4Account
+      tags: [phase4]
+      summary: Get the allowlisted Kalshi account snapshot
+      description: Requires the configured Phase 4 administrator identity.
+      responses:
+        "200":
+          description: Account connection state and private account snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Phase4Account"
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "502":
+          description: Account provider unavailable
+        "503":
+          description: Account credentials are configured but unavailable
+  /phase4/state:
+    get:
+      operationId: getPhase4State
+      tags: [phase4]
+      summary: Get Phase 4 shadow trading state
+      description: Requires the configured Phase 4 administrator identity.
+      responses:
+        "200":
+          description: Shadow configuration, proposed orders, and notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Phase4State"
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "503":
+          description: Phase 4 state unavailable
+  /phase4/shadow/mode:
+    post:
+      operationId: setPhase4ShadowMode
+      tags: [phase4]
+      summary: Set the Phase 4 shadow mode
+      description: Requires the configured Phase 4 administrator identity. No mode submits orders.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Phase4ShadowModeInput"
+      responses:
+        "200":
+          description: Updated shadow state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Phase4State"
+        "400":
+          description: Invalid mode
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "503":
+          description: Unable to update shadow mode
+  /phase4/shadow/limits:
+    patch:
+      operationId: setPhase4ShadowLimits
+      tags: [phase4]
+      summary: Update Phase 4 shadow risk limits
+      description: Requires the configured Phase 4 administrator identity and is available only in development.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Phase4ShadowLimitsInput"
+      responses:
+        "200":
+          description: Updated shadow state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Phase4State"
+        "400":
+          description: Invalid shadow limits
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "404":
+          description: Development-only operation
+        "503":
+          description: Unable to update shadow limits
+  /phase4/shadow/scan:
+    post:
+      operationId: scanPhase4Shadow
+      tags: [phase4]
+      summary: Manually run one development shadow scan
+      description: Requires the configured administrator identity; available only in development and never submits orders.
+      responses:
+        "200":
+          description: Shadow state after the scan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Phase4State"
+        "404":
+          description: Development-only operation
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "503":
+          description: Shadow scan unavailable
+  /micro-live/state:
+    get:
+      operationId: getMicroLiveState
+      tags: [micro-live]
+      summary: Read micro-live execution state
+      description: >
+        Requires the configured Phase 4 administrator identity. This endpoint
+        only reads state and never creates or updates micro-live configuration.
+      responses:
+        "200":
+          description: Micro-live configuration flags, kill switch, lease, and recent decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveState"
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "503":
+          description: Micro-live state unavailable
+  /micro-live/bounded-run/arm:
+    post:
+      operationId: armMicroLiveBoundedRun
+      tags: [micro-live]
+      summary: Arm one development-only, fee-approved entry window
+      description: >
+        Administrator only. The running API verifies its own current fee approval,
+        worker lease, account binding and reconciliation. Submissions stay blocked
+        during preparation. Arming does not place an order and does not replace
+        the environment execution prerequisites.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveBoundedRunInput"
+      responses:
+        "200":
+          description: Bounded entry window armed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveBoundedRunResult"
+        "400": { description: Explicit confirmation required }
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+        "404": { description: Development only }
+        "409":
+          description: One or more safety requirements were not satisfied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveBoundedRunResult"
+        "503": { description: Arming unavailable }
+  /micro-live/bounded-run/prepare-next:
+    post:
+      operationId: prepareNextMicroLiveBoundedRun
+      tags: [micro-live]
+      summary: Archive an expired unused run and prepare a new $5-cap development slot
+      description: >
+        Administrator only and development only. Requires the exact expired,
+        frozen, unused prior run and disabled database execution gates. Records
+        immutable prior-run history and an audit reason, then prepares but does
+        not arm the next run. Never approves fees, places or cancels an order,
+        clears a claimed attempt, or modifies the previous run's $1 cap.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLivePrepareNextBoundedRunInput"
+      responses:
+        "200":
+          description: New development run slot prepared, still unarmed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLivePrepareNextBoundedRunResult"
+        "400": { description: "Confirmation, prior run ID, and reason are required" }
+        "401": { description: "Signed out" }
+        "403": { description: "Not administrator" }
+        "404": { description: "Development-only operation" }
+        "409":
+          description: Prior run is not safely eligible for a new-run transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLivePrepareNextBoundedRunResult"
+        "503": { description: "New-run transition unavailable" }
+  /micro-live/bounded-run/resume-exit:
+    post:
+      operationId: resumeMicroLiveBoundedExit
+      tags: [micro-live]
+      summary: Reconcile and resume only the recorded exit after a restart
+      description: >
+        Administrator only and development only. Never reopens entry, submits an
+        order, retries an uncertain submission or overrides an emergency stop.
+        Requires attributable filled exposure and complete exchange evidence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveBoundedRunInput"
+      responses:
+        "200":
+          description: Exit-only readiness restored for the exact run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveBoundedRunResult"
+        "400": { description: Explicit confirmation required }
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+        "404": { description: Development only }
+        "409":
+          description: Recovery blocked by a safety requirement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveBoundedRunResult"
+        "503": { description: Recovery unavailable }
+  /micro-live/resolve-stale-accounting:
+    post:
+      operationId: resolveStaleMicroLiveAccounting
+      tags: [micro-live]
+      summary: Resolve one stale startup accounting flag in development only
+      description: >
+        Phase 4 administrator only. Re-audits complete primary-account history
+        using GET requests, then atomically records the decision and clears only
+        the stale accounting flag and reason if all frozen-state guards pass.
+        Never grants execution readiness or places/cancels orders.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveAccountingResolutionInput"
+      responses:
+        "200":
+          description: Accounting flag cleared and audit decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveAccountingResolutionResult"
+        "400": { description: Invalid resolution request }
+        "401": { description: Signed out }
+        "403": { description: Not the configured administrator }
+        "409":
+          description: Accounting resolution blocked by a server-side guard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveAccountingResolutionResult"
+        "503": { description: Unable to commit resolution }
+  /micro-live/fee-approval:
+    get:
+      operationId: getMicroLiveFeeApproval
+      tags: [micro-live]
+      summary: Read the persisted standing fee policy or temporary fee review
+      description: >
+        Administrator only. Returns the database-persisted standing fee policy
+        independently of the process lifetime. Approval does not expire; fee data
+        must still pass a fresh per-order validation before any submission.
+      responses:
+        "200":
+          description: Current review or approval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveFeeApproval"
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+  /micro-live/fee-review:
+    post:
+      operationId: reviewMicroLiveFeePdf
+      tags: [micro-live]
+      summary: Extract an uploaded official fee-schedule PDF for human review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveFeePdfInput"
+      responses:
+        "200":
+          description: Review requiring separate explicit approval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveFeeApproval"
+        "400": { description: Invalid or unverifiable PDF }
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+  /micro-live/fee-approve:
+    post:
+      operationId: approveMicroLiveFeePdf
+      tags: [micro-live]
+      summary: Explicitly approve a standing fee policy from the reviewed schedule
+      description: >
+        Administrator only. Persists the exact reviewed PDF digest, policy
+        version, $5.00 fee-inclusive exposure limit, approval timestamp, and
+        approving administrator identity. The standing approval has no time-based
+        expiry and does not change any execution flag or submit an order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveFeeApproveInput"
+      responses:
+        "200":
+          description: Persisted standing fee-policy approval; execution flags remain unchanged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveFeeApproval"
+        "409": { description: "Review expired, changed, or policy approval was blocked" }
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+        "503": { description: Standing fee policy could not be persisted }
+  /micro-live/fee-revoke:
+    post:
+      operationId: revokeMicroLiveFeeApproval
+      tags: [micro-live]
+      summary: Revoke the persisted standing fee policy
+      description: >
+        Administrator only. Requires explicit confirmation and removes the
+        standing approval. Future entry and exit fee barriers fail closed until
+        a new PDF review and explicit administrator approval. Does not change
+        execution flags, run claims, or the kill switch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveFeeRevokeInput"
+      responses:
+        "200":
+          description: Current fee-policy state after revocation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveFeeApproval"
+        "400": { description: Explicit confirmation required }
+        "401": { description: Signed out }
+        "403": { description: Not administrator }
+        "503": { description: Standing fee policy could not be revoked }
+  /micro-live/emergency-stop:
+    post:
+      operationId: emergencyStopMicroLive
+      tags: [micro-live]
+      summary: Persist the micro-live emergency stop
+      description: >
+        Requires the configured Phase 4 administrator identity. Sets the
+        persistent kill switch ON and disables both micro-live execution flags.
+        This endpoint never sends an exchange order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveEmergencyStopInput"
+      responses:
+        "200":
+          description: Micro-live state after the emergency stop was persisted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveState"
+        "400":
+          description: Invalid emergency-stop request
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "503":
+          description: Unable to persist emergency stop or state unavailable
+  /micro-live/reconcile-uncertain:
+    post:
+      operationId: reconcileUncertainMicroLiveSubmission
+      tags: [micro-live]
+      summary: Link a proven exchange order to an ID-less local reservation
+      description: >
+        Administrator only. Requires both environment and database execution flags
+        OFF and the manual kill switch ON. Reads current and historical exchange
+        orders and fills, matches the exact client order ID and reservation, and
+        audits the decision. A linked order remains unknown until ordinary full
+        startup reconciliation; absence from resting orders never proves rejection.
+        This operation never posts or cancels an exchange order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveUncertainRecoveryInput"
+      responses:
+        "200":
+          description: Unique exchange identity linked; execution remains disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveUncertainRecoveryResult"
+        "400":
+          description: Invalid local order ID
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "409":
+          description: Evidence incomplete, conflicting, or gates not disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveUncertainRecoveryResult"
+        "503":
+          description: Recovery unavailable
+  /micro-live/recover-and-cancel-uncertain-exit:
+    post:
+      operationId: recoverAndCancelUncertainExit
+      tags: [micro-live]
+      summary: Recover and safely cancel an uncertain ID-less sell exit
+      description: >
+        Administrator only. Requires both environment and database execution flags
+        OFF and the manual kill switch ON. This may issue an exchange DELETE only
+        after complete authenticated order and fill history proves the exact
+        exchange identity, and account-wide checks prove exclusive ownership by
+        this local reservation. The operation audits its decision and leaves the
+        local order unresolved for verification. The link-only
+        /micro-live/reconcile-uncertain operation never cancels an order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveUncertainRecoveryInput"
+      responses:
+        "200":
+          description: Exchange order linked and cancellation safely checked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveUncertainExitRecoveryResult"
+        "400":
+          description: Invalid local order ID
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "409":
+          description: Recovery or cancellation blocked by incomplete or conflicting evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveUncertainExitRecoveryResult"
+        "503":
+          description: Recovery unavailable or response invalid
+  /micro-live/reconcile-settlement:
+    post:
+      operationId: reconcileMicroLiveSettlement
+      tags: [micro-live]
+      summary: Verify and record an exchange settlement for a local position
+      description: >
+        Administrator only. Requires both execution flags OFF and kill switch ON.
+        Reads exchange fills, positions and settlement records; rejects ambiguous
+        quantities, conflicting evidence, or incomplete snapshots. Never submits
+        or cancels an exchange order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicroLiveSettlementInput"
+      responses:
+        "200":
+          description: Settlement recorded or already recorded from identical evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveSettlementResult"
+        "400":
+          description: Invalid position ID
+        "401":
+          description: Signed out
+        "403":
+          description: Not the configured administrator
+        "409":
+          description: Settlement evidence or execution gates do not permit recording
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicroLiveSettlementResult"
+        "503":
+          description: Settlement reconciliation unavailable
+  /history/paper:
+    post:
+      operationId: savePaperPosition
+      tags: [history]
+      summary: Save an immutable paper position idempotently
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaperPositionInput"
+      responses:
+        "200":
+          description: Whether the position was inserted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaperSaveResult"
+        "400":
+          description: Invalid paper position
+        "401":
+          description: Unauthorized
+  /history/live:
+    post:
+      operationId: saveLiveAction
+      tags: [history]
+      summary: Save a live trade update and event atomically
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LiveActionInput"
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedResult"
+        "400":
+          description: Invalid live action
+        "401":
+          description: Unauthorized
+  /history/import:
+    post:
+      operationId: importHistory
+      tags: [history]
+      summary: Import history without overwriting existing records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HistoryImportInput"
+      responses:
+        "200":
+          description: Import counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryImportResult"
+        "400":
+          description: Invalid import data
+        "401":
+          description: Unauthorized
+components:
+  schemas:
+    MicroLiveState:
+      type: object
+      additionalProperties: false
+      required: [enabled, configurationExists, databaseFlags, environmentFlags, killSwitch, accountingUnresolved, accountingUnresolvedReason, lease, reconciliation, readOnlyAudit, availableBankrollCents, maxLiveBankrollCents, availableKalshiBalance, pendingOrders, fills, openExposureCents, reservedRiskCents, realizedPnlCents, realizedPnlMicros, unrealizedPnlCents, wins, losses, currentPosition, lastAttempted, lastAccepted, lastRejection, latestBlockedReason, currentV13Signal, openPositionCount, recentDecision, boundedRun]
+      properties:
+        enabled: { type: boolean }
+        configurationExists: { type: boolean }
+        accountingUnresolved: { type: boolean }
+        accountingUnresolvedReason: { type: [string, "null"] }
+        databaseFlags:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveFlags"
+            - type: "null"
+        environmentFlags: { $ref: "#/components/schemas/MicroLiveFlags" }
+        killSwitch: { type: string, enum: [ON, OFF] }
+        lease: { $ref: "#/components/schemas/MicroLiveLease" }
+        reconciliation: { $ref: "#/components/schemas/MicroLiveReconciliation" }
+        readOnlyAudit: { $ref: "#/components/schemas/MicroLiveReadOnlyAudit" }
+        availableBankrollCents: { type: [integer, "null"] }
+        maxLiveBankrollCents: { type: [integer, "null"] }
+        availableKalshiBalance:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveAvailableBalance"
+            - type: "null"
+        pendingOrders: { $ref: "#/components/schemas/MicroLivePendingOrders" }
+        fills: { $ref: "#/components/schemas/MicroLiveFills" }
+        openExposureCents: { type: integer }
+        reservedRiskCents: { type: integer }
+        realizedPnlCents: { type: [integer, "null"] }
+        realizedPnlMicros: { type: [integer, "null"], description: "Net realized dollars in exact millionths; null when any required fee or trade value is unknown." }
+        unrealizedPnlCents: { type: [integer, "null"] }
+        wins: { type: [integer, "null"] }
+        losses: { type: [integer, "null"] }
+        currentPosition:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveCurrentPosition"
+            - type: "null"
+        lastAttempted:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveDecision"
+            - type: "null"
+        lastAccepted:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveDecision"
+            - type: "null"
+        lastRejection:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveDecision"
+            - type: "null"
+        latestBlockedReason: { type: [string, "null"] }
+        currentV13Signal:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveV13Signal"
+            - type: "null"
+        openPositionCount: { type: integer }
+        recentDecision:
+          oneOf:
+            - $ref: "#/components/schemas/MicroLiveDecision"
+            - type: "null"
+        boundedRun: { $ref: "#/components/schemas/MicroLiveBoundedRunState" }
+    MicroLiveBoundedRunState:
+      type: object
+      additionalProperties: false
+      required: [phase, entryDeadlineAt, armedAt, runId, entryAttempted, exitAttempted, freezeReason, capMicros]
+      properties:
+        phase: { type: [string, "null"], enum: [UNARMED, FROZEN, PREPARING, ENTRY_OPEN, EXIT_ONLY, null] }
+        entryDeadlineAt: { type: [string, "null"], format: date-time }
+        armedAt: { type: [string, "null"], format: date-time }
+        runId: { type: [string, "null"] }
+        entryAttempted: { type: boolean }
+        exitAttempted: { type: boolean }
+        freezeReason: { type: [string, "null"] }
+        capMicros: { type: integer, minimum: 1000000, maximum: 5000000, description: "Fee-inclusive per-run reservation cap in exact millionths of a dollar." }
+    MicroLiveBoundedRunInput:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm: { type: boolean, enum: [true] }
+    MicroLiveBoundedRunResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [armed, resumed, blocked] }
+        reason: { type: string }
+    MicroLivePrepareNextBoundedRunInput:
+      type: object
+      additionalProperties: false
+      required: [confirm, priorRunId, reason]
+      properties:
+        confirm: { type: boolean, enum: [true] }
+        priorRunId: { type: string, minLength: 1, maxLength: 64 }
+        reason: { type: string, minLength: 16, maxLength: 512 }
+    MicroLivePrepareNextBoundedRunResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [prepared, blocked] }
+        reason: { type: string }
+    MicroLiveAccountingResolutionInput:
+      type: object
+      additionalProperties: false
+      required: [expectedUnresolvedReason, resolutionReason]
+      properties:
+        expectedUnresolvedReason:
+          type: string
+          enum: [startup_exchange_reconciliation_failed]
+        resolutionReason:
+          type: string
+          minLength: 16
+          maxLength: 512
+    MicroLiveAccountingResolutionResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [blocked, resolved] }
+        reason: { type: string }
+        decisionId: { type: string }
+    MicroLiveAvailableBalance:
+      type: object
+      additionalProperties: false
+      required: [cents, dollars, observedAt]
+      properties:
+        cents: { type: integer }
+        dollars: { type: string }
+        observedAt: { type: string, format: date-time }
+    MicroLivePendingOrders:
+      type: object
+      additionalProperties: false
+      required: [count, list]
+      properties:
+        count: { type: integer }
+        list:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    MicroLiveFills:
+      type: object
+      additionalProperties: false
+      required: [count, list]
+      properties:
+        count: { type: integer }
+        list:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    MicroLiveCurrentPosition:
+      type: object
+      description: Current position record; fields are defined by the engine ledger.
+      additionalProperties: true
+    MicroLiveV13Signal:
+      type: object
+      additionalProperties: false
+      required: [signal, direction, ticker, evaluatedAt]
+      properties:
+        signal: { type: string }
+        direction: { type: string }
+        ticker: { type: [string, "null"] }
+        evaluatedAt: { type: [string, "null"], format: date-time }
+    MicroLiveFlags:
+      type: object
+      additionalProperties: false
+      required: [microLiveProductionEnabled, liveExecutionEnabled]
+      properties:
+        microLiveProductionEnabled: { type: boolean }
+        liveExecutionEnabled: { type: boolean }
+    MicroLiveLease:
+      type: object
+      additionalProperties: false
+      required: [held, owner, expiresAt]
+      properties:
+        held: { type: boolean }
+        owner: { type: [string, "null"] }
+        expiresAt: { type: [string, "null"], format: date-time }
+    MicroLiveReconciliation:
+      type: object
+      additionalProperties: false
+      required: [status, checkedAt]
+      properties:
+        status: { type: string, enum: [not_run, required, current] }
+        checkedAt: { type: [string, "null"], format: date-time }
+    MicroLiveReadOnlyAudit:
+      type: object
+      additionalProperties: false
+      description: GET-only diagnostic. Historical account fills are unattributed and never grant execution reconciliation readiness.
+      required: [status, checkedAt, reason, boundaryAt, knownBotFills, historicalUnattributedFills, unexplainedFills, positionDiscrepancies]
+      properties:
+        status: { type: string, enum: [not_run, observed, blocked] }
+        checkedAt: { type: [string, "null"], format: date-time }
+        reason: { type: [string, "null"] }
+        boundaryAt: { type: [string, "null"], format: date-time, description: "Earlier of the persisted config creation and earliest known bot order creation. Fills strictly before it can be historical but remain unattributed." }
+        knownBotFills: { type: [integer, "null"], description: "Exchange fills linked to a locally known micro-live exchange order ID; identity alone does not verify accounting." }
+        historicalUnattributedFills: { type: [integer, "null"], description: "Older exchange fills not linked to known bot orders. Never imported into the bot ledger." }
+        unexplainedFills: { type: [integer, "null"], description: "Unlinked fills at/after the boundary or without a trustworthy timestamp; blocks the audit." }
+        positionDiscrepancies: { type: [integer, "null"], description: "Account positions that disagree with reconstructed bot inventory, including unexpected nonzero positions; blocks the audit." }
+    MicroLiveDecision:
+      type: object
+      additionalProperties: false
+      required: [evaluationId, status, reason, decidedAt]
+      properties:
+        evaluationId: { type: [string, "null"] }
+        status: { type: string, enum: [blocked, submitted, unknown, rejected, partial, filled] }
+        reason: { type: string }
+        decidedAt: { type: string, format: date-time }
+        orderId: { type: string }
+    MicroLiveAccountSnapshot:
+      type: object
+      description: Complete normalized private account snapshot shape available from the Kalshi account reader.
+      additionalProperties: false
+      required: [balance, openOrders, positions, fills, truncated]
+      properties:
+        balance: { $ref: "#/components/schemas/MicroLiveBalance" }
+        openOrders:
+          type: array
+          items: { $ref: "#/components/schemas/MicroLivePendingOrder" }
+        positions:
+          type: array
+          items: { $ref: "#/components/schemas/MicroLivePosition" }
+        fills:
+          type: array
+          items: { $ref: "#/components/schemas/MicroLiveFill" }
+        truncated: { $ref: "#/components/schemas/MicroLiveAccountTruncation" }
+    MicroLiveBalance:
+      type: object
+      additionalProperties: false
+      required: [availableCashDollars, portfolioValueDollars]
+      properties:
+        availableCashDollars: { type: string }
+        portfolioValueDollars: { type: [string, "null"] }
+    MicroLivePendingOrder:
+      type: object
+      additionalProperties: false
+      required: [id, ticker, side, action, priceDollars, remainingCount, status, createdAt]
+      properties:
+        id: { type: string }
+        ticker: { type: string }
+        side: { type: string }
+        action: { type: string }
+        priceDollars: { type: [string, "null"] }
+        remainingCount: { type: [string, "null"] }
+        status: { type: string }
+        createdAt: { type: [string, "null"], format: date-time }
+    MicroLivePosition:
+      type: object
+      additionalProperties: false
+      required: [ticker, positionFp, marketExposureDollars, realizedPnlDollars]
+      properties:
+        ticker: { type: string }
+        positionFp: { type: string }
+        marketExposureDollars: { type: [string, "null"] }
+        realizedPnlDollars: { type: [string, "null"] }
+    MicroLiveFill:
+      type: object
+      additionalProperties: false
+      required: [id, orderId, ticker, side, action, countFp, priceDollars, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: [string, "null"] }
+        ticker: { type: string }
+        side: { type: string }
+        action: { type: string }
+        countFp: { type: string }
+        priceDollars: { type: [string, "null"] }
+        createdAt: { type: [string, "null"], format: date-time }
+    MicroLiveAccountTruncation:
+      type: object
+      additionalProperties: false
+      required: [openOrders, positions, fills]
+      properties:
+        openOrders: { type: boolean }
+        positions: { type: boolean }
+        fills: { type: boolean }
+    MicroLiveEmergencyStopInput:
+      type: object
+      additionalProperties: false
+      required: [disable]
+      properties:
+        disable: { type: boolean, const: true }
+    MicroLiveFeeApproval:
+      type: object
+      additionalProperties: false
+      required: [status, reviewId, digest, effectiveDate, feeRule, evidence, expiresAt, approvedAt, approved, policyVersion, maximumExposureMicros, approvedRunCapMicros, approvedBy, sourceUrl, formulaVersion, artifactStatus, artifactCheckedAt, artifactReason]
+      properties:
+        status: { type: string, enum: [none, review, approved] }
+        reviewId: { type: ["string", "null"] }
+        digest: { type: ["string", "null"] }
+        effectiveDate: { type: ["string", "null"] }
+        feeRule: { type: ["string", "null"] }
+        evidence: { type: ["string", "null"] }
+        expiresAt: { type: ["string", "null"], description: "Only a temporary unapproved PDF review expires; a standing approved policy has no expiry." }
+        approvedAt: { type: ["string", "null"] }
+        approved: { type: boolean, description: "True only when the persistent approval record is complete, current-version, and within its authorized limits." }
+        policyVersion: { type: ["string", "null"] }
+        maximumExposureMicros: { type: ["integer", "null"], minimum: 0, maximum: 5000000, description: "Fee-inclusive policy maximum in exact millionths of a dollar; the live execution cap remains separately enforced." }
+        approvedRunCapMicros: { type: ["integer", "null"], minimum: 0, maximum: 5000000, description: "Maximum run cap explicitly covered by this fee-policy approval, in exact millionths of a dollar." }
+        approvedBy: { type: ["string", "null"], description: "Authenticated administrator identity/reference recorded at approval." }
+        sourceUrl: { type: ["string", "null"], description: "Pinned canonical source URL for the approved fee artifact; arbitrary URLs are never accepted." }
+        formulaVersion: { type: ["string", "null"], description: "Version identifier for the verified standard quadratic 0.07 fee formula." }
+        artifactStatus: { type: string, enum: [unverified, verified, changed, unavailable, invalid], description: "Latest canonical-source verification state; process-local monitoring never grants authorization." }
+        artifactCheckedAt: { type: ["string", "null"], description: "ISO timestamp of the most recent canonical artifact verification attempt." }
+        artifactReason: { type: ["string", "null"], description: "Machine-readable reason for the latest canonical-source verification result." }
+    MicroLiveFeePdfInput:
+      type: object
+      additionalProperties: false
+      required: [pdfBase64]
+      properties:
+        pdfBase64: { type: string, minLength: 132, maxLength: 2700000 }
+    MicroLiveFeeApproveInput:
+      type: object
+      additionalProperties: false
+      required: [reviewId, digest]
+      properties:
+        reviewId: { type: string, format: uuid }
+        digest: { type: string, pattern: "^[0-9a-f]{64}$" }
+    MicroLiveFeeRevokeInput:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm: { type: boolean, const: true }
+    MicroLiveUncertainRecoveryResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason, orderId]
+      properties:
+        status: { type: string, enum: [blocked, linked_needs_reconciliation] }
+        reason: { type: string }
+        orderId: { type: string, format: uuid }
+    MicroLiveUncertainRecoveryInput:
+      type: object
+      additionalProperties: false
+      required: [orderId]
+      properties:
+        orderId: { type: string, format: uuid }
+    MicroLiveUncertainExitRecoveryResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason, orderId]
+      properties:
+        status: { type: string, enum: [blocked, linked_and_cancel_checked] }
+        reason: { type: string }
+        orderId: { type: string, format: uuid }
+    MicroLiveSettlementInput:
+      type: object
+      additionalProperties: false
+      required: [positionId]
+      properties:
+        positionId: { type: string, minLength: 1, maxLength: 256 }
+    MicroLiveSettlementResult:
+      type: object
+      additionalProperties: false
+      required: [status, reason, positionId]
+      properties:
+        status: { type: string, enum: [blocked, recorded, already_recorded] }
+        reason: { type: string }
+        positionId: { type: string }
+    Phase4Account:
+      type: object
+      additionalProperties: false
+      required: [status, balance, openOrders, positions, fills, truncated]
+      properties:
+        status: { type: string, enum: [NOT_CONFIGURED, CONNECTED] }
+        balance:
+          oneOf:
+            - $ref: "#/components/schemas/Phase4Balance"
+            - type: "null"
+        openOrders:
+          type: array
+          items: { $ref: "#/components/schemas/Phase4OpenOrder" }
+        positions:
+          type: array
+          items: { $ref: "#/components/schemas/Phase4Position" }
+        fills:
+          type: array
+          items: { $ref: "#/components/schemas/Phase4Fill" }
+        truncated: { $ref: "#/components/schemas/Phase4AccountTruncation" }
+    Phase4AccountTruncation:
+      type: object
+      additionalProperties: false
+      required: [openOrders, positions, fills]
+      properties:
+        openOrders: { type: boolean }
+        positions: { type: boolean }
+        fills: { type: boolean }
+    Phase4Balance:
+      type: object
+      additionalProperties: false
+      required: [availableCashDollars, portfolioValueDollars]
+      properties:
+        availableCashDollars: { type: string }
+        portfolioValueDollars: { type: [string, "null"] }
+    Phase4OpenOrder:
+      type: object
+      additionalProperties: false
+      required: [id, ticker, side, action, priceDollars, remainingCount, status, createdAt]
+      properties:
+        id: { type: string }
+        ticker: { type: string }
+        side: { type: string }
+        action: { type: string }
+        priceDollars: { type: [string, "null"] }
+        remainingCount: { type: [string, "null"] }
+        status: { type: string }
+        createdAt: { type: [string, "null"] }
+    Phase4Position:
+      type: object
+      additionalProperties: false
+      required: [ticker, positionFp, marketExposureDollars, realizedPnlDollars]
+      properties:
+        ticker: { type: string }
+        positionFp: { type: string }
+        marketExposureDollars: { type: [string, "null"] }
+        realizedPnlDollars: { type: [string, "null"] }
+    Phase4Fill:
+      type: object
+      additionalProperties: false
+      required: [id, orderId, ticker, side, action, countFp, priceDollars, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: [string, "null"] }
+        ticker: { type: string }
+        side: { type: string }
+        action: { type: string }
+        countFp: { type: string }
+        priceDollars: { type: [string, "null"] }
+        createdAt: { type: [string, "null"] }
+    Phase4State:
+      type: object
+      additionalProperties: true
+      required: [config, proposedOrders, notifications]
+      properties:
+        config: { $ref: "#/components/schemas/Phase4ShadowConfig" }
+        proposedOrders:
+          type: array
+          items: { $ref: "#/components/schemas/Phase4ProposedOrder" }
+        notifications:
+          type: array
+          items: { $ref: "#/components/schemas/Phase4Notification" }
+    Phase4ShadowConfig:
+      type: object
+      additionalProperties: true
+      required: [id, mode, liveExecutionEnabled, liveCapitalLimit, liveCapitalRemaining, maxStakePerTrade, maxDailyLoss, maxTotalExperimentLoss, maxOpenPositions, maxEntryPrice, maxSlippage, shadowCapitalLimit, shadowCapitalRemaining, shadowMaxStakePerTrade, shadowMaxOpenPositions, shadowMaxTotalLoss, manualKillSwitch, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        mode: { type: string, enum: [PAPER_ONLY, SHADOW_LIVE] }
+        manualKillSwitch: { type: boolean }
+        liveExecutionEnabled: { type: boolean, const: false }
+        liveCapitalLimit: { type: number }
+        liveCapitalRemaining: { type: number }
+        maxStakePerTrade: { type: number }
+        maxDailyLoss: { type: number }
+        maxTotalExperimentLoss: { type: number }
+        maxOpenPositions: { type: integer }
+        maxEntryPrice: { type: number }
+        maxSlippage: { type: number }
+        shadowCapitalLimit: { type: number }
+        shadowCapitalRemaining: { type: number }
+        shadowMaxStakePerTrade: { type: number }
+        shadowMaxOpenPositions: { type: integer }
+        shadowMaxTotalLoss: { type: number }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Phase4ProposedOrder:
+      type: object
+      additionalProperties: false
+      required: [id, marketTicker, crossingKey, triggerType, direction, sourceEvaluationId, quotePrice, proposedLimitPrice, contracts, intendedStake, simulatedRemainingCapital, status, riskVerdict, riskReason, recordedAt, createdAt]
+      properties:
+        id: { type: string }
+        marketTicker: { type: string }
+        crossingKey: { type: string }
+        triggerType: { type: string, enum: [SCOUT, CONFIRM] }
+        direction: { type: string, enum: [UP, DOWN] }
+        sourceEvaluationId: { type: string }
+        quotePrice: { type: [number, "null"] }
+        proposedLimitPrice: { type: [number, "null"] }
+        contracts: { type: integer }
+        intendedStake: { type: number }
+        simulatedRemainingCapital: { type: [number, "null"] }
+        status: { type: string, enum: [PROPOSED, BLOCKED] }
+        riskVerdict: { type: string, enum: [ALLOW, BLOCK] }
+        riskReason: { type: string }
+        recordedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    Phase4Notification:
+      type: object
+      additionalProperties: false
+      required: [id, eventType, severity, message, details, createdAt]
+      properties:
+        id: { type: string }
+        eventType: { type: string, enum: [API, FEED, RISK, KILL, ENTRY, EXIT] }
+        severity: { type: string, enum: [INFO, WARN, ERROR] }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: false
+          properties:
+            mode: { type: string, enum: [PAPER_ONLY, SHADOW_LIVE] }
+            manualKillSwitch: { type: boolean }
+            marketTicker: { type: string }
+            evaluationId: { type: string }
+            reasons:
+              type: array
+              items: { type: string }
+        createdAt: { type: string, format: date-time }
+    Phase4ShadowModeInput:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [PAPER_ONLY, SHADOW_LIVE] }
+    Phase4ShadowLimitsInput:
+      type: object
+      additionalProperties: false
+      required: [liveCapitalLimit, liveCapitalRemaining, maxStakePerTrade, maxDailyLoss, maxTotalExperimentLoss, maxOpenPositions, maxEntryPrice, maxSlippage, manualKillSwitch]
+      properties:
+        liveCapitalLimit: { type: number, minimum: 0 }
+        liveCapitalRemaining: { type: number, minimum: 0 }
+        maxStakePerTrade: { type: number, minimum: 0 }
+        maxDailyLoss: { type: number, minimum: 0 }
+        maxTotalExperimentLoss: { type: number, minimum: 0 }
+        maxOpenPositions: { type: integer, minimum: 0, maximum: 100 }
+        maxEntryPrice: { type: number, minimum: 0, maximum: 1 }
+        maxSlippage: { type: number, minimum: 0, maximum: 1 }
+        manualKillSwitch: { type: boolean }
+    ForwardTestStatus:
+      type: object
+      additionalProperties: false
+      required: [engineId, engineMode, strategyVersion, enabled, workerRunning, workerOwner, leaseAcquiredAt, lastHeartbeatAt, lastAttemptedCycleAt, lastSuccessfulCycleAt, cycleCount, workerUptimeSeconds, lastMarketPollAt, lastEvaluationAt, marketTicker, activeWindow, signal, direction, currentReason, signedBuffer, btcPrice, target, upOffer, downOffer, lastTriggerType, lastTriggerAt, openPaperPosition, markPrice, unrealizedPaperPnl, lastSettlement, lastError, databaseConnectionStatus, evaluationCount, windowsObserved, triggerCount, scoutTriggers, confirmTriggers, openPaperPositionCount, completedPaperForwardTests, wins, losses, cumulativePaperPnl]
+      properties:
+        engineId: { type: [string, "null"] }
+        engineMode: { type: string, enum: [PAPER_ONLY] }
+        strategyVersion: { type: string, enum: [V1.3] }
+        enabled: { type: boolean }
+        workerRunning: { type: boolean }
+        workerOwner: { type: [string, "null"] }
+        leaseAcquiredAt: { type: [string, "null"], format: date-time }
+        lastAttemptedCycleAt: { type: [string, "null"], format: date-time }
+        lastSuccessfulCycleAt: { type: [string, "null"], format: date-time }
+        cycleCount: { type: integer }
+        workerUptimeSeconds: { type: [number, "null"] }
+        lastHeartbeatAt: { type: [string, "null"], format: date-time }
+        lastMarketPollAt: { type: [string, "null"], format: date-time }
+        lastEvaluationAt: { type: [string, "null"], format: date-time }
+        marketTicker: { type: [string, "null"] }
+        activeWindow:
+          oneOf:
+            - $ref: "#/components/schemas/ForwardTestWindowStatus"
+            - type: "null"
+        signal: { type: [string, "null"] }
+        direction: { type: [string, "null"] }
+        currentReason: { type: [string, "null"] }
+        signedBuffer: { type: [number, "null"] }
+        btcPrice: { type: [number, "null"] }
+        target: { type: [number, "null"] }
+        upOffer: { type: [number, "null"] }
+        downOffer: { type: [number, "null"] }
+        lastTriggerType: { type: [string, "null"] }
+        lastTriggerAt: { type: [string, "null"], format: date-time }
+        openPaperPosition:
+          oneOf:
+            - $ref: "#/components/schemas/ForwardTestOpenPosition"
+            - type: "null"
+        markPrice: { type: [number, "null"] }
+        unrealizedPaperPnl: { type: [number, "null"] }
+        lastSettlement:
+          oneOf:
+            - $ref: "#/components/schemas/ForwardTestSettlement"
+            - type: "null"
+        lastError: { type: [string, "null"] }
+        databaseConnectionStatus: { type: string, enum: [CONNECTED] }
+        evaluationCount: { type: integer }
+        windowsObserved: { type: integer }
+        triggerCount: { type: integer }
+        scoutTriggers: { type: integer }
+        confirmTriggers: { type: integer }
+        openPaperPositionCount: { type: integer }
+        completedPaperForwardTests: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        cumulativePaperPnl: { type: number }
+    ForwardTestHistory:
+      type: object
+      additionalProperties: false
+      required: [positions, summary]
+      properties:
+        positions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServerForwardTestPosition"
+        summary:
+          $ref: "#/components/schemas/ServerForwardTestHistorySummary"
+    ServerForwardTestPosition:
+      type: object
+      additionalProperties: false
+      required: [id, marketTicker, strategyVersion, triggerType, direction, enteredAt, entryBtcPrice, target, entryOffer, stake, contracts, status, closedAt, exitPrice, closeReason, settlementResult, payout, pnl]
+      properties:
+        id: { type: string }
+        marketTicker: { type: string }
+        strategyVersion: { type: string, enum: [V1.3] }
+        triggerType: { type: string, enum: [SCOUT, CONFIRM] }
+        direction: { type: string, enum: [UP, DOWN] }
+        enteredAt: { type: string, format: date-time }
+        entryBtcPrice: { type: number }
+        target: { type: number }
+        entryOffer: { type: number }
+        stake: { type: number }
+        contracts: { type: number }
+        status: { type: string, enum: [OPEN, CLOSED, SETTLED] }
+        closedAt: { type: [string, "null"], format: date-time }
+        exitPrice: { type: [number, "null"] }
+        closeReason: { type: [string, "null"] }
+        settlementResult: { type: [string, "null"] }
+        payout: { type: [number, "null"] }
+        pnl: { type: [number, "null"] }
+    ServerForwardTestHistorySummary:
+      type: object
+      additionalProperties: false
+      required: [completed, wins, losses, totalStake, totalPnl, openPositionCount]
+      properties:
+        completed: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        totalStake: { type: number }
+        totalPnl: { type: number }
+        openPositionCount: { type: integer }
+    ForwardTestWindowStatus:
+      type: object
+      additionalProperties: false
+      required: [ticker, startsAt, endsAt, target, firstCrossOccurred, crossingConsumed, scoutTriggered, confirmTriggered, finalized]
+      properties:
+        ticker: { type: string }
+        startsAt: { type: [string, "null"], format: date-time }
+        endsAt: { type: [string, "null"], format: date-time }
+        target: { type: number }
+        firstCrossOccurred: { type: boolean }
+        crossingConsumed: { type: boolean }
+        scoutTriggered: { type: boolean }
+        confirmTriggered: { type: boolean }
+        finalized: { type: boolean }
+    ForwardTestOpenPosition:
+      type: object
+      additionalProperties: false
+      required: [id, ticker, direction, triggerType, enteredAt, stake, entryOffer, confirmTriggered]
+      properties:
+        id: { type: string }
+        ticker: { type: string }
+        direction: { type: string, enum: [UP, DOWN] }
+        triggerType: { type: string, enum: [SCOUT, CONFIRM] }
+        enteredAt: { type: string, format: date-time }
+        stake: { type: number }
+        entryOffer: { type: number }
+        confirmTriggered: { type: boolean }
+    ForwardTestSettlement:
+      type: object
+      additionalProperties: false
+      required: [ticker, closedAt, result, pnl]
+      properties:
+        ticker: { type: string }
+        closedAt: { type: string, format: date-time }
+        result: { type: [string, "null"] }
+        pnl: { type: number }
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+        release:
+          type: object
+          required: [revision, tree, dirty, provenance, championId, parameterHash, scoutMaxCents, confirmMaxCents, executionAuthority]
+          properties:
+            revision: { type: string }
+            tree: { type: string }
+            dirty: { type: boolean }
+            provenance: { type: string }
+            championId: { type: string }
+            parameterHash: { type: string }
+            scoutMaxCents: { type: number }
+            confirmMaxCents: { type: number }
+            executionAuthority: { type: string, enum: [NONE] }
+      required:
+        - status
+    PaperPosition:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, minLength: 1 }
+        direction: { type: string, enum: [up, down] }
+        status: { type: string, enum: [open, closed] }
+        openedAt: { type: number }
+        closedAt: { type: [number, "null"] }
+        entryPrice: { type: number }
+        exitPrice: { type: [number, "null"] }
+        stake: { type: number }
+        pnl: { type: [number, "null"] }
+        reason: { type: [string, "null"] }
+        ticker: { type: string, minLength: 1 }
+        target: { type: [number, "null"] }
+        entrySignal: { type: [string, "null"] }
+        entryBtcPrice: { type: [number, "null"] }
+        entryBuffer: { type: [number, "null"] }
+        entryVelocity: { type: [number, "null"] }
+      required: [id, direction, status, openedAt, closedAt, entryPrice, exitPrice, stake, pnl, reason, ticker, target]
+    PaperPositionInput:
+      allOf:
+        - $ref: "#/components/schemas/PaperPosition"
+        - type: object
+          description: Paper writes and imports must be completed positions.
+          properties:
+            status: { type: string, const: closed }
+            openedAt: { type: number, minimum: 0 }
+            closedAt: { type: number, minimum: 0 }
+            entryPrice: { type: number, exclusiveMinimum: 0, maximum: 1 }
+            exitPrice: { type: number, minimum: 0, maximum: 1 }
+            stake: { type: number, exclusiveMinimum: 0 }
+            pnl: { type: number }
+          required: [status, openedAt, closedAt, entryPrice, exitPrice, stake, pnl]
+    LiveTrade:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, minLength: 1 }
+        ticker: { type: string, minLength: 1 }
+        direction: { type: string, enum: [up, down] }
+        scoutStake: { type: number }
+        scoutEntryPrice: { type: number }
+        addStake: { type: number }
+        addEntryPrice: { type: [number, "null"] }
+        exitPrice: { type: [number, "null"] }
+        fees: { type: number }
+        pnl: { type: [number, "null"] }
+        status: { type: string, enum: [open, closed] }
+        openedAt: { type: number }
+        closedAt: { type: [number, "null"] }
+        closeReason: { type: [string, "null"] }
+      required: [id, ticker, direction, scoutStake, scoutEntryPrice, addStake, addEntryPrice, exitPrice, fees, pnl, status, openedAt, closedAt, closeReason]
+    LiveEvent:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, minLength: 1 }
+        action: { type: string, enum: [scout, add, exit, settlement, skip] }
+        ticker: { type: string, minLength: 1 }
+        direction: { type: [string, "null"], enum: [up, down, null] }
+        signal: { type: string }
+        createdAt: { type: number }
+        note: { type: string }
+      required: [id, action, ticker, direction, signal, createdAt, note]
+    History:
+      type: object
+      properties:
+        paper: { type: array, items: { $ref: "#/components/schemas/PaperPositionInput" } }
+        liveTrades: { type: array, items: { $ref: "#/components/schemas/LiveTrade" } }
+        liveEvents: { type: array, items: { $ref: "#/components/schemas/LiveEvent" } }
+        syncedAt: { type: number }
+        metrics: { $ref: "#/components/schemas/HistoryMetrics" }
+      required: [paper, liveTrades, liveEvents, syncedAt, metrics]
+    HistoryMetrics:
+      type: object
+      description: >
+        Metrics are calculated by the server from the authenticated user's
+        fetched history using the dashboard's existing formulas.
+      properties:
+        paper: { $ref: "#/components/schemas/PaperHistoryMetrics" }
+        live: { $ref: "#/components/schemas/LiveHistoryMetrics" }
+      required: [paper, live]
+    PaperHistoryMetrics:
+      type: object
+      description: >
+        Paper calculations use every saved paper record. Null PnL counts as
+        zero; wins have PnL greater than zero and losses have PnL less than
+        or equal to zero. Monetary values are rounded to cents.
+      properties:
+        completed: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        cumulativePnl: { type: number }
+        winRate: { type: number }
+        averageWin: { type: number }
+        averageLoss: { type: number }
+        expectancy: { type: number }
+      required: [completed, wins, losses, cumulativePnl, winRate, averageWin, averageLoss, expectancy]
+    LiveHistoryMetrics:
+      type: object
+      description: >
+        Live completed trades have closed status, non-null PnL, and non-null
+        closedAt. Wins and losses use strict positive and negative PnL; the
+        denominator for win rate and expectancy is all completed trades.
+        Current bankroll is the $25 starting bankroll plus realized PnL less
+        exposure in the first open trade, matching the dashboard formulas.
+      properties:
+        livePnl: { type: number }
+        currentBankroll: { type: number }
+        remainingBankroll: { type: number }
+        exposure: { type: number }
+        completedTrades: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        winRate: { type: number }
+        averageWin: { type: number }
+        averageLoss: { type: number }
+        expectancy: { type: number }
+        maxDrawdown: { type: number }
+      required: [livePnl, currentBankroll, remainingBankroll, exposure, completedTrades, wins, losses, winRate, averageWin, averageLoss, expectancy, maxDrawdown]
+    LiveActionInput:
+      type: object
+      properties:
+        trade:
+          oneOf:
+            - $ref: "#/components/schemas/LiveTrade"
+            - type: "null"
+        event: { $ref: "#/components/schemas/LiveEvent" }
+      required: [trade, event]
+    HistoryImportInput:
+      type: object
+      properties:
+        paper: { type: array, items: { $ref: "#/components/schemas/PaperPosition" } }
+        liveTrades: { type: array, items: { $ref: "#/components/schemas/LiveTrade" } }
+        liveEvents: { type: array, items: { $ref: "#/components/schemas/LiveEvent" } }
+      required: [paper, liveTrades, liveEvents]
+    PaperSaveResult:
+      type: object
+      properties:
+        inserted: { type: boolean }
+      required: [inserted]
+    SavedResult:
+      type: object
+      properties:
+        saved: { type: boolean, const: true }
+      required: [saved]
+    HistoryImportResult:
+      type: object
+      properties:
+        paperImported: { type: integer }
+        liveImported: { type: integer }
+        eventsImported: { type: integer }
+      required: [paperImported, liveImported, eventsImported]
+

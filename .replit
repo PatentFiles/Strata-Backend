@@ -1,0 +1,45 @@
+modules = ["nodejs-24", "python-base-3.13", "postgresql-16"]
+
+[deployment]
+router = "application"
+deploymentTarget = "vm"
+ignorePorts = false
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.development]
+FORWARD_TEST_WORKER_ENABLED = "true"
+MICRO_LIVE_ACCOUNT_MODE = "primary_nonexclusive"
+LIVE_EXECUTION_ENABLED = "false"
+MICRO_LIVE_PRODUCTION_ENABLED = "false"
+KALSHI_KEY_GENERATION_AUTHORIZED = "false"
+KALSHI_KEY_PROVISIONING_ENABLED = "true"
+KALSHI_INDEX2_KEY_GENERATION_AUTHORIZED = "false"
+KALSHI_INDEX2_KEY_PROVISIONING_ENABLED = "true"
+
+[userenv.production]
+FORWARD_TEST_PRODUCTION_WORKER_ENABLED = "true"
+SHADOW_LIVE_PRODUCTION_PREFLIGHT_ENABLED = "true"
+SHADOW_LIVE_PRODUCTION_ENABLED = "true"
+
+[userenv.shared]
+KALSHI_API_ENVIRONMENT = "production"
+KALSHI_BOT_SUBACCOUNT = "0"

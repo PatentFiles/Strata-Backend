@@ -1,0 +1,48 @@
+The local MICRO_LIVE fee and run-validity implementation is verified. Proceed to the controlled production-validation stage only.
+
+Do not enable real-money execution. Do not arm a run, approve fees, change the kill switch, submit/cancel an order, or copy the development database over production.
+
+Before making production changes, create a new Git checkpoint and record the current production baseline.
+
+Then:
+
+1. Review the exact production schema diff. It should be additive only and include the new durable microLiveFeeVerification storage and required constraints/indexes. Show me the diff before applying it. No table/column deletion, destructive migration, or development-data copy is permitted.
+2. Publish the tested code and additive schema while keeping:
+    * MICRO_LIVE execution flag OFF
+    * live execution flag OFF
+    * kill switch ON
+    * fee approval OFF
+3. After deployment, perform read-only production verification:
+    * API health
+    * Phase 4 admin authorization
+    * production database connectivity
+    * MICRO_LIVE configuration state
+    * durable fee-verification table/state
+    * Kalshi authenticated account reads
+    * no resting bot-created order
+    * no unexplained position
+    * no active MICRO_LIVE run
+    * no execution POST/DELETE calls
+4. Query the live Kalshi fee metadata for the exact current KXBTC15M candidate and report:
+    * market ticker
+    * event ticker
+    * series fee_type
+    * series fee_multiplier
+    * applicable event override, if any
+    * pending series fee changes
+    * pending event fee changes
+    * timestamp/freshness of the evidence
+        Do not hardcode any of these values.
+5. Verify restart behavior with execution disabled:
+    * restart the production API once,
+    * confirm the durable fee gate is loaded before order eligibility,
+    * confirm execution remains blocked,
+    * confirm no POST or DELETE occurs during startup/reconciliation.
+6. Verify the new production database contains no MICRO_LIVE order/fill/decision records created merely by deployment or restart.
+7. Run the production-safe read-only checks and report all results.
+
+Stop after verification.
+
+Do not approve the fee policy, arm MICRO_LIVE, disable the kill switch, or perform an evidence-collection trade. Ask for explicit approval before any step that could permit a real Kalshi order.
+
+Preserve V1.3 exactly. Do not change strategy thresholds, Scout/Confirm logic, exits, bankroll rules, fee cap, one-entry/one-exit claims, reconciliation behavior, or uncertainty handling.

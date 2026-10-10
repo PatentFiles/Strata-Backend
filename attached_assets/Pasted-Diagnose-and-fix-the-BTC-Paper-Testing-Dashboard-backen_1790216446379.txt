@@ -1,0 +1,67 @@
+Diagnose and fix the BTC Paper Testing Dashboard backend connectivity failure shown by the live Diagnostics panel.
+
+CURRENT OBSERVED FAILURE:
+
+Diagnostics currently shows:
+- Feed status: error
+- Market poll error: "Load failed"
+- Last successful market poll was much earlier
+- Strategy evaluation continues running
+- Current signal falls back to WATCH
+- API write attempt: failed with "Load failed"
+- Server readback: Not checked
+- Database confirmation: none
+- Test persistence disabled because the private ledger cannot connect
+
+IMPORTANT:
+Both the market-data request and protected history/database request fail with the same browser "Load failed" error. Treat this first as a frontend-to-backend connectivity/base-URL/server routing issue, NOT as merely a Kalshi-data problem.
+
+Please trace the application end to end and determine the actual root cause.
+
+Check specifically:
+
+1. Verify the backend server is running and listening correctly.
+2. Verify every frontend fetch URL used by:
+   - market polling
+   - authentication/session checking
+   - saved history
+   - persistence testing
+3. Check whether the frontend is using localhost, a development-only hostname, an expired Replit preview URL, or an incorrect API base URL.
+4. Make all API requests use same-origin relative routes whenever possible, such as:
+   /api/...
+   instead of hard-coded development URLs.
+5. Verify the frontend and backend are served from compatible origins.
+6. Check CORS only if cross-origin requests are actually necessary.
+7. Verify cookies/auth credentials are being included correctly for protected history requests.
+8. Verify the PostgreSQL connection itself separately from browser networking.
+9. Confirm the public market route responds with HTTP 200.
+10. Confirm the authenticated history route responds successfully for a signed-in user.
+11. Confirm Test persistence:
+    - writes the diagnostic record
+    - receives API success
+    - confirms the DB write
+    - reads the same record back
+12. Verify the fix after a server restart and page refresh.
+
+Also inspect the deployment/preview architecture:
+- Development preview must work.
+- Published .replit.app version must work.
+- Do not hard-code the current .replit.dev preview hostname because it can change.
+
+Do NOT alter:
+- V1.3 signal logic
+- Scout/Confirm thresholds
+- bankroll rules
+- market calculations
+- paper-trade logic
+
+After fixing it, report exactly:
+- root cause
+- files changed
+- whether any API base URL was wrong
+- whether the backend had stopped or become unreachable
+- HTTP status from the market endpoint
+- HTTP status from the protected history endpoint
+- whether PostgreSQL is connected
+- whether Test persistence passed write + readback
+- whether I need to republish

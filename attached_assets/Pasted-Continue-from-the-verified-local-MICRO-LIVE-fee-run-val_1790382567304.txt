@@ -1,0 +1,111 @@
+Continue from the verified local MICRO_LIVE fee/run-validity implementation.
+
+Keep real-money execution DISABLED. Do not publish, arm, approve fees, alter the production database, change the kill switch, or submit/cancel any real Kalshi order.
+
+The next objective is to remove the remaining fee-applicability and durability blockers without weakening any existing safety invariant.
+
+1. Use Kalshi’s live fee metadata for runtime applicability
+
+For the exact series containing the candidate market, obtain and validate:
+
+* fee_type
+* fee_multiplier
+* series ticker
+* last_updated_ts if available
+
+Also query the official scheduled series fee-change endpoint and determine whether a pending fee change applies before or during the candidate order lifecycle.
+
+The approved PDF/hash remains the administrator-approved formula artifact, but do not require downloading the PDF before every order. Runtime applicability should be proven from current Kalshi API metadata for the exact series.
+
+For KXBTC15M, do not assume the fee type or multiplier. Read and verify them.
+
+2. Define precedence explicitly
+
+Fee evaluation must use:
+
+1. any applicable market/event-specific override if Kalshi exposes one,
+2. otherwise the exact series fee_type and fee_multiplier,
+3. the approved formula artifact only to interpret that fee type/formula.
+
+If any required layer is unknown, contradictory, stale, unsupported, or cannot be parsed, block submission.
+
+3. Handle scheduled fee changes
+
+Before entry or exit eligibility, check whether a scheduled fee change exists for the relevant series.
+
+If a change becomes effective before the order could be submitted or while a reserved live lifecycle remains open, recompute the complete fee-inclusive worst-case debit. If the exact $5 cap can no longer be proven, block.
+
+4. Make invalidation durable
+
+Replace the process-local fee invalidation latch with transactional database-backed state.
+
+Any observed:
+
+* authoritative artifact mismatch,
+* unsupported fee type,
+* contradictory fee metadata,
+* unprovable applicability,
+* failed required verification,
+
+must commit a durable blocked state before the process may continue.
+
+After restart, the system must read that state before any execution eligibility check.
+
+A successful later fetch must not silently clear a durable invalidation. Clearing it must require the already-defined explicit administrator review/reapproval path.
+
+5. Keep source outages distinct
+
+A temporary PDF HTTP 429 should not be interpreted as evidence that the fee schedule changed.
+
+It should:
+
+* block any action that truly requires fresh PDF verification,
+* record source unavailable,
+* preserve the last approved artifact hash,
+* never substitute cached content as newly fetched evidence.
+
+Since runtime fee applicability should now be proven through the live Kalshi fee metadata, PDF rate limiting should no longer by itself prevent continuous operation when the approved artifact is already established and unchanged.
+
+6. Preserve all current safeguards
+
+Do not change:
+
+* V1.3 strategy logic,
+* $5 all-in cap,
+* one-entry/one-exit claims,
+* ≤15-second final submission fee evidence,
+* reconciliation requirements,
+* partial-IOC handling,
+* uncertain-submission freeze behavior,
+* lease fencing,
+* kill switch behavior,
+* restart fail-closed behavior.
+
+7. Add focused tests
+
+Add tests proving:
+
+* exact series fee_type/multiplier are used,
+* unsupported fee_type blocks,
+* scheduled fee change before submission recomputes fees,
+* scheduled fee change causing >$5 blocks,
+* no scheduled change allows eligibility,
+* PDF 429 does not masquerade as a changed hash,
+* process crash after fee invalidation cannot restore eligibility,
+* restart reads durable invalidation before any POST,
+* later good metadata cannot silently clear invalidation,
+* KXBTC15M applicability is derived from live metadata rather than hardcoded.
+
+Then run the complete MICRO_LIVE suite, fee tests, recovery tests, trading-client tests, API/dashboard typechecks, builds, and schema/diff checks.
+
+Report:
+
+* exact Kalshi fee endpoints used,
+* the live fee_type and fee_multiplier returned for KXBTC15M in development,
+* scheduled fee-change state,
+* precedence rules,
+* durable invalidation design,
+* all final test counts,
+* all files/schema changed.
+
+Stop after local verification. Do not publish or enable real execution.

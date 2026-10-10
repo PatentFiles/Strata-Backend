@@ -1,0 +1,41 @@
+- [Kalshi public data](kalshi-public-data.md) — Kalshi REST needs a read-only server proxy for browser CORS; Coinbase’s public WebSocket works directly.
+- [Kalshi recovery evidence](kalshi-recovery-evidence.md) — 404s are inconclusive for order recovery; settlement attribution needs complete account-market history.
+- [BTC signal safety](btc-signal-safety.md) — use actual buy offers for entry eligibility and invalidate stale market/tick snapshots before showing actionable signals.
+- [Private production verification](private-production-verification.md) — distinguish Replit’s outer access gate from Clerk; synthetic Clerk test login may jump to development.
+- [V1.3 evaluator boundary](v13-evaluator-boundary.md) — reuse shared signal classification, but feed coherence and settlement remain caller responsibilities.
+- [Forward-test scope](forward-test-scope.md) — keep the single server engine separate from per-user browser history and its metrics.
+- [Production paper-worker approval](production-paper-worker-approval.md) — production remains off through schema-only publish and verification; explicit approval precedes activation.
+- [Shared-workspace subagent failures](shared-subagent-failures.md) — an authorization failure can leave partial edits; inspect current files before retrying.
+- [Kalshi PEM in Secrets](kalshi-pem-secrets.md) — a multiline signing key may arrive as one line; verify PEM parsing without exposing its content.
+- [Shadow kill-switch boundary](shadow-kill-switch-boundary.md) — keep real execution locked and shadow risk budgets separate for genuine V1.3 proposals.
+- [Production shadow activation](production-shadow-activation.md) — verify production GET reads separately before enabling a budgeted observer; never reset spent simulation on restart.
+- [Drizzle constraint/index sync](drizzle-check-sync.md) — verify PostgreSQL CHECK and partial-index definitions after development pushes; changed definitions may remain stale.
+- [HTTP test callback failures](http-test-callback-failures.md) — event-handler exceptions can leave an HTTP test Promise pending instead of failing promptly.
+- [Micro-live intent boundary](micro-live-intent-boundary.md) — paper entry/exit events cannot automatically authorize actions for a separately filled live position.
+- [Kalshi canonical NO exits](kalshi-canonical-no-exits.md) — a signed NO-sell/YES-sell pair needs exact order identity and canonical YES/bid evidence; market quotes are not fill prices.
+- [Kalshi reduce-only exits](kalshi-reduce-only-exits.md) — V2 reduce_only caps placement quantity; use IOC rather than assuming a resting exit stays safe after inventory moves.
+- [Micro-live account ownership](micro-live-account-ownership.md) — shared primary mode accepts non-exclusive risk but must never claim isolation or relax exact attribution.
+- [Frozen exit recovery](frozen-exit-recovery.md) — a permanent exit or DELETE barrier must still permit GET-only recovery of late fills on later restarts.
+- [Kalshi balance precision](kalshi-balance-precision.md) — fee schedule centicent text does not prove account balance precision; conservatively bound non-direct per-fill rounding unless independently verified.
+- [Database test context](database-test-context.md) — shell environment labels can disagree with the actual DB destination; verify the connection against explicit dev/prod targets before any write.
+- [Kalshi fractional history](kalshi-fractional-history.md) — account-history fills may be fractional; compare exact hundredths and full order totals without relaxing bot sizing.
+- [Audited accounting clearance](audited-accounting-clearance.md) — GET-only verification is not clearance; a frozen admin write must recheck freshness and every ledger change after locks.
+- [Bounded-run test clocks](bounded-run-test-clock.md) — align injected time, fresh signals, fee evidence, and history scans when testing expiry and recovery.
+- [Bounded-run preparation boundary](bounded-run-preparation-boundary.md) — an audited higher-cap slot is not clearance to arm; mocked entry tests do not prove exit and restart recovery.
+- [Durable fee verification fence](durable-fee-verification-fence.md) — precommit closed observations; lock the fee gate through final POST without deadlocking the config row.
+- [Primary cash history coverage](primary-cash-history-coverage.md) — net balance cannot exclude offsetting transfers; mock scans do not establish real primary readiness.
+- [Kalshi exchange-scoped cash](kalshi-exchange-scoped-cash.md) — aggregate primary cash can be positive while a target exchange index has no spendable cash.
+- [Kalshi transfer reconciliation](kalshi-transfer-reconciliation.md) — an accepted transfer ID may initially GET 404; records can omit subaccount fields.
+- [Kalshi tier and grant divergence](kalshi-tier-grant-divergence.md) — HTTP success and an Advanced grant do not by themselves establish effective Advanced tier.
+- [Kalshi subaccount Content-Type](kalshi-subaccount-content-type.md) — zero-byte create requires an explicit JSON Content-Type in observed live behavior.
+- [Kalshi new subaccount visibility](kalshi-new-subaccount-visibility.md) — netting can list a new empty account before balances; verify scoped cash, not a contradictory breakdown.
+- [Development proxy origin](development-proxy-origin.md) — dev proxy headers need measurement; a no-referrer form navigation can serialize Origin as null.
+- [Development API route prefix](development-api-route-prefix.md) — an artifact-preview prefix can send a nested API-looking path to the frontend instead of the public API.
+- [Drizzle non-TTY schema preview](drizzle-nontty-schema-preview.md) — strict verbose push prints proposed SQL but cannot prompt without a TTY; confirm no DDL landed before using its output.
+- [Kalshi pair funding provenance](kalshi-pair-funding-provenance.md) — cross-shard transfer history omits subaccount identities; pre-funding zero cash cannot be reconstructed from a later balance.
+- [Pair cancellation proof continuity](pair-cancellation-proof-continuity.md) — frozen GET-only exit cancellation must carry the same digest-bound proof through every nested signed DELETE guard.
+- [Index-2 credential isolation](index2-credential-isolation.md) — hand off and bind the new pair key separately; never switch shared bot credentials or subaccount to make it fit.
+- [Operator handoff authority](operator-handoff-authority.md) — launch-champion display is not backend identity or execution clearance; monitoring changes must preserve authority.
+- [GitHub workflow permissions](github-workflow-permissions.md) — the connected OAuth App has refused workflow-file pushes; ordinary test coverage can use existing CI script entrypoints.
+- [Frozen commissioning authority](frozen-commissioning-authority.md) — retaining historical approval metadata in a frozen successor does not grant new execution authority.
+- [Historical strategy identity](historical-strategy-identity.md) — preserve unknown provenance; current-champion defaults must not relabel old records or supply authority.

@@ -1,0 +1,34 @@
+Proceed with planning the dedicated MICRO_LIVE Kalshi subaccount architecture.
+
+Do not change production, create a subaccount yet, transfer funds, create/delete API keys, enable execution, approve fees, arm a run, or submit/cancel/amend an order.
+
+Using current official Kalshi documentation and GET-only account evidence, determine the exact supported workflow for:
+
+1. Creating one dedicated numbered subaccount for MICRO_LIVE.
+2. Creating an API key restricted/bound specifically to that numbered subaccount with only the minimum scopes required for:
+    * account/balance reads
+    * orders/positions/fills/settlements reads
+    * placing the bot’s limit orders
+    * canceling only the bot’s orders
+3. Funding that subaccount from primary with an initial $25 allocation.
+4. Reading all transfers into and out of that numbered subaccount.
+5. Proving from API-key metadata that the resulting key is actually restricted to that exact subaccount.
+
+Determine whether these operations are supported through the Kalshi website, API, or both. Give me the exact manual steps where user interaction is required.
+
+Then design the application changes for account_mode=exclusive:
+
+* KALSHI_BOT_SUBACCOUNT must be a numbered value 1–63, never 0.
+* Startup must prove the configured API key is restricted to that exact subaccount.
+* If restriction cannot be proven, readiness=false.
+* Establish a durable initial balance anchor after the $25 transfer.
+* Monitor complete subaccount-transfer history.
+* Any unexplained transfer, order, fill, position, settlement, or balance discrepancy freezes execution.
+* Never automatically transfer additional money into the bot account.
+* If the available bankroll reaches the configured stop floor, disable new live entries while PAPER_ONLY and SHADOW_LIVE continue.
+* Preserve the existing $1 initial MICRO_LIVE all-in cap unless separately approved later.
+* Preserve one-entry/one-exit claims, fee gates, IOC handling, reconciliation, uncertainty freeze, and all existing safety controls.
+
+Also preserve the legacy rule: any exit lacking a provable persisted run ID remains permanently ineligible for automated DELETE.
+
+Report the exact Kalshi-supported setup procedure and required application changes. Stop before performing any mutation.

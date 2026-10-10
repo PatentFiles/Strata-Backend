@@ -1,0 +1,82 @@
+Update the existing BTC15 paper-testing dashboard to add a LIVE TEST MODE for manual real-money testing.
+
+Do not connect to Kalshi order execution and do not submit real orders. The dashboard should only generate signals and let me manually record what I actually did in Kalshi.
+
+Add these fixed live-test risk settings:
+
+* Starting live-test bankroll: $25
+* Scout size: $2.50
+* Confirm/add size: $2.50
+* Maximum exposure per 15-minute contract: $5
+* Never increase position size after a loss
+* Never exceed the original $25 test bankroll
+
+Add explicit model signals:
+
+* ⚪ PASS
+* 🟡 WATCH UP
+* 🟡 WATCH DOWN
+* 🟢 ENTER UP — SCOUT $2.50
+* 🔴 ENTER DOWN — SCOUT $2.50
+* ✅ ADD UP — $2.50
+* ✅ ADD DOWN — $2.50
+* 🚨 EXIT UP
+* 🚨 EXIT DOWN
+
+Preserve the current Early-Bird / V1.3 logic:
+
+* detect fresh strike crossings
+* calculate BTC buffer from strike
+* calculate short-term BTC velocity
+* identify when BTC moves faster than the Kalshi contract reprices
+* SCOUT after a fresh directional cross with roughly $8–$15 separation, aligned momentum, and that side still priced <=60%
+* CONFIRM/add around $20+ separation if the side remains <=68%
+* EXIT quickly on approximately an $8 wrong-side recross, probability collapse, or clear momentum invalidation
+
+Add a LIVE TRADE PANEL with buttons for:
+
+* “I Entered Scout”
+* “I Added”
+* “I Exited”
+* “Held to Settlement”
+* “Skip Trade”
+
+When I tap a button, allow me to record:
+
+* side: UP or DOWN
+* actual dollars wagered
+* actual Kalshi entry price / percentage
+* actual add price if applicable
+* actual exit price or settlement
+* fees if known
+
+Automatically calculate:
+
+* live trade profit/loss
+* cumulative live P&L
+* remaining bankroll
+* number of live trades
+* wins
+* losses
+* win rate
+* average win
+* average loss
+* expectancy per completed trade
+* maximum drawdown
+
+Keep PAPER RESULTS and LIVE RESULTS separate so we can compare theoretical model performance with real execution performance.
+
+Add a clear top-level summary:
+
+* Starting bankroll: $25
+* Current bankroll
+* Live P&L
+* Paper P&L
+* Completed live trades
+* Expectancy/trade
+
+If remaining bankroll reaches $0, disable new LIVE entry signals and display: “LIVE TEST BUDGET EXHAUSTED.”
+
+Keep the interface optimized for an iPhone screen.
+
+Do not change this into automated trading. No order placement, no Kalshi private keys, and no ability to exceed the $25 test budget.

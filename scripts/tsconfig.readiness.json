@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["verify-live-readiness.ts", "verify-live-readiness.test.ts"],
+  "references": [{ "path": "../lib/db" }]
+}

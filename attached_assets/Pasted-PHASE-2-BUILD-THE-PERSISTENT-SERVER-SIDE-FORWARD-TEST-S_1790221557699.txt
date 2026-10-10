@@ -1,0 +1,266 @@
+PHASE 2 — BUILD THE PERSISTENT SERVER-SIDE FORWARD-TEST STATE
+
+Phase 1 is complete and the shared authoritative V1.3 evaluator is:
+
+evaluateV13Strategy
+in:
+lib/v13-strategy/src/index.ts
+
+The current browser strategy reaches it through evaluateStrategy in strategy.ts.
+
+DO NOT change V1.3 strategy logic.
+DO NOT change thresholds.
+DO NOT build the repeating 5-second background worker yet.
+DO NOT place real trades.
+DO NOT connect a Kalshi trading account.
+DO NOT publish automatically.
+DO NOT overwrite existing production history.
+
+Make a new checkpoint before starting Phase 2.
+
+GOAL:
+
+Create the PostgreSQL persistence layer needed for a future server-side forward-test engine so the engine can survive:
+- page closes
+- browser refreshes
+- phone shutdown
+- server restart
+- deployment restart
+
+The database, not browser memory, must eventually become the source of truth for forward-test engine state.
+
+Build the following persistent concepts.
+
+1. ENGINE STATUS
+
+Create persistent server-side state for the forward-test engine.
+
+It should contain fields conceptually equivalent to:
+
+- engine identifier
+- strategy version = V1.3
+- enabled boolean
+- mode = PAPER_ONLY
+- last heartbeat time
+- last successful market poll time
+- last strategy evaluation time
+- current market ticker/window ID
+- current signal
+- current direction
+- current signed buffer
+- current BTC price
+- current Kalshi target
+- current UP offer
+- current DOWN offer
+- last error
+- created_at
+- updated_at
+
+There should be only one active V1.3 forward-test engine record unless there is a deliberate future version change.
+
+2. MARKET WINDOW STATE
+
+Persist per-15-minute-market state.
+
+Store enough information to prevent browser/server restarts from resetting crossing logic.
+
+Include conceptually:
+
+- Kalshi market ticker/window ID
+- target price
+- market start/end times
+- previous observed side of target
+- current observed side of target
+- whether first clean crossing has occurred
+- whether that crossing has already been consumed
+- crossing direction
+- crossing timestamp
+- Scout already triggered boolean
+- Confirm already triggered boolean
+- finalized boolean
+- settlement/result if known
+- created_at
+- updated_at
+
+There must be a UNIQUE constraint on market ticker/window ID.
+
+3. STRATEGY EVALUATIONS
+
+Create an append-only table for server strategy evaluations.
+
+Each evaluation should be capable of storing:
+
+- unique evaluation ID
+- timestamp
+- strategy version
+- market ticker/window ID
+- BTC price
+- Kalshi target
+- signed buffer
+- absolute buffer
+- BTC velocity/momentum input used by V1.3
+- UP offer
+- DOWN offer
+- seconds remaining
+- feed freshness status
+- crossing state
+- signal
+- direction
+- qualifying trigger boolean
+- reason
+- applicable entry offer
+- whether a paper position was already open
+- created_at
+
+This table is for research and auditability.
+
+Do not create fake trades from these rows.
+
+4. PAPER FORWARD-TEST POSITIONS
+
+Create persistent server-side paper-position storage for future use.
+
+Include enough fields for a future worker to recover an open hypothetical position after restart:
+
+- unique position ID
+- market ticker/window ID
+- strategy version
+- direction
+- trigger type Scout or Confirm
+- entry timestamp
+- entry offer / entry price
+- stake
+- contracts or equivalent quantity if currently used
+- target price
+- BTC price at entry
+- signed buffer at entry
+- status OPEN / SETTLED / CLOSED
+- exit or settlement timestamp
+- settlement result
+- payout
+- P&L
+- created_at
+- updated_at
+
+IMPORTANT:
+Creating this table must NOT create any actual position.
+
+5. DUPLICATE / IDEMPOTENCY PROTECTION
+
+Design unique/idempotency constraints so a restart cannot create duplicate forward-test actions.
+
+At minimum protect against:
+- duplicate Scout for the same market/crossing
+- duplicate Confirm for the same market/crossing
+- duplicate settlement of the same paper position
+- duplicate evaluation IDs
+
+Use database constraints where practical, not only in-memory checks.
+
+6. DATA ACCESS LAYER
+
+Create server-side repository/service functions for:
+
+- get engine status
+- upsert engine status
+- get/create market window state
+- update market window crossing state
+- append strategy evaluation
+- get recent strategy evaluations
+- create paper position safely/idempotently
+- get open paper position
+- settle paper position safely/idempotently
+- aggregate server forward-test statistics
+
+Do not make the browser directly write these database tables.
+
+7. READ-ONLY SERVER STATUS ENDPOINT
+
+Add an authenticated or appropriately protected API endpoint for the dashboard to inspect server-engine state.
+
+Conceptually:
+
+GET /api/forward-test/status
+
+It should return things such as:
+
+- engine mode
+- strategy version
+- engine enabled
+- heartbeat
+- current market
+- current signal/direction
+- evaluation count
+- windows observed
+- trigger count
+- open paper position count
+- completed paper forward tests
+- cumulative paper P&L
+- last error
+
+This endpoint is READ ONLY.
+
+8. DEVELOPMENT DATABASE ONLY FOR THIS PHASE
+
+Apply and test the new schema in development first.
+
+Do NOT overwrite or copy development data into production.
+
+Do not modify the existing saved-history records.
+
+Do not delete diagnostic records.
+
+Do not populate fake forward-test trades.
+
+9. TESTING
+
+Create automated tests proving:
+
+A. engine status survives a database reconnect
+
+B. market-window state survives reconnect/restart simulation
+
+C. consumed-crossing state remains consumed after reload
+
+D. duplicate Scout insertion is rejected or returns the existing record
+
+E. duplicate Confirm insertion is rejected or returns the existing record
+
+F. duplicate settlement cannot occur
+
+G. evaluations can be appended and queried chronologically
+
+H. no database operation alters the output of evaluateV13Strategy
+
+I. existing V1.3 parity/self-tests still pass
+
+J. existing browser/dashboard typecheck passes
+
+K. production build passes
+
+10. DO NOT START THE ENGINE YET
+
+At the end of Phase 2 there should be:
+
+DATABASE STRUCTURE: YES
+SERVER PERSISTENCE FUNCTIONS: YES
+READ-ONLY STATUS API: YES
+BACKGROUND LOOP: NO
+AUTOMATIC PAPER ENTRY: NO
+REAL TRADING: NO
+PUBLISH: NO
+
+Report back with:
+
+1. checkpoint ID
+2. exact database tables created
+3. exact files changed
+4. unique/idempotency constraints added
+5. API endpoint created
+6. persistence tests and results
+7. strategy self-test result
+8. typecheck result
+9. build result
+10. confirmation that no worker is running
+11. confirmation that no fake or real trades were created
+12. confirmation that V1.3 behavior was unchanged

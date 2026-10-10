@@ -1,0 +1,43 @@
+Continue Phase 5 development only. Do not publish, enable real-money execution, or submit any real Kalshi order.
+
+Resolve every remaining activation blocker before considering production:
+
+1. Build a deterministic live-position state machine for ENTRY → partial fill → filled → CONFIRM/add → EXIT requested → partial exit → fully closed.
+2. Do not infer live position state from the paper worker. Every live action must be tied to a persisted qualifying V1.3 evaluation plus the actual Kalshi order/fill state.
+3. Implement startup reconciliation before the executor can become eligible:
+    * fetch Kalshi open orders
+    * fetch current positions
+    * fetch fills
+    * reconcile them against the local live ledger
+    * fail closed on any mismatch or ambiguity
+4. Implement reliable restart recovery. Simulate crashes at every critical point: before submission, during submission, after submission before DB persistence, partial fill, full fill, exit submission, and partial exit.
+5. Implement live exit logic and prove that exits use the actual live position quantity and actual fills—not the paper position quantity.
+6. Implement Confirm/add logic with the existing exposure limits and actual remaining live position.
+7. Complete live accounting:
+    * reserved capital
+    * filled cost
+    * open exposure
+    * realized P&L
+    * unrealized P&L where reliable
+    * partial-fill accounting
+    * fees if Kalshi exposes them
+8. Preserve idempotency across retries, duplicate evaluations, server restarts, and multiple worker instances.
+9. Keep both execution flags OFF and the kill switch ON throughout testing.
+10. Add integration tests proving:
+
+* no duplicate orders
+* partial-entry recovery
+* full-entry recovery
+* partial-exit recovery
+* complete-exit recovery
+* rejected/canceled order recovery
+* network timeout after uncertain submission
+* server restart recovery
+* stale reconciliation blocks execution
+* kill switch blocks all submissions
+* one-position and $5 exposure limits cannot be bypassed
+
+11. Run all existing V1.3 parity, paper-worker, shadow, Phase 4, Kalshi-client, and Phase 5 tests afterward.
+12. Create a checkpoint before modifying anything.
+
+Stop after local development and verification. Show me the final activation blockers, test results, production schema diff, changed files, and whether the system can now prove complete entry-to-exit recovery through a restart. Do not publish without my explicit approval.

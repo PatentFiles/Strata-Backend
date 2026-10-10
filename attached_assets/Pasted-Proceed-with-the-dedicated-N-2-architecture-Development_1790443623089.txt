@@ -1,0 +1,65 @@
+Proceed with the dedicated (N,2) architecture. Development/mocked work only. Do not perform any Kalshi mutation yet.
+
+Treat (subaccount_number, exchange_index) as a single immutable MICRO_LIVE account identity. For this architecture, exchange_index=2; N will eventually be the number returned by Kalshi’s documented Create Subaccount operation.
+
+Complete the runtime migration so no primary-account or subaccount-1 assumption remains in the MICRO_LIVE execution path.
+
+1. Persistent identity
+Add/persist the authoritative:
+
+* dedicated subaccount number N;
+* exchange index 2;
+* restricted key identity/fingerprint;
+* funding-anchor transfer identity/time/amount;
+* initial reconciled cash balance;
+* activity-checkpoint digest.
+
+Never silently rebind an existing frozen/historical run. A newly provisioned pair must start through a new explicitly initialized run/account binding.
+
+2. Enforce the pair everywhere
+Every relevant balance, transfer, order, fill, position, settlement, cash-accounting, reconciliation and recovery check must prove it belongs to (N,2).
+
+Before every signed order/cancel:
+
+* configured N must equal verified restricted-key subaccount;
+* configured index must equal 2;
+* current KXBTC15M market exchange_index must equal 2;
+* persisted funding/account anchor must equal (N,2);
+* fresh account evidence must correspond to (N,2).
+
+Any missing/mismatched evidence fails closed.
+
+3. Stop relying on ticker auto-routing
+For MICRO_LIVE orders, explicitly bind the request to the verified exchange_index=2 where supported by the V2 request schema. Do not rely solely on ticker auto-routing.
+
+4. Finish the complete database-backed mocked lifecycle
+Test one continuous journey:
+
+provisioned (N,2) → $25 funding anchor → restart → reconciliation → $1 fee-inclusive entry → partial/full fill → exit/cancel → uncertain response handling → late-fill recovery → settlement → final fees/cash reconciliation → restart
+
+Include negative tests for:
+
+* wrong N;
+* wrong index;
+* key-binding mismatch;
+* market moves to another index;
+* unexplained cash movement;
+* unexplained transfer;
+* unrelated order/fill;
+* duplicate submission;
+* timeout before/after POST;
+* restart at each uncertain state;
+* stale account evidence;
+* cap violation;
+* missing fee evidence.
+
+5. Preserve existing safeguards
+Keep MICRO_LIVE execution disabled, both kill switches engaged, current historical run FROZEN, existing provisioning history immutable, and subaccount 1 unfunded.
+
+Do not create subaccount N, generate another key, transfer funds, arm a run, or place/cancel an order.
+
+Run the full focused MICRO_LIVE suite, trading-client suite, cash/accounting suite, API typecheck/build and schema-diff review.
+
+Definition of done for this step: report that the software is ready to accept an arbitrary Kalshi-assigned N on exchange index 2 and that the complete mocked/database-backed $25→$1 lifecycle passes without any assumption that N=0 or N=1.
+
+Stop there for authorization.

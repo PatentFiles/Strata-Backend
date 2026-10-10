@@ -1,0 +1,42 @@
+Proceed with Stage 2 controlled production SHADOW_LIVE activation.
+
+The production read-only Kalshi preflight has passed. Preserve the existing V1.3 evaluator exactly.
+
+Configure the production SHADOW_LIVE observer with:
+
+* mode: SHADOW_LIVE
+* simulated capital: $25.00
+* maximum simulated stake per proposal: $5.00
+* maximum open simulated positions: 1
+* maximum simulated loss / reserved-loss budget: $25.00
+* live_execution_enabled=false
+* manual kill switch=ON
+
+Then enable SHADOW_LIVE_PRODUCTION_ENABLED=true only for the shadow observer.
+
+Requirements:
+
+* Do NOT add or enable any Kalshi POST, PUT, PATCH, DELETE, order-submission, cancellation, amendment, transfer, or other mutation path.
+* The Kalshi credential-bearing client must remain GET-only.
+* Do NOT enable MICRO_LIVE or real-money execution.
+* Do NOT alter V1.3 signal thresholds, Scout/Confirm rules, crossing logic, settlement logic, bankroll rules, or the existing production paper worker.
+* Do NOT copy the development database over production.
+* Preserve all existing production forward-test history and P&L.
+* There must still be only one V1.3 evaluator/worker lease. SHADOW_LIVE must consume the persisted qualifying evaluations rather than run a second evaluator.
+
+Before activation, create a checkpoint.
+
+If the current production code cannot initialize those exact shadow limits safely without a new code change, direct production database mutation, or weakening an existing safety control, STOP and tell me exactly what is missing. Do not improvise.
+
+After activation, verify:
+
+1. the V1.3 paper worker still has a valid lease;
+2. SHADOW_LIVE observer is running;
+3. the exact $25 / $5 / 1-position / $25-loss limits are active;
+4. execution remains disabled;
+5. kill switch remains ON;
+6. Kalshi client remains GET-only;
+7. no real orders have been submitted;
+8. shadow proposals can be recorded from genuine future qualifying V1.3 triggers.
+
+Report the production verification results and stop. Do not proceed to MICRO_LIVE or real-money trading.

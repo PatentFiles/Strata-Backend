@@ -1,0 +1,71 @@
+Finish the final two blockers in the (N,2) execution lifecycle. Do not expand scope and do not make any real Kalshi mutation.
+
+The prospective clean-boundary, funding reconciliation and new-run initializer are now established. Preserve them.
+
+1. Pair-level reserved collateral
+
+Implement deterministic reserved-collateral accounting for (N,2) using authoritative order/fill state.
+
+It must distinguish:
+
+* available cash;
+* filled exposure;
+* collateral reserved by resting entry orders;
+* partially filled entry with remaining resting quantity;
+* resting/reduce-only exit;
+* terminal canceled/filled orders.
+
+Never count the same collateral or fee twice.
+
+Before a signed entry, prove:
+available cash + attributable reserved/filled state + reconciled fees/activity
+agrees with the persisted (N,2) checkpoint.
+
+Unknown, stale, truncated or contradictory order/fill evidence blocks.
+
+2. Activity-bearing restart/recovery
+
+Complete recovery for a process restart occurring:
+
+* after entry reservation but before POST result;
+* after POST with unknown response;
+* with resting entry;
+* after partial entry fill;
+* after full entry fill before exit;
+* with resting exit;
+* after uncertain cancel;
+* after late fill;
+* after settlement.
+
+Recovery must use persisted order/client/run/account identities plus GET-only exchange evidence. Never blindly repeat an ambiguous POST or DELETE.
+
+Preserve the existing one-entry/one-exit claims and (N,2) identity checks.
+
+Acceptance test
+
+Run one continuous database-backed arbitrary N=7, index 2 lifecycle:
+
+clean $0 → $25 funding → initialize → restart → $1 fee-inclusive entry → partial/full fill → restart → exit → cancel/uncertain-response case → late-fill reconciliation → settlement → final cash/fee reconciliation → restart
+
+Then separately prove:
+
+* resting-order collateral survives restart correctly;
+* unexplained pair activity freezes;
+* ambiguous cross-exchange transfer touching index 2 freezes;
+* wrong N/index/key/market shard blocks;
+* duplicate entry/exit is impossible;
+* fees aren’t double-counted.
+
+Do not weaken the signed-order guard merely to make the test pass.
+
+Do not apply schema changes to production yet. Do not create a real subaccount/key, transfer funds, enable execution, arm a live run, or submit/cancel a real order.
+
+Return only one of two conclusions:
+
+PASS — full database-backed N=7 lifecycle completed through final restart
+
+or
+
+BLOCKED — [specific external/API fact that makes completion impossible]
+
+An unfinished implementation is not an external blocker; continue implementing until PASS or until an actual Kalshi API limitation prevents it.

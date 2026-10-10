@@ -1,0 +1,38 @@
+Advanced-tier qualifying-order design — REVIEW ONLY. DO NOT PLACE AN ORDER.
+
+The corrected Advanced upgrade request returned HTTP 403. Do not resend it.
+
+Using current official Kalshi documentation, determine the safest way to satisfy the documented requirement that at least one of the latest 100 Predictions orders was created via API.
+
+Specifically determine:
+
+1. Whether an API-created order must receive a fill to qualify, or whether successful order creation alone qualifies.
+2. Whether an order subsequently canceled still counts as an API-created order.
+3. Whether an immediately canceled resting limit order qualifies.
+4. Whether an IOC order with zero fills qualifies.
+5. Whether Kalshi documents any minimum contract count, price, dollar exposure, market status, or other requirements for the qualifying order.
+6. Whether the existing read + write::trade trading credential can create the qualifying order without using the broad provisioning credential.
+7. Whether the API response/history provides enough evidence to prove that the order was successfully created before cancellation.
+
+If documentation does not establish whether canceled/unfilled orders qualify, state that explicitly. Do not infer it.
+
+Then design—but do not execute—the minimum-risk qualifying-order procedure.
+
+Requirements:
+
+* Use the existing trade-scoped credential, not the provisioning key, if supported.
+* Use an open Predictions market.
+* Minimize possible financial exposure.
+* Avoid intentionally crossing the spread.
+* Establish durable order identity before any cancellation.
+* Account for the possibility of an unexpected fill.
+* No automatic retry after an uncertain submission.
+* Verify the resulting order through authenticated GETs.
+* If cancellation is part of the design, verify final order/fill state through GETs.
+* Keep this operation completely separate from MICRO_LIVE and do not count it as a MICRO_LIVE run.
+
+Report the exact proposed request, maximum possible financial exposure, failure/recovery procedure, and what evidence would establish successful creation.
+
+Do not place or cancel an order, resend the upgrade POST, change MICRO_LIVE, transfer funds, or modify production.
+
+Stop after the design.

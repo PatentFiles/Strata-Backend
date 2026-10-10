@@ -1,0 +1,331 @@
+import { randomUUID } from "node:crypto";
+import type { PoolClient } from "@workspace/db";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, evaluateV13Strategy } from "@workspace/v13-strategy";
+import { preflightV13LiveMoneyEntry } from "../v13LiveMoneyEntryPreflight";
+import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
+import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
+import { canonical, cents, digest, money, requireProof, type Exchange, type MarketEvidence, type Request } from "./types";
+
+/**
+ * Never constructed or started by API startup. Production mutation authority
+ * is separate from micro-live and never inherits paper positions or sizing.
+ */
+export class ProductionExecutor {
+  static #fences = new WeakSet<() => Promise<void>>();
+  static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
+  constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
+    readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
+
+  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false): Promise<void> {
+    requireProof(a.commissioned && !a.kill_switch && a.execution_enabled &&
+      /^[0-9a-f]{64}$/.test(a.commissioning_digest ?? "") &&
+      Number(a.subaccount) === 1 && Number(a.exchange_index) === 2, "production_authority_disabled_or_uncommissioned");
+    requireProof(a.cash_precision_verified && /^[0-9a-f]{64}$/.test(a.fee_artifact_digest ?? ""),
+      "production_fee_or_cash_precision_approval_missing");
+    requireProof(!a.blocked_reason || allowBlockedExit || lifecycle, "production_account_frozen");
+    requireProof(a.reconciled_at && a.reconciled_at.getTime() <= this.now() &&
+      this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
+    const unknown = await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
+      AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
+    requireProof(lifecycle || unknown.rows.length === 0, "production_uncertain_order_blocks_mutation");
+    if (this.exchange.mode === "SIMULATION") {
+      const target = await tx.query("SELECT current_database() AS db,host(inet_server_addr()) AS host");
+      requireProof(process.env.NODE_ENV === "test" &&
+        /^v13_disposable_[a-z0-9_]+$/.test(target.rows[0].db) &&
+        ["127.0.0.1", "::1"].includes(target.rows[0].host), "simulation_requires_disposable_postgres");
+    } else {
+      requireProof(process.env.NODE_ENV === "production" &&
+        process.env.LIVE_EXECUTION_ENABLED === "true" &&
+        process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true" &&
+        process.env.MICRO_LIVE_ACCOUNT_MODE === "exclusive" &&
+        process.env.KALSHI_BOT_SUBACCOUNT === "1", "production_runtime_binding_or_flags_disabled");
+      const master = await tx.query("SELECT manual_kill_switch,live_execution_enabled FROM live_execution_config FOR SHARE");
+      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
+        master.rows[0].live_execution_enabled === true, "production_master_kill_switch_or_flag");
+      const boundary = await tx.query(`SELECT * FROM micro_live_pair_boundary WHERE subaccount_number=1
+        AND exchange_index=2 FOR SHARE`);
+      const b = boundary.rows[0];
+      requireProof(boundary.rows.length === 1 && b.state === "initialized" && b.initialized_run_id &&
+        b.restricted_key_fingerprint === a.key_fingerprint &&
+        b.activity_checkpoint_digest === a.commissioning_digest, "production_commissioning_linkage_missing");
+    }
+  }
+
+  async reconcile(): Promise<void> {
+    const a = await this.ledger.readAccount();
+    const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+    const snapshot = await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());
+    await this.ledger.reconcile(snapshot, a.revision, this.now());
+  }
+
+  async prepareEntry(evaluationId: string): Promise<string> {
+    const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
+    requireProof(source && source.evaluation_source === "paper" &&
+      source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
+      source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
+      source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
+      source.crossing_key && source.feed_freshness === "current" &&
+      ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
+    "production_source_not_qualifying_champion");
+    const side = source.direction === "UP" ? "YES" : "NO";
+    const book = await this.exchange.market(source.market_ticker, side);
+    return this.ledger.transaction(async (tx, a) => {
+      const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
+      if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
+      await this.gate(tx, a);
+      const p = await this.ledger.policy(tx, a);
+      const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
+      requireProof(sourceAge >= 0 && sourceAge <= p.maxQuoteAgeMs, "production_evaluation_stale");
+      const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
+      requireProof(canonical(pinnedSource) === canonical(source) &&
+        ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
+          typeof source[k] === "number" && Number.isFinite(source[k]) && source[k] >= 0 &&
+          source[k] + sourceAge <= p.maxQuoteAgeMs), "production_source_feed_stale_or_changed");
+      const classified = evaluateV13Strategy({
+        marketTicker: source.market_ticker, btcPrice: source.btc_price, target: source.target,
+        previousBuffer: source.previous_side === "UP" ? 1 : source.previous_side === "DOWN" ? -1 : null,
+        velocity: source.velocity, upOffer: source.up_offer, downOffer: source.down_offer,
+        freshness: "current", position: null,
+      });
+      requireProof(classified.signal === source.signal && classified.direction === source.direction &&
+        classified.qualifyingTrigger && classified.freshCross &&
+        Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
+      "production_source_classification_mismatch");
+      const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
+      requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
+      const balances = await tx.query(`SELECT
+        (SELECT count(*) FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) AS open,
+        (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
+        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
+        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1
+          AND occurred_at >= $2) AS daily_loss`, [a.id, new Date(new Date(this.now()).toISOString().slice(0, 10))]);
+      const b = balances.rows[0];
+      const capital = BigInt(p.capitalLimitCents) * 10_000n - money(b.basis) - money(a.reserved_micros) - money(b.total_loss);
+      requireProof(capital >= 0n, "production_capital_exhausted");
+      const pf = preflightV13LiveMoneyEntry({
+        policy: p, strategyParameterSetId: source.strategy_parameter_set_id, strategyParameterHash: source.strategy_parameter_hash,
+        signal: source.signal, direction: source.direction, referenceOffer: source.entry_offer,
+        bestAskDollars: book.bestAskDollars, askLevels: book.asks,
+        quoteAgeMs: this.now() - book.observedAtMs, nowMs: this.now(), feeEvidence: book.fee,
+        availableCashCents: cents(money(a.cash_micros) - money(a.reserved_micros)),
+        capitalRemainingCents: cents(capital), openPositions: Number(b.open),
+        realizedDailyLossCents: Math.ceil(Number(money(b.daily_loss)) / 10_000),
+        realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
+      });
+      requireProof(pf.ok, pf.ok ? "" : pf.reason);
+      const id = randomUUID(), clientOrderId = `v13p-${id}`;
+      const request: Request = { market: source.market_ticker, side, action: "BUY", contracts: pf.plan.contracts,
+        limitMicros: Math.round(pf.plan.limitPrice * 1_000_000), timeInForce: "IOC", reduceOnly: false, clientOrderId };
+      const decision = { source, book, preflight: pf, policy: p, identity: identity(a) };
+      const cap = digest({ id, request, decision, policyHash: pf.policyHash, fee: pf.feeEvidenceFingerprint });
+      const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
+      a.reserved_micros = String(money(a.reserved_micros) + reservation);
+      await tx.query(`INSERT INTO v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,
+        request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
+        VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [id, a.id, evaluationId, source.crossing_key, request.market, side, JSON.stringify(request), JSON.stringify(decision),
+        pf.policyHash, pf.feeEvidenceFingerprint, cap, clientOrderId, String(reservation), String(BigInt(book.fee.reservedExitFeeCents) * 10_000n)]);
+      await tx.query("INSERT INTO v13_production_position(id,account_id,market,side) VALUES($1,$2,$3,$4)", [id, a.id, request.market, side]);
+      this.fault("after_reservation");
+      await this.ledger.persist(tx, a);
+      await this.ledger.assertConservation(tx, a);
+      return id;
+    });
+  }
+
+  async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {
+    const parent = (await this.ledger.pool.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2", [parentId, this.ledger.accountId])).rows[0];
+    requireProof(parent?.kind === "ENTRY", "production_exit_parent_missing");
+    const book = await this.exchange.market(parent.market, parent.side);
+    return this.ledger.transaction(async (tx, a) => {
+      await this.gate(tx, a, true);
+      const p = await this.ledger.policy(tx, a);
+      requireProof(a.minimum_exit_micros === Math.round(minimumExitPrice * 1_000_000), "production_exit_floor_not_approved");
+      requireProof(parent.terminal, "production_entry_not_terminal");
+      const active = await tx.query("SELECT id FROM v13_production_intent WHERE parent_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')", [parentId]);
+      requireProof(active.rows.length === 0, "production_exit_already_pending");
+      const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [parentId])).rows[0];
+      requireProof(pos && money(pos.quantity_hundredths) > 0n, "production_exit_not_owned");
+      const source = (await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
+        AND market_ticker=$1 ORDER BY evaluated_at DESC,id DESC LIMIT 1 FOR SHARE`, [parent.market])).rows[0];
+      const age = source ? this.now() - new Date(source.evaluated_at).getTime() : Infinity;
+      requireProof(source && source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
+        source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
+        source.feed_freshness === "current" && age >= 0 && age <= p.maxQuoteAgeMs &&
+        ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
+          typeof source[k] === "number" && Number.isFinite(source[k]) && source[k] >= 0 &&
+          source[k] + age <= p.maxQuoteAgeMs) &&
+        Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
+      "production_exit_feed_unproven");
+      const ownedDecision = evaluateV13Strategy({ marketTicker: pos.market, btcPrice: source.btc_price,
+        target: source.target, previousBuffer: null, velocity: source.velocity,
+        upOffer: source.up_offer, downOffer: source.down_offer, freshness: "current",
+        position: { status: "open", direction: pos.side === "YES" ? "up" : "down" } });
+      requireProof(ownedDecision.signal === "EXIT" && ownedDecision.positionExitReason, "production_owned_exit_not_eligible");
+      const qty = money(pos.quantity_hundredths);
+      // Exit only whole owned contracts. Fractional residuals remain owned and
+      // persisted until settlement; never round quantity upward.
+      const plan = planV13IocExit({ ownedContracts: Number(qty / 100n), bestBidDollars: book.bestBidDollars,
+        bidLevels: book.bids, minimumExitPrice });
+      requireProof(plan.ok, plan.ok ? "" : plan.reason);
+      requireProof(this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
+        this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
+        book.fee.policyVersion === p.feePolicyVersion && book.fee.formulaVersion === p.feeFormulaVersion &&
+        book.fee.sourceUrl === p.feeSourceUrl && book.fee.fingerprint.length >= 16 &&
+        Number.isSafeInteger(book.fee.reservedExitFeeCents) && book.fee.reservedExitFeeCents >= 0 &&
+        BigInt(book.fee.reservedExitFeeCents) * 10_000n <= money(parent.reserved_micros), "production_exit_fee_or_quote_unproven");
+      const id = randomUUID();
+      const request: Request = { market: parent.market, side: parent.side, action: "SELL",
+        contracts: plan.plan.plannedContracts, limitMicros: Math.round(plan.plan.limitPrice * 1_000_000),
+        timeInForce: "IOC", reduceOnly: true, clientOrderId: `v13p-${id}` };
+      const decision = { book, plan: plan.plan, minimumExitPrice, policy: p, identity: identity(a), parentId,
+        ownedEvaluation: { position: pos, source, sourcePaperEvaluationId: source.id, decision: ownedDecision } };
+      await tx.query(`INSERT INTO v13_production_intent(id,account_id,parent_id,kind,market,side,request,decision,
+        policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
+        VALUES($1,$2,$3,'EXIT',$4,$5,$6,$7,$8,$9,$10,$11,0,0)`,
+      [id, a.id, parentId, parent.market, parent.side, JSON.stringify(request), JSON.stringify(decision),
+        p.policyHash, book.fee.fingerprint, digest({ id, request, decision, policyHash: p.policyHash, fee: book.fee.fingerprint }), request.clientOrderId]);
+      await this.ledger.persist(tx, a);
+      return id;
+    });
+  }
+
+  async dispatch(id: string): Promise<void> {
+    // Precommit dispatch identity BEFORE any network side effect. A crash in
+    // the gap is indistinguishable from an uncertain POST, so NEVER replay it.
+    const claimed = await this.ledger.transaction(async (tx, a) => {
+      const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
+      requireProof(i, "production_intent_missing");
+      if (i.state !== "PREPARED") return false;
+      await this.gate(tx, a, i.kind === "EXIT");
+      await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
+      await this.ledger.persist(tx, a);
+      return true;
+    });
+    if (!claimed) return;
+    this.fault("after_dispatch_commit");
+    let invoked = false;
+    try {
+      await this.ledger.transaction(async (tx, a) => {
+        const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+        const final = async () => {
+          // This intent itself is the ONLY allowed dispatched identity.
+          const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
+          requireProof(others.rows.length === 0, "production_other_uncertain_order");
+          await this.gate(tx, a, i.kind === "EXIT", id);
+          const p = await this.ledger.policy(tx, a);
+          requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
+            i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
+          "production_capability_or_policy_changed");
+          const book = await this.exchange.market(i.market, i.side);
+          const stored = i.decision.book as MarketEvidence;
+          requireProof(book.fee.fingerprint === i.fee_fingerprint &&
+            canonical({ ...book.fee, verifiedAtMs: 0 }) === canonical({ ...stored.fee, verifiedAtMs: 0 }) &&
+            this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
+            this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs,
+          "production_final_fee_or_quote_changed");
+          const plan = i.kind === "ENTRY" ? planV13IocEntry({
+            signal: (i.decision.source as { signal: "SCOUT" | "CONFIRM" }).signal,
+            direction: i.side === "YES" ? "UP" : "DOWN", referenceOffer: (i.decision.source as { entry_offer: number }).entry_offer,
+            maxStakeCents: p.maxEntryStakeCents, bestAskDollars: book.bestAskDollars, askLevels: book.asks,
+          }) : planV13IocExit({ ownedContracts: i.request.contracts,
+            bestBidDollars: book.bestBidDollars, bidLevels: book.bids,
+            minimumExitPrice: (i.decision.minimumExitPrice as number) });
+          requireProof(plan.ok && (i.kind === "ENTRY" ? ("contracts" in plan.plan && plan.plan.contracts === i.request.contracts) :
+            ("plannedContracts" in plan.plan && plan.plan.plannedContracts >= i.request.contracts)) &&
+            Math.round(plan.plan.limitPrice * 1_000_000) === i.request.limitMicros, "production_final_depth_changed");
+          if (i.kind === "EXIT") {
+            requireProof(a.minimum_exit_micros === Math.round((i.decision.minimumExitPrice as number) * 1_000_000),
+              "production_exit_floor_changed");
+            const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.parent_id])).rows[0];
+            requireProof(pos && money(pos.quantity_hundredths) >= BigInt(i.request.contracts) * 100n && i.request.reduceOnly,
+              "production_exit_ownership_changed");
+            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown> };
+            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
+            const age = this.now() - new Date(source?.evaluated_at ?? 0).getTime();
+            requireProof(source && canonical(source) === canonical(owned.source) &&
+              age >= 0 && age <= p.maxQuoteAgeMs &&
+              ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k => source[k] + age <= p.maxQuoteAgeMs),
+            "production_final_owned_feed_changed_or_stale");
+          }
+          const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+          await this.ledger.finalAccountProof(tx, a, await this.exchange.snapshot(identity(a), new Date(oldest).getTime()), this.now());
+          // Network reads above can consume the evidence lifetime. Recheck all
+          // clocks immediately before returning to the synchronous signer.
+          requireProof(this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
+            this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
+            this.now() - a.reconciled_at!.getTime() <= 15_000, "production_final_evidence_expired");
+          if (i.kind === "ENTRY") {
+            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
+            requireProof(canonical(source) === canonical(i.decision.source) &&
+              this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs &&
+              ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
+                source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
+            "production_final_source_changed_or_expired");
+          }
+        };
+        await final();
+        ProductionExecutor.#fences.add(final);
+        // Transport calls final again immediately before signing/sending. Locks
+        // remain held; policy/gate revocation cannot commit during this fence.
+        invoked = true;
+        await this.exchange.submit(i.request, final);
+        this.fault("after_post_before_commit");
+        await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1", [id]);
+        await this.ledger.observe(tx, "POST_ATTEMPT", { id, clientOrderId: i.client_order_id, outcome: "GET_RECONCILIATION_REQUIRED" });
+        await this.ledger.persist(tx, a);
+      });
+    } catch (error) {
+      // Even a rejected/timeout response is not terminal account evidence.
+      await this.ledger.transaction(async (tx, a) => {
+        if (!invoked) {
+          const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+          requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");
+          a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
+          await tx.query("UPDATE v13_production_intent SET state='BLOCKED',terminal=true,reserved_micros=0 WHERE id=$1", [id]);
+          await this.ledger.observe(tx, "PROVEN_NOT_POSTED", { id, reason: (error as Error).message });
+        } else {
+          await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1 AND state='DISPATCHED'", [id]);
+          await this.ledger.observe(tx, "POST_UNCERTAIN", { id, reason: (error as Error).message });
+        }
+        await this.ledger.persist(tx, a);
+        await this.ledger.assertConservation(tx, a);
+      });
+      throw error;
+    }
+  }
+
+  async cancel(id: string): Promise<void> {
+    // Cancellation is at most one LOCAL attempt; no claim of exchange exactly-once.
+    const order = await this.ledger.transaction(async (tx, a) => {
+      const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
+      requireProof(i && i.exchange_order_id && !i.terminal, "production_cancel_identity_unproven");
+      if (i.cancel_attempted) return null;
+      // Cancellation of a known uncertain order is allowed, but all OTHER
+      // uncertainty, ownership, approval and kill-switch barriers still apply.
+      await this.gate(tx, a, i.kind === "EXIT", id);
+      await this.ledger.policy(tx, a);
+      await tx.query("UPDATE v13_production_intent SET cancel_attempted=true,state='UNKNOWN' WHERE id=$1", [id]);
+      await this.ledger.persist(tx, a);
+      return i;
+    });
+    if (!order) return;
+    this.fault("after_cancel_commit");
+    await this.ledger.transaction(async (tx, a) => {
+      const final = async () => {
+        await this.gate(tx, a, order.kind === "EXIT", id);
+        requireProof(a.execution_enabled && !a.kill_switch && a.commissioned &&
+          identity(a).keyFingerprint === (order.decision.identity as { keyFingerprint: string }).keyFingerprint,
+        "production_cancel_gate_changed");
+        const p = await this.ledger.policy(tx, a);
+        requireProof(p.policyHash === order.policy_hash, "production_cancel_policy_changed");
+        if (this.exchange.mode === "LIVE") requireProof(process.env.LIVE_EXECUTION_ENABLED === "true" &&
+          process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true", "production_cancel_runtime_disabled");
+      };
+      ProductionExecutor.#fences.add(final);
+      await this.exchange.cancel(order.exchange_order_id!, final);
+      await this.ledger.observe(tx, "CANCEL_ATTEMPT", { id, exchangeOrderId: order.exchange_order_id, outcome: "GET_RECONCILIATION_REQUIRED" });
+      await this.ledger.persist(tx, a);
+    });
+  }
+}

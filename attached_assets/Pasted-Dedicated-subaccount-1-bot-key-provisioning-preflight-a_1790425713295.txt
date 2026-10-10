@@ -1,0 +1,96 @@
+Dedicated subaccount-1 bot-key provisioning — preflight and schema review first.
+
+Current established state:
+
+* effective Predictions tier: Advanced;
+* dedicated numbered subaccount: 1;
+* subaccount 1 verified empty;
+* subaccount 1 balance: $0.0000;
+* zero positions, orders and fills;
+* primary subaccount 0 remains separate;
+* MICRO_LIVE remains unchanged.
+
+The objective is to provision a new RSA API credential restricted to subaccount 1 with only:
+
+* read
+* write::trade
+
+It must NOT receive:
+
+* general write;
+* write::transfer;
+* API-key-management authority;
+* unrestricted/account-wide access.
+
+Stage A — GET/documentation/schema review only
+
+Before any mutation:
+
+1. Reconfirm subaccount 1 exists and remains empty.
+2. Reconfirm the provisioning credential is unrestricted read + write.
+3. Retrieve the current official schema for the API-key-generation endpoint.
+4. Verify the exact mechanism for binding a generated key to subaccount 1.
+5. Verify the exact scope representation for read + write::trade.
+6. Determine what private-key material is returned and whether it is returned only once.
+7. Determine how the unrestricted provisioning credential can subsequently inspect the generated key’s metadata.
+
+Do not infer field names from our earlier design if the current schema differs.
+
+Stage B — mutation only if Stage A proves the exact request
+
+Generate exactly one new RSA API key bound to:
+
+subaccount 1
+
+with exactly:
+
+read + write::trade
+
+Use the unrestricted provisioning credential only for key creation.
+
+No automatic retry.
+
+Immediately capture the returned private key through the secure Replit-secret workflow. Never print, log, persist in ordinary evidence files, or return the private key in the report.
+
+Store the new credential under dedicated candidate names separate from the existing production trading/verifier/provisioning credentials. Do not replace existing MICRO_LIVE secrets yet.
+
+Independent verification
+
+Using the unrestricted provisioning credential—not the newly generated restricted key—GET API-key metadata.
+
+Require exact proof that the new key:
+
+* has the expected key ID;
+* is bound specifically to subaccount 1;
+* has read;
+* has write::trade;
+* does NOT have general write;
+* does NOT have write::transfer;
+* has no unexpected additional scope.
+
+Then perform GET-only tests with the new restricted credential sufficient to establish that it can read its intended subaccount context.
+
+Do not use the new credential to place an order.
+
+If metadata is missing, contradictory, unrestricted, bound to subaccount 0, or contains broader scopes than intended, classify the credential REJECTED FOR MICRO_LIVE and stop. Do not compensate by changing account state.
+
+Hard stop
+
+Do not:
+
+* fund subaccount 1;
+* transfer the $0.01 or any other money;
+* modify KALSHI_BOT_SUBACCOUNT;
+* replace the current trading credential;
+* switch account_mode;
+* modify MICRO_LIVE DB configuration;
+* approve fees;
+* arm;
+* enable execution;
+* change kill switches;
+* submit/cancel an order;
+* create another subaccount.
+
+Report only sanitized key fingerprints/metadata, scope verification, subaccount binding verification, and restricted-key GET results.
+
+Never report private-key material. Then stop.

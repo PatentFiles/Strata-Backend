@@ -1,0 +1,62 @@
+Finish the (N,2) runtime. Do not perform any live Kalshi mutation.
+
+We have two remaining blockers. Address only these blockers; do not expand scope.
+
+A. Pair-scoped evidence reader
+
+Build a canonical account-evidence reader for (N, exchange_index=2) that collects every available relevant source:
+
+* balances;
+* current + historical orders;
+* current + historical fills;
+* positions;
+* settlements;
+* subaccount transfers;
+* cross-exchange transfers if applicable;
+* fee evidence required for reconciliation.
+
+Exhaust pagination wherever supported.
+
+Normalize every record with its available subaccount_number and exchange_index.
+
+Do not silently discard account-wide records. Classify evidence as:
+
+* positively attributable to (N,2);
+* positively attributable elsewhere;
+* unscoped/ambiguous.
+
+If an activity type capable of changing (N,2) cash cannot be completely attributed from the available APIs, fail closed and identify that exact API limitation rather than pretending coverage is complete.
+
+Create a deterministic evidence digest/checkpoint so startup and pre-order reconciliation can prove what changed since the $25 funding anchor.
+
+B. Explicit new-run initializer
+
+Implement a guarded initializer for a newly provisioned/funded dedicated account. It may initialize a new MICRO_LIVE run only when:
+
+* (N,2) is durably configured;
+* restricted-key metadata matches N;
+* KXBTC15M market shard is 2;
+* exactly one reconciled $25 funding anchor exists;
+* current (N,2) cash reconciles to that anchor;
+* no unexplained activity exists;
+* no open order/position exists;
+* fee verification is current;
+* execution remains disabled during initialization.
+
+Initialization must create a new run identity. Never modify/rebind the historical FROZEN run.
+
+Initializer must be idempotent and fail closed on restart/uncertainty.
+
+Then rerun one database-backed continuous test with arbitrary N=7:
+
+$0 clean pair → $25 funding anchor → initializer → restart → reconciliation → $1 fee-inclusive entry → partial/full fill → restart → exit/cancel → uncertain-response recovery → late fill → settlement → final fee/cash reconciliation → restart
+
+Include the existing negative pair/shard/key/activity tests.
+
+Hard stop condition: if official Kalshi APIs fundamentally cannot provide sufficient pair-scoped evidence to make A fail-closed, do not invent another workaround. Identify exactly which activity type cannot be attributed and why.
+
+No real subaccount creation, key generation, funding, order, cancellation, arming or execution activation in this step.
+
+Report either:
+PASS — complete mocked/database-backed (N,2) lifecycle works, or
+BLOCKED — exact Kalshi API evidence deficiency preventing it.

@@ -1,0 +1,47 @@
+Final MICRO_LIVE pre-production hardening — development only.
+
+Keep all real-money execution disabled. Do not publish, approve fees, arm a run, disable the kill switch, change production, or send/cancel any real Kalshi order.
+
+Complete these remaining safeguards:
+
+1. Close the legacy DELETE/cancellation bypass
+    * The trading client must not accept a cancellation solely from caller-provided guard context.
+    * Require the same class of durable, one-use authorization used by POST.
+    * Verify persisted run identity, account/subaccount binding, kill switch, execution gates, ownership of the exact order, cancellation claim, and reconciliation state.
+    * A cancellation authorization must be scoped to one exact order/client-order identity and be consumable only once.
+    * Preserve the existing permitted frozen-exit cancellation behavior, but route it through this authorization.
+    * Add restart, concurrency, duplicate-DELETE, wrong-order, wrong-run, and stale-authorization tests.
+2. Replace net-cash-only detection with activity-aware reconciliation
+    * Continue checking exact cash balance, but do not rely solely on net change.
+    * Maintain a durable reconciliation checkpoint for the primary non-exclusive account.
+    * On each reconciliation, inspect all available authenticated order/fill/settlement/account-history evidence since the checkpoint.
+    * Every new relevant activity item must either be attributable to the current MICRO_LIVE run or explicitly classified as unrelated permitted primary-account activity.
+    * Unknown activity affecting bot markets, positions, reserved exposure, or cash attribution must freeze MICRO_LIVE.
+    * Specifically test two unrelated cash movements that exactly offset between balance snapshots; the activity history must still detect them.
+    * Fail closed if required history is incomplete, truncated, ambiguous, or unavailable.
+3. Exercise the new binding and cash-baseline workflow locally
+    * Use mocked or isolated development evidence only.
+    * Record primary_nonexclusive / subaccount 0.
+    * Establish the cash baseline.
+    * Prove startup reconciliation can reach ready:true under a clean mocked account.
+    * Then simulate restart and prove the same state reconstructs without creating a new authorization or submission.
+4. Preserve all current controls:
+    * V1.3 behavior unchanged.
+    * $5 all-in ceiling unchanged.
+    * One entry / one exit semantics unchanged.
+    * Fee freshness and provenance unchanged.
+    * Partial IOC handling unchanged.
+    * Uncertain submission remains no-retry.
+
+Run focused tests, then the full MICRO_LIVE suite, trading-client suite, cash/reconciliation tests, typechecks, builds, and git diff --check.
+
+Report:
+
+* exact files/schema changed,
+* test counts,
+* whether POST and DELETE now require durable one-use authorization,
+* whether offsetting unexplained activity is detected,
+* whether mocked primary/subaccount-0 startup reaches ready:true,
+* exact remaining blockers.
+
+Stop before any production publish or activation.

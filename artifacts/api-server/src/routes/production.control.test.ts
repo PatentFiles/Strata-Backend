@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+import test from "node:test";
+import express from "express";
+import { ProductionSupervisor, type StopBlockers, type WorkerHandle } from "../lib/v13-production/control";
+import { createProductionRouter } from "./productionRouter";
+import { sanitizePublic } from "../lib/v13-production/sanitize";
+
+const FLAG_NAMES = [
+  "LIVE_EXECUTION_ENABLED",
+  "V13_PRODUCTION_EXECUTION_ENABLED",
+  "KALSHI_API_ENVIRONMENT",
+  "MICRO_LIVE_ACCOUNT_MODE",
+  "KALSHI_BOT_SUBACCOUNT",
+  "KALSHI_INDEX2_API_KEY_ID",
+  "KALSHI_INDEX2_PRIVATE_KEY",
+] as const;
+
+function flags(): Record<string, string | undefined> {
+  return Object.fromEntries(FLAG_NAMES.map((name) => [name, process.env[name]]));
+}
+
+function flat(): StopBlockers {
+  return { openPositionCount: 0, unresolvedIntentCount: 0, unknownIntentCount: 0, dispatchedIntentCount: 0 };
+}
+
+function harness(options?: {
+  start?: () => Promise<void>;
+  blockers?: () => Promise<StopBlockers>;
+  status?: () => Promise<unknown>;
+}) {
+  let creates = 0;
+  let starts = 0;
+  let stops = 0;
+  let scheduled = false;
+  let emergencyStops = 0;
+  const worker: WorkerHandle = {
+    async start() {
+      starts += 1;
+      if (options?.start) await options.start();
+      else scheduled = true;
+    },
+    stop() {
+      stops += 1;
+      scheduled = false;
+    },
+    isScheduled: () => scheduled,
+  };
+  const supervisor = new ProductionSupervisor({
+    createWorker: async () => {
+      creates += 1;
+      return worker;
+    },
+    readStopBlockers: options?.blockers ?? (async () => flat()),
+  });
+  const app = express();
+  app.use(express.json());
+  app.use("/api", createProductionRouter({
+    control: supervisor,
+    status: options?.status ?? (async () => supervisor.view()),
+    positions: async () => ({ positions: [] }),
+    orders: async () => ({ orders: [] }),
+    fills: async () => ({ fills: [] }),
+    trades: async () => ({ trades: [] }),
+    latestTrade: async () => ({ unresolved: false, latestCompleted: null }),
+  }));
+  return {
+    app, supervisor, worker,
+    counts: () => ({ creates, starts, stops, emergencyStops }),
+    noteEmergency: () => { emergencyStops += 1; },
+    setScheduled: (value: boolean) => { scheduled = value; },
+  };
+}
+
+async function listen(app: express.Express) {
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
+}
+
+function call(port: number, path: string, method: string, userId?: string, body?: unknown) {
+  return new Promise<{ status: number; body: Record<string, unknown> }>((resolve, reject) => {
+    const payload = body === undefined ? null : JSON.stringify(body);
+    const req = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path,
+      method,
+      headers: {
+        ...(userId ? { "x-test-user-id": userId } : {}),
+        ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString();
+        resolve({ status: res.statusCode ?? 0, body: text.startsWith("{") ? JSON.parse(text) : {} });
+      });
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+test("unauthenticated and unauthorized production START are denied", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  const h = harness();
+  const server = await listen(h.app);
+  try {
+    assert.equal((await call(server.port, "/api/production/start", "POST")).status, 401);
+    assert.equal((await call(server.port, "/api/production/start", "POST", "other-user")).status, 403);
+    assert.equal(h.counts().creates, 0);
+    assert.equal(h.counts().starts, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("START is idempotent and concurrent START creates one worker", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered = 0;
+  const h = harness({
+    start: async () => {
+      entered += 1;
+      await gate;
+      h.setScheduled(true);
+    },
+  });
+  const server = await listen(h.app);
+  try {
+    const first = call(server.port, "/api/production/start", "POST", "production-admin", {});
+    const second = call(server.port, "/api/production/start", "POST", "production-admin", {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(h.counts().creates, 1);
+    assert.equal(entered, 1);
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    assert.equal(a.body.runtimeStatus, "RUNNING");
+    assert.equal(a.body.workerRunning, true);
+    assert.equal(b.body.workerRunning, true);
+    const again = await call(server.port, "/api/production/start", "POST", "production-admin", {});
+    assert.equal(again.body.runtimeStatus, "RUNNING");
+    assert.equal(h.counts().creates, 1);
+    assert.equal(h.counts().starts, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("failed ProductionWorker.start does not report RUNNING and does not change authority flags", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  process.env.KALSHI_INDEX2_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----";
+  const before = flags();
+  const h = harness({
+    start: async () => {
+      throw new Error("production_authority_disabled_or_uncommissioned");
+    },
+  });
+  const server = await listen(h.app);
+  try {
+    const response = await call(server.port, "/api/production/start", "POST", "production-admin", {});
+    assert.equal(response.status, 200);
+    assert.equal(response.body.runtimeStatus, "BLOCKED");
+    assert.equal(response.body.workerRunning, false);
+    assert.equal(response.body.blockedReason, "production_authority_disabled_or_uncommissioned");
+    assert.equal(h.worker.isScheduled(), false);
+    assert.deepEqual(flags(), before);
+    assert.equal(response.body.killSwitch, undefined);
+    const text = JSON.stringify(response.body);
+    assert.equal(text.includes("PRIVATE KEY"), false);
+    assert.equal(text.includes("not-a-real-key"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("STOP while flat calls ProductionWorker.stop and does not engage emergency stop", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  const h = harness();
+  const server = await listen(h.app);
+  try {
+    assert.equal((await call(server.port, "/api/production/start", "POST", "production-admin")).body.runtimeStatus, "RUNNING");
+    const stopped = await call(server.port, "/api/production/stop", "POST", "production-admin", {});
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.body.runtimeStatus, "STOPPED");
+    assert.equal(stopped.body.workerRunning, false);
+    assert.equal(stopped.body.refused, false);
+    assert.equal(h.counts().stops, 1);
+    assert.equal(h.counts().emergencyStops, 0);
+    assert.equal(JSON.stringify(stopped.body).includes("emergency"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("STOP is blocked while an owned position or unresolved intent exists", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  for (const blockers of [
+    { ...flat(), openPositionCount: 1 },
+    { ...flat(), unresolvedIntentCount: 1 },
+    { ...flat(), unknownIntentCount: 1 },
+    { ...flat(), dispatchedIntentCount: 1 },
+  ]) {
+    const h = harness({ blockers: async () => blockers });
+    const server = await listen(h.app);
+    try {
+      await call(server.port, "/api/production/start", "POST", "production-admin");
+      const stopped = await call(server.port, "/api/production/stop", "POST", "production-admin");
+      assert.equal(stopped.status, 409);
+      assert.equal(stopped.body.runtimeStatus, "RUNNING");
+      assert.equal(stopped.body.workerRunning, true);
+      assert.equal(stopped.body.refused, true);
+      assert.equal(typeof stopped.body.reason, "string");
+      assert.equal(h.counts().stops, 0);
+      assert.equal(h.worker.isScheduled(), true);
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("runtime status follows the worker and public responses contain no secrets", async () => {
+  process.env.PHASE4_ADMIN_USER_ID = "production-admin";
+  const secret = "-----BEGIN PRIVATE KEY-----\nsuper-secret\n-----END PRIVATE KEY-----";
+  const h = harness({
+    status: async () => sanitizePublic({
+      runtimeStatus: h.supervisor.view().runtimeStatus,
+      workerRunning: h.supervisor.view().workerRunning,
+      privateKey: secret,
+      nested: { apiKey: "key-id", championId: "v13-champion-2-c52-confirm53" },
+    }),
+  });
+  const server = await listen(h.app);
+  try {
+    const idle = await call(server.port, "/api/production/status", "GET", "production-admin");
+    assert.equal(idle.body.runtimeStatus, "STOPPED");
+    assert.equal(idle.body.workerRunning, false);
+    await call(server.port, "/api/production/start", "POST", "production-admin");
+    const running = await call(server.port, "/api/production/status", "GET", "production-admin");
+    assert.equal(running.body.runtimeStatus, "RUNNING");
+    assert.equal(running.body.workerRunning, true);
+    const text = JSON.stringify(running.body);
+    assert.equal(text.includes("PRIVATE KEY"), false);
+    assert.equal(text.includes("super-secret"), false);
+    assert.equal(text.includes("key-id"), false);
+    const nested = running.body.nested as { championId?: string };
+    assert.equal(nested.championId, "v13-champion-2-c52-confirm53");
+  } finally {
+    await server.close();
+  }
+});

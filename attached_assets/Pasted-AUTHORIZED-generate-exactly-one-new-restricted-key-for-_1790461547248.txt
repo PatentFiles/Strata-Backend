@@ -1,0 +1,50 @@
+AUTHORIZED: generate exactly one new restricted key for the verified CREATED_CLEAN (N=1, exchange_index=2) account using the tested one-shot workflow.
+
+Immediately before the POST, re-check:
+
+* boundary remains CREATED_CLEAN for (1,2);
+* $0 cash / $0 portfolio;
+* no orders, positions, fills or settlements;
+* new provisioning-attempt table contains zero attempts;
+* execution OFF;
+* both kill switches engaged;
+* historical run FROZEN.
+
+If those checks pass, temporarily enable only the dedicated key-generation authorization required by the tested workflow and generate exactly one credential:
+
+* RSA
+* new unique index-2 MICRO_LIVE key name;
+* subaccount 1;
+* scopes exactly ["read","write::trade"];
+* no general write.
+
+Commit the durable attempt before network I/O. Never automatically retry after the network-attempt boundary.
+
+I will perform the authenticated owner handoff myself. Do not expose the private key in logs, database records, Agent output, or chat.
+
+After the one-time key is returned, stop and instruct me to copy:
+
+* the new key ID into the new dedicated development secret;
+* the private key into the corresponding new dedicated development secret.
+
+Do not overwrite the historical restricted-key secrets unless the tested migration explicitly requires that later. Keep the old and new credentials distinguishable.
+
+After I confirm the secrets are saved, use the unrestricted verifier with GET-only requests to verify:
+
+* exact generated key ID;
+* intended new key name;
+* subaccount 1;
+* scopes exactly read + write::trade;
+* no general write;
+* successful signed GET using the new restricted credential against (1,2).
+
+Only after all those checks pass may the boundary advance from CREATED_CLEAN to KEY_BOUND_VERIFIED.
+
+Then disable key-generation authorization again and stop.
+
+Do not transfer the $25.
+Do not initialize or arm a run.
+Do not enable execution.
+Do not place or cancel an order.
+
+If generation returns timeout/unknown/malformed/contradictory results, do not retry. Preserve the uncertain attempt and stop for review.

@@ -1,0 +1,62 @@
+Enable and validate the development provisioning UI without permitting key generation.
+
+The provisioning implementation and mocked tests have passed. We now need to exercise the real development-browser security boundary before allowing the one-shot Kalshi key-generation POST.
+
+Keep generation hard-disabled
+
+Add/use a separate generation-authorization gate so that:
+
+KALSHI_KEY_PROVISIONING_ENABLED=true
+
+may expose the owner-only development interface, but cannot by itself authorize the Kalshi POST.
+
+The actual generation operation must require a second explicit server-side authorization state/flag that remains OFF during this test.
+
+Do not weaken or bypass the durable one-attempt mechanism.
+
+Browser/session validation
+
+In development only:
+
+1. Enable the provisioning interface.
+2. Confirm the route is still absent from the published deployment.
+3. With no Clerk session, require denial.
+4. With the authenticated owner Clerk session matching PHASE4_ADMIN_USER_ID, confirm the page loads.
+5. Confirm the page contains no client-side JavaScript or external resources.
+6. Inspect response headers and verify:
+    * Cache-Control: no-store, private
+    * Pragma: no-cache
+    * restrictive CSP including script-src 'none' and frame-ancestors 'none'
+    * no credential material in URLs.
+7. Verify CSRF behavior using the real browser session.
+8. Attempting the final generation action while the second generation gate is OFF must fail before:
+    * creating an attempt record;
+    * changing an existing attempt;
+    * calling Kalshi.
+9. Verify the development attempt table still contains zero records afterward.
+
+Do not use or display the provisioning private key during these checks.
+
+Reconfirm target immediately afterward
+
+GET-only verify:
+
+* subaccount 1 still exists;
+* balance remains $0.0000;
+* zero positions/orders/fills;
+* intended generated credential remains exactly:
+    * RSA
+    * MICRO_LIVE_SUBACCOUNT_1
+    * subaccount 1
+    * scopes read, write::trade.
+
+Stop
+
+Leave the actual generation authorization OFF.
+
+Do not generate a Kalshi key.
+Do not fund subaccount 1.
+Do not change existing credentials.
+Do not modify MICRO_LIVE.
+
+Report the real owner-session test results, headers/CSRF results, production isolation, attempt-table count, and final subaccount-1 state. Then stop.

@@ -1,0 +1,56 @@
+Prepare Phase 4C for production SHADOW_LIVE operation only. Do not publish.
+
+Goal: allow the existing production V1.3 paper worker to continue exactly as it does now, while a separate SHADOW_LIVE observer consumes its persisted qualifying evaluations and records simulated proposals using the real Kalshi read-only orderbook.
+
+Do NOT enable or implement real-money execution.
+
+Required changes:
+
+1. Add a separate production environment gate such as:
+    SHADOW_LIVE_PRODUCTION_ENABLED=false
+    by default.
+
+The shadow observer may run in production only when this explicit flag is true.
+
+2. Remove the NODE_ENV=development dependency from the observer startup path, but replace it with the explicit production shadow gate above.
+3. Allow only the minimum read-only Phase 4 routes needed to inspect SHADOW_LIVE status/history in production. Keep all execution/mutation routes unavailable.
+4. Production shadow configuration must be separate from development and default safely to:
+
+* mode = SHADOW_LIVE
+* live_execution_enabled = false
+* manual_kill_switch = true
+* shadow capital = 0
+* shadow max stake = 0
+* shadow max open positions = 0
+* shadow max loss/reserved capital = 0
+
+Do not copy development values into production.
+
+5. Tighten the database constraint so production cannot be put into MICRO_LIVE through the database while Phase 4C is shadow-only. The production-safe schema should permit only the modes needed now and must continue enforcing live_execution_enabled=false.
+6. Do not add any Kalshi POST, PUT, PATCH, DELETE, order submission, amendment, cancellation, or transfer path. The credential-bearing client must remain GET-only.
+7. Preserve the existing production V1.3 paper worker and its lease/fencing logic exactly. SHADOW_LIVE must consume persisted qualifying evaluations; it must not run a second V1.3 evaluator.
+8. Minimize the production schema diff. If live_real_orders, live_real_fills, or live_pnl are not required for SHADOW_LIVE, exclude them from the Phase 4C production migration for now. Keep only tables/fields required for shadow configuration, simulated proposals, and shadow notifications/history.
+9. Add tests proving:
+
+* production shadow observer is OFF by default;
+* it starts only when the explicit production shadow flag is true;
+* V1.3 paper worker remains single-instance;
+* no Kalshi mutation method exists;
+* live_execution_enabled cannot become true;
+* MICRO_LIVE cannot be activated;
+* zero shadow limits block simulated proposals safely;
+* configured shadow limits permit simulated proposals only;
+* restart/idempotency does not duplicate proposals;
+* existing production paper data is untouched.
+
+10. Run the V1.3 self-test, 23 parity cases, worker integration suite, Kalshi client tests, shadow integration tests, typechecks, and full build.
+
+Then perform a new pre-publish audit showing:
+
+* exact schema diff;
+* exact production startup gates;
+* production default shadow configuration;
+* confirmation that no existing production data is modified;
+* confirmation that no real-order capability exists.
+
+Stop before publishing or changing production.

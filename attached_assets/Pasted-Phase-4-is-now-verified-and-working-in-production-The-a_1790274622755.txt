@@ -1,0 +1,54 @@
+Phase 4 is now verified and working in production. The admin panel is unlocked, authenticated Kalshi GET access works, SHADOW_LIVE is running, the V1.3 paper worker remains intact, and real execution is still locked.
+
+Proceed with Phase 5 development for real-money execution infrastructure, but DO NOT enable real-money trading yet.
+
+Requirements:
+
+1. Preserve the existing V1.3 evaluator exactly. Do not change Scout, Confirm, first-crossing, exit, settlement, price, or signal rules.
+2. Preserve the existing production paper-worker and SHADOW_LIVE observer. Do not create a second V1.3 evaluator.
+3. Add the real Kalshi order-submission client and required authenticated order endpoints, but keep all mutation methods inaccessible unless a separate explicit production execution gate is enabled.
+4. Add a production execution configuration with safe defaults:
+    * live_execution_enabled = false
+    * manual kill switch = ON
+    * maximum live bankroll = $25
+    * maximum single-order risk = $5
+    * maximum one open live position at a time
+    * maximum cumulative reserved loss = $25
+    * no martingale
+    * no automatic increase in sizing
+5. Build an idempotent live order ledger that records:
+    * originating V1.3 evaluation
+    * market ticker
+    * side
+    * intended limit price
+    * stake
+    * contract count
+    * Kalshi order ID
+    * submission time
+    * order status
+    * fills
+    * average fill price
+    * exit order
+    * realized P&L
+    * failure/rejection reason
+6. Prevent duplicate orders from retries, restarts, duplicate worker instances, or duplicate evaluations.
+7. Require a fresh real orderbook check immediately before any eventual order submission. Fail closed if data is stale, missing, outside V1.3 price limits, or differs materially from the qualifying shadow quote.
+8. Add reconciliation against Kalshi open orders, positions, and fills so the application never assumes an order filled merely because it was submitted.
+9. Add a clear Phase 5 dashboard showing:
+    * EXECUTION DISABLED / ENABLED
+    * kill-switch state
+    * available live bankroll
+    * reserved capital
+    * open live exposure
+    * pending orders
+    * fills
+    * realized P&L
+    * most recent execution decision
+    * exact reason an order was blocked
+10. Real and paper/shadow records must remain completely separate.
+11. Add comprehensive tests for duplicate prevention, stale quotes, partial fills, rejected orders, network failures, worker restarts, kill-switch behavior, bankroll limits, and order reconciliation.
+12. Run the V1.3 self-test and all existing parity tests to prove strategy behavior is unchanged.
+13. Create a checkpoint before making changes.
+14. Do not publish, do not enable live_execution_enabled, do not turn off the kill switch, and do not submit any real Kalshi order.
+
+Stop after implementation and verification. Show me the exact files changed, test results, production schema diff, and the proposed controlled activation procedure. Ask for my explicit approval before any production publish or real-order capability is enabled.

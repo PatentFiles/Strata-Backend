@@ -1,0 +1,32 @@
+Adopt a prospective clean-boundary model for a newly created dedicated (N,2) account. Do not make live mutations yet.
+
+Stop attempting to reconstruct complete historical pair-level activity from information Kalshi does not expose.
+
+Design the new account lifecycle around a trusted prospective boundary:
+
+Create new N on index 2 → GET-verify (N,2) exists → capture/persist pre-funding $0 balance and zero positions/orders/fills/settlements → verify restricted key binding → establish clean-boundary timestamp/digest → transfer exactly $25 → reconcile funding → initialize new run.
+
+For activity occurring after that clean boundary:
+
+* pair-attributable activity must reconcile normally;
+* any new cross-exchange transfer touching exchange index 2 whose subaccount cannot be determined must be classified as ambiguous and freeze MICRO_LIVE;
+* never assume such a transfer belongs to N or another account;
+* no automatic recovery from that freeze merely because balances later happen to reconcile;
+* require explicit review/new checkpoint before further entries.
+
+Also fix the two other review findings:
+
+1. Resting-order holds: startup/pre-entry reconciliation must include open/resting orders and their reserved collateral. A cash balance alone cannot establish available exposure.
+2. Fee accounting: establish one canonical cash-flow model so trading fees are recognized exactly once. Add tests proving fills followed by settlement cannot double-subtract the same fee.
+
+Build the explicit new-run initializer using the prospective clean boundary. It must create a new run and never rebind the historical FROZEN run.
+
+Then run the complete database-backed mocked N=7,index=2 lifecycle from before funding, including:
+
+$0 clean snapshot → clean-boundary persistence → $25 funding → reconciliation → initializer → restart → $1 fee-inclusive entry → fill/partial fill → exit/cancel → uncertain response → late fill → settlement → final cash/fee reconciliation → restart.
+
+Add a post-anchor ambiguous cross-exchange transfer test and prove it freezes before another entry.
+
+Do not create a real subaccount, key, transfer, order or cancellation yet.
+
+Report PASS/BLOCKED and stop.

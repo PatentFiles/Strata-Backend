@@ -1,0 +1,111 @@
+PHASE 1 — CREATE ONE SHARED V1.3 STRATEGY ENGINE
+
+We are beginning the conversion from browser-dependent forward testing to a server-side always-running forward-test engine.
+
+DO NOT build the background worker yet.
+DO NOT change deployment type yet.
+DO NOT alter production data.
+DO NOT change V1.3 behavior.
+
+FIRST make a checkpoint of the current working project.
+
+Inspect the existing V1.3 decision logic, including:
+- usePaperTrading.ts
+- fresh-crossing detection
+- PASS / WATCH / SCOUT / CONFIRM logic
+- UP / DOWN directional logic
+- Scout requirements
+- Confirm requirements
+- offer-price limits
+- target/buffer calculations
+- time-remaining handling
+- market freshness handling
+- existing-position handling
+
+The current V1.3 rules MUST remain identical, including:
+
+Fresh crossing:
+Only the first clean strike crossing counts.
+
+Scout:
+$8-$15 qualifying move.
+Selected side must be at or under 60%.
+
+Confirm:
+$20+ qualifying move.
+Selected side must be at or under 68%.
+
+Extract ONLY the deterministic strategy decision logic into one shared module that can be executed by either the browser or a future server worker.
+
+Create a pure function conceptually like:
+
+evaluateV13Strategy(input) -> result
+
+The input should contain all market/state values necessary to reproduce the current decision, including where applicable:
+- BTC price
+- Kalshi target
+- signed buffer
+- absolute buffer
+- BTC velocity/momentum input currently used
+- UP offer
+- DOWN offer
+- seconds remaining
+- market ticker/window ID
+- feed freshness
+- previous-side/strike-crossing state
+- whether a qualifying crossing already occurred
+- current paper-position state
+
+The result should expose:
+- signal: PASS | WATCH | SCOUT | CONFIRM
+- direction: UP | DOWN | NONE
+- qualifyingTrigger: boolean
+- reason
+- applicable entry offer
+- signed buffer
+- any other values currently needed by the UI or paper-testing logic
+
+Then update the EXISTING browser implementation so it calls this shared evaluator rather than maintaining separate decision logic.
+
+There must be ONE authoritative V1.3 decision engine.
+
+CRITICAL:
+Do not change:
+- thresholds
+- crossing rules
+- market calculations
+- bankroll rules
+- stake size
+- paper-entry behavior
+- settlement behavior
+- existing database records
+- authentication
+- public/private access
+- production deployment
+
+VALIDATION REQUIRED:
+
+1. Run the existing strategy self-test.
+2. Run TypeScript typecheck.
+3. Run production build.
+4. Create representative test cases for:
+   - PASS near target
+   - WATCH
+   - Scout UP
+   - Scout DOWN
+   - Confirm UP
+   - Confirm DOWN
+   - offer too expensive
+   - stale feed
+   - crossing already consumed
+5. Compare old decision behavior with the new shared evaluator and prove outputs are identical.
+
+Do not publish automatically.
+
+When finished tell me:
+- exact files changed
+- exact shared evaluator filename
+- whether usePaperTrading.ts now calls that shared evaluator
+- test results
+- whether any behavior changed
+- whether build/typecheck passed

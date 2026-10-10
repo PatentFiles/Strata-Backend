@@ -1,0 +1,14 @@
+The focused tests and typecheck pass. I’ll restart the API once so it loads the new route, then inspect startup logs and the development configuration read-only. I will not call the resolution endpoint.
+Implemented a development-only admin endpoint for the specific stale startup_exchange_reconciliation_failed flag. It performs a fresh GET-only primary-account audit, rejects prior local attempts or activity and concurrent changes, then atomically records the admin decision and audit evidence before clearing the two accounting fields. It does not grant readiness.
+Invocation for review—not invoked:
+POST /api/micro-live/resolve-stale-accounting
+Content-Type: application/json
+Clerk-authenticated session for the configured Phase 4 admin
+{
+  "expectedUnresolvedReason": "startup_exchange_reconciliation_failed",
+  "resolutionReason": "<explicit documented review reason, 16–512 characters>"
+}
+Prerequisites: The API must be in development mode and bound to primary account/subaccount 0. Environment and database execution flags must be off, with the kill switch on. The recorded unresolved reason must match exactly. There must be no run ID, entry or exit attempt, reservation, local order, fill, settlement, or ALLOW/ERROR decision. The complete audit must pass; configuration, ledger, decisions, binding, gates, and audit freshness are rechecked at the locked write boundary.
+On success, it adds a BLOCK admin-decision record containing the actor, stated reason, audit summary, and evidence hashes. Only micro_live_accounting_unresolved and its reason are cleared on the configuration row; readiness is invalidated. Exclusive mode is unchanged.
+Verification: 6 focused resolution tests, 1 focused authorization test, and API typecheck passed. An additional unfiltered legacy authorization-suite run failed at an unrelated uncertain-exit recovery assertion (blocked versus its expected linked_and_cancel_checked); that flow was not changed or claimed as passing.
+The endpoint was not called against the development account. Read-only state still shows the original unresolved flag, execution flags off, kill switch on, and zero local orders, fills, settlements, and decisions. Nothing was published or submitted/canceled.

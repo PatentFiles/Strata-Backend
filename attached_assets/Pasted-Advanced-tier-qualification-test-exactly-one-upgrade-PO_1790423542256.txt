@@ -1,0 +1,85 @@
+Advanced-tier qualification test — exactly one upgrade POST.
+
+The qualifying API-order experiment is completely reconciled:
+
+* one API order received HTTP 201;
+* exact order identity was independently verified;
+* order initially rested with 0.00 filled / 1.00 remaining;
+* exactly one cancellation received HTTP 200;
+* final state is canceled, 0.00 remaining, 0.00 filled;
+* zero position;
+* zero selected-ticker fills;
+* index-0 cash restored/remains $0.0100.
+
+Do not submit another trade.
+
+Pre-upgrade GET verification
+
+Using authenticated GETs:
+
+1. Confirm /account/limits still reports the current tier before mutation.
+2. Confirm the newly created order remains present in authenticated order history.
+3. Confirm its persisted order_id and client_order_id match the qualifying experiment.
+4. Confirm final order state remains canceled with zero fills.
+5. Confirm there are no open positions/resting orders from the experiment.
+
+Save this evidence outside MICRO_LIVE.
+
+Upgrade mutation
+
+Then send exactly one:
+
+POST /trade-api/v2/account/api_usage_level/upgrade
+
+using the verified temporary provisioning credential with read + write.
+
+Use the previously established accepted request representation:
+
+* zero-byte request body;
+* Content-Type: application/json;
+* normal Kalshi signed authentication;
+* sign timestamp + POST + /trade-api/v2/account/api_usage_level/upgrade.
+
+No automatic retry.
+
+Preserve:
+
+* HTTP status;
+* sanitized response body;
+* response content type;
+* request ID/header if provided;
+* timestamp.
+
+After POST
+
+Regardless of the POST result, perform authenticated:
+
+GET /trade-api/v2/account/limits
+
+and report the actual resulting tier/grants.
+
+The GET result is authoritative for whether the account changed.
+
+If POST returns 201, do not assume Advanced until the limits GET confirms it.
+
+If POST returns 403, do not submit another order or another upgrade attempt. Record that the canceled zero-fill API-created order was insufficient under the observed behavior and stop.
+
+Any 400, 401, 409, 429, 5xx, timeout, or uncertain response → no retry; perform the limits GET and stop for review.
+
+Hard stop
+
+Do not:
+
+* create a numbered subaccount;
+* generate another API key;
+* transfer additional funds;
+* place another order;
+* modify MICRO_LIVE;
+* arm execution;
+* approve fees;
+* change kill switches.
+
+Report:
+pre-tier → POST status → response → post-tier/grants → whether Advanced is independently confirmed.
+
+Then stop.

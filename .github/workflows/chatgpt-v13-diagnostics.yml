@@ -1,0 +1,82 @@
+name: ChatGPT V13 diagnostics
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: v13_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d v13_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/v13_ci
+      NODE_ENV: test
+      GITHUB_ACTIONS: "true"
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+      - name: Test paper strategy execution semantics
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../btc-paper-dashboard/src/lib/strategy.self-test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=/tmp/v13-strategy-self-test.cjs
+          node /tmp/v13-strategy-self-test.cjs
+          pnpm --filter @workspace/api-server exec esbuild ../btc-paper-dashboard/src/lib/strategy.parity-test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=/tmp/v13-strategy-parity-test.cjs
+          node /tmp/v13-strategy-parity-test.cjs
+      - name: Build workspace
+        run: pnpm run build
+      - name: Initialize disposable database schema
+        run: pnpm --filter @workspace/db run push
+      - name: Test API and forward-test integration
+        working-directory: artifacts/api-server
+        run: pnpm test
+      - name: Test Kalshi account and trading clients
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/kalshiAccountClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiAccountClient.test.cjs
+          node --test dist/kalshiAccountClient.test.cjs
+          pnpm exec esbuild src/lib/kalshiTradingClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiTradingClient.test.cjs             --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/kalshiTradingClient.test.cjs
+      - name: Test V13 production and micro-live safety suites
+        working-directory: artifacts/api-server
+        run: pnpm run test:v13-safety-all
+      - name: Test index-2 provisioning route
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/routes/pairKeyProvisioning.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/pairKeyProvisioning.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
+            --external:@clerk/express --external:express
+          node --test dist/pairKeyProvisioning.test.cjs

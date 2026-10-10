@@ -1,0 +1,67 @@
+Replace the MICRO_LIVE 30-minute/24-hour fee-approval TTL with a standing fee policy, while keeping real execution disabled during implementation and testing.
+
+The standing approval means only this:
+
+MICRO_LIVE may continue operating without repeated human fee approval only when every individual order is freshly validated against current Kalshi fee information and the complete worst-case debit remains within the configured $5 all-in risk cap.
+
+Requirements:
+
+1. Remove fee authorization expiration as a dependency for normal operation. Do not make stale fee quotes permanently valid.
+2. Persist a versioned standing fee-policy approval in the database containing:
+    * approved status
+    * approved_at
+    * policy version
+    * maximum fee-inclusive exposure
+    * approving administrator identity/reference
+3. Before every entry and every exit, retrieve or recompute the currently applicable Kalshi fee information.
+4. Treat fee data freshness separately from standing authorization. Fee information must meet a strict freshness requirement at order-submission time.
+5. Calculate worst-case total debit before submission, including:
+    * entry cost
+    * applicable entry fee
+    * reserved permitted exit cost/fee where required by the existing risk model
+    * any already reserved amount for that live position
+6. Preserve the hard $5 all-in maximum exposure. Never round or reinterpret the cap upward.
+7. If fees cannot be verified, data is stale, fee calculation is ambiguous, the policy version is unknown, or the $5 cap would be exceeded: fail closed and submit nothing.
+8. A restart must read the same persisted standing approval. Restarting must never create, renew, or modify authorization.
+9. Any increase to the configured $5 cap or relaxation of the fee policy must invalidate the existing approval and require a new explicit administrator approval.
+10. Tightening a limit may take effect immediately without broadening authorization.
+11. Preserve:
+    * V1.3 exactly
+    * one-entry claim
+    * one-exit claim
+    * reduce-only IOC exit protections
+    * partial-fill handling
+    * uncertainty freeze
+    * restart reconciliation
+    * kill switch
+    * execution fencing/lease
+    * shadow and paper systems
+12. Add tests for:
+    * standing approval survives restart
+    * no time-based expiration occurs
+    * fresh fee check occurs on every attempted entry
+    * fresh fee check occurs on every attempted exit
+    * changed fees are detected between two orders
+    * fee increase causing >$5 exposure blocks submission
+    * stale/unavailable/malformed fee information blocks submission
+    * revoked standing approval blocks submission
+    * policy-version mismatch blocks submission
+    * changing the cap upward invalidates prior approval
+    * duplicate/retried execution cannot bypass the fee barrier
+    * failure at the fee barrier results in zero POSTs
+13. Run focused tests and the entire existing suite, including the 114+ execution/recovery tests.
+
+Do not publish, arm execution, remove the hold, submit/cancel a real order, or change production data during this task.
+
+Report exactly:
+
+* what replaced the old 30-minute mechanism
+* database/schema changes
+* where current fees are obtained
+* the exact freshness rule
+* the exact fail-closed barriers
+* all files changed
+* all test results
+* any remaining blockers to unattended 24/7 operation.
+
+Stop after local verification and wait for explicit approval before any production change.

@@ -1,0 +1,49 @@
+MICRO_LIVE Kalshi reconciliation capability audit — GET/read-only only.
+
+Do not publish, migrate production, approve fees, arm a run, enable execution, disable the kill switch, or submit/cancel/amend an order.
+
+We have completed the development hardening, but primary-account readiness still fails closed because we have not proven that Kalshi exposes sufficient authenticated history to reconcile cash/activity on primary_nonexclusive / subaccount 0.
+
+Perform a documentation + authenticated GET-only capability audit.
+
+Determine exactly which currently supported Kalshi API endpoints can provide:
+
+* current available balance,
+* portfolio value,
+* open orders,
+* historical/completed/canceled orders,
+* fills,
+* settlements,
+* deposits,
+* withdrawals,
+* transfers,
+* fees,
+* any ledger/account-activity/event history,
+* timestamps, IDs, pagination/cursors and subaccount identifiers for each.
+
+For each relevant endpoint:
+
+* identify the official documented endpoint,
+* whether our current credentials can GET it,
+* whether it supports subaccount 0,
+* whether pagination can be exhausted deterministically,
+* whether history has a retention/window limitation,
+* whether records have stable unique IDs,
+* whether the monetary effects are sufficient to reconstruct changes in available cash,
+* and whether deposits/withdrawals/transfers can be observed independently of net balance.
+
+Exercise only authenticated GET requests against our account. Do not expose API keys, signatures, private-key material, or other secrets in the report.
+
+Then classify primary-account reconciliation as one of:
+
+A. Complete — API evidence can account for every cash-affecting event required for deterministic reconciliation.
+
+B. Bounded — some activity is observable but there are documented gaps; describe exactly what can and cannot be proven.
+
+C. Insufficient — the API cannot provide enough evidence to safely use a non-exclusive primary account under our fail-closed requirements.
+
+If B or C, do not weaken the reconciliation rules to make readiness pass. Instead determine whether an isolated numbered Kalshi subaccount plus a key restricted to that subaccount would eliminate the unsupported reconciliation requirement. Verify that from current official Kalshi documentation rather than assuming it.
+
+Also investigate the legacy exit with no persisted run ID. Determine whether its identity can be proven from existing immutable database/exchange evidence. If not, keep it permanently ineligible for DELETE authorization rather than synthesizing a run identity.
+
+Report the findings and recommended architecture. Do not modify production or enable trading.

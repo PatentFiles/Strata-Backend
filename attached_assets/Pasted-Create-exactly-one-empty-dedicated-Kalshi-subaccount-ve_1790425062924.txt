@@ -1,0 +1,82 @@
+Create exactly one empty dedicated Kalshi subaccount, verify it, then stop.
+
+Purpose: establish the dedicated account boundary for future MICRO_LIVE testing. This operation remains outside MICRO_LIVE.
+
+Fresh preflight — GET only
+
+Immediately before mutation:
+
+1. GET /account/limits.
+2. Require usage_tier == advanced.
+3. Require a permanent Advanced grant for event_contract.
+4. Verify the provisioning credential still has unrestricted read + write.
+5. Enumerate all numbered subaccounts using the available all-subaccount balance/netting views.
+6. Require that no numbered subaccount currently exists.
+
+If any prerequisite differs, do not POST.
+
+Persist the sanitized preflight outside MICRO_LIVE.
+
+Mutation
+
+Validate the current official V2 POST /portfolio/subaccounts schema immediately before execution.
+
+Then send exactly one create-subaccount POST using only the temporary provisioning credential.
+
+Do not assume the request body or Content-Type from memory; use the current documented schema.
+
+No automatic retry.
+
+Preserve:
+
+* HTTP status;
+* sanitized response;
+* returned subaccount number/ID;
+* timestamp;
+* response/request identifier if supplied.
+
+Verification
+
+After a definitive successful creation response, use authenticated GETs to independently enumerate subaccounts.
+
+Require:
+
+* exactly one new numbered subaccount exists;
+* its number matches the creation response;
+* it is in the valid numbered range 1–63;
+* primary subaccount 0 remains present;
+* no unexpected additional numbered subaccount exists;
+* the new subaccount has no unexplained cash, positions, resting orders or fills.
+
+Record the assigned number as the candidate dedicated MICRO_LIVE subaccount, but do not modify MICRO_LIVE configuration yet.
+
+Uncertain POST handling
+
+If the POST times out or otherwise has an uncertain result:
+
+* do not retry;
+* enumerate subaccounts through GETs;
+* compare against the persisted pre-mutation inventory;
+* if exactly one new numbered subaccount can be uniquely attributed to this operation, report it for review;
+* otherwise stop with creation state UNCERTAIN.
+
+Hard stop
+
+Do not:
+
+* fund the new subaccount;
+* transfer the $0.01 currently on primary exchange index 0;
+* generate or restrict an API key;
+* change KALSHI_BOT_SUBACCOUNT;
+* change account mode;
+* modify MICRO_LIVE database state;
+* approve fees;
+* arm a run;
+* enable execution;
+* change kill switches;
+* submit or cancel another market order;
+* retry the Advanced upgrade.
+
+Report the preflight, POST result, assigned numbered subaccount, post-creation inventory, and confirmation that the new subaccount remains empty.
+
+Then stop.
