@@ -4,6 +4,12 @@ import {
   V13_CHAMPION_PARAMETER_SET,
 } from "@workspace/v13-strategy";
 import { V13_MAX_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
+import {
+  canonicalInventory,
+  pairKey,
+  predictionsApiTier,
+  scopedPairBalanceProven,
+} from "../kalshiSubaccountInventory";
 
 /** Reviewed dedicated pair. Production rows cannot name any other pair. */
 export const PRODUCTION_SUBACCOUNT = 1;
@@ -507,6 +513,10 @@ export interface SubaccountStatus {
   exchangeIndexesForSubaccount1: number[];
   readyForCleanBoundary: boolean;
   reason: string;
+  apiTier: string | null;
+  subaccountCreationTierEligible: boolean;
+  nettingSubaccount1Exists: boolean;
+  balanceInventorySubaccount1Exists: boolean;
 }
 
 export type SubaccountAttemptState =
@@ -579,7 +589,114 @@ export function summarizeSubaccountInventory(identities: readonly SubaccountIden
     exchangeIndexesForSubaccount1,
     readyForCleanBoundary: diagnosis === null,
     reason,
+    apiTier: null,
+    subaccountCreationTierEligible: false,
+    nettingSubaccount1Exists: subaccount1Exists,
+    balanceInventorySubaccount1Exists: subaccount1Exists,
   };
+}
+
+function statusShell(
+  reason: string,
+  tier: { apiTier: string | null; subaccountCreationTierEligible: boolean },
+  patch: Partial<SubaccountStatus> = {},
+): SubaccountStatus {
+  return {
+    subaccount1Exists: false,
+    subaccount1Exchange2Exists: false,
+    matchingRows: 0,
+    numberedSubaccounts: [],
+    exchangeIndexesForSubaccount1: [],
+    readyForCleanBoundary: false,
+    reason,
+    apiTier: tier.apiTier,
+    subaccountCreationTierEligible: tier.subaccountCreationTierEligible,
+    nettingSubaccount1Exists: false,
+    balanceInventorySubaccount1Exists: false,
+    ...patch,
+  };
+}
+
+/** Reviewed netting + balances views. A netting-only new account is pending, not missing. */
+export function assembleSubaccountStatus(input: {
+  nettingPayload: unknown;
+  balancePayload: unknown;
+  scopedPayload: unknown;
+  limitsPayload: unknown;
+  attemptState: SubaccountAttemptState;
+}): SubaccountStatus {
+  const tier = predictionsApiTier(input.limitsPayload);
+  let inventory: ReturnType<typeof canonicalInventory>;
+  try {
+    inventory = canonicalInventory(input.nettingPayload, input.balancePayload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    return statusShell(
+      message.includes("duplicate") ? "subaccount_inventory_duplicated" : "subaccount_inventory_contradictory",
+      tier,
+    );
+  }
+  const nettingKeys = new Set(inventory.nettingConfigs.map(pairKey));
+  const balanceKeys = new Set(inventory.balances.map(pairKey));
+  const onlyBalance = [...balanceKeys].filter((key) => !nettingKeys.has(key));
+  const onlyNetting = [...nettingKeys].filter((key) => !balanceKeys.has(key));
+  const nettingSubaccount1 = inventory.nettingConfigs.filter((row) => row.subaccountNumber === PRODUCTION_SUBACCOUNT);
+  const balanceSubaccount1 = inventory.balances.filter((row) => row.subaccountNumber === PRODUCTION_SUBACCOUNT);
+  const nettingPair = nettingSubaccount1.filter((row) => row.exchangeIndex === PRODUCTION_EXCHANGE_INDEX);
+  const balancePair = balanceSubaccount1.filter((row) => row.exchangeIndex === PRODUCTION_EXCHANGE_INDEX);
+  const numberedSubaccounts = [...new Set([
+    ...inventory.nettingConfigs.map((row) => row.subaccountNumber),
+    ...inventory.balances.map((row) => row.subaccountNumber),
+  ])].sort((left, right) => left - right);
+  const exchangeIndexesForSubaccount1 = [...new Set(nettingSubaccount1.map((row) => row.exchangeIndex))]
+    .sort((left, right) => left - right);
+  const shared = {
+    numberedSubaccounts,
+    exchangeIndexesForSubaccount1,
+    nettingSubaccount1Exists: nettingSubaccount1.length > 0,
+    balanceInventorySubaccount1Exists: balanceSubaccount1.length > 0,
+  };
+  if (onlyBalance.length > 0 || nettingPair.length > 1 || balancePair.length > 1) {
+    return statusShell(
+      nettingPair.length > 1 || balancePair.length > 1
+        ? "subaccount_inventory_duplicated"
+        : "subaccount_inventory_contradictory",
+      tier,
+      shared,
+    );
+  }
+  if (nettingSubaccount1.length > 0 && balanceSubaccount1.length === 0) {
+    return statusShell("subaccount_1_pending_balance_visibility", tier, {
+      ...shared,
+      subaccount1Exists: true,
+    });
+  }
+  if (nettingPair.length === 1 && balancePair.length === 1) {
+    if (onlyNetting.length > 0) {
+      return statusShell("subaccount_inventory_contradictory", tier, shared);
+    }
+    const scoped = scopedPairBalanceProven(input.scopedPayload, PRODUCTION_SUBACCOUNT, PRODUCTION_EXCHANGE_INDEX);
+    return statusShell(scoped ? "ready_for_clean_boundary" : "scoped_balance_identity_unproven", tier, {
+      ...shared,
+      subaccount1Exists: true,
+      subaccount1Exchange2Exists: scoped,
+      matchingRows: 1,
+      readyForCleanBoundary: scoped,
+    });
+  }
+  if (nettingSubaccount1.length > 0 && balanceSubaccount1.length > 0) {
+    return statusShell("subaccount_1_exists_exchange_2_missing", tier, {
+      ...shared,
+      subaccount1Exists: true,
+    });
+  }
+  return statusShell(
+    input.attemptState === "uncertain"
+      ? "subaccount_1_not_visible_after_uncertain_attempt"
+      : "subaccount_1_missing",
+    tier,
+    shared,
+  );
 }
 
 export function unprovenSubaccountStatus(): SubaccountStatus {
@@ -591,6 +708,10 @@ export function unprovenSubaccountStatus(): SubaccountStatus {
     exchangeIndexesForSubaccount1: [],
     readyForCleanBoundary: false,
     reason: "subaccount_inventory_unproven",
+    apiTier: null,
+    subaccountCreationTierEligible: false,
+    nettingSubaccount1Exists: false,
+    balanceInventorySubaccount1Exists: false,
   };
 }
 
@@ -621,6 +742,13 @@ export function subaccountCreationDecision(input: {
   if (input.priorAttempt === "uncertain") return { proceed: false, reason: "subaccount_creation_uncertain_no_retry" };
   if (input.priorAttempt !== "none") return { proceed: false, reason: "subaccount_creation_attempt_exists" };
   if (!input.inventoryProven) return { proceed: false, reason: "subaccount_inventory_unproven" };
+  if (input.status.reason === "subaccount_1_pending_balance_visibility" ||
+      input.status.reason === "subaccount_inventory_contradictory" ||
+      input.status.reason === "subaccount_inventory_duplicated" ||
+      input.status.reason === "subaccount_1_not_visible_after_uncertain_attempt" ||
+      input.status.reason === "scoped_balance_identity_unproven") {
+    return { proceed: false, reason: input.status.reason };
+  }
   if (input.status.subaccount1Exists && !input.status.subaccount1Exchange2Exists) {
     return { proceed: false, reason: "subaccount_1_exists_exchange_2_missing" };
   }

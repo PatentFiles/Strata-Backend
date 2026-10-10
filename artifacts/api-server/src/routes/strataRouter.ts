@@ -28,6 +28,10 @@ function blockedCommissioningPort(): CommissioningPort {
       exchangeIndexesForSubaccount1: [],
       readyForCleanBoundary: false,
       reason: "subaccount_status_unavailable",
+      apiTier: null,
+      subaccountCreationTierEligible: false,
+      nettingSubaccount1Exists: false,
+      balanceInventorySubaccount1Exists: false,
     }),
     createSubaccount: async () => ({
       state: "blocked",

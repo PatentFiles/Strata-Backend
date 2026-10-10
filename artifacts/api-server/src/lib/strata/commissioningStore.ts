@@ -6,8 +6,8 @@ import {
   createStrataSubaccount,
   generateStrataIndex2Key,
   inspectStrataIndex2Credentials,
-  readStrataSubaccountBalances,
 } from "../generatePairRestrictedKalshiKey";
+import { readReviewedSubaccountEvidence } from "../microLiveSubaccountCreation";
 import { configuredKey } from "../microLivePairBoundary";
 import { postOneShotPairFunding, readPairTransferHistory, readPrimaryIndex2Balance } from "../kalshiPairFundingClient";
 import {
@@ -34,8 +34,8 @@ import {
   fundingAuthorizationDecision,
   index2GenerationDecision,
   maskKeyId,
+  assembleSubaccountStatus,
   subaccountCreationDecision,
-  summarizeSubaccountInventory,
   unprovenSubaccountStatus,
   type Index2AttemptState,
   type SubaccountAttemptState,
@@ -653,8 +653,24 @@ function subaccountClosed(reason: string, posts = 0, returnedSubaccount: number 
 }
 
 export async function readRailwaySubaccountStatus(): Promise<SubaccountStatus> {
+  let attemptState: SubaccountAttemptState = "none";
   try {
-    return summarizeSubaccountInventory(await readStrataSubaccountBalances("verifier"));
+    const attempt = await query(
+      "SELECT state FROM strata_subaccount_creation_attempt WHERE singleton_id = 'singleton'",
+    );
+    const state = attempt.rows[0]?.state;
+    if (state === "uncertain" || state === "attempted" || state === "response_received" || state === "rejected") {
+      attemptState = state;
+    } else if (attempt.rows[0]) {
+      attemptState = "attempted";
+    }
+  } catch {
+    return unprovenSubaccountStatus();
+  }
+  try {
+    const evidence = await readReviewedSubaccountEvidence();
+    if (evidence.calls.some((call) => call.method !== "GET")) return unprovenSubaccountStatus();
+    return assembleSubaccountStatus({ ...evidence, attemptState });
   } catch {
     return unprovenSubaccountStatus();
   }
@@ -703,7 +719,9 @@ export async function createRailwaySubaccount(
   if (!local.proceed && local.reason !== "subaccount_inventory_unproven") return subaccountClosed(local.reason);
   let status: SubaccountStatus;
   try {
-    status = summarizeSubaccountInventory(await readStrataSubaccountBalances("provisioning"));
+    const evidence = await readReviewedSubaccountEvidence();
+    if (evidence.calls.some((call) => call.method !== "GET")) return subaccountClosed("subaccount_inventory_unproven");
+    status = assembleSubaccountStatus({ ...evidence, attemptState: priorAttempt });
   } catch {
     return subaccountClosed("subaccount_inventory_unproven");
   }

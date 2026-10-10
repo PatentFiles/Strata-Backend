@@ -1,5 +1,12 @@
 import { randomUUID, createPrivateKey, createSign, constants as cryptoConstants, createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import {
+  canonicalInventory,
+  inventoryInteger as integer,
+  inventoryObject as object,
+  pairKey,
+  validateInventory,
+} from "./kalshiSubaccountInventory";
 
 const API_PREFIX = "/trade-api/v2";
 const TARGET_EXCHANGE_INDEX = 2;
@@ -300,88 +307,6 @@ function digest(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Kalshi inventory response is malformed.");
-  }
-  return value as Record<string, unknown>;
-}
-
-function integer(value: unknown): number | null {
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
-  if (typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)) {
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function pairIdentity(row: Record<string, unknown>): PairIdentity {
-  const subaccountNumber = integer(row.subaccount_number ?? row.subaccount);
-  const exchangeIndex = integer(row.exchange_index);
-  if (subaccountNumber === null || subaccountNumber > SUBACCOUNT_LIMIT ||
-      exchangeIndex === null || exchangeIndex > SUBACCOUNT_LIMIT) {
-    throw new Error("Kalshi inventory contains an account without explicit valid pair identity.");
-  }
-  return { subaccountNumber, exchangeIndex };
-}
-
-function pairKey(identity: PairIdentity): string {
-  return `${identity.subaccountNumber}:${identity.exchangeIndex}`;
-}
-
-function amountMicros(value: unknown): string | null {
-  if (typeof value !== "number" && typeof value !== "string") return null;
-  const stringValue = String(value);
-  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d{1,6}))?$/.exec(stringValue);
-  if (!match) throw new Error("Kalshi inventory contains an invalid balance.");
-  const micros = BigInt(match[2]!) * 1_000_000n + BigInt((match[3] ?? "").padEnd(6, "0"));
-  return `${match[1] === "-" ? "-" : ""}${micros}`;
-}
-
-function extractRows(payload: Record<string, unknown>, candidates: string[]): Record<string, unknown>[] {
-  if (payload.cursor) throw new Error("Kalshi inventory is paginated; complete inventory is required.");
-  const key = candidates.find((candidate) => Array.isArray(payload[candidate]));
-  if (!key) throw new Error("Kalshi inventory response does not contain a complete account list.");
-  return (payload[key] as unknown[]).map(object);
-}
-
-function canonicalInventory(nettingPayload: unknown, balancePayload: unknown): CanonicalInventory {
-  const nettingRows = extractRows(object(nettingPayload), ["netting_configs"]);
-  const balanceRows = extractRows(object(balancePayload), ["subaccount_balances"]);
-  const nettingConfigs = nettingRows.map((row) => {
-    const identity = pairIdentity(row);
-    if (typeof row.enabled !== "boolean") {
-      throw new Error("Kalshi netting inventory is missing its enabled flag.");
-    }
-    return { ...identity, enabled: row.enabled };
-  }).sort((a, b) => pairKey(a).localeCompare(pairKey(b)));
-  const balances = balanceRows.map((row) => {
-    const identity = pairIdentity(row);
-    const balanceMicros = amountMicros(row.balance ?? row.balance_dollars);
-    const updatedAt = integer(row.updated_ts);
-    if (balanceMicros === null || updatedAt === null || updatedAt === 0) {
-      throw new Error("Kalshi balances inventory is missing a valid balance or timestamp.");
-    }
-    return { ...identity, balanceMicros, updatedAt };
-  }).sort((a, b) => pairKey(a).localeCompare(pairKey(b)));
-  const ensureUnique = (rows: readonly PairIdentity[]) => {
-    const keys = rows.map(pairKey);
-    if (new Set(keys).size !== keys.length) throw new Error("Kalshi inventory has duplicate account identities.");
-  };
-  ensureUnique(nettingConfigs);
-  ensureUnique(balances);
-  return { nettingConfigs, balances };
-}
-
-function validateInventory(inventory: CanonicalInventory): void {
-  const netting = new Map(inventory.nettingConfigs.map((row) => [pairKey(row), row]));
-  const balances = new Map(inventory.balances.map((row) => [pairKey(row), row]));
-  if (netting.size !== balances.size || [...netting.keys()].some((key) => !balances.has(key))) {
-    throw new Error("Kalshi account and balance inventory views contradict each other.");
-  }
-}
-
 function index2Keys(inventory: CanonicalInventory): Set<string> {
   return new Set(inventory.nettingConfigs
     .filter((row) => row.exchangeIndex === TARGET_EXCHANGE_INDEX)
@@ -442,31 +367,72 @@ function hasContradictoryExplicitIndex(data: unknown): boolean {
     integer(value.exchange_index) !== TARGET_EXCHANGE_INDEX);
 }
 
+export async function signedProvisioningRequest(
+  fetchImpl: CreationFetch,
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  query = "",
+): Promise<Response> {
+  const { keyId, key } = signingKey();
+  const timestamp = String(Date.now());
+  const headers = new Headers({
+    Accept: "application/json",
+    "KALSHI-ACCESS-KEY": keyId,
+    "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    "KALSHI-ACCESS-SIGNATURE": signature(key, timestamp, method, path),
+  });
+  const init: RequestInit = {
+    method,
+    redirect: "manual",
+    headers,
+    cache: "no-store",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  };
+  if (body !== undefined) {
+    headers.set("Content-Type", "application/json");
+    init.body = JSON.stringify(body);
+  }
+  return fetchImpl(`${API_HOST}${path}${query}`, init);
+}
+
+const LIMITS_PATH = `${API_PREFIX}/account/limits`;
+const SCOPED_BALANCE_PATH = `${API_PREFIX}/portfolio/balance`;
+const SCOPED_BALANCE_QUERY = "?subaccount=1&exchange_index=2";
+
+/** GET-only. Does not create, fund, or pass the development mutation gate. */
+export async function readReviewedSubaccountEvidence(fetchImpl: CreationFetch = fetch): Promise<{
+  limitsPayload: unknown;
+  nettingPayload: unknown;
+  balancePayload: unknown;
+  scopedPayload: unknown;
+  calls: Array<{ method: "GET"; path: string }>;
+}> {
+  const reads: Array<{ path: string; query: string }> = [
+    { path: LIMITS_PATH, query: "" },
+    { path: NETTING_PATH, query: "" },
+    { path: BALANCES_PATH, query: "" },
+    { path: SCOPED_BALANCE_PATH, query: SCOPED_BALANCE_QUERY },
+  ];
+  const calls = reads.map((read) => ({ method: "GET" as const, path: `${read.path}${read.query}` }));
+  const responses = await Promise.all(reads.map((read) =>
+    signedProvisioningRequest(fetchImpl, "GET", read.path, undefined, read.query)));
+  if (responses.some((response) => response.status !== 200)) {
+    await Promise.all(responses.map((response) => response.body?.cancel()));
+    throw new Error("Reviewed subaccount inventory GET failed.");
+  }
+  const [limitsPayload, nettingPayload, balancePayload, scopedPayload] = await Promise.all(
+    responses.map((response) => response.json() as Promise<unknown>),
+  );
+  return { limitsPayload, nettingPayload, balancePayload, scopedPayload, calls };
+}
+
 export function createMicroLiveSubaccountCreationService(
   options: { store: CreationAttemptStore; fetchImpl?: CreationFetch },
 ): MicroLiveSubaccountCreationService {
   const fetchImpl = options.fetchImpl ?? fetch;
   async function request(method: "GET" | "POST", path: string, body?: unknown): Promise<Response> {
-    const { keyId, key } = signingKey();
-    const timestamp = String(Date.now());
-    const headers = new Headers({
-      Accept: "application/json",
-      "KALSHI-ACCESS-KEY": keyId,
-      "KALSHI-ACCESS-TIMESTAMP": timestamp,
-      "KALSHI-ACCESS-SIGNATURE": signature(key, timestamp, method, path),
-    });
-    const init: RequestInit = {
-      method,
-      redirect: "manual",
-      headers,
-      cache: "no-store",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    };
-    if (body !== undefined) {
-      headers.set("Content-Type", "application/json");
-      init.body = JSON.stringify(body);
-    }
-    return fetchImpl(`${API_HOST}${path}`, init);
+    return signedProvisioningRequest(fetchImpl, method, path, body);
   }
 
   async function readInventory(): Promise<CanonicalInventory> {

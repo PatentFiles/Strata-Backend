@@ -16,6 +16,7 @@ import {
   FUNDING_CONFIRMATION,
   approvedExitFloor,
   dedicatedSignerFingerprint,
+  assembleSubaccountStatus,
   cleanPairInventoryDiagnosis,
   emptySnapshot,
   fundingAuthorizationDecision,
@@ -36,6 +37,7 @@ import {
   type PolicyLimits,
 } from "../lib/strata/commissioning";
 import { verifySupabaseAccessToken } from "../lib/strata/supabaseAuth";
+import { readReviewedSubaccountEvidence } from "../lib/microLiveSubaccountCreation";
 import { createStrataRouter } from "./strataRouter";
 import type { CommissioningPort, ExchangeCall } from "./strataCommissioning";
 
@@ -279,8 +281,28 @@ function memoryPort(initial: CommissioningSnapshot) {
       };
     },
     readSubaccountStatus: async () => {
-      calls.push({ method: "GET", path: "/trade-api/v2/portfolio/subaccounts/balances" });
-      return summarizeSubaccountInventory(subaccountIdentities);
+      for (const path of [
+        "/trade-api/v2/account/limits",
+        "/trade-api/v2/portfolio/subaccounts/netting",
+        "/trade-api/v2/portfolio/subaccounts/balances",
+        "/trade-api/v2/portfolio/balance?subaccount=1&exchange_index=2",
+      ]) calls.push({ method: "GET", path });
+      const row = (identity: SubaccountIdentity) => ({
+        subaccount_number: identity.subaccount,
+        exchange_index: identity.exchangeIndex,
+        enabled: false,
+        balance: "0.0000",
+        updated_ts: 1790422846,
+      });
+      return assembleSubaccountStatus({
+        nettingPayload: { netting_configs: subaccountIdentities.map(row) },
+        balancePayload: { subaccount_balances: subaccountIdentities.map(row) },
+        scopedPayload: subaccountIdentities.some((identity) => identity.subaccount === 1 && identity.exchangeIndex === 2)
+          ? { balance_dollars: "0.0000", subaccount_number: 1, exchange_index: 2 }
+          : { balance_breakdown: [{ balance: "10.00" }] },
+        limitsPayload: { usage_tier: "advanced" },
+        attemptState: subaccountAttempt,
+      });
     },
     createSubaccount: async (confirmation) => {
       const before = envBefore();
@@ -969,4 +991,155 @@ test("subaccount inspection is GET-only and creation is one restricted POST", as
   const sql = readFileSync("../../lib/db/drizzle/0003_strata_subaccount_creation_attempt.sql", "utf8");
   assert.equal(/balance|private_key/i.test(sql), false);
   assert.equal(readFileSync("src/lib/kalshiAccountClient.ts", "utf8").includes("clean_pair_inventory_missing_or_duplicated"), false);
+
+  const limits = { usage_tier: "advanced", read_limit: 9999, write_limit: 9999 };
+  const primary = {
+    subaccount_number: 0, exchange_index: 2, enabled: false, balance: "10.0000", updated_ts: 1790422846,
+  };
+  const pair = {
+    subaccount_number: 1, exchange_index: 2, enabled: false, balance: "0.0000", updated_ts: 1790422846,
+  };
+  const pending = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [primary, pair] },
+    balancePayload: { subaccount_balances: [primary] },
+    scopedPayload: { balance_breakdown: [{ balance: "10.00" }] },
+    limitsPayload: { usage_tier: "basic" },
+    attemptState: "uncertain",
+  });
+  assert.equal(pending.reason, "subaccount_1_pending_balance_visibility");
+  assert.equal(pending.subaccount1Exists, true);
+  assert.equal(pending.subaccount1Exchange2Exists, false);
+  assert.equal(pending.readyForCleanBoundary, false);
+  assert.equal(pending.nettingSubaccount1Exists, true);
+  assert.equal(pending.balanceInventorySubaccount1Exists, false);
+  assert.equal(pending.apiTier, "basic");
+  assert.equal(pending.subaccountCreationTierEligible, false);
+  assert.equal(JSON.stringify(pending).includes("10.0000"), false);
+  assert.equal(subaccountCreationDecision({
+    confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
+    status: pending,
+    inventoryProven: true,
+    priorAttempt: "uncertain",
+    workerRunning: false,
+    productionAccountExists: false,
+    nodeEnv: "production",
+    kalshiEnvironment: "production",
+    provisioningConfigured: true,
+  }).proceed, false);
+
+  const balanceOnly = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [primary] },
+    balancePayload: { subaccount_balances: [primary, pair] },
+    scopedPayload: { balance_dollars: "0.0000", subaccount_number: 1, exchange_index: 2 },
+    limitsPayload: limits,
+    attemptState: "uncertain",
+  });
+  assert.equal(balanceOnly.reason, "subaccount_inventory_contradictory");
+  assert.equal(balanceOnly.readyForCleanBoundary, false);
+
+  const agreed = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [primary, pair] },
+    balancePayload: { subaccount_balances: [primary, pair] },
+    scopedPayload: { balance_dollars: "0.0000", subaccount_number: 1, exchange_index: 2 },
+    limitsPayload: { usage_tier: "premier" },
+    attemptState: "uncertain",
+  });
+  assert.equal(agreed.matchingRows, 1);
+  assert.equal(agreed.subaccount1Exists, true);
+  assert.equal(agreed.subaccount1Exchange2Exists, true);
+  assert.equal(agreed.readyForCleanBoundary, true);
+  assert.equal(agreed.subaccountCreationTierEligible, true);
+  assert.equal(agreed.apiTier, "premier");
+  const wrongScope = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [primary, pair] },
+    balancePayload: { subaccount_balances: [primary, pair] },
+    scopedPayload: { balance_dollars: "0.0000", subaccount_number: 0, exchange_index: 2 },
+    limitsPayload: { usage_tier: "advanced" },
+    attemptState: "uncertain",
+  });
+  assert.equal(wrongScope.reason, "scoped_balance_identity_unproven");
+  assert.equal(wrongScope.subaccount1Exchange2Exists, false);
+  assert.equal(wrongScope.readyForCleanBoundary, false);
+
+  const duplicatedInventory = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [pair, pair] },
+    balancePayload: { subaccount_balances: [pair, pair] },
+    scopedPayload: { balance_dollars: "0.0000", subaccount_number: 1, exchange_index: 2 },
+    limitsPayload: { usage_tier: "advanced" },
+    attemptState: "none",
+  });
+  assert.equal(duplicatedInventory.reason, "subaccount_inventory_duplicated");
+  assert.equal(duplicatedInventory.readyForCleanBoundary, false);
+
+  const absent = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [primary] },
+    balancePayload: { subaccount_balances: [primary] },
+    scopedPayload: { balance_dollars: "10.0000", subaccount_number: 0, exchange_index: 2 },
+    limitsPayload: { usage_tier: "advanced" },
+    attemptState: "uncertain",
+  });
+  assert.equal(absent.reason, "subaccount_1_not_visible_after_uncertain_attempt");
+  assert.equal(absent.subaccount1Exists, false);
+  assert.equal(absent.subaccountCreationTierEligible, true);
+  assert.equal(subaccountCreationDecision({
+    confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
+    status: absent,
+    inventoryProven: true,
+    priorAttempt: "uncertain",
+    workerRunning: false,
+    productionAccountExists: false,
+    nodeEnv: "production",
+    kalshiEnvironment: "production",
+    provisioningConfigured: true,
+  }).reason, "subaccount_creation_uncertain_no_retry");
+});
+
+test("reviewed subaccount reconciliation is GET-only and does not change execution flags", async () => {
+  const saved = Object.fromEntries(FLAG_NAMES.map((name) => [name, process.env[name]]));
+  const savedProvisioningId = process.env.KALSHI_PROVISIONING_API_KEY_ID;
+  const savedProvisioningKey = process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  process.env.KALSHI_PROVISIONING_API_KEY_ID = "unit-test-provisioning-id";
+  process.env.KALSHI_PROVISIONING_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const calls: string[] = [];
+  const previous = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    calls.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
+    assert.equal(init?.method, "GET");
+    if (url.pathname.endsWith("/account/limits")) return Response.json({ usage_tier: "advanced" });
+    if (url.pathname.endsWith("/subaccounts/netting")) {
+      return Response.json({ netting_configs: [{ subaccount_number: 0, exchange_index: 2, enabled: false }] });
+    }
+    if (url.pathname.endsWith("/subaccounts/balances")) {
+      return Response.json({ subaccount_balances: [{ subaccount_number: 0, exchange_index: 2, balance: "1.0000", updated_ts: 1790422846 }] });
+    }
+    return Response.json({ balance_dollars: "1.0000", subaccount_number: 0, exchange_index: 2 });
+  }) as typeof fetch;
+  try {
+    const evidence = await readReviewedSubaccountEvidence();
+    assert.equal(evidence.calls.every((call) => call.method === "GET"), true);
+    assert.equal(calls.some((call) => call.startsWith("POST")), false);
+    assert.equal(calls.some((call) => call.includes("/account/limits")), true);
+    assert.equal(calls.some((call) => call.includes("/subaccounts/netting")), true);
+    assert.equal(calls.some((call) => call.includes("/subaccounts/balances")), true);
+    assert.equal(calls.some((call) => call.includes("subaccount=1&exchange_index=2")), true);
+    assert.equal(calls.some((call) => call.includes("transfer") || call.includes("order")), false);
+    const status = assembleSubaccountStatus({ ...evidence, attemptState: "uncertain" });
+    assert.equal(status.reason, "subaccount_1_not_visible_after_uncertain_attempt");
+    assert.equal(status.apiTier, "advanced");
+    assert.equal(status.subaccountCreationTierEligible, true);
+    assert.equal(JSON.stringify(status).includes("1.0000"), false);
+    for (const name of FLAG_NAMES) assert.equal(process.env[name], saved[name]);
+  } finally {
+    globalThis.fetch = previous;
+    for (const name of FLAG_NAMES) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+    if (savedProvisioningId === undefined) delete process.env.KALSHI_PROVISIONING_API_KEY_ID;
+    else process.env.KALSHI_PROVISIONING_API_KEY_ID = savedProvisioningId;
+    if (savedProvisioningKey === undefined) delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+    else process.env.KALSHI_PROVISIONING_PRIVATE_KEY = savedProvisioningKey;
+  }
 });
