@@ -20,6 +20,25 @@ function blockedCommissioningPort(): CommissioningPort {
   const read = async () => emptySnapshot();
   return {
     read,
+    readSubaccountStatus: async () => ({
+      subaccount1Exists: false,
+      subaccount1Exchange2Exists: false,
+      matchingRows: 0,
+      numberedSubaccounts: [],
+      exchangeIndexesForSubaccount1: [],
+      readyForCleanBoundary: false,
+      reason: "subaccount_status_unavailable",
+    }),
+    createSubaccount: async () => ({
+      state: "blocked",
+      reason: "subaccount_creation_unavailable",
+      posts: 0,
+      returnedSubaccount: null,
+      workerStarted: false,
+      environmentChanged: false,
+      funded: false,
+      commissioned: false,
+    }),
     generateIndex2Key: async () => ({
       state: "blocked",
       reason: "index2_generation_unavailable",

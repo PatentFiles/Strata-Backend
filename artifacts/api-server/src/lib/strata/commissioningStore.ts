@@ -2,7 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { captureCleanPairSnapshot, verifyKalshiRestrictedTradingKeyForSubaccount } from "../kalshiAccountClient";
-import { generateStrataIndex2Key, inspectStrataIndex2Credentials } from "../generatePairRestrictedKalshiKey";
+import {
+  createStrataSubaccount,
+  generateStrataIndex2Key,
+  inspectStrataIndex2Credentials,
+  readStrataSubaccountBalances,
+} from "../generatePairRestrictedKalshiKey";
 import { configuredKey } from "../microLivePairBoundary";
 import { postOneShotPairFunding, readPairTransferHistory, readPrimaryIndex2Balance } from "../kalshiPairFundingClient";
 import {
@@ -29,7 +34,12 @@ import {
   fundingAuthorizationDecision,
   index2GenerationDecision,
   maskKeyId,
+  subaccountCreationDecision,
+  summarizeSubaccountInventory,
+  unprovenSubaccountStatus,
   type Index2AttemptState,
+  type SubaccountAttemptState,
+  type SubaccountStatus,
   planArm,
   planCommission,
   planDisarm,
@@ -38,7 +48,9 @@ import {
   type CommissioningSnapshot,
   type PolicyLimits,
 } from "./commissioning";
-import type { CommissioningPort, ExchangeCall, Index2GenerationResult } from "../../routes/strataCommissioning";
+import type {
+  CommissioningPort, ExchangeCall, Index2GenerationResult, SubaccountCreateResult,
+} from "../../routes/strataCommissioning";
 
 type QueryRows = { rows: Array<Record<string, unknown>> };
 
@@ -627,11 +639,164 @@ export async function generateRailwayIndex2Key(
   }
 }
 
+function subaccountClosed(reason: string, posts = 0, returnedSubaccount: number | null = null): SubaccountCreateResult {
+  return {
+    state: "blocked",
+    reason,
+    posts,
+    returnedSubaccount,
+    workerStarted: false,
+    environmentChanged: false,
+    funded: false,
+    commissioned: false,
+  };
+}
+
+export async function readRailwaySubaccountStatus(): Promise<SubaccountStatus> {
+  try {
+    return summarizeSubaccountInventory(await readStrataSubaccountBalances("verifier"));
+  } catch {
+    return unprovenSubaccountStatus();
+  }
+}
+
+/** Commits one attempt, then allows one subaccount POST. No funding or orders. */
+export async function createRailwaySubaccount(
+  confirmation: unknown,
+  workerRunning: boolean,
+): Promise<SubaccountCreateResult> {
+  let priorAttempt: SubaccountAttemptState = "none";
+  let accountExists = false;
+  try {
+    const [attempt, account, micro] = await Promise.all([
+      query("SELECT state FROM strata_subaccount_creation_attempt WHERE singleton_id = 'singleton'"),
+      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query("SELECT 1 FROM micro_live_subaccount_creation_attempts LIMIT 1"),
+    ]);
+    accountExists = account.rows.length > 0;
+    if (micro.rows.length > 0) priorAttempt = "attempted";
+    else if (attempt.rows[0]) {
+      const state = attempt.rows[0].state;
+      priorAttempt = state === "uncertain" || state === "response_received" ||
+        state === "rejected" || state === "attempted"
+        ? state
+        : "attempted";
+    }
+  } catch {
+    return subaccountClosed("subaccount_preflight_unproven");
+  }
+  const present = Boolean(process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim() &&
+    process.env.KALSHI_PROVISIONING_PRIVATE_KEY?.trim());
+  const local = subaccountCreationDecision({
+    confirmation,
+    status: unprovenSubaccountStatus(),
+    inventoryProven: false,
+    priorAttempt,
+    workerRunning,
+    productionAccountExists: accountExists,
+    nodeEnv: process.env.NODE_ENV,
+    kalshiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    provisioningConfigured: present,
+    liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+    v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+  });
+  if (!local.proceed && local.reason !== "subaccount_inventory_unproven") return subaccountClosed(local.reason);
+  let status: SubaccountStatus;
+  try {
+    status = summarizeSubaccountInventory(await readStrataSubaccountBalances("provisioning"));
+  } catch {
+    return subaccountClosed("subaccount_inventory_unproven");
+  }
+  const decision = subaccountCreationDecision({
+    confirmation,
+    status,
+    inventoryProven: true,
+    priorAttempt,
+    workerRunning,
+    productionAccountExists: accountExists,
+    nodeEnv: process.env.NODE_ENV,
+    kalshiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    provisioningConfigured: present,
+    liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+    v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+  });
+  if (!decision.proceed) return subaccountClosed(decision.reason);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const locked = await client.query(
+      "SELECT state FROM strata_subaccount_creation_attempt WHERE singleton_id = 'singleton' FOR UPDATE",
+    );
+    if (locked.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return subaccountClosed("subaccount_creation_attempt_exists");
+    }
+    await client.query(`INSERT INTO strata_subaccount_creation_attempt
+      (singleton_id, exchange_index, state)
+      VALUES ('singleton', 2, 'attempted')`);
+    await client.query("COMMIT");
+  } catch {
+    try { await client.query("ROLLBACK"); } catch { /* the insert did not commit */ }
+    return subaccountClosed("subaccount_attempt_not_durable");
+  } finally {
+    client.release();
+  }
+
+  try {
+    const created = await createStrataSubaccount();
+    if (created.outcome === "created") {
+      const saved = await pool.query(`UPDATE strata_subaccount_creation_attempt
+        SET state = 'response_received', returned_subaccount = 1, response_received_at = now()
+        WHERE singleton_id = 'singleton' AND state = 'attempted' AND returned_subaccount IS NULL
+        RETURNING singleton_id`);
+      if (saved.rowCount !== 1) {
+        await pool.query(`UPDATE strata_subaccount_creation_attempt
+          SET state = 'uncertain' WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+        return {
+          state: "uncertain", reason: "subaccount_creation_uncertain_no_retry", posts: 1,
+          returnedSubaccount: null, workerStarted: false, environmentChanged: false,
+          funded: false, commissioned: false,
+        };
+      }
+      return {
+        state: "created", reason: "subaccount_1_created", posts: 1, returnedSubaccount: 1,
+        workerStarted: false, environmentChanged: false, funded: false, commissioned: false,
+      };
+    }
+    if (created.outcome === "wrong_number") {
+      await pool.query(`UPDATE strata_subaccount_creation_attempt
+        SET state = 'rejected', returned_subaccount = $1, response_received_at = now()
+        WHERE singleton_id = 'singleton' AND state = 'attempted'`, [created.subaccountNumber]);
+      return subaccountClosed("returned_subaccount_not_1", 1, created.subaccountNumber);
+    }
+    await pool.query(`UPDATE strata_subaccount_creation_attempt
+      SET state = 'uncertain' WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+    return {
+      state: "uncertain", reason: "subaccount_creation_uncertain_no_retry", posts: 1,
+      returnedSubaccount: null, workerStarted: false, environmentChanged: false,
+      funded: false, commissioned: false,
+    };
+  } catch {
+    try {
+      await pool.query(`UPDATE strata_subaccount_creation_attempt
+        SET state = 'uncertain' WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+    } catch { /* an attempted row still refuses a second POST */ }
+    return {
+      state: "uncertain", reason: "subaccount_creation_uncertain_no_retry", posts: 1,
+      returnedSubaccount: null, workerStarted: false, environmentChanged: false,
+      funded: false, commissioned: false,
+    };
+  }
+}
+
 export function createDatabaseCommissioningPort(
   workerRunning: () => boolean = () => false,
 ): CommissioningPort {
   return {
     read: () => readCommissioningSnapshot(workerRunning()),
+    readSubaccountStatus: () => readRailwaySubaccountStatus(),
+    createSubaccount: (confirmation) => createRailwaySubaccount(confirmation, workerRunning()),
     generateIndex2Key: (confirmation) => generateRailwayIndex2Key(confirmation, workerRunning()),
     async verifySigner() {
       const probe = await probeDedicatedSigner();

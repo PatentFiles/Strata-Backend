@@ -16,13 +16,18 @@ import {
   FUNDING_CONFIRMATION,
   approvedExitFloor,
   dedicatedSignerFingerprint,
+  cleanPairInventoryDiagnosis,
   emptySnapshot,
   fundingAuthorizationDecision,
   index2GenerationDecision,
   planArm,
+  SUBACCOUNT_CREATE_CONFIRMATION,
+  subaccountCreationDecision,
+  summarizeSubaccountInventory,
   STRATA_INDEX2_KEY_CONFIRMATION,
   STRATA_INDEX2_KEY_NAME,
   type Index2GenerationFacts,
+  type SubaccountIdentity,
   planCommission,
   planDisarm,
   validatePolicyLimits,
@@ -88,6 +93,14 @@ function memoryPort(initial: CommissioningSnapshot) {
   const index2Payloads: unknown[] = [];
   const index2Stored: Array<Record<string, unknown>> = [];
   const index2Pem = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----";
+  let subaccountIdentities: SubaccountIdentity[] = [
+    { subaccount: 0, exchangeIndex: 0 },
+    { subaccount: 0, exchangeIndex: 2 },
+  ];
+  let subaccountAttempt: "none" | "attempted" | "uncertain" | "response_received" | "rejected" = "none";
+  let subaccountPosts = 0;
+  let subaccountOutcome: "created" | "uncertain" | "wrong_number" = "created";
+  const subaccountPayloads: unknown[] = [];
   let reviewedFeeAccepted = false;
   let reviewedCashMicros: string | null = null;
   let draft: PolicyLimits | null = null;
@@ -265,6 +278,69 @@ function memoryPort(initial: CommissioningSnapshot) {
         accountCount: accounts.length,
       };
     },
+    readSubaccountStatus: async () => {
+      calls.push({ method: "GET", path: "/trade-api/v2/portfolio/subaccounts/balances" });
+      return summarizeSubaccountInventory(subaccountIdentities);
+    },
+    createSubaccount: async (confirmation) => {
+      const before = envBefore();
+      const status = summarizeSubaccountInventory(subaccountIdentities);
+      const decision = subaccountCreationDecision({
+        confirmation,
+        status,
+        inventoryProven: true,
+        priorAttempt: subaccountAttempt,
+        workerRunning: snapshot.workerRunning,
+        productionAccountExists: snapshot.account.count > 0,
+        nodeEnv: "production",
+        kalshiEnvironment: "production",
+        provisioningConfigured: true,
+        liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+        v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+      });
+      const unchanged = () => FLAG_NAMES.every((name) => process.env[name] === before[name]);
+      if (!decision.proceed) {
+        return {
+          state: "blocked" as const, reason: decision.reason, posts: subaccountPosts,
+          returnedSubaccount: null, workerStarted: false as const,
+          environmentChanged: false as const, funded: false as const, commissioned: false as const,
+        };
+      }
+      subaccountAttempt = "attempted";
+      subaccountPosts += 1;
+      subaccountPayloads.push({ exchange_index: 2 });
+      calls.push({ method: "POST", path: "/trade-api/v2/portfolio/subaccounts" });
+      if (!unchanged() || workerStarts !== 0) {
+        return {
+          state: "blocked" as const, reason: "environment_or_worker_changed", posts: subaccountPosts,
+          returnedSubaccount: null, workerStarted: false as const,
+          environmentChanged: false as const, funded: false as const, commissioned: false as const,
+        };
+      }
+      if (subaccountOutcome === "uncertain") {
+        subaccountAttempt = "uncertain";
+        return {
+          state: "uncertain" as const, reason: "subaccount_creation_uncertain_no_retry", posts: subaccountPosts,
+          returnedSubaccount: null, workerStarted: false as const,
+          environmentChanged: false as const, funded: false as const, commissioned: false as const,
+        };
+      }
+      if (subaccountOutcome === "wrong_number") {
+        subaccountAttempt = "rejected";
+        return {
+          state: "blocked" as const, reason: "returned_subaccount_not_1", posts: subaccountPosts,
+          returnedSubaccount: 7, workerStarted: false as const,
+          environmentChanged: false as const, funded: false as const, commissioned: false as const,
+        };
+      }
+      subaccountAttempt = "response_received";
+      subaccountIdentities = [...subaccountIdentities, { subaccount: 1, exchangeIndex: 2 }];
+      return {
+        state: "created" as const, reason: "subaccount_1_created", posts: subaccountPosts,
+        returnedSubaccount: 1, workerStarted: false as const,
+        environmentChanged: false as const, funded: false as const, commissioned: false as const,
+      };
+    },
     arm: async (confirmation) => {
       const before = envBefore();
       const decision = planArm(snapshot, confirmation);
@@ -297,6 +373,12 @@ function memoryPort(initial: CommissioningSnapshot) {
       index2Overlay = next;
       index2Outcome = outcome;
     },
+    setSubaccounts(next: SubaccountIdentity[], outcome: "created" | "uncertain" | "wrong_number" = "created") {
+      subaccountIdentities = next;
+      subaccountOutcome = outcome;
+    },
+    subaccountPosts: () => subaccountPosts,
+    subaccountPayloads: () => subaccountPayloads,
     noteGet(path: string) { calls.push({ method: "GET", path }); },
     acceptReviewedFee() { reviewedFeeAccepted = true; },
     proveCash(micros: string) { reviewedCashMicros = micros; },
@@ -805,4 +887,86 @@ test("INDEX2 generation is one authenticated POST and never stores or logs the p
     else process.env.V13_PRODUCTION_EXECUTION_ENABLED = savedV13;
     await server.close();
   }
+});
+
+test("subaccount inspection is GET-only and creation is one restricted POST", async () => {
+  assert.equal(cleanPairInventoryDiagnosis([]), "clean_pair_inventory_missing");
+  assert.equal(cleanPairInventoryDiagnosis([{ subaccount: 1, exchangeIndex: 0 }]), "clean_pair_exchange_index_2_missing");
+  assert.equal(cleanPairInventoryDiagnosis([
+    { subaccount: 1, exchangeIndex: 2 },
+    { subaccount: 1, exchangeIndex: 2 },
+  ]), "clean_pair_inventory_duplicated");
+  assert.equal(cleanPairInventoryDiagnosis([{ subaccount: 1, exchangeIndex: 2 }]), null);
+  const missing = summarizeSubaccountInventory([{ subaccount: 0, exchangeIndex: 2 }]);
+  assert.equal(missing.subaccount1Exists, false);
+  assert.equal(missing.reason, "subaccount_1_missing");
+  const exchangeMissing = summarizeSubaccountInventory([{ subaccount: 1, exchangeIndex: 0 }]);
+  assert.equal(exchangeMissing.reason, "subaccount_1_exists_exchange_2_missing");
+  const duplicated = summarizeSubaccountInventory([
+    { subaccount: 1, exchangeIndex: 2 },
+    { subaccount: 1, exchangeIndex: 2 },
+  ]);
+  assert.equal(duplicated.matchingRows, 2);
+  assert.equal(duplicated.readyForCleanBoundary, false);
+
+  const saved = Object.fromEntries(FLAG_NAMES.map((name) => [name, process.env[name]]));
+  const gate = memoryPort(emptySnapshot());
+  const status = await gate.port.readSubaccountStatus();
+  assert.equal(status.subaccount1Exists, false);
+  assert.deepEqual(status.numberedSubaccounts, [0]);
+  assert.deepEqual(gate.calls.filter((item) => item.path.includes("balances")).map((item) => item.method), ["GET"]);
+  const wrong = await gate.port.createSubaccount("create");
+  assert.equal(wrong.reason, "explicit_subaccount_confirmation_required");
+  assert.equal(gate.subaccountPosts(), 0);
+  gate.setSubaccounts([{ subaccount: 1, exchangeIndex: 2 }]);
+  const existing = await gate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(existing.reason, "subaccount_1_already_exists");
+  assert.equal(gate.subaccountPosts(), 0);
+  gate.setSubaccounts([{ subaccount: 1, exchangeIndex: 0 }]);
+  assert.equal((await gate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION)).reason, "subaccount_1_exists_exchange_2_missing");
+  gate.setSubaccounts([{ subaccount: 0, exchangeIndex: 2 }, { subaccount: 2, exchangeIndex: 2 }]);
+  assert.equal((await gate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION)).reason, "next_subaccount_would_not_be_1");
+  assert.equal(gate.subaccountPosts(), 0);
+  gate.setSubaccounts([{ subaccount: 0, exchangeIndex: 2 }], "uncertain");
+  const uncertain = await gate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(uncertain.state, "uncertain");
+  assert.equal(uncertain.posts, 1);
+  const retry = await gate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(retry.reason, "subaccount_creation_uncertain_no_retry");
+  assert.equal(gate.subaccountPosts(), 1);
+  assert.deepEqual(gate.subaccountPayloads(), [{ exchange_index: 2 }]);
+  assert.equal(gate.calls.some((item) => item.path.includes("transfer") || item.path.includes("order")), false);
+
+  const createdGate = memoryPort(emptySnapshot());
+  const created = await createdGate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(created.state, "created");
+  assert.equal(created.returnedSubaccount, 1);
+  assert.equal(created.workerStarted, false);
+  assert.equal(created.environmentChanged, false);
+  assert.equal(created.funded, false);
+  assert.equal(created.commissioned, false);
+  assert.equal(createdGate.workerStarts(), 0);
+  const again = await createdGate.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(again.reason, "subaccount_creation_attempt_exists");
+  assert.equal(createdGate.subaccountPosts(), 1);
+  const wrongNumber = memoryPort(emptySnapshot());
+  wrongNumber.setSubaccounts([{ subaccount: 0, exchangeIndex: 2 }], "wrong_number");
+  const rejected = await wrongNumber.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION);
+  assert.equal(rejected.reason, "returned_subaccount_not_1");
+  assert.equal(rejected.returnedSubaccount, 7);
+  assert.equal((await wrongNumber.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION)).reason, "subaccount_creation_attempt_exists");
+  assert.equal(wrongNumber.subaccountPosts(), 1);
+  const running = memoryPort(emptySnapshot());
+  running.current().workerRunning = true;
+  assert.equal((await running.port.createSubaccount(SUBACCOUNT_CREATE_CONFIRMATION)).reason, "production_worker_running");
+  assert.equal(running.subaccountPosts(), 0);
+  for (const name of FLAG_NAMES) assert.equal(process.env[name], saved[name]);
+  const source = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = source.slice(source.indexOf("export async function createRailwaySubaccount"), source.indexOf("export function createDatabaseCommissioningPort"));
+  assert.equal(body.includes("/portfolio/orders"), false);
+  assert.equal(body.includes("postOneShotPairFunding"), false);
+  assert.equal(body.includes("LIVE_EXECUTION_ENABLED ="), false);
+  const sql = readFileSync("../../lib/db/drizzle/0003_strata_subaccount_creation_attempt.sql", "utf8");
+  assert.equal(/balance|private_key/i.test(sql), false);
+  assert.equal(readFileSync("src/lib/kalshiAccountClient.ts", "utf8").includes("clean_pair_inventory_missing_or_duplicated"), false);
 });

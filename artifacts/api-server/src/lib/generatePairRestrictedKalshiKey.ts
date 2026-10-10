@@ -6,6 +6,8 @@ import { captureCleanPairSnapshot } from "./kalshiAccountClient";
 import {
   STRATA_INDEX2_KEY_NAME,
   STRATA_INDEX2_KEY_SCOPES,
+  subaccountIdentitiesFromBalancePayload,
+  type SubaccountIdentity,
 } from "./strata/commissioning";
 
 const HOST = "https://external-api.kalshi.com";
@@ -201,6 +203,80 @@ export async function generateStrataIndex2Key(): Promise<GeneratedPairKey> {
     `${PREFIX}/api_keys/generate`,
     JSON.stringify(STRATA_INDEX2_GENERATION_BODY),
   ));
+}
+
+const SUBACCOUNT_BALANCES_PATH = `${PREFIX}/portfolio/subaccounts/balances`;
+const SUBACCOUNT_CREATE_PATH = `${PREFIX}/portfolio/subaccounts`;
+
+function responseIdentity(payload: unknown): { subaccountNumber: number | null; exchangeIndex: number | null } {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { subaccountNumber: null, exchangeIndex: null };
+  }
+  const root = payload as Record<string, unknown>;
+  const body = root.subaccount && typeof root.subaccount === "object" && !Array.isArray(root.subaccount)
+    ? root.subaccount as Record<string, unknown>
+    : root;
+  const number = body.subaccount_number ?? body.subaccount;
+  const subaccountNumber = typeof number === "number" && Number.isSafeInteger(number) ? number : null;
+  const exchangeIndex = typeof body.exchange_index === "number" && Number.isSafeInteger(body.exchange_index)
+    ? body.exchange_index : null;
+  return { subaccountNumber, exchangeIndex };
+}
+
+/** Signed GET of subaccount identity only. Balance amounts are not returned. */
+export async function readStrataSubaccountBalances(
+  kind: "provisioning" | "verifier" = "verifier",
+): Promise<SubaccountIdentity[]> {
+  const response = await request(kind, "GET", SUBACCOUNT_BALANCES_PATH);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error("subaccount_inventory_unproven");
+  }
+  return subaccountIdentitiesFromBalancePayload(await response.json() as unknown);
+}
+
+/**
+ * One provisioning POST. Callers commit the attempt first and must not call
+ * this again after an uncertain or rejected result.
+ */
+export async function createStrataSubaccount(): Promise<
+  | { outcome: "created"; subaccountNumber: 1 }
+  | { outcome: "wrong_number"; subaccountNumber: number }
+  | { outcome: "uncertain" }
+> {
+  if (process.env.NODE_ENV !== "production" ||
+      process.env.KALSHI_API_ENVIRONMENT !== "production" ||
+      process.env.LIVE_EXECUTION_ENABLED === "true" ||
+      process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true") {
+    throw new Error("Strata subaccount creation is closed");
+  }
+  const response = await request(
+    "provisioning",
+    "POST",
+    SUBACCOUNT_CREATE_PATH,
+    JSON.stringify({ exchange_index: 2 }),
+  );
+  if (response.status !== 201) {
+    await response.body?.cancel();
+    return { outcome: "uncertain" };
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await response.text());
+  } catch {
+    return { outcome: "uncertain" };
+  }
+  const identity = responseIdentity(payload);
+  if (identity.subaccountNumber === null || identity.subaccountNumber < 0 || identity.subaccountNumber > 63) {
+    return { outcome: "uncertain" };
+  }
+  if (identity.exchangeIndex !== null && identity.exchangeIndex !== 2) {
+    return { outcome: "wrong_number", subaccountNumber: identity.subaccountNumber };
+  }
+  if (identity.subaccountNumber !== 1) {
+    return { outcome: "wrong_number", subaccountNumber: identity.subaccountNumber };
+  }
+  return { outcome: "created", subaccountNumber: 1 };
 }
 
 /** Independent unrestricted metadata GET, not an assertion of shard isolation. */

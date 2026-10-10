@@ -487,6 +487,152 @@ export function index2GenerationDecision(facts: Index2GenerationFacts): { procee
   return { proceed: true, reason: "preflight_passed" };
 }
 
+export const SUBACCOUNT_CREATE_CONFIRMATION = "CREATE_KALSHI_SUBACCOUNT_1_EXCHANGE_2";
+
+export type CleanPairInventoryReason =
+  | "clean_pair_inventory_missing"
+  | "clean_pair_inventory_duplicated"
+  | "clean_pair_exchange_index_2_missing";
+
+export interface SubaccountIdentity {
+  subaccount: number | null;
+  exchangeIndex: number | null;
+}
+
+export interface SubaccountStatus {
+  subaccount1Exists: boolean;
+  subaccount1Exchange2Exists: boolean;
+  matchingRows: number;
+  numberedSubaccounts: number[];
+  exchangeIndexesForSubaccount1: number[];
+  readyForCleanBoundary: boolean;
+  reason: string;
+}
+
+export type SubaccountAttemptState =
+  | "none" | "attempted" | "uncertain" | "response_received" | "rejected";
+
+function identityInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/** Keeps only account identity. Balance fields are discarded. */
+export function subaccountIdentitiesFromBalancePayload(payload: unknown): SubaccountIdentity[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("subaccount_inventory_incomplete");
+  }
+  const body = payload as Record<string, unknown>;
+  if ("cursor" in body && body.cursor) throw new Error("subaccount_inventory_incomplete");
+  if (!Array.isArray(body.subaccount_balances)) throw new Error("subaccount_inventory_incomplete");
+  return body.subaccount_balances.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error("subaccount_inventory_incomplete");
+    }
+    const record = row as Record<string, unknown>;
+    return {
+      subaccount: identityInteger(record.subaccount_number ?? record.subaccount),
+      exchangeIndex: identityInteger(record.exchange_index),
+    };
+  });
+}
+
+/** Exactly one (subaccount, exchange index) row passes. Every other shape stays blocked. */
+export function cleanPairInventoryDiagnosis(
+  identities: readonly SubaccountIdentity[],
+  subaccountNumber = PRODUCTION_SUBACCOUNT,
+  exchangeIndex = PRODUCTION_EXCHANGE_INDEX,
+): CleanPairInventoryReason | null {
+  const pairRows = identities.filter((row) =>
+    row.subaccount === subaccountNumber && row.exchangeIndex === exchangeIndex);
+  if (pairRows.length > 1) return "clean_pair_inventory_duplicated";
+  if (pairRows.length === 1) return null;
+  if (identities.some((row) => row.subaccount === subaccountNumber)) {
+    return "clean_pair_exchange_index_2_missing";
+  }
+  return "clean_pair_inventory_missing";
+}
+
+export function summarizeSubaccountInventory(identities: readonly SubaccountIdentity[]): SubaccountStatus {
+  const numberedSubaccounts = [...new Set(identities.flatMap((row) =>
+    row.subaccount === null ? [] : [row.subaccount]))].sort((left, right) => left - right);
+  const exchangeIndexesForSubaccount1 = [...new Set(identities.flatMap((row) =>
+    row.subaccount === PRODUCTION_SUBACCOUNT && row.exchangeIndex !== null ? [row.exchangeIndex] : []))].sort((left, right) => left - right);
+  const matchingRows = identities.filter((row) =>
+    row.subaccount === PRODUCTION_SUBACCOUNT && row.exchangeIndex === PRODUCTION_EXCHANGE_INDEX).length;
+  const subaccount1Exists = identities.some((row) => row.subaccount === PRODUCTION_SUBACCOUNT);
+  const diagnosis = cleanPairInventoryDiagnosis(identities);
+  let reason = "subaccount_1_missing";
+  if (diagnosis === null) reason = "ready_for_clean_boundary";
+  else if (diagnosis === "clean_pair_inventory_duplicated") reason = "clean_pair_inventory_duplicated";
+  else if (diagnosis === "clean_pair_exchange_index_2_missing") reason = "subaccount_1_exists_exchange_2_missing";
+  else if (numberedSubaccounts.some((number) => number >= 1)) reason = "next_subaccount_would_not_be_1";
+  return {
+    subaccount1Exists,
+    subaccount1Exchange2Exists: matchingRows > 0,
+    matchingRows,
+    numberedSubaccounts,
+    exchangeIndexesForSubaccount1,
+    readyForCleanBoundary: diagnosis === null,
+    reason,
+  };
+}
+
+export function unprovenSubaccountStatus(): SubaccountStatus {
+  return {
+    subaccount1Exists: false,
+    subaccount1Exchange2Exists: false,
+    matchingRows: 0,
+    numberedSubaccounts: [],
+    exchangeIndexesForSubaccount1: [],
+    readyForCleanBoundary: false,
+    reason: "subaccount_inventory_unproven",
+  };
+}
+
+export function subaccountCreationDecision(input: {
+  confirmation: unknown;
+  status: SubaccountStatus;
+  inventoryProven: boolean;
+  priorAttempt: SubaccountAttemptState;
+  workerRunning: boolean;
+  productionAccountExists: boolean;
+  nodeEnv: string | undefined;
+  kalshiEnvironment: string | undefined;
+  provisioningConfigured: boolean;
+  liveExecutionEnabled?: string;
+  v13ProductionExecutionEnabled?: string;
+}): { proceed: boolean; reason: string } {
+  if (input.confirmation !== SUBACCOUNT_CREATE_CONFIRMATION) {
+    return { proceed: false, reason: "explicit_subaccount_confirmation_required" };
+  }
+  if (!input.provisioningConfigured) return { proceed: false, reason: "provisioning_credential_missing" };
+  if (input.kalshiEnvironment !== "production") return { proceed: false, reason: "kalshi_environment_not_production" };
+  if (input.nodeEnv !== "production") return { proceed: false, reason: "node_environment_not_production" };
+  if (input.liveExecutionEnabled === "true" || input.v13ProductionExecutionEnabled === "true") {
+    return { proceed: false, reason: "subaccount_creation_refused_while_execution_enabled" };
+  }
+  if (input.workerRunning) return { proceed: false, reason: "production_worker_running" };
+  if (input.productionAccountExists) return { proceed: false, reason: "production_account_exists" };
+  if (input.priorAttempt === "uncertain") return { proceed: false, reason: "subaccount_creation_uncertain_no_retry" };
+  if (input.priorAttempt !== "none") return { proceed: false, reason: "subaccount_creation_attempt_exists" };
+  if (!input.inventoryProven) return { proceed: false, reason: "subaccount_inventory_unproven" };
+  if (input.status.subaccount1Exists && !input.status.subaccount1Exchange2Exists) {
+    return { proceed: false, reason: "subaccount_1_exists_exchange_2_missing" };
+  }
+  if (input.status.subaccount1Exists || input.status.matchingRows > 0) {
+    return { proceed: false, reason: "subaccount_1_already_exists" };
+  }
+  if (input.status.numberedSubaccounts.some((number) => number >= 1)) {
+    return { proceed: false, reason: "next_subaccount_would_not_be_1" };
+  }
+  return { proceed: true, reason: "subaccount_1_absent" };
+}
+
 export interface PolicyLimits {
   capitalLimitCents: number;
   maxEntryStakeCents: number;

@@ -7,6 +7,7 @@ import {
 import {
   compatibleOptionalDirection, compatibleOptionalPrice, mergeDirectionAndPrices,
 } from "./microLiveFillNormalization";
+import { cleanPairInventoryDiagnosis } from "./strata/commissioning";
 
 export type KalshiAccountSnapshot = {
   balance: {
@@ -2756,8 +2757,14 @@ export async function captureCleanPairSnapshot(
       const pairRows = rows.filter((row) =>
         evidenceSubaccount(row) === subaccountNumber &&
         normalizedExchangeIndex(row.exchange_index) === exchangeIndex);
-      if (pairRows.length !== 1) {
-        reasons.push("clean_pair_inventory_missing_or_duplicated");
+      const inventoryReason = cleanPairInventoryDiagnosis(rows.map((row) => ({
+        subaccount: evidenceSubaccount(row),
+        exchangeIndex: normalizedExchangeIndex(row.exchange_index),
+      })), subaccountNumber, exchangeIndex);
+      if (inventoryReason) {
+        reasons.push(inventoryReason);
+      } else if (pairRows.length !== 1) {
+        reasons.push("clean_pair_inventory_missing");
       } else {
         const row = pairRows[0]!;
         const balance = requiredDecimal(row, ["balance"]);

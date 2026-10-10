@@ -6,6 +6,8 @@ import {
   generatePairRestrictedKalshiKey,
   generateStrataIndex2Key,
   inspectStrataIndex2Credentials,
+  createStrataSubaccount,
+  readStrataSubaccountBalances,
   verifyPairKeyMetadata,
 } from "./generatePairRestrictedKalshiKey";
 import { PAIR_KEY_NAME } from "./microLivePairKeyProvisioningAttempt";
@@ -348,6 +350,69 @@ test("Strata INDEX2 generation posts the restricted payload once and does not tr
     const postsBefore = calls.filter((item) => item.method === "POST").length;
     await assert.rejects(generateStrataIndex2Key(), /closed/);
     assert.equal(calls.filter((item) => item.method === "POST").length, postsBefore);
+  } finally {
+    for (const [name, value] of [
+      ["NODE_ENV", saved.nodeEnv],
+      ["KALSHI_API_ENVIRONMENT", saved.apiEnvironment],
+      ["LIVE_EXECUTION_ENABLED", saved.live],
+      ["V13_PRODUCTION_EXECUTION_ENABLED", saved.v13],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("Strata subaccount inventory is GET-only and creation posts exchange index 2 once", async () => {
+  const saved = {
+    nodeEnv: process.env.NODE_ENV,
+    apiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    live: process.env.LIVE_EXECUTION_ENABLED,
+    v13: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+  };
+  const provisioning = rsa();
+  process.env.NODE_ENV = "production";
+  process.env.KALSHI_API_ENVIRONMENT = "production";
+  delete process.env.LIVE_EXECUTION_ENABLED;
+  delete process.env.V13_PRODUCTION_EXECUTION_ENABLED;
+  process.env.KALSHI_PROVISIONING_API_KEY_ID = ownerId;
+  process.env.KALSHI_PROVISIONING_PRIVATE_KEY =
+    provisioning.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  process.env.KALSHI_VERIFIER_API_KEY_ID = "independent-verifier-id";
+  process.env.KALSHI_VERIFIER_API_PRIVATE_KEY =
+    provisioning.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const calls: Array<{ method: string; path: string; body?: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    calls.push({ method: init?.method ?? "", path: url.pathname, body: typeof init?.body === "string" ? init.body : undefined });
+    assert.equal(init?.method, "GET");
+    return response({
+      subaccount_balances: [
+        { subaccount_number: 0, exchange_index: 2, balance: "999.0000" },
+      ],
+    });
+  }) as typeof fetch;
+  try {
+    const identities = await readStrataSubaccountBalances("verifier");
+    assert.deepEqual(identities, [{ subaccount: 0, exchangeIndex: 2 }]);
+    assert.equal(JSON.stringify(identities).includes("999"), false);
+    assert.equal(calls.every((item) => item.method === "GET" && item.path === "/trade-api/v2/portfolio/subaccounts/balances"), true);
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({ method: init?.method ?? "", path: url.pathname, body: typeof init?.body === "string" ? init.body : undefined });
+      assert.equal(init?.method, "POST");
+      assert.equal(url.pathname, "/trade-api/v2/portfolio/subaccounts");
+      return response({ subaccount_number: 7, exchange_index: 2 }, 201);
+    }) as typeof fetch;
+    const wrong = await createStrataSubaccount();
+    assert.equal(wrong.outcome, "wrong_number");
+    if (wrong.outcome === "wrong_number") assert.equal(wrong.subaccountNumber, 7);
+    assert.equal(calls.filter((item) => item.method === "POST").length, 1);
+    assert.deepEqual(JSON.parse(calls.find((item) => item.method === "POST")?.body ?? "{}"), { exchange_index: 2 });
+    assert.equal(calls.some((item) => item.path.includes("transfer") || item.path.includes("order")), false);
+    process.env.LIVE_EXECUTION_ENABLED = "true";
+    await assert.rejects(createStrataSubaccount(), /closed/);
+    assert.equal(calls.filter((item) => item.method === "POST").length, 1);
   } finally {
     for (const [name, value] of [
       ["NODE_ENV", saved.nodeEnv],

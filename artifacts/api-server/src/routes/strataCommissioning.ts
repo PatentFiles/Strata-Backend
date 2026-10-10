@@ -6,6 +6,7 @@ import {
   fundingAuthorizationDecision,
   planCommission,
   type CommissioningSnapshot,
+  type SubaccountStatus,
 } from "../lib/strata/commissioning";
 
 export interface ExchangeCall {
@@ -25,8 +26,21 @@ export interface Index2GenerationResult {
   environmentChanged: false;
 }
 
+export interface SubaccountCreateResult {
+  state: "blocked" | "created" | "uncertain";
+  reason: string;
+  posts: number;
+  returnedSubaccount: number | null;
+  workerStarted: false;
+  environmentChanged: false;
+  funded: false;
+  commissioned: false;
+}
+
 export interface CommissioningPort {
   read(): Promise<CommissioningSnapshot>;
+  readSubaccountStatus(): Promise<SubaccountStatus>;
+  createSubaccount(confirmation: unknown): Promise<SubaccountCreateResult>;
   generateIndex2Key(confirmation: unknown): Promise<Index2GenerationResult>;
   verifySigner(): Promise<{ snapshot: CommissioningSnapshot; calls: ExchangeCall[] }>;
   verifyBoundary(): Promise<CommissioningSnapshot>;
@@ -119,6 +133,30 @@ export function createStrataCommissioningRouter(
       res.json(sanitizePublic(commissioningStatus(await port.verifyBoundary())));
     } catch {
       res.status(503).json({ error: "Boundary verification is unavailable" });
+    }
+  });
+
+  router.get("/subaccount-status", async (_req, res) => {
+    try {
+      res.json(sanitizePublic(await port.readSubaccountStatus()));
+    } catch {
+      res.status(503).json({ error: "Subaccount status is unavailable" });
+    }
+  });
+
+  router.post("/create-subaccount", async (req, res) => {
+    try {
+      const result = await port.createSubaccount(req.body?.confirm);
+      const status = result.state === "created" ? 201
+        : result.reason === "explicit_subaccount_confirmation_required" ? 400 : 409;
+      res.status(status).json(sanitizePublic({
+        ...result,
+        followUp: result.state === "created"
+          ? "Rerun GET /api/strata/commissioning/subaccount-status, then POST /api/strata/commissioning/capture-boundary."
+          : undefined,
+      }));
+    } catch {
+      res.status(503).json({ error: "Subaccount creation is unavailable" });
     }
   });
 
