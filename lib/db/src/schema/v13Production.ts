@@ -1,11 +1,13 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { v13LiveMoneyPolicyTable } from "./v13LiveMoneyPolicy";
 import { forwardTestEvaluationTable } from "./forwardTestEvaluation";
 
 // No defaults grant authority. No startup migration or seed writes these tables.
 export const v13ProductionAccountTable = pgTable("v13_production_account", {
   id: text("id").primaryKey(),
+  ownerUserId: uuid("owner_user_id"),
+  kalshiConnectionId: uuid("kalshi_connection_id"),
   policyId: text("policy_id").notNull().references(() => v13LiveMoneyPolicyTable.id),
   subaccount: bigint("subaccount", { mode: "number" }).notNull(),
   exchangeIndex: bigint("exchange_index", { mode: "number" }).notNull(),
@@ -25,7 +27,8 @@ export const v13ProductionAccountTable = pgTable("v13_production_account", {
   evidenceDigest: text("evidence_digest"),
   revision: bigint("revision", { mode: "bigint" }).notNull().default(sql`0`),
 }, t => [
-  uniqueIndex("v13_production_account_pair").on(t.subaccount, t.exchangeIndex),
+  uniqueIndex("v13_production_account_owned_pair").on(t.ownerUserId, t.subaccount, t.exchangeIndex).where(sql`${t.ownerUserId} IS NOT NULL`),
+  uniqueIndex("v13_production_account_legacy_pair").on(t.subaccount, t.exchangeIndex).where(sql`${t.ownerUserId} IS NULL`),
   check("v13_production_account_pair_check", sql`${t.subaccount}=1 AND ${t.exchangeIndex}=2`),
   check("v13_production_account_fingerprint", sql`${t.keyFingerprint} ~ '^[0-9a-f]{64}$'`),
   check("v13_production_account_cash", sql`${t.cashMicros}>=0 AND ${t.reservedMicros}>=0 AND ${t.reservedMicros}<=${t.cashMicros}`),

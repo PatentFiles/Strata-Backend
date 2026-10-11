@@ -8,6 +8,7 @@ import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabas
 import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
 import { createStrataCommissioningRouter, type CommissioningPort } from "./strataCommissioning";
+import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -16,6 +17,7 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
   commissioning?: CommissioningPort;
+  userScope?: UserScopePort;
 }
 
 function blockedCommissioningPort(): CommissioningPort {
@@ -141,6 +143,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const access = createStrataAccess(deps);
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
+  router.use("/me", createUserExecutionRouter(access.requireUser, deps.userScope ?? closedUserScopePort()));
   router.use("/commissioning", createStrataCommissioningRouter(
     access.requireDeveloper,
     deps.commissioning ?? blockedCommissioningPort(),
