@@ -38,6 +38,7 @@ import {
   type PolicyLimits,
 } from "../lib/strata/commissioning";
 import { verifySupabaseAccessToken } from "../lib/strata/supabaseAuth";
+import { scopedPairBalanceProven } from "../lib/kalshiSubaccountInventory";
 import { readProvisioningInventory, readReviewedSubaccountEvidence } from "../lib/microLiveSubaccountCreation";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { createStrataRouter } from "./strataRouter";
@@ -1324,4 +1325,128 @@ test("local RSA signer diagnostic names the failed stage and does not fetch or e
     if (savedProvisioningKey === undefined) delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
     else process.env.KALSHI_PROVISIONING_PRIVATE_KEY = savedProvisioningKey;
   }
+});
+
+test("scoped balance scalar proves an already agreed (1,2) pair without an identity echo", () => {
+  const limits = { usage_tier: "advanced" };
+  const row = (subaccount: number, exchange: number) => ({
+    subaccount_number: subaccount,
+    exchange_index: exchange,
+    enabled: false,
+    balance: "0.0000",
+    updated_ts: 1790422846,
+  });
+  const agreedRows = [row(0, 0), row(1, 0), row(1, 2)];
+  const views = (rows: ReturnType<typeof row>[]) => ({
+    nettingPayload: { netting_configs: rows },
+    balancePayload: { subaccount_balances: rows },
+  });
+  const proven = assembleSubaccountStatus({
+    ...views(agreedRows),
+    scopedPayload: { balance_dollars: "0.0000" },
+    limitsPayload: limits,
+    attemptState: "uncertain",
+  });
+  assert.equal(scopedPairBalanceProven({ balance: 0 }, 1, 2), true);
+  assert.equal(scopedPairBalanceProven({ balance_breakdown: [{ balance: "0.0000" }] }, 1, 2), false);
+  assert.equal(proven.reason, "ready_for_clean_boundary");
+  assert.equal(proven.subaccount1Exists, true);
+  assert.equal(proven.subaccount1Exchange2Exists, true);
+  assert.equal(proven.matchingRows, 1);
+  assert.deepEqual(proven.numberedSubaccounts, [0, 1]);
+  assert.deepEqual(proven.exchangeIndexesForSubaccount1, [0, 2]);
+  assert.equal(proven.readyForCleanBoundary, true);
+  assert.equal(proven.apiTier, "advanced");
+
+  const echoed = assembleSubaccountStatus({
+    ...views(agreedRows),
+    scopedPayload: { balance: "1.250000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(echoed.reason, "ready_for_clean_boundary");
+  assert.equal(echoed.readyForCleanBoundary, true);
+
+  const missingNetting = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [row(0, 0), row(1, 0)] },
+    balancePayload: { subaccount_balances: [row(0, 0), row(1, 0)] },
+    scopedPayload: { balance_dollars: "0.0000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(missingNetting.readyForCleanBoundary, false);
+  assert.equal(missingNetting.subaccount1Exchange2Exists, false);
+  assert.notEqual(missingNetting.reason, "ready_for_clean_boundary");
+
+  const missingBalance = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: agreedRows },
+    balancePayload: { subaccount_balances: [row(0, 0), row(1, 0)] },
+    scopedPayload: { balance_dollars: "0.0000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(missingBalance.readyForCleanBoundary, false);
+  assert.notEqual(missingBalance.reason, "ready_for_clean_boundary");
+
+  const duplicated = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [row(1, 2), row(1, 2)] },
+    balancePayload: { subaccount_balances: [row(1, 2), row(1, 2)] },
+    scopedPayload: { balance_dollars: "0.0000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(duplicated.reason, "subaccount_inventory_duplicated");
+  assert.equal(duplicated.readyForCleanBoundary, false);
+
+  const contradictory = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [row(1, 2)] },
+    balancePayload: { subaccount_balances: [row(1, 2), row(2, 2)] },
+    scopedPayload: { balance_dollars: "0.0000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(contradictory.reason, "subaccount_inventory_contradictory");
+  assert.equal(contradictory.readyForCleanBoundary, false);
+
+  const malformed = assembleSubaccountStatus({
+    ...views(agreedRows),
+    scopedPayload: { balance_breakdown: [{ balance: "0.0000", subaccount_number: 1, exchange_index: 2 }] },
+    limitsPayload: limits,
+    attemptState: "uncertain",
+  });
+  assert.equal(malformed.reason, "scoped_balance_identity_unproven");
+  assert.equal(malformed.subaccount1Exchange2Exists, false);
+  assert.equal(malformed.readyForCleanBoundary, false);
+  const badScalar = assembleSubaccountStatus({
+    ...views(agreedRows),
+    scopedPayload: { balance_dollars: "not-a-balance" },
+    limitsPayload: limits,
+    attemptState: "uncertain",
+  });
+  assert.equal(badScalar.reason, "scoped_balance_identity_unproven");
+  assert.equal(badScalar.readyForCleanBoundary, false);
+
+  const scalarAlone = assembleSubaccountStatus({
+    nettingPayload: { netting_configs: [row(0, 0)] },
+    balancePayload: { subaccount_balances: [row(0, 0)] },
+    scopedPayload: { balance_dollars: "25.0000" },
+    limitsPayload: limits,
+    attemptState: "none",
+  });
+  assert.equal(scalarAlone.readyForCleanBoundary, false);
+  assert.equal(scalarAlone.subaccount1Exists, false);
+
+  const creation = {
+    confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
+    status: proven,
+    inventoryProven: true,
+    workerRunning: false,
+    productionAccountExists: false,
+    nodeEnv: "production" as const,
+    kalshiEnvironment: "production" as const,
+    provisioningConfigured: true,
+  };
+  assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).reason, "subaccount_1_already_exists");
+  assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "uncertain" }).reason, "subaccount_creation_uncertain_no_retry");
+  assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).proceed, false);
 });

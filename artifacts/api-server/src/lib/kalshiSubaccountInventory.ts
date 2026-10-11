@@ -113,8 +113,12 @@ export function predictionsApiTier(payload: unknown): {
 }
 
 /**
- * Scalar pair balance only. balance_breakdown is not identity or cash proof.
- * The amount itself is not returned.
+ * Scalar cash proof for a scoped Get Balance body.
+ * Callers may supply this body only after HTTP 200 from the fixed request
+ * `subaccount=1&exchange_index=2`. That request, plus the two canonical
+ * inventory views, establishes the pair. Get Balance does not have to echo
+ * those fields. balance_breakdown is neither identity nor cash proof.
+ * An echoed identity that disagrees still fails closed. The amount is not returned.
  */
 export function scopedPairBalanceProven(
   payload: unknown,
@@ -127,10 +131,15 @@ export function scopedPairBalanceProven(
     ? root.balance as Record<string, unknown>
     : root;
   const scalar = value.balance_dollars ?? value.balance;
-  if (typeof scalar === "object") return false;
+  if (typeof scalar === "object" || scalar == null) return false;
   if (typeof scalar !== "number" && typeof scalar !== "string") return false;
   if (!/^(-?)(0|[1-9]\d*)(?:\.(\d{1,6}))?$/.test(String(scalar))) return false;
+  const echoedSubaccount = "subaccount_number" in value || "subaccount" in value;
+  const echoedIndex = "exchange_index" in value;
+  if (!echoedSubaccount && !echoedIndex) return true;
   const seenSubaccount = inventoryInteger(value.subaccount_number ?? value.subaccount);
   const seenIndex = inventoryInteger(value.exchange_index);
-  return seenSubaccount === subaccount && seenIndex === exchangeIndex;
+  if (echoedSubaccount && seenSubaccount !== subaccount) return false;
+  if (echoedIndex && seenIndex !== exchangeIndex) return false;
+  return true;
 }
