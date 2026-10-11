@@ -855,6 +855,16 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   };
   assert.equal(validatePolicyLimits(ceilingLimits).ok, true);
   assert.equal(validatePolicyLimits({ ...ceilingLimits, maxEntryStakeCents: 2_500_001 }).ok, false);
+  const launchPolicy = {
+    capitalLimitCents: 15000,
+    maxEntryStakeCents: 150,
+    maxEntryAllInCents: 200,
+    maxDailyLossCents: 500,
+    maxTotalLossCents: 1500,
+    maxQuoteAgeMs: 1000,
+    maxFeeEvidenceAgeMs: 1000,
+  };
+  assert.equal(validatePolicyLimits(launchPolicy).ok, true);
   assert.equal(validatePolicyLimits({ ...OPERATOR_LIMITS, chosenForYou: 1 } as never).ok, false);
   const gate = memoryPort(emptySnapshot());
   assert.equal((await gate.port.verifyFee()).snapshot.fee.verified, false);
@@ -884,7 +894,12 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal(gate.workerStarts(), 0);
   const owned = ready();
   owned.openPositionCount = 1;
+  owned.unresolvedIntentCount = 0;
   assert.equal(planDisarm(owned, DISARM_CONFIRMATION).reason, "disarm_refused_while_position_or_intent_open");
+  const unresolved = ready();
+  unresolved.openPositionCount = 0;
+  unresolved.unresolvedIntentCount = 1;
+  assert.equal(planDisarm(unresolved, DISARM_CONFIRMATION).reason, "disarm_refused_while_position_or_intent_open");
   const commissioned = memoryPort(ready());
   await commissioned.port.commission("COMMISSION_WITHOUT_EXECUTION", DEVELOPER_ID);
   const saved = process.env.LIVE_EXECUTION_ENABLED;

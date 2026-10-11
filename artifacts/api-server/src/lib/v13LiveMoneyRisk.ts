@@ -63,6 +63,28 @@ export type V13LiveMoneyRiskDecision =
   | { ok: true; plannedAllInCents: number }
   | { ok: false; reason: string };
 
+/** Conservative launch reservation: the fee-inclusive entry must fit in both remaining loss allowances. */
+export function remainingLossBudgetAllowsEntry(
+  plannedAllInCents: number,
+  maxDailyLossCents: number,
+  realizedDailyLossCents: number,
+  maxTotalLossCents: number,
+  realizedTotalLossCents: number,
+): boolean {
+  const values = [
+    plannedAllInCents, maxDailyLossCents, realizedDailyLossCents,
+    maxTotalLossCents, realizedTotalLossCents,
+  ];
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0) || plannedAllInCents < 1) {
+    return false;
+  }
+  const dailyRemaining = maxDailyLossCents - realizedDailyLossCents;
+  const totalRemaining = maxTotalLossCents - realizedTotalLossCents;
+  if (!Number.isSafeInteger(dailyRemaining) || !Number.isSafeInteger(totalRemaining)) return false;
+  if (dailyRemaining <= 0 || totalRemaining <= 0) return false;
+  return plannedAllInCents <= dailyRemaining && plannedAllInCents <= totalRemaining;
+}
+
 export function computeV13LiveMoneyPolicyHash(
   policy: V13ApprovedLiveMoneyPolicy,
 ): string {
@@ -187,6 +209,12 @@ export function evaluateV13LiveMoneyRisk(
       plannedAllInCents > input.capitalRemainingCents ||
       plannedAllInCents > p.capitalLimitCents) {
     return { ok: false, reason: "live_money_entry_exceeds_capital_or_stake_limit" };
+  }
+  if (!remainingLossBudgetAllowsEntry(
+    plannedAllInCents, p.maxDailyLossCents, input.realizedDailyLossCents,
+    p.maxTotalLossCents, input.realizedTotalLossCents,
+  )) {
+    return { ok: false, reason: "live_money_entry_exceeds_remaining_loss_budget" };
   }
   return { ok: true, plannedAllInCents };
 }

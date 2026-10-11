@@ -101,6 +101,56 @@ test("large reduce-only exit walks bid depth only to the explicit floor", () => 
   assert.equal(result.plan.expectedVwap, 0.477);
 });
 
+test("one-cent exit floor plans at or above 0.01 and stays inside owned quantity", () => {
+  const atFloor = planV13IocExit({
+    ownedContracts: 5,
+    bestBidDollars: "0.0100",
+    minimumExitPrice: 0.01,
+    bidLevels: [{ priceDollars: "0.0100", availableContracts: "5" }],
+  });
+  assert.equal(atFloor.ok, true);
+  if (!atFloor.ok) return;
+  assert.equal(atFloor.plan.plannedContracts, 5);
+  assert.equal(atFloor.plan.limitPrice, 0.01);
+  assert.ok(atFloor.plan.plannedContracts <= atFloor.plan.requestedContracts);
+
+  const above = planV13IocExit({
+    ownedContracts: 4,
+    bestBidDollars: "0.0200",
+    minimumExitPrice: 0.01,
+    bidLevels: [
+      { priceDollars: "0.0200", availableContracts: "2" },
+      { priceDollars: "0.0150", availableContracts: "2" },
+      { priceDollars: "0.0090", availableContracts: "20" },
+    ],
+  });
+  assert.equal(above.ok, true);
+  if (!above.ok) return;
+  assert.equal(above.plan.plannedContracts, 4);
+  assert.ok(above.plan.limitPrice >= 0.01);
+  assert.equal(above.plan.residualContracts, 0);
+
+  const below = planV13IocExit({
+    ownedContracts: 5,
+    bestBidDollars: "0.0090",
+    minimumExitPrice: 0.01,
+    bidLevels: [{ priceDollars: "0.0090", availableContracts: "5" }],
+  });
+  assert.equal(below.ok, false);
+
+  const partial = planV13IocExit({
+    ownedContracts: 10,
+    bestBidDollars: "0.0100",
+    minimumExitPrice: 0.01,
+    bidLevels: [{ priceDollars: "0.0100", availableContracts: "3" }],
+  });
+  assert.equal(partial.ok, true);
+  if (!partial.ok) return;
+  assert.equal(partial.plan.plannedContracts, 3);
+  assert.equal(partial.plan.residualContracts, 7);
+  assert.ok(partial.plan.plannedContracts <= partial.plan.requestedContracts);
+});
+
 test("exit planner reports residual instead of assuming liquidity below the floor", () => {
   const result = planV13IocExit({
     ownedContracts: 10_000,

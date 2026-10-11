@@ -7,6 +7,7 @@ import {
 import {
   computeV13LiveMoneyPolicyHash,
   evaluateV13LiveMoneyRisk,
+  remainingLossBudgetAllowsEntry,
   V13_MAX_ENTRY_STAKE_CENTS,
   type V13ApprovedLiveMoneyPolicy,
 } from "./v13LiveMoneyRisk";
@@ -32,8 +33,8 @@ const approved = (): V13ApprovedLiveMoneyPolicy => {
     maxEntryStakeCents: V13_MAX_ENTRY_STAKE_CENTS,
     maxEntryAllInCents: 2_509_000,
     maxOpenPositions: 1,
-    maxDailyLossCents: 100_000,
-    maxTotalLossCents: 500_000,
+    maxDailyLossCents: 3_000_000,
+    maxTotalLossCents: 3_000_000,
     maxQuoteAgeMs: 1_000,
     maxFeeEvidenceAgeMs: 1_000,
     feePolicyVersion: FEE_POLICY,
@@ -124,8 +125,87 @@ test("available cash, capital remaining, and capital limit still cap a 25000-dol
   const shortCapital = baseInput();
   shortCapital.policy.capitalLimitCents = 2_508_999;
   shortCapital.policy.maxEntryAllInCents = 2_508_999;
+  shortCapital.policy.maxDailyLossCents = 2_508_999;
+  shortCapital.policy.maxTotalLossCents = 2_508_999;
   shortCapital.policy.policyHash = computeV13LiveMoneyPolicyHash(shortCapital.policy);
   assert.equal(evaluateV13LiveMoneyRisk(shortCapital).ok, false);
+});
+
+function launchPolicy(): V13ApprovedLiveMoneyPolicy {
+  const policy: V13ApprovedLiveMoneyPolicy = {
+    ...approved(),
+    capitalLimitCents: 15_000,
+    maxEntryStakeCents: 150,
+    maxEntryAllInCents: 200,
+    maxOpenPositions: 1,
+    maxDailyLossCents: 500,
+    maxTotalLossCents: 1_500,
+    maxQuoteAgeMs: 1_000,
+    maxFeeEvidenceAgeMs: 1_000,
+    policyHash: null,
+  };
+  policy.policyHash = computeV13LiveMoneyPolicyHash(policy);
+  return policy;
+}
+
+function launchInput(plannedGrossCents: number, reservedEntryFeeCents: number, reservedExitFeeCents: number) {
+  return {
+    ...baseInput(),
+    policy: launchPolicy(),
+    plannedGrossCents,
+    reservedEntryFeeCents,
+    reservedExitFeeCents,
+    availableCashCents: 15_000,
+    capitalRemainingCents: 15_000,
+    realizedDailyLossCents: 0,
+    realizedTotalLossCents: 0,
+    quoteAgeMs: 250,
+    feeEvidenceAgeMs: 250,
+  };
+}
+
+test("$150 launch all-in includes both fee reserves and rejects one cent over $2", () => {
+  assert.equal(launchPolicy().maxOpenPositions, 1);
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 24, 25)), { ok: true, plannedAllInCents: 199 });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 25, 25)), { ok: true, plannedAllInCents: 200 });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 25, 26)), {
+    ok: false,
+    reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 51, 0)), {
+    ok: false,
+    reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  });
+  assert.equal(evaluateV13LiveMoneyRisk(launchInput(151, 0, 0)).ok, false);
+  const twoPositions = launchPolicy();
+  twoPositions.maxOpenPositions = 2;
+  twoPositions.policyHash = computeV13LiveMoneyPolicyHash(twoPositions);
+  assert.equal(evaluateV13LiveMoneyRisk({ ...launchInput(150, 25, 25), policy: twoPositions }).ok, false);
+});
+
+test("$5 daily and $15 total remaining loss budgets block an entry that would exceed either", () => {
+  const fit = launchInput(150, 25, 25);
+  assert.deepEqual(evaluateV13LiveMoneyRisk(fit), { ok: true, plannedAllInCents: 200 });
+  fit.realizedDailyLossCents = 300;
+  assert.equal(evaluateV13LiveMoneyRisk(fit).ok, true);
+  fit.realizedDailyLossCents = 301;
+  assert.deepEqual(evaluateV13LiveMoneyRisk(fit), {
+    ok: false,
+    reason: "live_money_entry_exceeds_remaining_loss_budget",
+  });
+  fit.realizedDailyLossCents = 500;
+  assert.equal(evaluateV13LiveMoneyRisk(fit).ok, false);
+  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 500, 1_500, 0), false);
+  const total = launchInput(150, 25, 25);
+  total.realizedTotalLossCents = 1_300;
+  assert.equal(evaluateV13LiveMoneyRisk(total).ok, true);
+  total.realizedTotalLossCents = 1_301;
+  assert.deepEqual(evaluateV13LiveMoneyRisk(total), {
+    ok: false,
+    reason: "live_money_entry_exceeds_remaining_loss_budget",
+  });
+  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 0, 1_500, 1_301), false);
+  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 300, 1_500, 1_300), true);
 });
 
 test("policy hash binds a non-null entry policy version and leaves null unbound", () => {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
@@ -260,4 +261,29 @@ test("runtime status follows the worker and public responses contain no secrets"
   } finally {
     await server.close();
   }
+});
+
+test("entry loss recheck and kill switch stay in front of submit without a new order", () => {
+  const executor = readFileSync("src/lib/v13-production/executor.ts", "utf8");
+  const prepareEntry = executor.slice(executor.indexOf("async prepareEntry"), executor.indexOf("async prepareExit"));
+  const prepareExit = executor.slice(executor.indexOf("async prepareExit"), executor.indexOf("async dispatch"));
+  const dispatch = executor.slice(executor.indexOf("async dispatch"), executor.indexOf("async cancel"));
+  const final = dispatch.slice(dispatch.indexOf("const final = async"));
+  const entryRecheck = final.slice(final.indexOf("if (i.kind === \"ENTRY\")"));
+  assert.match(prepareEntry, /gate\(tx, a\)/);
+  assert.equal(prepareEntry.includes("gate(tx, a, true)"), false);
+  assert.match(prepareExit, /gate\(tx, a, true\)/);
+  assert.match(prepareExit, /reduceOnly: true/);
+  assert.match(prepareExit, /qty \/ 100n/);
+  assert.equal(prepareExit.includes("Math.ceil"), false);
+  assert.match(prepareExit, /production_exit_not_owned/);
+  assert.match(dispatch, /gate\(tx, a, i\.kind === "EXIT", id\)/);
+  assert.match(entryRecheck, /remainingLossBudgetAllowsEntry/);
+  assert.match(entryRecheck, /live_money_entry_exceeds_remaining_loss_budget/);
+  assert.equal(entryRecheck.includes("INSERT INTO"), false);
+  assert.ok(final.indexOf("remainingLossBudgetAllowsEntry") < final.indexOf("this.exchange.submit"));
+  assert.match(executor, /!a\.kill_switch/);
+  assert.match(executor, /manual_kill_switch === false/);
+  assert.match(executor, /live_execution_enabled === true/);
+  assert.match(executor, /!a\.blocked_reason \|\| allowBlockedExit/);
 });

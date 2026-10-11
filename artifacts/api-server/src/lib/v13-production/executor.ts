@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION,
   V13_LEGACY_ENTRY_POLICY, previousBufferFromSide, evaluateV13Strategy } from "@workspace/v13-strategy";
+import { remainingLossBudgetAllowsEntry } from "../v13LiveMoneyRisk";
 import { preflightV13LiveMoneyEntry } from "../v13LiveMoneyEntryPreflight";
 import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
@@ -318,6 +319,21 @@ export class ProductionExecutor {
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
               await this.assertEntryPolicyWindow(tx, source);
             }
+            const losses = (await tx.query(`SELECT
+              (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
+              (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1
+                AND occurred_at >= $2) AS daily_loss`,
+            [a.id, new Date(new Date(this.now()).toISOString().slice(0, 10))])).rows[0];
+            const plannedAllInCents = Number(
+              (i.decision.preflight as { plannedAllInCents?: unknown } | undefined)?.plannedAllInCents,
+            );
+            requireProof(remainingLossBudgetAllowsEntry(
+              plannedAllInCents,
+              p.maxDailyLossCents,
+              Math.ceil(Number(money(losses.daily_loss)) / 10_000),
+              p.maxTotalLossCents,
+              Math.ceil(Number(money(losses.total_loss)) / 10_000),
+            ), "live_money_entry_exceeds_remaining_loss_budget");
           }
         };
         await final();
