@@ -17,8 +17,10 @@ import {
   FUNDING_CONFIRMATION,
   approvedExitFloor,
   dedicatedSignerFingerprint,
+  applyDurableDedicatedSigner,
   assembleSubaccountStatus,
   cleanPairInventoryDiagnosis,
+  commissioningStatus,
   emptySnapshot,
   fundingAuthorizationDecision,
   index2GenerationDecision,
@@ -2179,4 +2181,128 @@ test("INDEX2 replacement preserves the old attempt and allows one current-accoun
   assert.equal(gate.index2Posts(), 1);
   assert.equal(gate.index2Archive().length, 1);
   assert.equal(gate.workerStarts(), 0);
+});
+
+test("status reconstructs dedicated signer verification from the current key-bound boundary", () => {
+  const fingerprint = "ab".repeat(32);
+  const digest = "cd".repeat(32);
+  const keyId = "index2-current-key";
+  const boundAt = new Date("2026-10-10T16:30:00.000Z");
+  const ready = () => {
+    const snapshot = emptySnapshot("2026-10-10T22:00:00.000Z");
+    snapshot.signer = {
+      configured: true,
+      syntacticallyUsable: true,
+      fingerprint,
+      signedGetSucceeded: false,
+      restrictedToPair: false,
+      historyComplete: false,
+      keyIdMasked: "****key",
+    };
+    snapshot.boundary = {
+      exists: true,
+      subaccount: 1,
+      exchangeIndex: 2,
+      state: "KEY_BOUND_VERIFIED",
+      cleanZero: true,
+      verified: true,
+      fingerprintMatches: true,
+      historyComplete: true,
+      ambiguous: false,
+    };
+    return snapshot;
+  };
+  const binding = {
+    currentApiKeyId: keyId,
+    rowCount: 1,
+    restrictedApiKeyId: keyId,
+    restrictedKeyFingerprint: fingerprint,
+    keyBoundAt: boundAt,
+    keyBindingEvidenceDigest: digest,
+  };
+  const fresh = emptySnapshot();
+  assert.equal(commissioningStatus(fresh).dedicatedSignerVerified, false);
+  assert.equal(applyDurableDedicatedSigner(fresh, { ...binding, rowCount: 0 }), false);
+  assert.equal(fresh.signer.signedGetSucceeded, false);
+
+  const transient = ready();
+  transient.signer.signedGetSucceeded = true;
+  transient.signer.restrictedToPair = true;
+  transient.signer.historyComplete = true;
+  assert.equal(commissioningStatus(transient).dedicatedSignerVerified, true);
+  assert.equal(commissioningStatus(transient).keyFingerprintVerified, true);
+
+  const persisted = ready();
+  assert.equal(applyDurableDedicatedSigner(persisted, binding), true);
+  assert.equal(commissioningStatus(persisted).dedicatedSignerVerified, true);
+  assert.equal(persisted.signer.signedGetSucceeded, true);
+  assert.equal(persisted.signer.restrictedToPair, true);
+  assert.equal(persisted.signer.historyComplete, true);
+  const funded = ready();
+  funded.boundary.state = "funded";
+  assert.equal(applyDurableDedicatedSigner(funded, binding), true);
+
+  const changedKey = ready();
+  assert.equal(applyDurableDedicatedSigner(changedKey, { ...binding, currentApiKeyId: "replacement-key" }), false);
+  assert.equal(commissioningStatus(changedKey).dedicatedSignerVerified, false);
+  const changedFingerprint = ready();
+  changedFingerprint.signer.fingerprint = "ef".repeat(32);
+  assert.equal(applyDurableDedicatedSigner(changedFingerprint, binding), false);
+  assert.equal(changedFingerprint.signer.signedGetSucceeded, false);
+  const unusable = ready();
+  unusable.signer.syntacticallyUsable = false;
+  assert.equal(applyDurableDedicatedSigner(unusable, binding), false);
+
+  const missingBoundAt = ready();
+  assert.equal(applyDurableDedicatedSigner(missingBoundAt, { ...binding, keyBoundAt: null }), false);
+  assert.equal(applyDurableDedicatedSigner(ready(), { ...binding, keyBoundAt: "" }), false);
+  assert.equal(applyDurableDedicatedSigner(ready(), { ...binding, keyBindingEvidenceDigest: null }), false);
+  assert.equal(applyDurableDedicatedSigner(ready(), { ...binding, keyBindingEvidenceDigest: "not-a-digest" }), false);
+  assert.equal(applyDurableDedicatedSigner(ready(), { ...binding, keyBindingEvidenceDigest: "A".repeat(64) }), false);
+
+  const wrongSubaccount = ready();
+  wrongSubaccount.boundary.subaccount = 2;
+  assert.equal(applyDurableDedicatedSigner(wrongSubaccount, binding), false);
+  const wrongExchange = ready();
+  wrongExchange.boundary.exchangeIndex = 0;
+  assert.equal(applyDurableDedicatedSigner(wrongExchange, binding), false);
+  const createdClean = ready();
+  createdClean.boundary.state = "CREATED_CLEAN";
+  assert.equal(applyDurableDedicatedSigner(createdClean, binding), false);
+  const unverified = ready();
+  unverified.boundary.verified = false;
+  assert.equal(applyDurableDedicatedSigner(unverified, binding), false);
+
+  const incomplete = ready();
+  incomplete.boundary.historyComplete = false;
+  assert.equal(applyDurableDedicatedSigner(incomplete, binding), false);
+  assert.equal(commissioningStatus(incomplete).dedicatedSignerVerified, false);
+
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const readBody = store.slice(
+    store.indexOf("export async function readCommissioningSnapshot"),
+    store.indexOf("export async function probeDedicatedSigner"),
+  );
+  assert.equal(readBody.includes("applyDurableDedicatedSigner"), true);
+  assert.equal(readBody.includes('hasOwnProperty.call(signerPatch, "signedGetSucceeded")'), true);
+  assert.equal(readBody.includes("fetch("), false);
+  assert.equal(readBody.includes("probeDedicatedSigner"), false);
+  assert.equal(readBody.includes("postOneShotPairFunding"), false);
+  assert.equal(readBody.includes('method: "POST"'), false);
+  assert.equal(readBody.includes('method: "DELETE"'), false);
+  assert.equal(readBody.includes("/portfolio/orders"), false);
+  const port = store.slice(store.indexOf("export function createDatabaseCommissioningPort"));
+  const readPort = port.slice(port.indexOf("read:"), port.indexOf("readSubaccountStatus"));
+  assert.equal(readPort.includes("readCommissioningSnapshot"), true);
+  assert.equal(readPort.includes("probeDedicatedSigner"), false);
+  assert.equal(readPort.includes("fundRailwayPair"), false);
+  const verify = port.slice(port.indexOf("async verifySigner"), port.indexOf("verifyBoundary"));
+  assert.equal(verify.includes("signedGetSucceeded: probe.signedGetSucceeded"), true);
+  assert.equal(verify.includes("restrictedToPair: probe.signedGetSucceeded"), true);
+  const route = readFileSync("src/routes/strataCommissioning.ts", "utf8");
+  const statusRoute = route.slice(route.indexOf('router.get("/status"'), route.indexOf('router.post("/verify-signer"'));
+  assert.equal(statusRoute.includes("port.read()"), true);
+  assert.equal(statusRoute.includes("verifySigner"), false);
+  assert.equal(statusRoute.includes("fund"), false);
+  assert.equal(statusRoute.includes("/portfolio/orders"), false);
 });

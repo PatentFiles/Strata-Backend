@@ -33,6 +33,7 @@ import {
   PRE_BOUNDARY_ROUND_TRIP_CENTS,
   PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION,
   blockingSubaccountTransferDetail,
+  applyDurableDedicatedSigner,
   dedicatedSignerFingerprint,
   provePreBoundaryRoundTrip,
   EXIT_FLOOR_CONFIRMATION,
@@ -247,6 +248,17 @@ export async function readCommissioningSnapshot(
     }
   } catch {
     snapshot.boundary.historyComplete = false;
+  }
+  if (!Object.prototype.hasOwnProperty.call(signerPatch, "signedGetSucceeded")) {
+    const boundaryRow = boundary.rows.length === 1 ? boundary.rows[0]! : null;
+    applyDurableDedicatedSigner(snapshot, {
+      currentApiKeyId: key?.apiKeyId ?? null,
+      rowCount: boundary.rows.length,
+      restrictedApiKeyId: text(boundaryRow?.restricted_api_key_id),
+      restrictedKeyFingerprint: text(boundaryRow?.restricted_key_fingerprint),
+      keyBoundAt: boundaryRow?.key_bound_at ?? null,
+      keyBindingEvidenceDigest: text(boundaryRow?.key_binding_evidence_digest),
+    });
   }
   try {
     const positions = await query(

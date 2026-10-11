@@ -246,6 +246,60 @@ export function dedicatedSignerFingerprint(keyId: string, privateKey: string): s
   return createHash("sha256").update(`${id}\u001f${pem}`).digest("hex");
 }
 
+const DURABLE_KEY_BOUND_STATES = new Set([
+  "KEY_BOUND_VERIFIED",
+  "funded",
+  "initialized",
+  "frozen",
+]);
+
+export interface DurableSignerBinding {
+  currentApiKeyId: string | null;
+  rowCount: number;
+  restrictedApiKeyId: string | null;
+  restrictedKeyFingerprint: string | null;
+  keyBoundAt: unknown;
+  keyBindingEvidenceDigest: string | null;
+}
+
+function keyBoundAtPresent(value: unknown): boolean {
+  if (value instanceof Date) return Number.isFinite(value.getTime());
+  return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value));
+}
+
+/**
+ * Reconstruct dedicated-signer verification from the persisted key binding.
+ * A credential change fails closed because the current key id and fingerprint
+ * must match. This does not store a boolean and does not call Kalshi.
+ */
+export function applyDurableDedicatedSigner(
+  snapshot: CommissioningSnapshot,
+  binding: DurableSignerBinding,
+): boolean {
+  const fingerprint = snapshot.signer.fingerprint;
+  const durable = snapshot.signer.configured &&
+    snapshot.signer.syntacticallyUsable &&
+    typeof fingerprint === "string" && FINGERPRINT.test(fingerprint) &&
+    typeof binding.currentApiKeyId === "string" && binding.currentApiKeyId.trim() !== "" &&
+    binding.rowCount === 1 &&
+    snapshot.boundary.subaccount === PRODUCTION_SUBACCOUNT &&
+    snapshot.boundary.exchangeIndex === PRODUCTION_EXCHANGE_INDEX &&
+    typeof snapshot.boundary.state === "string" &&
+    DURABLE_KEY_BOUND_STATES.has(snapshot.boundary.state) &&
+    binding.restrictedKeyFingerprint === fingerprint &&
+    binding.restrictedApiKeyId === binding.currentApiKeyId &&
+    keyBoundAtPresent(binding.keyBoundAt) &&
+    typeof binding.keyBindingEvidenceDigest === "string" &&
+    FINGERPRINT.test(binding.keyBindingEvidenceDigest) &&
+    snapshot.boundary.verified &&
+    snapshot.boundary.historyComplete;
+  if (!durable) return false;
+  snapshot.signer.signedGetSucceeded = true;
+  snapshot.signer.restrictedToPair = true;
+  snapshot.signer.historyComplete = true;
+  return true;
+}
+
 export function maskKeyId(keyId: string | null | undefined): string | null {
   const trimmed = keyId?.trim();
   if (!trimmed) return null;
