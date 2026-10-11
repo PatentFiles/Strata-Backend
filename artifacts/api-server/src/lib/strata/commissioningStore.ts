@@ -28,6 +28,7 @@ import {
   REVIEWED_FUNDING_CENTS,
   REVIEWED_FUNDING_MICROS,
   OPERATOR_POLICY_FIELDS,
+  PRE_BOUNDARY_INBOUND_TRANSFER_ID,
   PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
   PRE_BOUNDARY_ROUND_TRIP_CENTS,
   PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION,
@@ -331,7 +332,8 @@ async function readStoredRoundTrip(): Promise<{
     if (rows.rows.length !== 1) return null;
     const row = rows.rows[0]!;
     if (row.outbound_transfer_id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID) return null;
-    if (typeof row.inbound_transfer_id !== "string" || typeof row.id !== "string") return null;
+    if (row.inbound_transfer_id !== PRE_BOUNDARY_INBOUND_TRANSFER_ID) return null;
+    if (typeof row.id !== "string") return null;
     if (typeof row.evidence_digest !== "string" || !/^[0-9a-f]{64}$/.test(row.evidence_digest)) return null;
     return {
       id: row.id,
@@ -371,6 +373,7 @@ async function captureRailwayBoundary(workerRunning: () => boolean) {
         zeroSettlements: snapshot.zeroSettlements,
         reasons: snapshot.reasons,
         records: snapshot.records,
+        scanStartedAt: snapshot.scanStartedAt,
       });
       const published = await readCommissioningSnapshot(workerRunning());
       published.preBoundaryRoundTripAcknowledged = acknowledgedRoundTrip !== null;
@@ -481,6 +484,7 @@ async function acknowledgePreBoundaryRoundTrip(confirmation: unknown, actor: str
     zeroSettlements: snapshot.zeroSettlements,
     reasons: snapshot.reasons,
     records: snapshot.records,
+    scanStartedAt: snapshot.scanStartedAt,
   });
   if (!proof.ok) {
     return {

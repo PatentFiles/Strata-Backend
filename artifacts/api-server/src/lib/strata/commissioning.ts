@@ -17,7 +17,8 @@ import type { ProvisioningDiagnostic, ProvisioningSignerDiagnostic } from "../mi
 /** Reviewed dedicated pair. Production rows cannot name any other pair. */
 export const PRODUCTION_SUBACCOUNT = 1;
 export const PRODUCTION_EXCHANGE_INDEX = 2;
-/** The already-identified outbound leg of the intentional pre-boundary $25 round trip. */
+/** The already-identified legs of the intentional pre-boundary $25 round trip. */
+export const PRE_BOUNDARY_INBOUND_TRANSFER_ID = "0991273c-2a60-462a-be81-b10e08d1c76c";
 export const PRE_BOUNDARY_OUTBOUND_TRANSFER_ID = "391a20ac-5332-41d6-b015-9b8720e4e5c1";
 export const PRE_BOUNDARY_ROUND_TRIP_CENTS = 2500;
 export const PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION = "ACKNOWLEDGE_INTENTIONAL_PRE_BOUNDARY_25_ROUND_TRIP";
@@ -1051,6 +1052,7 @@ export interface PreBoundaryTransferView {
   exchangeIndex?: number | null;
   sourceExchangeIndex?: number | null;
   destinationExchangeIndex?: number | null;
+  subaccountNumber?: number | null;
 }
 
 export interface RoundTripTransferDiagnostic {
@@ -1133,6 +1135,70 @@ function roundTripIndex(value: string | null | undefined, fallback: number | nul
   return roundTripInteger(value) ?? (typeof fallback === "number" && Number.isSafeInteger(fallback) ? fallback : null);
 }
 
+const CROSS_EXCHANGE_BLOCKING_PREFIXES = [
+  "clean_prior_cross_exchange_transfer:",
+  "clean_ambiguous_cross_exchange_transfer:",
+  "clean_cross_exchange_transfer_timestamp_missing:",
+  "clean_cross_exchange_transfer_during_snapshot_scan:",
+] as const;
+
+function optionalIndex(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function numberedSubaccount(record: PreBoundaryTransferView): number | null {
+  return roundTripInteger(record.details.source_subaccount)
+    ?? roundTripInteger(record.details.destination_subaccount)
+    ?? roundTripInteger(record.details.from_subaccount)
+    ?? roundTripInteger(record.details.to_subaccount)
+    ?? roundTripInteger(record.details.subaccount_number)
+    ?? roundTripInteger(record.details.subaccount)
+    ?? optionalIndex(record.subaccountNumber);
+}
+
+function crossExchangeTiedToProductionSubaccount(record: PreBoundaryTransferView): boolean {
+  if (record.classification === "pair" || record.subaccountNumber === PRODUCTION_SUBACCOUNT) return true;
+  return [
+    record.details.source_subaccount,
+    record.details.destination_subaccount,
+    record.details.from_subaccount,
+    record.details.to_subaccount,
+    record.details.subaccount_number,
+    record.details.subaccount,
+  ].some((value) => roundTripInteger(value) === PRODUCTION_SUBACCOUNT);
+}
+
+function touchesProductionExchange(record: PreBoundaryTransferView): boolean {
+  return roundTripInteger(record.details.source_exchange_shard) === PRODUCTION_EXCHANGE_INDEX ||
+    roundTripInteger(record.details.destination_exchange_shard) === PRODUCTION_EXCHANGE_INDEX ||
+    roundTripInteger(record.details.exchange_index) === PRODUCTION_EXCHANGE_INDEX ||
+    optionalIndex(record.sourceExchangeIndex) === PRODUCTION_EXCHANGE_INDEX ||
+    optionalIndex(record.destinationExchangeIndex) === PRODUCTION_EXCHANGE_INDEX ||
+    optionalIndex(record.exchangeIndex) === PRODUCTION_EXCHANGE_INDEX;
+}
+
+/**
+ * Account-wide cross-exchange history has shard identity and no numbered
+ * subaccount. Capture already retains that pre-scan evidence as ambiguous.
+ * This predicate does not reclassify it and does not remove it from evidence.
+ */
+function retainedAccountWideCrossExchange(
+  record: PreBoundaryTransferView,
+  reasons: string[],
+  scanStartedAt: string | null | undefined,
+): boolean {
+  if (record.feed !== "cross_exchange_transfer" || record.classification !== "ambiguous") return false;
+  if (crossExchangeTiedToProductionSubaccount(record) || numberedSubaccount(record) !== null) return false;
+  if (!touchesProductionExchange(record)) return false;
+  if (reasons.some((reason) => CROSS_EXCHANGE_BLOCKING_PREFIXES.some((prefix) => reason === `${prefix}${record.id}`))) {
+    return false;
+  }
+  const createdAt = roundTripCreatedAt(record);
+  const scanMs = typeof scanStartedAt === "string" ? Date.parse(scanStartedAt) : NaN;
+  const occurredMs = createdAt === null ? NaN : Date.parse(createdAt);
+  return Number.isFinite(scanMs) && Number.isFinite(occurredMs) && occurredMs < scanMs;
+}
+
 function isInboundCandidate(record: PreBoundaryTransferView): boolean {
   return record.feed === "subaccount_transfer" &&
     record.classification === "pair" &&
@@ -1140,7 +1206,7 @@ function isInboundCandidate(record: PreBoundaryTransferView): boolean {
     roundTripInteger(record.details.to_subaccount) === PRODUCTION_SUBACCOUNT &&
     roundTripInteger(record.details.exchange_index) === PRODUCTION_EXCHANGE_INDEX &&
     roundTripInteger(record.details.amount_cents) === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
-    record.id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID;
+    record.id === PRE_BOUNDARY_INBOUND_TRANSFER_ID;
 }
 
 function isOutboundCandidate(record: PreBoundaryTransferView): boolean {
@@ -1176,17 +1242,26 @@ function sanitizeRoundTripTransfer(record: PreBoundaryTransferView): RoundTripTr
   };
 }
 
-function roundTripFailureDiagnostic(records: PreBoundaryTransferView[]): {
+function roundTripFailureDiagnostic(
+  records: PreBoundaryTransferView[],
+  reasons: string[],
+  scanStartedAt: string | null | undefined,
+): {
   unrecognizedTransfers: RoundTripTransferDiagnostic[];
   roundTripCandidates: { inbound: RoundTripTransferDiagnostic[]; outbound: RoundTripTransferDiagnostic[] };
 } {
-  const touching = records.filter((record) =>
-    (record.feed === "subaccount_transfer" || record.feed === "cross_exchange_transfer") &&
-    record.classification !== "elsewhere");
   const inbound: RoundTripTransferDiagnostic[] = [];
   const outbound: RoundTripTransferDiagnostic[] = [];
   const unrecognized: RoundTripTransferDiagnostic[] = [];
-  for (const record of touching) {
+  for (const record of records) {
+    if (record.feed === "cross_exchange_transfer") {
+      if (retainedAccountWideCrossExchange(record, reasons, scanStartedAt)) continue;
+      if (record.classification === "elsewhere" && !crossExchangeTiedToProductionSubaccount(record)) continue;
+      const view = sanitizeRoundTripTransfer(record);
+      if (view) unrecognized.push(view);
+      continue;
+    }
+    if (record.feed !== "subaccount_transfer" || record.classification === "elsewhere") continue;
     const view = sanitizeRoundTripTransfer(record);
     if (!view) continue;
     if (isInboundCandidate(record)) inbound.push(view);
@@ -1201,11 +1276,15 @@ function roundTripFailureDiagnostic(records: PreBoundaryTransferView[]): {
   };
 }
 
-function unrecognizedRoundTrip(records: PreBoundaryTransferView[]) {
+function unrecognizedRoundTrip(
+  records: PreBoundaryTransferView[],
+  reasons: string[],
+  scanStartedAt: string | null | undefined,
+) {
   return {
     ok: false as const,
     reason: "pre_boundary_unrecognized_transfer" as const,
-    ...roundTripFailureDiagnostic(records),
+    ...roundTripFailureDiagnostic(records, reasons, scanStartedAt),
   };
 }
 
@@ -1233,6 +1312,8 @@ export function provePreBoundaryRoundTrip(input: {
   zeroSettlements: boolean;
   reasons: string[];
   records: PreBoundaryTransferView[];
+  /** Start of the boundary scan that retained account-wide cross-exchange evidence. */
+  scanStartedAt?: string | null;
 }): { ok: true; roundTrip: PreBoundaryRoundTripProof } | {
   ok: false;
   reason: string;
@@ -1246,13 +1327,20 @@ export function provePreBoundaryRoundTrip(input: {
   if (!input.zeroOrders) return { ok: false, reason: "pre_boundary_order_present" };
   if (!input.zeroFills) return { ok: false, reason: "pre_boundary_fill_present" };
   if (!input.zeroSettlements) return { ok: false, reason: "pre_boundary_settlement_present" };
+  const blockingCrossExchange = input.reasons.find((reason) =>
+    CROSS_EXCHANGE_BLOCKING_PREFIXES.some((prefix) => reason.startsWith(prefix)));
+  if (blockingCrossExchange) return { ok: false, reason: blockingCrossExchange };
   const otherReason = input.reasons.find((reason) => !reason.startsWith("clean_prior_subaccount_transfer:"));
   if (otherReason) return { ok: false, reason: otherReason };
+  const unexplainedCrossExchange = input.records.some((record) =>
+    record.feed === "cross_exchange_transfer" &&
+    !retainedAccountWideCrossExchange(record, input.reasons, input.scanStartedAt) &&
+    (crossExchangeTiedToProductionSubaccount(record) || record.classification !== "elsewhere"));
+  if (unexplainedCrossExchange) return unrecognizedRoundTrip(input.records, input.reasons, input.scanStartedAt);
   const touching = input.records.filter((record) =>
-    (record.feed === "subaccount_transfer" || record.feed === "cross_exchange_transfer") &&
-    record.classification !== "elsewhere");
-  if (touching.some((record) => record.classification === "ambiguous" || record.feed !== "subaccount_transfer")) {
-    return unrecognizedRoundTrip(input.records);
+    record.feed === "subaccount_transfer" && record.classification !== "elsewhere");
+  if (touching.some((record) => record.classification !== "pair")) {
+    return unrecognizedRoundTrip(input.records, input.reasons, input.scanStartedAt);
   }
   const parsed = touching.map((record) => ({
     id: record.id,
@@ -1263,13 +1351,13 @@ export function provePreBoundaryRoundTrip(input: {
     createdAt: roundTripCreatedAt(record),
   }));
   if (parsed.some((row) => row.createdAt === null || !TRANSFER_UUID.test(row.id))) {
-    return unrecognizedRoundTrip(input.records);
+    return unrecognizedRoundTrip(input.records, input.reasons, input.scanStartedAt);
   }
   const inbound = parsed.filter((row) =>
     row.from === 0 && row.to === PRODUCTION_SUBACCOUNT &&
     row.exchange === PRODUCTION_EXCHANGE_INDEX &&
     row.cents === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
-    row.id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+    row.id === PRE_BOUNDARY_INBOUND_TRANSFER_ID);
   const outbound = parsed.filter((row) =>
     row.from === PRODUCTION_SUBACCOUNT && row.to === 0 &&
     row.exchange === PRODUCTION_EXCHANGE_INDEX &&
@@ -1277,7 +1365,7 @@ export function provePreBoundaryRoundTrip(input: {
     row.id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
   const recognized = new Set([...inbound, ...outbound].map((row) => row.id));
   if (parsed.some((row) => !recognized.has(row.id))) {
-    return unrecognizedRoundTrip(input.records);
+    return unrecognizedRoundTrip(input.records, input.reasons, input.scanStartedAt);
   }
   if (inbound.length !== 1) return { ok: false, reason: "pre_boundary_inbound_transfer_not_proven" };
   if (outbound.length !== 1) return { ok: false, reason: "pre_boundary_outbound_transfer_mismatch" };

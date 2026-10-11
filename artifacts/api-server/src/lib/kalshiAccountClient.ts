@@ -3046,6 +3046,7 @@ export async function captureCleanPairSnapshot(
     zeroSettlements,
     reasons: uniqueReasons,
     records,
+    scanStartedAt,
   }) : null;
   const waiverAccepted = Boolean(
     acknowledged && roundTripProof?.ok &&

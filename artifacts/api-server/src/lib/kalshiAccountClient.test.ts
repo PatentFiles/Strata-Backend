@@ -23,6 +23,11 @@ import {
   verifyKalshiRestrictedTradingKeyForSubaccount,
 } from "./kalshiAccountClient";
 import {
+  PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+  PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+  provePreBoundaryRoundTrip,
+} from "./strata/commissioning";
+import {
   reconcilePairCollateralLedger,
   type PairCollateralLocalLedger,
 } from "./microLivePairCollateral";
@@ -688,7 +693,10 @@ function cleanPairFixture(overrides: {
   historicalFillsUnavailable?: boolean;
   creationBoundary?: boolean;
   inventoryAgeSeconds?: number;
+  subaccount?: number;
 } = {}) {
+  const pairSubaccount = overrides.subaccount ?? 7;
+  const pairSubaccountText = String(pairSubaccount);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const requests: Array<{ url: URL; keyId: string; method: string }> = [];
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -712,7 +720,7 @@ function cleanPairFixture(overrides: {
     }
     if (url.pathname.endsWith("/portfolio/balance")) {
       assert.equal(keyId, overrides.creationBoundary ? "verifier-key-id" : "test-key-id");
-      assert.equal(url.searchParams.get("subaccount"), "7");
+      assert.equal(url.searchParams.get("subaccount"), pairSubaccountText);
       assert.equal(url.searchParams.get("exchange_index"), "2");
       const signature = createVerify("sha256");
       const timestamp = headers["KALSHI-ACCESS-TIMESTAMP"]!;
@@ -739,11 +747,11 @@ function cleanPairFixture(overrides: {
         json: async () => ({
           subaccount_balances: [
             {
-              subaccount_number: 7, exchange_index: 2,
+              subaccount_number: pairSubaccount, exchange_index: 2,
               balance: overrides.inventoryCash ?? "0.0000",
               updated_ts: nowSeconds - (overrides.inventoryAgeSeconds ?? 0),
             },
-            { subaccount_number: 7, exchange_index: 0, balance: "4.0000",
+            { subaccount_number: pairSubaccount, exchange_index: 0, balance: "4.0000",
               updated_ts: nowSeconds },
             { subaccount_number: 8, exchange_index: 2, balance: "9.0000",
               updated_ts: nowSeconds },
@@ -793,11 +801,11 @@ function cleanPairFixture(overrides: {
     const [suffix, item] = matched;
     const needsPairQuery = suffix.startsWith("/portfolio/");
     if (needsPairQuery) {
-      assert.equal(url.searchParams.get("subaccount"), "7");
+      assert.equal(url.searchParams.get("subaccount"), pairSubaccountText);
       assert.equal(url.searchParams.get("exchange_index"),
         suffix.endsWith("/settlements") ? null : "2");
     } else {
-      assert.equal(url.searchParams.get("subaccount"), "7");
+      assert.equal(url.searchParams.get("subaccount"), pairSubaccountText);
     }
     const cursor = url.searchParams.get("cursor");
     if (suffix === "/historical/orders" && overrides.loopHistoricalOrders) {
@@ -2096,6 +2104,267 @@ test("prospective clean-pair capture blocks cross-shard transfer timestamps duri
     assert.ok(snapshot.reasons.includes(
       "clean_cross_exchange_transfer_timestamp_missing:transfer-without-timestamp",
     ));
+  } finally {
+    restoreEnvironment();
+  }
+});
+
+test("exact subaccount round trip retains nine pre-scan account-wide cross-exchange records", async () => {
+  const inboundCreated = Math.floor(Date.parse("2026-09-27T01:08:49.000Z") / 1000);
+  const outboundCreated = Math.floor(Date.parse("2026-10-10T16:24:20.000Z") / 1000);
+  const roundTrip = [
+    {
+      transfer_id: PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+      from_subaccount: 0,
+      to_subaccount: 1,
+      exchange_index: 2,
+      amount_cents: 2500,
+      created_ts: inboundCreated,
+      status: "completed",
+    },
+    {
+      transfer_id: PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+      from_subaccount: 1,
+      to_subaccount: 0,
+      exchange_index: 2,
+      amount_cents: 2500,
+      created_ts: outboundCreated,
+      status: "completed",
+    },
+  ];
+  const oldCross = Array.from({ length: 9 }, (_, index) => {
+    const n = index + 1;
+    const source = n % 2 === 0 ? 0 : 2;
+    return {
+      transfer_id: `old-account-wide-cross-${n}`,
+      source_exchange_shard: source,
+      destination_exchange_shard: source === 0 ? 2 : 0,
+      amount: "10.0000",
+      status: "completed",
+      created_ts: Math.floor(Date.parse("2026-01-15T00:00:00.000Z") / 1000) + n,
+    };
+  });
+  const prepare = () => {
+    setCredentials();
+    process.env.KALSHI_BOT_SUBACCOUNT = "1";
+    process.env.KALSHI_VERIFIER_API_KEY_ID = "verifier-key-id";
+    process.env.KALSHI_VERIFIER_API_PRIVATE_KEY = privateKeyPem;
+  };
+  const capture = async (
+    overrides: {
+      transfers?: unknown[];
+      crossTransfers?: unknown[];
+      availableCash?: string;
+      inventoryCash?: string;
+    },
+    acknowledged?: {
+      id: string;
+      inboundTransferId: string;
+      outboundTransferId: string;
+      evidenceDigest: string;
+    } | null,
+  ) => {
+    prepare();
+    const fixture = cleanPairFixture({
+      subaccount: 1,
+      creationBoundary: true,
+      ...overrides,
+    });
+    globalThis.fetch = fixture.fetcher;
+    const snapshot = await captureCleanPairSnapshot(1, "KXBTC15M", {
+      creationBoundary: true,
+      acknowledgedRoundTrip: acknowledged,
+    });
+    assert.ok(fixture.requests.length > 0);
+    assert.ok(fixture.requests.every((request) => request.method === "GET"));
+    return snapshot;
+  };
+  try {
+    const blocked = await capture({ transfers: roundTrip, crossTransfers: oldCross });
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.evidenceDigest, null);
+    assert.deepEqual([...blocked.reasons].sort(), [
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_INBOUND_TRANSFER_ID}`,
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_OUTBOUND_TRANSFER_ID}`,
+    ].sort());
+    const retained = blocked.records.filter((record) => record.id.startsWith("old-account-wide-cross-"));
+    assert.equal(retained.length, 9);
+    assert.ok(retained.every((record) =>
+      record.feed === "cross_exchange_transfer" &&
+      record.classification === "ambiguous" &&
+      record.subaccountNumber === null));
+    const proof = provePreBoundaryRoundTrip({
+      availableCashMicros: blocked.availableCashMicros,
+      inventoryCashMicros: blocked.inventoryCashMicros,
+      portfolioValueMicros: blocked.portfolioValueMicros ?? null,
+      zeroPositions: blocked.zeroPositions,
+      zeroOrders: blocked.zeroOrders,
+      zeroFills: blocked.zeroFills,
+      zeroSettlements: blocked.zeroSettlements,
+      reasons: blocked.reasons,
+      records: blocked.records,
+      scanStartedAt: blocked.scanStartedAt,
+    });
+    assert.equal(proof.ok, true);
+    if (!proof.ok) return;
+    assert.equal(proof.roundTrip.inboundTransferId, PRE_BOUNDARY_INBOUND_TRANSFER_ID);
+    assert.equal(proof.roundTrip.outboundTransferId, PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+    const acknowledgment = {
+      id: "11111111-1111-4111-8111-111111111111",
+      inboundTransferId: proof.roundTrip.inboundTransferId,
+      outboundTransferId: proof.roundTrip.outboundTransferId,
+      evidenceDigest: proof.roundTrip.evidenceDigest,
+    };
+    const waived = await capture({ transfers: roundTrip, crossTransfers: oldCross }, acknowledgment);
+    assert.equal(waived.status, "clean");
+    assert.match(waived.evidenceDigest ?? "", /^[0-9a-f]{64}$/);
+    assert.deepEqual(waived.reasons, []);
+    assert.equal(waived.preBoundaryRoundTripSatisfied, true);
+    assert.equal(waived.zeroPriorPairTransfers, false);
+    const canonical = waived.records.filter((record) => record.id.startsWith("old-account-wide-cross-"));
+    assert.equal(canonical.length, 9);
+    assert.ok(canonical.every((record) => record.classification === "ambiguous"));
+    assert.ok(waived.records.some((record) => record.id === PRE_BOUNDARY_INBOUND_TRANSFER_ID));
+    assert.ok(waived.records.some((record) => record.id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID));
+
+    const thirdId = "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const third = await capture({
+      transfers: [...roundTrip, {
+        transfer_id: thirdId,
+        from_subaccount: 1,
+        to_subaccount: 0,
+        exchange_index: 2,
+        amount_cents: 100,
+        created_ts: outboundCreated,
+        status: "completed",
+      }],
+      crossTransfers: oldCross,
+    }, acknowledgment);
+    assert.equal(third.status, "blocked");
+    assert.equal(third.evidenceDigest, null);
+    assert.equal(third.preBoundaryRoundTripSatisfied, false);
+    assert.ok(third.reasons.includes(`clean_prior_subaccount_transfer:${thirdId}`));
+
+    const during = await capture({
+      transfers: roundTrip,
+      crossTransfers: [...oldCross, {
+        transfer_id: "during-scan-cross",
+        source_exchange_shard: 0,
+        destination_exchange_shard: 2,
+        amount: "1.0000",
+        status: "completed",
+        created_ts: Math.ceil(Date.now() / 1000) + 30,
+      }],
+    }, acknowledgment);
+    assert.equal(during.status, "blocked");
+    assert.ok(during.reasons.includes(
+      "clean_cross_exchange_transfer_during_snapshot_scan:during-scan-cross",
+    ));
+    assert.equal(during.preBoundaryRoundTripSatisfied, false);
+
+    const tied = await capture({
+      transfers: roundTrip,
+      crossTransfers: [...oldCross, {
+        transfer_id: "tied-to-subaccount-1",
+        source_subaccount: 1,
+        source_exchange_shard: 2,
+        destination_exchange_shard: 0,
+        amount: "1.0000",
+        status: "completed",
+        created_ts: inboundCreated,
+      }],
+    });
+    assert.equal(tied.status, "blocked");
+    assert.ok(tied.reasons.includes("clean_prior_cross_exchange_transfer:tied-to-subaccount-1"));
+    assert.equal(provePreBoundaryRoundTrip({
+      availableCashMicros: tied.availableCashMicros,
+      inventoryCashMicros: tied.inventoryCashMicros,
+      portfolioValueMicros: tied.portfolioValueMicros ?? null,
+      zeroPositions: tied.zeroPositions,
+      zeroOrders: tied.zeroOrders,
+      zeroFills: tied.zeroFills,
+      zeroSettlements: tied.zeroSettlements,
+      reasons: tied.reasons,
+      records: tied.records,
+      scanStartedAt: tied.scanStartedAt,
+    }).ok, false);
+
+    const timeless = await capture({
+      transfers: roundTrip,
+      crossTransfers: [...oldCross, {
+        transfer_id: "timestampless-cross",
+        source_exchange_shard: 2,
+        destination_exchange_shard: 0,
+        amount: "1.0000",
+        status: "completed",
+      }],
+    });
+    assert.equal(timeless.status, "blocked");
+    assert.ok(timeless.reasons.includes(
+      "clean_cross_exchange_transfer_timestamp_missing:timestampless-cross",
+    ));
+
+    const wrongInboundId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const wrongInbound = await capture({
+      transfers: roundTrip.map((row) => row.transfer_id === PRE_BOUNDARY_INBOUND_TRANSFER_ID
+        ? { ...row, transfer_id: wrongInboundId }
+        : row),
+      crossTransfers: oldCross,
+    });
+    assert.equal(wrongInbound.status, "blocked");
+    assert.equal(provePreBoundaryRoundTrip({
+      availableCashMicros: wrongInbound.availableCashMicros,
+      inventoryCashMicros: wrongInbound.inventoryCashMicros,
+      portfolioValueMicros: wrongInbound.portfolioValueMicros ?? null,
+      zeroPositions: wrongInbound.zeroPositions,
+      zeroOrders: wrongInbound.zeroOrders,
+      zeroFills: wrongInbound.zeroFills,
+      zeroSettlements: wrongInbound.zeroSettlements,
+      reasons: wrongInbound.reasons,
+      records: wrongInbound.records,
+      scanStartedAt: wrongInbound.scanStartedAt,
+    }).ok, false);
+
+    const wrongOutboundId = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const wrongOutbound = await capture({
+      transfers: roundTrip.map((row) => row.transfer_id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID
+        ? { ...row, transfer_id: wrongOutboundId }
+        : row),
+      crossTransfers: oldCross,
+    });
+    assert.equal(provePreBoundaryRoundTrip({
+      availableCashMicros: wrongOutbound.availableCashMicros,
+      inventoryCashMicros: wrongOutbound.inventoryCashMicros,
+      portfolioValueMicros: wrongOutbound.portfolioValueMicros ?? null,
+      zeroPositions: wrongOutbound.zeroPositions,
+      zeroOrders: wrongOutbound.zeroOrders,
+      zeroFills: wrongOutbound.zeroFills,
+      zeroSettlements: wrongOutbound.zeroSettlements,
+      reasons: wrongOutbound.reasons,
+      records: wrongOutbound.records,
+      scanStartedAt: wrongOutbound.scanStartedAt,
+    }).ok, false);
+
+    const funded = await capture({
+      transfers: roundTrip,
+      crossTransfers: oldCross,
+      availableCash: "0.0100",
+      inventoryCash: "0.0100",
+    });
+    assert.equal(funded.status, "blocked");
+    assert.ok(funded.reasons.includes("clean_pair_available_cash_not_zero"));
+    assert.equal(provePreBoundaryRoundTrip({
+      availableCashMicros: funded.availableCashMicros,
+      inventoryCashMicros: funded.inventoryCashMicros,
+      portfolioValueMicros: funded.portfolioValueMicros ?? null,
+      zeroPositions: funded.zeroPositions,
+      zeroOrders: funded.zeroOrders,
+      zeroFills: funded.zeroFills,
+      zeroSettlements: funded.zeroSettlements,
+      reasons: funded.reasons,
+      records: funded.records,
+      scanStartedAt: funded.scanStartedAt,
+    }).ok, false);
   } finally {
     restoreEnvironment();
   }

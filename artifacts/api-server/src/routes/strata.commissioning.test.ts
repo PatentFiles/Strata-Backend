@@ -35,6 +35,7 @@ import {
   type SubaccountIdentity,
   planCommission,
   planDisarm,
+  PRE_BOUNDARY_INBOUND_TRANSFER_ID,
   PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
   blockingSubaccountTransferDetail,
   policyReadFromRows,
@@ -1658,7 +1659,7 @@ test("partial blocking transfer keeps its identity when amount and status are ab
 });
 
 test("intentional pre-boundary $25 round trip is acknowledged only for its two transfers", () => {
-  const inboundId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const inboundId = PRE_BOUNDARY_INBOUND_TRANSFER_ID;
   const created = "2026-10-10T16:24:20.000Z";
   const leg = (id: string, from: number, to: number, cents = 2500, exchange = 2) => ({
     feed: "subaccount_transfer",
@@ -1708,7 +1709,7 @@ test("intentional pre-boundary $25 round trip is acknowledged only for its two t
   assert.equal(reasonOf(provePreBoundaryRoundTrip({
     ...exact,
     records: [inbound, outbound, leg("cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee", 0, 1)],
-  })), "pre_boundary_inbound_transfer_not_proven");
+  })), "pre_boundary_unrecognized_transfer");
   assert.equal(reasonOf(provePreBoundaryRoundTrip({
     ...exact,
     records: [leg(inboundId, 0, 1, 2499), outbound],
@@ -1774,7 +1775,7 @@ test("intentional pre-boundary $25 round trip is acknowledged only for its two t
 });
 
 test("unrecognized round-trip transfers are sanitized and still block acknowledgment", () => {
-  const inboundId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const inboundId = PRE_BOUNDARY_INBOUND_TRANSFER_ID;
   const created = "2026-10-10T16:24:20.000Z";
   const leg = (id: string, from: number, to: number, cents = 2500, exchange = 2) => ({
     feed: "subaccount_transfer",
@@ -1854,6 +1855,208 @@ test("unrecognized round-trip transfers are sanitized and still block acknowledg
   assert.equal(blockedReturn > -1 && insertAt > blockedReturn, true);
   assert.equal(body.includes("unrecognizedTransfers"), true);
   assert.equal(body.includes("roundTripCandidates"), true);
+});
+
+test("old account-wide cross-exchange evidence does not block the exact pre-boundary round trip", () => {
+  const scanStartedAt = "2026-10-10T22:00:00.000Z";
+  const inboundCreated = "2026-09-27T01:08:49.000Z";
+  const outboundCreated = "2026-10-10T16:24:20.000Z";
+  const leg = (
+    id: string,
+    from: number,
+    to: number,
+    cents = 2500,
+    exchange = 2,
+    created = outboundCreated,
+  ) => ({
+    feed: "subaccount_transfer" as const,
+    id,
+    classification: "pair" as const,
+    occurredAt: created,
+    details: {
+      from_subaccount: String(from),
+      to_subaccount: String(to),
+      exchange_index: String(exchange),
+      amount_cents: String(cents),
+      created_ts: created,
+    },
+  });
+  const oldCross = (n: number) => {
+    const created = new Date(Date.UTC(2026, 0, n, 0, 0, 0)).toISOString();
+    const source = n % 2 === 0 ? 0 : 2;
+    const destination = source === 0 ? 2 : 0;
+    return {
+      feed: "cross_exchange_transfer" as const,
+      id: `old-account-wide-cross-${n}`,
+      classification: "ambiguous" as const,
+      occurredAt: created,
+      sourceExchangeIndex: source,
+      destinationExchangeIndex: destination,
+      subaccountNumber: null,
+      details: {
+        source_subaccount: null,
+        destination_subaccount: null,
+        source_exchange_shard: String(source),
+        destination_exchange_shard: String(destination),
+        amount: "25.0000",
+        created_ts: created,
+      },
+    };
+  };
+  const inbound = leg(PRE_BOUNDARY_INBOUND_TRANSFER_ID, 0, 1, 2500, 2, inboundCreated);
+  const outbound = leg(PRE_BOUNDARY_OUTBOUND_TRANSFER_ID, 1, 0);
+  const historical = Array.from({ length: 9 }, (_, index) => oldCross(index + 1));
+  const elsewhereCross = {
+    feed: "cross_exchange_transfer" as const,
+    id: "elsewhere-cross",
+    classification: "elsewhere" as const,
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    details: {
+      source_subaccount: "3",
+      destination_subaccount: "4",
+      source_exchange_shard: "0",
+      destination_exchange_shard: "1",
+      created_ts: "2026-01-01T00:00:00.000Z",
+    },
+  };
+  const records = [inbound, outbound, ...historical, elsewhereCross];
+  const base = {
+    availableCashMicros: "0" as const,
+    inventoryCashMicros: "0" as const,
+    portfolioValueMicros: "0" as const,
+    zeroPositions: true,
+    zeroOrders: true,
+    zeroFills: true,
+    zeroSettlements: true,
+    scanStartedAt,
+    reasons: [
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_INBOUND_TRANSFER_ID}`,
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_OUTBOUND_TRANSFER_ID}`,
+    ],
+    records,
+  };
+  const reasonOf = (result: { ok: true } | { ok: false; reason: string }) => result.ok ? "" : result.reason;
+  const proven = provePreBoundaryRoundTrip(base);
+  assert.equal(proven.ok, true);
+  if (!proven.ok) return;
+  assert.equal(proven.roundTrip.inboundTransferId, PRE_BOUNDARY_INBOUND_TRANSFER_ID);
+  assert.equal(proven.roundTrip.outboundTransferId, PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+  assert.equal(proven.roundTrip.inboundCreatedAt, inboundCreated);
+  assert.equal(proven.roundTrip.outboundCreatedAt, outboundCreated);
+  assert.equal(proven.roundTrip.amountCents, 2500);
+  assert.equal(historical.every((row) => row.classification === "ambiguous"), true);
+  assert.equal(elsewhereCross.classification, "elsewhere");
+  assert.equal(records.filter((row) => row.id.startsWith("old-account-wide-cross-")).length, 9);
+
+  const during = {
+    ...oldCross(1),
+    id: "during-scan-cross",
+    occurredAt: scanStartedAt,
+    details: { ...oldCross(1).details, created_ts: scanStartedAt },
+  };
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    records: [inbound, outbound, during],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    reasons: [...base.reasons, "clean_cross_exchange_transfer_during_snapshot_scan:during-scan-cross"],
+    records: [inbound, outbound, during],
+  })), "clean_cross_exchange_transfer_during_snapshot_scan:during-scan-cross");
+
+  const tied = {
+    ...oldCross(2),
+    id: "tied-to-subaccount-1",
+    details: { ...oldCross(2).details, source_subaccount: "1" },
+  };
+  assert.equal(tied.classification, "ambiguous");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    records: [inbound, outbound, tied],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    reasons: [...base.reasons, "clean_prior_cross_exchange_transfer:tied-to-subaccount-1"],
+    records: [inbound, outbound, tied],
+  })), "clean_prior_cross_exchange_transfer:tied-to-subaccount-1");
+
+  const timeless = {
+    ...oldCross(3),
+    id: "timestampless-cross",
+    occurredAt: null,
+    details: { ...oldCross(3).details, created_ts: null },
+  };
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    records: [inbound, outbound, timeless],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    reasons: [...base.reasons, "clean_cross_exchange_transfer_timestamp_missing:timestampless-cross"],
+    records: [inbound, outbound, timeless],
+  })), "clean_cross_exchange_transfer_timestamp_missing:timestampless-cross");
+
+  const thirdId = "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const third = provePreBoundaryRoundTrip({
+    ...base,
+    reasons: [...base.reasons, `clean_prior_subaccount_transfer:${thirdId}`],
+    records: [...records, leg(thirdId, 1, 0, 100)],
+  });
+  assert.equal(third.ok, false);
+  if (third.ok) return;
+  assert.equal(third.reason, "pre_boundary_unrecognized_transfer");
+  assert.deepEqual(third.unrecognizedTransfers?.map((row) => row.transferId), [thirdId]);
+  assert.equal(JSON.stringify(third).includes("old-account-wide-cross-1"), false);
+
+  const wrongInbound = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    reasons: [
+      `clean_prior_subaccount_transfer:${wrongInbound}`,
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_OUTBOUND_TRANSFER_ID}`,
+    ],
+    records: [leg(wrongInbound, 0, 1, 2500, 2, inboundCreated), outbound, ...historical],
+  })), "pre_boundary_unrecognized_transfer");
+  const wrongOutbound = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...base,
+    records: [inbound, leg(wrongOutbound, 1, 0), ...historical],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, records: [outbound, ...historical] })), "pre_boundary_inbound_transfer_not_proven");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, records: [inbound, ...historical] })), "pre_boundary_outbound_transfer_mismatch");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, availableCashMicros: "1" })), "pre_boundary_available_cash_not_zero");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, inventoryCashMicros: "1" })), "pre_boundary_inventory_cash_not_zero");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, portfolioValueMicros: "1" })), "pre_boundary_portfolio_value_not_zero");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, zeroPositions: false })), "pre_boundary_position_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, zeroOrders: false })), "pre_boundary_order_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, zeroFills: false })), "pre_boundary_fill_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...base, zeroSettlements: false })), "pre_boundary_settlement_present");
+
+  const waived = selectBlockingCleanReasons([
+    ...base.reasons,
+    `clean_prior_subaccount_transfer:${thirdId}`,
+    "clean_prior_cross_exchange_transfer:tied-to-subaccount-1",
+    "clean_cross_exchange_transfer_during_snapshot_scan:during-scan-cross",
+    "clean_cross_exchange_transfer_timestamp_missing:timestampless-cross",
+    "clean_ambiguous_cross_exchange_transfer:other-shard",
+  ], {
+    inboundTransferId: PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+    outboundTransferId: PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+  });
+  assert.deepEqual(waived, [
+    `clean_prior_subaccount_transfer:${thirdId}`,
+    "clean_prior_cross_exchange_transfer:tied-to-subaccount-1",
+    "clean_cross_exchange_transfer_during_snapshot_scan:during-scan-cross",
+    "clean_cross_exchange_transfer_timestamp_missing:timestampless-cross",
+    "clean_ambiguous_cross_exchange_transfer:other-shard",
+  ]);
+  const account = readFileSync("src/lib/kalshiAccountClient.ts", "utf8");
+  assert.equal(account.includes("do not infer that it"), true);
+  assert.equal(account.includes("records: canonicalRecords"), true);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const reader = store.slice(store.indexOf("async function readStoredRoundTrip"), store.indexOf("async function captureRailwayBoundary"));
+  assert.equal(reader.includes("PRE_BOUNDARY_INBOUND_TRANSFER_ID"), true);
+  assert.equal(reader.includes("PRE_BOUNDARY_OUTBOUND_TRANSFER_ID"), true);
 });
 
 test("policy read returns draft limits and approval state without raw policy rows", () => {
