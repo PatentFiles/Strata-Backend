@@ -514,6 +514,8 @@ export interface FeeVerificationReport {
   contentType: string | null;
   finalOrigin: string | null;
   finalPathname: string | null;
+  retryAfterSeconds: number | null;
+  networkAttempts: number;
 }
 
 const PUBLIC_FEE_REASON = /^[a-z0-9_]{1,80}$/;

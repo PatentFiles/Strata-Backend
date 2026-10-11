@@ -1275,6 +1275,8 @@ export function createDatabaseCommissioningPort(
             contentType: established.diagnostic.contentType,
             finalOrigin: established.diagnostic.finalOrigin,
             finalPathname: established.diagnostic.finalPathname,
+            retryAfterSeconds: established.diagnostic.retryAfterSeconds,
+            networkAttempts: established.diagnostic.networkAttempts,
           },
         };
       }
@@ -1288,6 +1290,8 @@ export function createDatabaseCommissioningPort(
           contentType: established.diagnostic.contentType,
           finalOrigin: established.diagnostic.finalOrigin,
           finalPathname: established.diagnostic.finalPathname,
+          retryAfterSeconds: established.diagnostic.retryAfterSeconds,
+          networkAttempts: established.diagnostic.networkAttempts,
         },
       };
     },

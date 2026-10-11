@@ -287,6 +287,8 @@ export interface OfficialFeeFetchDiagnostic {
   contentType: string | null;
   finalOrigin: string | null;
   finalPathname: string | null;
+  retryAfterSeconds: number | null;
+  networkAttempts: number;
 }
 
 const EMPTY_FEE_FETCH: OfficialFeeFetchDiagnostic = {
@@ -294,7 +296,12 @@ const EMPTY_FEE_FETCH: OfficialFeeFetchDiagnostic = {
   contentType: null,
   finalOrigin: null,
   finalPathname: null,
+  retryAfterSeconds: null,
+  networkAttempts: 0,
 };
+
+const MAX_FEE_429_RETRY_SECONDS = 15;
+const MAX_REPORTED_RETRY_AFTER_SECONDS = 86_400;
 
 function mediaType(value: string | null): string | null {
   const media = value?.split(";")[0]?.trim().toLowerCase() ?? "";
@@ -305,12 +312,33 @@ function httpStatus(value: number): number | null {
   return Number.isInteger(value) && value >= 100 && value <= 599 ? value : null;
 }
 
+function parsedRetryAfterSeconds(response: Response): number | null {
+  if (httpStatus(response.status) !== 429) return null;
+  const raw = response.headers.get("retry-after");
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length < 1 || trimmed.length > 80) return null;
+  if (/^\d{1,5}$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isSafeInteger(seconds) && seconds <= MAX_REPORTED_RETRY_AFTER_SECONDS ? seconds : null;
+  }
+  const when = Date.parse(trimmed);
+  if (!Number.isFinite(when)) return null;
+  const seconds = Math.ceil((when - Date.now()) / 1000);
+  if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > MAX_REPORTED_RETRY_AFTER_SECONDS) return null;
+  return seconds;
+}
+
 /** Origin and pathname only. Query, fragment, userinfo, and raw headers stay out. */
-export function officialFeeFetchDiagnostic(response: Response | null): OfficialFeeFetchDiagnostic {
-  if (!response) return { ...EMPTY_FEE_FETCH };
+export function officialFeeFetchDiagnostic(
+  response: Response | null,
+  networkAttempts = 0,
+): OfficialFeeFetchDiagnostic {
+  if (!response) return { ...EMPTY_FEE_FETCH, networkAttempts };
   const status = httpStatus(response.status);
   const contentType = mediaType(response.headers.get("content-type"));
   const location = response.url || CANONICAL_FEE_SCHEDULE_URL;
+  const retryAfterSeconds = parsedRetryAfterSeconds(response);
   try {
     const url = new URL(location);
     const hostnameSafe = url.protocol === "https:" &&
@@ -322,45 +350,71 @@ export function officialFeeFetchDiagnostic(response: Response | null): OfficialF
       contentType,
       finalOrigin: hostnameSafe ? url.origin : null,
       finalPathname: pathSafe ? url.pathname : null,
+      retryAfterSeconds,
+      networkAttempts,
     };
   } catch {
-    return { httpStatus: status, contentType, finalOrigin: null, finalPathname: null };
+    return {
+      httpStatus: status,
+      contentType,
+      finalOrigin: null,
+      finalPathname: null,
+      retryAfterSeconds,
+      networkAttempts,
+    };
   }
 }
 
-function pdfEnvelopeRejected(bytes: Buffer): boolean {
-  return bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
-    bytes.subarray(0, 5).toString() !== "%PDF-" ||
-    !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"));
+function officialFeeLocationAccepted(response: Response): boolean {
+  const location = response.url || CANONICAL_FEE_SCHEDULE_URL;
+  try {
+    const url = new URL(location);
+    const canonical = new URL(CANONICAL_FEE_SCHEDULE_URL);
+    return url.protocol === "https:" &&
+      !url.username && !url.password &&
+      url.origin === canonical.origin &&
+      url.pathname === canonical.pathname &&
+      url.search === "" &&
+      url.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
+  return fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
+    method: "GET",
+    headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
+    redirect: "error",
+    signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+  });
 }
 
 /**
- * Hash the official PDF only after the reviewed parser accepts the formula.
- * A mismatched placeholder digest is not a successful verification.
+ * Validate one official PDF response. The digest is the SHA-256 of these bytes.
  */
-export async function establishOfficialFeeDigest(
-  fetchImpl: typeof fetch = globalThis.fetch,
+async function validateFetchedOfficialFeePdf(
+  response: Response,
+  networkAttempts: number,
 ): Promise<{ ok: true; digest: string; diagnostic: OfficialFeeFetchDiagnostic } |
   { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic }> {
-  let response: Response;
-  try {
-    response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
-      method: "GET",
-      headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
-      redirect: "error",
-      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
-    });
-  } catch {
-    return { ok: false, reason: "official_fee_schedule_unavailable", diagnostic: { ...EMPTY_FEE_FETCH } };
-  }
-  const diagnostic = officialFeeFetchDiagnostic(response);
+  const diagnostic = officialFeeFetchDiagnostic(response, networkAttempts);
   const status = httpStatus(response.status);
-  if (!response.ok) {
+  if (status !== 200) {
     return {
       ok: false,
       reason: status === null ? "official_fee_schedule_unavailable" : `official_fee_schedule_http_${status}`,
       diagnostic,
     };
+  }
+  if (!officialFeeLocationAccepted(response)) {
+    return { ok: false, reason: "official_fee_schedule_redirected", diagnostic };
   }
   if (mediaType(response.headers.get("content-type")) !== "application/pdf") {
     return { ok: false, reason: "official_fee_schedule_content_type_invalid", diagnostic };
@@ -379,15 +433,52 @@ export async function establishOfficialFeeDigest(
   if (!parsed || parsed.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return { ok: false, reason: "official_fee_schedule_formula_unverifiable", diagnostic };
   }
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  const verified = await verifyCurrentFeeArtifact({
-    digest,
-    policyVersion: STANDING_FEE_POLICY_VERSION,
-    sourceUrl: CANONICAL_FEE_SCHEDULE_URL,
-    formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
-  }, fetchImpl);
-  if (!verified.valid || verified.digest !== digest) {
-    return { ok: false, reason: verified.reason ?? "official_fee_schedule_not_verified", diagnostic };
+  return {
+    ok: true,
+    digest: createHash("sha256").update(bytes).digest("hex"),
+    diagnostic,
+  };
+}
+
+function pdfEnvelopeRejected(bytes: Buffer): boolean {
+  return bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
+    bytes.subarray(0, 5).toString() !== "%PDF-" ||
+    !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"));
+}
+
+/**
+ * Hash the official PDF from one GET after the reviewed parser accepts it.
+ * A 429 may wait once, and only when Retry-After is at most 15 seconds.
+ */
+export async function establishOfficialFeeDigest(
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<{ ok: true; digest: string; diagnostic: OfficialFeeFetchDiagnostic } |
+  { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic }> {
+  let failure: { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic } | null = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchOfficialFeeSchedule(fetchImpl);
+    } catch {
+      return {
+        ok: false,
+        reason: "official_fee_schedule_unavailable",
+        diagnostic: { ...EMPTY_FEE_FETCH, networkAttempts: attempt },
+      };
+    }
+    const validated = await validateFetchedOfficialFeePdf(response, attempt);
+    if (validated.ok) return validated;
+    failure = validated;
+    const wait = validated.diagnostic.retryAfterSeconds;
+    if (attempt !== 1 || validated.reason !== "official_fee_schedule_http_429" ||
+        wait === null || wait > MAX_FEE_429_RETRY_SECONDS) {
+      return validated;
+    }
+    await delay(wait * 1000);
   }
-  return { ok: true, digest, diagnostic };
+  return failure ?? {
+    ok: false,
+    reason: "official_fee_schedule_unavailable",
+    diagnostic: { ...EMPTY_FEE_FETCH, networkAttempts: 2 },
+  };
 }

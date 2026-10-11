@@ -281,6 +281,8 @@ function memoryPort(initial: CommissioningSnapshot) {
             contentType: null,
             finalOrigin: null,
             finalPathname: null,
+            retryAfterSeconds: null,
+            networkAttempts: 0,
           },
         };
       }
@@ -295,6 +297,8 @@ function memoryPort(initial: CommissioningSnapshot) {
           contentType: "application/pdf",
           finalOrigin: "https://kalshi.com",
           finalPathname: "/docs/kalshi-fee-schedule.pdf",
+          retryAfterSeconds: null,
+          networkAttempts: 1,
         },
       };
     },
@@ -2456,6 +2460,7 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
     "official_fee_schedule_formula_unverifiable",
     "official_fee_schedule_not_verified",
     "official_fee_schedule_http_429",
+    "official_fee_schedule_redirected",
   ]) {
     assert.equal(publicFeeVerificationReason(reason), reason);
   }
@@ -2477,6 +2482,9 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
   assert.equal(body.includes("contentType: established.diagnostic.contentType"), true);
   assert.equal(body.includes("finalOrigin: established.diagnostic.finalOrigin"), true);
   assert.equal(body.includes("finalPathname: established.diagnostic.finalPathname"), true);
+  assert.equal(body.includes("retryAfterSeconds: established.diagnostic.retryAfterSeconds"), true);
+  assert.equal(body.includes("networkAttempts: established.diagnostic.networkAttempts"), true);
+  assert.equal(body.includes("verifyCurrentFeeArtifact"), false);
   const successReturn = body.slice(body.indexOf("ok: true"), body.indexOf("digestStored: false"));
   assert.equal(successReturn.includes("digest: established.digest"), false);
   assert.equal(body.includes("postOneShotPairFunding"), false);

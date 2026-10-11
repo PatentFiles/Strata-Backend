@@ -262,11 +262,19 @@ function assertSanitizedFeeResult(value: { diagnostic: { finalPathname: string |
 
 test("200 application/pdf is not approval until the reviewed parser accepts the formula", async () => {
   const bytes = examplePdf("Kalshi document without a trading fee formula.");
-  const result = await establishOfficialFeeDigest(mockFeeResponse({
-    contentType: "application/pdf",
-    body: bytes,
-    url: "https://kalshi.com/docs/kalshi-fee-schedule.pdf?token=secret-token#fragment",
-  }));
+  let calls = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls += 1;
+    assert.equal(String(input), CANONICAL_FEE_SCHEDULE_URL);
+    assert.equal(init?.method, "GET");
+    return mockFeeResponse({
+      contentType: "application/pdf",
+      body: bytes,
+      url: CANONICAL_FEE_SCHEDULE_URL,
+    })(input, init);
+  }) as typeof fetch;
+  const result = await establishOfficialFeeDigest(fetchImpl);
+  assert.equal(calls, 1);
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.reason, "official_fee_schedule_formula_unverifiable");
@@ -274,6 +282,8 @@ test("200 application/pdf is not approval until the reviewed parser accepts the 
   assert.equal(result.diagnostic.contentType, "application/pdf");
   assert.equal(result.diagnostic.finalOrigin, "https://kalshi.com");
   assert.equal(result.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+  assert.equal(result.diagnostic.networkAttempts, 1);
+  assert.equal("digest" in result, false);
   assertSanitizedFeeResult(result);
 });
 
@@ -365,7 +375,7 @@ test("official fee fetch rejects an oversized body and an invalid PDF", async ()
   }
 });
 
-test("official fee fetch stores a digest only after the reviewed parser and second verification agree", async () => {
+test("one successful verification parses and hashes the same PDF bytes from one GET", async () => {
   let calls = 0;
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     calls += 1;
@@ -373,13 +383,15 @@ test("official fee fetch stores a digest only after the reviewed parser and seco
     assert.equal(init?.method, "GET");
     assert.equal(init?.redirect, "error");
     assert.equal(init?.credentials, undefined);
+    assert.equal(String(input).includes("/portfolio/"), false);
+    assert.equal(String(input).includes("/trade-api/"), false);
     return new Response(new Uint8Array(pdf), {
       status: 200,
       headers: { "content-type": "application/pdf", "content-length": String(pdf.length) },
     });
   }) as typeof fetch;
   const result = await establishOfficialFeeDigest(fetchImpl);
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.digest, digest);
@@ -387,5 +399,146 @@ test("official fee fetch stores a digest only after the reviewed parser and seco
   assert.equal(result.diagnostic.contentType, "application/pdf");
   assert.equal(result.diagnostic.finalOrigin, "https://kalshi.com");
   assert.equal(result.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+  assert.equal(result.diagnostic.retryAfterSeconds, null);
+  assert.equal(result.diagnostic.networkAttempts, 1);
   assert.equal(JSON.stringify(result.diagnostic).includes("%PDF"), false);
+  const source = readFileSync("src/lib/microLiveFeeArtifact.ts", "utf8");
+  const establish = source.slice(source.indexOf("export async function establishOfficialFeeDigest"));
+  assert.equal(establish.includes("verifyCurrentFeeArtifact"), false);
+  assert.equal(establish.includes("/portfolio/"), false);
+  assert.equal(establish.includes("/trade-api/"), false);
+  assert.equal(establish.includes('method: "POST"'), false);
+  assert.equal(establish.includes('method: "DELETE"'), false);
+});
+
+function sequencedFeeFetch(steps: Array<{
+  status: number;
+  contentType?: string;
+  body?: Uint8Array;
+  retryAfter?: string;
+  url?: string;
+}>): { fetch: typeof fetch; calls: () => number } {
+  let calls = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls += 1;
+    assert.equal(String(input), CANONICAL_FEE_SCHEDULE_URL);
+    assert.equal(init?.method, "GET");
+    assert.equal(init?.redirect, "error");
+    assert.equal(init?.credentials, undefined);
+    assert.equal(String(input).includes("/portfolio/"), false);
+    const step = steps[calls - 1] ?? steps[steps.length - 1]!;
+    const response = new Response(step.body ? new Uint8Array(step.body) : null, {
+      status: step.status,
+      headers: {
+        ...(step.contentType ? { "content-type": step.contentType } : {}),
+        ...(step.retryAfter !== undefined ? { "retry-after": step.retryAfter } : {}),
+        "set-cookie": "session=secret-cookie",
+        "x-request-token": "secret-token",
+      },
+    });
+    if (step.url !== undefined) Object.defineProperty(response, "url", { value: step.url });
+    return response;
+  }) as typeof fetch;
+  return { fetch: fetchImpl, calls: () => calls };
+}
+
+test("429 without Retry-After performs one GET and stores nothing", async () => {
+  const observed = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain", body: new TextEncoder().encode("BODY-SECRET-MARKER"), retryAfter: "secret-token" },
+  ]);
+  const result = await establishOfficialFeeDigest(observed.fetch);
+  assert.equal(observed.calls(), 1);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "official_fee_schedule_http_429");
+  assert.equal(result.diagnostic.httpStatus, 429);
+  assert.equal(result.diagnostic.contentType, "text/plain");
+  assert.equal(result.diagnostic.retryAfterSeconds, null);
+  assert.equal(result.diagnostic.networkAttempts, 1);
+  assert.equal("digest" in result, false);
+  assertSanitizedFeeResult(result);
+
+  const absent = sequencedFeeFetch([{ status: 429, contentType: "text/plain" }]);
+  const plain = await establishOfficialFeeDigest(absent.fetch);
+  assert.equal(absent.calls(), 1);
+  assert.equal(plain.ok, false);
+  if (!plain.ok) assert.equal(plain.diagnostic.retryAfterSeconds, null);
+});
+
+test("429 with a short Retry-After retries once and stores a digest only when the PDF validates", async () => {
+  const recovered = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain", retryAfter: "0" },
+    { status: 200, contentType: "application/pdf", body: pdf, url: CANONICAL_FEE_SCHEDULE_URL },
+  ]);
+  const success = await establishOfficialFeeDigest(recovered.fetch);
+  assert.equal(recovered.calls(), 2);
+  assert.equal(success.ok, true);
+  if (!success.ok) return;
+  assert.equal(success.digest, digest);
+  assert.equal(success.diagnostic.httpStatus, 200);
+  assert.equal(success.diagnostic.contentType, "application/pdf");
+  assert.equal(success.diagnostic.retryAfterSeconds, null);
+  assert.equal(success.diagnostic.networkAttempts, 2);
+
+  const blocked = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain", retryAfter: "0" },
+    { status: 429, contentType: "text/plain", retryAfter: "0", body: new TextEncoder().encode("BODY-SECRET-MARKER") },
+  ]);
+  const second = await establishOfficialFeeDigest(blocked.fetch);
+  assert.equal(blocked.calls(), 2);
+  assert.equal(second.ok, false);
+  if (second.ok) return;
+  assert.equal(second.reason, "official_fee_schedule_http_429");
+  assert.equal(second.diagnostic.retryAfterSeconds, 0);
+  assert.equal(second.diagnostic.networkAttempts, 2);
+  assert.equal("digest" in second, false);
+  assertSanitizedFeeResult(second);
+
+  const later = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain", retryAfter: "16" },
+  ]);
+  const deferred = await establishOfficialFeeDigest(later.fetch);
+  assert.equal(later.calls(), 1);
+  assert.equal(deferred.ok, false);
+  if (!deferred.ok) {
+    assert.equal(deferred.diagnostic.retryAfterSeconds, 16);
+    assert.equal(deferred.diagnostic.networkAttempts, 1);
+    assert.equal("digest" in deferred, false);
+  }
+});
+
+test("redirect mismatch and a changed PDF block without another GET", async () => {
+  const redirected = sequencedFeeFetch([{
+    status: 200,
+    contentType: "application/pdf",
+    body: pdf,
+    url: "https://example.com/docs/kalshi-fee-schedule.pdf?token=secret-token",
+  }]);
+  const mismatch = await establishOfficialFeeDigest(redirected.fetch);
+  assert.equal(redirected.calls(), 1);
+  assert.equal(mismatch.ok, false);
+  if (!mismatch.ok) {
+    assert.equal(mismatch.reason, "official_fee_schedule_redirected");
+    assert.equal(mismatch.diagnostic.finalOrigin, "https://example.com");
+    assert.equal(mismatch.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+    assert.equal("digest" in mismatch, false);
+    assertSanitizedFeeResult(mismatch);
+  }
+
+  const changedPdf = examplePdf(
+    "Kalshi Fee Schedule Effective July 7, 2026 General Trading Fees. The standard fee applies to all markets. Standard quadratic taker fee = 0.08 x contracts x price x 1 - price",
+  );
+  const changed = sequencedFeeFetch([{
+    status: 200,
+    contentType: "application/pdf",
+    body: changedPdf,
+    url: CANONICAL_FEE_SCHEDULE_URL,
+  }]);
+  const rejected = await establishOfficialFeeDigest(changed.fetch);
+  assert.equal(changed.calls(), 1);
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) {
+    assert.equal(rejected.reason, "official_fee_schedule_formula_unverifiable");
+    assert.equal("digest" in rejected, false);
+  }
 });

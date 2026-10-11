@@ -79,6 +79,8 @@ function blockedCommissioningPort(): CommissioningPort {
         contentType: null,
         finalOrigin: null,
         finalPathname: null,
+        retryAfterSeconds: null,
+        networkAttempts: 0,
       },
     }),
     verifyCash: read,
