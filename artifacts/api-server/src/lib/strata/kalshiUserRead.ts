@@ -1,3 +1,4 @@
+import { reviewedKalshiCents } from "../kalshiAccountClient";
 import { predictionsApiTier } from "../kalshiSubaccountInventory";
 
 export const BOT_SUBACCOUNT = 1;
@@ -25,26 +26,15 @@ export interface KalshiUserRead {
   withdrawals: unknown[];
 }
 
-function centsFromDollars(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value * 100);
-  if (typeof value !== "string" || !/^-?\d+(?:\.\d+)?$/.test(value)) return null;
-  const negative = value.startsWith("-");
-  const [whole, fraction = ""] = value.replace("-", "").split(".");
-  const cents = Number(whole) * 100 + Number((fraction + "00").slice(0, 2));
-  if (!Number.isSafeInteger(cents)) return null;
-  return negative ? -cents : cents;
-}
-
-/** Documented Kalshi balance fields only. Unknown keys are dropped. */
+/** Documented Kalshi balance fields only. Dollar strings win; integer fields are cents. */
 export function normalizeKalshiMoney(payload: unknown): KalshiMoney {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { cashCents: null, portfolioValueCents: null };
   }
   const row = payload as Record<string, unknown>;
-  const cash = row.balance_dollars ?? row.balance;
   return {
-    cashCents: centsFromDollars(cash),
-    portfolioValueCents: centsFromDollars(row.portfolio_value),
+    cashCents: reviewedKalshiCents(row, ["balance_dollars"], ["balance"]),
+    portfolioValueCents: reviewedKalshiCents(row, ["portfolio_value_dollars"], ["portfolio_value"]),
   };
 }
 

@@ -61,6 +61,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS v13_live_money_policy_one_approved_per_account
 ALTER TABLE strata_configured_stake
   ADD COLUMN IF NOT EXISTS execution_account_id text;
 
+ALTER TABLE v13_production_account
+  ALTER COLUMN policy_id DROP NOT NULL;
+
+ALTER TABLE v13_production_account
+  DROP CONSTRAINT IF EXISTS v13_production_account_authority;
+
+ALTER TABLE v13_production_account
+  ADD CONSTRAINT v13_production_account_authority CHECK (
+    NOT commissioned OR (
+      policy_id IS NOT NULL AND
+      commissioning_digest IS NOT NULL AND
+      commissioning_digest ~ '^[0-9a-f]{64}$' AND
+      minimum_exit_micros IS NOT NULL AND
+      minimum_exit_micros BETWEEN 1 AND 999999
+    )
+  );
+
 ALTER TABLE strata_configured_stake
   DROP CONSTRAINT IF EXISTS strata_configured_stake_singleton;
 
@@ -79,7 +96,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS strata_configured_stake_account
   ON strata_configured_stake (execution_account_id)
   WHERE execution_account_id IS NOT NULL;
 
-ALTER TABLE public.financial_accounts
+-- Authoritative bot capability stays on the server-only Vault connection.
+-- verified_at and key_fingerprint already live on this table.
+-- public.financial_accounts remains client-readable and is not an execution authority store.
+ALTER TABLE private.provider_connections
   ADD COLUMN IF NOT EXISTS api_usage_tier text,
   ADD COLUMN IF NOT EXISTS bot_eligible boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS bot_eligibility_reason text;
@@ -115,5 +135,20 @@ CREATE TABLE IF NOT EXISTS v13_shared_preset (
     revision >= 1
   )
 );
+
+ALTER TABLE v13_shared_preset ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE v13_shared_preset FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON TABLE v13_shared_preset FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON TABLE v13_shared_preset FROM authenticated';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'REVOKE ALL ON TABLE v13_shared_preset FROM service_role';
+  END IF;
+END $$;
 
 COMMIT;

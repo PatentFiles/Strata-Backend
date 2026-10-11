@@ -403,8 +403,32 @@ function isAllowedGetPath(path: string): boolean {
     path === `${API_PREFIX}/historical/orders` ||
     path === `${API_PREFIX}/historical/fills` ||
     path === `${API_PREFIX}/api_keys` ||
+    path === `${API_PREFIX}/account/limits` ||
     /^\/trade-api\/v2\/markets\/[^/]+$/.test(path) ||
     /^\/trade-api\/v2\/markets\/[^/]+\/orderbook$/.test(path);
+}
+
+export async function getScopedKalshiJson(
+  creds: { keyId: string; privateKey: string },
+  path: string,
+  query = "",
+  fetchImpl: typeof fetch = fetch,
+): Promise<unknown> {
+  if (!isAllowedGetPath(path)) throw new KalshiApiError("INVALID_RESPONSE");
+  const timestamp = Date.now().toString();
+  const signature = signRequest(creds, "GET", path, timestamp);
+  const response = await fetchImpl(`${baseUrl()}${path}${query}`, {
+    method: "GET",
+    cache: "no-store",
+    headers: {
+      Accept: "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE": signature,
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    },
+  });
+  if (!response.ok) throw new KalshiApiError("HTTP_ERROR", response.status);
+  return await response.json() as unknown;
 }
 
 async function getJson(path: string, query = "", signal?: AbortSignal): Promise<unknown> {
@@ -746,6 +770,32 @@ function dollarsOrCents(
 ): string | null {
   const dollars = firstDecimal(source, dollarKeys);
   return dollars !== null ? dollars : centsToDollars(firstDecimal(source, centKeys));
+}
+
+function exactDollarStringToCents(dollars: string): number | null {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(dollars);
+  if (!match) return null;
+  const fraction = match[3] ?? "";
+  if ([...fraction.slice(2)].some((digit) => digit !== "0")) return null;
+  const cents = BigInt(match[2]!) * 100n + BigInt((fraction + "00").slice(0, 2));
+  const signed = match[1] === "-" ? -cents : cents;
+  if (signed > BigInt(Number.MAX_SAFE_INTEGER) || signed < -BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(signed);
+}
+
+/** Fixed-point dollar fields win. Integer fields are already cents. Malformed values are null. */
+export function reviewedKalshiCents(
+  source: Record<string, unknown>,
+  dollarKeys: string[],
+  centKeys: string[],
+): number | null {
+  try {
+    const dollars = dollarsOrCents(source, dollarKeys, centKeys);
+    if (dollars === null) return null;
+    return exactDollarStringToCents(dollars);
+  } catch {
+    return null;
+  }
 }
 
 function dateString(source: JsonObject, keys: string[]): string | null {

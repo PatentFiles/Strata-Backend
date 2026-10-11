@@ -8,7 +8,7 @@ export const v13ProductionAccountTable = pgTable("v13_production_account", {
   id: text("id").primaryKey(),
   ownerUserId: uuid("owner_user_id"),
   kalshiConnectionId: uuid("kalshi_connection_id"),
-  policyId: text("policy_id").notNull().references(() => v13LiveMoneyPolicyTable.id),
+  policyId: text("policy_id").references(() => v13LiveMoneyPolicyTable.id),
   subaccount: bigint("subaccount", { mode: "number" }).notNull(),
   exchangeIndex: bigint("exchange_index", { mode: "number" }).notNull(),
   keyFingerprint: text("key_fingerprint").notNull(),
@@ -32,7 +32,7 @@ export const v13ProductionAccountTable = pgTable("v13_production_account", {
   check("v13_production_account_pair_check", sql`${t.subaccount}=1 AND ${t.exchangeIndex}=2`),
   check("v13_production_account_fingerprint", sql`${t.keyFingerprint} ~ '^[0-9a-f]{64}$'`),
   check("v13_production_account_cash", sql`${t.cashMicros}>=0 AND ${t.reservedMicros}>=0 AND ${t.reservedMicros}<=${t.cashMicros}`),
-  check("v13_production_account_authority", sql`NOT ${t.commissioned} OR (${t.commissioningDigest} IS NOT NULL AND ${t.commissioningDigest} ~ '^[0-9a-f]{64}$' AND ${t.minimumExitMicros} IS NOT NULL AND ${t.minimumExitMicros} BETWEEN 1 AND 999999)`),
+  check("v13_production_account_authority", sql`NOT ${t.commissioned} OR (${t.policyId} IS NOT NULL AND ${t.commissioningDigest} IS NOT NULL AND ${t.commissioningDigest} ~ '^[0-9a-f]{64}$' AND ${t.minimumExitMicros} IS NOT NULL AND ${t.minimumExitMicros} BETWEEN 1 AND 999999)`),
 ]);
 
 export const v13ProductionIntentTable = pgTable("v13_production_intent", {

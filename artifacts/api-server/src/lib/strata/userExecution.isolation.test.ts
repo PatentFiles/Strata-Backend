@@ -219,7 +219,7 @@ test("credential ciphertext is not a public field and Kalshi reads do not invent
     credentialVerified: true,
     limits: { usage_tier: "basic" },
     numberedSubaccountAvailable: false,
-    primary: { balance_dollars: "12.34", portfolio_value: "15.00", kyc_pending: true, withdrawable: "9.00" },
+    primary: { balance_dollars: "12.34", portfolio_value_dollars: "15.00", portfolio_value: 999999, kyc_pending: true, withdrawable: "9.00" },
     botSubaccount: null,
     activity: { positions: [{ ticker: "KXBTC15M", privateKey: "nope" }] },
   });
@@ -232,7 +232,19 @@ test("credential ciphertext is not a public field and Kalshi reads do not invent
   assert.equal(JSON.stringify(basic).includes("withdrawable"), false);
   assert.equal(JSON.stringify(basic).includes("availableToTrade"), false);
   assert.equal(basic.positions[0] && "privateKey" in (basic.positions[0] as object), false);
-  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "1.00", portfolio_value: "2.00" }), { cashCents: 100, portfolioValueCents: 200 });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "1.00", portfolio_value_dollars: "2.00", portfolio_value: 999999 }), { cashCents: 100, portfolioValueCents: 200 });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "0" }), { cashCents: 0, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "0.01" }), { cashCents: 1, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "25.0000" }), { cashCents: 2500, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance: 2500 }), { cashCents: 2500, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "200.00" }), { cashCents: 20000, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "5000.00" }), { cashCents: 500000, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ portfolio_value_dollars: "12.3400" }), { cashCents: null, portfolioValueCents: 1234 });
+  assert.deepEqual(normalizeKalshiMoney({ portfolio_value: 1234 }), { cashCents: null, portfolioValueCents: 1234 });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "25.0000", balance: 1 }), { cashCents: 2500, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance: "25.00" }), { cashCents: null, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "nope", portfolio_value: "12.34" }), { cashCents: null, portfolioValueCents: null });
+  assert.deepEqual(normalizeKalshiMoney({ balance_dollars: "900719925474099.00" }), { cashCents: null, portfolioValueCents: null });
   const missing = emptyUserExecutionView(USER_A);
   assert.equal(missing.executionAccountExists, false);
   assert.equal(missing.botCashCents, null);
@@ -260,5 +272,10 @@ test("user-scope migration is additive and does not rewrite the legacy account",
   assert.equal(sql.includes("INSERT INTO v13_live_money_policy"), false);
   assert.match(sql, /owner_user_id uuid/);
   assert.match(sql, /v13_shared_preset/);
+  assert.match(sql, /ALTER COLUMN policy_id DROP NOT NULL/);
+  assert.match(sql, /policy_id IS NOT NULL/);
+  assert.match(sql, /private\.provider_connections/);
+  assert.match(sql, /REVOKE ALL ON TABLE v13_shared_preset FROM PUBLIC/);
+  assert.equal(/ALTER TABLE public\.financial_accounts[\s\S]*bot_eligible/.test(sql), false);
   assert.equal(sql.includes("live_execution_enabled = true"), false);
 });

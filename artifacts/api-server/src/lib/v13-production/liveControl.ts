@@ -153,7 +153,7 @@ export async function readProductionStatus(control: ProductionView) {
   const view = control.view();
   const account = await accountRow().catch(() => null);
   let maxEntryStakeCents: number | null = null;
-  if (account) {
+  if (account?.policyId) {
     const [policy] = await db.select({
       maxEntryStakeCents: v13LiveMoneyPolicyTable.maxEntryStakeCents,
     }).from(v13LiveMoneyPolicyTable).where(eq(v13LiveMoneyPolicyTable.id, account.policyId)).limit(1);

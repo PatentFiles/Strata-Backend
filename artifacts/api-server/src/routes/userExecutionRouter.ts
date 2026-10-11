@@ -6,6 +6,7 @@ import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
 
 export interface UserScopePort {
+  migrationReady(): Promise<boolean>;
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
   control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
@@ -21,6 +22,7 @@ export interface UserScopePort {
 export function closedUserScopePort(): UserScopePort {
   const refused = async (userId: string) => ({ ok: false, reason: "user_scope_not_migrated", view: emptyUserExecutionView(userId) });
   return {
+    migrationReady: async () => false,
     settings: async (userId) => emptyUserExecutionView(userId),
     wallet: async () => emptyKalshiUserRead(),
     control: async (userId) => refused(userId),
@@ -47,9 +49,19 @@ function ignoreForeignOwner(body: unknown): void {
 export function createUserExecutionRouter(requireUser: RequestHandler, port: UserScopePort): IRouter {
   const router: IRouter = Router();
   router.use(requireUser);
+  const migrated = async (res: { status: (code: number) => { json: (body: unknown) => void } }) => {
+    try {
+      if (await port.migrationReady()) return true;
+    } catch {
+      // A missing schema is a closed scope, not a process failure.
+    }
+    res.status(409).json({ error: "user_scope_not_migrated" });
+    return false;
+  };
   router.get("/bot-settings", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    if (!await migrated(res)) return;
     res.json(sanitizePublic(await port.settings(userId)));
   });
   router.get("/wallet", async (_req, res) => {
@@ -61,6 +73,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
     const action = req.body?.action;
     if (action !== "ARM" && action !== "DISARM" && action !== "START" && action !== "STOP" && action !== "KILL") {
       return void res.status(400).json({ error: "control_action_invalid" });
@@ -72,6 +85,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
     const cents = req.body?.configuredStakeCents;
     const revision = req.body?.revision ?? null;
     if (typeof cents !== "number") return void res.status(400).json({ error: "stake_cents_not_integer" });
@@ -81,12 +95,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   router.get("/presets", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    if (!await migrated(res)) return;
     res.json(sanitizePublic({ presets: await port.presets(userId) }));
   });
   router.post("/presets", async (req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
     const result = await port.savePreset(userId, req.body ?? {});
     res.status(result.ok ? 200 : 400).json(sanitizePublic(result));
   });
@@ -94,12 +110,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
     const result = await port.updatePreset(userId, String(req.params.id), req.body ?? {});
     res.status(result.ok ? 200 : 403).json(sanitizePublic(result));
   });
   router.delete("/presets/:id", async (req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    if (!await migrated(res)) return;
     const result = await port.deletePreset(userId, String(req.params.id));
     res.status(result.ok ? 200 : 403).json(sanitizePublic(result));
   });
@@ -107,6 +125,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
     const result = await port.applyPreset(userId, String(req.params.id));
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
