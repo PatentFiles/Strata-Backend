@@ -35,8 +35,11 @@ import {
   type SubaccountIdentity,
   planCommission,
   planDisarm,
+  PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
   blockingSubaccountTransferDetail,
   policyReadFromRows,
+  provePreBoundaryRoundTrip,
+  selectBlockingCleanReasons,
   validatePolicyLimits,
   type AccountPlan,
   type CommissioningSnapshot,
@@ -451,6 +454,26 @@ function memoryPort(initial: CommissioningSnapshot) {
       snapshot.account.killSwitch = true;
       return { status: "DISARMED", reason: decision.reason, emergencyStop: false };
     },
+    acknowledgePreBoundaryRoundTrip: async (confirmation: unknown) => ({
+      status: "BLOCKED" as const,
+      reason: confirmation === "ACKNOWLEDGE_INTENTIONAL_PRE_BOUNDARY_25_ROUND_TRIP"
+        ? "pre_boundary_round_trip_unproven"
+        : "explicit_pre_boundary_round_trip_confirmation_required",
+      acknowledged: false,
+      eligible: false,
+      inboundTransferId: null,
+      outboundTransferId: null,
+      amountCents: null,
+      inboundCreatedAt: null,
+      outboundCreatedAt: null,
+      evidenceDigest: null,
+      calls: [] as Array<{ method: "GET" | "POST" | "DELETE"; path: string }>,
+      funded: false as const,
+      commissioned: false as const,
+      armed: false as const,
+      workerStarted: false as const,
+      executionFlagsChanged: false as const,
+    }),
   };
   return {
     port,
@@ -1632,6 +1655,122 @@ test("partial blocking transfer keeps its identity when amount and status are ab
   });
   assert.equal(JSON.stringify(detail).includes("must-not-leak"), false);
   assert.equal(JSON.stringify(detail).includes("11111111"), false);
+});
+
+test("intentional pre-boundary $25 round trip is acknowledged only for its two transfers", () => {
+  const inboundId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const created = "2026-10-10T16:24:20.000Z";
+  const leg = (id: string, from: number, to: number, cents = 2500, exchange = 2) => ({
+    feed: "subaccount_transfer",
+    id,
+    classification: "pair",
+    occurredAt: created,
+    details: {
+      from_subaccount: String(from),
+      to_subaccount: String(to),
+      exchange_index: String(exchange),
+      amount_cents: String(cents),
+      created_ts: created,
+    },
+  });
+  const inbound = leg(inboundId, 0, 1);
+  const outbound = leg(PRE_BOUNDARY_OUTBOUND_TRANSFER_ID, 1, 0);
+  const exact = {
+    availableCashMicros: "0" as const,
+    inventoryCashMicros: "0" as const,
+    portfolioValueMicros: "0" as const,
+    zeroPositions: true,
+    zeroOrders: true,
+    zeroFills: true,
+    zeroSettlements: true,
+    reasons: [
+      `clean_prior_subaccount_transfer:${inboundId}`,
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_OUTBOUND_TRANSFER_ID}`,
+    ],
+    records: [inbound, outbound],
+  };
+  const reasonOf = (result: { ok: true } | { ok: false; reason: string }) => result.ok ? "" : result.reason;
+  const proven = provePreBoundaryRoundTrip(exact);
+  assert.equal(proven.ok, true);
+  if (!proven.ok) return;
+  assert.equal(proven.roundTrip.inboundTransferId, inboundId);
+  assert.equal(proven.roundTrip.outboundTransferId, PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+  assert.equal(proven.roundTrip.amountCents, 2500);
+  assert.match(proven.roundTrip.evidenceDigest, /^[0-9a-f]{64}$/);
+  assert.equal(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [leg(inboundId, 0, 1), leg("bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee", 1, 0)],
+  }).ok, false);
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [outbound],
+  })), "pre_boundary_inbound_transfer_not_proven");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [inbound, outbound, leg("cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee", 0, 1)],
+  })), "pre_boundary_inbound_transfer_not_proven");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [leg(inboundId, 0, 1, 2499), outbound],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [leg(inboundId, 0, 1, 2500, 0), outbound],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [leg(inboundId, 2, 1), outbound],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({
+    ...exact,
+    records: [inbound, outbound, leg("dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee", 1, 0, 100)],
+  })), "pre_boundary_unrecognized_transfer");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, zeroOrders: false })), "pre_boundary_order_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, zeroPositions: false })), "pre_boundary_position_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, zeroFills: false })), "pre_boundary_fill_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, zeroSettlements: false })), "pre_boundary_settlement_present");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, availableCashMicros: "1" })), "pre_boundary_available_cash_not_zero");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, inventoryCashMicros: "1" })), "pre_boundary_inventory_cash_not_zero");
+  assert.equal(reasonOf(provePreBoundaryRoundTrip({ ...exact, portfolioValueMicros: "1" })), "pre_boundary_portfolio_value_not_zero");
+  const acknowledged = {
+    inboundTransferId: proven.roundTrip.inboundTransferId,
+    outboundTransferId: proven.roundTrip.outboundTransferId,
+  };
+  const later = "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const waived = selectBlockingCleanReasons([
+    ...exact.reasons,
+    `clean_prior_subaccount_transfer:${later}`,
+  ], acknowledged);
+  assert.deepEqual(waived, [`clean_prior_subaccount_transfer:${later}`]);
+  assert.deepEqual(selectBlockingCleanReasons(exact.reasons, null), exact.reasons);
+  const changed = provePreBoundaryRoundTrip({
+    ...exact,
+    records: [leg(inboundId, 0, 1), { ...outbound, occurredAt: "2026-10-10T16:24:21.000Z", details: { ...outbound.details, created_ts: "2026-10-10T16:24:21.000Z" } }],
+  });
+  assert.equal(changed.ok, true);
+  if (changed.ok) assert.notEqual(changed.roundTrip.evidenceDigest, proven.roundTrip.evidenceDigest);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(store.indexOf("async function acknowledgePreBoundaryRoundTrip"), store.indexOf("async function fundRailwayPair"));
+  assert.equal(body.includes("captureCleanPairSnapshot"), true);
+  assert.equal(body.includes("INSERT INTO strata_pre_boundary_transfer_acknowledgment"), true);
+  assert.equal(body.includes("pre_boundary_round_trip_already_acknowledged"), true);
+  assert.equal(body.includes('method: "POST"'), false);
+  assert.equal(body.includes("postOneShotPairFunding"), false);
+  assert.equal(body.includes("planCommission"), false);
+  assert.equal(body.includes("planArm"), false);
+  assert.equal(body.includes("/portfolio/orders"), false);
+  assert.equal(body.includes("LIVE_EXECUTION_ENABLED"), false);
+  const account = readFileSync("src/lib/kalshiAccountClient.ts", "utf8");
+  const digestAt = account.indexOf("const evidenceDigest = clean ? digestOf({");
+  const digest = account.slice(digestAt, account.indexOf("}) : null;", digestAt));
+  assert.equal(digest.includes("acknowledgedPreBoundaryRoundTrip"), true);
+  assert.equal(digest.includes("inboundTransferId"), true);
+  assert.equal(digest.includes("outboundTransferId"), true);
+  assert.equal(digest.includes("evidenceDigest"), true);
+  const migration = readFileSync("../../lib/db/drizzle/0006_strata_pre_boundary_transfer_acknowledgment.sql", "utf8");
+  assert.equal(migration.includes("UNIQUE (round_trip_key)"), true);
+  assert.equal(migration.includes("DELETE"), false);
+  assert.equal(migration.includes("private_key"), false);
 });
 
 test("policy read returns draft limits and approval state without raw policy rows", () => {

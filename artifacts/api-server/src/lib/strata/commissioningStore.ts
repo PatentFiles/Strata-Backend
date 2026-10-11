@@ -28,8 +28,12 @@ import {
   REVIEWED_FUNDING_CENTS,
   REVIEWED_FUNDING_MICROS,
   OPERATOR_POLICY_FIELDS,
+  PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+  PRE_BOUNDARY_ROUND_TRIP_CENTS,
+  PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION,
   blockingSubaccountTransferDetail,
   dedicatedSignerFingerprint,
+  provePreBoundaryRoundTrip,
   EXIT_FLOOR_CONFIRMATION,
   approvedExitFloor,
   emptySnapshot,
@@ -256,6 +260,8 @@ export async function readCommissioningSnapshot(
     snapshot.openPositionCount = 0;
     snapshot.unresolvedIntentCount = 0;
   }
+  snapshot.preBoundaryRoundTripAcknowledged = (await readStoredRoundTrip()) !== null;
+  snapshot.preBoundaryRoundTripEligibleForAcknowledgment = false;
   return snapshot;
 }
 
@@ -312,20 +318,65 @@ async function currentIndex2Ticker(): Promise<string> {
   return String(current[0]!.ticker);
 }
 
+async function readStoredRoundTrip(): Promise<{
+  id: string;
+  inboundTransferId: string;
+  outboundTransferId: string;
+  evidenceDigest: string;
+} | null> {
+  try {
+    const rows = await query(`SELECT id, inbound_transfer_id, outbound_transfer_id, evidence_digest
+      FROM strata_pre_boundary_transfer_acknowledgment
+      WHERE state = 'ACKNOWLEDGED' LIMIT 2`);
+    if (rows.rows.length !== 1) return null;
+    const row = rows.rows[0]!;
+    if (row.outbound_transfer_id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID) return null;
+    if (typeof row.inbound_transfer_id !== "string" || typeof row.id !== "string") return null;
+    if (typeof row.evidence_digest !== "string" || !/^[0-9a-f]{64}$/.test(row.evidence_digest)) return null;
+    return {
+      id: row.id,
+      inboundTransferId: row.inbound_transfer_id,
+      outboundTransferId: PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+      evidenceDigest: row.evidence_digest,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function captureRailwayBoundary(workerRunning: () => boolean) {
   try {
     const ticker = await currentIndex2Ticker();
-    const snapshot = await captureCleanPairSnapshot(PRODUCTION_SUBACCOUNT, ticker, { creationBoundary: true });
+    const acknowledgedRoundTrip = await readStoredRoundTrip();
+    const snapshot = await captureCleanPairSnapshot(PRODUCTION_SUBACCOUNT, ticker, {
+      creationBoundary: true,
+      acknowledgedRoundTrip,
+    });
+    const historyClear = snapshot.zeroPriorPairTransfers || snapshot.preBoundaryRoundTripSatisfied === true;
     const clean = snapshot.status === "clean" && snapshot.reasons.length === 0 &&
       snapshot.availableCashMicros === "0" && snapshot.inventoryCashMicros === "0" &&
       snapshot.zeroOrders && snapshot.zeroPositions && snapshot.zeroFills &&
-      snapshot.zeroSettlements &&       snapshot.zeroPriorPairTransfers && snapshot.portfolioValueMicros === "0" &&
+      snapshot.zeroSettlements && historyClear && snapshot.portfolioValueMicros === "0" &&
       snapshot.pair.subaccountNumber === 1 && snapshot.pair.exchangeIndex === 2 &&
       typeof snapshot.evidenceDigest === "string" && /^[0-9a-f]{64}$/.test(snapshot.evidenceDigest);
     if (!clean || !snapshot.evidenceDigest) {
       const reason = snapshot.reasons[0] ?? "clean_boundary_not_proven";
+      const proof = provePreBoundaryRoundTrip({
+        availableCashMicros: snapshot.availableCashMicros,
+        inventoryCashMicros: snapshot.inventoryCashMicros,
+        portfolioValueMicros: snapshot.portfolioValueMicros ?? null,
+        zeroPositions: snapshot.zeroPositions,
+        zeroOrders: snapshot.zeroOrders,
+        zeroFills: snapshot.zeroFills,
+        zeroSettlements: snapshot.zeroSettlements,
+        reasons: snapshot.reasons,
+        records: snapshot.records,
+      });
+      const published = await readCommissioningSnapshot(workerRunning());
+      published.preBoundaryRoundTripAcknowledged = acknowledgedRoundTrip !== null;
+      published.preBoundaryRoundTripEligibleForAcknowledgment = acknowledgedRoundTrip === null && proof.ok;
       return {
-        snapshot: await readCommissioningSnapshot(workerRunning()),
+        snapshot: published,
         calls: BOUNDARY_GETS,
         blocked: true,
         reason,
@@ -381,6 +432,88 @@ async function captureRailwayBoundary(workerRunning: () => boolean) {
   }
 }
 
+async function acknowledgePreBoundaryRoundTrip(confirmation: unknown, actor: string) {
+  const closed = {
+    acknowledged: false,
+    eligible: false,
+    inboundTransferId: null,
+    outboundTransferId: null,
+    amountCents: null,
+    inboundCreatedAt: null,
+    outboundCreatedAt: null,
+    evidenceDigest: null,
+    calls: BOUNDARY_GETS,
+    funded: false as const,
+    commissioned: false as const,
+    armed: false as const,
+    workerStarted: false as const,
+    executionFlagsChanged: false as const,
+  };
+  if (confirmation !== PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION) {
+    return { status: "BLOCKED" as const, reason: "explicit_pre_boundary_round_trip_confirmation_required", ...closed, calls: [] };
+  }
+  if (actor.trim() === "") {
+    return { status: "BLOCKED" as const, reason: "pre_boundary_actor_required", ...closed, calls: [] };
+  }
+  const existing = await readStoredRoundTrip();
+  if (existing) {
+    return {
+      status: "BLOCKED" as const,
+      reason: "pre_boundary_round_trip_already_acknowledged",
+      ...closed,
+      acknowledged: true,
+      calls: [],
+      outboundTransferId: existing.outboundTransferId,
+      inboundTransferId: existing.inboundTransferId,
+      evidenceDigest: existing.evidenceDigest,
+      amountCents: PRE_BOUNDARY_ROUND_TRIP_CENTS,
+    };
+  }
+  const ticker = await currentIndex2Ticker();
+  const snapshot = await captureCleanPairSnapshot(PRODUCTION_SUBACCOUNT, ticker, { creationBoundary: true });
+  const proof = provePreBoundaryRoundTrip({
+    availableCashMicros: snapshot.availableCashMicros,
+    inventoryCashMicros: snapshot.inventoryCashMicros,
+    portfolioValueMicros: snapshot.portfolioValueMicros ?? null,
+    zeroPositions: snapshot.zeroPositions,
+    zeroOrders: snapshot.zeroOrders,
+    zeroFills: snapshot.zeroFills,
+    zeroSettlements: snapshot.zeroSettlements,
+    reasons: snapshot.reasons,
+    records: snapshot.records,
+  });
+  if (!proof.ok) {
+    return { status: "BLOCKED" as const, reason: proof.reason, ...closed, eligible: false };
+  }
+  const id = randomUUID();
+  await query(`INSERT INTO strata_pre_boundary_transfer_acknowledgment (
+      id, subaccount, exchange_index, inbound_transfer_id, outbound_transfer_id, amount_cents,
+      inbound_created_at, outbound_created_at, acknowledged_by, evidence_digest, state)
+    VALUES ($1, 1, 2, $2, $3, $4, $5, $6, $7, $8, 'ACKNOWLEDGED')`, [
+    id,
+    proof.roundTrip.inboundTransferId,
+    proof.roundTrip.outboundTransferId,
+    proof.roundTrip.amountCents,
+    proof.roundTrip.inboundCreatedAt,
+    proof.roundTrip.outboundCreatedAt,
+    actor,
+    proof.roundTrip.evidenceDigest,
+  ]);
+  return {
+    status: "ACKNOWLEDGED" as const,
+    reason: "pre_boundary_round_trip_acknowledged",
+    ...closed,
+    acknowledged: true,
+    eligible: false,
+    inboundTransferId: proof.roundTrip.inboundTransferId,
+    outboundTransferId: proof.roundTrip.outboundTransferId,
+    amountCents: proof.roundTrip.amountCents,
+    inboundCreatedAt: proof.roundTrip.inboundCreatedAt,
+    outboundCreatedAt: proof.roundTrip.outboundCreatedAt,
+    evidenceDigest: proof.roundTrip.evidenceDigest,
+  };
+}
+
 async function fundRailwayPair(confirmation: unknown, workerRunning: () => boolean) {
   const existing = await query(
     "SELECT attempt_uuid, state FROM micro_live_pair_funding_attempts WHERE destination_subaccount = 1 AND exchange_index = 2",
@@ -408,7 +541,10 @@ async function fundRailwayPair(confirmation: unknown, workerRunning: () => boole
   let primary: { scopedMicros: string; inventoryMicros: string };
   try {
     ticker = await currentIndex2Ticker();
-    const clean = await captureCleanPairSnapshot(1, ticker, { creationBoundary: true });
+    const clean = await captureCleanPairSnapshot(1, ticker, {
+      creationBoundary: true,
+      acknowledgedRoundTrip: await readStoredRoundTrip(),
+    });
     if (clean.status !== "clean" || clean.reasons.length > 0 || !clean.evidenceDigest) {
       return { state: "blocked", reason: "fresh_preflight_failed", transferAttempted: false, attempts: 0 };
     }
@@ -1035,6 +1171,7 @@ export function createDatabaseCommissioningPort(
     },
     verifyBoundary: () => readCommissioningSnapshot(workerRunning()),
     captureBoundary: () => captureRailwayBoundary(workerRunning),
+    acknowledgePreBoundaryRoundTrip: (confirmation, actor) => acknowledgePreBoundaryRoundTrip(confirmation, actor),
     reconcileFunding: () => reconcileRailwayFunding(workerRunning),
     fund: (confirmation) => fundRailwayPair(confirmation, workerRunning),
     async verifyFee() {

@@ -10,6 +10,7 @@ import {
 import {
   blockingSubaccountTransferDetail,
   cleanPairInventoryDiagnosis,
+  provePreBoundaryRoundTrip,
   type BlockingSubaccountTransfer,
 } from "./strata/commissioning";
 
@@ -168,6 +169,8 @@ export type KalshiProspectiveCleanPairSnapshot = {
   records: KalshiPairEvidenceRecord[];
   /** Diagnostic only. Omitted from the clean-boundary evidence digest. */
   blockingTransfer?: BlockingSubaccountTransfer | null;
+  /** True only when the persisted two-transfer round trip was reproven and nothing else blocked. */
+  preBoundaryRoundTripSatisfied?: boolean;
 };
 
 export type KalshiPairEvidenceClassification = "pair" | "elsewhere" | "ambiguous";
@@ -2605,7 +2608,15 @@ export async function readKalshiDedicatedPairEvidence(
 export async function captureCleanPairSnapshot(
   subaccountNumber: number,
   ticker: string,
-  options: { creationBoundary?: boolean } = {},
+  options: {
+    creationBoundary?: boolean;
+    acknowledgedRoundTrip?: {
+      id: string;
+      inboundTransferId: string;
+      outboundTransferId: string;
+      evidenceDigest: string;
+    } | null;
+  } = {},
 ): Promise<KalshiProspectiveCleanPairSnapshot> {
   const exchangeIndex = 2 as const;
   if (!Number.isSafeInteger(subaccountNumber) ||
@@ -3024,10 +3035,36 @@ export async function captureCleanPairSnapshot(
     reason.startsWith("clean_prior_cross_exchange_transfer:") ||
     reason.startsWith("clean_cross_exchange_transfer_timestamp_missing:") ||
     reason.startsWith("clean_cross_exchange_transfer_during_snapshot_scan:"));
-  const clean = uniqueReasons.length === 0 &&
+  const acknowledged = options.acknowledgedRoundTrip ?? null;
+  const roundTripProof = acknowledged ? provePreBoundaryRoundTrip({
+    availableCashMicros,
+    inventoryCashMicros,
+    portfolioValueMicros,
+    zeroPositions,
+    zeroOrders,
+    zeroFills,
+    zeroSettlements,
+    reasons: uniqueReasons,
+    records,
+  }) : null;
+  const waiverAccepted = Boolean(
+    acknowledged && roundTripProof?.ok &&
+    roundTripProof.roundTrip.inboundTransferId === acknowledged.inboundTransferId &&
+    roundTripProof.roundTrip.outboundTransferId === acknowledged.outboundTransferId &&
+    roundTripProof.roundTrip.evidenceDigest === acknowledged.evidenceDigest &&
+    uniqueReasons.every((reason) =>
+      reason === `clean_prior_subaccount_transfer:${acknowledged.inboundTransferId}` ||
+      reason === `clean_prior_subaccount_transfer:${acknowledged.outboundTransferId}`),
+  );
+  const reasonsForClean = waiverAccepted && acknowledged
+    ? uniqueReasons.filter((reason) =>
+      reason !== `clean_prior_subaccount_transfer:${acknowledged.inboundTransferId}` &&
+      reason !== `clean_prior_subaccount_transfer:${acknowledged.outboundTransferId}`)
+    : uniqueReasons;
+  const clean = reasonsForClean.length === 0 &&
     availableCashMicros === "0" && inventoryCashMicros === "0" &&
     zeroPositions && zeroOrders && zeroFills && zeroSettlements &&
-    zeroPriorPairTransfers &&
+    (zeroPriorPairTransfers || waiverAccepted) &&
     (options.creationBoundary || keyRestrictionVerified && tradePermissionVerified) &&
     marketExchangeIndex === exchangeIndex &&
     Object.values(feeds).every((feed) => feed.complete);
@@ -3070,6 +3107,15 @@ export async function captureCleanPairSnapshot(
     zeroSettlements,
     zeroPriorPairTransfers,
     records: canonicalRecords,
+    ...(waiverAccepted && acknowledged && roundTripProof?.ok ? {
+      acknowledgedPreBoundaryRoundTrip: {
+        acknowledgmentId: acknowledged.id,
+        inboundTransferId: acknowledged.inboundTransferId,
+        outboundTransferId: acknowledged.outboundTransferId,
+        amountCents: 2500 as const,
+        evidenceDigest: acknowledged.evidenceDigest,
+      },
+    } : {}),
   }) : null;
 
   return {
@@ -3090,9 +3136,10 @@ export async function captureCleanPairSnapshot(
     tradePermissionVerified,
     marketExchangeIndex,
     evidenceDigest,
-    reasons: uniqueReasons,
+    reasons: reasonsForClean,
     records: canonicalRecords,
-    blockingTransfer,
+    blockingTransfer: waiverAccepted ? null : blockingTransfer,
+    preBoundaryRoundTripSatisfied: waiverAccepted,
   };
 }
 

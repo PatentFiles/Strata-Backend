@@ -17,6 +17,10 @@ import type { ProvisioningDiagnostic, ProvisioningSignerDiagnostic } from "../mi
 /** Reviewed dedicated pair. Production rows cannot name any other pair. */
 export const PRODUCTION_SUBACCOUNT = 1;
 export const PRODUCTION_EXCHANGE_INDEX = 2;
+/** The already-identified outbound leg of the intentional pre-boundary $25 round trip. */
+export const PRE_BOUNDARY_OUTBOUND_TRANSFER_ID = "391a20ac-5332-41d6-b015-9b8720e4e5c1";
+export const PRE_BOUNDARY_ROUND_TRIP_CENTS = 2500;
+export const PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION = "ACKNOWLEDGE_INTENTIONAL_PRE_BOUNDARY_25_ROUND_TRIP";
 /** Reviewed one-shot transfer. Not a default the server may invent. */
 export const REVIEWED_FUNDING_CENTS = 2500;
 export const REVIEWED_FUNDING_MICROS = "25000000";
@@ -116,6 +120,8 @@ export interface CommissioningSnapshot {
   /** Persisted operator approval only. Never taken from the request body. */
   approvedMinimumExitMicros: number | null;
   workerRunning: boolean;
+  preBoundaryRoundTripAcknowledged: boolean;
+  preBoundaryRoundTripEligibleForAcknowledgment: boolean;
 }
 
 export interface AccountPlan {
@@ -170,6 +176,8 @@ export interface CommissioningStatus {
   kalshiConnectionStatus: KalshiConnectionStatus;
   asOf: string;
   workerRunning: boolean;
+  preBoundaryRoundTripAcknowledged: boolean;
+  preBoundaryRoundTripEligibleForAcknowledgment: boolean;
 }
 
 export type KalshiConnectionStatus =
@@ -216,6 +224,8 @@ export function emptySnapshot(asOf = new Date(0).toISOString()): CommissioningSn
     },
     approvedMinimumExitMicros: null,
     workerRunning: false,
+    preBoundaryRoundTripAcknowledged: false,
+    preBoundaryRoundTripEligibleForAcknowledgment: false,
   };
 }
 
@@ -371,6 +381,8 @@ export function commissioningStatus(snapshot: CommissioningSnapshot): Commission
     kalshiConnectionStatus: deriveKalshiConnectionStatus(snapshot, prerequisite.length === 0 && accountReady),
     asOf: snapshot.asOf,
     workerRunning: snapshot.workerRunning,
+    preBoundaryRoundTripAcknowledged: snapshot.preBoundaryRoundTripAcknowledged,
+    preBoundaryRoundTripEligibleForAcknowledgment: snapshot.preBoundaryRoundTripEligibleForAcknowledgment,
     ...entryPolicyRuntimeState(),
   };
 }
@@ -1028,4 +1040,154 @@ export function blockingSubaccountTransferDetail(
   const missingFields = (Object.keys(values) as Array<keyof typeof values>)
     .filter((key) => values[key] === null);
   return { transferId, ...values, missingFields };
+}
+
+export interface PreBoundaryTransferView {
+  feed: string;
+  id: string;
+  classification: string;
+  occurredAt: string | null;
+  details: Record<string, string | null>;
+}
+
+export interface PreBoundaryAcknowledgmentResult {
+  status: "ACKNOWLEDGED" | "BLOCKED";
+  reason: string;
+  acknowledged: boolean;
+  eligible: boolean;
+  inboundTransferId: string | null;
+  outboundTransferId: string | null;
+  amountCents: number | null;
+  inboundCreatedAt: string | null;
+  outboundCreatedAt: string | null;
+  evidenceDigest: string | null;
+  calls: Array<{ method: "GET" | "POST" | "DELETE"; path: string }>;
+  funded: false;
+  commissioned: false;
+  armed: false;
+  workerStarted: false;
+  executionFlagsChanged: false;
+}
+
+export interface PreBoundaryRoundTripProof {
+  inboundTransferId: string;
+  outboundTransferId: string;
+  amountCents: number;
+  inboundCreatedAt: string;
+  outboundCreatedAt: string;
+  evidenceDigest: string;
+}
+
+const TRANSFER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function roundTripInteger(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function roundTripCreatedAt(record: PreBoundaryTransferView): string | null {
+  const raw = record.details.created_ts ?? record.details.created_time ?? record.details.created_at;
+  if (typeof raw === "string" && /^(?:0|[1-9]\d*)$/.test(raw)) {
+    const numeric = Number(raw);
+    const millis = numeric < 100_000_000_000 ? numeric * 1000 : numeric;
+    const parsed = new Date(millis);
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+  const candidate = typeof raw === "string" && raw.trim() !== "" ? raw : record.occurredAt;
+  if (typeof candidate !== "string") return null;
+  const millis = Date.parse(candidate);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
+}
+
+function roundTripDigest(proof: Omit<PreBoundaryRoundTripProof, "evidenceDigest">): string {
+  return createHash("sha256").update(JSON.stringify({
+    version: 1,
+    subaccount: PRODUCTION_SUBACCOUNT,
+    exchangeIndex: PRODUCTION_EXCHANGE_INDEX,
+    amountCents: PRE_BOUNDARY_ROUND_TRIP_CENTS,
+    inboundTransferId: proof.inboundTransferId,
+    outboundTransferId: proof.outboundTransferId,
+    inboundCreatedAt: proof.inboundCreatedAt,
+    outboundCreatedAt: proof.outboundCreatedAt,
+  })).digest("hex");
+}
+
+/** Prove the one intentional $25 round trip. Any other pair activity fails closed. */
+export function provePreBoundaryRoundTrip(input: {
+  availableCashMicros: string | null;
+  inventoryCashMicros: string | null;
+  portfolioValueMicros: string | null;
+  zeroPositions: boolean;
+  zeroOrders: boolean;
+  zeroFills: boolean;
+  zeroSettlements: boolean;
+  reasons: string[];
+  records: PreBoundaryTransferView[];
+}): { ok: true; roundTrip: PreBoundaryRoundTripProof } | { ok: false; reason: string } {
+  if (input.availableCashMicros !== "0") return { ok: false, reason: "pre_boundary_available_cash_not_zero" };
+  if (input.inventoryCashMicros !== "0") return { ok: false, reason: "pre_boundary_inventory_cash_not_zero" };
+  if (input.portfolioValueMicros !== "0") return { ok: false, reason: "pre_boundary_portfolio_value_not_zero" };
+  if (!input.zeroPositions) return { ok: false, reason: "pre_boundary_position_present" };
+  if (!input.zeroOrders) return { ok: false, reason: "pre_boundary_order_present" };
+  if (!input.zeroFills) return { ok: false, reason: "pre_boundary_fill_present" };
+  if (!input.zeroSettlements) return { ok: false, reason: "pre_boundary_settlement_present" };
+  const otherReason = input.reasons.find((reason) => !reason.startsWith("clean_prior_subaccount_transfer:"));
+  if (otherReason) return { ok: false, reason: otherReason };
+  const touching = input.records.filter((record) =>
+    (record.feed === "subaccount_transfer" || record.feed === "cross_exchange_transfer") &&
+    record.classification !== "elsewhere");
+  if (touching.some((record) => record.classification === "ambiguous" || record.feed !== "subaccount_transfer")) {
+    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+  }
+  const parsed = touching.map((record) => ({
+    id: record.id,
+    from: roundTripInteger(record.details.from_subaccount),
+    to: roundTripInteger(record.details.to_subaccount),
+    exchange: roundTripInteger(record.details.exchange_index),
+    cents: roundTripInteger(record.details.amount_cents),
+    createdAt: roundTripCreatedAt(record),
+  }));
+  if (parsed.some((row) => row.createdAt === null || !TRANSFER_UUID.test(row.id))) {
+    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+  }
+  const inbound = parsed.filter((row) =>
+    row.from === 0 && row.to === PRODUCTION_SUBACCOUNT &&
+    row.exchange === PRODUCTION_EXCHANGE_INDEX &&
+    row.cents === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
+    row.id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+  const outbound = parsed.filter((row) =>
+    row.from === PRODUCTION_SUBACCOUNT && row.to === 0 &&
+    row.exchange === PRODUCTION_EXCHANGE_INDEX &&
+    row.cents === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
+    row.id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
+  const recognized = new Set([...inbound, ...outbound].map((row) => row.id));
+  if (parsed.some((row) => !recognized.has(row.id))) {
+    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+  }
+  if (inbound.length !== 1) return { ok: false, reason: "pre_boundary_inbound_transfer_not_proven" };
+  if (outbound.length !== 1) return { ok: false, reason: "pre_boundary_outbound_transfer_mismatch" };
+  const inboundRow = inbound[0]!;
+  const outboundRow = outbound[0]!;
+  const roundTrip = {
+    inboundTransferId: inboundRow.id,
+    outboundTransferId: outboundRow.id,
+    amountCents: PRE_BOUNDARY_ROUND_TRIP_CENTS,
+    inboundCreatedAt: inboundRow.createdAt!,
+    outboundCreatedAt: outboundRow.createdAt!,
+  };
+  return { ok: true, roundTrip: { ...roundTrip, evidenceDigest: roundTripDigest(roundTrip) } };
+}
+
+/** Drop only the two persisted transfer ids. Every other historical reason still blocks. */
+export function selectBlockingCleanReasons(
+  reasons: string[],
+  acknowledged: { inboundTransferId: string; outboundTransferId: string } | null,
+): string[] {
+  if (!acknowledged) return [...reasons];
+  const waived = new Set([
+    `clean_prior_subaccount_transfer:${acknowledged.inboundTransferId}`,
+    `clean_prior_subaccount_transfer:${acknowledged.outboundTransferId}`,
+  ]);
+  return reasons.filter((reason) => !waived.has(reason));
 }

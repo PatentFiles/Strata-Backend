@@ -1,9 +1,11 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import {
+  PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION,
   STRATA_INDEX2_KEY_SCOPES,
   STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
   commissioningStatus,
+  type PreBoundaryAcknowledgmentResult,
   fundingAuthorizationDecision,
   type BlockingSubaccountTransfer,
   type PolicyRead,
@@ -55,6 +57,7 @@ export interface CommissioningPort {
     reason: string;
     blockingTransfer?: BlockingSubaccountTransfer | null;
   }>;
+  acknowledgePreBoundaryRoundTrip(confirmation: unknown, actor: string): Promise<PreBoundaryAcknowledgmentResult>;
   reconcileFunding(): Promise<{ state: string; reason: string; transferAttempted: false }>;
   fund(confirmation: unknown): Promise<{ state: string; reason: string; transferAttempted: boolean; attempts: number }>;
   verifyFee(): Promise<CommissioningSnapshot>;
@@ -167,6 +170,44 @@ export function createStrataCommissioningRouter(
       }));
     } catch {
       res.status(503).json({ error: "Subaccount creation is unavailable" });
+    }
+  });
+
+  router.post("/acknowledge-pre-boundary-round-trip", async (req, res) => {
+    if (req.body?.confirm !== PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION) {
+      res.status(400).json(sanitizePublic({
+        status: "BLOCKED",
+        reason: "explicit_pre_boundary_round_trip_confirmation_required",
+        acknowledged: false,
+        eligible: false,
+        funded: false,
+        commissioned: false,
+        armed: false,
+        workerStarted: false,
+        executionFlagsChanged: false,
+      }));
+      return;
+    }
+    try {
+      const actor = (res.locals.strata as { subject?: string } | undefined)?.subject ?? "";
+      const result = await port.acknowledgePreBoundaryRoundTrip(req.body.confirm, actor);
+      const unsafe = result.calls.some((call) => call.method !== "GET");
+      if (unsafe) {
+        res.status(409).json(sanitizePublic({
+          status: "BLOCKED",
+          reason: "pre_boundary_acknowledgment_must_be_get_only",
+          acknowledged: false,
+          funded: false,
+          commissioned: false,
+          armed: false,
+          workerStarted: false,
+          executionFlagsChanged: false,
+        }));
+        return;
+      }
+      res.status(result.status === "ACKNOWLEDGED" ? 200 : 409).json(sanitizePublic(result));
+    } catch {
+      res.status(503).json({ error: "Pre-boundary acknowledgment is unavailable" });
     }
   });
 
