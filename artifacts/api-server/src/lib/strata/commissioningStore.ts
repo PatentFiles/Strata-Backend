@@ -674,6 +674,14 @@ export async function readRailwaySubaccountStatus(): Promise<SubaccountStatus> {
       return unprovenSubaccountStatus({
         provisioningAuthenticated: evidence.provisioningAuthenticated,
         diagnostics: evidence.diagnostics,
+        credentialIdPresent: evidence.credentialIdPresent,
+        privateKeyPresent: evidence.privateKeyPresent,
+        privateKeyParsed: evidence.privateKeyParsed,
+        privateKeyType: evidence.privateKeyType,
+        signatureGenerated: evidence.signatureGenerated,
+        fetchAttempted: evidence.fetchAttempted,
+        localFailureStage: evidence.localFailureStage,
+        localErrorName: evidence.localErrorName,
       });
     }
     return assembleSubaccountStatus({ ...evidence, attemptState });

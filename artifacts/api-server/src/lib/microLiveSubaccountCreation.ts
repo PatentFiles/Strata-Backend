@@ -240,16 +240,94 @@ function assertCreationAuthorized(): void {
   }
 }
 
+const SAFE_ERROR_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,31}$/;
+
+export type ProvisioningLocalFailureStage =
+  | "credential_read"
+  | "private_key_parse"
+  | "key_type_validation"
+  | "signature_generation"
+  | "fetch";
+
+export interface ProvisioningSignerDiagnostic {
+  credentialIdPresent: boolean;
+  privateKeyPresent: boolean;
+  privateKeyParsed: boolean;
+  privateKeyType: "rsa" | "rsa-pss" | "other" | null;
+  signatureGenerated: boolean;
+  fetchAttempted: boolean;
+  localFailureStage: ProvisioningLocalFailureStage | null;
+  localErrorName: string | null;
+}
+
+class ProvisioningPathError extends Error {
+  readonly signer: ProvisioningSignerDiagnostic;
+  constructor(signer: ProvisioningSignerDiagnostic, message: string) {
+    super(message);
+    this.name = "Error";
+    this.signer = signer;
+  }
+}
+
+function safeErrorName(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  return SAFE_ERROR_NAME.test(error.name) ? error.name : null;
+}
+
+function pathError(signer: ProvisioningSignerDiagnostic): ProvisioningPathError {
+  const message = signer.localFailureStage === "credential_read"
+    ? "Kalshi provisioning credential is not configured."
+    : signer.localFailureStage === "key_type_validation"
+      ? "Kalshi provisioning credential must be an RSA key."
+      : "Provisioning request failed.";
+  return new ProvisioningPathError(signer, message);
+}
+
+function classifiedKeyType(key: ReturnType<typeof createPrivateKey>): "rsa" | "rsa-pss" | "other" {
+  if (key.asymmetricKeyType === "rsa") return "rsa";
+  if (key.asymmetricKeyType === "rsa-pss") return "rsa-pss";
+  return "other";
+}
+
 function signingKey(): { keyId: string; key: ReturnType<typeof createPrivateKey> } {
   const keyId = process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim();
   const raw = process.env.KALSHI_PROVISIONING_PRIVATE_KEY?.trim();
-  if (!keyId || !raw) throw new Error("Kalshi provisioning credential is not configured.");
+  const unread: ProvisioningSignerDiagnostic = {
+    credentialIdPresent: Boolean(keyId),
+    privateKeyPresent: Boolean(raw),
+    privateKeyParsed: false,
+    privateKeyType: null,
+    signatureGenerated: false,
+    fetchAttempted: false,
+    localFailureStage: "credential_read",
+    localErrorName: null,
+  };
+  if (!keyId || !raw) throw pathError(unread);
   const pem = raw.replaceAll("\\n", "\n")
     .replace(/(-----BEGIN [A-Z ]+-----)\s*/, "$1\n")
     .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
-  const key = createPrivateKey(pem);
-  if (key.asymmetricKeyType !== "rsa" && key.asymmetricKeyType !== "rsa-pss") {
-    throw new Error("Kalshi provisioning credential must be an RSA key.");
+  let key: ReturnType<typeof createPrivateKey>;
+  try {
+    key = createPrivateKey(pem);
+  } catch (error) {
+    throw pathError({
+      ...unread,
+      credentialIdPresent: true,
+      privateKeyPresent: true,
+      localFailureStage: "private_key_parse",
+      localErrorName: safeErrorName(error),
+    });
+  }
+  const privateKeyType = classifiedKeyType(key);
+  if (privateKeyType === "other") {
+    throw pathError({
+      ...unread,
+      credentialIdPresent: true,
+      privateKeyPresent: true,
+      privateKeyParsed: true,
+      privateKeyType,
+      localFailureStage: "key_type_validation",
+    });
   }
   return { keyId, key };
 }
@@ -373,14 +451,51 @@ export async function signedProvisioningRequest(
   path: string,
   body?: unknown,
   query = "",
+  observed?: { signer: ProvisioningSignerDiagnostic | null },
 ): Promise<Response> {
-  const { keyId, key } = signingKey();
+  if (observed) observed.signer = null;
+  let keyId: string;
+  let key: ReturnType<typeof createPrivateKey>;
+  try {
+    ({ keyId, key } = signingKey());
+  } catch (error) {
+    const signer = error instanceof ProvisioningPathError ? error.signer : {
+      credentialIdPresent: Boolean(process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim()),
+      privateKeyPresent: Boolean(process.env.KALSHI_PROVISIONING_PRIVATE_KEY?.trim()),
+      privateKeyParsed: false,
+      privateKeyType: null,
+      signatureGenerated: false,
+      fetchAttempted: false,
+      localFailureStage: "credential_read" as const,
+      localErrorName: safeErrorName(error),
+    };
+    if (observed) observed.signer = signer;
+    throw error instanceof ProvisioningPathError ? error : pathError(signer);
+  }
+  const privateKeyType = classifiedKeyType(key);
   const timestamp = String(Date.now());
+  let signed: string;
+  try {
+    signed = signature(key, timestamp, method, path);
+  } catch (error) {
+    const signer: ProvisioningSignerDiagnostic = {
+      credentialIdPresent: true,
+      privateKeyPresent: true,
+      privateKeyParsed: true,
+      privateKeyType,
+      signatureGenerated: false,
+      fetchAttempted: false,
+      localFailureStage: "signature_generation",
+      localErrorName: safeErrorName(error),
+    };
+    if (observed) observed.signer = signer;
+    throw pathError(signer);
+  }
   const headers = new Headers({
     Accept: "application/json",
     "KALSHI-ACCESS-KEY": keyId,
     "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    "KALSHI-ACCESS-SIGNATURE": signature(key, timestamp, method, path),
+    "KALSHI-ACCESS-SIGNATURE": signed,
   });
   const init: RequestInit = {
     method,
@@ -393,7 +508,28 @@ export async function signedProvisioningRequest(
     headers.set("Content-Type", "application/json");
     init.body = JSON.stringify(body);
   }
-  return fetchImpl(`${API_HOST}${path}${query}`, init);
+  const reachedFetch: ProvisioningSignerDiagnostic = {
+    credentialIdPresent: true,
+    privateKeyPresent: true,
+    privateKeyParsed: true,
+    privateKeyType,
+    signatureGenerated: true,
+    fetchAttempted: true,
+    localFailureStage: null,
+    localErrorName: null,
+  };
+  if (observed) observed.signer = reachedFetch;
+  try {
+    return await fetchImpl(`${API_HOST}${path}${query}`, init);
+  } catch (error) {
+    const signer: ProvisioningSignerDiagnostic = {
+      ...reachedFetch,
+      localFailureStage: "fetch",
+      localErrorName: safeErrorName(error),
+    };
+    if (observed) observed.signer = signer;
+    throw pathError(signer);
+  }
 }
 
 const LIMITS_PATH = `${API_PREFIX}/account/limits`;
@@ -416,7 +552,7 @@ export interface ProvisioningDiagnostic {
   errorMessage: string | null;
 }
 
-export interface ProvisioningInventoryRead {
+export interface ProvisioningInventoryRead extends ProvisioningSignerDiagnostic {
   complete: boolean;
   provisioningAuthenticated: boolean;
   diagnostics: ProvisioningDiagnostic[];
@@ -457,20 +593,34 @@ function diagnosticError(data: unknown): { errorCode: string | null; errorMessag
 }
 
 function localReadFailure(error: unknown): string {
+  const name = error instanceof ProvisioningPathError ? error.signer.localErrorName : error instanceof Error ? error.name : null;
+  if (name === "TimeoutError" || name === "AbortError") return "timeout";
   if (!(error instanceof Error)) return "request_failed";
   if (error.message === "Kalshi provisioning credential is not configured.") return "provisioning_credential_missing";
   if (error.message === "Kalshi provisioning credential must be an RSA key.") return "provisioning_credential_invalid";
-  if (error.name === "TimeoutError" || error.name === "AbortError") return "timeout";
   return "request_failed";
+}
+
+function signerProgress(signer: ProvisioningSignerDiagnostic): number {
+  if (signer.fetchAttempted && signer.localFailureStage === null) return 6;
+  switch (signer.localFailureStage) {
+    case "fetch": return 5;
+    case "signature_generation": return 4;
+    case "key_type_validation": return 3;
+    case "private_key_parse": return 2;
+    case "credential_read": return 1;
+    default: return 0;
+  }
 }
 
 async function readOneProvisioningEndpoint(
   fetchImpl: CreationFetch,
   read: { path: string; query: string },
-): Promise<{ diagnostic: ProvisioningDiagnostic; payload: unknown }> {
+): Promise<{ diagnostic: ProvisioningDiagnostic; payload: unknown; signer: ProvisioningSignerDiagnostic }> {
   const endpoint = `${read.path}${read.query}`;
+  const observed: { signer: ProvisioningSignerDiagnostic | null } = { signer: null };
   try {
-    const response = await signedProvisioningRequest(fetchImpl, "GET", read.path, undefined, read.query);
+    const response = await signedProvisioningRequest(fetchImpl, "GET", read.path, undefined, read.query, observed);
     let data: unknown = null;
     try {
       data = await response.json();
@@ -489,8 +639,28 @@ async function readOneProvisioningEndpoint(
         errorMessage: readable ? null : parsed.errorMessage,
       },
       payload: readable ? data : null,
+      signer: observed.signer ?? {
+        credentialIdPresent: true,
+        privateKeyPresent: true,
+        privateKeyParsed: true,
+        privateKeyType: null,
+        signatureGenerated: true,
+        fetchAttempted: true,
+        localFailureStage: null,
+        localErrorName: null,
+      },
     };
   } catch (error) {
+    const signer = error instanceof ProvisioningPathError ? error.signer : observed.signer ?? {
+      credentialIdPresent: Boolean(process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim()),
+      privateKeyPresent: Boolean(process.env.KALSHI_PROVISIONING_PRIVATE_KEY?.trim()),
+      privateKeyParsed: false,
+      privateKeyType: null,
+      signatureGenerated: false,
+      fetchAttempted: false,
+      localFailureStage: null,
+      localErrorName: safeErrorName(error),
+    };
     return {
       diagnostic: {
         endpoint,
@@ -501,6 +671,7 @@ async function readOneProvisioningEndpoint(
         errorMessage: null,
       },
       payload: null,
+      signer,
     };
   }
 }
@@ -509,8 +680,11 @@ async function readOneProvisioningEndpoint(
 export async function readProvisioningInventory(fetchImpl: CreationFetch = fetch): Promise<ProvisioningInventoryRead> {
   const reads = await Promise.all(PROVISIONING_READS.map((read) => readOneProvisioningEndpoint(fetchImpl, read)));
   const diagnostics = reads.map((read) => read.diagnostic);
+  const signer = reads.map((read) => read.signer).reduce((best, candidate) =>
+    signerProgress(candidate) > signerProgress(best) ? candidate : best);
   const limits = diagnostics[0];
   return {
+    ...signer,
     complete: diagnostics.every((diagnostic) => diagnostic.ok),
     provisioningAuthenticated: limits?.httpStatus === 200,
     diagnostics,

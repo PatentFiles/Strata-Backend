@@ -1156,11 +1156,15 @@ test("unproven provisioning inventory returns sanitized GET diagnostics and does
   process.env.KALSHI_PROVISIONING_API_KEY_ID = keyId;
   process.env.KALSHI_PROVISIONING_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const methods: string[] = [];
+  const signatures: string[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     methods.push(init?.method ?? "GET");
     assert.equal(init?.method, "GET");
-    const headerDump = JSON.stringify(Object.fromEntries(new Headers(init?.headers).entries()));
+    const headers = new Headers(init?.headers);
+    const signature = headers.get("KALSHI-ACCESS-SIGNATURE") ?? "";
+    if (signature) signatures.push(signature);
+    const headerDump = JSON.stringify(Object.fromEntries(headers.entries()));
     assert.equal(headerDump.includes(keyId), true);
     if (url.pathname.endsWith("/account/limits")) {
       return Response.json({ usage_tier: "advanced" }, { status: 200, headers: { "KALSHI-ACCESS-SIGNATURE": "must-not-leak" } });
@@ -1196,21 +1200,116 @@ test("unproven provisioning inventory returns sanitized GET diagnostics and does
       [403, false, "forbidden", null],
       [404, false, null, "missing"],
     ]);
-    const status = sanitizePublic(unprovenSubaccountStatus({
-      provisioningAuthenticated: evidence.provisioningAuthenticated,
-      diagnostics: evidence.diagnostics,
-    }));
+    assert.equal(evidence.credentialIdPresent, true);
+    assert.equal(evidence.privateKeyPresent, true);
+    assert.equal(evidence.privateKeyParsed, true);
+    assert.equal(evidence.privateKeyType, "rsa");
+    assert.equal(evidence.signatureGenerated, true);
+    assert.equal(evidence.fetchAttempted, true);
+    assert.equal(evidence.localFailureStage, null);
+    assert.equal(evidence.localErrorName, null);
+    const status = sanitizePublic(unprovenSubaccountStatus(evidence));
     assert.equal(status.reason, "subaccount_inventory_unproven");
+    assert.equal(status.privateKeyParsed, true);
+    assert.equal(status.fetchAttempted, true);
     const published = JSON.stringify(status);
     assert.equal(published.includes(keyId), false);
     assert.equal(published.includes("PRIVATE KEY"), false);
     assert.equal(published.includes("Bearer"), false);
     assert.equal(published.includes("KALSHI-ACCESS"), false);
     assert.equal(published.includes("Authorization"), false);
+    assert.equal(signatures.length > 0, true);
+    assert.equal(signatures.some((value) => published.includes(value)), false);
     await assert.rejects(readReviewedSubaccountEvidence(fetchImpl), /Reviewed subaccount inventory GET failed/);
     assert.equal(subaccountCreationDecision({
       confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
       status,
+      inventoryProven: false,
+      priorAttempt: "uncertain",
+      workerRunning: false,
+      productionAccountExists: false,
+      nodeEnv: "production",
+      kalshiEnvironment: "production",
+      provisioningConfigured: true,
+    }).reason, "subaccount_creation_uncertain_no_retry");
+  } finally {
+    if (savedProvisioningId === undefined) delete process.env.KALSHI_PROVISIONING_API_KEY_ID;
+    else process.env.KALSHI_PROVISIONING_API_KEY_ID = savedProvisioningId;
+    if (savedProvisioningKey === undefined) delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+    else process.env.KALSHI_PROVISIONING_PRIVATE_KEY = savedProvisioningKey;
+  }
+});
+
+test("local RSA signer diagnostic names the failed stage and does not fetch or expose secrets", async () => {
+  const savedProvisioningId = process.env.KALSHI_PROVISIONING_API_KEY_ID;
+  const savedProvisioningKey = process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+  const keyId = "unit-test-provisioning-id";
+  let fetches = 0;
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    fetches += 1;
+    assert.equal(init?.method, "GET");
+    throw new TypeError("socket closed");
+  };
+  try {
+    process.env.KALSHI_PROVISIONING_API_KEY_ID = keyId;
+    delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+    const missing = sanitizePublic(unprovenSubaccountStatus(await readProvisioningInventory(fetchImpl)));
+    assert.equal(fetches, 0);
+    assert.equal(missing.credentialIdPresent, true);
+    assert.equal(missing.privateKeyPresent, false);
+    assert.equal(missing.privateKeyParsed, false);
+    assert.equal(missing.privateKeyType, null);
+    assert.equal(missing.signatureGenerated, false);
+    assert.equal(missing.fetchAttempted, false);
+    assert.equal(missing.localFailureStage, "credential_read");
+    assert.equal(missing.localErrorName, null);
+    assert.equal(missing.diagnostics?.every((row) => row.method === "GET" && row.httpStatus === null), true);
+
+    const fragment = "not-a-real-key-body";
+    process.env.KALSHI_PROVISIONING_PRIVATE_KEY =
+      `-----BEGIN RSA PRIVATE KEY-----\n${fragment}\n-----END RSA PRIVATE KEY-----`;
+    const unreadable = sanitizePublic(unprovenSubaccountStatus(await readProvisioningInventory(fetchImpl)));
+    assert.equal(fetches, 0);
+    assert.equal(unreadable.privateKeyPresent, true);
+    assert.equal(unreadable.privateKeyParsed, false);
+    assert.equal(unreadable.fetchAttempted, false);
+    assert.equal(unreadable.signatureGenerated, false);
+    assert.equal(unreadable.localFailureStage, "private_key_parse");
+    assert.match(unreadable.localErrorName ?? "Error", /^[A-Za-z_][A-Za-z0-9_]{0,31}$/);
+    const hidden = JSON.stringify(unreadable);
+    assert.equal(hidden.includes(fragment), false);
+    assert.equal(hidden.includes(keyId), false);
+    assert.equal(hidden.includes("BEGIN"), false);
+    assert.equal(hidden.includes("DECODER"), false);
+
+    const { privateKey: ecKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    process.env.KALSHI_PROVISIONING_PRIVATE_KEY = ecKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const other = await readProvisioningInventory(fetchImpl);
+    assert.equal(fetches, 0);
+    assert.equal(other.privateKeyParsed, true);
+    assert.equal(other.privateKeyType, "other");
+    assert.equal(other.signatureGenerated, false);
+    assert.equal(other.fetchAttempted, false);
+    assert.equal(other.localFailureStage, "key_type_validation");
+
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pkcs1 = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+    assert.equal(pkcs1.includes("BEGIN RSA PRIVATE KEY"), true);
+    process.env.KALSHI_PROVISIONING_PRIVATE_KEY = pkcs1;
+    const fetched = await readProvisioningInventory(fetchImpl);
+    assert.equal(fetches, 4);
+    assert.equal(fetched.privateKeyParsed, true);
+    assert.equal(fetched.privateKeyType, "rsa");
+    assert.equal(fetched.signatureGenerated, true);
+    assert.equal(fetched.fetchAttempted, true);
+    assert.equal(fetched.localFailureStage, "fetch");
+    assert.equal(fetched.localErrorName, "TypeError");
+    assert.equal(fetched.diagnostics.every((row) => row.method === "GET" && row.httpStatus === null && row.errorCode === "request_failed"), true);
+    assert.equal(JSON.stringify(fetched).includes(keyId), false);
+    assert.equal(JSON.stringify(fetched).includes("BEGIN RSA PRIVATE KEY"), false);
+    assert.equal(subaccountCreationDecision({
+      confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
+      status: unprovenSubaccountStatus(fetched),
       inventoryProven: false,
       priorAttempt: "uncertain",
       workerRunning: false,

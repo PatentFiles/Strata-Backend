@@ -12,7 +12,7 @@ import {
   predictionsApiTier,
   scopedPairBalanceProven,
 } from "../kalshiSubaccountInventory";
-import type { ProvisioningDiagnostic } from "../microLiveSubaccountCreation";
+import type { ProvisioningDiagnostic, ProvisioningSignerDiagnostic } from "../microLiveSubaccountCreation";
 
 /** Reviewed dedicated pair. Production rows cannot name any other pair. */
 export const PRODUCTION_SUBACCOUNT = 1;
@@ -539,6 +539,14 @@ export interface SubaccountStatus {
   balanceInventorySubaccount1Exists: boolean;
   provisioningAuthenticated?: boolean;
   diagnostics?: ProvisioningDiagnostic[];
+  credentialIdPresent?: boolean;
+  privateKeyPresent?: boolean;
+  privateKeyParsed?: boolean;
+  privateKeyType?: ProvisioningSignerDiagnostic["privateKeyType"];
+  signatureGenerated?: boolean;
+  fetchAttempted?: boolean;
+  localFailureStage?: ProvisioningSignerDiagnostic["localFailureStage"];
+  localErrorName?: string | null;
 }
 
 export type SubaccountAttemptState =
@@ -724,7 +732,7 @@ export function assembleSubaccountStatus(input: {
 export function unprovenSubaccountStatus(diagnostics?: {
   provisioningAuthenticated: boolean;
   diagnostics: ProvisioningDiagnostic[];
-}): SubaccountStatus {
+} & Partial<ProvisioningSignerDiagnostic>): SubaccountStatus {
   return {
     subaccount1Exists: false,
     subaccount1Exchange2Exists: false,
@@ -740,6 +748,14 @@ export function unprovenSubaccountStatus(diagnostics?: {
     ...(diagnostics ? {
       provisioningAuthenticated: diagnostics.provisioningAuthenticated,
       diagnostics: diagnostics.diagnostics,
+      credentialIdPresent: diagnostics.credentialIdPresent,
+      privateKeyPresent: diagnostics.privateKeyPresent,
+      privateKeyParsed: diagnostics.privateKeyParsed,
+      privateKeyType: diagnostics.privateKeyType,
+      signatureGenerated: diagnostics.signatureGenerated,
+      fetchAttempted: diagnostics.fetchAttempted,
+      localFailureStage: diagnostics.localFailureStage,
+      localErrorName: diagnostics.localErrorName,
     } : {}),
   };
 }
