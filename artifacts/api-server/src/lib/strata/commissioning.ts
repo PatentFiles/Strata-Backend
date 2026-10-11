@@ -948,15 +948,20 @@ export function planDisarm(snapshot: CommissioningSnapshot, confirmation: unknow
 
 export interface BlockingSubaccountTransfer {
   transferId: string;
-  fromSubaccount: number;
-  toSubaccount: number;
-  exchangeIndex: number;
-  amountCents: number;
-  status: string;
-  createdAt: string;
+  fromSubaccount: number | null;
+  toSubaccount: number | null;
+  exchangeIndex: number | null;
+  amountCents: number | null;
+  amountDollars: string | null;
+  status: string | null;
+  createdAt: string | null;
+  missingFields: string[];
 }
 
 const BLOCKING_TRANSFER_REASON = /^clean_prior_subaccount_transfer:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const SAFE_DOLLARS = /^-?(?:0|[1-9]\d*)(?:\.\d{1,6})?$/;
+const SAFE_STATUS = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,31}$/;
+const SECRETISH = /private|secret|password|credential|pem|authorization|api[-_]?key|token|signature|bearer/i;
 
 function blockingInteger(value: string | null | undefined): number | null {
   if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
@@ -964,7 +969,31 @@ function blockingInteger(value: string | null | undefined): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-/** Sanitized fields for the one transfer named by a clean-pair block. */
+function blockingDollars(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || !SAFE_DOLLARS.test(value) || SECRETISH.test(value)) return null;
+  return value;
+}
+
+function blockingStatus(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || !SAFE_STATUS.test(value) || SECRETISH.test(value)) return null;
+  return value;
+}
+
+function blockingTime(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || value.trim() === "" || SECRETISH.test(value)) return null;
+  if (/^(?:0|[1-9]\d*)$/.test(value)) {
+    const raw = Number(value);
+    if (!Number.isSafeInteger(raw)) return null;
+    const millis = raw < 100_000_000_000 ? raw * 1000 : raw;
+    const parsed = new Date(millis);
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return null;
+  return new Date(millis).toISOString();
+}
+
+/** Sanitized fields for the one transfer named by a clean-pair block. Missing fields stay null. */
 export function blockingSubaccountTransferDetail(
   reason: string,
   records: Array<{
@@ -983,18 +1012,20 @@ export function blockingSubaccountTransferDetail(
     record.id === transferId &&
     record.classification === "pair");
   if (matches.length !== 1) return null;
-  const record = matches[0]!;
-  const fromSubaccount = blockingInteger(record.details.from_subaccount);
-  const toSubaccount = blockingInteger(record.details.to_subaccount);
-  const exchangeIndex = blockingInteger(record.details.exchange_index);
-  const amountCents = blockingInteger(record.details.amount_cents);
-  const status = record.details.status;
-  const createdAt = record.occurredAt;
-  if (fromSubaccount === null || toSubaccount === null || exchangeIndex === null ||
-      amountCents === null || createdAt === null ||
-      typeof status !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(status) ||
-      !Number.isFinite(Date.parse(createdAt))) {
-    return null;
-  }
-  return { transferId, fromSubaccount, toSubaccount, exchangeIndex, amountCents, status, createdAt };
+  const details = matches[0]!.details;
+  const fromSubaccount = blockingInteger(details.from_subaccount);
+  const toSubaccount = blockingInteger(details.to_subaccount);
+  const exchangeIndex = blockingInteger(details.exchange_index);
+  const amountCents = blockingInteger(details.amount_cents);
+  const amountDollars = blockingDollars(details.amount_dollars) ?? blockingDollars(details.amount);
+  const status = blockingStatus(details.status);
+  const createdAt = blockingTime(details.created_ts)
+    ?? blockingTime(details.created_time)
+    ?? blockingTime(details.created_at);
+  const values = {
+    fromSubaccount, toSubaccount, exchangeIndex, amountCents, amountDollars, status, createdAt,
+  };
+  const missingFields = (Object.keys(values) as Array<keyof typeof values>)
+    .filter((key) => values[key] === null);
+  return { transferId, ...values, missingFields };
 }

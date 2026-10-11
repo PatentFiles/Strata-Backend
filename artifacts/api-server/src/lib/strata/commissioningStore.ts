@@ -329,7 +329,9 @@ async function captureRailwayBoundary(workerRunning: () => boolean) {
         calls: BOUNDARY_GETS,
         blocked: true,
         reason,
-        blockingTransfer: blockingSubaccountTransferDetail(reason, snapshot.records),
+        blockingTransfer: snapshot.blockingTransfer !== undefined
+          ? snapshot.blockingTransfer
+          : blockingSubaccountTransferDetail(reason, snapshot.records),
       };
     }
     const existing = await query("SELECT state FROM micro_live_pair_boundary WHERE subaccount_number = 1");

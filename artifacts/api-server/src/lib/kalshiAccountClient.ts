@@ -7,7 +7,11 @@ import {
 import {
   compatibleOptionalDirection, compatibleOptionalPrice, mergeDirectionAndPrices,
 } from "./microLiveFillNormalization";
-import { cleanPairInventoryDiagnosis } from "./strata/commissioning";
+import {
+  blockingSubaccountTransferDetail,
+  cleanPairInventoryDiagnosis,
+  type BlockingSubaccountTransfer,
+} from "./strata/commissioning";
 
 export type KalshiAccountSnapshot = {
   balance: {
@@ -162,6 +166,8 @@ export type KalshiProspectiveCleanPairSnapshot = {
   evidenceDigest: string | null;
   reasons: string[];
   records: KalshiPairEvidenceRecord[];
+  /** Diagnostic only. Omitted from the clean-boundary evidence digest. */
+  blockingTransfer?: BlockingSubaccountTransfer | null;
 };
 
 export type KalshiPairEvidenceClassification = "pair" | "elsewhere" | "ambiguous";
@@ -3025,6 +3031,29 @@ export async function captureCleanPairSnapshot(
     (options.creationBoundary || keyRestrictionVerified && tradePermissionVerified) &&
     marketExchangeIndex === exchangeIndex &&
     Object.values(feeds).every((feed) => feed.complete);
+  const diagnosticScalar = (value: unknown): string | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "string" && value.length <= 64 && !/[\u0000-\u001f]/.test(value)) return value;
+    return null;
+  };
+  const blockingTransfer = blockingSubaccountTransferDetail(uniqueReasons[0] ?? "", subaccountTransfers.map(({ record, value }) => ({
+    feed: record.feed,
+    id: record.id,
+    classification: record.classification,
+    occurredAt: null,
+    details: {
+      from_subaccount: diagnosticScalar(value.from_subaccount),
+      to_subaccount: diagnosticScalar(value.to_subaccount),
+      exchange_index: diagnosticScalar(value.exchange_index),
+      amount_cents: diagnosticScalar(value.amount_cents),
+      amount_dollars: diagnosticScalar(value.amount_dollars),
+      amount: diagnosticScalar(value.amount),
+      status: diagnosticScalar(value.status),
+      created_ts: diagnosticScalar(value.created_ts),
+      created_time: diagnosticScalar(value.created_time),
+      created_at: diagnosticScalar(value.created_at),
+    },
+  })));
   const evidenceDigest = clean ? digestOf({
     version: 1,
     pair: { subaccountNumber, exchangeIndex },
@@ -3063,6 +3092,7 @@ export async function captureCleanPairSnapshot(
     evidenceDigest,
     reasons: uniqueReasons,
     records: canonicalRecords,
+    blockingTransfer,
   };
 }
 

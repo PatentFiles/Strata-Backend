@@ -1536,6 +1536,7 @@ test("clean-pair block returns only the named subaccount transfer", () => {
         exchange_index: "2",
         amount_cents: "1",
         status: "applied",
+        created_ts: "2026-10-10T00:00:00.000Z",
         signature: "must-not-leak",
       },
     },
@@ -1543,13 +1544,16 @@ test("clean-pair block returns only the named subaccount transfer", () => {
       feed: "subaccount_transfer",
       id: transferId,
       classification: "pair",
-      occurredAt: "2026-10-10T15:37:52.251Z",
+      occurredAt: null,
       details: {
         from_subaccount: "0",
         to_subaccount: "1",
         exchange_index: "2",
         amount_cents: "2500",
+        amount_dollars: "25.00",
+        amount: "9.00",
         status: "applied",
+        created_time: "2026-10-10T15:37:52.251Z",
         signature: "must-not-leak",
         authorization: "must-not-leak",
       },
@@ -1561,12 +1565,15 @@ test("clean-pair block returns only the named subaccount transfer", () => {
     toSubaccount: 1,
     exchangeIndex: 2,
     amountCents: 2500,
+    amountDollars: "25.00",
     status: "applied",
     createdAt: "2026-10-10T15:37:52.251Z",
+    missingFields: [],
   });
   const published = JSON.stringify(detail);
   assert.equal(published.includes("must-not-leak"), false);
   assert.equal(published.includes("11111111-1111-4111-8111-111111111111"), false);
+  assert.equal(published.includes("9.00"), false);
   assert.equal(blockingSubaccountTransferDetail("clean_pair_inventory_cash_not_zero", []), null);
   assert.equal(blockingSubaccountTransferDetail(reason, [{
     feed: "subaccount_transfer",
@@ -1580,10 +1587,51 @@ test("clean-pair block returns only the named subaccount transfer", () => {
   }]), null);
   const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
   const body = store.slice(store.indexOf("async function captureRailwayBoundary"), store.indexOf("async function fundRailwayPair"));
-  assert.equal(body.includes("blockingSubaccountTransferDetail"), true);
+  assert.equal(body.includes("blocked: true"), true);
   assert.equal(body.includes("zeroPriorPairTransfers"), true);
   assert.equal(body.includes('method: "POST"'), false);
   assert.equal(body.includes("/portfolio/orders"), false);
+  assert.equal(body.includes("postOneShotPairFunding"), false);
+  const account = readFileSync("src/lib/kalshiAccountClient.ts", "utf8");
+  const digestAt = account.indexOf("const evidenceDigest = clean ? digestOf({");
+  const digest = account.slice(digestAt, account.indexOf("}) : null;", digestAt));
+  assert.equal(digest.includes("blockingTransfer"), false);
+  assert.equal(digest.includes("zeroPriorPairTransfers"), true);
+  assert.equal(account.includes("clean_prior_subaccount_transfer:${item.record.id}"), true);
+});
+
+test("partial blocking transfer keeps its identity when amount and status are absent", () => {
+  const transferId = "391a20ac-5332-41d6-b015-9b8720e4e5c1";
+  const reason = `clean_prior_subaccount_transfer:${transferId}`;
+  const detail = blockingSubaccountTransferDetail(reason, [{
+    feed: "subaccount_transfer",
+    id: transferId,
+    classification: "pair",
+    occurredAt: null,
+    details: {
+      from_subaccount: "0",
+      to_subaccount: null,
+      exchange_index: null,
+      amount_cents: null,
+      amount: "25.0000",
+      status: null,
+      created_at: "2026-10-10T15:37:52.251Z",
+      signature: "must-not-leak",
+    },
+  }]);
+  assert.deepEqual(detail, {
+    transferId,
+    fromSubaccount: 0,
+    toSubaccount: null,
+    exchangeIndex: null,
+    amountCents: null,
+    amountDollars: "25.0000",
+    status: null,
+    createdAt: "2026-10-10T15:37:52.251Z",
+    missingFields: ["toSubaccount", "exchangeIndex", "amountCents", "status"],
+  });
+  assert.equal(JSON.stringify(detail).includes("must-not-leak"), false);
+  assert.equal(JSON.stringify(detail).includes("11111111"), false);
 });
 
 test("policy read returns draft limits and approval state without raw policy rows", () => {
