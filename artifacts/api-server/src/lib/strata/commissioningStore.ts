@@ -6,6 +6,7 @@ import {
   createStrataSubaccount,
   generateStrataIndex2Key,
   inspectStrataIndex2Credentials,
+  inspectStrataIndex2Replacement,
 } from "../generatePairRestrictedKalshiKey";
 import { readProvisioningInventory, readReviewedSubaccountEvidence } from "../microLiveSubaccountCreation";
 import { configuredKey } from "../microLivePairBoundary";
@@ -33,6 +34,7 @@ import {
   emptySnapshot,
   fundingAuthorizationDecision,
   index2GenerationDecision,
+  index2ReplacementDecision,
   maskKeyId,
   assembleSubaccountStatus,
   subaccountCreationDecision,
@@ -822,6 +824,190 @@ export async function createRailwaySubaccount(
   }
 }
 
+/** Archives the old attempt in place, then allows one replacement POST. The private key is not written. */
+export async function replaceRailwayIndex2Key(
+  confirmation: unknown,
+  workerRunning: boolean,
+): Promise<Index2GenerationResult> {
+  let priorAttempt: Index2AttemptState = "none";
+  let accountExists = false;
+  let replacementAlreadyUsed = false;
+  try {
+    const [attempt, account, replaced] = await Promise.all([
+      query("SELECT state FROM strata_index2_key_attempt WHERE singleton_id = 'singleton'"),
+      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query(`SELECT 1 FROM strata_index2_key_attempt
+        WHERE supersession_reason = 'replaced_for_current_kalshi_account' LIMIT 1`),
+    ]);
+    accountExists = account.rows.length > 0;
+    replacementAlreadyUsed = replaced.rows.length > 0;
+    if (attempt.rows[0]) {
+      const state = attempt.rows[0].state;
+      priorAttempt = state === "uncertain" || state === "response_received" || state === "attempted"
+        ? state
+        : "attempted";
+    }
+  } catch {
+    return index2Closed("index2_replacement_preflight_unproven");
+  }
+  const present = (name: string) => Boolean(process.env[name]?.trim());
+  const base = {
+    confirmation,
+    nodeEnv: process.env.NODE_ENV,
+    provisioningKeyIdPresent: present("KALSHI_PROVISIONING_API_KEY_ID"),
+    provisioningPrivateKeyPresent: present("KALSHI_PROVISIONING_PRIVATE_KEY"),
+    verifierKeyIdPresent: present("KALSHI_VERIFIER_API_KEY_ID"),
+    verifierPrivateKeyPresent: present("KALSHI_VERIFIER_API_PRIVATE_KEY"),
+    kalshiEnvironment: process.env.KALSHI_API_ENVIRONMENT,
+    priorAttempt,
+    workerRunning,
+    productionAccountExists: accountExists,
+    liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+    v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+    replacementAlreadyUsed,
+  };
+  const local = index2ReplacementDecision({
+    ...base,
+    provisioningCredentialValid: true,
+    provisioningUnrestricted: true,
+    provisioningScopesExact: true,
+    verifierCredentialValid: true,
+    sameAccountProven: true,
+    tierEligible: true,
+    pairProven: true,
+    existingIndex2Name: false,
+  });
+  if (!local.proceed) return index2Closed(local.reason);
+  let remote;
+  try {
+    remote = await inspectStrataIndex2Replacement();
+  } catch {
+    return index2Closed("index2_replacement_preflight_unproven");
+  }
+  let pairProven = false;
+  try {
+    const evidence = await readProvisioningInventory();
+    if (evidence.complete && evidence.calls.every((call) => call.method === "GET")) {
+      const status = assembleSubaccountStatus({ ...evidence, attemptState: "none" });
+      pairProven = status.readyForCleanBoundary &&
+        status.subaccount1Exists &&
+        status.subaccount1Exchange2Exists &&
+        status.matchingRows === 1 &&
+        status.exchangeIndexesForSubaccount1.includes(PRODUCTION_EXCHANGE_INDEX);
+    }
+  } catch {
+    pairProven = false;
+  }
+  const inspected = index2ReplacementDecision({
+    ...base,
+    ...remote,
+    pairProven,
+  });
+  if (!inspected.proceed) return index2Closed(inspected.reason);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const locked = await client.query(
+      `SELECT state FROM strata_index2_key_attempt
+       WHERE singleton_id = 'singleton' FOR UPDATE`,
+    );
+    const state = locked.rows[0]?.state;
+    if (state !== "uncertain" && state !== "response_received") {
+      await client.query("ROLLBACK");
+      return index2Closed(state === "attempted"
+        ? "index2_generation_attempt_in_progress"
+        : "index2_replacement_requires_historical_attempt");
+    }
+    const already = await client.query(
+      `SELECT 1 FROM strata_index2_key_attempt
+       WHERE supersession_reason = 'replaced_for_current_kalshi_account' LIMIT 1`,
+    );
+    if (already.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return index2Closed(state === "uncertain"
+        ? "index2_generation_uncertain_no_retry"
+        : "index2_replacement_already_used");
+    }
+    const archived = await client.query(
+      `UPDATE strata_index2_key_attempt
+       SET singleton_id = $1,
+           superseded_at = now(),
+           supersession_reason = 'replaced_for_current_kalshi_account'
+       WHERE singleton_id = 'singleton'
+         AND state IN ('uncertain', 'response_received')
+         AND superseded_at IS NULL
+       RETURNING singleton_id`,
+      [randomUUID()],
+    );
+    if (archived.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return index2Closed("index2_replacement_not_durable");
+    }
+    await client.query(`INSERT INTO strata_index2_key_attempt
+      (singleton_id, key_name, subaccount, key_type, scopes, state)
+      VALUES ('singleton', 'Strata INDEX2', 1, 'rsa', ARRAY['read', 'write::trade']::text[], 'attempted')`);
+    await client.query("COMMIT");
+  } catch {
+    try { await client.query("ROLLBACK"); } catch { /* the archive did not commit */ }
+    return index2Closed("index2_replacement_not_durable");
+  } finally {
+    client.release();
+  }
+
+  try {
+    const generated = await generateStrataIndex2Key();
+    const apiKeyId = generated.id.toString("utf8");
+    const privateKey = generated.pem.toString("utf8");
+    generated.id.fill(0);
+    generated.pem.fill(0);
+    const saved = await pool.query(`UPDATE strata_index2_key_attempt
+      SET state = 'response_received', api_key_id = $1, response_received_at = now()
+      WHERE singleton_id = 'singleton' AND state = 'attempted' AND api_key_id IS NULL
+      RETURNING singleton_id`, [apiKeyId]);
+    if (saved.rowCount !== 1) {
+      await pool.query(`UPDATE strata_index2_key_attempt
+        SET state = 'uncertain'
+        WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+      return {
+        state: "uncertain",
+        reason: "index2_generation_uncertain_no_retry",
+        posts: 1,
+        privateKeyPersisted: false,
+        verified: false,
+        workerStarted: false,
+        environmentChanged: false,
+      };
+    }
+    return {
+      state: "generated",
+      reason: "handed_off_once",
+      apiKeyId,
+      privateKey,
+      posts: 1,
+      privateKeyPersisted: false,
+      verified: false,
+      workerStarted: false,
+      environmentChanged: false,
+    };
+  } catch {
+    try {
+      await pool.query(`UPDATE strata_index2_key_attempt
+        SET state = 'uncertain'
+        WHERE singleton_id = 'singleton' AND state = 'attempted'`);
+    } catch { /* an attempted row still refuses a second POST */ }
+    return {
+      state: "uncertain",
+      reason: "index2_generation_uncertain_no_retry",
+      posts: 1,
+      privateKeyPersisted: false,
+      verified: false,
+      workerStarted: false,
+      environmentChanged: false,
+    };
+  }
+}
+
 export function createDatabaseCommissioningPort(
   workerRunning: () => boolean = () => false,
 ): CommissioningPort {
@@ -830,6 +1016,7 @@ export function createDatabaseCommissioningPort(
     readSubaccountStatus: () => readRailwaySubaccountStatus(),
     createSubaccount: (confirmation) => createRailwaySubaccount(confirmation, workerRunning()),
     generateIndex2Key: (confirmation) => generateRailwayIndex2Key(confirmation, workerRunning()),
+    replaceIndex2Key: (confirmation) => replaceRailwayIndex2Key(confirmation, workerRunning()),
     async verifySigner() {
       const probe = await probeDedicatedSigner();
       const snapshot = await readCommissioningSnapshot(workerRunning(), {

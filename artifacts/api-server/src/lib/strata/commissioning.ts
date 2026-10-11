@@ -23,6 +23,7 @@ export const REVIEWED_FUNDING_MICROS = "25000000";
 /** Restricted trading key created once for the Railway pair. */
 export const STRATA_INDEX2_KEY_NAME = "Strata INDEX2";
 export const STRATA_INDEX2_KEY_CONFIRMATION = "GENERATE_RESTRICTED_INDEX2_KEY";
+export const STRATA_INDEX2_REPLACEMENT_CONFIRMATION = "REPLACE_INDEX2_FOR_CURRENT_KALSHI_ACCOUNT";
 export const STRATA_INDEX2_KEY_SCOPES = ["read", "write::trade"] as const;
 
 export const OPERATOR_POLICY_FIELDS = [
@@ -510,6 +511,47 @@ export function index2GenerationDecision(facts: Index2GenerationFacts): { procee
   if (facts.productionAccountExists) return { proceed: false, reason: "production_account_exists" };
   if (facts.liveExecutionEnabled === "true") return { proceed: false, reason: "live_execution_enabled" };
   if (facts.v13ProductionExecutionEnabled === "true") return { proceed: false, reason: "v13_production_execution_enabled" };
+  return { proceed: true, reason: "preflight_passed" };
+}
+
+export interface Index2ReplacementFacts extends Index2GenerationFacts {
+  sameAccountProven: boolean;
+  tierEligible: boolean;
+  pairProven: boolean;
+  replacementAlreadyUsed: boolean;
+}
+
+/** One replacement for the current account. The original generation phrase cannot authorize it. */
+export function index2ReplacementDecision(facts: Index2ReplacementFacts): { proceed: boolean; reason: string } {
+  if (facts.confirmation !== STRATA_INDEX2_REPLACEMENT_CONFIRMATION) {
+    return { proceed: false, reason: "explicit_index2_replacement_confirmation_required" };
+  }
+  if (!facts.provisioningKeyIdPresent) return { proceed: false, reason: "provisioning_key_id_missing" };
+  if (!facts.provisioningPrivateKeyPresent) return { proceed: false, reason: "provisioning_private_key_missing" };
+  if (!facts.verifierKeyIdPresent) return { proceed: false, reason: "verifier_key_id_missing" };
+  if (!facts.verifierPrivateKeyPresent) return { proceed: false, reason: "verifier_private_key_missing" };
+  if (facts.kalshiEnvironment !== "production") return { proceed: false, reason: "kalshi_environment_not_production" };
+  if (facts.nodeEnv !== "production") return { proceed: false, reason: "node_environment_not_production" };
+  if (!facts.provisioningCredentialValid) return { proceed: false, reason: "provisioning_credential_invalid" };
+  if (!facts.provisioningUnrestricted) return { proceed: false, reason: "provisioning_key_not_unrestricted" };
+  if (!facts.provisioningScopesExact) return { proceed: false, reason: "provisioning_scopes_not_exact" };
+  if (!facts.verifierCredentialValid) return { proceed: false, reason: "verifier_credential_invalid" };
+  if (!facts.sameAccountProven) return { proceed: false, reason: "index2_credentials_not_same_account" };
+  if (!facts.tierEligible) return { proceed: false, reason: "index2_api_tier_below_advanced" };
+  if (!facts.pairProven) return { proceed: false, reason: "index2_pair_not_proven" };
+  if (facts.existingIndex2Name) return { proceed: false, reason: "index2_key_name_already_exists" };
+  if (facts.workerRunning) return { proceed: false, reason: "production_worker_running" };
+  if (facts.productionAccountExists) return { proceed: false, reason: "production_account_exists" };
+  if (facts.liveExecutionEnabled === "true") return { proceed: false, reason: "live_execution_enabled" };
+  if (facts.v13ProductionExecutionEnabled === "true") return { proceed: false, reason: "v13_production_execution_enabled" };
+  if (facts.replacementAlreadyUsed && facts.priorAttempt === "uncertain") {
+    return { proceed: false, reason: "index2_generation_uncertain_no_retry" };
+  }
+  if (facts.replacementAlreadyUsed) return { proceed: false, reason: "index2_replacement_already_used" };
+  if (facts.priorAttempt === "attempted") return { proceed: false, reason: "index2_generation_attempt_in_progress" };
+  if (facts.priorAttempt !== "uncertain" && facts.priorAttempt !== "response_received") {
+    return { proceed: false, reason: "index2_replacement_requires_historical_attempt" };
+  }
   return { proceed: true, reason: "preflight_passed" };
 }
 

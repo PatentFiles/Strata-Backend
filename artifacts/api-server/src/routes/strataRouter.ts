@@ -52,6 +52,15 @@ function blockedCommissioningPort(): CommissioningPort {
       workerStarted: false,
       environmentChanged: false,
     }),
+    replaceIndex2Key: async () => ({
+      state: "blocked",
+      reason: "index2_replacement_unavailable",
+      posts: 0,
+      privateKeyPersisted: false,
+      verified: false,
+      workerStarted: false,
+      environmentChanged: false,
+    }),
     verifySigner: async () => ({ snapshot: emptySnapshot(), calls: [] }),
     verifyBoundary: read,
     reconcileFunding: async () => ({

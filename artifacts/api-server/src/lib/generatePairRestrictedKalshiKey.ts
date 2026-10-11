@@ -3,6 +3,7 @@ import {
   PAIR_KEY_NAME, PAIR_SCOPES, PAIR_SUBACCOUNT,
 } from "./microLivePairKeyProvisioningAttempt";
 import { captureCleanPairSnapshot } from "./kalshiAccountClient";
+import { predictionsApiTier } from "./kalshiSubaccountInventory";
 import {
   STRATA_INDEX2_KEY_NAME,
   STRATA_INDEX2_KEY_SCOPES,
@@ -146,6 +147,65 @@ export async function inspectStrataIndex2Credentials(): Promise<{
     provisioningScopesExact: owner.length === 1 && exactScopes(owner[0]?.scopes, ["read", "write"]),
     verifierCredentialValid: true,
     existingIndex2Name: named,
+  };
+}
+
+function keyIds(keys: Array<Record<string, unknown>>): string[] {
+  return keys.flatMap((item) =>
+    typeof item.api_key_id === "string" && item.api_key_id.trim() ? [item.api_key_id.trim()] : []);
+}
+
+function sameKalshiAccount(
+  provisioning: Array<Record<string, unknown>>,
+  verifier: Array<Record<string, unknown>>,
+  provisioningId: string,
+  verifierId: string,
+): boolean {
+  const provisioningIds = keyIds(provisioning);
+  const verifierIds = keyIds(verifier);
+  if (provisioningIds.length === 0 || provisioningIds.length !== verifierIds.length) return false;
+  const provisioningSet = new Set(provisioningIds);
+  const verifierSet = new Set(verifierIds);
+  if (provisioningSet.size !== provisioningIds.length || verifierSet.size !== verifierIds.length) return false;
+  for (const id of provisioningSet) if (!verifierSet.has(id)) return false;
+  const count = (ids: string[], id: string) => ids.filter((item) => item === id).length;
+  return count(provisioningIds, provisioningId) === 1 &&
+    count(verifierIds, provisioningId) === 1 &&
+    count(provisioningIds, verifierId) === 1 &&
+    count(verifierIds, verifierId) === 1;
+}
+
+/** GET-only proof that both credentials belong to the current account. Key ids are not returned. */
+export async function inspectStrataIndex2Replacement(): Promise<{
+  provisioningCredentialValid: boolean;
+  provisioningUnrestricted: boolean;
+  provisioningScopesExact: boolean;
+  verifierCredentialValid: boolean;
+  sameAccountProven: boolean;
+  tierEligible: boolean;
+  existingIndex2Name: boolean;
+}> {
+  const provisioningId = process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim() ?? "";
+  const verifierId = process.env.KALSHI_VERIFIER_API_KEY_ID?.trim() ?? "";
+  const provisioning = await keyInventory("provisioning");
+  const verifier = await keyInventory("verifier");
+  const limits = await request("provisioning", "GET", `${PREFIX}/account/limits`);
+  if (!limits.ok) {
+    await limits.body?.cancel();
+    throw new Error("Provisioning account limits GET failed");
+  }
+  const tier = predictionsApiTier(await limits.json() as unknown);
+  const owner = provisioning.filter((item) => item.api_key_id === provisioningId);
+  const verifierOwner = verifier.filter((item) => item.api_key_id === verifierId);
+  return {
+    provisioningCredentialValid: owner.length === 1,
+    provisioningUnrestricted: owner.length === 1 &&
+      (!Object.hasOwn(owner[0]!, "subaccount") || owner[0]!.subaccount === null),
+    provisioningScopesExact: owner.length === 1 && exactScopes(owner[0]?.scopes, ["read", "write"]),
+    verifierCredentialValid: verifierOwner.length === 1,
+    sameAccountProven: sameKalshiAccount(provisioning, verifier, provisioningId, verifierId),
+    tierEligible: tier.subaccountCreationTierEligible,
+    existingIndex2Name: [...provisioning, ...verifier].some((item) => item.name === STRATA_INDEX2_KEY_NAME),
   };
 }
 

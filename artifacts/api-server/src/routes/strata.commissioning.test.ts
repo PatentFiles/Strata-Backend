@@ -10,6 +10,7 @@ import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyG
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash } from "../lib/v13LiveMoneyRisk";
 import {
+  type Index2ReplacementFacts,
   ARM_CONFIRMATION,
   DISARM_CONFIRMATION,
   EXIT_FLOOR_CONFIRMATION,
@@ -21,6 +22,8 @@ import {
   emptySnapshot,
   fundingAuthorizationDecision,
   index2GenerationDecision,
+  index2ReplacementDecision,
+  STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
   planArm,
   SUBACCOUNT_CREATE_CONFIRMATION,
   subaccountCreationDecision,
@@ -96,6 +99,9 @@ function memoryPort(initial: CommissioningSnapshot) {
   let index2Posts = 0;
   let index2Overlay: Partial<Index2GenerationFacts> = {};
   let index2Outcome: "generated" | "uncertain" = "generated";
+  let index2ReplacementUsed = false;
+  const index2Archive: Array<{ state: string; apiKeyId?: string }> = [];
+  let index2ReplacementOverlay: Partial<Index2ReplacementFacts> = {};
   const index2Payloads: unknown[] = [];
   const index2Stored: Array<Record<string, unknown>> = [];
   const index2Pem = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----";
@@ -157,6 +163,64 @@ function memoryPort(initial: CommissioningSnapshot) {
       index2Stored.push({ apiKeyId: "strata-index2-test-key", state: "response_received" });
       return {
         state: "generated", reason: "handed_off_once", apiKeyId: "strata-index2-test-key",
+        privateKey: index2Pem, posts: index2Posts, privateKeyPersisted: false, verified: false,
+        workerStarted: false, environmentChanged: false,
+      };
+    },
+    replaceIndex2Key: async (confirmation) => {
+      const priorAttempt = index2Attempt === "none" ? (index2ReplacementOverlay.priorAttempt ?? "uncertain") : index2Attempt;
+      const decision = index2ReplacementDecision({
+        nodeEnv: "production",
+        provisioningKeyIdPresent: true,
+        provisioningPrivateKeyPresent: true,
+        verifierKeyIdPresent: true,
+        verifierPrivateKeyPresent: true,
+        kalshiEnvironment: "production",
+        provisioningCredentialValid: true,
+        provisioningUnrestricted: true,
+        provisioningScopesExact: true,
+        verifierCredentialValid: true,
+        sameAccountProven: true,
+        tierEligible: true,
+        pairProven: true,
+        existingIndex2Name: false,
+        replacementAlreadyUsed: index2ReplacementUsed,
+        workerRunning: snapshot.workerRunning,
+        productionAccountExists: snapshot.account.count > 0,
+        liveExecutionEnabled: process.env.LIVE_EXECUTION_ENABLED,
+        v13ProductionExecutionEnabled: process.env.V13_PRODUCTION_EXECUTION_ENABLED,
+        ...index2ReplacementOverlay,
+        confirmation,
+        priorAttempt,
+      });
+      if (!decision.proceed) {
+        return {
+          state: "blocked", reason: decision.reason, posts: index2Posts,
+          privateKeyPersisted: false, verified: false, workerStarted: false, environmentChanged: false,
+        };
+      }
+      index2Archive.push({
+        state: priorAttempt,
+        apiKeyId: index2Stored.find((row) => row.state === "response_received")?.apiKeyId as string | undefined,
+      });
+      index2ReplacementUsed = true;
+      index2Attempt = "attempted";
+      index2Posts += 1;
+      index2Payloads.push({
+        name: STRATA_INDEX2_KEY_NAME, key_type: "rsa", subaccount: 1, scopes: ["read", "write::trade"],
+      });
+      calls.push({ method: "POST", path: "/trade-api/v2/api_keys/generate" });
+      if (index2Outcome === "uncertain") {
+        index2Attempt = "uncertain";
+        return {
+          state: "uncertain", reason: "index2_generation_uncertain_no_retry", posts: index2Posts,
+          privateKeyPersisted: false, verified: false, workerStarted: false, environmentChanged: false,
+        };
+      }
+      index2Attempt = "response_received";
+      index2Stored.push({ apiKeyId: "strata-index2-replacement-key", state: "response_received" });
+      return {
+        state: "generated", reason: "handed_off_once", apiKeyId: "strata-index2-replacement-key",
         privateKey: index2Pem, posts: index2Posts, privateKeyPersisted: false, verified: false,
         workerStarted: false, environmentChanged: false,
       };
@@ -400,6 +464,11 @@ function memoryPort(initial: CommissioningSnapshot) {
       index2Overlay = next;
       index2Outcome = outcome;
     },
+    setIndex2Replacement(next: Partial<Index2ReplacementFacts>, outcome: "generated" | "uncertain" = "generated") {
+      index2ReplacementOverlay = next;
+      index2Outcome = outcome;
+    },
+    index2Archive: () => index2Archive,
     setSubaccounts(next: SubaccountIdentity[], outcome: "created" | "uncertain" | "wrong_number" = "created") {
       subaccountIdentities = next;
       subaccountOutcome = outcome;
@@ -1449,4 +1518,89 @@ test("scoped balance scalar proves an already agreed (1,2) pair without an ident
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).reason, "subaccount_1_already_exists");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "uncertain" }).reason, "subaccount_creation_uncertain_no_retry");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).proceed, false);
+});
+
+test("INDEX2 replacement preserves the old attempt and allows one current-account POST", async () => {
+  const ready = (): Index2ReplacementFacts => ({
+    confirmation: STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
+    nodeEnv: "production",
+    provisioningKeyIdPresent: true,
+    provisioningPrivateKeyPresent: true,
+    verifierKeyIdPresent: true,
+    verifierPrivateKeyPresent: true,
+    kalshiEnvironment: "production",
+    provisioningCredentialValid: true,
+    provisioningUnrestricted: true,
+    provisioningScopesExact: true,
+    verifierCredentialValid: true,
+    sameAccountProven: true,
+    tierEligible: true,
+    pairProven: true,
+    existingIndex2Name: false,
+    priorAttempt: "uncertain",
+    replacementAlreadyUsed: false,
+    workerRunning: false,
+    productionAccountExists: false,
+    liveExecutionEnabled: undefined,
+    v13ProductionExecutionEnabled: undefined,
+  });
+  assert.equal(index2ReplacementDecision(ready()).proceed, true);
+  assert.equal(index2ReplacementDecision({ ...ready(), confirmation: STRATA_INDEX2_KEY_CONFIRMATION }).reason,
+    "explicit_index2_replacement_confirmation_required");
+  for (const [reason, patch] of [
+    ["index2_credentials_not_same_account", { sameAccountProven: false }],
+    ["index2_api_tier_below_advanced", { tierEligible: false }],
+    ["index2_pair_not_proven", { pairProven: false }],
+    ["index2_key_name_already_exists", { existingIndex2Name: true }],
+    ["production_worker_running", { workerRunning: true }],
+    ["production_account_exists", { productionAccountExists: true }],
+    ["live_execution_enabled", { liveExecutionEnabled: "true" }],
+    ["v13_production_execution_enabled", { v13ProductionExecutionEnabled: "true" }],
+    ["index2_generation_uncertain_no_retry", { priorAttempt: "uncertain" as const, replacementAlreadyUsed: true }],
+    ["index2_replacement_already_used", { priorAttempt: "response_received" as const, replacementAlreadyUsed: true }],
+  ] as const) {
+    const decision = index2ReplacementDecision({ ...ready(), ...patch });
+    assert.equal(decision.proceed, false, reason);
+    assert.equal(decision.reason, reason);
+  }
+  assert.equal(index2GenerationDecision({
+    ...ready(),
+    confirmation: STRATA_INDEX2_KEY_CONFIRMATION,
+    priorAttempt: "uncertain",
+  }).reason, "index2_generation_uncertain_no_retry");
+
+  const sql = readFileSync("../../lib/db/drizzle/0005_strata_index2_key_attempt_supersession.sql", "utf8");
+  assert.equal(/private_key/i.test(sql), false);
+  assert.equal(/\bDELETE\b/i.test(sql), false);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const replacement = store.slice(
+    store.indexOf("export async function replaceRailwayIndex2Key"),
+    store.indexOf("export function createDatabaseCommissioningPort"),
+  );
+  assert.equal(replacement.includes("generateStrataIndex2Key"), true);
+  assert.equal(replacement.includes("private_key"), false);
+  assert.equal(replacement.includes("DELETE"), false);
+  assert.equal(replacement.includes("postOneShotPairFunding"), false);
+  assert.equal(replacement.includes("/portfolio/orders"), false);
+  assert.equal(replacement.includes("planCommission"), false);
+  assert.equal(replacement.includes("planArm"), false);
+  assert.equal(replacement.includes("LIVE_EXECUTION_ENABLED ="), false);
+
+  const gate = memoryPort(emptySnapshot());
+  gate.setIndex2Replacement({ priorAttempt: "uncertain" }, "uncertain");
+  const first = await gate.port.replaceIndex2Key(STRATA_INDEX2_REPLACEMENT_CONFIRMATION);
+  assert.equal(first.state, "uncertain");
+  assert.equal(first.privateKeyPersisted, false);
+  assert.equal(first.privateKey, undefined);
+  assert.equal(gate.index2Posts(), 1);
+  assert.equal(gate.index2Archive().length, 1);
+  assert.equal(gate.index2Archive()[0]?.state, "uncertain");
+  assert.equal(JSON.stringify(gate.index2Stored()).includes("not-a-key"), false);
+  assert.equal(gate.calls.filter((call) => call.method === "POST").length, 1);
+  assert.equal(gate.calls.some((call) => call.path.includes("order") || call.path.includes("fund") || call.path.includes("subaccount")), false);
+  const retry = await gate.port.replaceIndex2Key(STRATA_INDEX2_REPLACEMENT_CONFIRMATION);
+  assert.equal(retry.reason, "index2_generation_uncertain_no_retry");
+  assert.equal(gate.index2Posts(), 1);
+  assert.equal(gate.index2Archive().length, 1);
+  assert.equal(gate.workerStarts(), 0);
 });
