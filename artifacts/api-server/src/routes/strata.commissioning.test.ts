@@ -7,8 +7,14 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey } from "jose";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS } from "../lib/v13LiveMoneyRisk";
+import {
+  approvedPolicyFromDraft,
+  policyApprovalEntryBlock,
+  policyFromRow,
+} from "../lib/strata/commissioningStore";
+import { ENTRY_POLICY_REVIEW_BLOCKER } from "../lib/strata/configuredStake";
 import {
   type Index2ReplacementFacts,
   ARM_CONFIRMATION,
@@ -20,6 +26,7 @@ import {
   applyDurableDedicatedSigner,
   assembleSubaccountStatus,
   cleanPairInventoryDiagnosis,
+  commissioningBlockers,
   commissioningStatus,
   emptySnapshot,
   fundingAuthorizationDecision,
@@ -347,12 +354,15 @@ function memoryPort(initial: CommissioningSnapshot) {
     },
     approvePolicy: async (actor) => {
       if (!draft || !snapshot.fee.verified) return { status: "BLOCKED", reason: "policy_not_ready" };
+      const entryBlock = policyApprovalEntryBlock();
+      if (entryBlock) return { status: "BLOCKED", reason: entryBlock };
       const now = new Date("2026-10-10T00:00:00.000Z");
       const policyHash = computeV13LiveMoneyPolicyHash({
         id: "policy-1", version: 1, supersedesPolicyId: null, state: "APPROVED",
         strategyVersion: "V1.3",
         strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
         strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
+        entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
         championSelectionReviewId: "03376f2cc125ed649858f19d9aa910e9ff9a57c8",
         championSelectionEvidenceHash: V13_CHAMPION_PARAMETER_HASH,
         championSelectedBy: actor, championSelectedAt: now,
@@ -367,7 +377,7 @@ function memoryPort(initial: CommissioningSnapshot) {
         exists: true, id: "policy-1", approved: true,
         strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
         strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
-        entryPolicyVersion: null,
+        entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
         hashMatches: true, missingFields: [],
       };
       return { status: "APPROVED", reason: "policy_hash_recomputed", policyHash };
@@ -857,7 +867,11 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal((await gate.port.verifyFee()).snapshot.fee.verified, true);
   const proposed = await gate.port.proposePolicy(OPERATOR_LIMITS, DEVELOPER_ID);
   assert.equal(proposed.status, "PROPOSED");
+  const savedEntryApproval = process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED = V13_ENTRY_POLICY_VERSION;
   const approved = await gate.port.approvePolicy(DEVELOPER_ID);
+  if (savedEntryApproval === undefined) delete process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  else process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED = savedEntryApproval;
   assert.equal(approved.status, "APPROVED");
   assert.match(approved.policyHash ?? "", /^[0-9a-f]{64}$/);
   const exit = await gate.port.approveMinimumExit(400000, EXIT_FLOOR_CONFIRMATION, DEVELOPER_ID);
@@ -892,6 +906,91 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal(commissioned.emergencyStops(), 0);
   assert.equal(commissioned.current().account.killSwitch, true);
   assert.equal(commissioned.current().account.executionEnabled, false);
+});
+
+test("V2 approval binds the reviewed entry policy and leaves a blocked draft unchanged", () => {
+  const draft = {
+    id: "v13-live-money-1",
+    version: 1,
+    supersedes_policy_id: null,
+    state: "DRAFT",
+    strategy_version: "V1.3",
+    strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
+    strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
+    entry_policy_version: null,
+    capital_limit_cents: 2500,
+    max_entry_stake_cents: 100,
+    max_entry_all_in_cents: 200,
+    max_open_positions: 1,
+    max_daily_loss_cents: 500,
+    max_total_loss_cents: 1000,
+    max_quote_age_ms: 1000,
+    max_fee_evidence_age_ms: 2000,
+    require_full_depth: true,
+    entry_time_in_force: "IOC",
+    entry_limit_source: "SIGNAL_REFERENCE_OFFER",
+    created_by: DEVELOPER_ID,
+    policy_hash: null,
+  };
+  assert.equal(policyFromRow(draft).entryPolicyVersion, null);
+  assert.equal(policyFromRow({ ...draft, entry_policy_version: V13_ENTRY_POLICY_VERSION }).entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+  assert.equal(policyFromRow({ ...draft, entry_policy_version: V13_LEGACY_ENTRY_POLICY }).entryPolicyVersion, V13_LEGACY_ENTRY_POLICY);
+  const before = structuredClone(draft);
+  assert.equal(policyApprovalEntryBlock({}), ENTRY_POLICY_REVIEW_BLOCKER);
+  assert.equal(policyApprovalEntryBlock({ V13_ENTRY_POLICY_RUNTIME_APPROVED: "not-the-reviewed-v2" }), ENTRY_POLICY_REVIEW_BLOCKER);
+  assert.deepEqual(draft, before);
+  assert.equal(policyApprovalEntryBlock({ V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION }), null);
+  const now = new Date("2026-10-11T14:00:00.000Z");
+  const bound = approvedPolicyFromDraft(draft, DEVELOPER_ID, now);
+  assert.deepEqual(draft, before);
+  assert.equal(bound.policy.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+  const unbound = computeV13LiveMoneyPolicyHash({ ...bound.policy, entryPolicyVersion: null, policyHash: null });
+  assert.notEqual(bound.policyHash, unbound);
+  const stored = {
+    ...draft,
+    state: "APPROVED",
+    entry_policy_version: V13_ENTRY_POLICY_VERSION,
+    strategy_version: "V1.3",
+    strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
+    strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
+    champion_selection_review_id: bound.policy.championSelectionReviewId,
+    champion_selection_evidence_hash: bound.policy.championSelectionEvidenceHash,
+    champion_selected_by: DEVELOPER_ID,
+    champion_selected_at: now.toISOString(),
+    fee_policy_version: bound.policy.feePolicyVersion,
+    fee_source_url: bound.policy.feeSourceUrl,
+    fee_formula_version: bound.policy.feeFormulaVersion,
+    approved_by: DEVELOPER_ID,
+    approved_at: now.toISOString(),
+    policy_hash: bound.policyHash,
+  };
+  const reread = policyFromRow(stored);
+  assert.equal(reread.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+  assert.equal(reread.policyHash, bound.policyHash);
+  assert.equal(computeV13LiveMoneyPolicyHash({ ...reread, policyHash: null }), bound.policyHash);
+  const legacy = ready();
+  const runtimeApproved = { V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION };
+  legacy.policy.entryPolicyVersion = null;
+  assert.equal(commissioningBlockers(legacy, runtimeApproved).includes(ENTRY_POLICY_REVIEW_BLOCKER), true);
+  legacy.policy.entryPolicyVersion = V13_LEGACY_ENTRY_POLICY;
+  assert.equal(commissioningBlockers(legacy, runtimeApproved).includes(ENTRY_POLICY_REVIEW_BLOCKER), true);
+  legacy.policy.entryPolicyVersion = V13_ENTRY_POLICY_VERSION;
+  assert.equal(commissioningBlockers(legacy, {}).includes(ENTRY_POLICY_REVIEW_BLOCKER), true);
+  assert.equal(commissioningBlockers(legacy, runtimeApproved).includes(ENTRY_POLICY_REVIEW_BLOCKER), false);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const approval = store.slice(store.indexOf("async approvePolicy(actor)"), store.indexOf("async approveMinimumExit"));
+  assert.ok(approval.indexOf("policyApprovalEntryBlock") < approval.indexOf("UPDATE v13_live_money_policy"));
+  assert.match(approval, /entry_policy_version = \$10/);
+  assert.match(approval, /state = 'DRAFT'/);
+  assert.equal(approval.includes("fetch("), false);
+  assert.equal(approval.includes("/trade-api/"), false);
+  assert.equal(approval.includes("/portfolio/"), false);
+  const executor = readFileSync("src/lib/v13-production/executor.ts", "utf8");
+  const prepare = executor.slice(executor.indexOf("async prepareEntry"), executor.indexOf("async dispatch"));
+  const dispatch = executor.slice(executor.indexOf("async dispatch"));
+  assert.match(prepare, /assertEntryPolicyWindow\(tx, source\)/);
+  assert.match(dispatch, /assertEntryPolicyWindow\(tx, source\)/);
+  assert.ok(dispatch.indexOf("assertEntryPolicyWindow") < dispatch.indexOf("this.exchange.submit"));
 });
 
 test("INDEX2 generation is one authenticated POST and never stores or logs the private key", async () => {

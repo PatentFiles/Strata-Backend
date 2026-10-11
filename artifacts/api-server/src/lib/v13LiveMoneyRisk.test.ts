@@ -128,6 +128,15 @@ test("available cash, capital remaining, and capital limit still cap a 25000-dol
   assert.equal(evaluateV13LiveMoneyRisk(shortCapital).ok, false);
 });
 
+test("policy hash binds a non-null entry policy version and leaves null unbound", () => {
+  const policy = approved();
+  const unbound = computeV13LiveMoneyPolicyHash(policy);
+  policy.entryPolicyVersion = null;
+  assert.equal(computeV13LiveMoneyPolicyHash(policy), unbound);
+  policy.entryPolicyVersion = "v13-first-qualifying-cross-v2";
+  assert.notEqual(computeV13LiveMoneyPolicyHash(policy), unbound);
+});
+
 test("policy hash changes when an approved limit or fee identity changes", () => {
   const policy = approved();
   const original = policy.policyHash;

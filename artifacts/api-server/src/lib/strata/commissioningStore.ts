@@ -22,7 +22,9 @@ import { REVIEWED_RELEASE } from "./reviewedRelease";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
+  V13_ENTRY_POLICY_VERSION,
 } from "@workspace/v13-strategy";
+import { ENTRY_POLICY_REVIEW_BLOCKER, entryPolicyRuntimeState } from "./configuredStake";
 import {
   PRODUCTION_EXCHANGE_INDEX,
   PRODUCTION_SUBACCOUNT,
@@ -87,7 +89,18 @@ function missingPolicyFields(row: Record<string, unknown> | null): string[] {
   return missing;
 }
 
-function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMoneyPolicy {
+export function policyApprovalEntryBlock(
+  env: NodeJS.ProcessEnv = process.env,
+): typeof ENTRY_POLICY_REVIEW_BLOCKER | null {
+  const entryPolicy = entryPolicyRuntimeState(env);
+  if (entryPolicy.entryPolicyRuntimeApproved !== true ||
+      entryPolicy.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION) {
+    return ENTRY_POLICY_REVIEW_BLOCKER;
+  }
+  return null;
+}
+
+export function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMoneyPolicy {
   return {
     id: String(row.id),
     version: Number(row.version),
@@ -96,6 +109,7 @@ function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMoneyPolicy
     strategyVersion: String(row.strategy_version),
     strategyParameterSetId: String(row.strategy_parameter_set_id),
     strategyParameterHash: String(row.strategy_parameter_hash),
+    entryPolicyVersion: text(row.entry_policy_version),
     championSelectionReviewId: text(row.champion_selection_review_id),
     championSelectionEvidenceHash: text(row.champion_selection_evidence_hash),
     championSelectedBy: text(row.champion_selected_by),
@@ -119,6 +133,33 @@ function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMoneyPolicy
     approvedBy: text(row.approved_by),
     approvedAt: row.approved_at ? new Date(String(row.approved_at)) : null,
   };
+}
+
+export function approvedPolicyFromDraft(
+  draft: Record<string, unknown>,
+  actor: string,
+  now: Date,
+): { policy: V13ApprovedLiveMoneyPolicy; policyHash: string } {
+  const policy = policyFromRow({
+    ...draft,
+    state: "APPROVED",
+    entry_policy_version: V13_ENTRY_POLICY_VERSION,
+    champion_selection_review_id: REVIEWED_RELEASE.commit,
+    champion_selection_evidence_hash: V13_CHAMPION_PARAMETER_HASH,
+    champion_selected_by: actor,
+    champion_selected_at: now.toISOString(),
+    fee_policy_version: STANDING_FEE_POLICY_VERSION,
+    fee_source_url: CANONICAL_FEE_SCHEDULE_URL,
+    fee_formula_version: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+    approved_by: actor,
+    approved_at: now.toISOString(),
+    strategy_version: "V1.3",
+    strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
+    strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
+    policy_hash: null,
+  });
+  const policyHash = computeV13LiveMoneyPolicyHash(policy);
+  return { policy, policyHash };
 }
 
 export async function readCommissioningSnapshot(
@@ -1386,40 +1427,25 @@ export function createDatabaseCommissioningPort(
       if (!snapshot.fee.verified || !snapshot.fee.digest) {
         return { status: "BLOCKED", reason: "fee_artifact_unverified" };
       }
+      const entryBlock = policyApprovalEntryBlock();
+      if (entryBlock) return { status: "BLOCKED", reason: entryBlock };
       const drafts = await query("SELECT * FROM v13_live_money_policy WHERE state = 'DRAFT' ORDER BY version DESC LIMIT 1");
       const draft = drafts.rows[0];
       if (!draft) return { status: "BLOCKED", reason: "policy_draft_missing" };
       const now = new Date();
-      const policy = policyFromRow({
-        ...draft,
-        state: "APPROVED",
-        champion_selection_review_id: REVIEWED_RELEASE.commit,
-        champion_selection_evidence_hash: V13_CHAMPION_PARAMETER_HASH,
-        champion_selected_by: actor,
-        champion_selected_at: now.toISOString(),
-        fee_policy_version: STANDING_FEE_POLICY_VERSION,
-        fee_source_url: CANONICAL_FEE_SCHEDULE_URL,
-        fee_formula_version: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
-        approved_by: actor,
-        approved_at: now.toISOString(),
-        strategy_version: "V1.3",
-        strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
-        strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
-      });
-      policy.policyHash = null;
-      const policyHash = computeV13LiveMoneyPolicyHash(policy);
+      const { policyHash } = approvedPolicyFromDraft(draft, actor, now);
       await query(`UPDATE v13_live_money_policy SET
         state = 'APPROVED', strategy_version = 'V1.3',
         strategy_parameter_set_id = $2, strategy_parameter_hash = $3,
         champion_selection_review_id = $4, champion_selection_evidence_hash = $3,
         champion_selected_by = $5, champion_selected_at = $6,
         fee_policy_version = $7, fee_source_url = $8, fee_formula_version = $9,
-        approved_by = $5, approved_at = $6, policy_hash = $10
+        entry_policy_version = $10, approved_by = $5, approved_at = $6, policy_hash = $11
         WHERE id = $1 AND state = 'DRAFT'`, [
-        policy.id, V13_CHAMPION_PARAMETER_SET.id, V13_CHAMPION_PARAMETER_HASH,
+        draft.id, V13_CHAMPION_PARAMETER_SET.id, V13_CHAMPION_PARAMETER_HASH,
         REVIEWED_RELEASE.commit, actor, now.toISOString(),
         STANDING_FEE_POLICY_VERSION, CANONICAL_FEE_SCHEDULE_URL,
-        STANDARD_QUADRATIC_FEE_FORMULA_VERSION, policyHash,
+        STANDARD_QUADRATIC_FEE_FORMULA_VERSION, V13_ENTRY_POLICY_VERSION, policyHash,
       ]);
       return { status: "APPROVED", reason: "policy_hash_recomputed", policyHash };
     },

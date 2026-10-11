@@ -306,7 +306,10 @@ export function maskKeyId(keyId: string | null | undefined): string | null {
   return `****${trimmed.slice(-4)}`;
 }
 
-export function commissioningBlockers(snapshot: CommissioningSnapshot): string[] {
+export function commissioningBlockers(
+  snapshot: CommissioningSnapshot,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const blockers: string[] = [];
   if (!snapshot.signer.configured) blockers.push("dedicated_signer_missing");
   else if (!snapshot.signer.syntacticallyUsable || !snapshot.signer.fingerprint ||
@@ -341,7 +344,7 @@ export function commissioningBlockers(snapshot: CommissioningSnapshot): string[]
     blockers.push("live_money_policy_strategy_mismatch");
   } else if (!snapshot.policy.hashMatches) blockers.push("live_money_policy_hash_mismatch");
   else if (snapshot.policy.missingFields.length > 0) blockers.push("live_money_policy_operator_values_required");
-  const entryPolicy = entryPolicyRuntimeState();
+  const entryPolicy = entryPolicyRuntimeState(env);
   if (!entryPolicy.entryPolicyRuntimeApproved ||
       snapshot.policy.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION) {
     blockers.push(ENTRY_POLICY_REVIEW_BLOCKER);
