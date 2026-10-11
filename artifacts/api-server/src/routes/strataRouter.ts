@@ -1,7 +1,9 @@
 import { EmergencyStopMicroLiveBody } from "@workspace/api-zod";
 import { Router, type IRouter } from "express";
 import { entryPolicyRuntimeState } from "../lib/strata/configuredStake";
+import { deployedGitSha } from "../lib/strata/deployedGitSha";
 import { REVIEWED_RELEASE } from "../lib/strata/reviewedRelease";
+import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabaseAuth";
 import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
@@ -144,10 +146,11 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     deps.commissioning ?? blockedCommissioningPort(),
   ));
   router.get("/release", (_req, res) => {
-    res.json({
+    res.json(sanitizePublic({
       ...REVIEWED_RELEASE,
       ...entryPolicyRuntimeState(),
-    });
+      deployedGitSha: deployedGitSha(),
+    }));
   });
   router.get("/forward-test/status", access.requireUser, async (_req, res) => {
     try { res.json(await deps.forwardTestStatus()); }

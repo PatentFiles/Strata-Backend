@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
+import { REVIEWED_RELEASE } from "./reviewedRelease";
+import {
+  DEPLOYED_SHA_RUNTIME_UNAVAILABLE,
+  deployedGitSha,
+} from "./deployedGitSha";
 import {
   ENTRY_POLICY_REVIEW_BLOCKER,
   entryPolicyRuntimeState,
@@ -76,4 +82,86 @@ test("entry policy review stays blocked unless the exact runtime marker is prese
   const approved = entryPolicyRuntimeState({ V13_ENTRY_POLICY_RUNTIME_APPROVED: "v13-first-qualifying-cross-v2" });
   assert.equal(approved.entryPolicyRuntimeApproved, true);
   assert.equal(approved.entryPolicyBlockReason, null);
+  assert.equal(approved.entryPolicyRuntimeDiagnosticReason, null);
+});
+
+test("undefined entry-policy runtime env is missing and does not approve", () => {
+  const state = entryPolicyRuntimeState({});
+  assert.equal(state.entryPolicyRuntimeApproved, false);
+  assert.equal(state.entryPolicyLiveBlocked, true);
+  assert.equal(state.entryPolicyBlockReason, ENTRY_POLICY_REVIEW_BLOCKER);
+  assert.equal(state.entryPolicyRuntimeEnvName, "V13_ENTRY_POLICY_RUNTIME_APPROVED");
+  assert.equal(state.entryPolicyRuntimeExpectedValue, V13_ENTRY_POLICY_VERSION);
+  assert.equal(state.entryPolicyRuntimeConfiguredState, "MISSING");
+  assert.equal(state.entryPolicyRuntimeConfiguredValue, null);
+  assert.equal(state.entryPolicyRuntimeConfiguredLength, null);
+  assert.equal(state.entryPolicyRuntimeHasLeadingOrTrailingWhitespace, false);
+  assert.equal(state.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_missing");
+});
+
+test("exact entry-policy runtime value matches and approves", () => {
+  const state = entryPolicyRuntimeState({
+    V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION,
+  });
+  assert.equal(state.entryPolicyRuntimeApproved, true);
+  assert.equal(state.entryPolicyLiveBlocked, false);
+  assert.equal(state.entryPolicyBlockReason, null);
+  assert.equal(state.entryPolicyRuntimeConfiguredState, "MATCH");
+  assert.equal(state.entryPolicyRuntimeConfiguredValue, V13_ENTRY_POLICY_VERSION);
+  assert.equal(state.entryPolicyRuntimeConfiguredLength, V13_ENTRY_POLICY_VERSION.length);
+  assert.equal(state.entryPolicyRuntimeHasLeadingOrTrailingWhitespace, false);
+  assert.equal(state.entryPolicyRuntimeDiagnosticReason, null);
+});
+
+test("wrong entry-policy runtime value mismatches without approving", () => {
+  const wrong = "not-the-reviewed-v2";
+  const state = entryPolicyRuntimeState({ V13_ENTRY_POLICY_RUNTIME_APPROVED: wrong });
+  assert.equal(state.entryPolicyRuntimeApproved, false);
+  assert.equal(state.entryPolicyLiveBlocked, true);
+  assert.equal(state.entryPolicyBlockReason, ENTRY_POLICY_REVIEW_BLOCKER);
+  assert.equal(state.entryPolicyRuntimeConfiguredState, "MISMATCH");
+  assert.equal(state.entryPolicyRuntimeConfiguredValue, wrong);
+  assert.equal(state.entryPolicyRuntimeConfiguredLength, wrong.length);
+  assert.equal(state.entryPolicyRuntimeHasLeadingOrTrailingWhitespace, false);
+  assert.equal(state.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_mismatch");
+  const empty = entryPolicyRuntimeState({ V13_ENTRY_POLICY_RUNTIME_APPROVED: "" });
+  assert.equal(empty.entryPolicyRuntimeConfiguredState, "MISMATCH");
+  assert.equal(empty.entryPolicyRuntimeConfiguredValue, "");
+  assert.equal(empty.entryPolicyRuntimeConfiguredLength, 0);
+  assert.equal(empty.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_mismatch");
+});
+
+test("leading or trailing whitespace stays a mismatch and is not trimmed into approval", () => {
+  for (const value of [
+    ` ${V13_ENTRY_POLICY_VERSION}`,
+    `${V13_ENTRY_POLICY_VERSION} `,
+    ` ${V13_ENTRY_POLICY_VERSION} `,
+    `"${V13_ENTRY_POLICY_VERSION}"`,
+  ]) {
+    const state = entryPolicyRuntimeState({ V13_ENTRY_POLICY_RUNTIME_APPROVED: value });
+    assert.equal(state.entryPolicyRuntimeApproved, false, value);
+    assert.equal(state.entryPolicyBlockReason, ENTRY_POLICY_REVIEW_BLOCKER, value);
+    assert.equal(state.entryPolicyRuntimeConfiguredState, "MISMATCH", value);
+    assert.equal(state.entryPolicyRuntimeConfiguredValue, value, value);
+    assert.equal(state.entryPolicyRuntimeConfiguredLength, value.length, value);
+    if (value === `"${V13_ENTRY_POLICY_VERSION}"`) {
+      assert.equal(state.entryPolicyRuntimeHasLeadingOrTrailingWhitespace, false, value);
+      assert.equal(state.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_mismatch", value);
+    } else {
+      assert.equal(state.entryPolicyRuntimeHasLeadingOrTrailingWhitespace, true, value);
+      assert.equal(state.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_whitespace_mismatch", value);
+    }
+  }
+  const paddedWrong = entryPolicyRuntimeState({ V13_ENTRY_POLICY_RUNTIME_APPROVED: " wrong " });
+  assert.equal(paddedWrong.entryPolicyRuntimeApproved, false);
+  assert.equal(paddedWrong.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_whitespace_mismatch");
+});
+
+test("deployed git sha reads only Railway's commit variable", () => {
+  const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  assert.equal(deployedGitSha({}), DEPLOYED_SHA_RUNTIME_UNAVAILABLE);
+  assert.notEqual(deployedGitSha({}), REVIEWED_RELEASE.commit);
+  assert.equal(deployedGitSha({ RAILWAY_GIT_COMMIT_SHA: sha }), sha);
+  assert.equal(deployedGitSha({ RAILWAY_GIT_COMMIT_SHA: ` ${sha}` }), DEPLOYED_SHA_RUNTIME_UNAVAILABLE);
+  assert.equal(deployedGitSha({ RAILWAY_GIT_COMMIT_SHA: sha.slice(0, 7) }), DEPLOYED_SHA_RUNTIME_UNAVAILABLE);
 });

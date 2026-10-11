@@ -3,6 +3,7 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { BUILD_RELEASE, V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 import path from "node:path";
 import { buildReleaseIdentity } from "../../../../lib/v13-strategy/build-release.mjs";
+import { deployedGitSha } from "../lib/strata/deployedGitSha";
 
 const router: IRouter = Router();
 const processRelease = BUILD_RELEASE.provenance !== "unavailable"
@@ -23,7 +24,7 @@ router.get("/healthz", (_req, res) => {
       executionAuthority: "NONE",
     },
   });
-  res.json(data);
+  res.json({ ...data, deployedGitSha: deployedGitSha() });
 });
 
 export default router;

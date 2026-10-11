@@ -179,6 +179,17 @@ export interface CommissioningStatus {
   entryPolicyRuntimeApproved: boolean;
   entryPolicyLiveBlocked: boolean;
   entryPolicyBlockReason: string | null;
+  entryPolicyRuntimeEnvName: "V13_ENTRY_POLICY_RUNTIME_APPROVED";
+  entryPolicyRuntimeExpectedValue: typeof V13_ENTRY_POLICY_VERSION;
+  entryPolicyRuntimeConfiguredState: "MATCH" | "MISSING" | "MISMATCH";
+  entryPolicyRuntimeConfiguredValue: string | null;
+  entryPolicyRuntimeConfiguredLength: number | null;
+  entryPolicyRuntimeHasLeadingOrTrailingWhitespace: boolean;
+  entryPolicyRuntimeDiagnosticReason:
+    | "runtime_approval_env_missing"
+    | "runtime_approval_env_mismatch"
+    | "runtime_approval_env_whitespace_mismatch"
+    | null;
   blockers: string[];
   requiredOperatorEvidence: string[];
   kalshiConnectionStatus: KalshiConnectionStatus;

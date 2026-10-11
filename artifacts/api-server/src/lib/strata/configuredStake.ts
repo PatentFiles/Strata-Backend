@@ -1,6 +1,13 @@
 import { V13_ENTRY_POLICY_VERSION, V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 
 export const ENTRY_POLICY_REVIEW_BLOCKER = "entry_policy_revision_requires_separate_review";
+export const ENTRY_POLICY_RUNTIME_ENV_NAME = "V13_ENTRY_POLICY_RUNTIME_APPROVED";
+
+export type EntryPolicyRuntimeConfiguredState = "MATCH" | "MISSING" | "MISMATCH";
+export type EntryPolicyRuntimeDiagnosticReason =
+  | "runtime_approval_env_missing"
+  | "runtime_approval_env_mismatch"
+  | "runtime_approval_env_whitespace_mismatch";
 
 export interface EntryPolicyRuntimeState {
   championId: string;
@@ -9,11 +16,33 @@ export interface EntryPolicyRuntimeState {
   entryPolicyRuntimeApproved: boolean;
   entryPolicyLiveBlocked: boolean;
   entryPolicyBlockReason: string | null;
+  entryPolicyRuntimeEnvName: typeof ENTRY_POLICY_RUNTIME_ENV_NAME;
+  entryPolicyRuntimeExpectedValue: typeof V13_ENTRY_POLICY_VERSION;
+  entryPolicyRuntimeConfiguredState: EntryPolicyRuntimeConfiguredState;
+  entryPolicyRuntimeConfiguredValue: string | null;
+  entryPolicyRuntimeConfiguredLength: number | null;
+  entryPolicyRuntimeHasLeadingOrTrailingWhitespace: boolean;
+  entryPolicyRuntimeDiagnosticReason: EntryPolicyRuntimeDiagnosticReason | null;
 }
 
 /** Read-only. This never sets V13_ENTRY_POLICY_RUNTIME_APPROVED. */
 export function entryPolicyRuntimeState(env: NodeJS.ProcessEnv = process.env): EntryPolicyRuntimeState {
-  const approved = env.V13_ENTRY_POLICY_RUNTIME_APPROVED === V13_ENTRY_POLICY_VERSION;
+  const configured = env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  const present = typeof configured === "string";
+  const hasWhitespace = present && configured !== configured.trim();
+  const approved = configured === V13_ENTRY_POLICY_VERSION;
+  const configuredState: EntryPolicyRuntimeConfiguredState = !present
+    ? "MISSING"
+    : approved
+      ? "MATCH"
+      : "MISMATCH";
+  const diagnosticReason: EntryPolicyRuntimeDiagnosticReason | null = !present
+    ? "runtime_approval_env_missing"
+    : approved
+      ? null
+      : hasWhitespace
+        ? "runtime_approval_env_whitespace_mismatch"
+        : "runtime_approval_env_mismatch";
   return {
     championId: V13_CHAMPION_PARAMETER_SET.id,
     parameterHash: V13_CHAMPION_PARAMETER_HASH,
@@ -21,6 +50,13 @@ export function entryPolicyRuntimeState(env: NodeJS.ProcessEnv = process.env): E
     entryPolicyRuntimeApproved: approved,
     entryPolicyLiveBlocked: !approved,
     entryPolicyBlockReason: approved ? null : ENTRY_POLICY_REVIEW_BLOCKER,
+    entryPolicyRuntimeEnvName: ENTRY_POLICY_RUNTIME_ENV_NAME,
+    entryPolicyRuntimeExpectedValue: V13_ENTRY_POLICY_VERSION,
+    entryPolicyRuntimeConfiguredState: configuredState,
+    entryPolicyRuntimeConfiguredValue: present ? configured : null,
+    entryPolicyRuntimeConfiguredLength: present ? configured.length : null,
+    entryPolicyRuntimeHasLeadingOrTrailingWhitespace: hasWhitespace,
+    entryPolicyRuntimeDiagnosticReason: diagnosticReason,
   };
 }
 

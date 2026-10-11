@@ -1018,6 +1018,20 @@ test("V2 approval binds the reviewed entry policy and leaves a blocked draft unc
   legacy.policy.entryPolicyVersion = V13_ENTRY_POLICY_VERSION;
   assert.equal(commissioningBlockers(legacy, {}).includes(ENTRY_POLICY_REVIEW_BLOCKER), true);
   assert.equal(commissioningBlockers(legacy, runtimeApproved).includes(ENTRY_POLICY_REVIEW_BLOCKER), false);
+  const savedRuntime = process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  delete process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  try {
+    const diagnosed = commissioningStatus(emptySnapshot());
+    assert.equal(diagnosed.entryPolicyRuntimeApproved, false);
+    assert.equal(diagnosed.entryPolicyBlockReason, ENTRY_POLICY_REVIEW_BLOCKER);
+    assert.equal(diagnosed.blockers.includes(ENTRY_POLICY_REVIEW_BLOCKER), true);
+    assert.equal(diagnosed.entryPolicyRuntimeConfiguredState, "MISSING");
+    assert.equal(diagnosed.entryPolicyRuntimeDiagnosticReason, "runtime_approval_env_missing");
+    assert.equal(diagnosed.blockers.includes("runtime_approval_env_missing"), false);
+  } finally {
+    if (savedRuntime === undefined) delete process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+    else process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED = savedRuntime;
+  }
   const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
   const approval = store.slice(store.indexOf("async approvePolicy(actor)"), store.indexOf("async approveMinimumExit"));
   assert.ok(approval.indexOf("policyApprovalEntryBlock") < approval.indexOf("UPDATE v13_live_money_policy"));
