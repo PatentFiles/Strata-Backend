@@ -28,6 +28,7 @@ import {
   REVIEWED_FUNDING_CENTS,
   REVIEWED_FUNDING_MICROS,
   OPERATOR_POLICY_FIELDS,
+  blockingSubaccountTransferDetail,
   dedicatedSignerFingerprint,
   EXIT_FLOOR_CONFIRMATION,
   approvedExitFloor,
@@ -322,9 +323,13 @@ async function captureRailwayBoundary(workerRunning: () => boolean) {
       snapshot.pair.subaccountNumber === 1 && snapshot.pair.exchangeIndex === 2 &&
       typeof snapshot.evidenceDigest === "string" && /^[0-9a-f]{64}$/.test(snapshot.evidenceDigest);
     if (!clean || !snapshot.evidenceDigest) {
+      const reason = snapshot.reasons[0] ?? "clean_boundary_not_proven";
       return {
         snapshot: await readCommissioningSnapshot(workerRunning()),
-        calls: BOUNDARY_GETS, blocked: true, reason: snapshot.reasons[0] ?? "clean_boundary_not_proven",
+        calls: BOUNDARY_GETS,
+        blocked: true,
+        reason,
+        blockingTransfer: blockingSubaccountTransferDetail(reason, snapshot.records),
       };
     }
     const existing = await query("SELECT state FROM micro_live_pair_boundary WHERE subaccount_number = 1");

@@ -5,6 +5,7 @@ import {
   STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
   commissioningStatus,
   fundingAuthorizationDecision,
+  type BlockingSubaccountTransfer,
   type PolicyRead,
   planCommission,
   type CommissioningSnapshot,
@@ -47,7 +48,13 @@ export interface CommissioningPort {
   replaceIndex2Key(confirmation: unknown): Promise<Index2GenerationResult>;
   verifySigner(): Promise<{ snapshot: CommissioningSnapshot; calls: ExchangeCall[] }>;
   verifyBoundary(): Promise<CommissioningSnapshot>;
-  captureBoundary(): Promise<{ snapshot: CommissioningSnapshot; calls: ExchangeCall[]; blocked: boolean; reason: string }>;
+  captureBoundary(): Promise<{
+    snapshot: CommissioningSnapshot;
+    calls: ExchangeCall[];
+    blocked: boolean;
+    reason: string;
+    blockingTransfer?: BlockingSubaccountTransfer | null;
+  }>;
   reconcileFunding(): Promise<{ state: string; reason: string; transferAttempted: false }>;
   fund(confirmation: unknown): Promise<{ state: string; reason: string; transferAttempted: boolean; attempts: number }>;
   verifyFee(): Promise<CommissioningSnapshot>;
@@ -176,6 +183,7 @@ export function createStrataCommissioningRouter(
         blocked: result.blocked,
         reason: result.reason,
         exchangeCalls: result.calls,
+        ...(result.blockingTransfer ? { blockingTransfer: result.blockingTransfer } : {}),
       }));
     } catch {
       res.status(503).json({ error: "Boundary capture is unavailable" });

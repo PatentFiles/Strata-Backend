@@ -945,3 +945,56 @@ export function planDisarm(snapshot: CommissioningSnapshot, confirmation: unknow
   }
   return { ok: true, reason: "disarm_database_flags_only" };
 }
+
+export interface BlockingSubaccountTransfer {
+  transferId: string;
+  fromSubaccount: number;
+  toSubaccount: number;
+  exchangeIndex: number;
+  amountCents: number;
+  status: string;
+  createdAt: string;
+}
+
+const BLOCKING_TRANSFER_REASON = /^clean_prior_subaccount_transfer:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function blockingInteger(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/** Sanitized fields for the one transfer named by a clean-pair block. */
+export function blockingSubaccountTransferDetail(
+  reason: string,
+  records: Array<{
+    feed: string;
+    id: string;
+    classification: string;
+    occurredAt: string | null;
+    details: Record<string, string | null>;
+  }>,
+): BlockingSubaccountTransfer | null {
+  const match = BLOCKING_TRANSFER_REASON.exec(reason);
+  if (!match) return null;
+  const transferId = match[1]!;
+  const matches = records.filter((record) =>
+    record.feed === "subaccount_transfer" &&
+    record.id === transferId &&
+    record.classification === "pair");
+  if (matches.length !== 1) return null;
+  const record = matches[0]!;
+  const fromSubaccount = blockingInteger(record.details.from_subaccount);
+  const toSubaccount = blockingInteger(record.details.to_subaccount);
+  const exchangeIndex = blockingInteger(record.details.exchange_index);
+  const amountCents = blockingInteger(record.details.amount_cents);
+  const status = record.details.status;
+  const createdAt = record.occurredAt;
+  if (fromSubaccount === null || toSubaccount === null || exchangeIndex === null ||
+      amountCents === null || createdAt === null ||
+      typeof status !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(status) ||
+      !Number.isFinite(Date.parse(createdAt))) {
+    return null;
+  }
+  return { transferId, fromSubaccount, toSubaccount, exchangeIndex, amountCents, status, createdAt };
+}

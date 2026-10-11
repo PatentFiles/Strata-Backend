@@ -35,6 +35,7 @@ import {
   type SubaccountIdentity,
   planCommission,
   planDisarm,
+  blockingSubaccountTransferDetail,
   policyReadFromRows,
   validatePolicyLimits,
   type AccountPlan,
@@ -1518,6 +1519,71 @@ test("scoped balance scalar proves an already agreed (1,2) pair without an ident
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).reason, "subaccount_1_already_exists");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "uncertain" }).reason, "subaccount_creation_uncertain_no_retry");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).proceed, false);
+});
+
+test("clean-pair block returns only the named subaccount transfer", () => {
+  const transferId = "391a20ac-5332-41d6-b015-9b8720e4e5c1";
+  const reason = `clean_prior_subaccount_transfer:${transferId}`;
+  const detail = blockingSubaccountTransferDetail(reason, [
+    {
+      feed: "subaccount_transfer",
+      id: "11111111-1111-4111-8111-111111111111",
+      classification: "pair",
+      occurredAt: "2026-10-10T00:00:00.000Z",
+      details: {
+        from_subaccount: "0",
+        to_subaccount: "1",
+        exchange_index: "2",
+        amount_cents: "1",
+        status: "applied",
+        signature: "must-not-leak",
+      },
+    },
+    {
+      feed: "subaccount_transfer",
+      id: transferId,
+      classification: "pair",
+      occurredAt: "2026-10-10T15:37:52.251Z",
+      details: {
+        from_subaccount: "0",
+        to_subaccount: "1",
+        exchange_index: "2",
+        amount_cents: "2500",
+        status: "applied",
+        signature: "must-not-leak",
+        authorization: "must-not-leak",
+      },
+    },
+  ]);
+  assert.deepEqual(detail, {
+    transferId,
+    fromSubaccount: 0,
+    toSubaccount: 1,
+    exchangeIndex: 2,
+    amountCents: 2500,
+    status: "applied",
+    createdAt: "2026-10-10T15:37:52.251Z",
+  });
+  const published = JSON.stringify(detail);
+  assert.equal(published.includes("must-not-leak"), false);
+  assert.equal(published.includes("11111111-1111-4111-8111-111111111111"), false);
+  assert.equal(blockingSubaccountTransferDetail("clean_pair_inventory_cash_not_zero", []), null);
+  assert.equal(blockingSubaccountTransferDetail(reason, [{
+    feed: "subaccount_transfer",
+    id: transferId,
+    classification: "elsewhere",
+    occurredAt: "2026-10-10T15:37:52.251Z",
+    details: {
+      from_subaccount: "0", to_subaccount: "1", exchange_index: "2",
+      amount_cents: "2500", status: "applied",
+    },
+  }]), null);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(store.indexOf("async function captureRailwayBoundary"), store.indexOf("async function fundRailwayPair"));
+  assert.equal(body.includes("blockingSubaccountTransferDetail"), true);
+  assert.equal(body.includes("zeroPriorPairTransfers"), true);
+  assert.equal(body.includes('method: "POST"'), false);
+  assert.equal(body.includes("/portfolio/orders"), false);
 });
 
 test("policy read returns draft limits and approval state without raw policy rows", () => {
