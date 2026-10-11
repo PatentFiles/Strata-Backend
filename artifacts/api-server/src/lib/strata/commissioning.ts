@@ -1048,6 +1048,25 @@ export interface PreBoundaryTransferView {
   classification: string;
   occurredAt: string | null;
   details: Record<string, string | null>;
+  exchangeIndex?: number | null;
+  sourceExchangeIndex?: number | null;
+  destinationExchangeIndex?: number | null;
+}
+
+export interface RoundTripTransferDiagnostic {
+  feed: "subaccount_transfer" | "cross_exchange_transfer";
+  transferId: string;
+  classification: string;
+  fromSubaccount: number | null;
+  toSubaccount: number | null;
+  exchangeIndex: number | null;
+  sourceSubaccount: number | null;
+  destinationSubaccount: number | null;
+  sourceExchangeIndex: number | null;
+  destinationExchangeIndex: number | null;
+  amountCents: number | null;
+  amountDollars: string | null;
+  createdAt: string | null;
 }
 
 export interface PreBoundaryAcknowledgmentResult {
@@ -1067,6 +1086,11 @@ export interface PreBoundaryAcknowledgmentResult {
   armed: false;
   workerStarted: false;
   executionFlagsChanged: false;
+  unrecognizedTransfers?: RoundTripTransferDiagnostic[];
+  roundTripCandidates?: {
+    inbound: RoundTripTransferDiagnostic[];
+    outbound: RoundTripTransferDiagnostic[];
+  };
 }
 
 export interface PreBoundaryRoundTripProof {
@@ -1100,6 +1124,91 @@ function roundTripCreatedAt(record: PreBoundaryTransferView): string | null {
   return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
 }
 
+function roundTripDollars(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || !/^-?(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value)) return null;
+  return value;
+}
+
+function roundTripIndex(value: string | null | undefined, fallback: number | null | undefined): number | null {
+  return roundTripInteger(value) ?? (typeof fallback === "number" && Number.isSafeInteger(fallback) ? fallback : null);
+}
+
+function isInboundCandidate(record: PreBoundaryTransferView): boolean {
+  return record.feed === "subaccount_transfer" &&
+    record.classification === "pair" &&
+    roundTripInteger(record.details.from_subaccount) === 0 &&
+    roundTripInteger(record.details.to_subaccount) === PRODUCTION_SUBACCOUNT &&
+    roundTripInteger(record.details.exchange_index) === PRODUCTION_EXCHANGE_INDEX &&
+    roundTripInteger(record.details.amount_cents) === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
+    record.id !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID;
+}
+
+function isOutboundCandidate(record: PreBoundaryTransferView): boolean {
+  return record.feed === "subaccount_transfer" &&
+    record.classification === "pair" &&
+    roundTripInteger(record.details.from_subaccount) === PRODUCTION_SUBACCOUNT &&
+    roundTripInteger(record.details.to_subaccount) === 0 &&
+    roundTripInteger(record.details.exchange_index) === PRODUCTION_EXCHANGE_INDEX &&
+    roundTripInteger(record.details.amount_cents) === PRE_BOUNDARY_ROUND_TRIP_CENTS &&
+    record.id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID;
+}
+
+function sanitizeRoundTripTransfer(record: PreBoundaryTransferView): RoundTripTransferDiagnostic | null {
+  if (record.feed !== "subaccount_transfer" && record.feed !== "cross_exchange_transfer") return null;
+  if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(record.id)) return null;
+  const classification = /^(?:pair|elsewhere|ambiguous)$/.test(record.classification)
+    ? record.classification
+    : "unrecognized";
+  return {
+    feed: record.feed,
+    transferId: record.id,
+    classification,
+    fromSubaccount: roundTripInteger(record.details.from_subaccount),
+    toSubaccount: roundTripInteger(record.details.to_subaccount),
+    exchangeIndex: roundTripIndex(record.details.exchange_index, record.exchangeIndex),
+    sourceSubaccount: roundTripInteger(record.details.source_subaccount),
+    destinationSubaccount: roundTripInteger(record.details.destination_subaccount),
+    sourceExchangeIndex: roundTripIndex(record.details.source_exchange_shard, record.sourceExchangeIndex),
+    destinationExchangeIndex: roundTripIndex(record.details.destination_exchange_shard, record.destinationExchangeIndex),
+    amountCents: roundTripInteger(record.details.amount_cents),
+    amountDollars: roundTripDollars(record.details.amount_dollars) ?? roundTripDollars(record.details.amount),
+    createdAt: roundTripCreatedAt(record),
+  };
+}
+
+function roundTripFailureDiagnostic(records: PreBoundaryTransferView[]): {
+  unrecognizedTransfers: RoundTripTransferDiagnostic[];
+  roundTripCandidates: { inbound: RoundTripTransferDiagnostic[]; outbound: RoundTripTransferDiagnostic[] };
+} {
+  const touching = records.filter((record) =>
+    (record.feed === "subaccount_transfer" || record.feed === "cross_exchange_transfer") &&
+    record.classification !== "elsewhere");
+  const inbound: RoundTripTransferDiagnostic[] = [];
+  const outbound: RoundTripTransferDiagnostic[] = [];
+  const unrecognized: RoundTripTransferDiagnostic[] = [];
+  for (const record of touching) {
+    const view = sanitizeRoundTripTransfer(record);
+    if (!view) continue;
+    if (isInboundCandidate(record)) inbound.push(view);
+    else if (isOutboundCandidate(record)) outbound.push(view);
+    else unrecognized.push(view);
+  }
+  const causedByCandidateShape = [...inbound, ...outbound].filter((view) =>
+    view.createdAt === null || !TRANSFER_UUID.test(view.transferId));
+  return {
+    unrecognizedTransfers: [...unrecognized, ...causedByCandidateShape],
+    roundTripCandidates: { inbound, outbound },
+  };
+}
+
+function unrecognizedRoundTrip(records: PreBoundaryTransferView[]) {
+  return {
+    ok: false as const,
+    reason: "pre_boundary_unrecognized_transfer" as const,
+    ...roundTripFailureDiagnostic(records),
+  };
+}
+
 function roundTripDigest(proof: Omit<PreBoundaryRoundTripProof, "evidenceDigest">): string {
   return createHash("sha256").update(JSON.stringify({
     version: 1,
@@ -1124,7 +1233,12 @@ export function provePreBoundaryRoundTrip(input: {
   zeroSettlements: boolean;
   reasons: string[];
   records: PreBoundaryTransferView[];
-}): { ok: true; roundTrip: PreBoundaryRoundTripProof } | { ok: false; reason: string } {
+}): { ok: true; roundTrip: PreBoundaryRoundTripProof } | {
+  ok: false;
+  reason: string;
+  unrecognizedTransfers?: RoundTripTransferDiagnostic[];
+  roundTripCandidates?: { inbound: RoundTripTransferDiagnostic[]; outbound: RoundTripTransferDiagnostic[] };
+} {
   if (input.availableCashMicros !== "0") return { ok: false, reason: "pre_boundary_available_cash_not_zero" };
   if (input.inventoryCashMicros !== "0") return { ok: false, reason: "pre_boundary_inventory_cash_not_zero" };
   if (input.portfolioValueMicros !== "0") return { ok: false, reason: "pre_boundary_portfolio_value_not_zero" };
@@ -1138,7 +1252,7 @@ export function provePreBoundaryRoundTrip(input: {
     (record.feed === "subaccount_transfer" || record.feed === "cross_exchange_transfer") &&
     record.classification !== "elsewhere");
   if (touching.some((record) => record.classification === "ambiguous" || record.feed !== "subaccount_transfer")) {
-    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+    return unrecognizedRoundTrip(input.records);
   }
   const parsed = touching.map((record) => ({
     id: record.id,
@@ -1149,7 +1263,7 @@ export function provePreBoundaryRoundTrip(input: {
     createdAt: roundTripCreatedAt(record),
   }));
   if (parsed.some((row) => row.createdAt === null || !TRANSFER_UUID.test(row.id))) {
-    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+    return unrecognizedRoundTrip(input.records);
   }
   const inbound = parsed.filter((row) =>
     row.from === 0 && row.to === PRODUCTION_SUBACCOUNT &&
@@ -1163,7 +1277,7 @@ export function provePreBoundaryRoundTrip(input: {
     row.id === PRE_BOUNDARY_OUTBOUND_TRANSFER_ID);
   const recognized = new Set([...inbound, ...outbound].map((row) => row.id));
   if (parsed.some((row) => !recognized.has(row.id))) {
-    return { ok: false, reason: "pre_boundary_unrecognized_transfer" };
+    return unrecognizedRoundTrip(input.records);
   }
   if (inbound.length !== 1) return { ok: false, reason: "pre_boundary_inbound_transfer_not_proven" };
   if (outbound.length !== 1) return { ok: false, reason: "pre_boundary_outbound_transfer_mismatch" };

@@ -1773,6 +1773,89 @@ test("intentional pre-boundary $25 round trip is acknowledged only for its two t
   assert.equal(migration.includes("private_key"), false);
 });
 
+test("unrecognized round-trip transfers are sanitized and still block acknowledgment", () => {
+  const inboundId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const created = "2026-10-10T16:24:20.000Z";
+  const leg = (id: string, from: number, to: number, cents = 2500, exchange = 2) => ({
+    feed: "subaccount_transfer",
+    id,
+    classification: "pair",
+    occurredAt: created,
+    details: {
+      from_subaccount: String(from),
+      to_subaccount: String(to),
+      exchange_index: String(exchange),
+      amount_cents: String(cents),
+      created_ts: created,
+      signature: "must-not-leak",
+    },
+  });
+  const extraId = "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const blocked = provePreBoundaryRoundTrip({
+    availableCashMicros: "0",
+    inventoryCashMicros: "0",
+    portfolioValueMicros: "0",
+    zeroPositions: true,
+    zeroOrders: true,
+    zeroFills: true,
+    zeroSettlements: true,
+    reasons: [
+      `clean_prior_subaccount_transfer:${inboundId}`,
+      `clean_prior_subaccount_transfer:${PRE_BOUNDARY_OUTBOUND_TRANSFER_ID}`,
+      `clean_prior_subaccount_transfer:${extraId}`,
+    ],
+    records: [
+      leg(inboundId, 0, 1),
+      leg(PRE_BOUNDARY_OUTBOUND_TRANSFER_ID, 1, 0),
+      leg(extraId, 1, 0, 100),
+      {
+        feed: "subaccount_transfer",
+        id: "ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        classification: "elsewhere",
+        occurredAt: created,
+        details: {
+          from_subaccount: "3",
+          to_subaccount: "4",
+          exchange_index: "0",
+          amount_cents: "5",
+          created_ts: created,
+          signature: "must-not-leak",
+        },
+      },
+      {
+        feed: "position",
+        id: "not-a-transfer",
+        classification: "pair",
+        occurredAt: created,
+        details: { signature: "must-not-leak" },
+      },
+    ],
+  });
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) return;
+  assert.equal(blocked.reason, "pre_boundary_unrecognized_transfer");
+  assert.deepEqual(blocked.unrecognizedTransfers?.map((row) => row.transferId), [extraId]);
+  assert.deepEqual(blocked.roundTripCandidates?.inbound.map((row) => row.transferId), [inboundId]);
+  assert.deepEqual(blocked.roundTripCandidates?.outbound.map((row) => row.transferId), [PRE_BOUNDARY_OUTBOUND_TRANSFER_ID]);
+  const extra = blocked.unrecognizedTransfers?.[0];
+  assert.equal(extra?.fromSubaccount, 1);
+  assert.equal(extra?.toSubaccount, 0);
+  assert.equal(extra?.exchangeIndex, 2);
+  assert.equal(extra?.amountCents, 100);
+  assert.equal(extra?.amountDollars, null);
+  const published = JSON.stringify(blocked);
+  assert.equal(published.includes("must-not-leak"), false);
+  assert.equal(published.includes("ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee"), false);
+  assert.equal(published.includes("not-a-transfer"), false);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(store.indexOf("async function acknowledgePreBoundaryRoundTrip"), store.indexOf("async function fundRailwayPair"));
+  const blockedReturn = body.indexOf("pre_boundary_unrecognized_transfer");
+  const insertAt = body.indexOf("INSERT INTO strata_pre_boundary_transfer_acknowledgment");
+  assert.equal(blockedReturn > -1 && insertAt > blockedReturn, true);
+  assert.equal(body.includes("unrecognizedTransfers"), true);
+  assert.equal(body.includes("roundTripCandidates"), true);
+});
+
 test("policy read returns draft limits and approval state without raw policy rows", () => {
   const read = policyReadFromRows({
     draft: {

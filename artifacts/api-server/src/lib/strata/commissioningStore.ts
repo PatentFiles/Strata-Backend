@@ -483,7 +483,16 @@ async function acknowledgePreBoundaryRoundTrip(confirmation: unknown, actor: str
     records: snapshot.records,
   });
   if (!proof.ok) {
-    return { status: "BLOCKED" as const, reason: proof.reason, ...closed, eligible: false };
+    return {
+      status: "BLOCKED" as const,
+      reason: proof.reason,
+      ...closed,
+      eligible: false,
+      ...(proof.reason === "pre_boundary_unrecognized_transfer" ? {
+        unrecognizedTransfers: proof.unrecognizedTransfers ?? [],
+        roundTripCandidates: proof.roundTripCandidates ?? { inbound: [], outbound: [] },
+      } : {}),
+    };
   }
   const id = randomUUID();
   await query(`INSERT INTO strata_pre_boundary_transfer_acknowledgment (
