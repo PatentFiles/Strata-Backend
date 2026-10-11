@@ -101,6 +101,16 @@ export function policyApprovalEntryBlock(
   return null;
 }
 
+function policyDate(value: unknown): Date | null {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    const millis = value.getTime();
+    return Number.isFinite(millis) ? new Date(millis) : null;
+  }
+  const parsed = new Date(String(value));
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
 export function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMoneyPolicy {
   return {
     id: String(row.id),
@@ -114,7 +124,7 @@ export function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMone
     championSelectionReviewId: text(row.champion_selection_review_id),
     championSelectionEvidenceHash: text(row.champion_selection_evidence_hash),
     championSelectedBy: text(row.champion_selected_by),
-    championSelectedAt: row.champion_selected_at ? new Date(String(row.champion_selected_at)) : null,
+    championSelectedAt: policyDate(row.champion_selected_at),
     capitalLimitCents: Number(row.capital_limit_cents),
     maxEntryStakeCents: Number(row.max_entry_stake_cents),
     maxEntryAllInCents: Number(row.max_entry_all_in_cents),
@@ -132,7 +142,7 @@ export function policyFromRow(row: Record<string, unknown>): V13ApprovedLiveMone
     policyHash: text(row.policy_hash),
     createdBy: String(row.created_by),
     approvedBy: text(row.approved_by),
-    approvedAt: row.approved_at ? new Date(String(row.approved_at)) : null,
+    approvedAt: policyDate(row.approved_at),
   };
 }
 

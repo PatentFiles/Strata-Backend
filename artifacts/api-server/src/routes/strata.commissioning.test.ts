@@ -1048,6 +1048,87 @@ test("V2 approval binds the reviewed entry policy and leaves a blocked draft unc
   assert.ok(dispatch.indexOf("assertEntryPolicyWindow") < dispatch.indexOf("this.exchange.submit"));
 });
 
+test("approved policy hash keeps PostgreSQL date milliseconds", () => {
+  const when = new Date("2026-10-11T18:49:20.789Z");
+  const draft = {
+    id: "v13-live-money-1",
+    version: 1,
+    supersedes_policy_id: null,
+    state: "DRAFT",
+    strategy_version: "V1.3",
+    strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
+    strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
+    entry_policy_version: null,
+    capital_limit_cents: 15000,
+    max_entry_stake_cents: 150,
+    max_entry_all_in_cents: 200,
+    max_open_positions: 1,
+    max_daily_loss_cents: 500,
+    max_total_loss_cents: 1500,
+    max_quote_age_ms: 1000,
+    max_fee_evidence_age_ms: 1000,
+    require_full_depth: true,
+    entry_time_in_force: "IOC",
+    entry_limit_source: "SIGNAL_REFERENCE_OFFER",
+    created_by: DEVELOPER_ID,
+    policy_hash: null,
+  };
+  const bound = approvedPolicyFromDraft(draft, DEVELOPER_ID, when);
+  assert.match(bound.policyHash, /^[0-9a-f]{64}$/);
+  assert.equal(bound.policy.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+  const pgRow = {
+    ...draft,
+    state: "APPROVED",
+    entry_policy_version: bound.policy.entryPolicyVersion,
+    champion_selection_review_id: bound.policy.championSelectionReviewId,
+    champion_selection_evidence_hash: bound.policy.championSelectionEvidenceHash,
+    champion_selected_by: DEVELOPER_ID,
+    champion_selected_at: bound.policy.championSelectedAt,
+    fee_policy_version: bound.policy.feePolicyVersion,
+    fee_source_url: bound.policy.feeSourceUrl,
+    fee_formula_version: bound.policy.feeFormulaVersion,
+    approved_by: DEVELOPER_ID,
+    approved_at: bound.policy.approvedAt,
+    strategy_version: "V1.3",
+    strategy_parameter_set_id: V13_CHAMPION_PARAMETER_SET.id,
+    strategy_parameter_hash: V13_CHAMPION_PARAMETER_HASH,
+    policy_hash: bound.policyHash,
+  };
+  const reread = policyFromRow(pgRow);
+  assert.equal(reread.approvedAt?.toISOString(), "2026-10-11T18:49:20.789Z");
+  assert.equal(reread.championSelectedAt?.toISOString(), "2026-10-11T18:49:20.789Z");
+  assert.equal(computeV13LiveMoneyPolicyHash(reread), bound.policyHash);
+  const limitChanges: Array<Partial<typeof reread>> = [
+    { capitalLimitCents: 14999 },
+    { maxEntryStakeCents: 149 },
+    { maxEntryAllInCents: 199 },
+    { maxDailyLossCents: 499 },
+    { maxTotalLossCents: 1499 },
+    { maxQuoteAgeMs: 999 },
+    { maxFeeEvidenceAgeMs: 999 },
+    { maxOpenPositions: 0 },
+  ];
+  for (const change of limitChanges) {
+    assert.notEqual(computeV13LiveMoneyPolicyHash({ ...reread, ...change }), bound.policyHash);
+  }
+  assert.notEqual(
+    computeV13LiveMoneyPolicyHash({ ...reread, entryPolicyVersion: V13_LEGACY_ENTRY_POLICY }),
+    bound.policyHash,
+  );
+  assert.notEqual(
+    computeV13LiveMoneyPolicyHash({ ...reread, approvedAt: new Date(when.getTime() + 1) }),
+    bound.policyHash,
+  );
+  assert.notEqual(
+    computeV13LiveMoneyPolicyHash({ ...reread, championSelectedAt: new Date(when.getTime() - 1) }),
+    bound.policyHash,
+  );
+  assert.notEqual(
+    computeV13LiveMoneyPolicyHash({ ...reread, entryPolicyVersion: null }),
+    bound.policyHash,
+  );
+});
+
 test("INDEX2 generation is one authenticated POST and never stores or logs the private key", async () => {
   const readyFacts = (): Index2GenerationFacts => ({
     confirmation: STRATA_INDEX2_KEY_CONFIRMATION,
