@@ -71,7 +71,15 @@ function blockedCommissioningPort(): CommissioningPort {
     }),
     verifyFee: async () => ({
       snapshot: await read(),
-      feeVerification: { ok: false, reason: "official_fee_schedule_not_verified", digestStored: false },
+      feeVerification: {
+        ok: false,
+        reason: "official_fee_schedule_not_verified",
+        digestStored: false,
+        httpStatus: null,
+        contentType: null,
+        finalOrigin: null,
+        finalPathname: null,
+      },
     }),
     verifyCash: read,
     captureBoundary: async () => ({

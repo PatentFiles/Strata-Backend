@@ -1267,7 +1267,15 @@ export function createDatabaseCommissioningPort(
               fee_artifact_verified = true, updated_at = now()`, [established.digest]);
         return {
           snapshot: await readCommissioningSnapshot(workerRunning()),
-          feeVerification: { ok: true as const, reason: null, digestStored: true as const },
+          feeVerification: {
+            ok: true as const,
+            reason: null,
+            digestStored: true as const,
+            httpStatus: established.diagnostic.httpStatus,
+            contentType: established.diagnostic.contentType,
+            finalOrigin: established.diagnostic.finalOrigin,
+            finalPathname: established.diagnostic.finalPathname,
+          },
         };
       }
       return {
@@ -1276,6 +1284,10 @@ export function createDatabaseCommissioningPort(
           ok: false as const,
           reason: publicFeeVerificationReason(established.reason),
           digestStored: false as const,
+          httpStatus: established.diagnostic.httpStatus,
+          contentType: established.diagnostic.contentType,
+          finalOrigin: established.diagnostic.finalOrigin,
+          finalPathname: established.diagnostic.finalPathname,
         },
       };
     },

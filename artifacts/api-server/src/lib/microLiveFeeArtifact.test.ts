@@ -1,3 +1,26 @@
+const promiseWithResolvers = Promise as PromiseConstructor & {
+  withResolvers?: <T>() => {
+    promise: Promise<T>;
+    resolve: (value: T | PromiseLike<T>) => void;
+    reject: (reason?: unknown) => void;
+  };
+};
+if (typeof promiseWithResolvers.withResolvers !== "function") {
+  Object.defineProperty(Promise, "withResolvers", {
+    configurable: true,
+    writable: true,
+    value<T>() {
+      let resolve!: (value: T | PromiseLike<T>) => void;
+      let reject!: (reason?: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    },
+  });
+}
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -5,8 +28,8 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
-  CANONICAL_FEE_SCHEDULE_URL, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
-  STANDING_FEE_POLICY_VERSION, parseFeeSchedulePdf, parseFeeScheduleText,
+  CANONICAL_FEE_SCHEDULE_URL, MAX_FEE_SCHEDULE_BYTES, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  STANDING_FEE_POLICY_VERSION, establishOfficialFeeDigest, parseFeeSchedulePdf, parseFeeScheduleText,
   verifyCurrentFeeArtifact,
 } from "./microLiveFeeArtifact";
 
@@ -197,4 +220,172 @@ test("rejects arbitrary source URLs and unversioned formula identities before fe
   } as unknown as typeof approval, neverFetch);
   assert.equal(legacyMetadata.status, "invalid");
   assert.equal(calls, 0);
+});
+
+function mockFeeResponse(options: {
+  status?: number;
+  contentType?: string;
+  body?: Uint8Array;
+  url?: string;
+}): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(input), CANONICAL_FEE_SCHEDULE_URL);
+    assert.equal(init?.method, "GET");
+    assert.equal(init?.redirect, "error");
+    assert.equal(init?.credentials, undefined);
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("accept"), "application/pdf");
+    assert.equal(headers.get("cache-control"), "no-cache");
+    assert.ok(init?.signal);
+    const response = new Response(options.body ? new Uint8Array(options.body) : null, {
+      status: options.status ?? 200,
+      headers: {
+        ...(options.contentType ? { "content-type": options.contentType } : {}),
+        "set-cookie": "session=secret-cookie",
+        "x-request-token": "secret-token",
+      },
+    });
+    if (options.url !== undefined) Object.defineProperty(response, "url", { value: options.url });
+    return response;
+  }) as typeof fetch;
+}
+
+function assertSanitizedFeeResult(value: { diagnostic: { finalPathname: string | null } }): void {
+  const encoded = JSON.stringify(value);
+  assert.equal(encoded.includes("secret-cookie"), false);
+  assert.equal(encoded.includes("secret-token"), false);
+  assert.equal(encoded.includes("BODY-SECRET-MARKER"), false);
+  assert.equal(encoded.includes("%PDF"), false);
+  assert.equal(value.diagnostic.finalPathname?.includes("?"), false);
+  assert.equal(value.diagnostic.finalPathname?.includes("#"), false);
+}
+
+test("200 application/pdf is not approval until the reviewed parser accepts the formula", async () => {
+  const bytes = examplePdf("Kalshi document without a trading fee formula.");
+  const result = await establishOfficialFeeDigest(mockFeeResponse({
+    contentType: "application/pdf",
+    body: bytes,
+    url: "https://kalshi.com/docs/kalshi-fee-schedule.pdf?token=secret-token#fragment",
+  }));
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "official_fee_schedule_formula_unverifiable");
+  assert.equal(result.diagnostic.httpStatus, 200);
+  assert.equal(result.diagnostic.contentType, "application/pdf");
+  assert.equal(result.diagnostic.finalOrigin, "https://kalshi.com");
+  assert.equal(result.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+  assertSanitizedFeeResult(result);
+});
+
+test("official fee fetch reports HTTP 403 and 404 without the response body", async () => {
+  const body = new TextEncoder().encode("<html>BODY-SECRET-MARKER</html>");
+  const forbidden = await establishOfficialFeeDigest(mockFeeResponse({
+    status: 403,
+    contentType: "text/html",
+    body,
+    url: "https://user:secret-token@kalshi.com/docs/kalshi-fee-schedule.pdf?token=secret-token",
+  }));
+  assert.equal(forbidden.ok, false);
+  if (!forbidden.ok) {
+    assert.equal(forbidden.reason, "official_fee_schedule_http_403");
+    assert.equal(forbidden.diagnostic.httpStatus, 403);
+    assert.equal(forbidden.diagnostic.contentType, "text/html");
+    assert.equal(forbidden.diagnostic.finalOrigin, null);
+    assert.equal(forbidden.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+    assertSanitizedFeeResult(forbidden);
+  }
+
+  const missing = await establishOfficialFeeDigest(mockFeeResponse({
+    status: 404,
+    contentType: "text/html; charset=utf-8",
+    body,
+  }));
+  assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.equal(missing.reason, "official_fee_schedule_http_404");
+    assert.equal(missing.diagnostic.httpStatus, 404);
+    assert.equal(missing.diagnostic.contentType, "text/html");
+    assert.equal(missing.diagnostic.finalOrigin, "https://kalshi.com");
+    assert.equal(missing.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+    assertSanitizedFeeResult(missing);
+  }
+});
+
+test("official fee fetch rejects non-PDF content types", async () => {
+  const body = new TextEncoder().encode("<html>BODY-SECRET-MARKER</html>");
+  const html = await establishOfficialFeeDigest(mockFeeResponse({
+    contentType: "text/html",
+    body,
+  }));
+  assert.equal(html.ok, false);
+  if (!html.ok) {
+    assert.equal(html.reason, "official_fee_schedule_content_type_invalid");
+    assert.equal(html.diagnostic.httpStatus, 200);
+    assert.equal(html.diagnostic.contentType, "text/html");
+    assertSanitizedFeeResult(html);
+  }
+
+  const bytes = await establishOfficialFeeDigest(mockFeeResponse({
+    contentType: "application/octet-stream",
+    body: pdf,
+  }));
+  assert.equal(bytes.ok, false);
+  if (!bytes.ok) {
+    assert.equal(bytes.reason, "official_fee_schedule_content_type_invalid");
+    assert.equal(bytes.diagnostic.httpStatus, 200);
+    assert.equal(bytes.diagnostic.contentType, "application/octet-stream");
+    assertSanitizedFeeResult(bytes);
+  }
+});
+
+test("official fee fetch rejects an oversized body and an invalid PDF", async () => {
+  const oversized = await establishOfficialFeeDigest(mockFeeResponse({
+    contentType: "application/pdf",
+    body: new Uint8Array(MAX_FEE_SCHEDULE_BYTES + 1),
+  }));
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) {
+    assert.equal(oversized.reason, "official_fee_schedule_size_or_body_invalid");
+    assert.equal(oversized.diagnostic.httpStatus, 200);
+    assert.equal(oversized.diagnostic.contentType, "application/pdf");
+    assertSanitizedFeeResult(oversized);
+  }
+
+  const invalid = Buffer.concat([Buffer.from("%PDF-"), Buffer.alloc(120, 0x20)]);
+  const unreadable = await establishOfficialFeeDigest(mockFeeResponse({
+    contentType: "application/pdf",
+    body: invalid,
+  }));
+  assert.equal(unreadable.ok, false);
+  if (!unreadable.ok) {
+    assert.equal(unreadable.reason, "official_fee_schedule_pdf_unparseable");
+    assert.equal(unreadable.diagnostic.httpStatus, 200);
+    assert.equal(unreadable.diagnostic.contentType, "application/pdf");
+    assertSanitizedFeeResult(unreadable);
+  }
+});
+
+test("official fee fetch stores a digest only after the reviewed parser and second verification agree", async () => {
+  let calls = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls += 1;
+    assert.equal(String(input), CANONICAL_FEE_SCHEDULE_URL);
+    assert.equal(init?.method, "GET");
+    assert.equal(init?.redirect, "error");
+    assert.equal(init?.credentials, undefined);
+    return new Response(new Uint8Array(pdf), {
+      status: 200,
+      headers: { "content-type": "application/pdf", "content-length": String(pdf.length) },
+    });
+  }) as typeof fetch;
+  const result = await establishOfficialFeeDigest(fetchImpl);
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.digest, digest);
+  assert.equal(result.diagnostic.httpStatus, 200);
+  assert.equal(result.diagnostic.contentType, "application/pdf");
+  assert.equal(result.diagnostic.finalOrigin, "https://kalshi.com");
+  assert.equal(result.diagnostic.finalPathname, "/docs/kalshi-fee-schedule.pdf");
+  assert.equal(JSON.stringify(result.diagnostic).includes("%PDF"), false);
 });

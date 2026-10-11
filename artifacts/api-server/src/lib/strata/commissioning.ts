@@ -510,6 +510,10 @@ export interface FeeVerificationReport {
   ok: boolean;
   reason: string | null;
   digestStored: boolean;
+  httpStatus: number | null;
+  contentType: string | null;
+  finalOrigin: string | null;
+  finalPathname: string | null;
 }
 
 const PUBLIC_FEE_REASON = /^[a-z0-9_]{1,80}$/;

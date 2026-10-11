@@ -277,13 +277,25 @@ function memoryPort(initial: CommissioningSnapshot) {
             ok: false as const,
             reason: "official_fee_schedule_not_verified",
             digestStored: false as const,
+            httpStatus: null,
+            contentType: null,
+            finalOrigin: null,
+            finalPathname: null,
           },
         };
       }
       snapshot.fee = { ...snapshot.fee, digest: "c".repeat(64), verified: true };
       return {
         snapshot: structuredClone(snapshot),
-        feeVerification: { ok: true as const, reason: null, digestStored: true as const },
+        feeVerification: {
+          ok: true as const,
+          reason: null,
+          digestStored: true as const,
+          httpStatus: 200,
+          contentType: "application/pdf",
+          finalOrigin: "https://kalshi.com",
+          finalPathname: "/docs/kalshi-fee-schedule.pdf",
+        },
       };
     },
     verifyCash: async () => {
@@ -2436,8 +2448,11 @@ test("funding reconciliation selects only the post-attempt transfer and never re
 test("verify-fee returns the existing safe failure reason and stores a digest only on success", () => {
   for (const reason of [
     "official_fee_schedule_unavailable",
-    "official_fee_schedule_unreadable",
+    "official_fee_schedule_http_403",
+    "official_fee_schedule_http_404",
+    "official_fee_schedule_content_type_invalid",
     "official_fee_schedule_size_or_body_invalid",
+    "official_fee_schedule_pdf_unparseable",
     "official_fee_schedule_formula_unverifiable",
     "official_fee_schedule_not_verified",
     "official_fee_schedule_http_429",
@@ -2458,6 +2473,12 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
   assert.equal(body.includes("publicFeeVerificationReason(established.reason)"), true);
   assert.equal(body.includes("digestStored: true"), true);
   assert.equal(body.includes("reason: null"), true);
+  assert.equal(body.includes("httpStatus: established.diagnostic.httpStatus"), true);
+  assert.equal(body.includes("contentType: established.diagnostic.contentType"), true);
+  assert.equal(body.includes("finalOrigin: established.diagnostic.finalOrigin"), true);
+  assert.equal(body.includes("finalPathname: established.diagnostic.finalPathname"), true);
+  const successReturn = body.slice(body.indexOf("ok: true"), body.indexOf("digestStored: false"));
+  assert.equal(successReturn.includes("digest: established.digest"), false);
   assert.equal(body.includes("postOneShotPairFunding"), false);
   assert.equal(body.includes("planCommission"), false);
   assert.equal(body.includes("planArm"), false);

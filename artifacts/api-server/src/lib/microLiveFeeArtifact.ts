@@ -48,6 +48,14 @@ function failure(
   };
 }
 
+function calendarDay(value: string): string | null {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${parsed.getFullYear()}-${month}-${day}`;
+}
+
 /**
  * The July 7 schedule puts the general formula in "Trading Fees" and the
  * exceptions in a later "Non-Standard Fees" table. Keep this recognition
@@ -83,7 +91,7 @@ function parseJuly2026FeeSchedule(normalized: string): ParsedFeeSchedule | null 
       !series.includes("KXBTCY") ||
       /\bKXBTC15M\b/i.test(normalized) ||
       datedFooters.length < 5 ||
-      datedFooters.some(match => Date.parse(match[1]!) !== Date.parse("2026-07-07")))
+      datedFooters.some(match => calendarDay(match[1]!) !== "2026-07-07"))
     return null;
 
   return {
@@ -274,13 +282,66 @@ export async function verifyCurrentFeeArtifact(
   };
 }
 
+export interface OfficialFeeFetchDiagnostic {
+  httpStatus: number | null;
+  contentType: string | null;
+  finalOrigin: string | null;
+  finalPathname: string | null;
+}
+
+const EMPTY_FEE_FETCH: OfficialFeeFetchDiagnostic = {
+  httpStatus: null,
+  contentType: null,
+  finalOrigin: null,
+  finalPathname: null,
+};
+
+function mediaType(value: string | null): string | null {
+  const media = value?.split(";")[0]?.trim().toLowerCase() ?? "";
+  return /^[a-z0-9!#$&^_.+-]{1,64}\/[a-z0-9!#$&^_.+-]{1,64}$/.test(media) ? media : null;
+}
+
+function httpStatus(value: number): number | null {
+  return Number.isInteger(value) && value >= 100 && value <= 599 ? value : null;
+}
+
+/** Origin and pathname only. Query, fragment, userinfo, and raw headers stay out. */
+export function officialFeeFetchDiagnostic(response: Response | null): OfficialFeeFetchDiagnostic {
+  if (!response) return { ...EMPTY_FEE_FETCH };
+  const status = httpStatus(response.status);
+  const contentType = mediaType(response.headers.get("content-type"));
+  const location = response.url || CANONICAL_FEE_SCHEDULE_URL;
+  try {
+    const url = new URL(location);
+    const hostnameSafe = url.protocol === "https:" &&
+      !url.username && !url.password &&
+      /^[a-z0-9.-]+$/i.test(url.hostname);
+    const pathSafe = /^\/[A-Za-z0-9._~/-]{0,200}$/.test(url.pathname) && !url.pathname.includes("..");
+    return {
+      httpStatus: status,
+      contentType,
+      finalOrigin: hostnameSafe ? url.origin : null,
+      finalPathname: pathSafe ? url.pathname : null,
+    };
+  } catch {
+    return { httpStatus: status, contentType, finalOrigin: null, finalPathname: null };
+  }
+}
+
+function pdfEnvelopeRejected(bytes: Buffer): boolean {
+  return bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
+    bytes.subarray(0, 5).toString() !== "%PDF-" ||
+    !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"));
+}
+
 /**
  * Hash the official PDF only after the reviewed parser accepts the formula.
  * A mismatched placeholder digest is not a successful verification.
  */
 export async function establishOfficialFeeDigest(
   fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<{ ok: true; digest: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; digest: string; diagnostic: OfficialFeeFetchDiagnostic } |
+  { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic }> {
   let response: Response;
   try {
     response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
@@ -290,16 +351,33 @@ export async function establishOfficialFeeDigest(
       signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
     });
   } catch {
-    return { ok: false, reason: "official_fee_schedule_unavailable" };
+    return { ok: false, reason: "official_fee_schedule_unavailable", diagnostic: { ...EMPTY_FEE_FETCH } };
   }
-  if (!response.ok || response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/pdf") {
-    return { ok: false, reason: "official_fee_schedule_unreadable" };
+  const diagnostic = officialFeeFetchDiagnostic(response);
+  const status = httpStatus(response.status);
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: status === null ? "official_fee_schedule_unavailable" : `official_fee_schedule_http_${status}`,
+      diagnostic,
+    };
+  }
+  if (mediaType(response.headers.get("content-type")) !== "application/pdf") {
+    return { ok: false, reason: "official_fee_schedule_content_type_invalid", diagnostic };
   }
   const bytes = await readPdfWithinLimit(response);
-  if (!bytes) return { ok: false, reason: "official_fee_schedule_size_or_body_invalid" };
-  const parsed = await parseFeeSchedulePdf(bytes).catch(() => null);
+  if (!bytes) return { ok: false, reason: "official_fee_schedule_size_or_body_invalid", diagnostic };
+  if (pdfEnvelopeRejected(bytes)) {
+    return { ok: false, reason: "official_fee_schedule_pdf_unparseable", diagnostic };
+  }
+  let parsed: ParsedFeeSchedule | null;
+  try {
+    parsed = await parseFeeSchedulePdf(bytes);
+  } catch {
+    return { ok: false, reason: "official_fee_schedule_pdf_unparseable", diagnostic };
+  }
   if (!parsed || parsed.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
-    return { ok: false, reason: "official_fee_schedule_formula_unverifiable" };
+    return { ok: false, reason: "official_fee_schedule_formula_unverifiable", diagnostic };
   }
   const digest = createHash("sha256").update(bytes).digest("hex");
   const verified = await verifyCurrentFeeArtifact({
@@ -309,7 +387,7 @@ export async function establishOfficialFeeDigest(
     formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   }, fetchImpl);
   if (!verified.valid || verified.digest !== digest) {
-    return { ok: false, reason: verified.reason ?? "official_fee_schedule_not_verified" };
+    return { ok: false, reason: verified.reason ?? "official_fee_schedule_not_verified", diagnostic };
   }
-  return { ok: true, digest };
+  return { ok: true, digest, diagnostic };
 }
