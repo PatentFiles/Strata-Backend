@@ -74,7 +74,7 @@ function blockedCommissioningPort(): CommissioningPort {
     captureBoundary: async () => ({
       snapshot: emptySnapshot(), calls: [], blocked: true, reason: "boundary_capture_unavailable",
     }),
-    readPolicy: async () => ({ state: "ABSENT" }),
+    readPolicy: async () => ({ draft: null, approved: false }),
     proposePolicy: async () => ({ status: "BLOCKED", reason: "policy_proposal_unavailable" }),
     approvePolicy: async () => ({ status: "BLOCKED", reason: "policy_approval_unavailable" }),
     approveMinimumExit: async () => ({ status: "BLOCKED", reason: "minimum_exit_approval_unavailable" }),

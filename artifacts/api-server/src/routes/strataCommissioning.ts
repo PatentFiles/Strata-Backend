@@ -5,6 +5,7 @@ import {
   STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
   commissioningStatus,
   fundingAuthorizationDecision,
+  type PolicyRead,
   planCommission,
   type CommissioningSnapshot,
   type SubaccountStatus,
@@ -51,7 +52,7 @@ export interface CommissioningPort {
   fund(confirmation: unknown): Promise<{ state: string; reason: string; transferAttempted: boolean; attempts: number }>;
   verifyFee(): Promise<CommissioningSnapshot>;
   verifyCash(): Promise<CommissioningSnapshot>;
-  readPolicy(): Promise<unknown>;
+  readPolicy(): Promise<PolicyRead>;
   proposePolicy(body: unknown, actor: string): Promise<{ status: string; reason: string }>;
   approvePolicy(actor: string): Promise<{ status: string; reason: string; policyHash?: string }>;
   approveMinimumExit(micros: unknown, confirmation: unknown, actor: string): Promise<{ status: string; reason: string }>;

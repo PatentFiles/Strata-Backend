@@ -35,6 +35,7 @@ import {
   type SubaccountIdentity,
   planCommission,
   planDisarm,
+  policyReadFromRows,
   validatePolicyLimits,
   type AccountPlan,
   type CommissioningSnapshot,
@@ -443,7 +444,6 @@ function memoryPort(initial: CommissioningSnapshot) {
       return { status: "ARMED", reason: decision.reason, workerStarted: false, environmentChanged: false };
     },
     disarm: async (confirmation) => {
-      emergencyStops += 0;
       const decision = planDisarm(snapshot, confirmation);
       if (!decision.ok) return { status: "BLOCKED", reason: decision.reason, emergencyStop: false };
       snapshot.account.executionEnabled = false;
@@ -1518,6 +1518,43 @@ test("scoped balance scalar proves an already agreed (1,2) pair without an ident
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).reason, "subaccount_1_already_exists");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "uncertain" }).reason, "subaccount_creation_uncertain_no_retry");
   assert.equal(subaccountCreationDecision({ ...creation, priorAttempt: "none" }).proceed, false);
+});
+
+test("policy read returns draft limits and approval state without raw policy rows", () => {
+  const read = policyReadFromRows({
+    draft: {
+      capital_limit_cents: 1000,
+      max_entry_stake_cents: 500,
+      max_entry_all_in_cents: 800,
+      max_daily_loss_cents: 200,
+      max_total_loss_cents: 400,
+      max_quote_age_ms: 1500,
+      max_fee_evidence_age_ms: 1500,
+      policy_hash: "secret-hash",
+      created_by: "secret-actor",
+    },
+    approvedCount: 1,
+  });
+  assert.deepEqual(read, {
+    draft: {
+      capitalLimitCents: 1000,
+      maxEntryStakeCents: 500,
+      maxEntryAllInCents: 800,
+      maxDailyLossCents: 200,
+      maxTotalLossCents: 400,
+      maxQuoteAgeMs: 1500,
+      maxFeeEvidenceAgeMs: 1500,
+    },
+    approved: true,
+  });
+  assert.equal(JSON.stringify(read).includes("secret-hash"), false);
+  assert.equal(JSON.stringify(read).includes("secret-actor"), false);
+  assert.equal(policyReadFromRows({ draft: null, approvedCount: 0 }).approved, false);
+  assert.equal(policyReadFromRows({ draft: null, approvedCount: 2 }).approved, false);
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(store.indexOf("async readPolicy()"), store.indexOf("async proposePolicy"));
+  assert.equal(body.includes("policies:"), false);
+  assert.equal(body.includes("SELECT *"), false);
 });
 
 test("INDEX2 replacement preserves the old attempt and allows one current-account POST", async () => {

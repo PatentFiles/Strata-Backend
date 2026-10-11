@@ -858,6 +858,41 @@ export interface PolicyLimits {
   maxFeeEvidenceAgeMs: number;
 }
 
+export interface PolicyRead {
+  draft: PolicyLimits | null;
+  approved: boolean;
+}
+
+function policyInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/** Operator limits and approval only. Raw policy rows are not returned. */
+export function policyReadFromRows(input: {
+  draft: Record<string, unknown> | null;
+  approvedCount: number;
+}): PolicyRead {
+  const row = input.draft;
+  const limits = row ? {
+    capitalLimitCents: policyInteger(row.capital_limit_cents),
+    maxEntryStakeCents: policyInteger(row.max_entry_stake_cents),
+    maxEntryAllInCents: policyInteger(row.max_entry_all_in_cents),
+    maxDailyLossCents: policyInteger(row.max_daily_loss_cents),
+    maxTotalLossCents: policyInteger(row.max_total_loss_cents),
+    maxQuoteAgeMs: policyInteger(row.max_quote_age_ms),
+    maxFeeEvidenceAgeMs: policyInteger(row.max_fee_evidence_age_ms),
+  } : null;
+  const draft = limits && Object.values(limits).every((value) => value !== null)
+    ? limits as PolicyLimits
+    : null;
+  return { draft, approved: input.approvedCount === 1 };
+}
+
 export function validatePolicyLimits(input: Partial<PolicyLimits> | null): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
   if (!input) return { ok: false, errors: ["policy_values_required"] };

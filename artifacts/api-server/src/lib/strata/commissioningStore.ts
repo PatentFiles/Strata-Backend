@@ -35,6 +35,7 @@ import {
   fundingAuthorizationDecision,
   index2GenerationDecision,
   index2ReplacementDecision,
+  policyReadFromRows,
   maskKeyId,
   assembleSubaccountStatus,
   subaccountCreationDecision,
@@ -1057,8 +1058,16 @@ export function createDatabaseCommissioningPort(
       return readCommissioningSnapshot(workerRunning());
     },
     async readPolicy() {
-      const rows = await query("SELECT id, version, state, policy_hash, capital_limit_cents, max_entry_stake_cents, max_entry_all_in_cents, max_daily_loss_cents, max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms FROM v13_live_money_policy ORDER BY version DESC LIMIT 5");
-      return { policies: rows.rows };
+      const [drafts, approved] = await Promise.all([
+        query(`SELECT capital_limit_cents, max_entry_stake_cents, max_entry_all_in_cents,
+          max_daily_loss_cents, max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms
+          FROM v13_live_money_policy WHERE state = 'DRAFT' ORDER BY version DESC LIMIT 1`),
+        query("SELECT 1 FROM v13_live_money_policy WHERE state = 'APPROVED' LIMIT 2"),
+      ]);
+      return policyReadFromRows({
+        draft: drafts.rows[0] ?? null,
+        approvedCount: approved.rows.length,
+      });
     },
     async proposePolicy(body, actor) {
       const parsed = body && typeof body === "object" && !Array.isArray(body) ? body as Partial<PolicyLimits> : null;
