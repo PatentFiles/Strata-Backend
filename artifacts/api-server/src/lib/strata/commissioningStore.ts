@@ -7,7 +7,7 @@ import {
   generateStrataIndex2Key,
   inspectStrataIndex2Credentials,
 } from "../generatePairRestrictedKalshiKey";
-import { readReviewedSubaccountEvidence } from "../microLiveSubaccountCreation";
+import { readProvisioningInventory, readReviewedSubaccountEvidence } from "../microLiveSubaccountCreation";
 import { configuredKey } from "../microLivePairBoundary";
 import { postOneShotPairFunding, readPairTransferHistory, readPrimaryIndex2Balance } from "../kalshiPairFundingClient";
 import {
@@ -669,8 +669,13 @@ export async function readRailwaySubaccountStatus(): Promise<SubaccountStatus> {
     return unprovenSubaccountStatus();
   }
   try {
-    const evidence = await readReviewedSubaccountEvidence();
-    if (evidence.calls.some((call) => call.method !== "GET")) return unprovenSubaccountStatus();
+    const evidence = await readProvisioningInventory();
+    if (!evidence.complete || evidence.calls.some((call) => call.method !== "GET")) {
+      return unprovenSubaccountStatus({
+        provisioningAuthenticated: evidence.provisioningAuthenticated,
+        diagnostics: evidence.diagnostics,
+      });
+    }
     return assembleSubaccountStatus({ ...evidence, attemptState });
   } catch {
     return unprovenSubaccountStatus();

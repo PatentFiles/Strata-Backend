@@ -12,6 +12,7 @@ import {
   predictionsApiTier,
   scopedPairBalanceProven,
 } from "../kalshiSubaccountInventory";
+import type { ProvisioningDiagnostic } from "../microLiveSubaccountCreation";
 
 /** Reviewed dedicated pair. Production rows cannot name any other pair. */
 export const PRODUCTION_SUBACCOUNT = 1;
@@ -536,6 +537,8 @@ export interface SubaccountStatus {
   subaccountCreationTierEligible: boolean;
   nettingSubaccount1Exists: boolean;
   balanceInventorySubaccount1Exists: boolean;
+  provisioningAuthenticated?: boolean;
+  diagnostics?: ProvisioningDiagnostic[];
 }
 
 export type SubaccountAttemptState =
@@ -718,7 +721,10 @@ export function assembleSubaccountStatus(input: {
   );
 }
 
-export function unprovenSubaccountStatus(): SubaccountStatus {
+export function unprovenSubaccountStatus(diagnostics?: {
+  provisioningAuthenticated: boolean;
+  diagnostics: ProvisioningDiagnostic[];
+}): SubaccountStatus {
   return {
     subaccount1Exists: false,
     subaccount1Exchange2Exists: false,
@@ -731,6 +737,10 @@ export function unprovenSubaccountStatus(): SubaccountStatus {
     subaccountCreationTierEligible: false,
     nettingSubaccount1Exists: false,
     balanceInventorySubaccount1Exists: false,
+    ...(diagnostics ? {
+      provisioningAuthenticated: diagnostics.provisioningAuthenticated,
+      diagnostics: diagnostics.diagnostics,
+    } : {}),
   };
 }
 

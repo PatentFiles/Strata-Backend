@@ -400,6 +400,128 @@ const LIMITS_PATH = `${API_PREFIX}/account/limits`;
 const SCOPED_BALANCE_PATH = `${API_PREFIX}/portfolio/balance`;
 const SCOPED_BALANCE_QUERY = "?subaccount=1&exchange_index=2";
 
+const PROVISIONING_READS: ReadonlyArray<{ path: string; query: string }> = [
+  { path: LIMITS_PATH, query: "" },
+  { path: NETTING_PATH, query: "" },
+  { path: BALANCES_PATH, query: "" },
+  { path: SCOPED_BALANCE_PATH, query: SCOPED_BALANCE_QUERY },
+];
+
+export interface ProvisioningDiagnostic {
+  endpoint: string;
+  method: "GET";
+  httpStatus: number | null;
+  ok: boolean;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface ProvisioningInventoryRead {
+  complete: boolean;
+  provisioningAuthenticated: boolean;
+  diagnostics: ProvisioningDiagnostic[];
+  limitsPayload: unknown;
+  nettingPayload: unknown;
+  balancePayload: unknown;
+  scopedPayload: unknown;
+  calls: Array<{ method: "GET"; path: string }>;
+}
+
+function diagnosticText(value: unknown, max: number): string | null {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) return null;
+  const keyId = process.env.KALSHI_PROVISIONING_API_KEY_ID?.trim();
+  if (keyId && keyId.length >= 4 && text.includes(keyId)) return null;
+  if (/private key|-----BEGIN|KALSHI-ACCESS|authorization|bearer\b|api[_-]?key|signature|token/i.test(text)) {
+    return null;
+  }
+  if (/^[A-Za-z0-9+/=_-]{40,}$/.test(text)) return null;
+  return text;
+}
+
+function diagnosticError(data: unknown): { errorCode: string | null; errorMessage: string | null } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { errorCode: null, errorMessage: null };
+  }
+  const root = data as Record<string, unknown>;
+  const nested = root.error && typeof root.error === "object" && !Array.isArray(root.error)
+    ? root.error as Record<string, unknown>
+    : null;
+  const source = nested ?? root;
+  const errorCode = diagnosticText(source.code ?? source.error_code, 64);
+  const errorMessage = diagnosticText(source.message, 180)
+    ?? (typeof root.error === "string" ? diagnosticText(root.error, 180) : null);
+  return { errorCode, errorMessage };
+}
+
+function localReadFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "request_failed";
+  if (error.message === "Kalshi provisioning credential is not configured.") return "provisioning_credential_missing";
+  if (error.message === "Kalshi provisioning credential must be an RSA key.") return "provisioning_credential_invalid";
+  if (error.name === "TimeoutError" || error.name === "AbortError") return "timeout";
+  return "request_failed";
+}
+
+async function readOneProvisioningEndpoint(
+  fetchImpl: CreationFetch,
+  read: { path: string; query: string },
+): Promise<{ diagnostic: ProvisioningDiagnostic; payload: unknown }> {
+  const endpoint = `${read.path}${read.query}`;
+  try {
+    const response = await signedProvisioningRequest(fetchImpl, "GET", read.path, undefined, read.query);
+    let data: unknown = null;
+    try {
+      data = await response.json();
+    } catch {
+      try { await response.body?.cancel(); } catch { /* body was not readable */ }
+    }
+    const parsed = response.status === 200 ? { errorCode: null, errorMessage: null } : diagnosticError(data);
+    const readable = response.status === 200 && data !== null && typeof data === "object";
+    return {
+      diagnostic: {
+        endpoint,
+        method: "GET",
+        httpStatus: response.status,
+        ok: readable,
+        errorCode: readable ? null : parsed.errorCode ?? (response.status === 200 ? "unreadable_response" : null),
+        errorMessage: readable ? null : parsed.errorMessage,
+      },
+      payload: readable ? data : null,
+    };
+  } catch (error) {
+    return {
+      diagnostic: {
+        endpoint,
+        method: "GET",
+        httpStatus: null,
+        ok: false,
+        errorCode: localReadFailure(error),
+        errorMessage: null,
+      },
+      payload: null,
+    };
+  }
+}
+
+/** GET-only. Records sanitized status for each inventory read and never creates or funds. */
+export async function readProvisioningInventory(fetchImpl: CreationFetch = fetch): Promise<ProvisioningInventoryRead> {
+  const reads = await Promise.all(PROVISIONING_READS.map((read) => readOneProvisioningEndpoint(fetchImpl, read)));
+  const diagnostics = reads.map((read) => read.diagnostic);
+  const limits = diagnostics[0];
+  return {
+    complete: diagnostics.every((diagnostic) => diagnostic.ok),
+    provisioningAuthenticated: limits?.httpStatus === 200,
+    diagnostics,
+    limitsPayload: reads[0]?.payload ?? null,
+    nettingPayload: reads[1]?.payload ?? null,
+    balancePayload: reads[2]?.payload ?? null,
+    scopedPayload: reads[3]?.payload ?? null,
+    calls: diagnostics.map((diagnostic) => ({ method: "GET" as const, path: diagnostic.endpoint })),
+  };
+}
+
 /** GET-only. Does not create, fund, or pass the development mutation gate. */
 export async function readReviewedSubaccountEvidence(fetchImpl: CreationFetch = fetch): Promise<{
   limitsPayload: unknown;
@@ -408,23 +530,15 @@ export async function readReviewedSubaccountEvidence(fetchImpl: CreationFetch = 
   scopedPayload: unknown;
   calls: Array<{ method: "GET"; path: string }>;
 }> {
-  const reads: Array<{ path: string; query: string }> = [
-    { path: LIMITS_PATH, query: "" },
-    { path: NETTING_PATH, query: "" },
-    { path: BALANCES_PATH, query: "" },
-    { path: SCOPED_BALANCE_PATH, query: SCOPED_BALANCE_QUERY },
-  ];
-  const calls = reads.map((read) => ({ method: "GET" as const, path: `${read.path}${read.query}` }));
-  const responses = await Promise.all(reads.map((read) =>
-    signedProvisioningRequest(fetchImpl, "GET", read.path, undefined, read.query)));
-  if (responses.some((response) => response.status !== 200)) {
-    await Promise.all(responses.map((response) => response.body?.cancel()));
-    throw new Error("Reviewed subaccount inventory GET failed.");
-  }
-  const [limitsPayload, nettingPayload, balancePayload, scopedPayload] = await Promise.all(
-    responses.map((response) => response.json() as Promise<unknown>),
-  );
-  return { limitsPayload, nettingPayload, balancePayload, scopedPayload, calls };
+  const evidence = await readProvisioningInventory(fetchImpl);
+  if (!evidence.complete) throw new Error("Reviewed subaccount inventory GET failed.");
+  return {
+    limitsPayload: evidence.limitsPayload,
+    nettingPayload: evidence.nettingPayload,
+    balancePayload: evidence.balancePayload,
+    scopedPayload: evidence.scopedPayload,
+    calls: evidence.calls,
+  };
 }
 
 export function createMicroLiveSubaccountCreationService(

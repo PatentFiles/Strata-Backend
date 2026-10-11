@@ -25,6 +25,7 @@ import {
   SUBACCOUNT_CREATE_CONFIRMATION,
   subaccountCreationDecision,
   summarizeSubaccountInventory,
+  unprovenSubaccountStatus,
   STRATA_INDEX2_KEY_CONFIRMATION,
   STRATA_INDEX2_KEY_NAME,
   type Index2GenerationFacts,
@@ -37,7 +38,8 @@ import {
   type PolicyLimits,
 } from "../lib/strata/commissioning";
 import { verifySupabaseAccessToken } from "../lib/strata/supabaseAuth";
-import { readReviewedSubaccountEvidence } from "../lib/microLiveSubaccountCreation";
+import { readProvisioningInventory, readReviewedSubaccountEvidence } from "../lib/microLiveSubaccountCreation";
+import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { createStrataRouter } from "./strataRouter";
 import type { CommissioningPort, ExchangeCall } from "./strataCommissioning";
 
@@ -1139,6 +1141,85 @@ test("reviewed subaccount reconciliation is GET-only and does not change executi
       if (saved[name] === undefined) delete process.env[name];
       else process.env[name] = saved[name];
     }
+    if (savedProvisioningId === undefined) delete process.env.KALSHI_PROVISIONING_API_KEY_ID;
+    else process.env.KALSHI_PROVISIONING_API_KEY_ID = savedProvisioningId;
+    if (savedProvisioningKey === undefined) delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+    else process.env.KALSHI_PROVISIONING_PRIVATE_KEY = savedProvisioningKey;
+  }
+});
+
+test("unproven provisioning inventory returns sanitized GET diagnostics and does not retry creation", async () => {
+  const savedProvisioningId = process.env.KALSHI_PROVISIONING_API_KEY_ID;
+  const savedProvisioningKey = process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const keyId = "unit-test-provisioning-id";
+  process.env.KALSHI_PROVISIONING_API_KEY_ID = keyId;
+  process.env.KALSHI_PROVISIONING_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const methods: string[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    methods.push(init?.method ?? "GET");
+    assert.equal(init?.method, "GET");
+    const headerDump = JSON.stringify(Object.fromEntries(new Headers(init?.headers).entries()));
+    assert.equal(headerDump.includes(keyId), true);
+    if (url.pathname.endsWith("/account/limits")) {
+      return Response.json({ usage_tier: "advanced" }, { status: 200, headers: { "KALSHI-ACCESS-SIGNATURE": "must-not-leak" } });
+    }
+    if (url.pathname.endsWith("/subaccounts/netting")) {
+      return Response.json({
+        error: { code: "authentication_error", message: `login required ${keyId}` },
+      }, { status: 401, headers: { Authorization: "Bearer secret" } });
+    }
+    if (url.pathname.endsWith("/subaccounts/balances")) {
+      return Response.json({
+        code: "forbidden",
+        message: "not allowed\n-----BEGIN PRIVATE KEY-----\nsecret",
+      }, { status: 403 });
+    }
+    return Response.json({ message: "missing" }, { status: 404 });
+  };
+  try {
+    const evidence = await readProvisioningInventory(fetchImpl);
+    assert.equal(methods.every((method) => method === "GET"), true);
+    assert.equal(methods.length, 4);
+    assert.equal(evidence.complete, false);
+    assert.equal(evidence.provisioningAuthenticated, true);
+    assert.deepEqual(evidence.diagnostics.map((row) => row.endpoint), [
+      "/trade-api/v2/account/limits",
+      "/trade-api/v2/portfolio/subaccounts/netting",
+      "/trade-api/v2/portfolio/subaccounts/balances",
+      "/trade-api/v2/portfolio/balance?subaccount=1&exchange_index=2",
+    ]);
+    assert.deepEqual(evidence.diagnostics.map((row) => [row.httpStatus, row.ok, row.errorCode, row.errorMessage]), [
+      [200, true, null, null],
+      [401, false, "authentication_error", null],
+      [403, false, "forbidden", null],
+      [404, false, null, "missing"],
+    ]);
+    const status = sanitizePublic(unprovenSubaccountStatus({
+      provisioningAuthenticated: evidence.provisioningAuthenticated,
+      diagnostics: evidence.diagnostics,
+    }));
+    assert.equal(status.reason, "subaccount_inventory_unproven");
+    const published = JSON.stringify(status);
+    assert.equal(published.includes(keyId), false);
+    assert.equal(published.includes("PRIVATE KEY"), false);
+    assert.equal(published.includes("Bearer"), false);
+    assert.equal(published.includes("KALSHI-ACCESS"), false);
+    assert.equal(published.includes("Authorization"), false);
+    await assert.rejects(readReviewedSubaccountEvidence(fetchImpl), /Reviewed subaccount inventory GET failed/);
+    assert.equal(subaccountCreationDecision({
+      confirmation: SUBACCOUNT_CREATE_CONFIRMATION,
+      status,
+      inventoryProven: false,
+      priorAttempt: "uncertain",
+      workerRunning: false,
+      productionAccountExists: false,
+      nodeEnv: "production",
+      kalshiEnvironment: "production",
+      provisioningConfigured: true,
+    }).reason, "subaccount_creation_uncertain_no_retry");
+  } finally {
     if (savedProvisioningId === undefined) delete process.env.KALSHI_PROVISIONING_API_KEY_ID;
     else process.env.KALSHI_PROVISIONING_API_KEY_ID = savedProvisioningId;
     if (savedProvisioningKey === undefined) delete process.env.KALSHI_PROVISIONING_PRIVATE_KEY;
