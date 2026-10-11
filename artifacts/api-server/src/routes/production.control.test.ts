@@ -6,6 +6,8 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 import { ProductionSupervisor, type StopBlockers, type WorkerHandle } from "../lib/v13-production/control";
+import { ProductionExecutor } from "../lib/v13-production/executor";
+import type { Account } from "../lib/v13-production/ledger";
 import { createProductionRouter } from "./productionRouter";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 
@@ -286,4 +288,66 @@ test("entry loss recheck and kill switch stay in front of submit without a new o
   assert.match(executor, /manual_kill_switch === false/);
   assert.match(executor, /live_execution_enabled === true/);
   assert.match(executor, /!a\.blocked_reason \|\| allowBlockedExit/);
+});
+
+test("master and account kill switches block the only production mutation gate", async () => {
+  const microLive = readFileSync("src/lib/microLive.ts", "utf8");
+  const shadow = readFileSync("src/lib/shadowLive.ts", "utf8");
+  const startup = readFileSync("src/index.ts", "utf8");
+  const transport = readFileSync("src/lib/v13-production/transport.ts", "utf8");
+  const funding = readFileSync("src/lib/microLivePairFunding.ts", "utf8");
+  assert.equal(microLive.includes("live_execution_config"), false);
+  assert.match(shadow, /execution_must_remain_disabled/);
+  assert.match(shadow, /liveExecutionEnabled: false/);
+  assert.equal(startup.includes("ProductionExecutor"), false);
+  assert.equal(startup.includes("ProductionWorker"), false);
+  assert.match(transport, /ProductionExecutor\.isFinalFence/);
+  assert.match(funding, /!live\.liveExecutionEnabled/);
+
+  const names = [
+    "NODE_ENV", "LIVE_EXECUTION_ENABLED", "V13_PRODUCTION_EXECUTION_ENABLED",
+    "MICRO_LIVE_ACCOUNT_MODE", "KALSHI_BOT_SUBACCOUNT",
+  ] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.NODE_ENV = "production";
+  process.env.LIVE_EXECUTION_ENABLED = "true";
+  process.env.V13_PRODUCTION_EXECUTION_ENABLED = "true";
+  process.env.MICRO_LIVE_ACCOUNT_MODE = "exclusive";
+  process.env.KALSHI_BOT_SUBACCOUNT = "1";
+  try {
+    const executor = new ProductionExecutor({} as never, { mode: "LIVE" } as never);
+    const account = (overrides: Partial<Account> = {}): Account => ({
+      id: "acct", policy_id: "policy", subaccount: "1", exchange_index: "2",
+      key_fingerprint: "a".repeat(64), commissioning_digest: "b".repeat(64),
+      kill_switch: false, execution_enabled: true, commissioned: true,
+      minimum_exit_micros: 10000, fee_artifact_digest: "c".repeat(64),
+      cash_precision_verified: true, cash_micros: "25000000", reserved_micros: "0",
+      initial_cash_micros: "25000000", blocked_reason: null, reconciled_at: new Date(),
+      revision: "1", ...overrides,
+    });
+    const tx = (master: { manual_kill_switch: boolean; live_execution_enabled: boolean } | null) => ({
+      query: async (sql: string) => {
+        if (sql.includes("v13_production_intent")) return { rows: [] };
+        if (sql.includes("live_execution_config")) return { rows: master ? [master] : [] };
+        return { rows: [] };
+      },
+    });
+    await assert.rejects(
+      () => executor.gate(tx({ manual_kill_switch: true, live_execution_enabled: false }) as never, account()),
+      /production_master_kill_switch_or_flag/,
+    );
+    await assert.rejects(
+      () => executor.gate(tx({ manual_kill_switch: true, live_execution_enabled: true }) as never, account()),
+      /production_master_kill_switch_or_flag/,
+    );
+    await assert.rejects(
+      () => executor.gate(tx({ manual_kill_switch: false, live_execution_enabled: true }) as never, account({ kill_switch: true })),
+      /production_authority_disabled_or_uncommissioned/,
+    );
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  }
 });

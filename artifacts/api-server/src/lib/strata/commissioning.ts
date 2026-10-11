@@ -7,6 +7,11 @@ import {
 import { ENTRY_POLICY_REVIEW_BLOCKER, entryPolicyRuntimeState } from "./configuredStake";
 import { V13_MAX_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {
+  isProductionMasterReady,
+  masterIsFailClosed,
+  type ProductionMasterState,
+} from "./v13MasterGate";
+import {
   canonicalInventory,
   pairKey,
   predictionsApiTier,
@@ -118,6 +123,7 @@ export interface CommissioningSnapshot {
     executionEnabled: boolean | null;
     killSwitch: boolean | null;
   };
+  master: ProductionMasterState;
   /** Persisted operator approval only. Never taken from the request body. */
   approvedMinimumExitMicros: number | null;
   workerRunning: boolean;
@@ -164,6 +170,7 @@ export interface CommissioningStatus {
   commissioned: boolean | null;
   executionEnabled: boolean | null;
   killSwitch: boolean | null;
+  productionMasterReady: boolean;
   readyForCommissioning: boolean;
   readyForArming: boolean;
   championId: string;
@@ -223,6 +230,7 @@ export function emptySnapshot(asOf = new Date(0).toISOString()): CommissioningSn
       count: 0, id: null, subaccount: null, exchangeIndex: null, fingerprint: null,
       commissioned: null, executionEnabled: null, killSwitch: null,
     },
+    master: { count: 0, mode: null, liveExecutionEnabled: null, manualKillSwitch: null },
     approvedMinimumExitMicros: null,
     workerRunning: false,
     preBoundaryRoundTripAcknowledged: false,
@@ -422,6 +430,7 @@ export function commissioningStatus(snapshot: CommissioningSnapshot): Commission
     commissioned: snapshot.account.commissioned,
     executionEnabled: snapshot.account.executionEnabled,
     killSwitch: snapshot.account.killSwitch,
+    productionMasterReady: isProductionMasterReady(snapshot.master),
     readyForCommissioning: prerequisite.length === 0 && accountReady,
     readyForArming: snapshot.account.commissioned === true &&
       snapshot.account.executionEnabled === false &&
@@ -456,7 +465,8 @@ export function deriveKalshiConnectionStatus(
     snapshot.transportReady &&
     !snapshot.workerRunning;
   const entryPolicy = entryPolicyRuntimeState();
-  if (armed && entryPolicy.entryPolicyRuntimeApproved &&
+  if (armed && isProductionMasterReady(snapshot.master) &&
+      entryPolicy.entryPolicyRuntimeApproved &&
       snapshot.policy.entryPolicyVersion === V13_ENTRY_POLICY_VERSION) return "READY_TO_START";
   if (armed) return "BLOCKED";
   if (snapshot.account.commissioned === true &&
@@ -475,8 +485,14 @@ export function planCommission(snapshot: CommissioningSnapshot): {
   const status = commissioningStatus(snapshot);
   if (!status.readyForCommissioning || !snapshot.policy.id || !snapshot.signer.fingerprint ||
       !snapshot.fee.digest || !snapshot.cash.precisionVerified ||
-      !approvedExitFloor(snapshot.minimumExit.micros)) {
-    return { blockers: status.blockers, plan: null };
+      !approvedExitFloor(snapshot.minimumExit.micros) ||
+      !masterIsFailClosed(snapshot.master)) {
+    return {
+      blockers: masterIsFailClosed(snapshot.master)
+        ? status.blockers
+        : [...status.blockers, "production_master_not_fail_closed"],
+      plan: null,
+    };
   }
   const commissioningDigest = createHash("sha256").update(JSON.stringify({
     policyId: snapshot.policy.id,
@@ -1130,6 +1146,9 @@ export function planArm(snapshot: CommissioningSnapshot, confirmation: unknown):
   if (blockers.length > 0) return { ok: false, reason: blockers[0] ?? "stale_evidence" };
   if (snapshot.account.executionEnabled === true && snapshot.account.killSwitch === false) {
     return { ok: false, reason: "already_armed" };
+  }
+  if (!masterIsFailClosed(snapshot.master)) {
+    return { ok: false, reason: "production_master_not_fail_closed" };
   }
   return { ok: true, reason: "arm_database_flags_only" };
 }

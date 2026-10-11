@@ -25,9 +25,14 @@ export const liveExecutionConfigTable = pgTable("live_execution_config", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   check("live_execution_config_singleton_check", sql`${table.id} = 'singleton'`),
-  check("live_execution_config_mode_check", sql`${table.mode} IN ('PAPER_ONLY','SHADOW_LIVE')`),
-  // Phase 4C is shadow-only. The database itself disallows enabling execution.
-  check("live_execution_config_execution_disabled_check", sql`${table.liveExecutionEnabled} = false`),
+  check("live_execution_config_mode_check", sql`${table.mode} IN ('PAPER_ONLY','SHADOW_LIVE','V13_PRODUCTION')`),
+  check("live_execution_config_mode_execution_check", sql`
+    (${table.mode} IN ('PAPER_ONLY','SHADOW_LIVE') AND ${table.liveExecutionEnabled} = false)
+    OR ${table.mode} = 'V13_PRODUCTION'
+  `),
+  check("live_execution_config_execution_requires_kill_off_check", sql`
+    ${table.liveExecutionEnabled} = false OR ${table.manualKillSwitch} = false
+  `),
   check("live_execution_config_nonnegative_limits_check", sql`
     ${table.liveCapitalLimit} >= 0 AND ${table.liveCapitalRemaining} >= 0 AND
     ${table.maxStakePerTrade} >= 0 AND ${table.maxDailyLoss} >= 0 AND

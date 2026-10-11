@@ -64,6 +64,7 @@ import {
   type CommissioningSnapshot,
   type PolicyLimits,
 } from "./commissioning";
+import { armProductionAuthority, disarmProductionAuthority, masterExecutionAllowed } from "./v13MasterGate";
 import type {
   CommissioningPort, ExchangeCall, Index2GenerationResult, SubaccountCreateResult,
 } from "../../routes/strataCommissioning";
@@ -266,6 +267,23 @@ export async function readCommissioningSnapshot(
   }
   if (funding.rows.some((attempt) => attempt.state === "uncertain")) snapshot.funding.uncertain = true;
   snapshot.transportReady = transportGatesReady();
+  try {
+    const master = await query("SELECT mode, live_execution_enabled, manual_kill_switch FROM live_execution_config");
+    if (master.rows.length === 1) {
+      const row = master.rows[0]!;
+      const mode = text(row.mode);
+      const liveExecutionEnabled = row.live_execution_enabled === true;
+      const manualKillSwitch = row.manual_kill_switch === true;
+      snapshot.master = { count: 1, mode, liveExecutionEnabled, manualKillSwitch };
+      if (!mode || !masterExecutionAllowed(mode, liveExecutionEnabled, manualKillSwitch)) {
+        snapshot.master = { count: master.rows.length, mode: null, liveExecutionEnabled: null, manualKillSwitch: null };
+      }
+    } else {
+      snapshot.master = { count: master.rows.length, mode: null, liveExecutionEnabled: null, manualKillSwitch: null };
+    }
+  } catch {
+    snapshot.master = { count: 0, mode: null, liveExecutionEnabled: null, manualKillSwitch: null };
+  }
   try {
     const evidence = await query("SELECT * FROM v13_commissioning_evidence WHERE singleton_id = 'singleton'");
     const row = evidence.rows[0];
@@ -1473,10 +1491,15 @@ export function createDatabaseCommissioningPort(
       if (!decision.ok) {
         return { status: "BLOCKED", reason: decision.reason, workerStarted: false, environmentChanged: false };
       }
-      await query(`UPDATE v13_production_account
-        SET execution_enabled = true, kill_switch = false
-        WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true
-          AND execution_enabled = false AND kill_switch = true`);
+      const client = await pool.connect();
+      try {
+        const armed = await armProductionAuthority(client);
+        if (!armed.ok) {
+          return { status: "BLOCKED", reason: armed.reason, workerStarted: false, environmentChanged: false };
+        }
+      } finally {
+        client.release();
+      }
       return { status: "ARMED", reason: decision.reason, workerStarted: false, environmentChanged: false };
     },
     async disarm(confirmation) {
@@ -1485,9 +1508,15 @@ export function createDatabaseCommissioningPort(
       if (!decision.ok) {
         return { status: "BLOCKED", reason: decision.reason, emergencyStop: false };
       }
-      await query(`UPDATE v13_production_account
-        SET execution_enabled = false, kill_switch = true
-        WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true`);
+      const client = await pool.connect();
+      try {
+        const disarmed = await disarmProductionAuthority(client);
+        if (!disarmed.ok) {
+          return { status: "BLOCKED", reason: disarmed.reason, emergencyStop: false };
+        }
+      } finally {
+        client.release();
+      }
       return { status: "DISARMED", reason: decision.reason, emergencyStop: false };
     },
     async commission(confirmation) {
@@ -1523,6 +1552,20 @@ export function createDatabaseCommissioningPort(
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
+        const master = await client.query(`SELECT mode, live_execution_enabled, manual_kill_switch
+          FROM live_execution_config WHERE id = 'singleton' FOR UPDATE`);
+        const masterRow = master.rows[0];
+        if (master.rows.length !== 1 || !masterRow ||
+            masterRow.live_execution_enabled !== false || masterRow.manual_kill_switch !== true ||
+            typeof masterRow.mode !== "string" ||
+            !masterExecutionAllowed(masterRow.mode, false, true)) {
+          await client.query("ROLLBACK");
+          return {
+            status: "BLOCKED", blockers: ["production_master_not_fail_closed"],
+            executionEnabled: false, killSwitch: true, commissioned: false,
+            workerStarted: false, environmentChanged: false, accountCount: snapshot.account.count,
+          };
+        }
         const existing = await client.query(
           "SELECT id, commissioned FROM v13_production_account WHERE subaccount = 1 AND exchange_index = 2 FOR UPDATE",
         );

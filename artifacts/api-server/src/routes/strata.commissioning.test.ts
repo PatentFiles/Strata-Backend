@@ -16,6 +16,15 @@ import {
 } from "../lib/strata/commissioningStore";
 import { ENTRY_POLICY_REVIEW_BLOCKER } from "../lib/strata/configuredStake";
 import {
+  ARM_ACCOUNT_SQL,
+  ARM_MASTER_SQL,
+  DISARM_ACCOUNT_SQL,
+  DISARM_MASTER_SQL,
+  armProductionAuthority,
+  disarmProductionAuthority,
+  masterExecutionAllowed,
+} from "../lib/strata/v13MasterGate";
+import {
   type Index2ReplacementFacts,
   ARM_CONFIRMATION,
   DISARM_CONFIRMATION,
@@ -36,6 +45,7 @@ import {
   index2GenerationDecision,
   index2ReplacementDecision,
   STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
+  deriveKalshiConnectionStatus,
   planArm,
   SUBACCOUNT_CREATE_CONFIRMATION,
   subaccountCreationDecision,
@@ -105,6 +115,9 @@ function ready(): CommissioningSnapshot {
     hashMatches: true, missingFields: [],
   };
   snapshot.approvedMinimumExitMicros = 400000;
+  snapshot.master = {
+    count: 1, mode: "SHADOW_LIVE", liveExecutionEnabled: false, manualKillSwitch: true,
+  };
   return snapshot;
 }
 
@@ -518,6 +531,9 @@ function memoryPort(initial: CommissioningSnapshot) {
       if (!decision.ok) return { status: "BLOCKED", reason: decision.reason, workerStarted: false, environmentChanged: false };
       snapshot.account.executionEnabled = true;
       snapshot.account.killSwitch = false;
+      snapshot.master = {
+        count: 1, mode: "V13_PRODUCTION", liveExecutionEnabled: true, manualKillSwitch: false,
+      };
       const changed = FLAG_NAMES.some((name) => process.env[name] !== before[name]);
       if (changed) return { status: "BLOCKED", reason: "environment_changed", workerStarted: false, environmentChanged: false };
       return { status: "ARMED", reason: decision.reason, workerStarted: false, environmentChanged: false };
@@ -527,6 +543,9 @@ function memoryPort(initial: CommissioningSnapshot) {
       if (!decision.ok) return { status: "BLOCKED", reason: decision.reason, emergencyStop: false };
       snapshot.account.executionEnabled = false;
       snapshot.account.killSwitch = true;
+      snapshot.master = {
+        ...snapshot.master, liveExecutionEnabled: false, manualKillSwitch: true,
+      };
       return { status: "DISARMED", reason: decision.reason, emergencyStop: false };
     },
     acknowledgePreBoundaryRoundTrip: async (confirmation: unknown) => ({
@@ -705,6 +724,9 @@ test("commission creates one disarmed (1,2) account and does not arm or start a 
     assert.equal(created.killSwitch, true);
     assert.equal(created.workerStarted, false);
     assert.equal(created.environmentChanged, false);
+    assert.equal(gate.current().master.liveExecutionEnabled, false);
+    assert.equal(gate.current().master.manualKillSwitch, true);
+    assert.equal(gate.calls.length, 0);
     assert.equal(gate.accounts().length, 1);
     assert.equal(gate.workerStarts(), 0);
     const second = await gate.port.commission("COMMISSION_WITHOUT_EXECUTION", DEVELOPER_ID);
@@ -921,6 +943,10 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal(commissioned.emergencyStops(), 0);
   assert.equal(commissioned.current().account.killSwitch, true);
   assert.equal(commissioned.current().account.executionEnabled, false);
+  assert.equal(commissioned.current().master.liveExecutionEnabled, false);
+  assert.equal(commissioned.current().master.manualKillSwitch, true);
+  assert.equal(commissioned.current().master.mode, "V13_PRODUCTION");
+  assert.equal(commissioned.calls.length, 0);
 });
 
 test("V2 approval binds the reviewed entry policy and leaves a blocked draft unchanged", () => {
@@ -2794,5 +2820,103 @@ test("verify-fee-upload accepts only raw PDF bytes from an AAL2 operator", async
     assert.equal(gate.calls.length, 0);
   } finally {
     await server.close();
+  }
+});
+
+test("V13 master gate stays fail closed until an atomic arm and rolls both layers back", async () => {
+  const migration = readFileSync("../../lib/db/drizzle/0008_v13_production_master_gate.sql", "utf8");
+  assert.match(migration, /DROP CONSTRAINT IF EXISTS live_execution_config_execution_disabled_check/);
+  assert.match(migration, /'PAPER_ONLY', 'SHADOW_LIVE', 'V13_PRODUCTION'/);
+  assert.match(migration, /live_execution_enabled = false OR manual_kill_switch = false/);
+  assert.equal(/live_execution_enabled\s*=\s*true/.test(migration), false);
+  assert.equal(migration.includes("UPDATE "), false);
+  assert.match(migration, /SELECT 'singleton', 'V13_PRODUCTION', false, true/);
+  assert.equal(masterExecutionAllowed("PAPER_ONLY", true, false), false);
+  assert.equal(masterExecutionAllowed("SHADOW_LIVE", true, false), false);
+  assert.equal(masterExecutionAllowed("V13_PRODUCTION", true, true), false);
+  assert.equal(masterExecutionAllowed("V13_PRODUCTION", true, false), true);
+  assert.equal(masterExecutionAllowed("V13_PRODUCTION", false, true), true);
+
+  const disarmed = ready();
+  disarmed.account = {
+    count: 1, id: "acct", subaccount: 1, exchangeIndex: 2, fingerprint: "a".repeat(64),
+    commissioned: true, executionEnabled: false, killSwitch: true,
+  };
+  assert.equal(planArm(disarmed, ARM_CONFIRMATION).ok, true);
+  disarmed.master.liveExecutionEnabled = true;
+  assert.equal(planArm(disarmed, ARM_CONFIRMATION).reason, "production_master_not_fail_closed");
+
+  function client(failOn: string | null) {
+    const seen: string[] = [];
+    return {
+      seen,
+      async query(sql: string) {
+        seen.push(sql);
+        if (failOn && sql.includes(failOn)) throw new Error("write failed");
+        if (sql.includes("FROM v13_production_account") || sql.includes("FROM live_execution_config")) {
+          return {
+            rows: [{ id: "acct", mode: "SHADOW_LIVE", live_execution_enabled: false, manual_kill_switch: true }],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("UPDATE")) return { rows: [], rowCount: 1 };
+        return { rows: [], rowCount: null };
+      },
+    };
+  }
+
+  const armed = client(null);
+  assert.deepEqual(await armProductionAuthority(armed), { ok: true });
+  assert.ok(armed.seen.some((sql) => sql === ARM_ACCOUNT_SQL));
+  assert.ok(armed.seen.some((sql) => sql === ARM_MASTER_SQL));
+  assert.equal(armed.seen.at(-1), "COMMIT");
+  assert.equal(armed.seen.filter((sql) => sql === "ROLLBACK").length, 0);
+
+  const accountFailed = client("SET execution_enabled = true");
+  assert.equal((await armProductionAuthority(accountFailed)).ok, false);
+  assert.ok(accountFailed.seen.includes("ROLLBACK"));
+  assert.equal(accountFailed.seen.includes("COMMIT"), false);
+  assert.equal(accountFailed.seen.some((sql) => sql === ARM_MASTER_SQL), false);
+
+  const masterFailed = client("SET mode = 'V13_PRODUCTION'");
+  const masterFailure = await armProductionAuthority(masterFailed);
+  assert.equal(masterFailure.ok, false);
+  if (!masterFailure.ok) assert.equal(masterFailure.reason, "production_arm_rolled_back");
+  assert.ok(masterFailed.seen.some((sql) => sql === ARM_ACCOUNT_SQL));
+  assert.ok(masterFailed.seen.includes("ROLLBACK"));
+  assert.equal(masterFailed.seen.includes("COMMIT"), false);
+
+  const disarmedWrites = client(null);
+  assert.deepEqual(await disarmProductionAuthority(disarmedWrites), { ok: true });
+  assert.ok(disarmedWrites.seen.some((sql) => sql === DISARM_ACCOUNT_SQL));
+  assert.ok(disarmedWrites.seen.some((sql) => sql === DISARM_MASTER_SQL));
+  assert.equal(DISARM_MASTER_SQL.includes("mode ="), false);
+  assert.match(DISARM_MASTER_SQL, /live_execution_enabled = false/);
+  assert.match(DISARM_MASTER_SQL, /manual_kill_switch = true/);
+  const masterDisarmFailed = client("SET live_execution_enabled = false, manual_kill_switch = true");
+  assert.equal((await disarmProductionAuthority(masterDisarmFailed)).ok, false);
+  assert.ok(masterDisarmFailed.seen.includes("ROLLBACK"));
+  assert.equal(masterDisarmFailed.seen.includes("COMMIT"), false);
+
+  const saved = process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+  process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED = V13_ENTRY_POLICY_VERSION;
+  try {
+    const readyToStart = ready();
+    readyToStart.account = {
+      count: 1, id: "acct", subaccount: 1, exchangeIndex: 2, fingerprint: "a".repeat(64),
+      commissioned: true, executionEnabled: true, killSwitch: false,
+    };
+    readyToStart.transportReady = true;
+    readyToStart.policy.entryPolicyVersion = V13_ENTRY_POLICY_VERSION;
+    readyToStart.workerRunning = false;
+    readyToStart.master = { count: 1, mode: "V13_PRODUCTION", liveExecutionEnabled: true, manualKillSwitch: false };
+    assert.equal(deriveKalshiConnectionStatus(readyToStart, false), "READY_TO_START");
+    assert.equal(commissioningStatus(readyToStart).productionMasterReady, true);
+    readyToStart.master = { count: 1, mode: "V13_PRODUCTION", liveExecutionEnabled: false, manualKillSwitch: true };
+    assert.equal(deriveKalshiConnectionStatus(readyToStart, false), "BLOCKED");
+    assert.equal(commissioningStatus(readyToStart).productionMasterReady, false);
+  } finally {
+    if (saved === undefined) delete process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED;
+    else process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED = saved;
   }
 });
