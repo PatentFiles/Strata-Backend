@@ -5,7 +5,7 @@ import {
   V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY,
 } from "@workspace/v13-strategy";
 
-export const V13_MAX_ENTRY_STAKE_CENTS = 500_000;
+export const V13_MAX_ENTRY_STAKE_CENTS = 2_500_000;
 
 export type V13ApprovedLiveMoneyPolicy = {
   id: string;
@@ -104,7 +104,7 @@ export function computeV13LiveMoneyPolicyHash(
 /**
  * Pure final risk gate for a production-sized V13 IOC entry.
  *
- * It authorizes no exchange mutation. Contract notional is capped at $5,000.
+ * It authorizes no exchange mutation. Contract notional is capped at $25,000.
  * The separate all-in ceiling and capital checks include entry and reserved
  * exit fees so fees cannot silently push the authorized cash exposure higher.
  */

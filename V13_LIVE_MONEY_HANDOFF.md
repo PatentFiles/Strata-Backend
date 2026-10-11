@@ -4,7 +4,7 @@
 
 **State: IMPLEMENTED SOURCE FOR INDEPENDENT REVIEW / NOT LIVE-ENABLED**
 
-This branch supplies the separate production consumer, executor, adapter and durable ledger for Brit's independent review. It does not authorize trading. A later, independently approved production policy may authorize up to a **$5,000 contract-notional entry** only after independent review, deployment controls and live commissioning described below are completed.
+This branch supplies the separate production consumer, executor, adapter and durable ledger for Brit's independent review. It does not authorize trading. A later, independently approved production policy may authorize up to a **$25,000 contract-notional entry** only after independent review, deployment controls and live commissioning described below are completed.
 
 Start with **[V13_BRIT_ACCEPTANCE.md](V13_BRIT_ACCEPTANCE.md)** for last actual read-only verifier evidence and final-revision requirements, and **[V13_PRODUCTION_ACCEPTANCE.md](V13_PRODUCTION_ACCEPTANCE.md)** for source and isolated PostgreSQL acceptance. Brit independently reviews the implemented paths; unfinished engineering is not delegated to that review. Runtime commissioning remains **BLOCKED**.
 
@@ -16,7 +16,7 @@ This branch does **not** enable production trading, approve a risk policy, chang
 
 > The V1.3 signal decides whether an opportunity exists. The execution/risk layer decides whether and how much of that opportunity is executable.
 
-The $5,000 value is an authority ceiling, not a target stake. The executor must size down or refuse the trade when liquidity, fees, capital, loss limits, quote freshness, policy state, or reconciliation state require it.
+The $25,000 value is an authority ceiling, not a target stake. The executor must size down or refuse the trade when liquidity, fees, capital, loss limits, quote freshness, policy state, or reconciliation state require it.
 
 ## Strategy behavior preserved
 
@@ -62,7 +62,7 @@ See `V13_OPPORTUNITY_REPLAY_AND_SIZING.md` for counterfactual rejected-opportuni
 ### `v13ExecutionPlanner.ts`
 
 - Full-depth IOC entry planning.
-- Hard $5,000 notional boundary tests.
+- Hard $25,000 notional boundary tests.
 - Never chases above the persisted V1.3 signal/reference price.
 - Sizes down when visible book depth cannot absorb the requested stake.
 - Reduce-only exit planning with explicit residual reporting.
@@ -71,7 +71,7 @@ See `V13_OPPORTUNITY_REPLAY_AND_SIZING.md` for counterfactual rejected-opportuni
 
 - Versioned DRAFT / APPROVED / REVOKED policy rows.
 - Pinned champion strategy parameter-set ID/hash; a strategy promotion invalidates the old policy identity until deliberately re-approved.
-- Maximum entry stake capped at 500,000 cents ($5,000).
+- Maximum entry stake capped at 2,500,000 cents ($25,000).
 - Separate fee-inclusive all-in entry ceiling.
 - One-position maximum.
 - Daily and total loss limits.
@@ -210,12 +210,12 @@ All of the following must be true:
 - [ ] Approved policy is pinned to the selected champion ID/hash and includes champion-selection review ID, evidence hash, selector identity and selection timestamp.
 - [ ] One production policy is intentionally approved with explicit operator identity and immutable hash.
 - [ ] Live credentials/account identity are independently verified.
-- [ ] Initial live commissioning is performed at controlled size rather than immediately forcing the $5,000 ceiling.
+- [ ] Initial live commissioning is performed at controlled size rather than immediately forcing the $25,000 ceiling.
 - [ ] Fill rate, VWAP/slippage, fees, residual exits, reconciliation accuracy, and realized net expectancy are measured before size promotion.
 
 ## First-live commissioning rule
 
-The production architecture may permit a $5,000 ceiling, but the first live deployment should prove the exact production path at controlled size. Promotion should depend on measured execution quality and reconciliation integrity, not elapsed time or trade count alone.
+The production architecture may permit a $25,000 ceiling, but the first live deployment should prove the exact production path at controlled size. Promotion should depend on measured execution quality and reconciliation integrity, not elapsed time or trade count alone.
 
 Do not treat the original 267-paper-trade displayed P&L as production P&L. The signal sample remains useful, but earlier paper accounting was optimistic before executable-bid exits and authoritative settlement were enforced.
 

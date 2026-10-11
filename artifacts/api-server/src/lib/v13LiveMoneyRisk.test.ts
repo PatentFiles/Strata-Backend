@@ -28,9 +28,9 @@ const approved = (): V13ApprovedLiveMoneyPolicy => {
     championSelectionEvidenceHash: "a".repeat(64),
     championSelectedBy: "operator",
     championSelectedAt: new Date("2026-10-07T02:55:00.000Z"),
-    capitalLimitCents: 2_000_000,
+    capitalLimitCents: 3_000_000,
     maxEntryStakeCents: V13_MAX_ENTRY_STAKE_CENTS,
-    maxEntryAllInCents: 510_000,
+    maxEntryAllInCents: 2_509_000,
     maxOpenPositions: 1,
     maxDailyLossCents: 100_000,
     maxTotalLossCents: 500_000,
@@ -53,11 +53,11 @@ const approved = (): V13ApprovedLiveMoneyPolicy => {
 
 const baseInput = () => ({
   policy: approved(),
-  plannedGrossCents: 500_000,
+  plannedGrossCents: 2_500_000,
   reservedEntryFeeCents: 4_000,
   reservedExitFeeCents: 5_000,
-  availableCashCents: 1_000_000,
-  capitalRemainingCents: 2_000_000,
+  availableCashCents: 3_000_000,
+  capitalRemainingCents: 3_000_000,
   openPositions: 0,
   realizedDailyLossCents: 0,
   realizedTotalLossCents: 0,
@@ -70,28 +70,62 @@ const baseInput = () => ({
   fullDepthProven: true,
 });
 
-test("approved policy permits a 5000-dollar stake only when fee-inclusive exposure fits", () => {
-  assert.deepEqual(evaluateV13LiveMoneyRisk(baseInput()), {
+test("approved policy permits a 25000-dollar stake only when fee-inclusive exposure fits", () => {
+  assert.equal(V13_MAX_ENTRY_STAKE_CENTS, 2_500_000);
+  const decision = evaluateV13LiveMoneyRisk(baseInput());
+  assert.deepEqual(decision, {
     ok: true,
-    plannedAllInCents: 509_000,
+    plannedAllInCents: 2_509_000,
   });
+  assert.equal(Number.isSafeInteger(2_509_000), true);
 });
 
-test("one cent above 5000 dollars notional is rejected even if account cash is larger", () => {
+test("one cent above 25000 dollars notional is rejected even if account cash is larger", () => {
   const input = baseInput();
-  input.plannedGrossCents = 500_001;
+  input.plannedGrossCents = 2_500_001;
   input.availableCashCents = 5_000_000;
   input.capitalRemainingCents = 5_000_000;
   assert.equal(evaluateV13LiveMoneyRisk(input).ok, false);
 });
 
-test("fees can block a 5000-dollar stake even when contract notional is within limit", () => {
+test("a policy stake above 25000 dollars is rejected", () => {
   const input = baseInput();
-  input.reservedExitFeeCents = 6_001;
+  input.policy.maxEntryStakeCents = 2_500_001;
+  input.policy.maxEntryAllInCents = 2_600_000;
+  input.policy.capitalLimitCents = 3_000_000;
+  input.policy.policyHash = computeV13LiveMoneyPolicyHash(input.policy);
+  assert.deepEqual(evaluateV13LiveMoneyRisk(input), {
+    ok: false,
+    reason: "live_money_policy_limits_invalid",
+  });
+});
+
+test("fees can block a 25000-dollar stake even when contract notional is within limit", () => {
+  const input = baseInput();
+  input.reservedExitFeeCents = 5_001;
   assert.deepEqual(evaluateV13LiveMoneyRisk(input), {
     ok: false,
     reason: "live_money_entry_exceeds_capital_or_stake_limit",
   });
+});
+
+test("available cash, capital remaining, and capital limit still cap a 25000-dollar ceiling", () => {
+  const shortCash = baseInput();
+  shortCash.availableCashCents = 2_508_999;
+  assert.deepEqual(evaluateV13LiveMoneyRisk(shortCash), {
+    ok: false,
+    reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  });
+
+  const shortRemaining = baseInput();
+  shortRemaining.capitalRemainingCents = 2_508_999;
+  assert.equal(evaluateV13LiveMoneyRisk(shortRemaining).ok, false);
+
+  const shortCapital = baseInput();
+  shortCapital.policy.capitalLimitCents = 2_508_999;
+  shortCapital.policy.maxEntryAllInCents = 2_508_999;
+  shortCapital.policy.policyHash = computeV13LiveMoneyPolicyHash(shortCapital.policy);
+  assert.equal(evaluateV13LiveMoneyRisk(shortCapital).ok, false);
 });
 
 test("policy hash changes when an approved limit or fee identity changes", () => {

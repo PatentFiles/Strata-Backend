@@ -41,6 +41,13 @@ test("stake above the approved maximum is rejected", () => {
   const decision = validateConfiguredStake(clear, 500_001);
   assert.equal(decision.ok, false);
   if (!decision.ok) assert.equal(decision.reason, "above_approved_max_entry_stake");
+  const ceiling: StakeFacts = { ...clear, approvedMaxEntryStakeCents: 2_500_000 };
+  assert.equal(validateConfiguredStake(ceiling, 2_500_000).ok, true);
+  const overCeiling = validateConfiguredStake(ceiling, 2_500_001);
+  assert.equal(overCeiling.ok, false);
+  if (!overCeiling.ok) assert.equal(overCeiling.reason, "above_approved_max_entry_stake");
+  const aboveSmallerApproval = validateConfiguredStake(clear, 2_500_000);
+  assert.equal(aboveSmallerApproval.ok, false);
 });
 
 test("stake cannot change while running, positioned, or an intent is unresolved", () => {

@@ -8,7 +8,7 @@ import test from "node:test";
 import express from "express";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey } from "jose";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
-import { computeV13LiveMoneyPolicyHash } from "../lib/v13LiveMoneyRisk";
+import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS } from "../lib/v13LiveMoneyRisk";
 import {
   type Index2ReplacementFacts,
   ARM_CONFIRMATION,
@@ -42,6 +42,9 @@ import {
   planDisarm,
   PRE_BOUNDARY_INBOUND_TRANSFER_ID,
   PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+  PRE_BOUNDARY_ROUND_TRIP_CENTS,
+  REVIEWED_FUNDING_CENTS,
+  REVIEWED_FUNDING_MICROS,
   blockingSubaccountTransferDetail,
   policyReadFromRows,
   provePreBoundaryRoundTrip,
@@ -830,6 +833,18 @@ const OPERATOR_LIMITS = {
 test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () => {
   assert.equal(validatePolicyLimits(null).ok, false);
   assert.equal(validatePolicyLimits({ maxEntryStakeCents: 500000 }).ok, false);
+  assert.equal(V13_MAX_ENTRY_STAKE_CENTS, 2_500_000);
+  assert.equal(REVIEWED_FUNDING_CENTS, 2500);
+  assert.equal(REVIEWED_FUNDING_MICROS, "25000000");
+  assert.equal(PRE_BOUNDARY_ROUND_TRIP_CENTS, 2500);
+  const ceilingLimits = {
+    ...OPERATOR_LIMITS,
+    capitalLimitCents: 2_500_000,
+    maxEntryStakeCents: 2_500_000,
+    maxEntryAllInCents: 2_500_000,
+  };
+  assert.equal(validatePolicyLimits(ceilingLimits).ok, true);
+  assert.equal(validatePolicyLimits({ ...ceilingLimits, maxEntryStakeCents: 2_500_001 }).ok, false);
   assert.equal(validatePolicyLimits({ ...OPERATOR_LIMITS, chosenForYou: 1 } as never).ok, false);
   const gate = memoryPort(emptySnapshot());
   assert.equal((await gate.port.verifyFee()).snapshot.fee.verified, false);

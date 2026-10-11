@@ -72,7 +72,7 @@ export const v13LiveMoneyPolicyTable = pgTable("v13_live_money_policy", {
   `),
   check("v13_live_money_policy_limits_check", sql`
     ${table.capitalLimitCents} >= 0 AND ${table.capitalLimitCents} <= 2000000000 AND
-    ${table.maxEntryStakeCents} >= 0 AND ${table.maxEntryStakeCents} <= 500000 AND
+    ${table.maxEntryStakeCents} >= 0 AND ${table.maxEntryStakeCents} <= 2500000 AND
     ${table.maxEntryAllInCents} >= 0 AND ${table.maxEntryAllInCents} <= 2000000000 AND
     ${table.maxOpenPositions} >= 0 AND ${table.maxOpenPositions} <= 1 AND
     ${table.maxDailyLossCents} >= 0 AND ${table.maxDailyLossCents} <= 2000000000 AND

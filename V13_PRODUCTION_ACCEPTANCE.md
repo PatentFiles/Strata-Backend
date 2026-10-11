@@ -43,7 +43,7 @@ approved-policy and safety rows locked while obtaining their last proofs.
 Amounts use integer micros and exact hundredths of a contract. Reservations
 include entry notional, bounded entry fees and full-position exit fees. Admission
 sizes down or blocks against approved capital, available cash, loss limits,
-depth, pending claims and existing owned exposure. The $5,000 notional ceiling
+depth, pending claims and existing owned exposure. The $25,000 notional ceiling
 is not a sizing target or automatic authority.
 
 Concurrent consumers serialize reservations. Evaluation/crossing identifiers and
