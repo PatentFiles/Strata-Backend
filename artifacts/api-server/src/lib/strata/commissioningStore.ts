@@ -42,6 +42,7 @@ import {
   approvedExitFloor,
   emptySnapshot,
   fundingAuthorizationDecision,
+  publicFeeVerificationReason,
   index2GenerationDecision,
   index2ReplacementDecision,
   policyReadFromRows,
@@ -1264,8 +1265,19 @@ export function createDatabaseCommissioningPort(
           ON CONFLICT (singleton_id) DO UPDATE
           SET fee_artifact_digest = EXCLUDED.fee_artifact_digest,
               fee_artifact_verified = true, updated_at = now()`, [established.digest]);
+        return {
+          snapshot: await readCommissioningSnapshot(workerRunning()),
+          feeVerification: { ok: true as const, reason: null, digestStored: true as const },
+        };
       }
-      return readCommissioningSnapshot(workerRunning());
+      return {
+        snapshot: await readCommissioningSnapshot(workerRunning()),
+        feeVerification: {
+          ok: false as const,
+          reason: publicFeeVerificationReason(established.reason),
+          digestStored: false as const,
+        },
+      };
     },
     async verifyCash() {
       const evidence = await readPrimaryIndex2Balance(PRODUCTION_SUBACCOUNT);

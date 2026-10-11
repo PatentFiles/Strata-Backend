@@ -69,7 +69,10 @@ function blockedCommissioningPort(): CommissioningPort {
     fund: async () => ({
       state: "blocked", reason: "reviewed_funding_not_invoked", transferAttempted: false, attempts: 0,
     }),
-    verifyFee: read,
+    verifyFee: async () => ({
+      snapshot: await read(),
+      feeVerification: { ok: false, reason: "official_fee_schedule_not_verified", digestStored: false },
+    }),
     verifyCash: read,
     captureBoundary: async () => ({
       snapshot: emptySnapshot(), calls: [], blocked: true, reason: "boundary_capture_unavailable",

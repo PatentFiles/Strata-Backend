@@ -11,6 +11,7 @@ import {
   type PolicyRead,
   planCommission,
   type CommissioningSnapshot,
+  type FeeVerificationReport,
   type SubaccountStatus,
 } from "../lib/strata/commissioning";
 
@@ -60,7 +61,7 @@ export interface CommissioningPort {
   acknowledgePreBoundaryRoundTrip(confirmation: unknown, actor: string): Promise<PreBoundaryAcknowledgmentResult>;
   reconcileFunding(): Promise<{ state: string; reason: string; transferAttempted: false }>;
   fund(confirmation: unknown): Promise<{ state: string; reason: string; transferAttempted: boolean; attempts: number }>;
-  verifyFee(): Promise<CommissioningSnapshot>;
+  verifyFee(): Promise<{ snapshot: CommissioningSnapshot; feeVerification: FeeVerificationReport }>;
   verifyCash(): Promise<CommissioningSnapshot>;
   readPolicy(): Promise<PolicyRead>;
   proposePolicy(body: unknown, actor: string): Promise<{ status: string; reason: string }>;
@@ -266,7 +267,11 @@ export function createStrataCommissioningRouter(
 
   router.post("/verify-fee", async (_req, res) => {
     try {
-      res.json(sanitizePublic(commissioningStatus(await port.verifyFee())));
+      const result = await port.verifyFee();
+      res.json(sanitizePublic({
+        ...commissioningStatus(result.snapshot),
+        feeVerification: result.feeVerification,
+      }));
     } catch {
       res.status(503).json({ error: "Fee verification is unavailable" });
     }

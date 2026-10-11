@@ -505,6 +505,20 @@ export function planCommission(snapshot: CommissioningSnapshot): {
 }
 
 export const FUNDING_CONFIRMATION = "AUTHORIZE_ONE_SHOT_25_USD_TRANSFER";
+
+export interface FeeVerificationReport {
+  ok: boolean;
+  reason: string | null;
+  digestStored: boolean;
+}
+
+const PUBLIC_FEE_REASON = /^[a-z0-9_]{1,80}$/;
+
+/** Keep only the existing machine reason. URLs, bytes, and secrets do not pass. */
+export function publicFeeVerificationReason(reason: string): string {
+  return PUBLIC_FEE_REASON.test(reason) ? reason : "official_fee_schedule_not_verified";
+}
+
 /** Kalshi can stamp a transfer slightly before the local attempt row. */
 export const FUNDING_TRANSFER_WINDOW_BEFORE_MS = 1_000;
 /** Bound clock skew after the POST response. Later history stays outside the attempt. */

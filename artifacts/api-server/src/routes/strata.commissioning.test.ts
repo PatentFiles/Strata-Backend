@@ -23,6 +23,7 @@ import {
   commissioningStatus,
   emptySnapshot,
   fundingAuthorizationDecision,
+  publicFeeVerificationReason,
   fundingCashProvesExact25,
   selectCurrentFundingTransfer,
   index2GenerationDecision,
@@ -269,9 +270,21 @@ function memoryPort(initial: CommissioningSnapshot) {
       return { state: "uncertain", reason: "funding_uncertain_no_retry", transferAttempted: true, attempts: posts };
     },
     verifyFee: async () => {
-      if (!reviewedFeeAccepted) return structuredClone(snapshot);
+      if (!reviewedFeeAccepted) {
+        return {
+          snapshot: structuredClone(snapshot),
+          feeVerification: {
+            ok: false as const,
+            reason: "official_fee_schedule_not_verified",
+            digestStored: false as const,
+          },
+        };
+      }
       snapshot.fee = { ...snapshot.fee, digest: "c".repeat(64), verified: true };
-      return structuredClone(snapshot);
+      return {
+        snapshot: structuredClone(snapshot),
+        feeVerification: { ok: true as const, reason: null, digestStored: true as const },
+      };
     },
     verifyCash: async () => {
       if (reviewedCashMicros === null || !/^[0-9]+$/.test(reviewedCashMicros)) return structuredClone(snapshot);
@@ -773,14 +786,14 @@ test("policy, fee, cash, exit floor, arm, and disarm stay explicit", async () =>
   assert.equal(validatePolicyLimits({ maxEntryStakeCents: 500000 }).ok, false);
   assert.equal(validatePolicyLimits({ ...OPERATOR_LIMITS, chosenForYou: 1 } as never).ok, false);
   const gate = memoryPort(emptySnapshot());
-  assert.equal((await gate.port.verifyFee()).fee.verified, false);
+  assert.equal((await gate.port.verifyFee()).snapshot.fee.verified, false);
   assert.equal((await gate.port.verifyCash()).cash.precisionVerified, false);
   gate.proveCash("25.00");
   assert.equal((await gate.port.verifyCash()).cash.precisionVerified, false);
   gate.proveCash("25000000");
   assert.equal((await gate.port.verifyCash()).cash.source, "authenticated_kalshi_micros");
   gate.acceptReviewedFee();
-  assert.equal((await gate.port.verifyFee()).fee.verified, true);
+  assert.equal((await gate.port.verifyFee()).snapshot.fee.verified, true);
   const proposed = await gate.port.proposePolicy(OPERATOR_LIMITS, DEVELOPER_ID);
   assert.equal(proposed.status, "PROPOSED");
   const approved = await gate.port.approvePolicy(DEVELOPER_ID);
@@ -2418,4 +2431,39 @@ test("funding reconciliation selects only the post-attempt transfer and never re
   const reconcile = route.slice(route.indexOf('router.post("/funding/reconcile"'), route.indexOf('router.post("/fund"'));
   assert.equal(reconcile.includes("transferAttempted: false"), true);
   assert.equal(reconcile.includes("postOneShotPairFunding"), false);
+});
+
+test("verify-fee returns the existing safe failure reason and stores a digest only on success", () => {
+  for (const reason of [
+    "official_fee_schedule_unavailable",
+    "official_fee_schedule_unreadable",
+    "official_fee_schedule_size_or_body_invalid",
+    "official_fee_schedule_formula_unverifiable",
+    "official_fee_schedule_not_verified",
+    "official_fee_schedule_http_429",
+  ]) {
+    assert.equal(publicFeeVerificationReason(reason), reason);
+  }
+  assert.equal(publicFeeVerificationReason("https://fees.example/token"), "official_fee_schedule_not_verified");
+  assert.equal(
+    publicFeeVerificationReason("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"),
+    "official_fee_schedule_not_verified",
+  );
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(store.indexOf("async verifyFee()"), store.indexOf("async verifyCash()"));
+  const okBranch = body.indexOf("if (established.ok)");
+  const insertAt = body.indexOf("INSERT INTO v13_commissioning_evidence");
+  const failureReturn = body.indexOf("digestStored: false");
+  assert.equal(okBranch > -1 && insertAt > okBranch && failureReturn > insertAt, true);
+  assert.equal(body.includes("publicFeeVerificationReason(established.reason)"), true);
+  assert.equal(body.includes("digestStored: true"), true);
+  assert.equal(body.includes("reason: null"), true);
+  assert.equal(body.includes("postOneShotPairFunding"), false);
+  assert.equal(body.includes("planCommission"), false);
+  assert.equal(body.includes("planArm"), false);
+  assert.equal(body.includes("/portfolio/orders"), false);
+  const route = readFileSync("src/routes/strataCommissioning.ts", "utf8");
+  const verifyFee = route.slice(route.indexOf('router.post("/verify-fee"'), route.indexOf('router.post("/verify-cash"'));
+  assert.equal(verifyFee.includes("feeVerification: result.feeVerification"), true);
+  assert.equal(verifyFee.includes("commissioningStatus(result.snapshot)"), true);
 });
