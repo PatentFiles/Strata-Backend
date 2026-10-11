@@ -505,6 +505,103 @@ export function planCommission(snapshot: CommissioningSnapshot): {
 }
 
 export const FUNDING_CONFIRMATION = "AUTHORIZE_ONE_SHOT_25_USD_TRANSFER";
+/** Kalshi can stamp a transfer slightly before the local attempt row. */
+export const FUNDING_TRANSFER_WINDOW_BEFORE_MS = 1_000;
+/** Bound clock skew after the POST response. Later history stays outside the attempt. */
+export const FUNDING_TRANSFER_WINDOW_AFTER_MS = 5_000;
+
+export interface FundingTransferCandidate {
+  transferId: string;
+  fromSubaccount: number;
+  toSubaccount: number;
+  exchangeIndex: number;
+  amountCents: number;
+  occurredAt: string | null;
+}
+
+function fundingInstant(value: string | Date | null | undefined): number | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Choose the one new $25 inbound inside the current attempt window.
+ * The acknowledged pre-boundary round trip is never current funding.
+ */
+export function selectCurrentFundingTransfer(input: {
+  attemptedAt: string | Date | null;
+  responseReceivedAt: string | Date | null;
+  acknowledgedInboundTransferId: string | null;
+  acknowledgedOutboundTransferId: string | null;
+  transfers: readonly FundingTransferCandidate[];
+}): { status: "selected"; transfer: FundingTransferCandidate & { occurredAt: string } }
+  | { status: "pending" }
+  | { status: "ambiguous" }
+  | { status: "window_unproven" } {
+  const attemptedAt = fundingInstant(input.attemptedAt);
+  const responseReceivedAt = fundingInstant(input.responseReceivedAt);
+  if (attemptedAt === null || responseReceivedAt === null || responseReceivedAt < attemptedAt) {
+    return { status: "window_unproven" };
+  }
+  const excluded = new Set([
+    PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+    PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+    input.acknowledgedInboundTransferId,
+    input.acknowledgedOutboundTransferId,
+  ].filter((id): id is string => typeof id === "string" && id !== ""));
+  const earliest = attemptedAt - FUNDING_TRANSFER_WINDOW_BEFORE_MS;
+  const latest = responseReceivedAt + FUNDING_TRANSFER_WINDOW_AFTER_MS;
+  const candidates = input.transfers.filter((transfer) => {
+    if (excluded.has(transfer.transferId)) return false;
+    if (transfer.fromSubaccount !== 0 || transfer.toSubaccount !== PRODUCTION_SUBACCOUNT) return false;
+    if (transfer.exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) return false;
+    if (transfer.amountCents !== PRE_BOUNDARY_ROUND_TRIP_CENTS) return false;
+    const occurredAt = fundingInstant(transfer.occurredAt);
+    return occurredAt !== null && occurredAt >= earliest && occurredAt <= latest;
+  });
+  if (candidates.length === 0) return { status: "pending" };
+  if (candidates.length !== 1) return { status: "ambiguous" };
+  const transfer = candidates[0]!;
+  return { status: "selected", transfer: { ...transfer, occurredAt: transfer.occurredAt! } };
+}
+
+function exactMicros(value: string): bigint | null {
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+/** Destination must be exactly $25, and the source must have decreased by exactly $25. */
+export function fundingCashProvesExact25(input: {
+  sourceScopedBeforeMicros: string;
+  sourceInventoryBeforeMicros: string;
+  sourceScopedMicros: string;
+  sourceInventoryMicros: string;
+  destinationScopedMicros: string;
+  destinationInventoryMicros: string;
+}): boolean {
+  const beforeScoped = exactMicros(input.sourceScopedBeforeMicros);
+  const beforeInventory = exactMicros(input.sourceInventoryBeforeMicros);
+  const sourceScoped = exactMicros(input.sourceScopedMicros);
+  const sourceInventory = exactMicros(input.sourceInventoryMicros);
+  const destinationScoped = exactMicros(input.destinationScopedMicros);
+  const destinationInventory = exactMicros(input.destinationInventoryMicros);
+  if (beforeScoped === null || beforeInventory === null || sourceScoped === null ||
+      sourceInventory === null || destinationScoped === null || destinationInventory === null) {
+    return false;
+  }
+  const amount = BigInt(REVIEWED_FUNDING_MICROS);
+  return destinationScoped === amount &&
+    destinationInventory === amount &&
+    beforeScoped - sourceScoped === amount &&
+    beforeInventory - sourceInventory === amount;
+}
+
 export const ARM_CONFIRMATION = "ARM_V13_PRODUCTION";
 export const DISARM_CONFIRMATION = "DISARM_V13_PRODUCTION";
 export const EXIT_FLOOR_CONFIRMATION = "APPROVE_MINIMUM_EXIT_FLOOR";

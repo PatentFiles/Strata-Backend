@@ -23,6 +23,8 @@ import {
   commissioningStatus,
   emptySnapshot,
   fundingAuthorizationDecision,
+  fundingCashProvesExact25,
+  selectCurrentFundingTransfer,
   index2GenerationDecision,
   index2ReplacementDecision,
   STRATA_INDEX2_REPLACEMENT_CONFIRMATION,
@@ -2305,4 +2307,115 @@ test("status reconstructs dedicated signer verification from the current key-bou
   assert.equal(statusRoute.includes("verifySigner"), false);
   assert.equal(statusRoute.includes("fund"), false);
   assert.equal(statusRoute.includes("/portfolio/orders"), false);
+});
+
+test("funding reconciliation selects only the post-attempt transfer and never retries", () => {
+  const attemptedAt = "2026-10-11T04:00:00.000Z";
+  const responseReceivedAt = "2026-10-11T04:00:02.000Z";
+  const historical = {
+    transferId: PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+    fromSubaccount: 0,
+    toSubaccount: 1,
+    exchangeIndex: 2,
+    amountCents: 2500,
+    occurredAt: "2026-09-27T01:08:49.000Z",
+  };
+  const outbound = {
+    transferId: PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+    fromSubaccount: 1,
+    toSubaccount: 0,
+    exchangeIndex: 2,
+    amountCents: 2500,
+    occurredAt: "2026-10-10T16:24:20.000Z",
+  };
+  const currentId = "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const current = {
+    transferId: currentId,
+    fromSubaccount: 0,
+    toSubaccount: 1,
+    exchangeIndex: 2,
+    amountCents: 2500,
+    occurredAt: "2026-10-11T04:00:01.000Z",
+  };
+  const window = {
+    attemptedAt,
+    responseReceivedAt,
+    acknowledgedInboundTransferId: PRE_BOUNDARY_INBOUND_TRANSFER_ID,
+    acknowledgedOutboundTransferId: PRE_BOUNDARY_OUTBOUND_TRANSFER_ID,
+  };
+  const selected = selectCurrentFundingTransfer({ ...window, transfers: [historical, outbound, current] });
+  assert.equal(selected.status, "selected");
+  if (selected.status === "selected") assert.equal(selected.transfer.transferId, currentId);
+  const disguisedHistorical = { ...historical, occurredAt: current.occurredAt };
+  const excluded = selectCurrentFundingTransfer({ ...window, transfers: [disguisedHistorical, current] });
+  assert.equal(excluded.status, "selected");
+  if (excluded.status === "selected") assert.equal(excluded.transfer.transferId, currentId);
+  assert.equal(selectCurrentFundingTransfer({ ...window, transfers: [disguisedHistorical] }).status, "pending");
+  assert.equal(selectCurrentFundingTransfer({ ...window, transfers: [historical, outbound] }).status, "pending");
+  const early = { ...current, transferId: "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee", occurredAt: "2026-10-11T03:59:58.000Z" };
+  assert.equal(selectCurrentFundingTransfer({ ...window, transfers: [historical, early] }).status, "pending");
+  const late = { ...current, transferId: "eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee", occurredAt: "2026-10-11T04:00:08.000Z" };
+  assert.equal(selectCurrentFundingTransfer({ ...window, transfers: [historical, late] }).status, "pending");
+  const second = { ...current, transferId: "ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee" };
+  assert.equal(selectCurrentFundingTransfer({
+    ...window,
+    transfers: [historical, current, second],
+  }).status, "ambiguous");
+  assert.equal(selectCurrentFundingTransfer({
+    ...window,
+    transfers: [historical, { ...current, exchangeIndex: 0 }],
+  }).status, "pending");
+  assert.equal(selectCurrentFundingTransfer({
+    ...window,
+    transfers: [historical, { ...current, amountCents: 2501 }],
+  }).status, "pending");
+  assert.equal(selectCurrentFundingTransfer({
+    ...window,
+    transfers: [historical, { ...current, occurredAt: null }],
+  }).status, "pending");
+  assert.equal(selectCurrentFundingTransfer({
+    ...window,
+    responseReceivedAt: null,
+    transfers: [historical, current],
+  }).status, "window_unproven");
+
+  const balances = {
+    sourceScopedBeforeMicros: "50000000",
+    sourceInventoryBeforeMicros: "50000000",
+    sourceScopedMicros: "25000000",
+    sourceInventoryMicros: "25000000",
+    destinationScopedMicros: "25000000",
+    destinationInventoryMicros: "25000000",
+  };
+  assert.equal(fundingCashProvesExact25(balances), true);
+  assert.equal(fundingCashProvesExact25({ ...balances, sourceScopedMicros: "25000001" }), false);
+  assert.equal(fundingCashProvesExact25({ ...balances, sourceInventoryMicros: "24000000" }), false);
+  assert.equal(fundingCashProvesExact25({ ...balances, destinationScopedMicros: "25000001" }), false);
+  assert.equal(fundingCashProvesExact25({ ...balances, destinationInventoryMicros: "0" }), false);
+  assert.equal(fundingCashProvesExact25({ ...balances, sourceScopedBeforeMicros: "nope" }), false);
+
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  const body = store.slice(
+    store.indexOf("async function reconcileRailwayFunding"),
+    store.indexOf("function index2Closed"),
+  );
+  assert.equal(body.includes("selectCurrentFundingTransfer"), true);
+  assert.equal(body.includes("readStoredRoundTrip"), true);
+  assert.equal(body.includes("funding_transfer_pending_visibility"), true);
+  assert.equal(body.includes("funding_transferred_at = $2"), true);
+  assert.equal(body.includes("funding_transferred_at = now()"), false);
+  assert.equal(body.includes("clean_boundary_evidence_digest ="), false);
+  assert.equal(body.includes("postOneShotPairFunding"), false);
+  assert.equal(body.includes('method: "POST"'), false);
+  assert.equal(body.includes('method: "DELETE"'), false);
+  assert.equal(body.includes("/portfolio/subaccounts/transfers"), false);
+  assert.equal(body.includes("SET state = 'uncertain'"), false);
+  assert.equal(body.includes("state = 'reconciled'"), true);
+  const pendingAt = body.indexOf("funding_transfer_pending_visibility");
+  const updateAt = body.indexOf("UPDATE micro_live_pair_boundary");
+  assert.equal(pendingAt > -1 && updateAt > pendingAt, true);
+  const route = readFileSync("src/routes/strataCommissioning.ts", "utf8");
+  const reconcile = route.slice(route.indexOf('router.post("/funding/reconcile"'), route.indexOf('router.post("/fund"'));
+  assert.equal(reconcile.includes("transferAttempted: false"), true);
+  assert.equal(reconcile.includes("postOneShotPairFunding"), false);
 });

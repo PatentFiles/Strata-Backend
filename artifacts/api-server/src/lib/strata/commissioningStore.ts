@@ -35,7 +35,9 @@ import {
   blockingSubaccountTransferDetail,
   applyDurableDedicatedSigner,
   dedicatedSignerFingerprint,
+  fundingCashProvesExact25,
   provePreBoundaryRoundTrip,
+  selectCurrentFundingTransfer,
   EXIT_FLOOR_CONFIRMATION,
   approvedExitFloor,
   emptySnapshot,
@@ -608,48 +610,102 @@ async function fundRailwayPair(confirmation: unknown, workerRunning: () => boole
 async function reconcileRailwayFunding(workerRunning: () => boolean) {
   void workerRunning;
   const attempts = await query("SELECT * FROM micro_live_pair_funding_attempts WHERE destination_subaccount = 1 AND exchange_index = 2");
-  const attempt = attempts.rows[0];
-  if (!attempt) return { state: "blocked", reason: "funding_anchor_missing", transferAttempted: false as const };
+  if (attempts.rows.length === 0) {
+    return { state: "blocked", reason: "funding_anchor_missing", transferAttempted: false as const };
+  }
+  if (attempts.rows.length !== 1) {
+    return { state: "blocked", reason: "funding_attempt_ambiguous", transferAttempted: false as const };
+  }
+  const attempt = attempts.rows[0]!;
   if (attempt.state === "uncertain") {
     return { state: "uncertain", reason: "funding_uncertain_no_retry", transferAttempted: false as const };
+  }
+  if (attempt.state === "reconciled") {
+    const storedId = typeof attempt.transfer_id === "string" ? attempt.transfer_id : "";
+    if (storedId !== "" &&
+        storedId !== PRE_BOUNDARY_INBOUND_TRANSFER_ID &&
+        storedId !== PRE_BOUNDARY_OUTBOUND_TRANSFER_ID) {
+      return { state: "funded", reason: "recorded_funding_anchor_present", transferAttempted: false as const };
+    }
+    return { state: "blocked", reason: "reconciled_funding_transfer_unproven", transferAttempted: false as const };
+  }
+  if (attempt.state !== "response_received") {
+    return { state: "blocked", reason: "funding_attempt_not_response_received", transferAttempted: false as const };
+  }
+  const acknowledged = await readStoredRoundTrip();
+  if (!acknowledged) {
+    return {
+      state: "response_received",
+      reason: "funding_reconcile_acknowledgment_required",
+      transferAttempted: false as const,
+    };
   }
   try {
     const [history, primary, destination] = await Promise.all([
       readPairTransferHistory(), readPrimaryIndex2Balance(0), readPrimaryIndex2Balance(1),
     ]);
-    const exact = history.filter((item) => item.fromSubaccount === 0 && item.toSubaccount === 1 &&
-      item.exchangeIndex === 2 && item.amountCents === 2500);
-    const proved = exact.length === 1 && destination.scopedMicros === "25000000" &&
-      destination.inventoryMicros === "25000000" &&
-      BigInt(String(attempt.source_scoped_before_micros)) - BigInt(primary.scopedMicros) === 25_000_000n &&
-      BigInt(String(attempt.source_inventory_before_micros)) - BigInt(primary.inventoryMicros) === 25_000_000n;
-    if (!proved || !exact[0]) {
-      return { state: "uncertain", reason: "exact_transfer_not_proven", transferAttempted: false as const };
+    const selected = selectCurrentFundingTransfer({
+      attemptedAt: attempt.attempted_at instanceof Date || typeof attempt.attempted_at === "string"
+        ? attempt.attempted_at : null,
+      responseReceivedAt: attempt.response_received_at instanceof Date || typeof attempt.response_received_at === "string"
+        ? attempt.response_received_at : null,
+      acknowledgedInboundTransferId: acknowledged.inboundTransferId,
+      acknowledgedOutboundTransferId: acknowledged.outboundTransferId,
+      transfers: history,
+    });
+    if (selected.status === "pending") {
+      return {
+        state: "response_received",
+        reason: "funding_transfer_pending_visibility",
+        transferAttempted: false as const,
+      };
     }
-    if (attempt.state !== "response_received" && attempt.state !== "reconciled") {
-      return { state: "uncertain", reason: "funding_uncertain_no_retry", transferAttempted: false as const };
+    if (selected.status !== "selected") {
+      return {
+        state: "blocked",
+        reason: selected.status === "ambiguous" ? "funding_transfer_ambiguous" : "funding_attempt_window_unproven",
+        transferAttempted: false as const,
+      };
     }
-    if (attempt.state === "response_received") {
-      const digest = createHash("sha256").update(exact[0].transferId).digest("hex");
-      await query(`UPDATE micro_live_pair_boundary SET
-        state = 'funded', funding_transfer_id = $1, funding_amount_cents = 2500,
-        funding_transferred_at = now(), post_funding_balance_micros = '25000000',
-        post_funding_balance_semantics = 'available_cash', post_funding_snapshot_authenticated = true,
-        post_funding_snapshot_at = now(), post_funding_evidence_digest = $2, updated_at = now()
-        WHERE subaccount_number = 1 AND state = 'KEY_BOUND_VERIFIED'`, [exact[0].transferId, digest]);
-      await query(`UPDATE micro_live_pair_funding_attempts
-        SET state = 'reconciled', transfer_id = $2, reconciled_at = now()
-        WHERE attempt_uuid = $1 AND state = 'response_received'`, [attempt.attempt_uuid, exact[0].transferId]);
-      await query(`INSERT INTO v13_commissioning_evidence
-        (singleton_id, cash_precision_verified, cash_micros, cash_source, updated_at)
-        VALUES ('singleton', true, '25000000', 'authenticated_kalshi_micros', now())
-        ON CONFLICT (singleton_id) DO UPDATE SET
-          cash_precision_verified = true, cash_micros = '25000000',
-          cash_source = 'authenticated_kalshi_micros', updated_at = now()`);
+    const proved = fundingCashProvesExact25({
+      sourceScopedBeforeMicros: String(attempt.source_scoped_before_micros),
+      sourceInventoryBeforeMicros: String(attempt.source_inventory_before_micros),
+      sourceScopedMicros: primary.scopedMicros,
+      sourceInventoryMicros: primary.inventoryMicros,
+      destinationScopedMicros: destination.scopedMicros,
+      destinationInventoryMicros: destination.inventoryMicros,
+    });
+    if (!proved) {
+      return { state: "blocked", reason: "funding_balance_not_proven", transferAttempted: false as const };
     }
+    const transfer = selected.transfer;
+    const digest = createHash("sha256").update(transfer.transferId).digest("hex");
+    const fundedBoundary = await query(`UPDATE micro_live_pair_boundary SET
+      state = 'funded', funding_transfer_id = $1, funding_amount_cents = 2500,
+      funding_transferred_at = $2, post_funding_balance_micros = '25000000',
+      post_funding_balance_semantics = 'available_cash', post_funding_snapshot_authenticated = true,
+      post_funding_snapshot_at = now(), post_funding_evidence_digest = $3, updated_at = now()
+      WHERE subaccount_number = 1 AND state = 'KEY_BOUND_VERIFIED'
+      RETURNING subaccount_number`, [transfer.transferId, transfer.occurredAt, digest]);
+    if (fundedBoundary.rows.length !== 1) {
+      return {
+        state: "response_received",
+        reason: "funding_boundary_not_updated",
+        transferAttempted: false as const,
+      };
+    }
+    await query(`UPDATE micro_live_pair_funding_attempts
+      SET state = 'reconciled', transfer_id = $2, reconciled_at = now()
+      WHERE attempt_uuid = $1 AND state = 'response_received'`, [attempt.attempt_uuid, transfer.transferId]);
+    await query(`INSERT INTO v13_commissioning_evidence
+      (singleton_id, cash_precision_verified, cash_micros, cash_source, updated_at)
+      VALUES ('singleton', true, '25000000', 'authenticated_kalshi_micros', now())
+      ON CONFLICT (singleton_id) DO UPDATE SET
+        cash_precision_verified = true, cash_micros = '25000000',
+        cash_source = 'authenticated_kalshi_micros', updated_at = now()`);
     return { state: "funded", reason: "recorded_funding_anchor_present", transferAttempted: false as const };
   } catch {
-    return { state: "uncertain", reason: "funding_reconcile_get_failed", transferAttempted: false as const };
+    return { state: "response_received", reason: "funding_reconcile_get_failed", transferAttempted: false as const };
   }
 }
 
