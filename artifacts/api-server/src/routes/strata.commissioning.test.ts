@@ -125,6 +125,8 @@ function memoryPort(initial: CommissioningSnapshot) {
   let subaccountOutcome: "created" | "uncertain" | "wrong_number" = "created";
   const subaccountPayloads: unknown[] = [];
   let reviewedFeeAccepted = false;
+  let feeUploadCalls = 0;
+  let feeUploadBytes = 0;
   let reviewedCashMicros: string | null = null;
   let draft: PolicyLimits | null = null;
   const envBefore = () => Object.fromEntries(FLAG_NAMES.map((name) => [name, process.env[name]]));
@@ -299,6 +301,32 @@ function memoryPort(initial: CommissioningSnapshot) {
           finalPathname: "/docs/kalshi-fee-schedule.pdf",
           retryAfterSeconds: null,
           networkAttempts: 1,
+        },
+      };
+    },
+    verifyFeeUpload: async (bytes) => {
+      feeUploadCalls += 1;
+      feeUploadBytes = Buffer.isBuffer(bytes) ? bytes.length : -1;
+      if (!reviewedFeeAccepted || !Buffer.isBuffer(bytes)) {
+        return {
+          feeVerification: {
+            ok: false as const,
+            reason: "uploaded_fee_pdf_invalid",
+            digestStored: false as const,
+            sourceMode: null,
+            effectiveDate: null,
+            formulaVersion: null,
+          },
+        };
+      }
+      return {
+        feeVerification: {
+          ok: true as const,
+          reason: null,
+          digestStored: true as const,
+          sourceMode: "operator_uploaded_reviewed_official_pdf" as const,
+          effectiveDate: "2026-07-07",
+          formulaVersion: "standard-quadratic-0.07-v1",
         },
       };
     },
@@ -535,6 +563,8 @@ function memoryPort(initial: CommissioningSnapshot) {
     subaccountPayloads: () => subaccountPayloads,
     noteGet(path: string) { calls.push({ method: "GET", path }); },
     acceptReviewedFee() { reviewedFeeAccepted = true; },
+    feeUploadCalls: () => feeUploadCalls,
+    feeUploadBytes: () => feeUploadBytes,
     proveCash(micros: string) { reviewedCashMicros = micros; },
     workerStarts: () => workerStarts,
     emergencyStops: () => emergencyStops,
@@ -2461,6 +2491,11 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
     "official_fee_schedule_not_verified",
     "official_fee_schedule_http_429",
     "official_fee_schedule_redirected",
+    "uploaded_fee_pdf_invalid",
+    "uploaded_fee_pdf_too_large",
+    "uploaded_fee_pdf_formula_unverifiable",
+    "uploaded_fee_pdf_unreviewed_schedule",
+    "uploaded_fee_pdf_confirmation_required",
   ]) {
     assert.equal(publicFeeVerificationReason(reason), reason);
   }
@@ -2470,7 +2505,7 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
     "official_fee_schedule_not_verified",
   );
   const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
-  const body = store.slice(store.indexOf("async verifyFee()"), store.indexOf("async verifyCash()"));
+  const body = store.slice(store.indexOf("async verifyFee()"), store.indexOf("async verifyFeeUpload("));
   const okBranch = body.indexOf("if (established.ok)");
   const insertAt = body.indexOf("INSERT INTO v13_commissioning_evidence");
   const failureReturn = body.indexOf("digestStored: false");
@@ -2495,4 +2530,140 @@ test("verify-fee returns the existing safe failure reason and stores a digest on
   const verifyFee = route.slice(route.indexOf('router.post("/verify-fee"'), route.indexOf('router.post("/verify-cash"'));
   assert.equal(verifyFee.includes("feeVerification: result.feeVerification"), true);
   assert.equal(verifyFee.includes("commissioningStatus(result.snapshot)"), true);
+  const upload = store.slice(store.indexOf("async verifyFeeUpload("), store.indexOf("async verifyCash()"));
+  const uploadOk = upload.indexOf("if (!verified.ok)");
+  const uploadInsert = upload.indexOf("INSERT INTO v13_commissioning_evidence");
+  assert.equal(uploadOk > -1 && uploadInsert > uploadOk, true);
+  assert.equal(upload.includes("fee_artifact_digest"), true);
+  assert.equal(upload.includes("fee_artifact_verified"), true);
+  assert.equal(upload.includes("verifyCurrentFeeArtifact"), false);
+  assert.equal(upload.includes("establishOfficialFeeDigest"), false);
+  assert.equal(upload.includes("/portfolio/"), false);
+  assert.equal(upload.includes("/trade-api/"), false);
+  assert.equal(upload.includes("fetch("), false);
+  const uploadRoute = route.slice(route.indexOf('router.post("/verify-fee-upload"'), route.indexOf('router.post("/verify-cash"'));
+  assert.equal(uploadRoute.includes("VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION"), true);
+  assert.equal(route.includes('VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION = "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD"'), true);
+  assert.equal(uploadRoute.includes("application/pdf"), true);
+  assert.equal(uploadRoute.includes("commissioningStatus"), false);
+  assert.equal(uploadRoute.includes("feeVerification: result.feeVerification"), true);
+});
+
+test("verify-fee-upload accepts only raw PDF bytes from an AAL2 operator", async () => {
+  const { privateKey, keys } = await signingKeys();
+  const gate = memoryPort(emptySnapshot());
+  const app = express();
+  app.use(express.json());
+  app.use("/api/strata", createStrataRouter({
+    verifyToken: (value) => verifySupabaseAccessToken(value, { supabaseUrl: SUPABASE_URL, keys }),
+    roleOf,
+    control: { start: async () => { gate.startWorker(); }, stop() {}, view: () => ({ runtimeStatus: "STOPPED", workerRunning: false, blockedReason: null, lastProductionError: null, refused: false }), isScheduled: () => false } as never,
+    status: async () => ({ runtimeStatus: "STOPPED" }),
+    positions: async () => ({ positions: [] }),
+    orders: async () => ({ orders: [] }),
+    fills: async () => ({ fills: [] }),
+    trades: async () => ({ trades: [] }),
+    latestTrade: async () => ({ unresolved: false, latestCompleted: null }),
+    forwardTestStatus: async () => ({}),
+    forwardTestHistory: async () => ({}),
+    phase4State: async () => ({}),
+    microLiveState: async () => ({}),
+    emergencyStop: async () => ({ killSwitch: "ON" }),
+    commissioning: gate.port,
+  }));
+  const server = await listen(app);
+  const claimed = "caller-supplied-digest-marker";
+  const pem = "-----BEGIN PRIVATE KEY-----\nnot-in-the-response\n-----END PRIVATE KEY-----";
+  function send(path: string, method: string, bearer: string | undefined, payload: Buffer | null, headers: Record<string, string>) {
+    return new Promise<{ status: number; raw: string; body: Record<string, unknown> }>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: "127.0.0.1", port: server.port, path, method,
+        headers: {
+          ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+          ...headers,
+          ...(payload ? { "Content-Length": payload.length } : {}),
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString();
+          resolve({
+            status: res.statusCode ?? 0,
+            raw,
+            body: raw.startsWith("{") ? JSON.parse(raw) as Record<string, unknown> : {},
+          });
+        });
+      });
+      req.on("error", reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+  try {
+    const developer = await token(privateKey, DEVELOPER_ID);
+    const standard = await token(privateKey, STANDARD_ID);
+    const anonymous = await send("/api/strata/commissioning/verify-fee-upload", "POST", undefined, Buffer.from("%PDF-"), {
+      "Content-Type": "application/pdf",
+    });
+    assert.equal(anonymous.status, 401);
+    assert.equal(gate.feeUploadCalls(), 0);
+    const forbidden = await send("/api/strata/commissioning/verify-fee-upload", "POST", standard, Buffer.from("%PDF-"), {
+      "Content-Type": "application/pdf",
+      "X-Strata-Confirmation": "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD",
+    });
+    assert.equal(forbidden.status, 403);
+    assert.equal(gate.feeUploadCalls(), 0);
+    const json = await send("/api/strata/commissioning/verify-fee-upload", "POST", developer, Buffer.from(JSON.stringify({
+      digest: claimed,
+      note: pem,
+      effectiveDate: "2026-07-07",
+      formulaVersion: "standard-quadratic-0.07-v1",
+    })), {
+      "Content-Type": "application/json",
+      "X-Strata-Confirmation": "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD",
+    });
+    assert.equal(json.status, 415);
+    assert.equal(gate.feeUploadCalls(), 0);
+    assert.equal(json.raw.includes(claimed), false);
+    assert.equal(json.raw.includes("BEGIN PRIVATE KEY"), false);
+    assert.equal(json.raw.includes(developer), false);
+    const unconfirmed = await send("/api/strata/commissioning/verify-fee-upload", "POST", developer, Buffer.from("%PDF-1.4\n"), {
+      "Content-Type": "application/pdf",
+    });
+    assert.equal(unconfirmed.status, 400);
+    assert.equal(gate.feeUploadCalls(), 0);
+    const pdf = Buffer.from("%PDF-1.4\noperator-upload-bytes\n%%EOF");
+    const rejected = await send("/api/strata/commissioning/verify-fee-upload", "POST", developer, pdf, {
+      "Content-Type": "application/pdf",
+      "X-Strata-Confirmation": "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD",
+    });
+    assert.equal(rejected.status, 422);
+    assert.equal(gate.feeUploadCalls(), 1);
+    assert.equal(gate.feeUploadBytes(), pdf.length);
+    assert.equal((rejected.body.feeVerification as { digestStored: boolean }).digestStored, false);
+    assert.equal(rejected.raw.includes("%PDF"), false);
+    assert.equal(rejected.raw.includes(developer), false);
+    gate.acceptReviewedFee();
+    const accepted = await send("/api/strata/commissioning/verify-fee-upload", "POST", developer, pdf, {
+      "Content-Type": "application/pdf",
+      "X-Strata-Confirmation": "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD",
+    });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(accepted.body, {
+      feeVerification: {
+        ok: true,
+        reason: null,
+        digestStored: true,
+        sourceMode: "operator_uploaded_reviewed_official_pdf",
+        effectiveDate: "2026-07-07",
+        formulaVersion: "standard-quadratic-0.07-v1",
+      },
+    });
+    assert.equal(accepted.raw.includes("%PDF"), false);
+    assert.equal(accepted.raw.includes(developer), false);
+    assert.equal(gate.calls.length, 0);
+  } finally {
+    await server.close();
+  }
 });

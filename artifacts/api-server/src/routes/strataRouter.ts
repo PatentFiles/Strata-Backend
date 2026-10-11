@@ -83,6 +83,16 @@ function blockedCommissioningPort(): CommissioningPort {
         networkAttempts: 0,
       },
     }),
+    verifyFeeUpload: async () => ({
+      feeVerification: {
+        ok: false,
+        reason: "uploaded_fee_pdf_invalid",
+        digestStored: false,
+        sourceMode: null,
+        effectiveDate: null,
+        formulaVersion: null,
+      },
+    }),
     verifyCash: read,
     captureBoundary: async () => ({
       snapshot: emptySnapshot(), calls: [], blocked: true, reason: "boundary_capture_unavailable",

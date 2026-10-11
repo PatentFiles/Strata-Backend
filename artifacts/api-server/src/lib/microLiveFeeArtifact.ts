@@ -166,7 +166,7 @@ export function parseFeeScheduleText(text: string): ParsedFeeSchedule | null {
   };
 }
 
-export async function parseFeeSchedulePdf(bytes: Buffer): Promise<ParsedFeeSchedule | null> {
+async function extractFeeScheduleDocumentText(bytes: Buffer): Promise<string | null> {
   if (bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
       bytes.subarray(0, 5).toString() !== "%PDF-" ||
       !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"))) {
@@ -182,10 +182,72 @@ export async function parseFeeSchedulePdf(bytes: Buffer): Promise<ParsedFeeSched
       const content = await page.getTextContent();
       pages.push(content.items.map((item) => "str" in item ? item.str : "").join(" "));
     }
-    return parseFeeScheduleText(pages.join(" "));
+    return pages.join(" ");
   } finally {
     await loading.destroy();
   }
+}
+
+export async function parseFeeSchedulePdf(bytes: Buffer): Promise<ParsedFeeSchedule | null> {
+  const text = await extractFeeScheduleDocumentText(bytes);
+  if (text === null) return null;
+  return parseFeeScheduleText(text);
+}
+
+export type OfficialFeePdfByteFailure =
+  "invalid" | "too_large" | "formula_unverifiable" | "unreviewed_schedule";
+
+export type OfficialFeePdfByteVerification =
+  | {
+    ok: true;
+    digest: string;
+    effectiveDate: string;
+    formulaVersion: typeof STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
+  }
+  | { ok: false; reason: OfficialFeePdfByteFailure };
+
+function feeTextHasUnreviewedRate(normalized: string): boolean {
+  return [...normalized.matchAll(/(?<![\w.])0\.\d+\b/g)]
+    .some((match) => match[0] !== "0.07" && match[0] !== "0.0001");
+}
+
+/**
+ * Accept only the reviewed July 7, 2026 PDF. The digest is SHA-256 of these bytes.
+ * The pinned normalized-text digest stays inside the July parser.
+ */
+export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<OfficialFeePdfByteVerification> {
+  if (bytes.length > MAX_FEE_SCHEDULE_BYTES) return { ok: false, reason: "too_large" };
+  if (bytes.length < 100 || bytes.subarray(0, 5).toString() !== "%PDF-" ||
+      !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"))) {
+    return { ok: false, reason: "invalid" };
+  }
+  let text: string | null;
+  let parsed: ParsedFeeSchedule | null;
+  try {
+    parsed = await parseFeeSchedulePdf(bytes);
+    text = await extractFeeScheduleDocumentText(bytes);
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  if (text === null) return { ok: false, reason: "invalid" };
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const textDigest = createHash("sha256").update(normalized).digest("hex");
+  if (textDigest !== JULY_2026_TEXT_DIGEST) {
+    if (feeTextHasUnreviewedRate(normalized) || !normalized.includes("0.07")) {
+      return { ok: false, reason: "formula_unverifiable" };
+    }
+    return { ok: false, reason: "unreviewed_schedule" };
+  }
+  if (!parsed || parsed.effectiveDate !== "2026-07-07" ||
+      parsed.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return { ok: false, reason: "formula_unverifiable" };
+  }
+  return {
+    ok: true,
+    digest: createHash("sha256").update(bytes).digest("hex"),
+    effectiveDate: parsed.effectiveDate,
+    formulaVersion: parsed.formulaVersion,
+  };
 }
 
 async function readPdfWithinLimit(response: Response): Promise<Buffer | null> {
@@ -421,29 +483,16 @@ async function validateFetchedOfficialFeePdf(
   }
   const bytes = await readPdfWithinLimit(response);
   if (!bytes) return { ok: false, reason: "official_fee_schedule_size_or_body_invalid", diagnostic };
-  if (pdfEnvelopeRejected(bytes)) {
-    return { ok: false, reason: "official_fee_schedule_pdf_unparseable", diagnostic };
+  const verified = await verifyOfficialFeePdfBytes(bytes);
+  if (!verified.ok) {
+    const reason = verified.reason === "too_large"
+      ? "official_fee_schedule_size_or_body_invalid"
+      : verified.reason === "invalid"
+        ? "official_fee_schedule_pdf_unparseable"
+        : "official_fee_schedule_formula_unverifiable";
+    return { ok: false, reason, diagnostic };
   }
-  let parsed: ParsedFeeSchedule | null;
-  try {
-    parsed = await parseFeeSchedulePdf(bytes);
-  } catch {
-    return { ok: false, reason: "official_fee_schedule_pdf_unparseable", diagnostic };
-  }
-  if (!parsed || parsed.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
-    return { ok: false, reason: "official_fee_schedule_formula_unverifiable", diagnostic };
-  }
-  return {
-    ok: true,
-    digest: createHash("sha256").update(bytes).digest("hex"),
-    diagnostic,
-  };
-}
-
-function pdfEnvelopeRejected(bytes: Buffer): boolean {
-  return bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
-    bytes.subarray(0, 5).toString() !== "%PDF-" ||
-    !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"));
+  return { ok: true, digest: verified.digest, diagnostic };
 }
 
 /**

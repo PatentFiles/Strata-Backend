@@ -30,7 +30,7 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
   CANONICAL_FEE_SCHEDULE_URL, MAX_FEE_SCHEDULE_BYTES, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   STANDING_FEE_POLICY_VERSION, establishOfficialFeeDigest, parseFeeSchedulePdf, parseFeeScheduleText,
-  verifyCurrentFeeArtifact,
+  verifyCurrentFeeArtifact, verifyOfficialFeePdfBytes,
 } from "./microLiveFeeArtifact";
 
 function examplePdf(text: string): Buffer {
@@ -385,16 +385,20 @@ test("one successful verification parses and hashes the same PDF bytes from one 
     assert.equal(init?.credentials, undefined);
     assert.equal(String(input).includes("/portfolio/"), false);
     assert.equal(String(input).includes("/trade-api/"), false);
-    return new Response(new Uint8Array(pdf), {
+    const official = readFileSync(resolve(process.cwd(),
+      "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+    return new Response(new Uint8Array(official), {
       status: 200,
-      headers: { "content-type": "application/pdf", "content-length": String(pdf.length) },
+      headers: { "content-type": "application/pdf", "content-length": String(official.length) },
     });
   }) as typeof fetch;
   const result = await establishOfficialFeeDigest(fetchImpl);
   assert.equal(calls, 1);
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  assert.equal(result.digest, digest);
+  const official = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  assert.equal(result.digest, createHash("sha256").update(official).digest("hex"));
   assert.equal(result.diagnostic.httpStatus, 200);
   assert.equal(result.diagnostic.contentType, "application/pdf");
   assert.equal(result.diagnostic.finalOrigin, "https://kalshi.com");
@@ -468,13 +472,20 @@ test("429 without Retry-After performs one GET and stores nothing", async () => 
 test("429 with a short Retry-After retries once and stores a digest only when the PDF validates", async () => {
   const recovered = sequencedFeeFetch([
     { status: 429, contentType: "text/plain", retryAfter: "0" },
-    { status: 200, contentType: "application/pdf", body: pdf, url: CANONICAL_FEE_SCHEDULE_URL },
+    {
+      status: 200,
+      contentType: "application/pdf",
+      body: readFileSync(resolve(process.cwd(), "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf")),
+      url: CANONICAL_FEE_SCHEDULE_URL,
+    },
   ]);
   const success = await establishOfficialFeeDigest(recovered.fetch);
   assert.equal(recovered.calls(), 2);
   assert.equal(success.ok, true);
   if (!success.ok) return;
-  assert.equal(success.digest, digest);
+  const official = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  assert.equal(success.digest, createHash("sha256").update(official).digest("hex"));
   assert.equal(success.diagnostic.httpStatus, 200);
   assert.equal(success.diagnostic.contentType, "application/pdf");
   assert.equal(success.diagnostic.retryAfterSeconds, null);
@@ -541,4 +552,53 @@ test("redirect mismatch and a changed PDF block without another GET", async () =
     assert.equal(rejected.reason, "official_fee_schedule_formula_unverifiable");
     assert.equal("digest" in rejected, false);
   }
+});
+
+test("uploaded official fee bytes pass only the reviewed July 2026 PDF", async () => {
+  const official = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  const serverDigest = createHash("sha256").update(official).digest("hex");
+  const accepted = await verifyOfficialFeePdfBytes(official);
+  assert.equal(accepted.ok, true);
+  if (!accepted.ok) return;
+  assert.equal(accepted.digest, serverDigest);
+  assert.equal(accepted.effectiveDate, "2026-07-07");
+  assert.equal(accepted.formulaVersion, STANDARD_QUADRATIC_FEE_FORMULA_VERSION);
+  const source = readFileSync("src/lib/microLiveFeeArtifact.ts", "utf8");
+  const helper = source.slice(
+    source.indexOf("export async function verifyOfficialFeePdfBytes"),
+    source.indexOf("export interface OfficialFeeFetchDiagnostic"),
+  );
+  assert.equal(helper.includes("parseFeeSchedulePdf"), true);
+  assert.equal(helper.includes("JULY_2026_TEXT_DIGEST"), true);
+  assert.equal(helper.includes(serverDigest), false);
+  assert.equal(source.includes(serverDigest), false);
+
+  const lookalike = examplePdf(
+    "Kalshi Fee Schedule Effective July 7, 2026 General Trading Fees. The standard fee applies to all markets. Standard quadratic taker fee = 0.07 x contracts x price x 1 - price",
+  );
+  const modified = await verifyOfficialFeePdfBytes(lookalike);
+  assert.equal(modified.ok, false);
+  if (!modified.ok) assert.equal(modified.reason, "unreviewed_schedule");
+
+  const wrongFormula = await verifyOfficialFeePdfBytes(examplePdf(
+    "Kalshi Fee Schedule Effective July 7, 2026 General Trading Fees. The standard fee applies to all markets. Standard quadratic taker fee = 0.08 x contracts x price x 1 - price",
+  ));
+  assert.equal(wrongFormula.ok, false);
+  if (!wrongFormula.ok) assert.equal(wrongFormula.reason, "formula_unverifiable");
+
+  const wrongDate = await verifyOfficialFeePdfBytes(examplePdf(
+    "Kalshi Fee Schedule Effective July 8, 2026 General Trading Fees. The standard fee applies to all markets. Standard quadratic taker fee = 0.07 x contracts x price x 1 - price",
+  ));
+  assert.equal(wrongDate.ok, false);
+  if (!wrongDate.ok) assert.equal(wrongDate.reason, "unreviewed_schedule");
+
+  const oversized = await verifyOfficialFeePdfBytes(Buffer.alloc(MAX_FEE_SCHEDULE_BYTES + 1));
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) assert.equal(oversized.reason, "too_large");
+
+  const notPdf = await verifyOfficialFeePdfBytes(Buffer.from("not a pdf document ".repeat(20)));
+  assert.equal(notPdf.ok, false);
+  if (!notPdf.ok) assert.equal(notPdf.reason, "invalid");
+  assert.equal(JSON.stringify(accepted).includes("%PDF"), false);
 });

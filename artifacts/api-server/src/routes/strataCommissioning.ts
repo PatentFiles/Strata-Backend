@@ -1,4 +1,5 @@
-import { Router, type IRouter, type RequestHandler } from "express";
+import express, { Router, type IRouter, type RequestHandler } from "express";
+import { MAX_FEE_SCHEDULE_BYTES } from "../lib/microLiveFeeArtifact";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import {
   PRE_BOUNDARY_ROUND_TRIP_CONFIRMATION,
@@ -13,6 +14,7 @@ import {
   type CommissioningSnapshot,
   type FeeVerificationReport,
   type SubaccountStatus,
+  type UploadedFeeVerification,
 } from "../lib/strata/commissioning";
 
 export interface ExchangeCall {
@@ -62,6 +64,7 @@ export interface CommissioningPort {
   reconcileFunding(): Promise<{ state: string; reason: string; transferAttempted: false }>;
   fund(confirmation: unknown): Promise<{ state: string; reason: string; transferAttempted: boolean; attempts: number }>;
   verifyFee(): Promise<{ snapshot: CommissioningSnapshot; feeVerification: FeeVerificationReport }>;
+  verifyFeeUpload(bytes: Buffer): Promise<{ feeVerification: UploadedFeeVerification }>;
   verifyCash(): Promise<CommissioningSnapshot>;
   readPolicy(): Promise<PolicyRead>;
   proposePolicy(body: unknown, actor: string): Promise<{ status: string; reason: string }>;
@@ -79,6 +82,21 @@ export interface CommissioningPort {
   }>;
   arm(confirmation: unknown): Promise<{ status: string; reason: string; workerStarted: false; environmentChanged: false }>;
   disarm(confirmation: unknown): Promise<{ status: string; reason: string; emergencyStop: false }>;
+}
+
+export const VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION = "VERIFY_OFFICIAL_KALSHI_FEE_PDF_UPLOAD";
+
+function uploadedFeeFailure(reason: string): { feeVerification: UploadedFeeVerification } {
+  return {
+    feeVerification: {
+      ok: false,
+      reason,
+      digestStored: false,
+      sourceMode: null,
+      effectiveDate: null,
+      formulaVersion: null,
+    },
+  };
 }
 
 const AUTHORITY_FIELDS = new Set([
@@ -270,6 +288,39 @@ export function createStrataCommissioningRouter(
       const result = await port.verifyFee();
       res.json(sanitizePublic({
         ...commissioningStatus(result.snapshot),
+        feeVerification: result.feeVerification,
+      }));
+    } catch {
+      res.status(503).json({ error: "Fee verification is unavailable" });
+    }
+  });
+
+  router.post("/verify-fee-upload", (req, res, next) => {
+    const mediaType = req.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (mediaType !== "application/pdf") {
+      res.status(415).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_invalid")));
+      return;
+    }
+    if (req.get("x-strata-confirmation") !== VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION) {
+      res.status(400).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_confirmation_required")));
+      return;
+    }
+    express.raw({ type: "application/pdf", limit: MAX_FEE_SCHEDULE_BYTES })(req, res, (error: unknown) => {
+      if (error && typeof error === "object" && "type" in error && error.type === "entity.too.large") {
+        res.status(413).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_too_large")));
+        return;
+      }
+      if (error) {
+        res.status(400).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_invalid")));
+        return;
+      }
+      next();
+    });
+  }, async (req, res) => {
+    const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    try {
+      const result = await port.verifyFeeUpload(bytes);
+      res.status(result.feeVerification.ok ? 200 : 422).json(sanitizePublic({
         feeVerification: result.feeVerification,
       }));
     } catch {

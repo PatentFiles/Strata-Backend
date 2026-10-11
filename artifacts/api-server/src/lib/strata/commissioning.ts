@@ -506,6 +506,15 @@ export function planCommission(snapshot: CommissioningSnapshot): {
 
 export const FUNDING_CONFIRMATION = "AUTHORIZE_ONE_SHOT_25_USD_TRANSFER";
 
+export interface UploadedFeeVerification {
+  ok: boolean;
+  reason: string | null;
+  digestStored: boolean;
+  sourceMode: "operator_uploaded_reviewed_official_pdf" | null;
+  effectiveDate: string | null;
+  formulaVersion: string | null;
+}
+
 export interface FeeVerificationReport {
   ok: boolean;
   reason: string | null;

@@ -16,6 +16,7 @@ import {
   STANDING_FEE_POLICY_VERSION,
   STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   establishOfficialFeeDigest,
+  verifyOfficialFeePdfBytes,
 } from "../microLiveFeeArtifact";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
 import {
@@ -1292,6 +1293,44 @@ export function createDatabaseCommissioningPort(
           finalPathname: established.diagnostic.finalPathname,
           retryAfterSeconds: established.diagnostic.retryAfterSeconds,
           networkAttempts: established.diagnostic.networkAttempts,
+        },
+      };
+    },
+    async verifyFeeUpload(bytes: Buffer) {
+      const verified = await verifyOfficialFeePdfBytes(bytes);
+      if (!verified.ok) {
+        const reason = verified.reason === "too_large"
+          ? "uploaded_fee_pdf_too_large"
+          : verified.reason === "formula_unverifiable"
+            ? "uploaded_fee_pdf_formula_unverifiable"
+            : verified.reason === "unreviewed_schedule"
+              ? "uploaded_fee_pdf_unreviewed_schedule"
+              : "uploaded_fee_pdf_invalid";
+        return {
+          feeVerification: {
+            ok: false as const,
+            reason: publicFeeVerificationReason(reason),
+            digestStored: false as const,
+            sourceMode: null,
+            effectiveDate: null,
+            formulaVersion: null,
+          },
+        };
+      }
+      await query(`INSERT INTO v13_commissioning_evidence
+        (singleton_id, fee_artifact_digest, fee_artifact_verified, updated_at)
+        VALUES ('singleton', $1, true, now())
+        ON CONFLICT (singleton_id) DO UPDATE
+        SET fee_artifact_digest = EXCLUDED.fee_artifact_digest,
+            fee_artifact_verified = true, updated_at = now()`, [verified.digest]);
+      return {
+        feeVerification: {
+          ok: true as const,
+          reason: null,
+          digestStored: true as const,
+          sourceMode: "operator_uploaded_reviewed_official_pdf" as const,
+          effectiveDate: verified.effectiveDate,
+          formulaVersion: verified.formulaVersion,
         },
       };
     },
