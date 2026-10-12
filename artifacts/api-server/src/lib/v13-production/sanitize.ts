@@ -2,6 +2,7 @@ const SECRET_KEY = /private|secret|password|credential|pem|authorization|api[-_]
 const SECRET_VALUE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 const SIGNER_DIAGNOSTIC_KEY = new Set([
   "credentialIdPresent",
+  "credentialVerified",
   "privateKeyPresent",
   "privateKeyParsed",
   "privateKeyType",

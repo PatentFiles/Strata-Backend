@@ -3,6 +3,7 @@ import {
   createPrivateKey,
   createHash,
   createSign,
+  sign,
 } from "node:crypto";
 import {
   compatibleOptionalDirection, compatibleOptionalPrice, mergeDirectionAndPrices,
@@ -355,11 +356,7 @@ function credentials(): Credentials {
   const keyId = process.env.KALSHI_API_KEY_ID?.trim();
   const privateKey = process.env.KALSHI_API_PRIVATE_KEY?.trim();
   if (!keyId || !privateKey) throw new KalshiApiError("NOT_CONFIGURED");
-  // Replit Secrets may contain a PEM on one line; restore its boundary newlines.
-  const pem = privateKey.replaceAll("\\n", "\n")
-    .replace(/(-----BEGIN [A-Z ]+-----)\s*/, "$1\n")
-    .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
-  return { keyId, privateKey: pem };
+  return { keyId, privateKey: normalizeKalshiPem(privateKey) };
 }
 
 function baseUrl(): string {
@@ -372,14 +369,22 @@ function baseUrl(): string {
     : "https://external-api.demo.kalshi.co";
 }
 
+function normalizeKalshiPem(privateKey: string): string {
+  return privateKey.replaceAll("\\n", "\n")
+    .replace(/(-----BEGIN [A-Z ]+-----)\s*/, "$1\n")
+    .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
+}
+
 function signRequest(creds: Credentials, method: "GET", path: string, timestamp: string): string {
   try {
-    const key = createPrivateKey(creds.privateKey);
+    const key = createPrivateKey(normalizeKalshiPem(creds.privateKey));
+    const message = Buffer.from(`${timestamp}${method}${path}`);
+    if (key.asymmetricKeyType === "ed25519") return sign(null, message, key).toString("base64");
     if (key.asymmetricKeyType !== "rsa" && key.asymmetricKeyType !== "rsa-pss") {
       throw new Error("Unsupported signing key");
     }
     const signer = createSign("sha256");
-    signer.update(`${timestamp}${method}${path}`);
+    signer.update(message);
     signer.end();
     return signer.sign({
       key,

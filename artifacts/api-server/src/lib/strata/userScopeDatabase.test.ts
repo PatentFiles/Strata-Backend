@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
-import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import { sanitizePublic } from "../v13-production/sanitize";
 import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
 import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
 
@@ -214,6 +215,60 @@ test("wallet reads the caller's Vault connection before execution ownership exis
   assert.equal(calls.some((call) => call.params.includes("vault-b")), false);
 });
 
+test("primary balance verifies the credential when limits and activity reads fail", async () => {
+  const { db } = database(true);
+  const port = createDatabaseUserScopePort(db, {
+    kalshiGet: async (_creds, path) => {
+      if (path.endsWith("/portfolio/balance")) return { balance: 2500, portfolio_value: 1234 };
+      throw new KalshiApiError("HTTP_ERROR", 404);
+    },
+  });
+  const wallet = await port.wallet(USER_A);
+  assert.equal(wallet.credentialVerified, true);
+  assert.equal(wallet.verificationReason, "API_TIER_UNAVAILABLE");
+  assert.equal(wallet.primary.cashCents, 2500);
+  assert.equal(wallet.primary.portfolioValueCents, 1234);
+  assert.equal(wallet.apiUsageTier, null);
+  assert.equal(wallet.botEligible, false);
+  assert.equal(wallet.botEligibilityReason, "API_TIER_UNAVAILABLE");
+  const published = sanitizePublic({ ...wallet, private_key: "pem-a" });
+  assert.equal(published.credentialVerified, true);
+  assert.equal(published.verificationReason, "API_TIER_UNAVAILABLE");
+  assert.equal(published.primary.cashCents, 2500);
+  assert.equal(JSON.stringify(published).includes("pem-a"), false);
+});
+
+test("primary balance HTTP 401 does not verify the credential", async () => {
+  const { db } = database(true);
+  const port = createDatabaseUserScopePort(db, {
+    kalshiGet: async () => {
+      throw new KalshiApiError("HTTP_ERROR", 401);
+    },
+  });
+  const wallet = await port.wallet(USER_A);
+  assert.equal(wallet.credentialVerified, false);
+  assert.equal(wallet.verificationReason, "PRIMARY_BALANCE_HTTP_401");
+  assert.equal(wallet.primary.cashCents, null);
+  assert.equal(wallet.botEligible, false);
+});
+
+test("a malformed Vault secret stays unverified and is not returned", async () => {
+  const port = createDatabaseUserScopePort({
+    query: async (text) => {
+      if (text.includes("fa.user_id")) {
+        return { rows: [{ financial_account_id: "acct", vault_secret_id: "vault-a" }] };
+      }
+      if (text.includes("decrypted_secrets")) return { rows: [{ decrypted_secret: "not-json" }] };
+      return { rows: [] };
+    },
+  });
+  const wallet = await port.wallet(USER_A);
+  assert.equal(wallet.credentialVerified, false);
+  assert.equal(wallet.verificationReason, "VAULT_SECRET_FORMAT_INVALID");
+  assert.equal(JSON.stringify(wallet).includes("not-json"), false);
+  assert.equal(JSON.stringify(wallet).includes("private_key"), false);
+});
+
 test("an uncommissioned account cannot be armed and a client owner id is ignored", async () => {
   const seen: string[] = [];
   const port = createDatabaseUserScopePort({
@@ -277,4 +332,26 @@ test("scoped Kalshi reads are signed GETs and integer cents stay cents", async (
   await assert.rejects(
     getScopedKalshiJson({ keyId: "key-a", privateKey: pem }, "/trade-api/v2/portfolio/orders/cancel", "", async () => new Response("{}", { status: 200 })),
   );
+});
+
+test("scoped Kalshi reads sign stored Ed25519 keys", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  let method = "";
+  const payload = await getScopedKalshiJson(
+    { keyId: "key-ed", privateKey: pem },
+    "/trade-api/v2/portfolio/balance",
+    "",
+    async (_url, init) => {
+      method = init?.method ?? "";
+      const headers = new Headers(init?.headers);
+      const timestamp = headers.get("KALSHI-ACCESS-TIMESTAMP") ?? "";
+      const signature = Buffer.from(headers.get("KALSHI-ACCESS-SIGNATURE") ?? "", "base64");
+      assert.equal(verify(null, Buffer.from(`${timestamp}GET/trade-api/v2/portfolio/balance`), publicKey, signature), true);
+      assert.equal(headers.get("KALSHI-ACCESS-SIGNATURE")?.includes("PRIVATE"), false);
+      return new Response(JSON.stringify({ balance: 2500, portfolio_value: 1234 }), { status: 200 });
+    },
+  );
+  assert.equal(method, "GET");
+  assert.deepEqual(payload, { balance: 2500, portfolio_value: 1234 });
 });

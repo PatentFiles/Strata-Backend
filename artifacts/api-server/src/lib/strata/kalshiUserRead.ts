@@ -12,6 +12,7 @@ export interface KalshiMoney {
 
 export interface KalshiUserRead {
   credentialVerified: boolean;
+  verificationReason: string | null;
   apiUsageTier: string | null;
   botEligible: boolean;
   botEligibilityReason: string | null;
@@ -67,6 +68,7 @@ export function botEligibility(limitsPayload: unknown, numberedSubaccountAvailab
 export function emptyKalshiUserRead(): KalshiUserRead {
   return {
     credentialVerified: false,
+    verificationReason: null,
     apiUsageTier: null,
     botEligible: false,
     botEligibilityReason: null,

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import {
   assembleKalshiUserRead,
   BOT_EXCHANGE_INDEX,
   BOT_SUBACCOUNT,
   emptyKalshiUserRead,
+  normalizeKalshiMoney,
   type KalshiUserRead,
 } from "./kalshiUserRead";
 import { presetFieldError, type PolicyDraft, type SharedPreset } from "./sharedPresets";
@@ -51,9 +52,10 @@ const ACCOUNT_SQL = `
 `;
 
 const CONNECTION_SQL = `
-  SELECT pc.vault_secret_id::text AS vault_secret_id, pc.key_fingerprint, pc.verified_at
+  SELECT fa.id::text AS financial_account_id, pc.vault_secret_id::text AS vault_secret_id,
+         pc.key_fingerprint, pc.verified_at
   FROM public.financial_accounts fa
-  JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
+  LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
   WHERE fa.user_id = $1::uuid AND fa.provider = 'kalshi'
 `;
 
@@ -195,6 +197,27 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
   };
 }
 
+function unverified(reason: string): KalshiUserRead {
+  return { ...emptyKalshiUserRead(), verificationReason: reason };
+}
+
+function primaryFailureReason(error: unknown): string {
+  if (error instanceof KalshiApiError) {
+    if (error.type === "HTTP_ERROR" && error.status === 401) return "PRIMARY_BALANCE_HTTP_401";
+    if (error.type === "HTTP_ERROR" && error.status === 403) return "PRIMARY_BALANCE_HTTP_403";
+    if (error.type === "INVALID_CREDENTIALS") return "PRIMARY_BALANCE_AUTH_FAILED";
+    return "PRIMARY_BALANCE_INVALID_RESPONSE";
+  }
+  return "PRIMARY_BALANCE_AUTH_FAILED";
+}
+
+function balanceRecord(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const nested = (payload as Record<string, unknown>).balance;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested;
+  return payload;
+}
+
 function parseVaultSecret(secret: unknown): { keyId: string; privateKey: string } | null {
   const raw = typeof secret === "string" ? secret : null;
   if (!raw) return null;
@@ -246,57 +269,80 @@ export function createDatabaseUserScopePort(
       return viewFrom(userId, await ownedAccount(userId));
     },
     async wallet(userId) {
-      const empty = emptyKalshiUserRead();
       let connection: { rows: Array<Record<string, unknown>> };
       try {
         connection = await db.query(CONNECTION_SQL, [userId]);
       } catch {
-        return empty;
+        return unverified("NO_PROVIDER_CONNECTION");
       }
-      if (connection.rows.length !== 1) return empty;
-      const row = connection.rows[0]!;
-      const vaultId = text(row.vault_secret_id);
-      if (!vaultId) return empty;
+      if (connection.rows.length === 0) return unverified("NO_FINANCIAL_ACCOUNT");
+      const linked = connection.rows.filter((row) => text(row.vault_secret_id));
+      if (linked.length !== 1) return unverified("NO_PROVIDER_CONNECTION");
+      const vaultId = text(linked[0]?.vault_secret_id);
+      if (!vaultId) return unverified("NO_PROVIDER_CONNECTION");
       let secretRow: { rows: Array<Record<string, unknown>> };
       try {
         secretRow = await db.query(VAULT_SQL, [vaultId]);
       } catch {
-        return empty;
+        return unverified("VAULT_SECRET_MISSING");
+      }
+      if (secretRow.rows.length !== 1 || secretRow.rows[0]?.decrypted_secret == null) {
+        return unverified("VAULT_SECRET_MISSING");
       }
       const creds = parseVaultSecret(secretRow.rows[0]?.decrypted_secret);
-      if (!creds) return empty;
+      if (!creds) return unverified("VAULT_SECRET_FORMAT_INVALID");
       const read = async (path: string, query = "") => kalshiGet(creds, path, query);
-      try {
-        const botQuery = `?subaccount=${BOT_SUBACCOUNT}&exchange_index=${BOT_EXCHANGE_INDEX}`;
-        const activityQuery = `?limit=200&subaccount=${BOT_SUBACCOUNT}`;
-        const [limits, primary, bot, positions, orders, fills, settlements, transfers] = await Promise.all([
-          read("/trade-api/v2/account/limits"),
-          read("/trade-api/v2/portfolio/balance"),
-          read("/trade-api/v2/portfolio/balance", botQuery).catch(() => null),
-          read("/trade-api/v2/portfolio/positions", activityQuery).catch(() => null),
-          read("/trade-api/v2/portfolio/orders", activityQuery).catch(() => null),
-          read("/trade-api/v2/portfolio/fills", activityQuery).catch(() => null),
-          read("/trade-api/v2/portfolio/settlements", activityQuery).catch(() => null),
-          read("/trade-api/v2/portfolio/subaccounts/transfers", activityQuery).catch(() => null),
-        ]);
-        const assembled = assembleKalshiUserRead({
-          credentialVerified: true,
-          limits,
-          numberedSubaccountAvailable: bot !== null,
-          primary,
-          botSubaccount: bot,
-          activity: {
-            positions: rowsOf(positions, ["market_positions", "positions"]),
-            orders: rowsOf(orders, ["orders"]),
-            fills: rowsOf(fills, ["fills"]),
-            settlements: rowsOf(settlements, ["settlements"]),
-            subaccountTransfers: rowsOf(transfers, ["transfers"]),
-          },
-        });
-        return assembled;
-      } catch {
-        return empty;
+      const settled = async (path: string, query = "") => {
+        try {
+          return await read(path, query);
+        } catch {
+          return null;
+        }
+      };
+      const botQuery = `?subaccount=${BOT_SUBACCOUNT}&exchange_index=${BOT_EXCHANGE_INDEX}`;
+      const activityQuery = `?limit=200&subaccount=${BOT_SUBACCOUNT}`;
+      const primaryOutcome = await read("/trade-api/v2/portfolio/balance").then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      if (!primaryOutcome.ok) return unverified(primaryFailureReason(primaryOutcome.error));
+      const primary = balanceRecord(primaryOutcome.value);
+      const money = normalizeKalshiMoney(primary);
+      if (money.cashCents === null && money.portfolioValueCents === null) {
+        return unverified("PRIMARY_BALANCE_INVALID_RESPONSE");
       }
+      const [limits, bot, positions, orders, fills, settlements, transfers] = await Promise.all([
+        settled("/trade-api/v2/account/limits"),
+        settled("/trade-api/v2/portfolio/balance", botQuery),
+        settled("/trade-api/v2/portfolio/positions", activityQuery),
+        settled("/trade-api/v2/portfolio/orders", activityQuery),
+        settled("/trade-api/v2/portfolio/fills", activityQuery),
+        settled("/trade-api/v2/portfolio/settlements", activityQuery),
+        settled("/trade-api/v2/portfolio/subaccounts/transfers", activityQuery),
+      ]);
+      const assembled = assembleKalshiUserRead({
+        credentialVerified: true,
+        limits: limits ?? {},
+        numberedSubaccountAvailable: bot !== null,
+        primary,
+        botSubaccount: bot,
+        activity: {
+          positions: rowsOf(positions, ["market_positions", "positions"]),
+          orders: rowsOf(orders, ["orders"]),
+          fills: rowsOf(fills, ["fills"]),
+          settlements: rowsOf(settlements, ["settlements"]),
+          subaccountTransfers: rowsOf(transfers, ["transfers"]),
+        },
+      });
+      assembled.primary = money;
+      if (limits === null) {
+        assembled.apiUsageTier = null;
+        assembled.botEligible = false;
+        assembled.botEligibilityReason = "API_TIER_UNAVAILABLE";
+        assembled.verificationReason = "API_TIER_UNAVAILABLE";
+      }
+      if (assembled.apiUsageTier === null) assembled.botEligible = false;
+      return assembled;
     },
     async control(userId, action: ControlAction) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
