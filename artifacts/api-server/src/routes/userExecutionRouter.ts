@@ -4,7 +4,7 @@ import { emptyUserExecutionView, type ControlAction, type UserExecutionView } fr
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
-import { QUALIFICATION_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
+import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 
 export interface UserScopePort {
   migrationReady(): Promise<boolean>;
@@ -143,7 +143,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     const body = qualificationRequest(req.body);
-    if (body.confirm !== QUALIFICATION_CONFIRMATION) {
+    if (body.confirm !== QUALIFICATION_CONFIRMATION && body.confirm !== RESIDUAL_RISK_CONFIRMATION) {
       return void res.status(400).json({ status: "CONFIRMATION_REQUIRED" });
     }
     const result = await port.qualify(userId, body);

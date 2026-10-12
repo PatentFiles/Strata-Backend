@@ -9,6 +9,7 @@ import { predictionsApiTier } from "../kalshiSubaccountInventory";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
 
 export const QUALIFICATION_CONFIRMATION = "QUALIFY_ADVANCED_WITH_ONE_1CENT_API_ORDER";
+export const RESIDUAL_RISK_CONFIRMATION = "PROCEED_WITH_ADVANCED_UPGRADE_DESPITE_UNCERTAIN_1CENT_CANCEL";
 export const QUALIFICATION_ORDER_PATH = "/trade-api/v2/portfolio/events/orders";
 export const QUALIFICATION_UPGRADE_PATH = "/trade-api/v2/account/api_usage_level/upgrade";
 
@@ -31,7 +32,8 @@ export type QualificationGuardState =
   | "cancel_uncertain"
   | "upgrade_uncertain"
   | "upgrade_rejected"
-  | "canceled";
+  | "canceled"
+  | "advanced_verified_with_cancel_uncertain";
 
 export interface QualificationGuardRecord {
   state: QualificationGuardState;
@@ -40,6 +42,8 @@ export interface QualificationGuardRecord {
   ticker?: string | null;
   fillCount?: string | null;
   averageFillPrice?: string | null;
+  residualRiskAcceptedAt?: string | null;
+  advancedVerifiedAt?: string | null;
 }
 
 export interface QualificationGuard {
@@ -73,6 +77,8 @@ export interface QualificationResult {
   usageTier?: string | null;
   qualificationOrderCreated?: boolean;
   qualificationOrderCanceled?: boolean;
+  qualificationOrderCancellationUncertain?: boolean;
+  acceptedResidualOrderRisk?: boolean;
   fillCount?: string;
   orderId?: string;
   ticker?: string;
@@ -296,9 +302,24 @@ function reconcileQualificationOrder(
   return { kind: "unknown" };
 }
 
+function safeTicker(value: string | null | undefined): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : undefined;
+}
+
+function residualEvidence(row: { orderId?: string | null; ticker?: string | null }): Omit<QualificationResult, "status"> {
+  return {
+    qualificationOrderCreated: true,
+    qualificationOrderCancellationUncertain: true,
+    acceptedResidualOrderRisk: true,
+    orderId: safeId(row.orderId) ?? undefined,
+    ticker: safeTicker(row.ticker),
+  };
+}
+
 function storedResult(row: QualificationGuardRecord | null): QualificationResult {
   if (!row || row.state === "inflight") return { status: "QUALIFICATION_ALREADY_IN_PROGRESS" };
   if (row.state === "order_uncertain") return { status: "QUALIFICATION_ORDER_OUTCOME_UNCERTAIN" };
+  if (row.state === "advanced_verified_with_cancel_uncertain") return { status: "ADVANCED_VERIFIED", ...residualEvidence(row) };
   if (row.state === "cancel_uncertain") {
     return { status: "QUALIFICATION_CANCEL_UNCERTAIN", orderId: row.orderId ?? undefined, ticker: row.ticker ?? undefined };
   }
@@ -310,6 +331,12 @@ function storedResult(row: QualificationGuardRecord | null): QualificationResult
       ticker: row.ticker ?? undefined,
       fillCount: row.fillCount ?? undefined,
       averageFillPrice: row.averageFillPrice ?? undefined,
+    };
+  }
+  if (row.residualRiskAcceptedAt) {
+    return {
+      status: row.state === "upgrade_rejected" ? "UPGRADE_REJECTED" : "UPGRADE_OUTCOME_UNCERTAIN",
+      ...residualEvidence(row),
     };
   }
   return { status: "UPGRADE_OUTCOME_UNCERTAIN", qualificationOrderCreated: true, qualificationOrderCanceled: true, fillCount: "0.00" };
@@ -447,6 +474,64 @@ async function recoverCancelUncertain(
   });
 }
 
+async function requestResidualUpgrade(
+  input: {
+    creds: QualificationCreds;
+    connectionId: string;
+    guard: QualificationGuard;
+    transport: QualificationTransport;
+    now?: number;
+  },
+  existing: QualificationGuardRecord,
+): Promise<QualificationResult> {
+  const orderId = safeId(existing.orderId);
+  const ticker = safeTicker(existing.ticker);
+  const openEvidence = {
+    status: "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN",
+    ...residualEvidence({ ...existing, orderId, ticker }),
+  };
+  if (!orderId || !ticker) return openEvidence;
+  const kept = {
+    clientOrderId: existing.clientOrderId ?? null,
+    orderId,
+    ticker,
+    fillCount: "0.00",
+    residualRiskAcceptedAt: existing.residualRiskAcceptedAt ?? new Date(input.now ?? Date.now()).toISOString(),
+  };
+  const visible = residualEvidence(kept);
+  const tier = await readTier(input.transport, input.creds);
+  if (!tier.ok) return { status: tier.status, ...visible };
+  if (!tier.advanced && tier.tier !== "basic") {
+    return { status: "API_TIER_NOT_QUALIFIABLE", usageTier: tier.tier, ...visible };
+  }
+  if (tier.advanced) {
+    await input.guard.transition(input.connectionId, {
+      ...kept,
+      state: "advanced_verified_with_cancel_uncertain",
+      advancedVerifiedAt: new Date(input.now ?? Date.now()).toISOString(),
+    });
+    return { status: "ALREADY_ADVANCED", usageTier: tier.tier, ...visible };
+  }
+  await input.guard.transition(input.connectionId, { ...kept, state: "upgrade_uncertain" });
+  const upgrade = await input.transport.post(input.creds, QUALIFICATION_UPGRADE_PATH);
+  const upgradeClass = httpClass(upgrade);
+  if (upgradeClass === "uncertain") return { status: "UPGRADE_OUTCOME_UNCERTAIN", ...visible };
+  if (upgradeClass === "rejected" || upgrade === "uncertain" || upgrade.status !== 201) {
+    await input.guard.transition(input.connectionId, { ...kept, state: "upgrade_rejected" });
+    return { status: "UPGRADE_REJECTED", ...visible };
+  }
+  const verified = await readTier(input.transport, input.creds);
+  if (!verified.ok || !verified.advanced || !verified.tier) {
+    return { status: "UPGRADE_NOT_VERIFIED", usageTier: verified.ok ? verified.tier : null, ...visible };
+  }
+  await input.guard.transition(input.connectionId, {
+    ...kept,
+    state: "advanced_verified_with_cancel_uncertain",
+    advancedVerifiedAt: new Date(input.now ?? Date.now()).toISOString(),
+  });
+  return { status: "ADVANCED_VERIFIED", usageTier: verified.tier, ...visible };
+}
+
 export async function qualifyAdvancedApi(input: {
   creds: QualificationCreds;
   connectionId: string;
@@ -456,8 +541,24 @@ export async function qualifyAdvancedApi(input: {
   now?: number;
   newClientOrderId?: () => string;
 }): Promise<QualificationResult> {
-  if (input.confirm !== QUALIFICATION_CONFIRMATION) return { status: "CONFIRMATION_REQUIRED" };
+  const normal = input.confirm === QUALIFICATION_CONFIRMATION;
+  const residual = input.confirm === RESIDUAL_RISK_CONFIRMATION;
+  if (!normal && !residual) return { status: "CONFIRMATION_REQUIRED" };
   const existing = await input.guard.read(input.connectionId);
+  if (existing?.state === "advanced_verified_with_cancel_uncertain") {
+    return { status: "ADVANCED_VERIFIED", ...residualEvidence(existing) };
+  }
+  if (existing?.residualRiskAcceptedAt && existing.state === "upgrade_uncertain") {
+    return { status: "UPGRADE_OUTCOME_UNCERTAIN", ...residualEvidence(existing) };
+  }
+  if (existing?.residualRiskAcceptedAt && existing.state === "upgrade_rejected") {
+    if (!residual) return { status: "UPGRADE_REJECTED", ...residualEvidence(existing) };
+    return requestResidualUpgrade(input, existing);
+  }
+  if (residual) {
+    if (existing?.state !== "cancel_uncertain") return { status: "RESIDUAL_RISK_CONFIRMATION_NOT_APPLICABLE" };
+    return requestResidualUpgrade(input, existing);
+  }
   if (existing?.state === "canceled" || existing?.state === "upgrade_rejected") {
     const upgradeClaim = await input.guard.claimUpgrade(input.connectionId);
     if (upgradeClaim !== "claimed") return storedResult(await input.guard.read(input.connectionId));
@@ -627,6 +728,10 @@ export function createLiveQualificationTransport(fetchImpl: typeof fetch = fetch
 export function createSqlQualificationGuard(db: {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
 }): QualificationGuard {
+  const timestamp = (value: unknown): string | null => {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+    return typeof value === "string" && value.length > 0 ? value : null;
+  };
   const readRow = (row: Record<string, unknown> | undefined): QualificationGuardRecord | null => {
     if (!row || typeof row.state !== "string") return null;
     return {
@@ -636,8 +741,22 @@ export function createSqlQualificationGuard(db: {
       ticker: typeof row.ticker === "string" ? row.ticker : null,
       fillCount: typeof row.fill_count === "string" ? row.fill_count : null,
       averageFillPrice: typeof row.average_fill_price === "string" ? row.average_fill_price : null,
+      residualRiskAcceptedAt: timestamp(row.residual_risk_accepted_at),
+      advancedVerifiedAt: timestamp(row.advanced_verified_at),
     };
   };
+  const undefinedAuditColumn = (error: unknown): boolean => {
+    if (!error || typeof error !== "object") return false;
+    if ("code" in error && (error as { code?: unknown }).code === "42703") return true;
+    return error instanceof Error && /residual_risk_accepted_at|advanced_verified_at/.test(error.message);
+  };
+  const BASE_READ = `SELECT state, client_order_id, order_id, ticker, fill_count, average_fill_price
+         FROM private.kalshi_api_qualification_guard
+         WHERE provider_connection_id = $1::uuid`;
+  const AUDIT_READ = `SELECT state, client_order_id, order_id, ticker, fill_count, average_fill_price,
+            residual_risk_accepted_at, advanced_verified_at
+         FROM private.kalshi_api_qualification_guard
+         WHERE provider_connection_id = $1::uuid`;
   return {
     async claim(connectionId) {
       const inserted = await db.query(
@@ -660,15 +779,26 @@ export function createSqlQualificationGuard(db: {
       return updated.rows.length === 1 ? "claimed" : "blocked";
     },
     async read(connectionId) {
-      const result = await db.query(
-        `SELECT state, client_order_id, order_id, ticker, fill_count, average_fill_price
-         FROM private.kalshi_api_qualification_guard
-         WHERE provider_connection_id = $1::uuid`,
-        [connectionId],
-      );
-      return readRow(result.rows[0]);
+      try {
+        const result = await db.query(AUDIT_READ, [connectionId]);
+        return readRow(result.rows[0]);
+      } catch (error) {
+        if (!undefinedAuditColumn(error)) throw error;
+        const result = await db.query(BASE_READ, [connectionId]);
+        return readRow(result.rows[0]);
+      }
     },
     async transition(connectionId, record) {
+      if (record.residualRiskAcceptedAt || record.advancedVerifiedAt || record.state === "advanced_verified_with_cancel_uncertain") {
+        await db.query(
+          `UPDATE private.kalshi_api_qualification_guard
+           SET residual_risk_accepted_at = COALESCE($2::timestamptz, residual_risk_accepted_at),
+               advanced_verified_at = COALESCE($3::timestamptz, advanced_verified_at),
+               updated_at = now()
+           WHERE provider_connection_id = $1::uuid`,
+          [connectionId, record.residualRiskAcceptedAt ?? null, record.advancedVerifiedAt ?? null],
+        );
+      }
       await db.query(
         `UPDATE private.kalshi_api_qualification_guard
          SET state = $2, client_order_id = $3, order_id = $4, ticker = $5,

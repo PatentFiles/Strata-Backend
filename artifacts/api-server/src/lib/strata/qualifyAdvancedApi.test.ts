@@ -6,15 +6,18 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 import { getScopedKalshiJson, listOpenKalshiMarkets, mutateScopedKalshi, OPEN_MARKET_MAX_PAGES, OPEN_MARKET_PAGE_LIMIT } from "../kalshiAccountClient";
-import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
+import { sanitizePublic } from "../v13-production/sanitize";
+import { closedUserScopePort, createUserExecutionRouter } from "../../routes/userExecutionRouter";
 import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
 import {
   createMemoryQualificationGuard,
+  createSqlQualificationGuard,
   dollarTenThousandths,
   qualificationOrderBody,
   QUALIFICATION_CONFIRMATION,
   QUALIFICATION_ORDER_PATH,
   QUALIFICATION_UPGRADE_PATH,
+  RESIDUAL_RISK_CONFIRMATION,
   qualifyAdvancedApi,
   selectQualificationMarket,
   type QualificationExchangeResult,
@@ -274,6 +277,9 @@ test("qualification does not call strategy code or the legacy signer", () => {
   assert.equal(source.includes("v13StrategyResearch"), false);
   assert.equal(source.includes("bot_eligible = true"), false);
   assert.equal(source.includes("bot_eligible=true"), false);
+  assert.equal(source.includes("/trade-api/v2/portfolio/orders"), true);
+  assert.equal(source.includes("/trade-api/v2/portfolio/fills"), true);
+  assert.equal(source.includes("/trade-api/v2/portfolio/positions"), true);
 });
 
 test("a confirmed create cancels once and an uncertain create is not retried", async () => {
@@ -620,6 +626,257 @@ test("an unreadable qualification order stays cancel-uncertain without another o
   assert.equal(wrongOrder.orders().length, 0);
   assert.equal(wrongOrder.cancels().length, 0);
   assert.equal(wrongOrder.upgrades().length, 0);
+});
+
+async function seededAttempt(confirm: unknown, options: {
+  tiers?: string[];
+  upgrade?: QualificationExchangeResult | "uncertain";
+} = {}) {
+  const calls: Array<{ method: string; path: string; body?: unknown; keyId: string }> = [];
+  let limitReads = 0;
+  const tiers = options.tiers ?? ["basic", "advanced"];
+  const guard = createMemoryQualificationGuard();
+  await guard.claim("conn-1");
+  await guard.transition("conn-1", {
+    state: "cancel_uncertain",
+    clientOrderId: "client-1",
+    orderId: "ord-1",
+    ticker: "SAFE-MKT",
+    fillCount: "0.00",
+  });
+  const transport: QualificationTransport = {
+    async get(creds, path) {
+      calls.push({ method: "GET", path, keyId: creds.keyId });
+      if (path.endsWith("/account/limits")) return ok({ usage_tier: tiers[Math.min(limitReads++, tiers.length - 1)] });
+      return ok(null, 404);
+    },
+    async post(creds, path, body) {
+      calls.push({ method: "POST", path, body, keyId: creds.keyId });
+      if (path === QUALIFICATION_ORDER_PATH) return ok({ order_id: "ord-new" }, 201);
+      return options.upgrade ?? ok({}, 201);
+    },
+    async delete(creds, path, query) {
+      calls.push({ method: "DELETE", path, body: query, keyId: creds.keyId });
+      return v2Cancel();
+    },
+    async listOpenMarkets() {
+      calls.push({ method: "GET", path: "/markets", keyId: "" });
+      return [market("OTHER-MKT", "0.9900")];
+    },
+  };
+  const run = () => qualifyAdvancedApi({
+    creds: { keyId: "key-user", privateKey: "stored-private-key" },
+    connectionId: "conn-1",
+    confirm,
+    guard,
+    transport,
+    now: NOW,
+    newClientOrderId: () => "client-new",
+  });
+  const orders = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_ORDER_PATH);
+  const cancels = () => calls.filter((call) => call.method === "DELETE");
+  const upgrades = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_UPGRADE_PATH);
+  return { calls, run, guard, orders, cancels, upgrades };
+}
+
+test("the normal confirmation still fail-closes an uncertain cancel", async () => {
+  const flow = await seededAttempt(QUALIFICATION_CONFIRMATION);
+  const result = await flow.run();
+  assert.equal(result.status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
+  assert.equal(result.acceptedResidualOrderRisk, undefined);
+  assert.equal(result.qualificationOrderCanceled, undefined);
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 0);
+  assert.equal((await flow.guard.read("conn-1"))?.state, "cancel_uncertain");
+});
+
+test("explicit residual-risk acceptance upgrades the existing order once", async () => {
+  const flow = await seededAttempt(RESIDUAL_RISK_CONFIRMATION);
+  const result = sanitizePublic(await flow.run());
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(result.usageTier, "advanced");
+  assert.equal(result.qualificationOrderCreated, true);
+  assert.equal(result.qualificationOrderCancellationUncertain, true);
+  assert.equal(result.acceptedResidualOrderRisk, true);
+  assert.equal(result.qualificationOrderCanceled, undefined);
+  assert.equal(result.orderId, "ord-1");
+  assert.equal(result.ticker, "SAFE-MKT");
+  assert.equal(JSON.stringify(result).includes("qualificationOrderCanceled"), false);
+  assert.equal(JSON.stringify(result).includes("stored-private-key"), false);
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.calls.filter((call) => call.path.endsWith("/account/limits")).length, 2);
+  assert.equal(flow.calls.some((call) => call.path === "/markets"), false);
+  const row = await flow.guard.read("conn-1");
+  assert.equal(row?.state, "advanced_verified_with_cancel_uncertain");
+  assert.equal(row?.orderId, "ord-1");
+  assert.equal(row?.clientOrderId, "client-1");
+  assert.equal(row?.ticker, "SAFE-MKT");
+  assert.equal(row?.residualRiskAcceptedAt, new Date(NOW).toISOString());
+  assert.equal(row?.advancedVerifiedAt, new Date(NOW).toISOString());
+  assert.notEqual(row?.state, "canceled");
+  assert.equal((await flow.run()).status, "ADVANCED_VERIFIED");
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.upgrades().length, 1);
+});
+
+test("an uncertain residual upgrade is not retried", async () => {
+  const flow = await seededAttempt(RESIDUAL_RISK_CONFIRMATION, { upgrade: "uncertain" });
+  const first = await flow.run();
+  assert.equal(first.status, "UPGRADE_OUTCOME_UNCERTAIN");
+  assert.equal(first.qualificationOrderCanceled, undefined);
+  assert.equal(first.qualificationOrderCancellationUncertain, true);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.orders().length, 0);
+  const second = await flow.run();
+  assert.equal(second.status, "UPGRADE_OUTCOME_UNCERTAIN");
+  assert.equal(second.qualificationOrderCanceled, undefined);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+});
+
+test("an already advanced account does not order, cancel, or upgrade again", async () => {
+  const flow = await seededAttempt(RESIDUAL_RISK_CONFIRMATION, { tiers: ["advanced"] });
+  const result = await flow.run();
+  assert.equal(result.status, "ALREADY_ADVANCED");
+  assert.equal(result.usageTier, "advanced");
+  assert.equal(result.qualificationOrderCanceled, undefined);
+  assert.equal(result.orderId, "ord-1");
+  assert.equal(result.ticker, "SAFE-MKT");
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 0);
+  assert.equal((await flow.guard.read("conn-1"))?.state, "advanced_verified_with_cancel_uncertain");
+});
+
+test("a new qualification attempt still cancels before requesting the upgrade", async () => {
+  const flow = harness();
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(result.qualificationOrderCanceled, true);
+  const cancelAt = flow.calls.findIndex((call) => call.method === "DELETE");
+  const upgradeAt = flow.calls.findIndex((call) => call.path === QUALIFICATION_UPGRADE_PATH);
+  assert.equal(cancelAt >= 0 && cancelAt < upgradeAt, true);
+  assert.equal(flow.orders().length, 1);
+  assert.equal(flow.cancels().length, 1);
+  assert.equal(flow.upgrades().length, 1);
+});
+
+test("user A cannot accept residual risk on user B's qualification guard", async () => {
+  const queries: Array<{ text: string; params: unknown[] }> = [];
+  const guard = createMemoryQualificationGuard();
+  const userBConnection = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await guard.claim(userBConnection);
+  await guard.transition(userBConnection, {
+    state: "cancel_uncertain",
+    clientOrderId: "client-b",
+    orderId: "ord-b",
+    ticker: "SAFE-MKT",
+    fillCount: "0.00",
+  });
+  const db: UserScopeQuery = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes("fa.user_id")) {
+        if (params[0] === USER_A) return { rows: [{ provider_connection_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", vault_secret_id: "vault-a" }] };
+        if (params[0] === USER_B) return { rows: [{ provider_connection_id: userBConnection, vault_secret_id: "vault-b" }] };
+        return { rows: [] };
+      }
+      if (text.includes("decrypted_secrets") && params[0] === "vault-a") {
+        return { rows: [{ decrypted_secret: JSON.stringify({ api_key_id: "key-a", private_key: "pem-a" }) }] };
+      }
+      return { rows: [] };
+    },
+  };
+  let kalshiCalls = 0;
+  const port = createDatabaseUserScopePort(db, {
+    qualificationGuard: guard,
+    qualifyTransport: {
+      async get() { kalshiCalls += 1; return ok({ usage_tier: "advanced" }); },
+      async post() { kalshiCalls += 1; return ok({ order_id: "ord-new" }, 201); },
+      async delete() { kalshiCalls += 1; return v2Cancel(); },
+      async listOpenMarkets() { kalshiCalls += 1; return [market("SAFE-MKT", "0.4500")]; },
+    },
+  });
+  const result = await port.qualify(USER_A, {
+    confirm: RESIDUAL_RISK_CONFIRMATION,
+    owner_user_id: USER_B,
+    target_user_id: USER_B,
+    private_key: "injected-secret",
+  });
+  assert.equal(result.status, "RESIDUAL_RISK_CONFIRMATION_NOT_APPLICABLE");
+  assert.equal(kalshiCalls, 0);
+  assert.equal(queries.some((query) => query.params.includes(USER_B)), false);
+  assert.equal(queries.some((query) => query.params.includes("vault-b")), false);
+  assert.equal(JSON.stringify(result).includes("injected-secret"), false);
+  assert.equal((await guard.read(userBConnection))?.state, "cancel_uncertain");
+  assert.equal((await guard.read(userBConnection))?.orderId, "ord-b");
+});
+
+test("the guard read still works before the residual-risk migration is applied", async () => {
+  const texts: string[] = [];
+  const missing = Object.assign(new Error("column residual_risk_accepted_at does not exist"), { code: "42703" });
+  const guard = createSqlQualificationGuard({
+    async query(text) {
+      texts.push(text);
+      if (text.includes("residual_risk_accepted_at")) throw missing;
+      return { rows: [{ state: "cancel_uncertain", client_order_id: "client-1", order_id: "ord-1", ticker: "SAFE-MKT", fill_count: "0.00" }] };
+    },
+  });
+  const row = await guard.read("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  assert.equal(row?.orderId, "ord-1");
+  assert.equal(row?.state, "cancel_uncertain");
+  texts.length = 0;
+  await guard.transition("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+    state: "order_uncertain",
+    clientOrderId: "client-1",
+    orderId: "ord-1",
+    ticker: "SAFE-MKT",
+  });
+  assert.equal(texts.some((text) => text.includes("residual_risk_accepted_at")), false);
+  texts.length = 0;
+  await assert.rejects(guard.transition("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+    state: "upgrade_uncertain",
+    orderId: "ord-1",
+    ticker: "SAFE-MKT",
+    residualRiskAcceptedAt: new Date(NOW).toISOString(),
+  }));
+  assert.equal(texts.some((text) => text.includes("SET state = $2")), false);
+  assert.equal(texts.some((text) => text.includes("residual_risk_accepted_at")), true);
+});
+
+test("the route accepts only the two exact qualification confirmations", async () => {
+  const seen: unknown[] = [];
+  const port = closedUserScopePort();
+  port.qualify = async (_userId, body) => {
+    seen.push(body && typeof body === "object" ? (body as { confirm?: unknown }).confirm : undefined);
+    return { status: "ADVANCED_VERIFIED", orderId: "ord-1", ticker: "SAFE-MKT" };
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/me", createUserExecutionRouter((_req, res, next) => {
+    res.locals.strata = { subject: USER_A };
+    next();
+  }, port));
+  const server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/me/qualify-advanced-api`;
+    const rejected = await fetch(base, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: "no" }) });
+    assert.equal(rejected.status, 400);
+    const accepted = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: RESIDUAL_RISK_CONFIRMATION, private_key: "secret" }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(seen, [RESIDUAL_RISK_CONFIRMATION]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("scoped mutations refuse every path except the qualification order, cancel, and upgrade", async () => {
