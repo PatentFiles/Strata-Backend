@@ -12,6 +12,19 @@ export interface UserScopePort {
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
   control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
+  safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL"): Promise<{
+    ok: boolean;
+    reason?: string;
+    executable: false;
+    workerStarted: false;
+    executionActive: false;
+    view: UserExecutionView;
+  }>;
+  credentialStatus(userId: string): Promise<{ ok: boolean; reason: string; executable: false; roles: unknown[] }>;
+  registerCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
+  revokeCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
+  verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
+  commissioningStatus(userId: string): Promise<{ ready: false; executable: false; blockers: string[] }>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
   savePreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
@@ -30,6 +43,12 @@ export function closedUserScopePort(): UserScopePort {
     settings: async (userId) => emptyUserExecutionView(userId),
     wallet: async () => emptyKalshiUserRead(),
     control: async (userId) => refused(userId),
+    safetyControl: async (userId) => ({ ...await refused(userId), executable: false, workerStarted: false, executionActive: false }),
+    credentialStatus: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, roles: [] }),
+    registerCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    revokeCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    commissioningStatus: async () => ({ ready: false, executable: false, blockers: ["user_scope_not_migrated"] }),
     stake: async (userId) => refused(userId),
     presets: async () => [],
     savePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
@@ -86,12 +105,47 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
-    if (!await migrated(res)) return;
     const action = req.body?.action;
     if (action !== "ARM" && action !== "DISARM" && action !== "START" && action !== "STOP" && action !== "KILL") {
       return void res.status(400).json({ error: "control_action_invalid" });
     }
+    if (action === "STOP" || action === "DISARM" || action === "KILL") {
+      const result = await port.safetyControl(userId, action);
+      return void res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+    }
+    if (!await migrated(res)) return;
     const result = await port.control(userId, action);
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.get("/commissioning", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.json(sanitizePublic(await port.commissioningStatus(userId)));
+  });
+  router.get("/credentials", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.json(sanitizePublic(await port.credentialStatus(userId)));
+  });
+  router.post("/credentials", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.registerCredential(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/credentials/revoke", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.revokeCredential(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/credentials/verify", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.verifyCredential(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/stake", async (req, res) => {

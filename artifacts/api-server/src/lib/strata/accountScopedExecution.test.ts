@@ -12,6 +12,7 @@ import type { CredentialClient, CredentialDatabase } from "./accountCredentialSt
 import {
   accountRiskAllowsEntry,
   duplicateClientOrder,
+  executionBoundaryAllowsDispatch,
   operateAccountWorker,
   renewAccountWorkerLease,
   scopedObservationMatches,
@@ -118,7 +119,7 @@ function accountFor(userId: string): OwnedExecutionAccount {
   };
 }
 
-function ports(opened: { count: number }, fingerprint = FINGERPRINT_A): AccountCommissioningPorts {
+function ports(opened: { count: number }, fingerprint = FINGERPRINT_A, missingCredential = false): AccountCommissioningPorts {
   const ref = (userId: string): StoredCredentialRef => ({
     role: "restricted_execution",
     providerConnectionId: userId === USER_A ? CONNECTION_A : CONNECTION_B,
@@ -136,6 +137,7 @@ function ports(opened: { count: number }, fingerprint = FINGERPRINT_A): AccountC
       }];
     },
     async listCredentialRefs(userId, providerConnectionId) {
+      if (missingCredential) return [];
       const credential = ref(userId);
       return credential.providerConnectionId === providerConnectionId ? [credential] : [];
     },
@@ -165,7 +167,10 @@ function memoryLeases(failAcquire = false): CredentialDatabase & { rows: LeaseRo
   let turn = Promise.resolve();
   let fail = failAcquire;
   const query: CredentialClient["query"] = async (text, params = []) => {
-    const tag = text.match(/account-worker:([a-z]+)/)?.[1] ?? "";
+    const tag = text.match(/account-worker:([a-z-]+)/)?.[1] ?? "";
+    if (tag === "lock-owner") {
+      return { rows: rows.filter((item) => item.ownerUserId === params[0]).map(view) };
+    }
     if (tag === "lock") {
       const row = rows.find((item) => item.executionAccountId === params[0]);
       return { rows: row ? [view(row)] : [] };
@@ -228,6 +233,7 @@ function memoryLeases(failAcquire = false): CredentialDatabase & { rows: LeaseRo
       row.state = "released";
       row.releasedAt = String(params[2]);
       row.heartbeatAt = String(params[2]);
+      row.armRequested = false;
       row.fencingToken += 1;
       return { rows: [{ fencing_token: String(row.fencingToken) }] };
     }
@@ -241,8 +247,13 @@ function memoryLeases(failAcquire = false): CredentialDatabase & { rows: LeaseRo
       row.fencingToken += 1;
       return { rows: [{ fencing_token: String(row.fencingToken) }] };
     }
+    if (tag === "hold") {
+      if (row.ownerUserId !== params[1] || row.state !== "owned" || row.accountKill) return { rows: [] };
+      row.armRequested = false;
+      return { rows: [{ fencing_token: String(row.fencingToken) }] };
+    }
     if (tag === "disarm") {
-      if (row.ownerUserId !== params[1] || row.state === "owned" || row.accountKill) return { rows: [] };
+      if (row.ownerUserId !== params[1] || row.accountKill) return { rows: [] };
       row.armRequested = false;
       return { rows: [{ fencing_token: String(row.fencingToken) }] };
     }
@@ -299,6 +310,20 @@ function deps(options?: {
   killSwitch?: boolean;
   failAcquire?: boolean;
   accounts?: Map<string, OwnedExecutionAccount>;
+  missingCredential?: boolean;
+  safety?: {
+    listAccounts(userId: string): Promise<Array<{
+      executionAccountId: string;
+      ownerUserId: string;
+      financialAccountId: string;
+      providerConnectionId: string;
+      keyFingerprint: string | null;
+      vaultSecretId: string | null;
+      openPositionCount: number;
+      unresolvedIntentCount: number;
+    }>>;
+    markKilled(userId: string, executionAccountId: string): Promise<void>;
+  };
 }) {
   const opened = { count: 0 };
   const accounts = options?.accounts ?? new Map<string, OwnedExecutionAccount>([
@@ -311,7 +336,8 @@ function deps(options?: {
     opened,
     leases,
     deps: {
-      commissioning: ports(opened, options?.fingerprint),
+      commissioning: ports(opened, options?.fingerprint, options?.missingCredential),
+      safety: options?.safety,
       activity: {
         async readOwnedAccount(userId: string, executionAccountId: string) {
           const account = accounts.get(executionAccountId);
@@ -435,7 +461,10 @@ test("wrong user, credential mismatch, exposure, and kill switches stay isolated
   assert.equal(other.executable, false);
   assert.equal(harness.leases.rows.filter((row) => row.state === "owned").length, 2);
   const exposed = await operateAccountWorker(harness.deps, { authenticatedUserId: USER_B, holderId: "process-b", action: "STOP" });
-  assert.equal(exposed.reason, "open_position");
+  assert.equal(exposed.ok, true);
+  assert.equal(exposed.reason, "entries_stopped");
+  assert.equal(exposed.executionActive, false);
+  assert.equal(exposed.armRequested, false);
   assert.equal(harness.leases.rows.find((row) => row.executionAccountId === ACCOUNT_B)?.state, "owned");
   const stranger = await operateAccountWorker(harness.deps, {
     authenticatedUserId: "33333333-3333-4333-8333-333333333333",
@@ -455,7 +484,74 @@ test("wrong user, credential mismatch, exposure, and kill switches stay isolated
   const globalRefusal = await operateAccountWorker(global.deps, { authenticatedUserId: USER_B, holderId: "process-b", action: "START" });
   assert.equal(globalRefusal.reason, "global_kill_switch");
   const released = await operateAccountWorker(harness.deps, { authenticatedUserId: USER_A, holderId: "process-a", action: "STOP" });
-  assert.equal(released.reason, "account_kill_switch");
+  assert.equal(released.ok, true);
+  assert.equal(released.reason, "account_killed");
+  assert.equal(released.executionActive, false);
+});
+
+test("stop and kill do not require a working signer", async () => {
+  const harness = deps();
+  await operateAccountWorker(harness.deps, { authenticatedUserId: USER_A, holderId: "process-a", action: "ARM" });
+  await operateAccountWorker(harness.deps, { authenticatedUserId: USER_A, holderId: "process-a", action: "START" });
+  let killedAccount = false;
+  const blinded = deps({
+    missingCredential: true,
+    safety: {
+      async listAccounts(userId) {
+        if (userId !== USER_A) return [];
+        return [{
+          executionAccountId: ACCOUNT_A,
+          ownerUserId: USER_A,
+          financialAccountId: FINANCIAL_A,
+          providerConnectionId: CONNECTION_A,
+          keyFingerprint: null,
+          vaultSecretId: null,
+          openPositionCount: 1,
+          unresolvedIntentCount: 1,
+        }];
+      },
+      async markKilled() { killedAccount = true; },
+    },
+  });
+  blinded.deps.leases = harness.leases;
+  const stopped = await operateAccountWorker(blinded.deps, {
+    authenticatedUserId: USER_A,
+    holderId: "process-a",
+    action: "STOP",
+  });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.reason, "entries_stopped");
+  assert.equal(stopped.executionActive, false);
+  assert.equal(stopped.workerStarted, false);
+  assert.equal(harness.leases.rows[0]?.state, "owned");
+  assert.equal(harness.leases.rows[0]?.armRequested, false);
+  const killed = await operateAccountWorker(blinded.deps, {
+    authenticatedUserId: USER_A,
+    holderId: "safety",
+    action: "KILL",
+  });
+  assert.equal(killed.ok, true);
+  assert.equal(killed.accountKill, true);
+  assert.equal(killed.executionActive, false);
+  assert.equal(killedAccount, true);
+  assert.equal(executionBoundaryAllowsDispatch({
+    leaseState: "owned",
+    armRequested: true,
+    accountKill: false,
+    globalKill: false,
+    fencingToken: 2,
+    presentedToken: 2,
+    workerActuallyScheduled: true,
+  }).reason, "operation_not_enabled");
+  assert.equal(executionBoundaryAllowsDispatch({
+    leaseState: "owned",
+    armRequested: true,
+    accountKill: true,
+    globalKill: false,
+    fencingToken: 2,
+    presentedToken: 2,
+    workerActuallyScheduled: true,
+  }).reason, "account_kill_switch");
 });
 
 test("the user execution route and legacy stake path stay unchanged", () => {

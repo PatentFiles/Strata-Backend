@@ -288,7 +288,7 @@ export async function replaceOwnedCredentialBinding(
     return { ok: false, reason: "credential_fingerprint_invalid" };
   }
   try {
-    return await db.transaction((client) => replaceCredentialInTransaction(client, input));
+    return await db.transaction((client) => replaceOwnedCredentialInTransaction(client, input));
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
     if (code === "23505") return { ok: false, reason: "ambiguous_credential_role" };
@@ -296,6 +296,26 @@ export async function replaceOwnedCredentialBinding(
     if (code === "23503") return { ok: false, reason: "credential_binding_rejected" };
     throw error;
   }
+}
+
+export async function replaceOwnedCredentialInTransaction(
+  client: CredentialClient,
+  input: {
+    authenticatedUserId: string;
+    providerConnectionId: string;
+    role: string;
+    vaultSecretId: string;
+    keyFingerprint: string | null;
+  },
+): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
+  if (!(KNOWN_CREDENTIAL_ROLES as readonly string[]).includes(input.role)) {
+    return { ok: false, reason: "credential_role_rejected" };
+  }
+  if (!UUID.test(input.vaultSecretId)) return { ok: false, reason: "vault_secret_invalid" };
+  if (input.keyFingerprint !== null && !FINGERPRINT.test(input.keyFingerprint)) {
+    return { ok: false, reason: "credential_fingerprint_invalid" };
+  }
+  return replaceCredentialInTransaction(client, input);
 }
 
 async function replaceCredentialInTransaction(

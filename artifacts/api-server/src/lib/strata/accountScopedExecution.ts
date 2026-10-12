@@ -65,9 +65,26 @@ export interface AccountExecutionDeps {
   commissioning: AccountCommissioningPorts;
   activity: AccountActivityPort;
   leases: ExecutionDatabase;
+  safety?: AccountSafetyPort;
   globalKill(): Promise<boolean>;
   now(): number;
   leaseTtlMs?: number;
+}
+
+export interface SafetyAccountRef {
+  executionAccountId: string;
+  ownerUserId: string;
+  financialAccountId: string;
+  providerConnectionId: string;
+  keyFingerprint: string | null;
+  vaultSecretId: string | null;
+  openPositionCount: number;
+  unresolvedIntentCount: number;
+}
+
+export interface AccountSafetyPort {
+  listAccounts(authenticatedUserId: string): Promise<SafetyAccountRef[]>;
+  markKilled(authenticatedUserId: string, executionAccountId: string): Promise<void>;
 }
 
 export interface AccountExecutionResult {
@@ -75,6 +92,8 @@ export interface AccountExecutionResult {
   reason: string;
   executable: false;
   workerStarted: false;
+  /** True only when a real trading worker is scheduled. A lease is not enough. */
+  executionActive: false;
   fencingToken: number | null;
   state: AccountWorkerState;
   armRequested: boolean;
@@ -144,6 +163,7 @@ const RELEASE_LEASE_SQL = `
   SET state = 'released',
       released_at = $3::timestamptz,
       heartbeat_at = $3::timestamptz,
+      arm_requested = false,
       fencing_token = fencing_token + 1
   WHERE execution_account_id = $1
     AND owner_user_id = $2::uuid
@@ -182,15 +202,39 @@ const ARM_LEASE_SQL = `
   RETURNING fencing_token::text AS fencing_token
 `;
 
+const HOLD_LEASE_SQL = `
+  -- account-worker:hold
+  UPDATE private.kalshi_account_worker_lease
+  SET arm_requested = false
+  WHERE execution_account_id = $1
+    AND owner_user_id = $2::uuid
+    AND state = 'owned'
+    AND account_kill = false
+  RETURNING fencing_token::text AS fencing_token
+`;
+
 const DISARM_LEASE_SQL = `
   -- account-worker:disarm
   UPDATE private.kalshi_account_worker_lease
   SET arm_requested = false
   WHERE execution_account_id = $1
     AND owner_user_id = $2::uuid
-    AND state <> 'owned'
     AND account_kill = false
   RETURNING fencing_token::text AS fencing_token
+`;
+
+const LOCK_OWNER_LEASES_SQL = `
+  -- account-worker:lock-owner
+  SELECT execution_account_id,
+         owner_user_id::text AS owner_user_id,
+         holder_id,
+         fencing_token::text AS fencing_token,
+         state,
+         account_kill,
+         arm_requested
+  FROM private.kalshi_account_worker_lease
+  WHERE owner_user_id = $1::uuid
+  FOR UPDATE
 `;
 
 const HEARTBEAT_LEASE_SQL = `
@@ -244,6 +288,17 @@ export const SCOPED_STAKE_SQL = `
   JOIN v13_production_account a ON a.id = s.execution_account_id
   WHERE s.execution_account_id = $1
     AND a.owner_user_id = $2::uuid
+`;
+
+export const SAFETY_EXPOSURE_SQL = `
+  SELECT a.id::text AS execution_account_id,
+         a.kalshi_connection_id::text AS financial_account_id,
+         (SELECT count(*)::int FROM v13_production_position p
+           WHERE p.account_id = a.id AND p.quantity_hundredths > 0) AS open_positions,
+         (SELECT count(*)::int FROM v13_production_intent i
+           WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL', 'BLOCKED')) AS unresolved_intents
+  FROM v13_production_account a
+  WHERE a.owner_user_id = $1::uuid
 `;
 
 export const SCOPED_POSITIONS_SQL = `
@@ -389,8 +444,12 @@ export async function operateAccountWorker(
   if (!input.holderId.trim() || input.holderId.length > 200) {
     return refused("holder_invalid");
   }
+  const safetyAction = input.action === "STOP" || input.action === "DISARM" || input.action === "KILL";
   const bound = await resolveBoundAccount(deps, input.authenticatedUserId, input.clientRequest);
-  if (!bound.ok) return refused(bound.reason);
+  if (!bound.ok) {
+    if (!safetyAction) return refused(bound.reason);
+    return unboundSafety(deps, input);
+  }
   const globalKill = await deps.globalKill();
   if (globalKill && (input.action === "ARM" || input.action === "START")) {
     return refused("global_kill_switch");
@@ -431,6 +490,87 @@ export async function renewAccountWorkerLease(
     if (renewed.rows.length !== 1) return refused("stale_worker_fence");
     return ownedResult("operation_not_enabled", Number(renewed.rows[0]?.fencing_token), true, false);
   });
+}
+
+async function unboundSafety(
+  deps: AccountExecutionDeps,
+  input: {
+    authenticatedUserId: string;
+    holderId: string;
+    action: AccountWorkerAction;
+  },
+): Promise<AccountExecutionResult> {
+  const accounts = deps.safety ? await deps.safety.listAccounts(input.authenticatedUserId) : [];
+  if (!deps.safety) return refused("credential_unavailable");
+  const now = new Date(deps.now()).toISOString();
+  return deps.leases.transaction(async (client) => {
+    const locked = await client.query(LOCK_OWNER_LEASES_SQL, [input.authenticatedUserId]);
+    if (input.action === "KILL") {
+      for (const row of locked.rows) {
+        await client.query(KILL_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId, now]);
+      }
+      for (const account of accounts) {
+        if (!locked.rows.some((row) => row.execution_account_id === account.executionAccountId) &&
+            account.keyFingerprint && account.vaultSecretId) {
+          await client.query(INSERT_LEASE_SQL, [
+            account.executionAccountId,
+            account.ownerUserId,
+            account.financialAccountId,
+            account.providerConnectionId,
+            input.holderId,
+            1,
+            "killed",
+            now,
+            now,
+            true,
+            false,
+            account.keyFingerprint,
+            account.vaultSecretId,
+          ]);
+        }
+        await deps.safety?.markKilled(input.authenticatedUserId, account.executionAccountId);
+      }
+      return held("account_killed", null, "killed", false, true);
+    }
+    let stillOwned = false;
+    for (const row of locked.rows) {
+      const account = accounts.find((item) => item.executionAccountId === row.execution_account_id);
+      const exposure = !account || account.openPositionCount > 0 || account.unresolvedIntentCount > 0;
+      if (input.action === "STOP" && row.state === "owned" && exposure) {
+        await client.query(HOLD_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId]);
+        stillOwned = true;
+      } else if (input.action === "STOP" && row.state === "owned") {
+        await client.query(RELEASE_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId, now]);
+      } else if (!flag(row.account_kill)) {
+        await client.query(DISARM_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId]);
+        if (row.state === "owned") stillOwned = true;
+      }
+    }
+    return held(
+      input.action === "STOP" ? "entries_stopped" : "disarmed",
+      null,
+      stillOwned ? "owned" : "released",
+      false,
+      false,
+    );
+  });
+}
+
+export function executionBoundaryAllowsDispatch(input: {
+  leaseState: string;
+  armRequested: boolean;
+  accountKill: boolean;
+  globalKill: boolean;
+  fencingToken: number;
+  presentedToken: number;
+  workerActuallyScheduled: boolean;
+}): { allowed: false; reason: string } {
+  if (input.presentedToken !== input.fencingToken) return { allowed: false, reason: "stale_worker_fence" };
+  if (input.accountKill) return { allowed: false, reason: "account_kill_switch" };
+  if (input.globalKill) return { allowed: false, reason: "global_kill_switch" };
+  if (!input.armRequested || input.leaseState !== "owned") return { allowed: false, reason: "entries_stopped" };
+  if (!input.workerActuallyScheduled) return { allowed: false, reason: "worker_not_started" };
+  return { allowed: false, reason: "operation_not_enabled" };
 }
 
 async function resolveBoundAccount(
@@ -494,7 +634,12 @@ async function applyLeaseAction(
     return refused("foreign_execution_account");
   }
   if (input.action === "KILL") return killLease(client, input, current);
-  if (flag(current?.account_kill) || current?.state === "killed") return refused("account_kill_switch");
+  if (flag(current?.account_kill) || current?.state === "killed") {
+    if (input.action === "STOP" || input.action === "DISARM") {
+      return held("account_killed", tokenOf(current), "killed", false, true);
+    }
+    return refused("account_kill_switch");
+  }
   if (input.action === "ARM") return armLease(client, input, current);
   if (input.action === "DISARM") return disarmLease(client, input, current);
   if (input.action === "STOP") return releaseLease(client, input, current);
@@ -536,7 +681,8 @@ async function disarmLease(
     input.account.ownerUserId,
   ]);
   if (disarmed.rows.length !== 1) return refused("arm_not_recorded");
-  return held("operation_not_enabled", Number(disarmed.rows[0]?.fencing_token), "released", false, false);
+  const state = current.state === "owned" ? "owned" : "released";
+  return held("disarmed", Number(disarmed.rows[0]?.fencing_token), state, false, false);
 }
 
 async function acquireLease(
@@ -567,16 +713,23 @@ async function releaseLease(
   input: ActionInput,
   current: Record<string, unknown> | undefined,
 ): Promise<AccountExecutionResult> {
-  if (!current || current.state !== "owned") return held("operation_not_enabled", tokenOf(current), "released", flag(current?.arm_requested), false);
+  if (!current || current.state !== "owned") return held("entries_stopped", tokenOf(current), "released", false, false);
   const exposure = exposureBlocksStop(input.account);
-  if (exposure) return held(exposure, tokenOf(current), "owned", true, false);
+  if (exposure) {
+    const heldLease = await client.query(HOLD_LEASE_SQL, [
+      input.account.executionAccountId,
+      input.account.ownerUserId,
+    ]);
+    if (heldLease.rows.length !== 1) return refused("worker_release_failed");
+    return held("entries_stopped", Number(heldLease.rows[0]?.fencing_token), "owned", false, false);
+  }
   const released = await client.query(RELEASE_LEASE_SQL, [
     input.account.executionAccountId,
     input.account.ownerUserId,
     input.now,
   ]);
   if (released.rows.length !== 1) return refused("worker_release_failed");
-  return held("operation_not_enabled", Number(released.rows[0]?.fencing_token), "released", flag(current.arm_requested), false);
+  return held("entries_stopped", Number(released.rows[0]?.fencing_token), "released", false, false);
 }
 
 async function killLease(
@@ -651,10 +804,12 @@ function held(
   accountKill: boolean,
 ): AccountExecutionResult {
   return {
-    ok: reason === "operation_not_enabled",
+    ok: reason === "operation_not_enabled" || reason === "entries_stopped" ||
+      reason === "account_killed" || reason === "disarmed" || reason === "safety_recorded",
     reason,
     executable: PHASE3_EXECUTABLE,
     workerStarted: false,
+    executionActive: false,
     fencingToken,
     state,
     armRequested,

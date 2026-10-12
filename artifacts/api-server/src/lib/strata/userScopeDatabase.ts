@@ -19,6 +19,7 @@ import {
   type UserExecutionView,
 } from "./userExecutionScope";
 import type { UserScopePort } from "../../routes/userExecutionRouter";
+import { accountCredentialControls } from "./accountCredentialControls";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -390,6 +391,7 @@ export function createDatabaseUserScopePort(
       void action;
       return refused(userId, "user_execution_signer_not_provisioned", account);
     },
+    ...accountCredentialControls(db),
     async stake(userId, cents, revision) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
