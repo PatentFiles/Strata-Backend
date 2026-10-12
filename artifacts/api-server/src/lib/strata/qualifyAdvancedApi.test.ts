@@ -5,11 +5,12 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
-import { mutateScopedKalshi } from "../kalshiAccountClient";
+import { listOpenKalshiMarkets, mutateScopedKalshi, OPEN_MARKET_MAX_PAGES, OPEN_MARKET_PAGE_LIMIT } from "../kalshiAccountClient";
 import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
 import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
 import {
   createMemoryQualificationGuard,
+  dollarTenThousandths,
   qualificationOrderBody,
   QUALIFICATION_CONFIRMATION,
   QUALIFICATION_ORDER_PATH,
@@ -92,6 +93,107 @@ test("a one-cent ask and an expired market are not qualification markets", () =>
   ], NOW);
   assert.equal(selected?.ticker, "SAFE-MKT");
   assert.equal(selectQualificationMarket([market("TOUCH-MKT", "0.0100")], NOW), null);
+});
+
+test("qualification asks use exact four-decimal dollars and reject unsafe or malformed prices", () => {
+  assert.equal(dollarTenThousandths("0.0100"), 100);
+  assert.equal(dollarTenThousandths("0.0101"), 101);
+  assert.equal(dollarTenThousandths("0.0123"), 123);
+  assert.equal(dollarTenThousandths("0.0199"), 199);
+  assert.equal(dollarTenThousandths("0.0200"), 200);
+  assert.equal(dollarTenThousandths("0.5600"), 5600);
+  assert.equal(dollarTenThousandths("1.0000"), 10000);
+  const chosen = (ask: string) => selectQualificationMarket([market("PX-MKT", ask)], NOW)?.ticker ?? null;
+  assert.equal(chosen("0.0100"), null);
+  assert.equal(chosen("0.0101"), "PX-MKT");
+  assert.equal(chosen("0.0123"), "PX-MKT");
+  assert.equal(chosen("0.0199"), "PX-MKT");
+  assert.equal(chosen("0.0200"), "PX-MKT");
+  assert.equal(chosen("0.5600"), "PX-MKT");
+  assert.equal(chosen("nope"), null);
+  assert.equal(chosen("-0.0100"), null);
+  assert.equal(chosen("1.0001"), null);
+  assert.equal(chosen("0.01001"), null);
+  assert.equal(dollarTenThousandths("-0.0100"), null);
+  assert.equal(dollarTenThousandths("1.0001"), null);
+  assert.equal(dollarTenThousandths("0.01001"), null);
+  const highest = selectQualificationMarket([
+    market("LOW-SAFE", "0.0123"),
+    market("HIGH-SAFE", "0.5600"),
+  ], NOW);
+  assert.equal(highest?.ticker, "HIGH-SAFE");
+  const dollarsWin = selectQualificationMarket([{
+    ticker: "DOLLAR-WINS", status: "open", close_time: "2026-12-01T00:00:00.000Z",
+    yes_ask_dollars: "0.0100", yes_ask: 50,
+  }], NOW);
+  assert.equal(dollarsWin, null);
+  const legacy = selectQualificationMarket([{
+    ticker: "LEGACY-ASK", status: "open", close_time: "2026-12-01T00:00:00.000Z", yes_ask: 2,
+  }], NOW);
+  assert.equal(legacy?.ticker, "LEGACY-ASK");
+});
+
+test("closing, paused, and closed markets are not qualification markets", () => {
+  const boundary = new Date(NOW + 60_000).toISOString();
+  assert.equal(selectQualificationMarket([market("CLOSING", "0.5600", boundary)], NOW), null);
+  assert.equal(selectQualificationMarket([market("PAUSED", "0.5600", "2026-12-01T00:00:00.000Z", "paused")], NOW), null);
+  assert.equal(selectQualificationMarket([market("CLOSED", "0.5600", "2026-12-01T00:00:00.000Z", "closed")], NOW), null);
+  const later = new Date(NOW + 60_001).toISOString();
+  assert.equal(selectQualificationMarket([market("STILL-OPEN", "0.0123", later, "open")], NOW)?.ticker, "STILL-OPEN");
+});
+
+test("open-market discovery follows a cursor only until a safe ask and stays bounded", async () => {
+  const urls: string[] = [];
+  const headers: Array<Record<string, string>> = [];
+  const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+    urls.push(String(url));
+    headers.push(Object.fromEntries(new Headers(init?.headers).entries()));
+    const page = urls.length;
+    const markets = page === 1
+      ? Array.from({ length: 100 }, (_, index) => market(`UNSAFE-${index}`, "0.0100"))
+      : [market("LATER-SAFE", "0.0123")];
+    const cursor = page < 5 ? `cursor-${page}` : "";
+    return new Response(JSON.stringify({ markets, cursor }), { status: 200 });
+  };
+  const found = await listOpenKalshiMarkets(fetchImpl as typeof fetch, (markets) => selectQualificationMarket(markets, NOW) !== null);
+  assert.equal(urls.length, 2);
+  assert.equal(found.some((item) => (item as { ticker?: string }).ticker === "LATER-SAFE"), true);
+  assert.match(urls[0] ?? "", new RegExp(`status=open`));
+  assert.match(urls[0] ?? "", /mve_filter=exclude/);
+  assert.match(urls[0] ?? "", new RegExp(`limit=${OPEN_MARKET_PAGE_LIMIT}`));
+  assert.match(urls[1] ?? "", /cursor=cursor-1/);
+  assert.equal(headers.every((header) => header["kalshi-access-key"] === undefined && header.authorization === undefined), true);
+  const bounded: string[] = [];
+  const keepGoing = async (url: string | URL | Request) => {
+    bounded.push(String(url));
+    return new Response(JSON.stringify({
+      markets: [market(`NONE-${bounded.length}`, "0.0100")],
+      cursor: `more-${bounded.length}`,
+    }), { status: 200 });
+  };
+  await listOpenKalshiMarkets(keepGoing as typeof fetch);
+  assert.equal(bounded.length, OPEN_MARKET_MAX_PAGES);
+  await assert.rejects(listOpenKalshiMarkets((async () => new Response(JSON.stringify({
+    markets: [market("UNSAFE-0", "0.0100")],
+    cursor: "bad cursor",
+  }), { status: 200 })) as typeof fetch));
+});
+
+test("no safe market reports scan counts and places no order", async () => {
+  const flow = harness({ markets: [
+    market("TOUCH-MKT", "0.0100"),
+    market("BAD-ASK", "nope"),
+    market("CLOSED", "0.5000", "2026-12-01T00:00:00.000Z", "closed"),
+  ] });
+  const result = await flow.run();
+  assert.equal(result.status, "NO_SAFE_QUALIFICATION_MARKET");
+  assert.equal(result.marketsScanned, 3);
+  assert.equal(result.openMarkets, 2);
+  assert.equal(result.validCloseTimes, 2);
+  assert.equal(result.validAskPrices, 1);
+  assert.equal(result.safeAskPrices, 0);
+  assert.equal(flow.orders().length, 0);
+  assert.equal(JSON.stringify(result).includes("stored-private-key"), false);
 });
 
 test("basic user with exact confirmation places one post-only qualification order", async () => {

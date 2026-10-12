@@ -482,18 +482,46 @@ export async function mutateScopedKalshi(
   }
 }
 
-export async function listOpenKalshiMarkets(fetchImpl: typeof fetch = fetch): Promise<unknown[]> {
-  const response = await fetchImpl(`${baseUrl()}/trade-api/v2/markets?status=open&limit=100`, {
-    method: "GET",
-    cache: "no-store",
-    redirect: "manual",
-  });
-  if (response.status !== 200) throw new KalshiApiError("HTTP_ERROR", response.status);
-  const payload = await response.json() as unknown;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new KalshiApiError("INVALID_RESPONSE");
-  const markets = (payload as Record<string, unknown>).markets;
-  if (!Array.isArray(markets)) throw new KalshiApiError("INVALID_RESPONSE");
-  return markets;
+export const OPEN_MARKET_PAGE_LIMIT = 1000;
+export const OPEN_MARKET_MAX_PAGES = 3;
+export const OPEN_MARKET_MAX_MARKETS = 3000;
+
+const OPEN_MARKET_CURSOR = /^[A-Za-z0-9_-]{1,512}$/;
+
+/** Public open-market pages. Stops early when stopWhen is satisfied. No user credential is sent. */
+export async function listOpenKalshiMarkets(
+  fetchImpl: typeof fetch = fetch,
+  stopWhen?: (markets: unknown[]) => boolean,
+): Promise<unknown[]> {
+  const collected: unknown[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < OPEN_MARKET_MAX_PAGES && collected.length < OPEN_MARKET_MAX_MARKETS; page += 1) {
+    const params = new URLSearchParams({
+      status: "open",
+      mve_filter: "exclude",
+      limit: String(OPEN_MARKET_PAGE_LIMIT),
+    });
+    if (cursor) params.set("cursor", cursor);
+    const response = await fetchImpl(`${baseUrl()}/trade-api/v2/markets?${params.toString()}`, {
+      method: "GET",
+      cache: "no-store",
+      redirect: "manual",
+    });
+    if (response.status !== 200) throw new KalshiApiError("HTTP_ERROR", response.status);
+    const payload = await response.json() as unknown;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new KalshiApiError("INVALID_RESPONSE");
+    const record = payload as Record<string, unknown>;
+    if (!Array.isArray(record.markets)) throw new KalshiApiError("INVALID_RESPONSE");
+    const room = OPEN_MARKET_MAX_MARKETS - collected.length;
+    collected.push(...record.markets.slice(0, room));
+    if (stopWhen?.(collected)) break;
+    if (!("cursor" in record) || record.cursor == null || record.cursor === "") break;
+    if (typeof record.cursor !== "string" || !OPEN_MARKET_CURSOR.test(record.cursor)) {
+      throw new KalshiApiError("INVALID_RESPONSE");
+    }
+    cursor = record.cursor;
+  }
+  return collected;
 }
 
 async function getJson(path: string, query = "", signal?: AbortSignal): Promise<unknown> {

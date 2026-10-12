@@ -4,7 +4,6 @@ import {
   KalshiApiError,
   listOpenKalshiMarkets,
   mutateScopedKalshi,
-  reviewedKalshiCents,
 } from "../kalshiAccountClient";
 import { predictionsApiTier } from "../kalshiSubaccountInventory";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
@@ -78,6 +77,80 @@ export interface QualificationResult {
   orderId?: string;
   ticker?: string;
   averageFillPrice?: string;
+  marketsScanned?: number;
+  openMarkets?: number;
+  validCloseTimes?: number;
+  validAskPrices?: number;
+  safeAskPrices?: number;
+}
+
+const QUALIFICATION_BID_UNITS = 100;
+
+/** Exact non-negative fixed-point dollars, at most 4 decimals and at most 1.0000, in ten-thousandths. */
+export function dollarTenThousandths(value: string): number | null {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(value)) return null;
+  const [wholeText, fractionText = ""] = value.split(".");
+  const units = BigInt(wholeText) * 10000n + BigInt((fractionText + "0000").slice(0, 4));
+  if (units > 10000n) return null;
+  return Number(units);
+}
+
+export interface QualificationMarketScan {
+  ticker: string | null;
+  marketsScanned: number;
+  openMarkets: number;
+  validCloseTimes: number;
+  validAskPrices: number;
+  safeAskPrices: number;
+}
+
+function legacyCentAskUnits(value: unknown): number | null {
+  const cents = typeof value === "number" ? value : typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value) ? Number(value) : null;
+  if (cents === null || !Number.isSafeInteger(cents) || cents < 0 || cents > 100) return null;
+  return cents * 100;
+}
+
+function qualificationAskUnits(row: Record<string, unknown>): number | null {
+  if ("yes_ask_dollars" in row && row.yes_ask_dollars != null) {
+    return typeof row.yes_ask_dollars === "string" ? dollarTenThousandths(row.yes_ask_dollars) : null;
+  }
+  if ("yes_ask" in row && row.yes_ask != null) return legacyCentAskUnits(row.yes_ask);
+  return null;
+}
+
+export function scanQualificationMarkets(markets: unknown[], now: number): QualificationMarketScan {
+  const scan: QualificationMarketScan = {
+    ticker: null,
+    marketsScanned: 0,
+    openMarkets: 0,
+    validCloseTimes: 0,
+    validAskPrices: 0,
+    safeAskPrices: 0,
+  };
+  let bestUnits = QUALIFICATION_BID_UNITS;
+  for (const market of markets) {
+    scan.marketsScanned += 1;
+    if (!market || typeof market !== "object" || Array.isArray(market)) continue;
+    const row = market as Record<string, unknown>;
+    const ticker = row.ticker;
+    if (typeof ticker !== "string" || !/^[A-Z0-9][A-Z0-9._-]{0,120}$/.test(ticker)) continue;
+    // The public status=open feed labels a tradable market "active".
+    if (row.status !== "open" && row.status !== "active") continue;
+    scan.openMarkets += 1;
+    const closeAt = typeof row.close_time === "string" ? Date.parse(row.close_time) : Number.NaN;
+    if (!Number.isFinite(closeAt) || closeAt <= now + 60_000) continue;
+    scan.validCloseTimes += 1;
+    const askUnits = qualificationAskUnits(row);
+    if (askUnits === null) continue;
+    scan.validAskPrices += 1;
+    if (askUnits <= QUALIFICATION_BID_UNITS) continue;
+    scan.safeAskPrices += 1;
+    if (askUnits > bestUnits) {
+      bestUnits = askUnits;
+      scan.ticker = ticker;
+    }
+  }
+  return scan;
 }
 
 export function qualificationOrderBody(ticker: string, clientOrderId: string): Record<string, unknown> {
@@ -89,21 +162,8 @@ export function qualificationOrderBody(ticker: string, clientOrderId: string): R
 }
 
 export function selectQualificationMarket(markets: unknown[], now: number): { ticker: string } | null {
-  let best: { ticker: string; askCents: number } | null = null;
-  for (const market of markets) {
-    if (!market || typeof market !== "object" || Array.isArray(market)) continue;
-    const row = market as Record<string, unknown>;
-    const ticker = row.ticker;
-    const status = row.status;
-    if (typeof ticker !== "string" || !/^[A-Z0-9][A-Z0-9._-]{0,120}$/.test(ticker)) continue;
-    if (status !== "open" && status !== "active") continue;
-    const closeAt = typeof row.close_time === "string" ? Date.parse(row.close_time) : Number.NaN;
-    if (!Number.isFinite(closeAt) || closeAt <= now + 60_000) continue;
-    const askCents = reviewedKalshiCents(row, ["yes_ask_dollars"], ["yes_ask"]);
-    if (askCents === null || askCents <= 1) continue;
-    if (!best || askCents > best.askCents) best = { ticker, askCents };
-  }
-  return best ? { ticker: best.ticker } : null;
+  const scan = scanQualificationMarkets(markets, now);
+  return scan.ticker ? { ticker: scan.ticker } : null;
 }
 
 export function createMemoryQualificationGuard(): QualificationGuard {
@@ -290,11 +350,20 @@ export async function qualifyAdvancedApi(input: {
     return { status: "INSUFFICIENT_PRIMARY_CASH_FOR_QUALIFICATION" };
   }
   const markets = await input.transport.listOpenMarkets();
-  const selected = markets === "uncertain" ? null : selectQualificationMarket(markets, input.now ?? Date.now());
-  if (!selected) {
+  const now = input.now ?? Date.now();
+  const scan = markets === "uncertain" ? null : scanQualificationMarkets(markets, now);
+  if (!scan?.ticker) {
     await input.guard.clear(input.connectionId);
-    return { status: "NO_SAFE_QUALIFICATION_MARKET" };
+    return scan ? {
+      status: "NO_SAFE_QUALIFICATION_MARKET",
+      marketsScanned: scan.marketsScanned,
+      openMarkets: scan.openMarkets,
+      validCloseTimes: scan.validCloseTimes,
+      validAskPrices: scan.validAskPrices,
+      safeAskPrices: scan.safeAskPrices,
+    } : { status: "NO_SAFE_QUALIFICATION_MARKET" };
   }
+  const selected = { ticker: scan.ticker };
   const clientOrderId = (input.newClientOrderId ?? randomUUID)();
   const orderBody = qualificationOrderBody(selected.ticker, clientOrderId);
   await input.guard.transition(input.connectionId, {
@@ -417,7 +486,8 @@ export function createLiveQualificationTransport(fetchImpl: typeof fetch = fetch
     },
     async listOpenMarkets() {
       try {
-        return await listOpenKalshiMarkets(fetchImpl);
+        const now = Date.now();
+        return await listOpenKalshiMarkets(fetchImpl, (markets) => selectQualificationMarket(markets, now) !== null);
       } catch {
         return "uncertain";
       }
