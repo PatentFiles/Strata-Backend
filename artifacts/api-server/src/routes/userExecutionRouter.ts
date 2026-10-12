@@ -5,6 +5,7 @@ import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
+import { readQualificationDiagnostics, type QualificationDiagnostic } from "../lib/strata/qualificationDiagnostics";
 
 export interface UserScopePort {
   migrationReady(): Promise<boolean>;
@@ -18,6 +19,7 @@ export interface UserScopePort {
   deletePreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string }>;
   applyPreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string; draft?: PolicyDraft; view: UserExecutionView }>;
   qualify(userId: string, body: unknown): Promise<QualificationResult>;
+  diagnose(userId: string): Promise<QualificationDiagnostic>;
 }
 
 /** Fail closed. Does not read the legacy account and does not mutate Kalshi or the database. */
@@ -35,6 +37,7 @@ export function closedUserScopePort(): UserScopePort {
     deletePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     applyPreset: async (userId) => refused(userId),
     qualify: async () => ({ status: "USER_SCOPE_CLOSED" }),
+    diagnose: async () => ({ ...await readQualificationDiagnostics({ guard: null }), status: "USER_SCOPE_CLOSED" }),
   };
 }
 
@@ -149,6 +152,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const result = await port.qualify(userId, body);
     const ok = result.status === "ADVANCED_VERIFIED" || result.status === "ALREADY_ADVANCED";
     res.status(ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.get("/qualification-diagnostics", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    for (const key of ["user_id", "owner_user_id", "target_user_id", "provider_connection_id", "order_id", "client_order_id", "ticker", "api_key", "apiKey", "private_key", "privateKey", "pem"]) {
+      delete req.query[key];
+    }
+    const result = await port.diagnose(userId);
+    res.status(result.status === "QUALIFICATION_DIAGNOSTIC_READY" ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/legacy/claim", async (req, res) => {
     const userId = subject(res);

@@ -268,6 +268,7 @@ test("an unknown tier fails closed before any order", async () => {
 test("qualification does not call strategy code or the legacy signer", () => {
   const source = [
     "src/lib/strata/qualifyAdvancedApi.ts",
+    "src/lib/strata/qualificationDiagnostics.ts",
     "src/lib/strata/userScopeDatabase.ts",
     "src/routes/userExecutionRouter.ts",
   ].map((path) => readFileSync(path, "utf8")).join("\n");
@@ -315,6 +316,33 @@ test("an uncertain cancel does not request the upgrade", async () => {
   assert.equal(flow.orders().length, 1);
   assert.equal(flow.cancels().length, 1);
   assert.equal(flow.upgrades().length, 0);
+});
+
+test("a rejected upgrade keeps one attempt and a sanitized Kalshi error", async () => {
+  const flow = harness({
+    upgrade: ok({
+      error: { code: "not_eligible", message: "Need one API-created order.", details: { private_key: "stored-private-key" } },
+      headers: { authorization: "Bearer secret" },
+    }, 400),
+  });
+  const result = await flow.run();
+  assert.equal(result.status, "UPGRADE_REJECTED");
+  assert.equal(result.upstreamHttpStatus, 400);
+  assert.equal(result.upstreamCode, "not_eligible");
+  assert.equal(result.upstreamMessage, "Need one API-created order.");
+  assert.equal(JSON.stringify(result).includes("stored-private-key"), false);
+  assert.equal(JSON.stringify(result).includes("authorization"), false);
+  assert.equal(JSON.stringify(result).includes("Bearer"), false);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.orders().length, 1);
+  const noisy = harness({
+    upgrade: ok({ error: { code: "bad\u0000code", message: `x${"y".repeat(600)}` } }, 403),
+  });
+  const rejected = await noisy.run();
+  assert.equal(rejected.upstreamHttpStatus, 403);
+  assert.equal(rejected.upstreamCode, undefined);
+  assert.equal(rejected.upstreamMessage?.length, 500);
+  assert.equal(noisy.upgrades().length, 1);
 });
 
 test("a successful cancel requests the upgrade once and rereads limits", async () => {

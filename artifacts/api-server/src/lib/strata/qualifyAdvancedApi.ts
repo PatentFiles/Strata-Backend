@@ -79,6 +79,9 @@ export interface QualificationResult {
   qualificationOrderCanceled?: boolean;
   qualificationOrderCancellationUncertain?: boolean;
   acceptedResidualOrderRisk?: boolean;
+  upstreamHttpStatus?: number;
+  upstreamCode?: string;
+  upstreamMessage?: string;
   fillCount?: string;
   orderId?: string;
   ticker?: string;
@@ -342,6 +345,40 @@ function storedResult(row: QualificationGuardRecord | null): QualificationResult
   return { status: "UPGRADE_OUTCOME_UNCERTAIN", qualificationOrderCreated: true, qualificationOrderCanceled: true, fillCount: "0.00" };
 }
 
+function safeUpstreamText(value: unknown, max: number): string | undefined {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) return undefined;
+    value = String(value);
+  }
+  if (typeof value !== "string") return undefined;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  return text.slice(0, max);
+}
+
+/** Documented Kalshi error envelope only: { error: { code, message } } or { code, message }. */
+export function sanitizedUpgradeRejection(result: QualificationExchangeResult): {
+  upstreamHttpStatus: number;
+  upstreamCode?: string;
+  upstreamMessage?: string;
+} {
+  const reported: { upstreamHttpStatus: number; upstreamCode?: string; upstreamMessage?: string } = {
+    upstreamHttpStatus: result.status,
+  };
+  if (!result.body || typeof result.body !== "object" || Array.isArray(result.body)) return reported;
+  const record = result.body as Record<string, unknown>;
+  const nested = record.error;
+  const envelope = nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : record;
+  const code = safeUpstreamText(envelope.code, 128);
+  const message = safeUpstreamText(envelope.message, 500);
+  if (code) reported.upstreamCode = code;
+  if (message) reported.upstreamMessage = message;
+  return reported;
+}
+
 function httpClass(result: QualificationExchangeResult | "uncertain"): "uncertain" | "rejected" | "response" {
   if (result === "uncertain" || result.unreadable || result.status >= 500 || result.status === 429 || result.status === 408) return "uncertain";
   if (result.status >= 400) return "rejected";
@@ -372,7 +409,13 @@ async function finishUpgrade(
   }
   if (upgradeClass === "rejected" || upgrade === "uncertain" || upgrade.status !== 201) {
     await guard.transition(connectionId, { state: "upgrade_rejected", orderId: orderMeta.orderId, ticker: orderMeta.ticker, fillCount: "0.00" });
-    return { status: "UPGRADE_REJECTED", qualificationOrderCreated: true, qualificationOrderCanceled: true, fillCount: "0.00" };
+    return {
+      status: "UPGRADE_REJECTED",
+      qualificationOrderCreated: true,
+      qualificationOrderCanceled: true,
+      fillCount: "0.00",
+      ...(upgradeClass === "rejected" && upgrade !== "uncertain" ? sanitizedUpgradeRejection(upgrade) : {}),
+    };
   }
   const verified = await readTier(transport, creds);
   if (!verified.ok || !verified.advanced || !verified.tier) {
@@ -518,7 +561,11 @@ async function requestResidualUpgrade(
   if (upgradeClass === "uncertain") return { status: "UPGRADE_OUTCOME_UNCERTAIN", ...visible };
   if (upgradeClass === "rejected" || upgrade === "uncertain" || upgrade.status !== 201) {
     await input.guard.transition(input.connectionId, { ...kept, state: "upgrade_rejected" });
-    return { status: "UPGRADE_REJECTED", ...visible };
+    return {
+      status: "UPGRADE_REJECTED",
+      ...visible,
+      ...(upgradeClass === "rejected" && upgrade !== "uncertain" ? sanitizedUpgradeRejection(upgrade) : {}),
+    };
   }
   const verified = await readTier(input.transport, input.creds);
   if (!verified.ok || !verified.advanced || !verified.tier) {

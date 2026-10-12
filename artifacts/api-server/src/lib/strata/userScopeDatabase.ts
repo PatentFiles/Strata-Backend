@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import { classifyDiagnosticRead, readQualificationDiagnostics, type QualificationDiagnostic } from "./qualificationDiagnostics";
 import {
   assembleKalshiUserRead,
   BOT_EXCHANGE_INDEX,
@@ -527,6 +528,46 @@ export function createDatabaseUserScopePort(
       } catch {
         return { status: "QUALIFICATION_GUARD_UNAVAILABLE" };
       }
+    },
+    async diagnose(userId): Promise<QualificationDiagnostic> {
+      let connection: { rows: Array<Record<string, unknown>> };
+      try {
+        connection = await db.query(CONNECTION_SQL, [userId]);
+      } catch {
+        return readQualificationDiagnostics({ guard: null });
+      }
+      if (connection.rows.length === 0) return { ...await readQualificationDiagnostics({ guard: null }), status: "NO_FINANCIAL_ACCOUNT" };
+      const linked = connection.rows.filter((row) => text(row.vault_secret_id));
+      const connectionId = text(linked[0]?.provider_connection_id);
+      if (linked.length !== 1 || !connectionId) return { ...await readQualificationDiagnostics({ guard: null }), status: "NO_PROVIDER_CONNECTION" };
+      let guard;
+      try {
+        guard = await qualificationGuard.read(connectionId);
+      } catch {
+        return { ...await readQualificationDiagnostics({ guard: null }), status: "QUALIFICATION_GUARD_UNAVAILABLE" };
+      }
+      let creds: { keyId: string; privateKey: string } | null = null;
+      try {
+        const secretRow = await db.query(VAULT_SQL, [text(linked[0]?.vault_secret_id)]);
+        creds = secretRow.rows.length === 1 ? parseVaultSecret(secretRow.rows[0]?.decrypted_secret) : null;
+      } catch {
+        creds = null;
+      }
+      if (!creds) return readQualificationDiagnostics({ guard });
+      return readQualificationDiagnostics({
+        guard,
+        get: async (path, query) => {
+          try {
+            return { outcome: "OK", body: await kalshiGet(creds, path, query) };
+          } catch (error) {
+            if (error instanceof KalshiApiError && error.type === "INVALID_JSON") return { outcome: "UNREADABLE" };
+            if (error instanceof KalshiApiError && error.type === "HTTP_ERROR") {
+              return { outcome: classifyDiagnosticRead(error.status ?? 0, false) };
+            }
+            return { outcome: "UNCERTAIN" };
+          }
+        },
+      });
     },
   };
 }
