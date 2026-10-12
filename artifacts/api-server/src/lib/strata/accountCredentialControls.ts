@@ -14,6 +14,14 @@ import {
   userCommissioningReadiness,
   verifyAccountCredential,
 } from "./accountCredentialLifecycle";
+import { dedicatedSignerFingerprint } from "./commissioning";
+import { probeAccountCredential } from "./accountCredentialProbe";
+import {
+  persistAccountFundingAuthorization,
+  persistAccountFundingEvidence,
+  readAccountFunding,
+  RECORD_FUNDING_EVIDENCE_CONFIRMATION,
+} from "./accountFunding";
 import { operateAccountWorker, SAFETY_EXPOSURE_SQL, SCOPED_POLICY_SQL } from "./accountScopedExecution";
 
 const CREDENTIAL_TABLE_SQL = `
@@ -22,8 +30,27 @@ const CREDENTIAL_TABLE_SQL = `
 const LEASE_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_worker_lease') AS name
 `;
+const FUNDING_TABLE_SQL = `
+  SELECT to_regclass('private.kalshi_account_funding') AS name
+`;
+const OWNED_SECRET_SQL = `
+  SELECT decrypted_secret
+  FROM vault.decrypted_secrets
+  WHERE id = $1::uuid
+    AND EXISTS (
+      SELECT 1 FROM private.kalshi_connection_credentials c
+      WHERE c.vault_secret_id = vault.decrypted_secrets.id
+        AND c.owner_user_id = $2::uuid
+        AND c.revoked_at IS NULL
+    )
+`;
 
-export function accountCredentialControls(db: UserScopeQuery) {
+export function accountCredentialControls(
+  db: UserScopeQuery,
+  options: {
+    kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
+  } = {},
+) {
   const database = executionDatabase(db);
   const ports = () => createDatabaseAccountCommissioningPorts(database);
   return {
@@ -117,12 +144,56 @@ export function accountCredentialControls(db: UserScopeQuery) {
       if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
       const role = roleOf(body);
       if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
+      const getJson = options.kalshiGet ?? (async () => {
+        throw new Error("verification_transport_not_enabled");
+      });
       return verifyAccountCredential(database, ports(), {
         authenticatedUserId: userId,
         role,
         confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
-        async readSecret() { return null; },
-        async probe() { return { ok: false, reason: "verification_transport_not_enabled" }; },
+        readSecret: (vaultSecretId) => readOwnedSecret(db, userId, vaultSecretId),
+        async probe(material) {
+          const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
+          if (!fingerprint) return { ok: false, reason: "credential_fingerprint_mismatch" };
+          const probed = await probeAccountCredential(role, fingerprint, material, getJson);
+          return { ok: probed.ok, reason: probed.reason };
+        },
+      });
+    },
+    async authorizeFunding(userId: string, body: unknown) {
+      if (!await fundingTableReady(db)) {
+        return { ok: false, reason: "funding_migration_missing", executable: false as const, transferAttempted: false as const, authorizedMicros: null, evidenceMicros: null };
+      }
+      const fields = fundingBody(body);
+      if (!fields) {
+        return { ok: false, reason: "funding_amount_invalid", executable: false as const, transferAttempted: false as const, authorizedMicros: null, evidenceMicros: null };
+      }
+      return persistAccountFundingAuthorization(database, ports(), {
+        authenticatedUserId: userId,
+        confirmation: fields.confirmation,
+        authorizedMicros: fields.authorizedMicros,
+      });
+    },
+    async recordFundingEvidence(userId: string, body: unknown) {
+      if (!await fundingTableReady(db)) {
+        return { ok: false, reason: "funding_migration_missing", executable: false as const, transferAttempted: false as const, authorizedMicros: null, evidenceMicros: null };
+      }
+      const confirmation = body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null;
+      if (confirmation !== RECORD_FUNDING_EVIDENCE_CONFIRMATION) {
+        return { ok: false, reason: "explicit_authorization_required", executable: false as const, transferAttempted: false as const, authorizedMicros: null, evidenceMicros: null };
+      }
+      const getJson = options.kalshiGet ?? (async () => {
+        throw new Error("verification_transport_not_enabled");
+      });
+      const observed = await observeBalance(db, ports(), getJson, userId);
+      if (!observed.ok || !observed.evidenceMicros) {
+        return { ok: false, reason: observed.reason, executable: false as const, transferAttempted: false as const, authorizedMicros: null, evidenceMicros: null };
+      }
+      return persistAccountFundingEvidence(database, ports(), {
+        authenticatedUserId: userId,
+        confirmation,
+        evidenceMicros: observed.evidenceMicros,
+        evidenceSource: "kalshi_balance",
       });
     },
     async commissioningStatus(userId: string) {
@@ -143,10 +214,22 @@ export function accountCredentialControls(db: UserScopeQuery) {
           policyOwned = false;
         }
       }
+      let authorizedMicros: string | null = null;
+      let evidenceMicros: string | null = null;
+      if (resolved.ok && await fundingTableReady(db)) {
+        try {
+          const funding = await readAccountFunding(database, userId, resolved.context.providerConnectionId);
+          authorizedMicros = funding.authorizedMicros;
+          evidenceMicros = funding.evidenceMicros;
+        } catch {
+          authorizedMicros = null;
+          evidenceMicros = null;
+        }
+      }
       const readiness = userCommissioningReadiness({
         roles: status.roles,
-        authorizedMicros: null,
-        evidenceMicros: null,
+        authorizedMicros,
+        evidenceMicros,
         subaccount: resolved.ok ? resolved.context.subaccount : null,
         exchangeIndex: resolved.ok ? resolved.context.exchangeIndex : null,
         policyOwned,
@@ -176,6 +259,42 @@ async function credentialTablesReady(db: UserScopeQuery): Promise<boolean> {
   }
 }
 
+async function fundingTableReady(db: UserScopeQuery): Promise<boolean> {
+  try {
+    const ready = await db.query(FUNDING_TABLE_SQL);
+    return Boolean(ready.rows[0]?.name);
+  } catch {
+    return false;
+  }
+}
+
+async function readOwnedSecret(
+  db: UserScopeQuery,
+  userId: string,
+  vaultSecretId: string,
+): Promise<{ keyId: string; privateKey: string } | null> {
+  const secret = await db.query(OWNED_SECRET_SQL, [vaultSecretId, userId]);
+  if (secret.rows.length !== 1) return null;
+  return parseSecret(secret.rows[0]?.decrypted_secret);
+}
+
+async function observeBalance(
+  db: UserScopeQuery,
+  commissioning: ReturnType<typeof createDatabaseAccountCommissioningPorts>,
+  getJson: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>,
+  userId: string,
+): Promise<{ ok: boolean; reason: string; evidenceMicros: string | null }> {
+  const resolved = await resolveAccountCommissioningContext(userId, commissioning);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason, evidenceMicros: null };
+  const role = resolved.context.credentials.find((item) => item.role === "verification") ??
+    resolved.context.credentials.find((item) => item.role === "restricted_execution");
+  if (!role?.keyFingerprint) return { ok: false, reason: "missing_credential", evidenceMicros: null };
+  const material = await readOwnedSecret(db, userId, role.vaultSecretId);
+  if (!material) return { ok: false, reason: "vault_secret_missing", evidenceMicros: null };
+  const probed = await probeAccountCredential(role.role, role.keyFingerprint, material, getJson);
+  return { ok: probed.ok, reason: probed.reason, evidenceMicros: probed.evidenceMicros };
+}
+
 function credentialBody(body: unknown): { role: string; apiKeyId: string; privateKey: string } | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const record = { ...(body as Record<string, unknown>) };
@@ -193,6 +312,28 @@ function roleOf(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const role = (body as Record<string, unknown>).role;
   return typeof role === "string" ? role : null;
+}
+
+function parseSecret(value: unknown): { keyId: string; privateKey: string } | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (typeof parsed.api_key_id !== "string" || typeof parsed.private_key !== "string") return null;
+    if (!parsed.api_key_id || !parsed.private_key) return null;
+    return { keyId: parsed.api_key_id, privateKey: parsed.private_key };
+  } catch {
+    return null;
+  }
+}
+
+function fundingBody(body: unknown): { confirmation: unknown; authorizedMicros: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const record = { ...(body as Record<string, unknown>) };
+  delete record.owner_user_id;
+  delete record.target_user_id;
+  const authorized = record.authorizedMicros ?? record.authorized_micros;
+  if (typeof authorized !== "string" && typeof authorized !== "number") return null;
+  return { confirmation: record.confirmation, authorizedMicros: String(authorized) };
 }
 
 function text(value: unknown): string | null {

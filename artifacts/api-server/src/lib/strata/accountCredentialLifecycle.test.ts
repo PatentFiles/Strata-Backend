@@ -127,12 +127,21 @@ function harness(failInsert = false) {
         revoked_at: item.revokedAt,
       })) };
     }
-    if (text.includes("account-credential:verify")) {
+    if (text.includes("account-credential:lock-role")) {
       const row = bindings.find((item) => item.ownerUserId === params[0] && item.providerConnectionId === params[1] &&
         item.role === params[2] && !item.revokedAt);
+      return { rows: row ? [{
+        id: row.id,
+        vault_secret_id: row.vaultSecretId,
+        key_fingerprint: row.keyFingerprint,
+      }] : [] };
+    }
+    if (text.includes("account-credential:verify-record")) {
+      const row = bindings.find((item) => item.id === params[0] && item.ownerUserId === params[1] &&
+        item.vaultSecretId === params[2] && item.keyFingerprint === params[3] && !item.revokedAt);
       if (!row) return { rows: [] };
       row.verifiedAt = new Date().toISOString();
-      row.verificationReason = String(params[3]);
+      row.verificationReason = String(params[4]);
       return { rows: [{ id: row.id }] };
     }
     if (text.includes("FROM public.financial_accounts")) {
@@ -277,7 +286,40 @@ test("verification stays unauthorized until explicitly confirmed and funding is 
     policyOwned: true,
   });
   assert.equal(blocked.executable, false);
+  assert.equal(blocked.ready, false);
   assert.equal(blocked.blockers.includes("account_funding_evidence_mismatch"), true);
+  const secretReads: string[] = [];
+  const verified = await verifyAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+    async readSecret(vaultSecretId) {
+      secretReads.push(vaultSecretId);
+      return { keyId: material.apiKeyId, privateKey: material.privateKey };
+    },
+    async probe() {
+      const active = db.bindings.find((item) => item.ownerUserId === USER_A && item.role === "restricted_execution" && !item.revokedAt);
+      if (active) active.revokedAt = new Date().toISOString();
+      db.bindings.push({
+        id: "binding-rotated",
+        ownerUserId: USER_A,
+        financialAccountId: FINANCIAL_A,
+        providerConnectionId: CONNECTION_A,
+        role: "restricted_execution",
+        vaultSecretId: "34343434-3434-4343-8343-343434343434",
+        keyFingerprint: "cd".repeat(32),
+        revokedAt: null,
+        replacedBy: null,
+        verifiedAt: null,
+        verificationReason: null,
+      });
+      return { ok: true, reason: "credential_verified" };
+    },
+  });
+  assert.equal(verified.reason, "credential_rotated");
+  assert.equal(verified.vaultSecretId, null);
+  assert.equal(db.bindings.find((item) => item.id === "binding-rotated")?.verifiedAt, null);
+  assert.equal(secretReads.length, 1);
   const source = readFileSync("src/lib/strata/accountCredentialLifecycle.ts", "utf8");
   assert.equal(source.includes("process.env"), false);
   assert.equal(source.includes("KALSHI_INDEX2"), false);

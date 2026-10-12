@@ -64,15 +64,29 @@ const LIST_ROLE_SQL = `
   ORDER BY created_at
 `;
 
-const MARK_VERIFIED_SQL = `
-  -- account-credential:verify
-  UPDATE private.kalshi_connection_credentials
-  SET verified_at = now(),
-      verification_reason = $4,
-      updated_at = now()
+const LOCK_ROLE_SQL = `
+  -- account-credential:lock-role
+  SELECT id::text AS id,
+         vault_secret_id::text AS vault_secret_id,
+         key_fingerprint
+  FROM private.kalshi_connection_credentials
   WHERE owner_user_id = $1::uuid
     AND provider_connection_id = $2::uuid
     AND role = $3
+    AND revoked_at IS NULL
+  FOR UPDATE
+`;
+
+const VERIFY_RECORD_SQL = `
+  -- account-credential:verify-record
+  UPDATE private.kalshi_connection_credentials
+  SET verified_at = now(),
+      verification_reason = $5,
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND vault_secret_id = $3::uuid
+    AND key_fingerprint = $4
     AND revoked_at IS NULL
   RETURNING id::text AS id
 `;
@@ -193,26 +207,40 @@ export async function verifyAccountCredential(
   if (!knownCredentialRole(input.role)) return registration(false, "credential_role_rejected", input.role);
   const resolved = await resolveAccountCommissioningContext(input.authenticatedUserId, ports);
   if (!resolved.ok) return registration(false, resolved.reason, input.role);
-  const active = resolved.context.credentials.find((ref) => ref.role === input.role);
-  if (!active) return registration(false, "missing_credential", input.role);
-  const material = await input.readSecret(active.vaultSecretId);
-  if (!material) return registration(false, "vault_secret_missing", input.role);
-  const probed = await input.probe(material);
-  const reason = sanitizeReason(probed.ok ? "credential_verified" : probed.reason);
-  if (!probed.ok) return registration(false, reason, input.role);
-  const marked = await db.query(MARK_VERIFIED_SQL, [
+  const locked = await db.query(LOCK_ROLE_SQL, [
     input.authenticatedUserId,
     resolved.context.providerConnectionId,
     input.role,
+  ]);
+  if (locked.rows.length !== 1) return registration(false, "missing_credential", input.role);
+  const credentialId = text(locked.rows[0]?.id);
+  const vaultSecretId = text(locked.rows[0]?.vault_secret_id);
+  const fingerprint = text(locked.rows[0]?.key_fingerprint);
+  if (!credentialId || !vaultSecretId || !fingerprint) {
+    return registration(false, "credential_fingerprint_invalid", input.role);
+  }
+  const material = await input.readSecret(vaultSecretId);
+  if (!material) return registration(false, "vault_secret_missing", input.role);
+  if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== fingerprint) {
+    return registration(false, "credential_fingerprint_mismatch", input.role);
+  }
+  const probed = await input.probe(material);
+  const reason = sanitizeReason(probed.ok ? "credential_verified" : probed.reason);
+  if (!probed.ok) return registration(false, reason, input.role);
+  const marked = await db.query(VERIFY_RECORD_SQL, [
+    credentialId,
+    input.authenticatedUserId,
+    vaultSecretId,
+    fingerprint,
     reason,
   ]);
-  if (marked.rows.length !== 1) return registration(false, "credential_not_active", input.role);
+  if (marked.rows.length !== 1) return registration(false, "credential_rotated", input.role);
   return {
     ok: true,
     reason,
     executable: false,
     role: input.role,
-    fingerprint: active.keyFingerprint,
+    fingerprint,
     vaultSecretId: null,
   };
 }
@@ -247,7 +275,7 @@ export function userCommissioningReadiness(input: {
   subaccount: number | null;
   exchangeIndex: number | null;
   policyOwned: boolean;
-}): { ready: false; executable: false; blockers: string[] } {
+}): { ready: boolean; executable: false; blockers: string[] } {
   const blockers: string[] = [];
   const active = input.roles.filter((role) => !role.revoked);
   if (!active.some((role) => role.role === "restricted_execution" && role.verified)) {
@@ -258,7 +286,7 @@ export function userCommissioningReadiness(input: {
   if (!input.authorizedMicros) blockers.push("account_funding_not_authorized");
   else if (input.evidenceMicros !== input.authorizedMicros) blockers.push("account_funding_evidence_mismatch");
   if (!input.policyOwned) blockers.push("policy_not_owned");
-  return { ready: false, executable: false, blockers };
+  return { ready: blockers.length === 0, executable: false, blockers };
 }
 
 function registration(ok: boolean, reason: string, role: string | null): AccountCredentialRegistration {

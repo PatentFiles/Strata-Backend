@@ -24,7 +24,9 @@ export interface UserScopePort {
   registerCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   revokeCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
-  commissioningStatus(userId: string): Promise<{ ready: false; executable: false; blockers: string[] }>;
+  authorizeFunding(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
+  recordFundingEvidence(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
+  commissioningStatus(userId: string): Promise<{ ready: boolean; executable: false; blockers: string[] }>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
   savePreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
@@ -48,6 +50,8 @@ export function closedUserScopePort(): UserScopePort {
     registerCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     revokeCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
+    recordFundingEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     commissioningStatus: async () => ({ ready: false, executable: false, blockers: ["user_scope_not_migrated"] }),
     stake: async (userId) => refused(userId),
     presets: async () => [],
@@ -146,6 +150,20 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
     const result = await port.verifyCredential(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/funding-authorization", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.authorizeFunding(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/funding-evidence", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.recordFundingEvidence(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/stake", async (req, res) => {
