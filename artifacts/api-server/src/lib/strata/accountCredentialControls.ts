@@ -17,10 +17,12 @@ import {
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { probeAccountCredential } from "./accountCredentialProbe";
 import {
+  authorizeFutureAccountOperation,
   persistAccountFundingAuthorization,
   persistAccountFundingEvidence,
   readAccountFunding,
   RECORD_FUNDING_EVIDENCE_CONFIRMATION,
+  type FutureAccountOperation,
 } from "./accountFunding";
 import { operateAccountWorker, SAFETY_EXPOSURE_SQL, SCOPED_POLICY_SQL } from "./accountScopedExecution";
 
@@ -196,6 +198,14 @@ export function accountCredentialControls(
         evidenceSource: "kalshi_balance",
       });
     },
+    async authorizeOperation(_userId: string, body: unknown) {
+      const operation = operationOf(body);
+      if (!operation) return { ok: false as const, reason: "explicit_authorization_required", attempted: false as const };
+      return authorizeFutureAccountOperation({
+        operation,
+        confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
+      });
+    },
     async commissioningStatus(userId: string) {
       if (!await credentialTablesReady(db)) {
         return { ready: false as const, executable: false as const, blockers: ["credential_migration_missing"] };
@@ -216,11 +226,13 @@ export function accountCredentialControls(
       }
       let authorizedMicros: string | null = null;
       let evidenceMicros: string | null = null;
+      let evidenceSource: string | null = null;
       if (resolved.ok && await fundingTableReady(db)) {
         try {
           const funding = await readAccountFunding(database, userId, resolved.context.providerConnectionId);
           authorizedMicros = funding.authorizedMicros;
           evidenceMicros = funding.evidenceMicros;
+          evidenceSource = funding.evidenceSource;
         } catch {
           authorizedMicros = null;
           evidenceMicros = null;
@@ -230,6 +242,7 @@ export function accountCredentialControls(
         roles: status.roles,
         authorizedMicros,
         evidenceMicros,
+        evidenceSource,
         subaccount: resolved.ok ? resolved.context.subaccount : null,
         exchangeIndex: resolved.ok ? resolved.context.exchangeIndex : null,
         policyOwned,
@@ -306,6 +319,14 @@ function credentialBody(body: unknown): { role: string; apiKeyId: string; privat
   const privateKey = record.privateKey ?? record.private_key;
   if (typeof role !== "string" || typeof apiKeyId !== "string" || typeof privateKey !== "string") return null;
   return { role, apiKeyId, privateKey };
+}
+
+function operationOf(body: unknown): FutureAccountOperation | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const operation = (body as Record<string, unknown>).operation;
+  if (operation === "create_subaccount" || operation === "generate_api_key" ||
+      operation === "transfer_funds" || operation === "qualifying_order") return operation;
+  return null;
 }
 
 function roleOf(body: unknown): string | null {

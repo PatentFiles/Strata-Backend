@@ -57,7 +57,8 @@ const RECORD_EVIDENCE_SQL = `
 const READ_FUNDING_SQL = `
   -- account-funding:read
   SELECT authorized_micros::text AS authorized_micros,
-         evidence_micros::text AS evidence_micros
+         evidence_micros::text AS evidence_micros,
+         evidence_source
   FROM private.kalshi_account_funding
   WHERE owner_user_id = $1::uuid
     AND provider_connection_id = $2::uuid
@@ -115,6 +116,9 @@ export async function persistAccountFundingEvidence(
   if (input.confirmation !== RECORD_FUNDING_EVIDENCE_CONFIRMATION) {
     return funding(false, "explicit_authorization_required", null, null);
   }
+  if (input.evidenceSource === "kalshi_transfer") {
+    return funding(false, "funding_transfer_unproven", null, null);
+  }
   if (!/^\d+$/.test(input.evidenceMicros)) return funding(false, "funding_amount_invalid", null, null);
   const resolved = await resolveAccountCommissioningContext(input.authenticatedUserId, ports);
   if (!resolved.ok) return funding(false, resolved.reason, null, null);
@@ -134,7 +138,7 @@ export async function persistAccountFundingEvidence(
   ]);
   if (recorded.rows.length !== 1) return funding(false, "funding_evidence_not_recorded", authorized, null);
   const evidence = text(recorded.rows[0]?.evidence_micros);
-  const reason = evidence === authorized ? "funding_evidence_recorded" : "account_funding_evidence_mismatch";
+  const reason = evidence === authorized ? "funding_balance_observed" : "account_funding_evidence_mismatch";
   return funding(evidence === authorized, reason, authorized, evidence);
 }
 
@@ -142,13 +146,34 @@ export async function readAccountFunding(
   db: CredentialDatabase,
   ownerUserId: string,
   providerConnectionId: string,
-): Promise<{ authorizedMicros: string | null; evidenceMicros: string | null }> {
+): Promise<{ authorizedMicros: string | null; evidenceMicros: string | null; evidenceSource: string | null }> {
   const rows = await db.query(READ_FUNDING_SQL, [ownerUserId, providerConnectionId]);
-  if (rows.rows.length !== 1) return { authorizedMicros: null, evidenceMicros: null };
+  if (rows.rows.length !== 1) return { authorizedMicros: null, evidenceMicros: null, evidenceSource: null };
   return {
     authorizedMicros: text(rows.rows[0]?.authorized_micros),
     evidenceMicros: text(rows.rows[0]?.evidence_micros),
+    evidenceSource: text(rows.rows[0]?.evidence_source),
   };
+}
+
+const FUTURE_OPERATION_CONFIRMATION = {
+  create_subaccount: "CREATE_ACCOUNT_SUBACCOUNT",
+  generate_api_key: "GENERATE_ACCOUNT_API_KEY",
+  transfer_funds: "TRANSFER_ACCOUNT_FUNDS",
+  qualifying_order: "SUBMIT_QUALIFYING_ORDER",
+} as const;
+
+export type FutureAccountOperation = keyof typeof FUTURE_OPERATION_CONFIRMATION;
+
+/** Names the required confirmation and does not create, transfer, or order. */
+export function authorizeFutureAccountOperation(input: {
+  operation: FutureAccountOperation;
+  confirmation: unknown;
+}): { ok: false; reason: string; attempted: false } {
+  if (input.confirmation !== FUTURE_OPERATION_CONFIRMATION[input.operation]) {
+    return { ok: false, reason: "explicit_authorization_required", attempted: false };
+  }
+  return { ok: false, reason: "operation_not_enabled", attempted: false };
 }
 
 function funding(

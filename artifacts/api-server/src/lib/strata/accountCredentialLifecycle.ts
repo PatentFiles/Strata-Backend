@@ -275,6 +275,7 @@ export function userCommissioningReadiness(input: {
   subaccount: number | null;
   exchangeIndex: number | null;
   policyOwned: boolean;
+  evidenceSource?: string | null;
 }): { ready: boolean; executable: false; blockers: string[] } {
   const blockers: string[] = [];
   const active = input.roles.filter((role) => !role.revoked);
@@ -285,6 +286,7 @@ export function userCommissioningReadiness(input: {
   if (input.exchangeIndex !== null && input.exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) blockers.push("account_target_pair_mismatch");
   if (!input.authorizedMicros) blockers.push("account_funding_not_authorized");
   else if (input.evidenceMicros !== input.authorizedMicros) blockers.push("account_funding_evidence_mismatch");
+  else if (input.evidenceSource === "kalshi_transfer") blockers.push("account_funding_transfer_unproven");
   if (!input.policyOwned) blockers.push("policy_not_owned");
   return { ready: blockers.length === 0, executable: false, blockers };
 }

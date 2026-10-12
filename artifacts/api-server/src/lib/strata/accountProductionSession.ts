@@ -1,11 +1,16 @@
-import type { Pool } from "@workspace/db";
+import { constants, createPrivateKey, createSign } from "node:crypto";
+import type { Pool, PoolClient } from "@workspace/db";
+import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { ProductionExecutor } from "../v13-production/executor";
-import { ProductionLedger } from "../v13-production/ledger";
-import type { Exchange, Identity, MarketEvidence, Request, Snapshot } from "../v13-production/types";
+import { decodePolicy, ProductionLedger, type Account } from "../v13-production/ledger";
+import { encodeProductionOrder } from "../v13-production/transport";
+import { canonical, requireProof, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import { ProductionWorker } from "../v13-production/worker";
+import { dedicatedSignerFingerprint, PRODUCTION_EXCHANGE_INDEX, PRODUCTION_SUBACCOUNT } from "./commissioning";
 import { executionBoundaryAllowsDispatch } from "./accountScopedExecution";
 
 export const PHASE5_EXECUTABLE = false;
+const ORDER_PATH = "/trade-api/v2/portfolio/events/orders";
 
 export interface AccountDispatchState {
   leaseState: string;
@@ -21,10 +26,16 @@ export interface AccountDispatchState {
   presentedFingerprint: string;
   uncertainOrderCount: number;
   duplicateClientOrder: boolean;
+  liveExecutionEnabled?: boolean;
 }
 
-/** Final order boundary. A fresh fence is required, and live dispatch stays closed. */
-export function accountDispatchDecision(input: AccountDispatchState): { allowed: false; reason: string } {
+export interface AccountDispatchDecision {
+  allowed: boolean;
+  reason: string;
+}
+
+/** Final order boundary. Live submission still requires an explicit enablement flag. */
+export function accountDispatchDecision(input: AccountDispatchState): AccountDispatchDecision {
   if (input.authenticatedUserId !== input.ownerUserId) {
     return { allowed: false, reason: "foreign_execution_account" };
   }
@@ -37,7 +48,8 @@ export function accountDispatchDecision(input: AccountDispatchState): { allowed:
     return { allowed: false, reason: "production_uncertain_order_blocks_mutation" };
   }
   if (input.duplicateClientOrder) return { allowed: false, reason: "duplicate_client_order" };
-  return { allowed: false, reason: "operation_not_enabled" };
+  if (input.liveExecutionEnabled !== true) return { allowed: false, reason: "operation_not_enabled" };
+  return { allowed: true, reason: "dispatch_authorized" };
 }
 
 export function scheduleAccountEntries(): {
@@ -49,23 +61,106 @@ export function scheduleAccountEntries(): {
   return { ok: false, reason: "operation_not_enabled", workerStarted: false, executionActive: false };
 }
 
+export function accountOrderTransmission(
+  material: { keyId: string; privateKey: string },
+  request: Request,
+): { path: string; body: string; keyId: string } {
+  const body = JSON.stringify(encodeProductionOrder(request));
+  return { path: ORDER_PATH, body, keyId: material.keyId.trim() };
+}
+
+class OwnedAccountLedger extends ProductionLedger {
+  constructor(pool: Pool, accountId: string, readonly ownerUserId: string) {
+    super(pool, accountId);
+  }
+  override async policy(tx: PoolClient, account: Account) {
+    const { rows } = await tx.query(
+      `SELECT p.* FROM v13_live_money_policy p
+       JOIN v13_production_account a ON a.policy_id = p.id AND a.id = p.execution_account_id
+       WHERE p.id = $1 AND a.id = $2 AND a.owner_user_id = $3::uuid AND p.state = 'APPROVED'
+       FOR SHARE OF p`,
+      [account.policy_id, account.id, this.ownerUserId],
+    );
+    requireProof(rows.length === 1, "production_policy_missing");
+    const policy = decodePolicy(rows[0]!);
+    requireProof(policy.policyHash === computeV13LiveMoneyPolicyHash(policy),
+      "production_policy_revoked_changed_or_ambiguous");
+    return policy;
+  }
+}
+
 export class AccountScopedExchange implements Exchange {
-  readonly mode = "SIMULATION" as const;
+  readonly mode = "LIVE" as const;
   submitAttempts = 0;
-  constructor(readonly state: AccountDispatchState) {}
+  fetchCalls = 0;
+  constructor(
+    readonly state: AccountDispatchState,
+    readonly material: { keyId: string; privateKey: string } | null = null,
+    readonly readSnapshot: ((identity: Identity, historyFromMs: number) => Promise<Snapshot>) | null = null,
+    readonly fetchImpl: typeof fetch | null = null,
+    readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
+  ) {}
+  readonly #spent = new WeakSet<() => Promise<void>>();
   async market(): Promise<MarketEvidence> {
     throw new Error("operation_not_enabled");
   }
-  async snapshot(_identity: Identity, _historyFromMs: number): Promise<Snapshot> {
-    throw new Error("operation_not_enabled");
+  async snapshot(id: Identity, historyFromMs: number): Promise<Snapshot> {
+    if (id.subaccount !== PRODUCTION_SUBACCOUNT || id.exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) {
+      throw new Error("account_target_pair_mismatch");
+    }
+    if (id.keyFingerprint !== this.state.credentialFingerprint) throw new Error("credential_fingerprint_mismatch");
+    if (!this.readSnapshot) throw new Error("snapshot_unavailable");
+    const snapshot = await this.readSnapshot(id, historyFromMs);
+    if (canonical(snapshot.identity) !== canonical(id)) throw new Error("production_account_mismatch");
+    return snapshot;
   }
-  async submit(_request: Request, _finalCheck: () => Promise<void>): Promise<{ orderId?: string }> {
-    this.submitAttempts += 1;
-    throw new Error(accountDispatchDecision(this.state).reason);
+  async submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }> {
+    this.refuseBeforeWire();
+    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck);
+    return {};
   }
-  async cancel(_orderId: string, _finalCheck: () => Promise<void>): Promise<void> {
+  async cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void> {
+    this.refuseBeforeWire();
+    requireProof(/^[A-Za-z0-9._:-]{1,128}$/.test(orderId), "production_cancel_id_invalid");
+    const market = this.orderMarket ? await this.orderMarket(orderId) : null;
+    if (market === null || !/^KXBTC15M[A-Za-z0-9._-]+$/.test(market)) {
+      throw new Error("production_cancel_market_missing");
+    }
+    const path = `${ORDER_PATH}/${encodeURIComponent(orderId)}?market_ticker=${encodeURIComponent(market)}&subaccount=${PRODUCTION_SUBACCOUNT}&exchange_index=${PRODUCTION_EXCHANGE_INDEX}`;
+    await this.mutate("DELETE", path, undefined, finalCheck);
+  }
+  private refuseBeforeWire(): void {
     this.submitAttempts += 1;
-    throw new Error(accountDispatchDecision(this.state).reason);
+    const decision = accountDispatchDecision(this.state);
+    if (!decision.allowed) throw new Error(decision.reason);
+  }
+  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>): Promise<void> {
+    if (!ProductionExecutor.isFinalFence(finalCheck) || this.#spent.has(finalCheck)) {
+      throw new Error("production_opaque_fence_required");
+    }
+    await finalCheck();
+    this.#spent.add(finalCheck);
+    if (!this.material) throw new Error("credential_unavailable");
+    const fingerprint = dedicatedSignerFingerprint(this.material.keyId, this.material.privateKey);
+    if (!fingerprint || fingerprint !== this.state.credentialFingerprint) {
+      throw new Error("credential_fingerprint_mismatch");
+    }
+    if (!this.fetchImpl) throw new Error("live_transport_not_enabled");
+    const timestamp = String(Date.now());
+    const signature = signOwnedKey(this.material, timestamp, method, path.split("?")[0] ?? path);
+    this.fetchCalls += 1;
+    const response = await this.fetchImpl(`https://external-api.kalshi.com${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "KALSHI-ACCESS-KEY": this.material.keyId.trim(),
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+      },
+      ...(body === undefined ? {} : { body }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    requireProof(response.ok, "production_mutation_response_unproven");
   }
 }
 
@@ -82,9 +177,27 @@ export function bindAccountProductionWorker(input: {
   workerStarted: false;
   executionActive: false;
 } {
-  const exchange = new AccountScopedExchange(input.state);
-  const ledger = new ProductionLedger(input.pool, input.executionAccountId);
+  const exchange = new AccountScopedExchange({ ...input.state, liveExecutionEnabled: false });
+  const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange);
+  executor.accountOwnerUserId = input.ownerUserId;
   const worker = new ProductionWorker(executor);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
+}
+
+function signOwnedKey(
+  material: { keyId: string; privateKey: string },
+  timestamp: string,
+  method: string,
+  path: string,
+): string {
+  const pem = material.privateKey.trim().replaceAll("\\n", "\n")
+    .replace(/(-----BEGIN [A-Z ]+-----)\s*/, "$1\n")
+    .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
+  const key = createPrivateKey(pem);
+  requireProof(key.asymmetricKeyType === "rsa" || key.asymmetricKeyType === "rsa-pss", "credential_invalid");
+  const signer = createSign("sha256");
+  signer.update(`${timestamp}${method}${path}`);
+  signer.end();
+  return signer.sign({ key, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }).toString("base64");
 }

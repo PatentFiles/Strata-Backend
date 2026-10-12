@@ -17,6 +17,8 @@ export class ProductionExecutor {
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
   constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
+  /** Set only for an owned user account. The legacy singleton leaves this null. */
+  accountOwnerUserId: string | null = null;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
     market_ticker: string; target: number; crossing_key: string;
@@ -33,7 +35,13 @@ export class ProductionExecutor {
   }
 
   private async readConfiguredStake(tx: PoolClient): Promise<{ cents: number; revision: number }> {
-    const row = (await tx.query(`SELECT configured_stake_cents, revision
+    const row = this.accountOwnerUserId
+      ? (await tx.query(`SELECT s.configured_stake_cents, s.revision
+        FROM strata_configured_stake s
+        JOIN v13_production_account a ON a.id = s.execution_account_id
+        WHERE s.execution_account_id = $1 AND a.owner_user_id = $2::uuid
+        FOR UPDATE OF s`, [this.ledger.accountId, this.accountOwnerUserId])).rows[0]
+      : (await tx.query(`SELECT configured_stake_cents, revision
       FROM strata_configured_stake WHERE id='production' FOR UPDATE`)).rows[0];
     const cents = Number(row?.configured_stake_cents);
     const revision = Number(row?.revision);
@@ -54,6 +62,16 @@ export class ProductionExecutor {
     const unknown = await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
     requireProof(lifecycle || unknown.rows.length === 0, "production_uncertain_order_blocks_mutation");
+    if (this.accountOwnerUserId) {
+      const owner = await tx.query(`SELECT owner_user_id::text AS owner_user_id
+        FROM v13_production_account WHERE id=$1`, [a.id]);
+      requireProof(owner.rows.length === 1 && owner.rows[0].owner_user_id === this.accountOwnerUserId,
+        "foreign_execution_account");
+      const master = await tx.query("SELECT manual_kill_switch FROM live_execution_config");
+      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false,
+        "production_master_kill_switch_or_flag");
+      return;
+    }
     if (this.exchange.mode === "SIMULATION") {
       const target = await tx.query("SELECT current_database() AS db,host(inet_server_addr()) AS host");
       requireProof(process.env.NODE_ENV === "test" &&
