@@ -330,8 +330,15 @@ test("scoped Kalshi reads are signed GETs and integer cents stay cents", async (
   assert.equal(body, null);
   assert.deepEqual(payload, { balance: 2500, portfolio_value: 1234 });
   await assert.rejects(
-    getScopedKalshiJson({ keyId: "key-a", privateKey: pem }, "/trade-api/v2/portfolio/orders/cancel", "", async () => new Response("{}", { status: 200 })),
+    getScopedKalshiJson({ keyId: "key-a", privateKey: pem }, "/trade-api/v2/portfolio/orders/ord-1/cancel", "", async () => new Response("{}", { status: 200 })),
   );
+  const order = await getScopedKalshiJson(
+    { keyId: "key-a", privateKey: pem },
+    "/trade-api/v2/portfolio/orders/ord-1",
+    "",
+    async () => new Response(JSON.stringify({ order: { order_id: "ord-1" } }), { status: 200 }),
+  );
+  assert.deepEqual(order, { order: { order_id: "ord-1" } });
 });
 
 test("scoped Kalshi reads sign stored Ed25519 keys", async () => {

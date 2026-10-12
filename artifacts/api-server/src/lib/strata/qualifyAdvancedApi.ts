@@ -233,6 +233,69 @@ function safePrice(value: unknown): string | undefined {
   return typeof value === "string" && /^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value) ? value : undefined;
 }
 
+/** Exact contract quantity in hundredths. Rejects floats, negatives, and more than two decimals. */
+function contractHundredths(value: unknown): number | null {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value)) return null;
+  const [wholeText, fractionText = ""] = value.split(".");
+  const units = BigInt(wholeText) * 100n + BigInt((fractionText + "00").slice(0, 2));
+  if (units > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(units);
+}
+
+function cancelV2Proved(
+  result: QualificationExchangeResult | "uncertain",
+  expected: { orderId: string; clientOrderId?: string | null },
+): boolean {
+  if (result === "uncertain" || result.unreadable || result.status !== 200) return false;
+  if (!result.body || typeof result.body !== "object" || Array.isArray(result.body)) return false;
+  const body = result.body as Record<string, unknown>;
+  if (body.order_id !== expected.orderId) return false;
+  if ("client_order_id" in body && body.client_order_id != null && body.client_order_id !== expected.clientOrderId) return false;
+  if (body.reduced_by !== "1.00" || contractHundredths(body.reduced_by) !== 100) return false;
+  if ("ts_ms" in body && (typeof body.ts_ms !== "number" || !Number.isSafeInteger(body.ts_ms))) return false;
+  return true;
+}
+
+function nestedOrder(body: unknown): Record<string, unknown> | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const nested = (body as Record<string, unknown>).order;
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) return null;
+  return nested as Record<string, unknown>;
+}
+
+function matchesWhenPresent(record: Record<string, unknown>, key: string, expected: string | null | undefined): boolean {
+  if (!(key in record) || record[key] == null) return true;
+  return record[key] === expected;
+}
+
+type ReconciledOrder =
+  | { kind: "canceled" }
+  | { kind: "resting" }
+  | { kind: "fill"; fillCount?: string; averageFillPrice?: string }
+  | { kind: "unknown" };
+
+function reconcileQualificationOrder(
+  body: unknown,
+  stored: { orderId: string; clientOrderId?: string | null; ticker?: string | null },
+): ReconciledOrder {
+  const order = nestedOrder(body);
+  if (!order || order.order_id !== stored.orderId) return { kind: "unknown" };
+  if (!matchesWhenPresent(order, "ticker", stored.ticker)) return { kind: "unknown" };
+  if (!matchesWhenPresent(order, "client_order_id", stored.clientOrderId)) return { kind: "unknown" };
+  const fill = contractHundredths(order.fill_count);
+  const remaining = contractHundredths(order.remaining_count);
+  const status = order.status;
+  const fillCount = typeof order.fill_count === "string" && fill !== null ? order.fill_count : undefined;
+  const averageFillPrice = safePrice(order.average_fill_price);
+  if (fill !== null && fill > 0) return { kind: "fill", fillCount, averageFillPrice };
+  if (status === "executed" || status === "filled" || status === "partially_executed") {
+    return { kind: "fill", fillCount, averageFillPrice };
+  }
+  if (fill === 0 && remaining === 0 && status === "canceled") return { kind: "canceled" };
+  if (fill === 0 && remaining === 100 && status === "resting") return { kind: "resting" };
+  return { kind: "unknown" };
+}
+
 function storedResult(row: QualificationGuardRecord | null): QualificationResult {
   if (!row || row.state === "inflight") return { status: "QUALIFICATION_ALREADY_IN_PROGRESS" };
   if (row.state === "order_uncertain") return { status: "QUALIFICATION_ORDER_OUTCOME_UNCERTAIN" };
@@ -298,6 +361,92 @@ async function finishUpgrade(
   };
 }
 
+async function upgradeCanceledAttempt(
+  guard: QualificationGuard,
+  transport: QualificationTransport,
+  creds: QualificationCreds,
+  connectionId: string,
+  orderMeta: { clientOrderId?: string | null; orderId: string; ticker: string },
+): Promise<QualificationResult> {
+  await guard.transition(connectionId, {
+    state: "canceled",
+    clientOrderId: orderMeta.clientOrderId,
+    orderId: orderMeta.orderId,
+    ticker: orderMeta.ticker,
+    fillCount: "0.00",
+  });
+  if (await guard.claimUpgrade(connectionId) !== "claimed") return storedResult(await guard.read(connectionId));
+  return finishUpgrade(guard, transport, creds, connectionId, { orderId: orderMeta.orderId, ticker: orderMeta.ticker });
+}
+
+async function recoverCancelUncertain(
+  input: {
+    creds: QualificationCreds;
+    connectionId: string;
+    guard: QualificationGuard;
+    transport: QualificationTransport;
+  },
+  existing: QualificationGuardRecord,
+): Promise<QualificationResult> {
+  const orderId = safeId(existing.orderId);
+  const ticker = typeof existing.ticker === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(existing.ticker) ? existing.ticker : null;
+  const stopped = {
+    status: "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN",
+    qualificationOrderCreated: true,
+    orderId: orderId ?? undefined,
+    ticker: existing.ticker ?? undefined,
+    fillCount: "0.00",
+  };
+  if (!orderId || !ticker) return stopped;
+  const read = await input.transport.get(input.creds, `/trade-api/v2/portfolio/orders/${orderId}`);
+  if (read === "uncertain" || read.unreadable || read.status !== 200) return stopped;
+  const picture = reconcileQualificationOrder(read.body, {
+    orderId,
+    clientOrderId: existing.clientOrderId,
+    ticker,
+  });
+  if (picture.kind === "unknown") return stopped;
+  if (picture.kind === "fill") {
+    await input.guard.transition(input.connectionId, {
+      state: "unexpected_fill",
+      clientOrderId: existing.clientOrderId,
+      orderId,
+      ticker,
+      fillCount: picture.fillCount,
+      averageFillPrice: picture.averageFillPrice,
+    });
+    return {
+      status: "UNEXPECTED_QUALIFICATION_FILL",
+      qualificationOrderCreated: true,
+      orderId,
+      ticker,
+      fillCount: picture.fillCount,
+      averageFillPrice: picture.averageFillPrice,
+    };
+  }
+  if (picture.kind === "resting") {
+    const canceled = await input.transport.delete(
+      input.creds,
+      `${QUALIFICATION_ORDER_PATH}/${orderId}`,
+      `?market_ticker=${encodeURIComponent(ticker)}`,
+    );
+    if (!cancelV2Proved(canceled, { orderId, clientOrderId: existing.clientOrderId })) {
+      return {
+        status: "QUALIFICATION_CANCEL_UNCERTAIN",
+        qualificationOrderCreated: true,
+        orderId,
+        ticker,
+        fillCount: "0.00",
+      };
+    }
+  }
+  return upgradeCanceledAttempt(input.guard, input.transport, input.creds, input.connectionId, {
+    clientOrderId: existing.clientOrderId,
+    orderId,
+    ticker,
+  });
+}
+
 export async function qualifyAdvancedApi(input: {
   creds: QualificationCreds;
   connectionId: string;
@@ -317,6 +466,7 @@ export async function qualifyAdvancedApi(input: {
       ticker: existing.ticker ?? undefined,
     });
   }
+  if (existing?.state === "cancel_uncertain") return recoverCancelUncertain(input, existing);
   if (existing) return storedResult(existing);
   if (await input.guard.claim(input.connectionId) !== "claimed") return storedResult(await input.guard.read(input.connectionId));
 
@@ -418,7 +568,7 @@ export async function qualifyAdvancedApi(input: {
     `${QUALIFICATION_ORDER_PATH}/${orderId}`,
     `?market_ticker=${encodeURIComponent(selected.ticker)}`,
   );
-  if (httpClass(canceled) !== "response" || canceled === "uncertain" || (canceled.status !== 200 && canceled.status !== 204)) {
+  if (!cancelV2Proved(canceled, { orderId, clientOrderId })) {
     return {
       status: "QUALIFICATION_CANCEL_UNCERTAIN",
       qualificationOrderCreated: true,
@@ -427,32 +577,11 @@ export async function qualifyAdvancedApi(input: {
       fillCount: "0.00",
     };
   }
-  const cancelBody = canceled.status === 204 ? null : orderRecord(canceled.body);
-  if (canceled.status !== 204) {
-    const cancelRemaining = fixedPoint(cancelBody?.remaining_count);
-    const cancelStatus = cancelBody?.status;
-    const proved = cancelRemaining.kind === "zero" || cancelStatus === "canceled" || cancelStatus === "cancelled";
-    if (!proved) {
-      return {
-        status: "QUALIFICATION_CANCEL_UNCERTAIN",
-        qualificationOrderCreated: true,
-        orderId,
-        ticker: selected.ticker,
-        fillCount: "0.00",
-      };
-    }
-  }
-  await input.guard.transition(input.connectionId, {
-    state: "canceled",
+  return upgradeCanceledAttempt(input.guard, input.transport, input.creds, input.connectionId, {
     clientOrderId,
     orderId,
     ticker: selected.ticker,
-    fillCount: "0.00",
   });
-  if (await input.guard.claimUpgrade(input.connectionId) !== "claimed") {
-    return storedResult(await input.guard.read(input.connectionId));
-  }
-  return finishUpgrade(input.guard, input.transport, input.creds, input.connectionId, { orderId, ticker: selected.ticker });
 }
 
 export function createLiveQualificationTransport(fetchImpl: typeof fetch = fetch): QualificationTransport {

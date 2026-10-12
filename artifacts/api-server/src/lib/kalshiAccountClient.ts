@@ -413,13 +413,15 @@ function isAllowedGetPath(path: string): boolean {
     /^\/trade-api\/v2\/markets\/[^/]+\/orderbook$/.test(path);
 }
 
+const SCOPED_GET_ORDER_PATH = /^\/trade-api\/v2\/portfolio\/orders\/[A-Za-z0-9_-]{1,128}$/;
+
 export async function getScopedKalshiJson(
   creds: { keyId: string; privateKey: string },
   path: string,
   query = "",
   fetchImpl: typeof fetch = fetch,
 ): Promise<unknown> {
-  if (!isAllowedGetPath(path)) throw new KalshiApiError("INVALID_RESPONSE");
+  if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
   const response = await fetchImpl(`${baseUrl()}${path}${query}`, {

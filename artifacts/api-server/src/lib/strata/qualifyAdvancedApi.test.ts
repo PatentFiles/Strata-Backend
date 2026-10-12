@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
-import { listOpenKalshiMarkets, mutateScopedKalshi, OPEN_MARKET_MAX_PAGES, OPEN_MARKET_PAGE_LIMIT } from "../kalshiAccountClient";
+import { getScopedKalshiJson, listOpenKalshiMarkets, mutateScopedKalshi, OPEN_MARKET_MAX_PAGES, OPEN_MARKET_PAGE_LIMIT } from "../kalshiAccountClient";
 import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
 import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
 import {
@@ -33,6 +33,15 @@ function ok(body: unknown, status = 200): QualificationExchangeResult {
   return { status, body, unreadable: false };
 }
 
+function v2Cancel(orderId = "ord-1", clientOrderId: string | null = "client-1", reducedBy = "1.00"): QualificationExchangeResult {
+  return ok({
+    order_id: orderId,
+    ...(clientOrderId === null ? {} : { client_order_id: clientOrderId }),
+    reduced_by: reducedBy,
+    ts_ms: 1234567890,
+  });
+}
+
 function harness(overrides: Partial<{
   balance: unknown;
   limits: unknown[];
@@ -58,7 +67,7 @@ function harness(overrides: Partial<{
     },
     async delete(creds, path, query) {
       calls.push({ method: "DELETE", path, body: query, keyId: creds.keyId });
-      return overrides.cancel ?? ok({ status: "canceled", remaining_count: "0.00" });
+      return overrides.cancel ?? v2Cancel();
     },
     async listOpenMarkets() {
       calls.push({ method: "GET", path: "/markets", keyId: "" });
@@ -296,7 +305,7 @@ test("an unexpected fill does not place or cancel another order", async () => {
 test("an uncertain cancel does not request the upgrade", async () => {
   const flow = harness({ cancel: "uncertain" });
   assert.equal((await flow.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
-  assert.equal((await flow.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal((await flow.run()).status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
   assert.equal(flow.orders().length, 1);
   assert.equal(flow.cancels().length, 1);
   assert.equal(flow.upgrades().length, 0);
@@ -333,7 +342,7 @@ test("two concurrent confirmations cannot create two qualification orders", asyn
     },
     async delete(creds, path) {
       calls.push({ method: "DELETE", path, keyId: creds.keyId });
-      return ok({ status: "canceled", remaining_count: "0.00" });
+      return v2Cancel("ord-1", null);
     },
     async listOpenMarkets() {
       return [market("SAFE-MKT", "0.4500")];
@@ -393,7 +402,7 @@ test("user A cannot qualify user B", async () => {
         return ok({}, 201);
       },
       async delete() {
-        return ok({ status: "canceled", remaining_count: "0.00" });
+        return v2Cancel("ord-a", null);
       },
       async listOpenMarkets() {
         return [market("SAFE-MKT", "0.4500")];
@@ -445,6 +454,172 @@ test("the route rejects a missing confirmation before any qualification call", a
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("a valid V2 cancel proves the one-contract reduction and upgrades once", async () => {
+  const flow = harness();
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(flow.orders().length, 1);
+  assert.equal(flow.cancels().length, 1);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.orders()[0]?.body && (flow.orders()[0].body as { price: string }).price, "0.0100");
+});
+
+test("a V2 cancel for another order or a partial reduction does not upgrade", async () => {
+  const wrongOrder = harness({ cancel: v2Cancel("ord-other") });
+  assert.equal((await wrongOrder.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(wrongOrder.upgrades().length, 0);
+  assert.equal(wrongOrder.orders().length, 1);
+  const partial = harness({ cancel: v2Cancel("ord-1", "client-1", "0.50") });
+  assert.equal((await partial.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(partial.upgrades().length, 0);
+  assert.equal(partial.cancels().length, 1);
+  const malformed = harness({ cancel: ok({ order_id: "ord-1", client_order_id: "client-1", reduced_by: "1.00abc", ts_ms: 1234567890 }) });
+  assert.equal((await malformed.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(malformed.upgrades().length, 0);
+  const fractionalTime = harness({ cancel: ok({ order_id: "ord-1", client_order_id: "client-1", reduced_by: "1.00", ts_ms: 1.5 }) });
+  assert.equal((await fractionalTime.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(fractionalTime.upgrades().length, 0);
+  const wrongClient = harness({ cancel: v2Cancel("ord-1", "client-other") });
+  assert.equal((await wrongClient.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(wrongClient.orders().length, 1);
+  assert.equal(wrongClient.upgrades().length, 0);
+  const oldOrderShape = harness({ cancel: ok({ status: "canceled", remaining_count: "0.00" }) });
+  assert.equal((await oldOrderShape.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(oldOrderShape.upgrades().length, 0);
+  assert.equal(oldOrderShape.orders().length, 1);
+});
+
+function qualificationOrder(overrides: Record<string, unknown> = {}) {
+  return ok({
+    order: {
+      order_id: "ord-1",
+      client_order_id: "client-1",
+      ticker: "SAFE-MKT",
+      fill_count: "0.00",
+      remaining_count: "0.00",
+      status: "canceled",
+      ...overrides,
+    },
+  });
+}
+
+async function recover(order: QualificationExchangeResult | "uncertain", cancel?: QualificationExchangeResult | "uncertain") {
+  const calls: Array<{ method: string; path: string; body?: unknown; keyId: string }> = [];
+  const transport: QualificationTransport = {
+    async get(creds, path) {
+      calls.push({ method: "GET", path, keyId: creds.keyId });
+      if (path === "/trade-api/v2/portfolio/orders/ord-1") return order;
+      if (path.endsWith("/account/limits")) return ok({ usage_tier: "advanced" });
+      return ok(null, 404);
+    },
+    async post(creds, path, body) {
+      calls.push({ method: "POST", path, body, keyId: creds.keyId });
+      return path === QUALIFICATION_ORDER_PATH ? ok({ order_id: "ord-new" }, 201) : ok({}, 201);
+    },
+    async delete(creds, path, query) {
+      calls.push({ method: "DELETE", path, body: query, keyId: creds.keyId });
+      return cancel ?? v2Cancel();
+    },
+    async listOpenMarkets() {
+      calls.push({ method: "GET", path: "/markets", keyId: "" });
+      return [market("OTHER-MKT", "0.9900")];
+    },
+  };
+  const guard = createMemoryQualificationGuard();
+  await guard.claim("conn-1");
+  await guard.transition("conn-1", {
+    state: "cancel_uncertain",
+    clientOrderId: "client-1",
+    orderId: "ord-1",
+    ticker: "SAFE-MKT",
+    fillCount: "0.00",
+  });
+  const run = () => qualifyAdvancedApi({
+    creds: { keyId: "key-user", privateKey: "stored-private-key" },
+    connectionId: "conn-1",
+    confirm: QUALIFICATION_CONFIRMATION,
+    guard,
+    transport,
+    now: NOW,
+    newClientOrderId: () => "client-new",
+  });
+  const orders = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_ORDER_PATH);
+  const cancels = () => calls.filter((call) => call.method === "DELETE");
+  const upgrades = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_UPGRADE_PATH);
+  return { calls, run, orders, cancels, upgrades };
+}
+
+test("a canceled qualification order recovers into one upgrade and no new order", async () => {
+  const flow = await recover(qualificationOrder());
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.calls.some((call) => call.path === "/markets"), false);
+  assert.equal(flow.calls.some((call) => call.path === "/trade-api/v2/portfolio/orders/ord-1"), true);
+});
+
+test("a still-resting qualification order is canceled once with the stored ticker", async () => {
+  const flow = await recover(qualificationOrder({ fill_count: "0.00", remaining_count: "1.00", status: "resting" }));
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 1);
+  assert.equal(flow.cancels()[0]?.path, `${QUALIFICATION_ORDER_PATH}/ord-1`);
+  assert.equal(flow.cancels()[0]?.body, "?market_ticker=SAFE-MKT");
+  assert.equal(flow.upgrades().length, 1);
+  const uncertain = await recover(
+    qualificationOrder({ fill_count: "0.00", remaining_count: "1.00", status: "resting" }),
+    "uncertain",
+  );
+  assert.equal((await uncertain.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(uncertain.orders().length, 0);
+  assert.equal(uncertain.cancels().length, 1);
+  assert.equal(uncertain.upgrades().length, 0);
+});
+
+test("a qualification fill found during cancel recovery is not upgraded or replaced", async () => {
+  const flow = await recover(qualificationOrder({
+    fill_count: "0.50",
+    remaining_count: "0.50",
+    status: "executed",
+    average_fill_price: "0.0100",
+  }));
+  const result = await flow.run();
+  assert.equal(result.status, "UNEXPECTED_QUALIFICATION_FILL");
+  assert.equal(result.fillCount, "0.50");
+  assert.equal(result.orderId, "ord-1");
+  assert.equal(result.ticker, "SAFE-MKT");
+  assert.equal(result.averageFillPrice, "0.0100");
+  assert.equal(JSON.stringify(result).includes("stored-private-key"), false);
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 0);
+  assert.equal((await flow.run()).status, "UNEXPECTED_QUALIFICATION_FILL");
+  assert.equal(flow.orders().length, 0);
+});
+
+test("an unreadable qualification order stays cancel-uncertain without another order", async () => {
+  const malformed = await recover(ok({ order: { order_id: "ord-1" } }));
+  assert.equal((await malformed.run()).status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
+  assert.equal(malformed.orders().length, 0);
+  assert.equal(malformed.cancels().length, 0);
+  assert.equal(malformed.upgrades().length, 0);
+  assert.equal((await malformed.run()).status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
+  assert.equal(malformed.orders().length, 0);
+  const unavailable = await recover("uncertain");
+  assert.equal((await unavailable.run()).status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
+  assert.equal(unavailable.orders().length, 0);
+  assert.equal(unavailable.cancels().length, 0);
+  assert.equal(unavailable.upgrades().length, 0);
+  const wrongOrder = await recover(qualificationOrder({ order_id: "ord-other" }));
+  assert.equal((await wrongOrder.run()).status, "QUALIFICATION_CANCEL_RECONCILIATION_UNCERTAIN");
+  assert.equal(wrongOrder.orders().length, 0);
+  assert.equal(wrongOrder.cancels().length, 0);
+  assert.equal(wrongOrder.upgrades().length, 0);
 });
 
 test("scoped mutations refuse every path except the qualification order, cancel, and upgrade", async () => {
