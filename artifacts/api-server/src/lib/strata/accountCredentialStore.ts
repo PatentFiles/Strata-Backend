@@ -9,11 +9,49 @@ import {
   type StoredCredentialRef,
 } from "./accountCommissioningContext";
 
-export interface CredentialQuery {
+export interface CredentialClient {
   query(text: string, params?: unknown[]): Promise<{
     rows: Array<Record<string, unknown>>;
     rowCount?: number | null;
   }>;
+}
+
+/** Reads may use a pool. Replacement requires a transaction around one connection. */
+export interface CredentialDatabase extends CredentialClient {
+  transaction<T>(work: (client: CredentialClient) => Promise<T>): Promise<T>;
+}
+
+export interface PgClientLike extends CredentialClient {
+  release(error?: unknown): void;
+}
+
+/** The same shape as node-postgres Pool.connect/query. */
+export interface PgPoolLike extends CredentialClient {
+  connect(): Promise<PgClientLike>;
+}
+
+export function credentialDatabaseFromPool(pool: PgPoolLike): CredentialDatabase {
+  return {
+    query: (text, params) => pool.query(text, params),
+    async transaction(work) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await work(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          /* the failed statement already aborted the transaction */
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  };
 }
 
 const FINGERPRINT = /^[0-9a-f]{64}$/;
@@ -61,74 +99,76 @@ const EXECUTION_TARGET_SQL = `
     AND pc.id = $2::uuid
 `;
 
-const BINDING_PRECHECK_SQL = `
-  SELECT fa.user_id::text AS owner_user_id,
+const LOCK_OWNED_CONNECTION_SQL = `
+  -- credential-replacement:lock-connection
+  SELECT pc.id::text AS provider_connection_id,
          fa.id::text AS financial_account_id,
-         pc.id::text AS provider_connection_id,
-         pc.vault_secret_id::text AS connection_vault_secret_id,
-         (
-           SELECT count(*)::int
-           FROM private.kalshi_connection_credentials active
-           WHERE active.provider_connection_id = pc.id
-             AND active.owner_user_id = fa.user_id
-             AND active.role = $3
-             AND active.revoked_at IS NULL
-         ) AS active_count,
-         EXISTS (
-           SELECT 1 FROM private.kalshi_connection_credentials used
-           WHERE used.vault_secret_id = $4::uuid
-         ) AS vault_secret_used
-  FROM public.financial_accounts fa
-  JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
+         fa.user_id::text AS owner_user_id,
+         pc.vault_secret_id::text AS connection_vault_secret_id
+  FROM private.provider_connections pc
+  JOIN public.financial_accounts fa ON fa.id = pc.financial_account_id
   WHERE fa.user_id = $1::uuid
     AND fa.provider = 'kalshi'
     AND pc.id = $2::uuid
+  FOR UPDATE OF pc
 `;
 
-const REPLACE_BINDING_SQL = `
-  WITH owned AS (
-    SELECT fa.user_id, fa.id AS financial_account_id, pc.id AS provider_connection_id
-    FROM public.financial_accounts fa
-    JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
-    WHERE fa.user_id = $1::uuid
-      AND fa.provider = 'kalshi'
-      AND pc.id = $2::uuid
-      AND pc.vault_secret_id <> $4::uuid
-  ),
-  revoked AS (
-    UPDATE private.kalshi_connection_credentials c
-    SET revoked_at = now(), updated_at = now()
-    FROM owned
-    WHERE c.provider_connection_id = owned.provider_connection_id
-      AND c.owner_user_id = owned.user_id
-      AND c.financial_account_id = owned.financial_account_id
-      AND c.role = $3
-      AND c.revoked_at IS NULL
-    RETURNING c.id
-  ),
-  inserted AS (
-    INSERT INTO private.kalshi_connection_credentials (
-      owner_user_id, financial_account_id, provider_connection_id, role,
-      vault_secret_id, key_fingerprint, verified_at, verification_reason
-    )
-    SELECT owned.user_id, owned.financial_account_id, owned.provider_connection_id,
-           $3, $4::uuid, $5, NULL, NULL
-    FROM owned
-    RETURNING id
-  ),
-  linked AS (
-    UPDATE private.kalshi_connection_credentials old
-    SET replaced_by = inserted.id, updated_at = now()
-    FROM revoked, inserted
-    WHERE old.id = revoked.id
-    RETURNING old.id
-  )
-  SELECT inserted.id::text AS credential_id
-  FROM inserted
+const VAULT_SECRET_USED_SQL = `
+  -- credential-replacement:vault-used
+  SELECT id::text AS id
+  FROM private.kalshi_connection_credentials
+  WHERE vault_secret_id = $1::uuid
+  LIMIT 1
+`;
+
+const LOCK_ACTIVE_BINDING_SQL = `
+  -- credential-replacement:lock-active
+  SELECT id::text AS id
+  FROM private.kalshi_connection_credentials
+  WHERE provider_connection_id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND role = $4
+    AND revoked_at IS NULL
+  FOR UPDATE
+`;
+
+const REVOKE_ACTIVE_BINDING_SQL = `
+  -- credential-replacement:revoke
+  UPDATE private.kalshi_connection_credentials
+  SET revoked_at = now(), updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND provider_connection_id = $3::uuid
+    AND financial_account_id = $4::uuid
+    AND role = $5
+    AND revoked_at IS NULL
+  RETURNING id::text AS id
+`;
+
+const INSERT_BINDING_SQL = `
+  -- credential-replacement:insert
+  INSERT INTO private.kalshi_connection_credentials (
+    owner_user_id, financial_account_id, provider_connection_id, role,
+    vault_secret_id, key_fingerprint, verified_at, verification_reason
+  ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6, NULL, NULL)
+  RETURNING id::text AS credential_id
+`;
+
+const LINK_REPLACED_BINDING_SQL = `
+  -- credential-replacement:link
+  UPDATE private.kalshi_connection_credentials
+  SET replaced_by = $2::uuid, updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND revoked_at IS NOT NULL
+    AND replaced_by IS NULL
+  RETURNING id::text AS id
 `;
 
 export function createDatabaseAccountCommissioningPorts(
-  db: CredentialQuery,
+  db: CredentialClient,
   now = () => new Date().toISOString(),
 ): AccountCommissioningPorts {
   return {
@@ -151,7 +191,7 @@ export function createDatabaseAccountCommissioningPorts(
 }
 
 export async function listOwnedConnections(
-  db: CredentialQuery,
+  db: CredentialClient,
   authenticatedUserId: string,
 ): Promise<OwnedKalshiConnection[]> {
   const result = await db.query(LIST_CONNECTIONS_SQL, [authenticatedUserId]);
@@ -163,7 +203,7 @@ export async function listOwnedConnections(
 }
 
 export async function listCredentialRefs(
-  db: CredentialQuery,
+  db: CredentialClient,
   authenticatedUserId: string,
   providerConnectionId: string,
 ): Promise<StoredCredentialRef[]> {
@@ -188,7 +228,7 @@ export async function listCredentialRefs(
 }
 
 export async function readExecutionTarget(
-  db: CredentialQuery,
+  db: CredentialClient,
   authenticatedUserId: string,
   providerConnectionId: string,
 ): Promise<ExecutionTarget | null> {
@@ -206,7 +246,7 @@ export async function readExecutionTarget(
 }
 
 export async function readAccountSnapshot(
-  db: CredentialQuery,
+  db: CredentialClient,
   authenticatedUserId: string,
   providerConnectionId: string,
   asOf: string,
@@ -231,7 +271,7 @@ export async function readAccountSnapshot(
 }
 
 export async function replaceOwnedCredentialBinding(
-  db: CredentialQuery,
+  db: CredentialDatabase,
   input: {
     authenticatedUserId: string;
     providerConnectionId: string;
@@ -247,37 +287,8 @@ export async function replaceOwnedCredentialBinding(
   if (input.keyFingerprint !== null && !FINGERPRINT.test(input.keyFingerprint)) {
     return { ok: false, reason: "credential_fingerprint_invalid" };
   }
-  const precheck = await db.query(BINDING_PRECHECK_SQL, [
-    input.authenticatedUserId,
-    input.providerConnectionId,
-    input.role,
-    input.vaultSecretId,
-  ]);
-  if (precheck.rows.length === 0) return { ok: false, reason: "credential_not_owned" };
-  if (precheck.rows.length > 1) return { ok: false, reason: "owned_connection_ambiguous" };
-  const row = precheck.rows[0] ?? {};
-  if (text(row.owner_user_id) !== input.authenticatedUserId) {
-    return { ok: false, reason: "credential_not_owned" };
-  }
-  if (text(row.connection_vault_secret_id) === input.vaultSecretId) {
-    return { ok: false, reason: "vault_secret_reused_from_provider_connection" };
-  }
-  if (row.vault_secret_used === true || row.vault_secret_used === "t") {
-    return { ok: false, reason: "vault_secret_reused" };
-  }
-  const activeCount = integer(row.active_count) ?? 0;
-  if (activeCount > 1) return { ok: false, reason: "ambiguous_credential_role" };
   try {
-    const replaced = await db.query(REPLACE_BINDING_SQL, [
-      input.authenticatedUserId,
-      input.providerConnectionId,
-      input.role,
-      input.vaultSecretId,
-      input.keyFingerprint,
-    ]);
-    const credentialId = text(replaced.rows[0]?.credential_id);
-    if (!credentialId) return { ok: false, reason: "credential_binding_rejected" };
-    return { ok: true, credentialId };
+    return await db.transaction((client) => replaceCredentialInTransaction(client, input));
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
     if (code === "23505") return { ok: false, reason: "ambiguous_credential_role" };
@@ -285,6 +296,79 @@ export async function replaceOwnedCredentialBinding(
     if (code === "23503") return { ok: false, reason: "credential_binding_rejected" };
     throw error;
   }
+}
+
+async function replaceCredentialInTransaction(
+  client: CredentialClient,
+  input: {
+    authenticatedUserId: string;
+    providerConnectionId: string;
+    role: string;
+    vaultSecretId: string;
+    keyFingerprint: string | null;
+  },
+): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
+  const locked = await client.query(LOCK_OWNED_CONNECTION_SQL, [
+    input.authenticatedUserId,
+    input.providerConnectionId,
+  ]);
+  if (locked.rows.length === 0) return { ok: false, reason: "credential_not_owned" };
+  if (locked.rows.length > 1) return { ok: false, reason: "owned_connection_ambiguous" };
+  const owned = locked.rows[0] ?? {};
+  if (text(owned.owner_user_id) !== input.authenticatedUserId ||
+      text(owned.provider_connection_id) !== input.providerConnectionId) {
+    return { ok: false, reason: "credential_not_owned" };
+  }
+  const financialAccountId = requiredText(owned.financial_account_id, "credential_not_owned");
+  if (text(owned.connection_vault_secret_id) === input.vaultSecretId) {
+    return { ok: false, reason: "vault_secret_reused_from_provider_connection" };
+  }
+  const used = await client.query(VAULT_SECRET_USED_SQL, [input.vaultSecretId]);
+  if (used.rows.length > 0) return { ok: false, reason: "vault_secret_reused" };
+  const active = await client.query(LOCK_ACTIVE_BINDING_SQL, [
+    input.providerConnectionId,
+    input.authenticatedUserId,
+    financialAccountId,
+    input.role,
+  ]);
+  if (active.rows.length > 1) return { ok: false, reason: "ambiguous_credential_role" };
+  const previousId = text(active.rows[0]?.id);
+  if (previousId) {
+    const revoked = await client.query(REVOKE_ACTIVE_BINDING_SQL, [
+      previousId,
+      input.authenticatedUserId,
+      input.providerConnectionId,
+      financialAccountId,
+      input.role,
+    ]);
+    if (revoked.rows.length !== 1) throw bindingRejected("credential_binding_rejected");
+  }
+  const inserted = await client.query(INSERT_BINDING_SQL, [
+    input.authenticatedUserId,
+    financialAccountId,
+    input.providerConnectionId,
+    input.role,
+    input.vaultSecretId,
+    input.keyFingerprint,
+  ]);
+  const credentialId = text(inserted.rows[0]?.credential_id);
+  if (!credentialId) throw bindingRejected("credential_binding_rejected");
+  if (previousId) {
+    const linked = await client.query(LINK_REPLACED_BINDING_SQL, [
+      previousId,
+      credentialId,
+      input.authenticatedUserId,
+      input.providerConnectionId,
+    ]);
+    if (linked.rows.length !== 1) throw bindingRejected("credential_binding_rejected");
+  }
+  return { ok: true, credentialId };
+}
+
+function bindingRejected(reason: string): Error & { code: string } {
+  const error = new Error(reason) as Error & { code: string };
+  error.code = "23503";
+  return error;
 }
 
 export function knownCredentialRole(role: string): role is KnownCredentialRole {

@@ -11,7 +11,8 @@ import {
 import {
   createDatabaseAccountCommissioningPorts,
   replaceOwnedCredentialBinding,
-  type CredentialQuery,
+  type CredentialClient,
+  type CredentialDatabase,
 } from "./accountCredentialStore";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
@@ -64,117 +65,146 @@ function memory(seed?: {
   bindings?: BindingRow[];
   executions?: ExecutionRow[];
   duplicateList?: boolean;
+  failInsert?: boolean;
 }) {
   const calls: string[] = [];
   let sequence = 0;
+  let turn = Promise.resolve();
   const connections = [...(seed?.connections ?? [
     { userId: USER_A, financialAccountId: FINANCIAL_A, providerConnectionId: CONNECTION_A, vaultSecretId: WALLET_A },
     { userId: USER_B, financialAccountId: FINANCIAL_B, providerConnectionId: CONNECTION_B, vaultSecretId: WALLET_B },
   ])];
   const bindings = [...(seed?.bindings ?? [])];
   const executions = [...(seed?.executions ?? [])];
-  const db: CredentialQuery = {
-    async query(text, params = []) {
-      calls.push(text);
-      assert.equal(text.includes("decrypted_secret"), false);
-      assert.equal(text.includes("KALSHI_"), false);
-      if (text.includes("fa.provider = 'kalshi'") && text.includes("active_count")) {
-        assert.match(text, /fa\.user_id = \$1::uuid/);
-        assert.match(text, /pc\.id = \$2::uuid/);
-        const owned = connections.filter((row) => row.userId === params[0] && row.providerConnectionId === params[1]);
-        return {
-          rows: owned.map((row) => ({
-            owner_user_id: row.userId,
-            financial_account_id: row.financialAccountId,
-            provider_connection_id: row.providerConnectionId,
-            connection_vault_secret_id: row.vaultSecretId,
-            active_count: bindings.filter((binding) =>
-              binding.providerConnectionId === row.providerConnectionId &&
-              binding.ownerUserId === row.userId &&
-              binding.role === params[2] &&
-              binding.revokedAt === null).length,
-            vault_secret_used: bindings.some((binding) => binding.vaultSecretId === params[3]),
-          })),
-        };
+  const query: CredentialClient["query"] = async (text, params = []) => {
+    calls.push(text);
+    assert.equal(text.includes("decrypted_secret"), false);
+    assert.equal(text.includes("KALSHI_"), false);
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
+    if (text.includes("credential-replacement:lock-connection")) {
+      assert.match(text, /FOR UPDATE OF pc/);
+      assert.match(text, /fa\.user_id = \$1::uuid/);
+      return {
+        rows: connections.filter((row) => row.userId === params[0] && row.providerConnectionId === params[1]).map((row) => ({
+          provider_connection_id: row.providerConnectionId,
+          financial_account_id: row.financialAccountId,
+          owner_user_id: row.userId,
+          connection_vault_secret_id: row.vaultSecretId,
+        })),
+      };
+    }
+    if (text.includes("credential-replacement:vault-used")) {
+      return { rows: bindings.filter((row) => row.vaultSecretId === params[0]).map((row) => ({ id: row.id })) };
+    }
+    if (text.includes("credential-replacement:lock-active")) {
+      assert.match(text, /FOR UPDATE/);
+      return {
+        rows: bindings.filter((row) =>
+          row.providerConnectionId === params[0] &&
+          row.ownerUserId === params[1] &&
+          row.financialAccountId === params[2] &&
+          row.role === params[3] &&
+          row.revokedAt === null).map((row) => ({ id: row.id })),
+      };
+    }
+    if (text.includes("credential-replacement:revoke")) {
+      const row = bindings.find((binding) => binding.id === params[0] && binding.revokedAt === null);
+      if (!row || row.ownerUserId !== params[1] || row.providerConnectionId !== params[2]) return { rows: [] };
+      row.revokedAt = "2026-10-12T20:00:00.000Z";
+      return { rows: [{ id: row.id }] };
+    }
+    if (text.includes("credential-replacement:insert")) {
+      if (seed?.failInsert) {
+        const error = new Error("insert failed") as Error & { code: string };
+        error.code = "23503";
+        throw error;
       }
-      if (text.includes("INSERT INTO private.kalshi_connection_credentials")) {
-        assert.match(text, /fa\.user_id = \$1::uuid/);
-        assert.match(text, /pc\.vault_secret_id <> \$4::uuid/);
-        assert.match(text, /c\.owner_user_id = owned\.user_id/);
-        const owned = connections.find((row) => row.userId === params[0] && row.providerConnectionId === params[1]);
-        if (!owned || owned.vaultSecretId === params[3]) return { rows: [] };
-        const id = `cred-${sequence += 1}`;
-        for (const binding of bindings) {
-          if (binding.providerConnectionId === owned.providerConnectionId &&
-              binding.ownerUserId === owned.userId &&
-              binding.role === params[2] &&
-              binding.revokedAt === null) {
-            binding.revokedAt = "2026-10-12T20:00:00.000Z";
-            binding.replacedBy = id;
-          }
-        }
-        bindings.push({
-          id,
-          ownerUserId: owned.userId,
-          financialAccountId: owned.financialAccountId,
-          providerConnectionId: owned.providerConnectionId,
-          role: String(params[2]),
-          vaultSecretId: String(params[3]),
-          keyFingerprint: typeof params[4] === "string" ? params[4] : null,
-          revokedAt: null,
-          replacedBy: null,
-        });
-        return { rows: [{ credential_id: id }] };
+      const id = `cred-${sequence += 1}`;
+      bindings.push({
+        id,
+        ownerUserId: String(params[0]),
+        financialAccountId: String(params[1]),
+        providerConnectionId: String(params[2]),
+        role: String(params[3]),
+        vaultSecretId: String(params[4]),
+        keyFingerprint: typeof params[5] === "string" ? params[5] : null,
+        revokedAt: null,
+        replacedBy: null,
+      });
+      return { rows: [{ credential_id: id }] };
+    }
+    if (text.includes("credential-replacement:link")) {
+      const row = bindings.find((binding) => binding.id === params[0] && binding.revokedAt !== null && binding.replacedBy === null);
+      if (!row || row.ownerUserId !== params[2] || row.providerConnectionId !== params[3]) return { rows: [] };
+      row.replacedBy = String(params[1]);
+      return { rows: [{ id: row.id }] };
+    }
+    if (text.includes("FROM public.financial_accounts fa") && text.includes("provider_connection_id")) {
+      assert.match(text, /fa\.user_id = \$1::uuid/);
+      return {
+        rows: connections.filter((row) => row.userId === params[0]).map((row) => ({
+          authenticated_user_id: row.userId,
+          financial_account_id: row.financialAccountId,
+          provider_connection_id: row.providerConnectionId,
+        })),
+      };
+    }
+    if (text.includes("FROM private.kalshi_connection_credentials c")) {
+      assert.match(text, /c\.owner_user_id = \$1::uuid/);
+      assert.match(text, /c\.provider_connection_id = \$2::uuid/);
+      assert.match(text, /c\.revoked_at IS NULL/);
+      const rows = bindings.filter((row) =>
+        row.ownerUserId === params[0] &&
+        row.providerConnectionId === params[1] &&
+        row.revokedAt === null);
+      const visible = seed?.duplicateList ? [...rows, ...rows] : rows;
+      return {
+        rows: visible.map((row) => ({
+          role: row.role,
+          provider_connection_id: row.providerConnectionId,
+          vault_secret_id: row.vaultSecretId,
+          key_fingerprint: row.keyFingerprint,
+        })),
+      };
+    }
+    if (text.includes("FROM v13_production_account")) {
+      assert.match(text, /a\.owner_user_id = \$1::uuid/);
+      assert.match(text, /pc\.id = \$2::uuid/);
+      const connection = connections.find((row) => row.userId === params[0] && row.providerConnectionId === params[1]);
+      const rows = executions.filter((row) =>
+        row.ownerUserId === params[0] && connection && row.financialAccountId === connection.financialAccountId);
+      return {
+        rows: rows.map((row) => ({
+          execution_account_id: row.id,
+          owner_user_id: row.ownerUserId,
+          provider_connection_id: connection?.providerConnectionId,
+          subaccount: row.subaccount,
+          exchange_index: row.exchangeIndex,
+          commissioned: row.commissioned,
+          execution_enabled: row.executionEnabled,
+          kill_switch: row.killSwitch,
+          key_fingerprint: row.keyFingerprint,
+        })),
+      };
+    }
+    throw new Error(`unexpected credential sql: ${text.slice(0, 80)}`);
+  };
+  const db: CredentialDatabase = {
+    query,
+    async transaction(work) {
+      const previous = turn;
+      let release: () => void = () => {};
+      turn = new Promise((resolve) => { release = resolve; });
+      await previous;
+      const snapshot = bindings.map((row) => ({ ...row }));
+      try {
+        return await work({ query });
+      } catch (error) {
+        bindings.splice(0, bindings.length, ...snapshot);
+        throw error;
+      } finally {
+        release();
       }
-      if (text.includes("FROM public.financial_accounts fa") && text.includes("provider_connection_id")) {
-        assert.match(text, /fa\.user_id = \$1::uuid/);
-        return {
-          rows: connections.filter((row) => row.userId === params[0]).map((row) => ({
-            authenticated_user_id: row.userId,
-            financial_account_id: row.financialAccountId,
-            provider_connection_id: row.providerConnectionId,
-          })),
-        };
-      }
-      if (text.includes("FROM private.kalshi_connection_credentials c")) {
-        assert.match(text, /c\.owner_user_id = \$1::uuid/);
-        assert.match(text, /c\.provider_connection_id = \$2::uuid/);
-        assert.match(text, /c\.revoked_at IS NULL/);
-        const rows = bindings.filter((row) =>
-          row.ownerUserId === params[0] &&
-          row.providerConnectionId === params[1] &&
-          row.revokedAt === null);
-        const visible = seed?.duplicateList ? [...rows, ...rows] : rows;
-        return {
-          rows: visible.map((row) => ({
-            role: row.role,
-            provider_connection_id: row.providerConnectionId,
-            vault_secret_id: row.vaultSecretId,
-            key_fingerprint: row.keyFingerprint,
-          })),
-        };
-      }
-      if (text.includes("FROM v13_production_account")) {
-        assert.match(text, /a\.owner_user_id = \$1::uuid/);
-        assert.match(text, /pc\.id = \$2::uuid/);
-        const connection = connections.find((row) => row.userId === params[0] && row.providerConnectionId === params[1]);
-        const rows = executions.filter((row) =>
-          row.ownerUserId === params[0] && connection && row.financialAccountId === connection.financialAccountId);
-        return {
-          rows: rows.map((row) => ({
-            execution_account_id: row.id,
-            owner_user_id: row.ownerUserId,
-            provider_connection_id: connection?.providerConnectionId,
-            subaccount: row.subaccount,
-            exchange_index: row.exchangeIndex,
-            commissioned: row.commissioned,
-            execution_enabled: row.executionEnabled,
-            kill_switch: row.killSwitch,
-            key_fingerprint: row.keyFingerprint,
-          })),
-        };
-      }
-      throw new Error(`unexpected credential sql: ${text.slice(0, 80)}`);
     },
   };
   return { db, calls, connections, bindings, executions };
@@ -303,6 +333,56 @@ test("replacement keeps the old secret reference and does not copy the wallet se
   assert.equal(state.bindings.some((row) => row.vaultSecretId === WALLET_A), false);
   const active = state.bindings.filter((row) => row.role === "restricted_execution" && row.revokedAt === null);
   assert.equal(active.length, 1);
+  const markers = state.calls.map((sql) => sql.match(/credential-replacement:([a-z-]+)/)?.[1]).filter(Boolean);
+  assert.deepEqual(markers, ["lock-connection", "vault-used", "lock-active", "revoke", "insert", "link"]);
+});
+
+test("a failed insert rolls the revoked binding back", async () => {
+  const state = memory({
+    bindings: [binding(USER_A, CONNECTION_A, FINANCIAL_A, "restricted_execution", SECRET_A)],
+    failInsert: true,
+  });
+  const result = await replaceOwnedCredentialBinding(state.db, {
+    authenticatedUserId: USER_A,
+    providerConnectionId: CONNECTION_A,
+    role: "restricted_execution",
+    vaultSecretId: SECRET_NEXT,
+    keyFingerprint: FINGERPRINT,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(state.bindings.length, 1);
+  assert.equal(state.bindings[0]?.revokedAt, null);
+  assert.equal(state.bindings[0]?.replacedBy, null);
+  assert.equal(state.bindings[0]?.vaultSecretId, SECRET_A);
+});
+
+test("concurrent replacements serialize to one active binding", async () => {
+  const state = memory({
+    bindings: [binding(USER_A, CONNECTION_A, FINANCIAL_A, "restricted_execution", SECRET_A)],
+  });
+  const second = "78787878-7878-4787-8787-787878787878";
+  const [first, next] = await Promise.all([
+    replaceOwnedCredentialBinding(state.db, {
+      authenticatedUserId: USER_A,
+      providerConnectionId: CONNECTION_A,
+      role: "restricted_execution",
+      vaultSecretId: SECRET_NEXT,
+      keyFingerprint: FINGERPRINT,
+    }),
+    replaceOwnedCredentialBinding(state.db, {
+      authenticatedUserId: USER_A,
+      providerConnectionId: CONNECTION_A,
+      role: "restricted_execution",
+      vaultSecretId: second,
+      keyFingerprint: FINGERPRINT,
+    }),
+  ]);
+  assert.equal(first.ok, true);
+  assert.equal(next.ok, true);
+  const active = state.bindings.filter((row) => row.role === "restricted_execution" && row.revokedAt === null);
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.vaultSecretId, second);
+  assert.equal(state.bindings.filter((row) => row.revokedAt !== null).length, 2);
 });
 
 test("database resolution does not open secrets or fall back to Railway credentials", async () => {
@@ -369,28 +449,43 @@ test("the credential migration is private, additive, and has a rollback path", (
   assert.equal(sql.includes("INSERT INTO private.kalshi_connection_credentials"), false);
   assert.match(sql, /DROP TABLE IF EXISTS private\.kalshi_connection_credentials/);
   assert.equal(store.includes("process.env"), false);
+  assert.equal(store.includes("WITH owned AS"), false);
+  assert.match(store, /credential-replacement:revoke/);
+  assert.match(store, /credential-replacement:insert/);
+  assert.match(store, /FOR UPDATE OF pc/);
   assert.equal(wallet.includes("kalshi_connection_credentials"), false);
   assert.match(wallet, /legacy_unassigned_not_startable|user_execution_account_not_commissioned/);
 });
 
 test("a unique-role collision from the database stays ambiguous", async () => {
-  const db: CredentialQuery = {
-    async query(text) {
-      if (text.includes("active_count")) {
-        return {
-          rows: [{
-            owner_user_id: USER_A,
-            financial_account_id: FINANCIAL_A,
-            provider_connection_id: CONNECTION_A,
-            connection_vault_secret_id: WALLET_A,
-            active_count: 1,
-            vault_secret_used: false,
-          }],
-        };
-      }
-      const error = new Error("duplicate") as Error & { code: string };
-      error.code = "23505";
-      throw error;
+  const db: CredentialDatabase = {
+    async query() {
+      throw new Error("replacement must use a transaction");
+    },
+    async transaction(work) {
+      return work({
+        async query(text) {
+          if (text.includes("credential-replacement:lock-connection")) {
+            return {
+              rows: [{
+                owner_user_id: USER_A,
+                financial_account_id: FINANCIAL_A,
+                provider_connection_id: CONNECTION_A,
+                connection_vault_secret_id: WALLET_A,
+              }],
+            };
+          }
+          if (text.includes("credential-replacement:vault-used") || text.includes("credential-replacement:lock-active")) {
+            return { rows: [] };
+          }
+          if (text.includes("credential-replacement:insert")) {
+            const error = new Error("duplicate") as Error & { code: string };
+            error.code = "23505";
+            throw error;
+          }
+          throw new Error(text.slice(0, 80));
+        },
+      });
     },
   };
   const result = await replaceOwnedCredentialBinding(db, {
