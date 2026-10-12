@@ -18,6 +18,14 @@ import {
   type UserExecutionView,
 } from "./userExecutionScope";
 import type { UserScopePort } from "../../routes/userExecutionRouter";
+import {
+  createLiveQualificationTransport,
+  createSqlQualificationGuard,
+  qualifyAdvancedApi,
+  type QualificationGuard,
+  type QualificationResult,
+  type QualificationTransport,
+} from "./qualifyAdvancedApi";
 
 export interface UserScopeQuery {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
@@ -52,8 +60,8 @@ const ACCOUNT_SQL = `
 `;
 
 const CONNECTION_SQL = `
-  SELECT fa.id::text AS financial_account_id, pc.vault_secret_id::text AS vault_secret_id,
-         pc.key_fingerprint, pc.verified_at
+  SELECT fa.id::text AS financial_account_id, pc.id::text AS provider_connection_id,
+         pc.vault_secret_id::text AS vault_secret_id, pc.key_fingerprint, pc.verified_at
   FROM public.financial_accounts fa
   LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
   WHERE fa.user_id = $1::uuid AND fa.provider = 'kalshi'
@@ -237,9 +245,39 @@ export function createDatabaseUserScopePort(
   db: UserScopeQuery,
   options: {
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
+    qualifyTransport?: QualificationTransport;
+    qualificationGuard?: QualificationGuard;
   } = {},
 ): UserScopePort {
   const kalshiGet = options.kalshiGet ?? ((creds, path, query) => getScopedKalshiJson(creds, path, query ?? ""));
+  const qualifyTransport = options.qualifyTransport ?? createLiveQualificationTransport();
+  const qualificationGuard = options.qualificationGuard ?? createSqlQualificationGuard(db);
+  const loadKalshiConnection = async (userId: string): Promise<
+    { creds: { keyId: string; privateKey: string }; connectionId: string } | QualificationResult
+  > => {
+    let connection: { rows: Array<Record<string, unknown>> };
+    try {
+      connection = await db.query(CONNECTION_SQL, [userId]);
+    } catch {
+      return { status: "NO_PROVIDER_CONNECTION" };
+    }
+    if (connection.rows.length === 0) return { status: "NO_FINANCIAL_ACCOUNT" };
+    const linked = connection.rows.filter((row) => text(row.vault_secret_id));
+    if (linked.length !== 1) return { status: "NO_PROVIDER_CONNECTION" };
+    const connectionId = text(linked[0]?.provider_connection_id);
+    const vaultId = text(linked[0]?.vault_secret_id);
+    if (!connectionId || !vaultId) return { status: "NO_PROVIDER_CONNECTION" };
+    let secretRow: { rows: Array<Record<string, unknown>> };
+    try {
+      secretRow = await db.query(VAULT_SQL, [vaultId]);
+    } catch {
+      return { status: "VAULT_SECRET_MISSING" };
+    }
+    if (secretRow.rows.length !== 1 || secretRow.rows[0]?.decrypted_secret == null) return { status: "VAULT_SECRET_MISSING" };
+    const creds = parseVaultSecret(secretRow.rows[0]?.decrypted_secret);
+    if (!creds) return { status: "VAULT_SECRET_FORMAT_INVALID" };
+    return { creds, connectionId };
+  };
   let ready = false;
   const migrationReady = async () => {
     if (ready) return true;
@@ -471,6 +509,24 @@ export function createDatabaseUserScopePort(
         ],
       );
       return { ok: true, draft, view: viewFrom(userId, account) };
+    },
+    async qualify(userId, body): Promise<QualificationResult> {
+      const confirm = body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).confirm
+        : undefined;
+      const loaded = await loadKalshiConnection(userId);
+      if (!("creds" in loaded)) return loaded;
+      try {
+        return await qualifyAdvancedApi({
+          creds: loaded.creds,
+          connectionId: loaded.connectionId,
+          confirm,
+          guard: qualificationGuard,
+          transport: qualifyTransport,
+        });
+      } catch {
+        return { status: "QUALIFICATION_GUARD_UNAVAILABLE" };
+      }
     },
   };
 }

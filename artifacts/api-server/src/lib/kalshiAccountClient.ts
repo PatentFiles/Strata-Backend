@@ -375,7 +375,7 @@ function normalizeKalshiPem(privateKey: string): string {
     .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
 }
 
-function signRequest(creds: Credentials, method: "GET", path: string, timestamp: string): string {
+function signRequest(creds: Credentials, method: "GET" | "POST" | "DELETE", path: string, timestamp: string): string {
   try {
     const key = createPrivateKey(normalizeKalshiPem(creds.privateKey));
     const message = Buffer.from(`${timestamp}${method}${path}`);
@@ -434,6 +434,66 @@ export async function getScopedKalshiJson(
   });
   if (!response.ok) throw new KalshiApiError("HTTP_ERROR", response.status);
   return await response.json() as unknown;
+}
+
+const QUALIFICATION_ORDER_PATH = `${API_PREFIX}/portfolio/events/orders`;
+const QUALIFICATION_UPGRADE_PATH = `${API_PREFIX}/account/api_usage_level/upgrade`;
+
+function isAllowedQualificationMutation(method: "POST" | "DELETE", path: string): boolean {
+  if (method === "POST") return path === QUALIFICATION_ORDER_PATH || path === QUALIFICATION_UPGRADE_PATH;
+  return /^\/trade-api\/v2\/portfolio\/events\/orders\/[A-Za-z0-9_-]{1,128}$/.test(path);
+}
+
+/** Signed qualification POST or DELETE. Any other path is refused before the network. */
+export async function mutateScopedKalshi(
+  creds: { keyId: string; privateKey: string },
+  method: "POST" | "DELETE",
+  path: string,
+  options: { query?: string; body?: unknown; fetchImpl?: typeof fetch } = {},
+): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  if (!isAllowedQualificationMutation(method, path)) throw new KalshiApiError("INVALID_RESPONSE");
+  const timestamp = Date.now().toString();
+  const signature = signRequest(creds, method, path, timestamp);
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "KALSHI-ACCESS-KEY": creds.keyId,
+    "KALSHI-ACCESS-SIGNATURE": signature,
+    "KALSHI-ACCESS-TIMESTAMP": timestamp,
+  };
+  let body: string | undefined;
+  if (method === "POST" && options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(options.body);
+  }
+  const response = await (options.fetchImpl ?? fetch)(`${baseUrl()}${path}${options.query ?? ""}`, {
+    method,
+    cache: "no-store",
+    redirect: "manual",
+    headers,
+    body,
+  });
+  if (response.status >= 300 && response.status < 400) return { status: response.status, body: null, unreadable: true };
+  const text = await response.text();
+  if (!text) return { status: response.status, body: null, unreadable: false };
+  try {
+    return { status: response.status, body: JSON.parse(text) as unknown, unreadable: false };
+  } catch {
+    return { status: response.status, body: null, unreadable: true };
+  }
+}
+
+export async function listOpenKalshiMarkets(fetchImpl: typeof fetch = fetch): Promise<unknown[]> {
+  const response = await fetchImpl(`${baseUrl()}/trade-api/v2/markets?status=open&limit=100`, {
+    method: "GET",
+    cache: "no-store",
+    redirect: "manual",
+  });
+  if (response.status !== 200) throw new KalshiApiError("HTTP_ERROR", response.status);
+  const payload = await response.json() as unknown;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new KalshiApiError("INVALID_RESPONSE");
+  const markets = (payload as Record<string, unknown>).markets;
+  if (!Array.isArray(markets)) throw new KalshiApiError("INVALID_RESPONSE");
+  return markets;
 }
 
 async function getJson(path: string, query = "", signal?: AbortSignal): Promise<unknown> {

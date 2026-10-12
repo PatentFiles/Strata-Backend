@@ -1,0 +1,360 @@
+import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import test from "node:test";
+import express from "express";
+import { mutateScopedKalshi } from "../kalshiAccountClient";
+import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
+import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
+import {
+  createMemoryQualificationGuard,
+  qualificationOrderBody,
+  QUALIFICATION_CONFIRMATION,
+  QUALIFICATION_ORDER_PATH,
+  QUALIFICATION_UPGRADE_PATH,
+  qualifyAdvancedApi,
+  selectQualificationMarket,
+  type QualificationExchangeResult,
+  type QualificationTransport,
+} from "./qualifyAdvancedApi";
+
+const NOW = Date.parse("2026-10-11T00:00:00.000Z");
+const USER_A = "11111111-1111-4111-8111-111111111111";
+const USER_B = "22222222-2222-4222-8222-222222222222";
+
+function market(ticker: string, ask: string, close = "2026-12-01T00:00:00.000Z", status = "active") {
+  return { ticker, status, close_time: close, yes_ask_dollars: ask, yes_bid_dollars: "0.4000" };
+}
+
+function ok(body: unknown, status = 200): QualificationExchangeResult {
+  return { status, body, unreadable: false };
+}
+
+function harness(overrides: Partial<{
+  balance: unknown;
+  limits: unknown[];
+  markets: unknown[] | "uncertain";
+  create: QualificationExchangeResult | "uncertain";
+  cancel: QualificationExchangeResult | "uncertain";
+  upgrade: QualificationExchangeResult | "uncertain";
+}> = {}) {
+  const calls: Array<{ method: string; path: string; body?: unknown; keyId: string }> = [];
+  let limitReads = 0;
+  const limits = overrides.limits ?? [{ usage_tier: "basic" }, { usage_tier: "advanced" }];
+  const transport: QualificationTransport = {
+    async get(creds, path) {
+      calls.push({ method: "GET", path, keyId: creds.keyId });
+      if (path.endsWith("/portfolio/balance")) return ok(overrides.balance ?? { balance: 2500, portfolio_value: 0 });
+      if (path.endsWith("/account/limits")) return ok(limits[Math.min(limitReads++, limits.length - 1)]);
+      return ok(null, 404);
+    },
+    async post(creds, path, body) {
+      calls.push({ method: "POST", path, body, keyId: creds.keyId });
+      if (path === QUALIFICATION_UPGRADE_PATH) return overrides.upgrade ?? ok({}, 201);
+      return overrides.create ?? ok({ order_id: "ord-1", fill_count: "0.00", remaining_count: "1.00" }, 201);
+    },
+    async delete(creds, path, query) {
+      calls.push({ method: "DELETE", path, body: query, keyId: creds.keyId });
+      return overrides.cancel ?? ok({ status: "canceled", remaining_count: "0.00" });
+    },
+    async listOpenMarkets() {
+      calls.push({ method: "GET", path: "/markets", keyId: "" });
+      return overrides.markets ?? [
+        market("EXPIRED-MKT", "0.5000", "2020-01-01T00:00:00.000Z"),
+        market("TOUCH-MKT", "0.0100"),
+        market("SAFE-MKT", "0.4500"),
+      ];
+    },
+  };
+  const guard = createMemoryQualificationGuard();
+  const run = (confirm: unknown = QUALIFICATION_CONFIRMATION, connectionId = "conn-1") => qualifyAdvancedApi({
+    creds: { keyId: "key-user", privateKey: "stored-private-key" },
+    connectionId,
+    confirm,
+    guard,
+    transport,
+    now: NOW,
+    newClientOrderId: () => "client-1",
+  });
+  const orders = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_ORDER_PATH);
+  const cancels = () => calls.filter((call) => call.method === "DELETE");
+  const upgrades = () => calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_UPGRADE_PATH);
+  return { calls, run, orders, cancels, upgrades };
+}
+
+test("a one-cent ask and an expired market are not qualification markets", () => {
+  const selected = selectQualificationMarket([
+    market("EXPIRED-MKT", "0.8000", "2020-01-01T00:00:00.000Z"),
+    market("TOUCH-MKT", "0.0100"),
+    { ticker: "SAFE-MKT", status: "active", close_time: "2026-12-01T00:00:00.000Z", yes_ask: 2 },
+  ], NOW);
+  assert.equal(selected?.ticker, "SAFE-MKT");
+  assert.equal(selectQualificationMarket([market("TOUCH-MKT", "0.0100")], NOW), null);
+});
+
+test("basic user with exact confirmation places one post-only qualification order", async () => {
+  const flow = harness();
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(result.usageTier, "advanced");
+  assert.equal(result.qualificationOrderCreated, true);
+  assert.equal(result.qualificationOrderCanceled, true);
+  assert.equal(result.fillCount, "0.00");
+  assert.equal(flow.orders().length, 1);
+  assert.equal(flow.cancels().length, 1);
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.calls.filter((call) => call.path.endsWith("/account/limits")).length, 2);
+  const body = flow.orders()[0]?.body as Record<string, unknown>;
+  assert.equal(body.ticker, "SAFE-MKT");
+  assert.equal(body.side, "bid");
+  assert.equal(body.count, "1.00");
+  assert.equal(body.price, "0.0100");
+  assert.equal(body.post_only, true);
+  assert.equal(body.subaccount, 0);
+  assert.equal(body.cancel_order_on_pause, true);
+  assert.equal(body.reduce_only, false);
+  assert.equal(body.time_in_force, "good_till_canceled");
+  assert.equal("exchange_index" in body, false);
+  assert.equal(JSON.stringify(body).includes("stored-private-key"), false);
+  assert.deepEqual(qualificationOrderBody("SAFE-MKT", "client-1").price, "0.0100");
+});
+
+test("missing confirmation places zero orders", async () => {
+  const flow = harness();
+  const result = await flow.run("please");
+  assert.equal(result.status, "CONFIRMATION_REQUIRED");
+  assert.equal(flow.orders().length, 0);
+  assert.equal(flow.calls.length, 0);
+});
+
+test("an already advanced tier places zero orders", async () => {
+  const flow = harness({ limits: [{ usage_tier: "premier" }] });
+  const result = await flow.run();
+  assert.equal(result.status, "ALREADY_ADVANCED");
+  assert.equal(result.usageTier, "premier");
+  assert.equal(flow.orders().length, 0);
+});
+
+test("insufficient primary cash places zero orders", async () => {
+  const flow = harness({ balance: { balance: 0, portfolio_value: 0 } });
+  const result = await flow.run();
+  assert.equal(result.status, "INSUFFICIENT_PRIMARY_CASH_FOR_QUALIFICATION");
+  assert.equal(flow.orders().length, 0);
+});
+
+test("an unknown tier fails closed before any order", async () => {
+  const flow = harness({ limits: [{ usage_tier: "restricted" }] });
+  const result = await flow.run();
+  assert.equal(result.status, "API_TIER_NOT_QUALIFIABLE");
+  assert.equal(flow.orders().length, 0);
+});
+
+test("qualification does not call strategy code or the legacy signer", () => {
+  const source = [
+    "src/lib/strata/qualifyAdvancedApi.ts",
+    "src/lib/strata/userScopeDatabase.ts",
+    "src/routes/userExecutionRouter.ts",
+  ].map((path) => readFileSync(path, "utf8")).join("\n");
+  assert.equal(source.includes("getLiveProductionSupervisor"), false);
+  assert.equal(source.includes("KALSHI_INDEX2"), false);
+  assert.equal(source.includes("KALSHI_API_PRIVATE_KEY"), false);
+  assert.equal(source.includes("v13StrategyResearch"), false);
+  assert.equal(source.includes("bot_eligible = true"), false);
+  assert.equal(source.includes("bot_eligible=true"), false);
+});
+
+test("a confirmed create cancels once and an uncertain create is not retried", async () => {
+  const uncertain = harness({ create: "uncertain" });
+  assert.equal((await uncertain.run()).status, "QUALIFICATION_ORDER_OUTCOME_UNCERTAIN");
+  assert.equal((await uncertain.run()).status, "QUALIFICATION_ORDER_OUTCOME_UNCERTAIN");
+  assert.equal(uncertain.orders().length, 1);
+  assert.equal(uncertain.cancels().length, 0);
+  assert.equal(uncertain.upgrades().length, 0);
+});
+
+test("an unexpected fill does not place or cancel another order", async () => {
+  const flow = harness({
+    create: ok({ order_id: "ord-fill", fill_count: "1.00", remaining_count: "0.00", average_fill_price: "0.0100" }, 201),
+  });
+  const result = await flow.run();
+  assert.equal(result.status, "UNEXPECTED_QUALIFICATION_FILL");
+  assert.equal(result.orderId, "ord-fill");
+  assert.equal(result.ticker, "SAFE-MKT");
+  assert.equal(result.fillCount, "1.00");
+  assert.equal(result.averageFillPrice, "0.0100");
+  assert.equal(JSON.stringify(result).includes("stored-private-key"), false);
+  assert.equal((await flow.run()).status, "UNEXPECTED_QUALIFICATION_FILL");
+  assert.equal(flow.orders().length, 1);
+  assert.equal(flow.cancels().length, 0);
+  assert.equal(flow.upgrades().length, 0);
+});
+
+test("an uncertain cancel does not request the upgrade", async () => {
+  const flow = harness({ cancel: "uncertain" });
+  assert.equal((await flow.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal((await flow.run()).status, "QUALIFICATION_CANCEL_UNCERTAIN");
+  assert.equal(flow.orders().length, 1);
+  assert.equal(flow.cancels().length, 1);
+  assert.equal(flow.upgrades().length, 0);
+});
+
+test("a successful cancel requests the upgrade once and rereads limits", async () => {
+  const flow = harness();
+  const result = await flow.run();
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(flow.upgrades().length, 1);
+  assert.equal(flow.calls.filter((call) => call.path.endsWith("/account/limits")).length, 2);
+  assert.equal(flow.upgrades()[0]?.keyId, "key-user");
+});
+
+test("two concurrent confirmations cannot create two qualification orders", async () => {
+  const calls: Array<{ method: string; path: string; body?: unknown; keyId: string }> = [];
+  let releaseOrder: () => void = () => undefined;
+  const orderGate = new Promise<void>((resolve) => { releaseOrder = resolve; });
+  let orders = 0;
+  const transport: QualificationTransport = {
+    async get(creds, path) {
+      calls.push({ method: "GET", path, keyId: creds.keyId });
+      if (path.endsWith("/portfolio/balance")) return ok({ balance: 2500, portfolio_value: 0 });
+      return ok({ usage_tier: "basic" });
+    },
+    async post(creds, path, body) {
+      calls.push({ method: "POST", path, body, keyId: creds.keyId });
+      if (path === QUALIFICATION_ORDER_PATH) {
+        orders += 1;
+        await orderGate;
+        return ok({ order_id: "ord-1", fill_count: "0.00", remaining_count: "1.00" }, 201);
+      }
+      return ok({}, 201);
+    },
+    async delete(creds, path) {
+      calls.push({ method: "DELETE", path, keyId: creds.keyId });
+      return ok({ status: "canceled", remaining_count: "0.00" });
+    },
+    async listOpenMarkets() {
+      return [market("SAFE-MKT", "0.4500")];
+    },
+  };
+  const guard = createMemoryQualificationGuard();
+  const start = (id: string) => qualifyAdvancedApi({
+    creds: { keyId: "key-user", privateKey: "stored-private-key" },
+    connectionId: "conn-1",
+    confirm: QUALIFICATION_CONFIRMATION,
+    guard,
+    transport,
+    now: NOW,
+    newClientOrderId: () => id,
+  });
+  const first = start("client-a");
+  const second = start("client-b");
+  const deadline = Date.now() + 1000;
+  while (orders < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(orders, 1);
+  releaseOrder();
+  await Promise.all([first, second]);
+  assert.equal(calls.filter((call) => call.method === "POST" && call.path === QUALIFICATION_ORDER_PATH).length, 1);
+});
+
+test("user A cannot qualify user B", async () => {
+  const queries: Array<{ text: string; params: unknown[] }> = [];
+  const db: UserScopeQuery = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes("fa.user_id")) {
+        if (params[0] === USER_A) return { rows: [{ provider_connection_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", vault_secret_id: "vault-a" }] };
+        if (params[0] === USER_B) return { rows: [{ provider_connection_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", vault_secret_id: "vault-b" }] };
+        return { rows: [] };
+      }
+      if (text.includes("decrypted_secrets")) {
+        if (params[0] === "vault-a") return { rows: [{ decrypted_secret: JSON.stringify({ api_key_id: "key-a", private_key: "pem-a" }) }] };
+        if (params[0] === "vault-b") return { rows: [{ decrypted_secret: JSON.stringify({ api_key_id: "key-b", private_key: "pem-b-secret" }) }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const seen: string[] = [];
+  let limitReads = 0;
+  const port = createDatabaseUserScopePort(db, {
+    qualificationGuard: createMemoryQualificationGuard(),
+    qualifyTransport: {
+      async get(creds, path) {
+        seen.push(creds.keyId);
+        if (path.endsWith("/portfolio/balance")) return ok({ balance: 2500, portfolio_value: 0 });
+        limitReads += 1;
+        return ok({ usage_tier: limitReads === 1 ? "basic" : "advanced" });
+      },
+      async post(creds, path) {
+        seen.push(creds.keyId);
+        if (path === QUALIFICATION_ORDER_PATH) return ok({ order_id: "ord-a", fill_count: "0.00", remaining_count: "1.00" }, 201);
+        return ok({}, 201);
+      },
+      async delete() {
+        return ok({ status: "canceled", remaining_count: "0.00" });
+      },
+      async listOpenMarkets() {
+        return [market("SAFE-MKT", "0.4500")];
+      },
+    },
+  });
+  const result = await port.qualify(USER_A, {
+    confirm: QUALIFICATION_CONFIRMATION,
+    owner_user_id: USER_B,
+    target_user_id: USER_B,
+    api_key: "injected",
+    private_key: "injected-secret",
+  });
+  assert.equal(result.status, "ADVANCED_VERIFIED");
+  assert.equal(seen.every((key) => key === "key-a"), true);
+  assert.equal(queries.some((query) => query.params.includes(USER_B)), false);
+  assert.equal(queries.some((query) => query.params.includes("vault-b")), false);
+  assert.equal(JSON.stringify(result).includes("pem-b-secret"), false);
+  assert.equal(JSON.stringify(result).includes("injected-secret"), false);
+  assert.equal(queries.some((query) => query.text.includes("bot_eligible")), false);
+});
+
+test("the route rejects a missing confirmation before any qualification call", async () => {
+  let called = false;
+  const port = createDatabaseUserScopePort({ query: async () => { throw new Error("db"); } }, {
+    qualifyTransport: { async get() { called = true; return "uncertain"; }, async post() { called = true; return "uncertain"; }, async delete() { called = true; return "uncertain"; }, async listOpenMarkets() { called = true; return "uncertain"; } },
+  });
+  const original = port.qualify.bind(port);
+  port.qualify = async (...args) => {
+    called = true;
+    return original(...args);
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/me", createUserExecutionRouter((_req, res, next) => {
+    res.locals.strata = { subject: USER_A };
+    next();
+  }, port));
+  const server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/me/qualify-advanced-api`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: "no", private_key: "secret" }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal(called, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("scoped mutations refuse every path except the qualification order, cancel, and upgrade", async () => {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response("{}", { status: 201 });
+  };
+  const creds = { keyId: "key-user", privateKey: pem };
+  await assert.rejects(mutateScopedKalshi(creds, "POST", "/trade-api/v2/portfolio/orders", { body: {}, fetchImpl }));
+  await assert.rejects(mutateScopedKalshi(creds, "DELETE", "/trade-api/v2/portfolio/events/orders/../balance", { fetchImpl }));
+  assert.equal(calls, 0);
+});

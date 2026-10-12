@@ -4,6 +4,7 @@ import { emptyUserExecutionView, type ControlAction, type UserExecutionView } fr
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
+import { QUALIFICATION_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 
 export interface UserScopePort {
   migrationReady(): Promise<boolean>;
@@ -16,6 +17,7 @@ export interface UserScopePort {
   updatePreset(userId: string, presetId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
   deletePreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string }>;
   applyPreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string; draft?: PolicyDraft; view: UserExecutionView }>;
+  qualify(userId: string, body: unknown): Promise<QualificationResult>;
 }
 
 /** Fail closed. Does not read the legacy account and does not mutate Kalshi or the database. */
@@ -32,6 +34,7 @@ export function closedUserScopePort(): UserScopePort {
     updatePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     deletePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     applyPreset: async (userId) => refused(userId),
+    qualify: async () => ({ status: "USER_SCOPE_CLOSED" }),
   };
 }
 
@@ -44,6 +47,13 @@ function ignoreForeignOwner(body: unknown): void {
   if (!body || typeof body !== "object") return;
   delete (body as Record<string, unknown>).owner_user_id;
   delete (body as Record<string, unknown>).target_user_id;
+}
+
+function qualificationRequest(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const copy = { ...(body as Record<string, unknown>) };
+  for (const key of ["owner_user_id", "target_user_id", "api_key", "apiKey", "private_key", "privateKey", "pem"]) delete copy[key];
+  return copy;
 }
 
 export function createUserExecutionRouter(requireUser: RequestHandler, port: UserScopePort): IRouter {
@@ -128,6 +138,17 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!await migrated(res)) return;
     const result = await port.applyPreset(userId, String(req.params.id));
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/qualify-advanced-api", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    const body = qualificationRequest(req.body);
+    if (body.confirm !== QUALIFICATION_CONFIRMATION) {
+      return void res.status(400).json({ status: "CONFIRMATION_REQUIRED" });
+    }
+    const result = await port.qualify(userId, body);
+    const ok = result.status === "ADVANCED_VERIFIED" || result.status === "ALREADY_ADVANCED";
+    res.status(ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/legacy/claim", async (req, res) => {
     const userId = subject(res);
