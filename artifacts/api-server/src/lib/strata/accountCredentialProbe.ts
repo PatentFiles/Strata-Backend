@@ -55,6 +55,14 @@ export interface ProvisioningCredentialInspection {
   ok: boolean;
   reason: string;
   scopesVerified: boolean;
+  writeScopeVerified: boolean;
+  unrestricted: boolean;
+}
+
+export interface AccountSetupExecutionCredentialInspection {
+  ok: boolean;
+  reason: string;
+  scopesVerified: boolean;
   unrestricted: boolean;
 }
 
@@ -279,7 +287,7 @@ export async function inspectSubaccount1(
   }
 }
 
-/** Verifies the user's own account-wide provisioning key without performing a mutation. */
+/** Verifies a user's account-wide read key for GET-only setup preparation. */
 export async function inspectProvisioningCredential(
   expectedFingerprint: string,
   material: CredentialProbeMaterial,
@@ -300,16 +308,65 @@ export async function inspectProvisioningCredential(
   const record = keyRecord(payload, material.keyId);
   if (!record) return provisioningInspection(false, "provisioning_credential_permission_unproven");
   const scopes = stringList(record.scopes);
-  const exactScopes = scopes.length === 2 && scopes.includes("read") && scopes.includes("write");
-  if (!exactScopes) {
-    return provisioningInspection(false, "provisioning_credential_scopes_rejected", false,
-      !Object.hasOwn(record, "subaccount") || record.subaccount === null);
+  const readVerified = scopes.includes("read");
+  const writeVerified = scopes.includes("write");
+  if (!readVerified) {
+    return provisioningInspection(false, "provisioning_credential_read_scope_rejected", false,
+      writeVerified, !Object.hasOwn(record, "subaccount") || record.subaccount === null);
   }
   const unrestricted = !Object.hasOwn(record, "subaccount") || record.subaccount === null;
   if (!unrestricted) {
-    return provisioningInspection(false, "provisioning_credential_must_be_unrestricted", true, false);
+    return provisioningInspection(false, "provisioning_credential_must_be_unrestricted",
+      true, writeVerified, false);
   }
-  return provisioningInspection(true, "provisioning_credential_verified", true, true);
+  return provisioningInspection(true, "provisioning_read_credential_verified",
+    true, writeVerified, true);
+}
+
+/** Metadata proof for the separate account-setup mutation key. */
+export async function inspectAccountSetupExecutionCredential(
+  targetKeyId: string,
+  authority: VerifiedCredentialAuthority,
+  getJson: (creds: CredentialProbeMaterial, path: string, query?: string) => Promise<unknown>,
+): Promise<AccountSetupExecutionCredentialInspection> {
+  if (!authorityMatchesFingerprint(authority)) {
+    return setupExecutionInspection(false, "verification_credential_fingerprint_mismatch");
+  }
+  if (targetKeyId.trim() === authority.material.keyId.trim()) {
+    return setupExecutionInspection(false, "account_setup_execution_credential_not_independent");
+  }
+  let payload: unknown;
+  try {
+    payload = await getJson(authority.material, API_KEYS_PATH, "");
+  } catch {
+    return setupExecutionInspection(false, "account_setup_execution_metadata_unproven");
+  }
+  if (!apiKeyInventory(payload)) {
+    return setupExecutionInspection(false, "account_setup_execution_metadata_unproven");
+  }
+  const verificationRecord = keyRecord(payload, authority.material.keyId);
+  if (!verificationRecord) {
+    return setupExecutionInspection(false, "verification_credential_permission_unproven");
+  }
+  const verificationScopes = stringList(verificationRecord.scopes);
+  if (!verificationScopes.includes("read") ||
+      (Object.hasOwn(verificationRecord, "subaccount") && verificationRecord.subaccount !== null)) {
+    return setupExecutionInspection(false, "verification_credential_not_authorized");
+  }
+  const record = keyRecord(payload, targetKeyId);
+  if (!record) {
+    return setupExecutionInspection(false, "account_setup_execution_credential_unproven");
+  }
+  const scopes = stringList(record.scopes);
+  const exactScopes = scopes.length === 2 && scopes.includes("read") && scopes.includes("write");
+  if (!exactScopes) {
+    return setupExecutionInspection(false, "account_setup_execution_permission_rejected");
+  }
+  const unrestricted = !Object.hasOwn(record, "subaccount") || record.subaccount === null;
+  if (!unrestricted) {
+    return setupExecutionInspection(false, "account_setup_execution_must_be_unrestricted", true, false);
+  }
+  return setupExecutionInspection(true, "account_setup_execution_credential_verified", true, true);
 }
 
 function keyRecord(payload: unknown, keyId: string): Record<string, unknown> | null {
@@ -383,8 +440,18 @@ function provisioningInspection(
   ok: boolean,
   reason: string,
   scopesVerified = false,
+  writeScopeVerified = false,
   unrestricted = false,
 ): ProvisioningCredentialInspection {
+  return { ok, reason, scopesVerified, writeScopeVerified, unrestricted };
+}
+
+function setupExecutionInspection(
+  ok: boolean,
+  reason: string,
+  scopesVerified = false,
+  unrestricted = false,
+): AccountSetupExecutionCredentialInspection {
   return { ok, reason, scopesVerified, unrestricted };
 }
 

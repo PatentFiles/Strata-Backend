@@ -440,6 +440,7 @@ export async function getScopedKalshiJson(
 
 const QUALIFICATION_ORDER_PATH = `${API_PREFIX}/portfolio/events/orders`;
 const QUALIFICATION_UPGRADE_PATH = `${API_PREFIX}/account/api_usage_level/upgrade`;
+const SUBACCOUNT_CREATION_PATH = `${API_PREFIX}/portfolio/subaccounts`;
 
 function isAllowedQualificationMutation(method: "POST" | "DELETE", path: string): boolean {
   if (method === "POST") return path === QUALIFICATION_ORDER_PATH || path === QUALIFICATION_UPGRADE_PATH;
@@ -475,6 +476,43 @@ export async function mutateScopedKalshi(
     body,
   });
   if (response.status >= 300 && response.status < 400) return { status: response.status, body: null, unreadable: true };
+  const text = await response.text();
+  if (!text) return { status: response.status, body: null, unreadable: false };
+  try {
+    return { status: response.status, body: JSON.parse(text) as unknown, unreadable: false };
+  } catch {
+    return { status: response.status, body: null, unreadable: true };
+  }
+}
+
+/**
+ * The only user-scoped setup mutation transport. The path and exchange index
+ * are fixed so callers cannot turn account setup authorization into a general
+ * Kalshi write capability.
+ */
+export async function createScopedKalshiSubaccountOne(
+  creds: { keyId: string; privateKey: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  const timestamp = Date.now().toString();
+  const signature = signRequest(creds, "POST", SUBACCOUNT_CREATION_PATH, timestamp);
+  const response = await fetchImpl(`${baseUrl()}${SUBACCOUNT_CREATION_PATH}`, {
+    method: "POST",
+    cache: "no-store",
+    redirect: "manual",
+    signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE": signature,
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    },
+    body: JSON.stringify({ exchange_index: 2 }),
+  });
+  if (response.status >= 300 && response.status < 400) {
+    return { status: response.status, body: null, unreadable: true };
+  }
   const text = await response.text();
   if (!text) return { status: response.status, body: null, unreadable: false };
   try {

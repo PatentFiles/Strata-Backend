@@ -12,7 +12,13 @@ const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
 const candidates = [...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
   "/usr/lib/postgresql/16/bin", "/usr/lib/postgresql/17/bin", "/usr/lib/postgresql/15/bin"];
-const available = p => existsSync(join(p, "initdb")) && existsSync(join(p, "pg_ctl"));
+const executable = (directory, name) => {
+  const direct = join(directory, name);
+  if (existsSync(direct)) return direct;
+  const windows = `${direct}.exe`;
+  return process.platform === "win32" && existsSync(windows) ? windows : null;
+};
+const available = p => executable(p, "initdb") !== null && executable(p, "pg_ctl") !== null;
 // Prefer installed tools; enumerating a large Nix store can stall before initdb.
 if (!candidates.some(available) && existsSync("/nix/store")) candidates.push(...readdirSync("/nix/store")
   .filter(n => /-postgresql-16\./.test(n)).map(n => `/nix/store/${n}/bin`));
@@ -56,32 +62,43 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
 // exclusively owns a NEW local postgres/v13_ci cluster on 5432, or fails.
 if (fullSuite) { env.GITHUB_ACTIONS = "true"; env.CI = "true"; }
 function run(command, args, options = {}) {
-  const r = spawnSync(command, args, { cwd: api, env, stdio: "inherit", timeout: fullSuite ? 600_000 : 180_000, ...options });
+  const shell = process.platform === "win32" && /\.cmd$/i.test(command);
+  const r = spawnSync(command, args, {
+    cwd: api,
+    env,
+    stdio: "inherit",
+    timeout: fullSuite ? 600_000 : 180_000,
+    shell,
+    ...options,
+  });
   if (r.status !== 0) throw new Error(`Disposable test command failed (${r.status}): ${command}`);
 }
 let started = false;
 try {
-  run(join(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
+  run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
     "--set=shared_buffers=16MB"]);
-  run(join(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
+  run(executable(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
     `-h 127.0.0.1 -p ${port} -k ${root}`, "-w", "start"]);
   started = true;
-  run(join(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
+  run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  run("pnpm", ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
+  run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+    ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
   if (process.argv[2] === "--full-suite") {
-    run("pnpm", ["run", "test:v13-safety-all"]);
+    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
   } else {
     const testFile = process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
-    run("pnpm", ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
+    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+      ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",
     "--external:pdfjs-dist/*", "--external:pino", "--external:pino-pretty"]);
     run(process.execPath, ["--test", `${root}/acceptance.cjs`]);
   }
 } finally {
   if (started) {
-    const stopped = spawnSync(join(bin, "pg_ctl"), ["-D", join(root, "data"), "-m", "immediate", "-w", "stop"],
+    const stopped = spawnSync(executable(bin, "pg_ctl"),
+      ["-D", join(root, "data"), "-m", "immediate", "-w", "stop"],
       { env, stdio: "inherit" });
     if (stopped.status !== 0) throw new Error("Disposable cluster cleanup failed");
   }

@@ -23,6 +23,9 @@ export interface UserCommissioningStatus {
   provisioningKeyMetadataVerified: boolean | null;
   provisioningApiTier: string | null;
   provisioningSubaccountCreationEligible: boolean | null;
+  subaccountCreationAuthorityPresent: boolean;
+  subaccountCreationAuthorityVerified: boolean;
+  subaccountCreationExecutionRoleAvailable: boolean;
   restrictedKeyMetadataVerified: boolean | null;
   restrictedKeyReadVerified: boolean;
   executionAccountExists: boolean;
@@ -60,6 +63,12 @@ export interface UserScopePort {
     idempotent?: boolean;
     attempt?: PublicAccountSetupAttempt | null;
   }>;
+  executeOperation(userId: string, body: unknown): Promise<{
+    ok: boolean;
+    reason: string;
+    attempted: boolean;
+    executable: false;
+  }>;
   commissioningStatus(userId: string): Promise<UserCommissioningStatus>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
@@ -87,6 +96,7 @@ export function closedUserScopePort(): UserScopePort {
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     recordFundingEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     authorizeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false, executable: false }),
+    executeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false, executable: false }),
     commissioningStatus: async () => ({
       ready: false,
       executable: false,
@@ -98,6 +108,9 @@ export function closedUserScopePort(): UserScopePort {
       provisioningKeyMetadataVerified: null,
       provisioningApiTier: null,
       provisioningSubaccountCreationEligible: null,
+      subaccountCreationAuthorityPresent: false,
+      subaccountCreationAuthorityVerified: false,
+      subaccountCreationExecutionRoleAvailable: false,
       restrictedKeyMetadataVerified: null,
       restrictedKeyReadVerified: false,
       executionAccountExists: false,
@@ -111,6 +124,7 @@ export function closedUserScopePort(): UserScopePort {
         endpoint: null,
         requiredConfirmation: null,
         effect: "user_scope_not_migrated",
+        attemptId: null,
       },
     }),
     stake: async (userId) => refused(userId),
@@ -231,6 +245,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
     const result = await port.authorizeOperation(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/account-operations/execute", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.executeOperation(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/stake", async (req, res) => {

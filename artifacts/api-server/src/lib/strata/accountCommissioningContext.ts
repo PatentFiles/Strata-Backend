@@ -24,6 +24,7 @@ export type Phase1Operation = (typeof PHASE1_APPROVED_OPERATIONS)[number];
 export const KNOWN_CREDENTIAL_ROLES = [
   "provisioning",
   "verification",
+  "account_setup_execution",
   "restricted_execution",
 ] as const;
 

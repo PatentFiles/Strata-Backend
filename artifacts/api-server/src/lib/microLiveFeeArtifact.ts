@@ -2,6 +2,31 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
+// pdfjs-dist 6 uses this ES2024 primitive while the supported Node 20
+// production runtime does not provide it yet.
+const promiseWithResolvers = Promise as PromiseConstructor & {
+  withResolvers?: <T>() => {
+    promise: Promise<T>;
+    resolve: (value: T | PromiseLike<T>) => void;
+    reject: (reason?: unknown) => void;
+  };
+};
+if (typeof promiseWithResolvers.withResolvers !== "function") {
+  Object.defineProperty(Promise, "withResolvers", {
+    configurable: true,
+    writable: true,
+    value<T>() {
+      let resolve!: (value: T | PromiseLike<T>) => void;
+      let reject!: (reason?: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    },
+  });
+}
+
 export const CANONICAL_FEE_SCHEDULE_URL = "https://kalshi.com/docs/kalshi-fee-schedule.pdf";
 export const STANDING_FEE_POLICY_VERSION = "micro-live-standing-fee-policy-v1";
 export const STANDARD_QUADRATIC_FEE_FORMULA_VERSION = "standard-quadratic-0.07-v1";

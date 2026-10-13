@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import {
+  createScopedKalshiSubaccountOne,
+  getScopedKalshiJson,
+  KalshiApiError,
+} from "../kalshiAccountClient";
+import type { SubaccountCreationTransport } from "./accountSubaccountCreation";
 import { classifyDiagnosticRead, readQualificationDiagnostics, type QualificationDiagnostic } from "./qualificationDiagnostics";
 import {
   assembleKalshiUserRead,
@@ -247,11 +252,14 @@ export function createDatabaseUserScopePort(
   db: UserScopeQuery,
   options: {
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
+    kalshiCreateSubaccount?: SubaccountCreationTransport;
     qualifyTransport?: QualificationTransport;
     qualificationGuard?: QualificationGuard;
   } = {},
 ): UserScopePort {
   const kalshiGet = options.kalshiGet ?? ((creds, path, query) => getScopedKalshiJson(creds, path, query ?? ""));
+  const kalshiCreateSubaccount = options.kalshiCreateSubaccount ??
+    ((creds) => createScopedKalshiSubaccountOne(creds));
   const qualifyTransport = options.qualifyTransport ?? createLiveQualificationTransport();
   const qualificationGuard = options.qualificationGuard ?? createSqlQualificationGuard(db);
   const loadKalshiConnection = async (userId: string): Promise<
@@ -391,7 +399,7 @@ export function createDatabaseUserScopePort(
       void action;
       return refused(userId, "user_execution_signer_not_provisioned", account);
     },
-    ...accountCredentialControls(db, { kalshiGet }),
+    ...accountCredentialControls(db, { kalshiGet, kalshiCreateSubaccount }),
     async stake(userId, cents, revision) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);

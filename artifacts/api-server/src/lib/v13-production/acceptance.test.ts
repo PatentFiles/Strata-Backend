@@ -524,6 +524,13 @@ test("unknown policy revision and champion-hash approval mismatch cannot reserve
 test("configured stake is pinned and a later revision cannot resize a prepared entry", async () => {
   const f = await fixture();
   await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=50, revision=2 WHERE id='production'");
+  f.exchange.book.fee = {
+    ...f.exchange.book.fee,
+    fingerprint: "test-fingerprint-one-contract",
+    contracts: 1,
+    reservedEntryFeeCents: 1,
+    reservedExitFeeCents: 2,
+  };
   const id = await f.executor.prepareEntry(await f.source());
   const prepared = (await pool.query("SELECT decision, request FROM v13_production_intent WHERE id=$1", [id])).rows[0];
   assert.equal(prepared.decision.configuredStakeCents, 50);

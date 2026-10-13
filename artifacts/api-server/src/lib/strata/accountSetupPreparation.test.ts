@@ -27,6 +27,8 @@ const CONNECTION_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const CONNECTION_B = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const CREDENTIAL_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const CREDENTIAL_B = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const EXECUTION_CREDENTIAL_A = "55555555-5555-4555-8555-555555555555";
+const EXECUTION_CREDENTIAL_B = "66666666-6666-4666-8666-666666666666";
 const FINGERPRINT_A = "ab".repeat(32);
 const FINGERPRINT_B = "cd".repeat(32);
 
@@ -62,7 +64,7 @@ test("setup plans are exact, disabled, and contain no generated private material
     .includes("private_key"), false);
 });
 
-test("provisioning metadata requires exact management scopes and an account-wide key", async () => {
+test("read-only provisioning metadata supports preparation but must remain account-wide", async () => {
   const authority = keyAuthority("provisioning-key");
   const get = async (_material: unknown, _path: string) => ({
     api_keys: [{ api_key_id: authority.material.keyId, subaccount: null, scopes: ["read", "write"] }],
@@ -71,19 +73,29 @@ test("provisioning metadata requires exact management scopes and an account-wide
     await inspectProvisioningCredential(authority.expectedFingerprint, authority.material, get),
     {
       ok: true,
-      reason: "provisioning_credential_verified",
+      reason: "provisioning_read_credential_verified",
       scopesVerified: true,
+      writeScopeVerified: true,
       unrestricted: true,
     },
   );
-  const wrongScopes = await inspectProvisioningCredential(
+  const readOnly = await inspectProvisioningCredential(
     authority.expectedFingerprint,
     authority.material,
     async () => ({
-      api_keys: [{ api_key_id: authority.material.keyId, subaccount: null, scopes: ["read", "write::trade"] }],
+      api_keys: [{ api_key_id: authority.material.keyId, subaccount: null, scopes: ["read"] }],
     }),
   );
-  assert.equal(wrongScopes.reason, "provisioning_credential_scopes_rejected");
+  assert.equal(readOnly.ok, true);
+  assert.equal(readOnly.writeScopeVerified, false);
+  const missingRead = await inspectProvisioningCredential(
+    authority.expectedFingerprint,
+    authority.material,
+    async () => ({
+      api_keys: [{ api_key_id: authority.material.keyId, subaccount: null, scopes: ["write"] }],
+    }),
+  );
+  assert.equal(missingRead.reason, "provisioning_credential_read_scope_rejected");
   const restricted = await inspectProvisioningCredential(
     authority.expectedFingerprint,
     authority.material,
@@ -186,27 +198,39 @@ test("account controls prepare isolated subaccount plans for two users without a
   const status = await controls.commissioningStatus(USER_A);
   assert.equal(status.operationPreparationAvailable, true);
   assert.equal(status.operationPreparations.length, 1);
-  assert.equal(status.nextAuthorizedAction?.action, "separately_authorize_prepared_operation");
+  assert.equal(status.nextAuthorizedAction?.action, "review_and_separately_apply_migration_0016");
   assert.equal(status.nextAuthorizedAction?.effect,
-    "review_only_preparation_exists_no_mutation_executor_enabled");
+    "enable_independent_account_setup_execution_role");
 });
 
-test("preparation rejects scope mismatch, foreign ownership, and authority rotation", async () => {
+test("read-only preparation succeeds while missing read scope, foreign ownership, and rotation are rejected", async () => {
   const scopeFixture = operationFixture("create", { provisioningScopes: ["read"] });
   const scopeControls = accountCredentialControls(scopeFixture.db, { kalshiGet: scopeFixture.kalshiGet });
-  const scopeRejected = await scopeControls.authorizeOperation(USER_A, {
+  const readOnlyPrepared = await scopeControls.authorizeOperation(USER_A, {
     operation: "create_subaccount",
     confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
   });
-  assert.equal(scopeRejected.reason, "provisioning_credential_scopes_rejected");
-  assert.equal(scopeFixture.attempts.rows.length, 0);
+  assert.equal(readOnlyPrepared.ok, true);
+  assert.equal(readOnlyPrepared.reason, "operation_prepared_not_executed");
+  assert.equal(scopeFixture.attempts.rows.length, 1);
 
-  const foreign = await scopeControls.authorizeOperation(USER_B, {
+  const noReadFixture = operationFixture("create", { provisioningScopes: ["write"] });
+  const noReadControls = accountCredentialControls(noReadFixture.db, {
+    kalshiGet: noReadFixture.kalshiGet,
+  });
+  const noReadRejected = await noReadControls.authorizeOperation(USER_A, {
+    operation: "create_subaccount",
+    confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
+  });
+  assert.equal(noReadRejected.reason, "provisioning_credential_read_scope_rejected");
+  assert.equal(noReadFixture.attempts.rows.length, 0);
+
+  const foreign = await noReadControls.authorizeOperation(USER_B, {
     operation: "create_subaccount",
     confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
   });
   assert.equal(foreign.reason, "owned_connection_missing");
-  assert.equal(scopeFixture.attempts.rows.length, 0);
+  assert.equal(noReadFixture.attempts.rows.length, 0);
 
   const rotatedFixture = operationFixture("create", { rotateProvisioningAtLimits: true });
   const rotatedControls = accountCredentialControls(rotatedFixture.db, {
@@ -218,6 +242,118 @@ test("preparation rejects scope mismatch, foreign ownership, and authority rotat
   });
   assert.equal(rotated.reason, "setup_authority_rotated");
   assert.equal(rotatedFixture.attempts.rows.length, 0);
+});
+
+test("account controls execute one independently authorized creation and expose its exact next action", async () => {
+  const fixture = operationFixture("create", {
+    includeExecution: true,
+    provisioningScopes: ["read"],
+  });
+  let posts = 0;
+  const controls = accountCredentialControls(fixture.db, {
+    kalshiGet: fixture.kalshiGet,
+    async kalshiCreateSubaccount(material) {
+      posts += 1;
+      assert.equal(material.keyId, fixture.users[0]?.execution.keyId);
+      fixture.setInventory("exists");
+      return { status: 201, body: { subaccount_number: 1 }, unreadable: false };
+    },
+  });
+  const prepared = await controls.authorizeOperation(USER_A, {
+    operation: "create_subaccount",
+    confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
+  });
+  assert.equal(prepared.ok, true);
+  assert.ok(prepared.attempt?.attemptId);
+  const status = await controls.commissioningStatus(USER_A);
+  assert.equal(status.subaccountCreationAuthorityPresent, true);
+  assert.equal(status.subaccountCreationAuthorityVerified, true);
+  assert.equal(status.nextAuthorizedAction?.action, "separately_authorize_subaccount_creation");
+  assert.equal(status.nextAuthorizedAction?.attemptId, prepared.attempt?.attemptId);
+  assert.equal(
+    status.nextAuthorizedAction?.requiredConfirmation,
+    "EXECUTE_CREATE_SUBACCOUNT_1_ON_EXCHANGE_INDEX_2",
+  );
+  const executed = await controls.executeOperation(USER_A, {
+    operation: "create_subaccount",
+    attemptId: prepared.attempt?.attemptId,
+    confirmation: "EXECUTE_CREATE_SUBACCOUNT_1_ON_EXCHANGE_INDEX_2",
+  });
+  assert.equal(executed.ok, true);
+  assert.equal(executed.reason, "subaccount_1_created_and_verified");
+  assert.equal(posts, 1);
+  const duplicate = await controls.executeOperation(USER_A, {
+    operation: "create_subaccount",
+    attemptId: prepared.attempt?.attemptId,
+    confirmation: "EXECUTE_CREATE_SUBACCOUNT_1_ON_EXCHANGE_INDEX_2",
+  });
+  assert.equal(duplicate.reason, "subaccount_1_already_exists");
+  assert.equal(posts, 1);
+});
+
+test("execution preflight rejects insufficient authority and stale inventory without a POST", async () => {
+  for (const scenario of ["insufficient_scope", "stale_inventory"] as const) {
+    const fixture = operationFixture("create", {
+      includeExecution: true,
+      executionScopes: scenario === "insufficient_scope" ? ["read"] : ["read", "write"],
+    });
+    let posts = 0;
+    const controls = accountCredentialControls(fixture.db, {
+      kalshiGet: fixture.kalshiGet,
+      async kalshiCreateSubaccount() {
+        posts += 1;
+        return { status: 201, body: { subaccount_number: 1 }, unreadable: false };
+      },
+    });
+    const prepared = await controls.authorizeOperation(USER_A, {
+      operation: "create_subaccount",
+      confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
+    });
+    assert.equal(prepared.ok, true);
+    if (scenario === "stale_inventory") fixture.setInventory("gap");
+    const result = await controls.executeOperation(USER_A, {
+      operation: "create_subaccount",
+      attemptId: prepared.attempt?.attemptId,
+      confirmation: "EXECUTE_CREATE_SUBACCOUNT_1_ON_EXCHANGE_INDEX_2",
+    });
+    assert.equal(
+      result.reason,
+      scenario === "insufficient_scope"
+        ? "account_setup_execution_permission_rejected"
+        : "subaccount_creation_inventory_stale",
+    );
+    assert.equal(result.attempted, false);
+    assert.equal(posts, 0);
+    assert.equal(fixture.attempts.rows[0]?.state, "prepared");
+  }
+});
+
+test("execution authority rotation after read-only checks blocks the creation POST", async () => {
+  const fixture = operationFixture("create", {
+    includeExecution: true,
+    rotateExecutionAtLimits: true,
+  });
+  let posts = 0;
+  const controls = accountCredentialControls(fixture.db, {
+    kalshiGet: fixture.kalshiGet,
+    async kalshiCreateSubaccount() {
+      posts += 1;
+      return { status: 201, body: { subaccount_number: 1 }, unreadable: false };
+    },
+  });
+  const prepared = await controls.authorizeOperation(USER_A, {
+    operation: "create_subaccount",
+    confirmation: "CREATE_ACCOUNT_SUBACCOUNT",
+  });
+  assert.equal(prepared.ok, true);
+  const result = await controls.executeOperation(USER_A, {
+    operation: "create_subaccount",
+    attemptId: prepared.attempt?.attemptId,
+    confirmation: "EXECUTE_CREATE_SUBACCOUNT_1_ON_EXCHANGE_INDEX_2",
+  });
+  assert.equal(result.reason, "account_setup_execution_credential_rotated");
+  assert.equal(result.attempted, false);
+  assert.equal(posts, 0);
 });
 
 test("unrestricted legacy key prepares exact restricted-key replacement and verified key prepares disabled execution account", async () => {
@@ -265,10 +401,13 @@ test("unrestricted legacy key prepares exact restricted-key replacement and veri
     call.path.endsWith("/portfolio/balance")), true);
 });
 
-test("review-only migration and implementation contain no mutation executor or secret payload", () => {
+test("review-only setup migrations stay explicit and the creation transport is fixed and secret-free", () => {
   const migration = readFileSync("../../lib/db/drizzle/0015_kalshi_account_operation_attempts.sql", "utf8");
+  const roleMigration = readFileSync("../../lib/db/drizzle/0016_kalshi_account_setup_execution_role.sql", "utf8");
   const preparation = readFileSync("src/lib/strata/accountSetupPreparation.ts", "utf8");
   const controls = readFileSync("src/lib/strata/accountCredentialControls.ts", "utf8");
+  const creation = readFileSync("src/lib/strata/accountSubaccountCreation.ts", "utf8");
+  const client = readFileSync("src/lib/kalshiAccountClient.ts", "utf8");
   const startup = readFileSync("src/index.ts", "utf8");
   const build = readFileSync("build.mjs", "utf8");
   const journal = readFileSync("../../lib/db/drizzle/meta/_journal.json", "utf8");
@@ -277,14 +416,23 @@ test("review-only migration and implementation contain no mutation executor or s
   assert.match(migration, /UNIQUE INDEX[\s\S]*provider_connection_id, operation/);
   assert.equal(migration.includes("private_key"), false);
   assert.equal(migration.includes("decrypted_secret"), false);
+  assert.match(roleMigration, /REVIEW ONLY/);
+  assert.match(roleMigration, /account_setup_execution/);
+  assert.equal(roleMigration.includes("decrypted_secret"), false);
   assert.equal(preparation.includes("vault.decrypted_secrets"), false);
   assert.equal(preparation.includes("INSERT INTO public.v13_production_account"), false);
   assert.equal(controls.includes("kalshiPost"), false);
   assert.equal(controls.includes("fetch("), false);
   assert.equal(controls.includes("INSERT INTO public.v13_production_account"), false);
+  assert.match(creation, /state !== "prepared"/);
+  assert.match(creation, /manual_kill_switch !== true/);
+  assert.match(client, /body: JSON\.stringify\(\{ exchange_index: 2 \}\)/);
   assert.equal(startup.includes("0015_kalshi_account_operation_attempts"), false);
+  assert.equal(startup.includes("0016_kalshi_account_setup_execution_role"), false);
   assert.equal(build.includes("0015_kalshi_account_operation_attempts"), false);
+  assert.equal(build.includes("0016_kalshi_account_setup_execution_role"), false);
   assert.equal(journal.includes("0015_kalshi_account_operation_attempts"), false);
+  assert.equal(journal.includes("0016_kalshi_account_setup_execution_role"), false);
 });
 
 function keyAuthority(keyId: string): VerifiedCredentialAuthority {
@@ -300,7 +448,10 @@ function operationFixture(
   options: {
     twoUsers?: boolean;
     provisioningScopes?: string[];
+    includeExecution?: boolean;
+    executionScopes?: string[];
     rotateProvisioningAtLimits?: boolean;
+    rotateExecutionAtLimits?: boolean;
   } = {},
 ) {
   const identities = [
@@ -311,9 +462,11 @@ function operationFixture(
       provisioningId: CREDENTIAL_A,
       verificationId: "10000000-0000-4000-8000-000000000001",
       restrictedId: "10000000-0000-4000-8000-000000000002",
+      executionId: EXECUTION_CREDENTIAL_A,
       provisioningVault: "20000000-0000-4000-8000-000000000001",
       verificationVault: "20000000-0000-4000-8000-000000000002",
       restrictedVault: "20000000-0000-4000-8000-000000000003",
+      executionVault: "20000000-0000-4000-8000-000000000004",
     },
     {
       userId: USER_B,
@@ -322,23 +475,28 @@ function operationFixture(
       provisioningId: CREDENTIAL_B,
       verificationId: "30000000-0000-4000-8000-000000000001",
       restrictedId: "30000000-0000-4000-8000-000000000002",
+      executionId: EXECUTION_CREDENTIAL_B,
       provisioningVault: "40000000-0000-4000-8000-000000000001",
       verificationVault: "40000000-0000-4000-8000-000000000002",
       restrictedVault: "40000000-0000-4000-8000-000000000003",
+      executionVault: "40000000-0000-4000-8000-000000000004",
     },
   ].slice(0, options.twoUsers ? 2 : 1);
   const users = identities.map((identity, index) => {
     const provisioning = keyAuthority(`provisioning-${index + 1}`);
     const verification = keyAuthority(`verification-${index + 1}`);
     const restricted = keyAuthority(`restricted-${index + 1}`);
+    const execution = keyAuthority(`setup-execution-${index + 1}`);
     return {
       ...identity,
       provisioning: provisioning.material,
       verification: verification.material,
       restricted: restricted.material,
+      execution: execution.material,
       provisioningFingerprint: provisioning.expectedFingerprint,
       verificationFingerprint: verification.expectedFingerprint,
       restrictedFingerprint: restricted.expectedFingerprint,
+      executionFingerprint: execution.expectedFingerprint,
     };
   });
   const bindings = users.flatMap((user) => {
@@ -379,11 +537,82 @@ function operationFixture(
         verified: mode === "provision",
       });
     }
+    if (options.includeExecution) {
+      rows.push({
+        id: user.executionId,
+        owner: user.userId,
+        account: user.accountId,
+        connection: user.connectionId,
+        role: "account_setup_execution",
+        vault: user.executionVault,
+        fingerprint: user.executionFingerprint,
+        material: user.execution,
+        verified: true,
+      });
+    }
     return rows;
   });
   const attempts = preparationDatabase();
+  let inventory: "missing" | "gap" | "exists" = mode === "create" ? "missing" : "exists";
   const db = {
     async query(sql: string, params: unknown[] = []) {
+      if (sql.includes("conname = 'kalshi_connection_credentials_role_check'")) {
+        return { rows: [{ ready: options.includeExecution === true }] };
+      }
+      if (sql.includes("account-subaccount-creation:lock-attempt")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.account === params[2] && item.connection === params[3]);
+        const execution = bindings.find((item) =>
+          item.id === params[4] && item.owner === params[1] &&
+          item.connection === params[3] && item.role === "account_setup_execution" &&
+          item.verified && item.fingerprint === params[5]);
+        return { rows: row && execution ? [{
+          attempt_id: row.id,
+          state: row.state,
+          plan: row.plan,
+          execution_credential_id: execution.id,
+        }] : [] };
+      }
+      if (sql.includes("account-subaccount-creation:master-safety")) {
+        return { rows: [{ live_execution_enabled: false, manual_kill_switch: true }] };
+      }
+      if (sql.includes("account-subaccount-creation:mark-attempted")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.account === params[2] && item.connection === params[3] &&
+          item.state === "prepared");
+        if (!row) return { rows: [] };
+        row.state = "attempted";
+        return { rows: [{ attempt_id: row.id, state: row.state }] };
+      }
+      if (sql.includes("account-subaccount-creation:mark-uncertain")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.connection === params[2] && item.state === "attempted");
+        if (!row) return { rows: [] };
+        row.state = "uncertain";
+        row.responseStatus = typeof params[3] === "number" ? params[3] : null;
+        return { rows: [{ attempt_id: row.id }] };
+      }
+      if (sql.includes("account-subaccount-creation:mark-response")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.connection === params[2] && item.state === "attempted");
+        if (!row) return { rows: [] };
+        row.state = "response_received";
+        row.responseStatus = Number(params[3]);
+        return { rows: [{ attempt_id: row.id }] };
+      }
+      if (sql.includes("account-subaccount-creation:mark-completed")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.connection === params[2] && item.state === "response_received" &&
+          item.responseStatus === 201);
+        if (!row) return { rows: [] };
+        row.state = "completed";
+        return { rows: [{ attempt_id: row.id }] };
+      }
       if (sql.includes("account-setup-attempt:")) return attempts.query(sql, params);
       if (sql.includes("to_regclass('private.kalshi_account_operation_attempts')")) {
         return { rows: [{ name: "private.kalshi_account_operation_attempts" }] };
@@ -457,14 +686,20 @@ function operationFixture(
     const user = users.find((item) =>
       item.provisioning.keyId === material.keyId ||
       item.verification.keyId === material.keyId ||
-      item.restricted.keyId === material.keyId);
+      item.restricted.keyId === material.keyId ||
+      item.execution.keyId === material.keyId);
     assert.ok(user);
     if (path.endsWith("/portfolio/subaccounts/balances")) {
       assert.equal(material.keyId, user.verification.keyId);
       return {
-        subaccount_balances: mode === "create"
+        subaccount_balances: inventory === "missing"
           ? [{ subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 }]
-          : [
+          : inventory === "gap"
+            ? [
+              { subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+              { subaccount_number: 2, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+            ]
+            : [
             { subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
             { subaccount_number: 1, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
           ],
@@ -486,13 +721,27 @@ function operationFixture(
           subaccount: mode === "generate" ? null : 1,
           scopes: ["read", "write::trade"],
         }]),
+        ...(options.includeExecution ? [{
+          api_key_id: user.execution.keyId,
+          subaccount: null,
+          scopes: options.executionScopes ?? ["read", "write"],
+        }] : []),
       ] };
     }
     if (path.endsWith("/account/limits")) {
-      assert.equal(material.keyId, user.provisioning.keyId);
-      if (options.rotateProvisioningAtLimits) {
+      assert.equal(
+        material.keyId === user.provisioning.keyId || material.keyId === user.execution.keyId,
+        true,
+      );
+      if (options.rotateProvisioningAtLimits && material.keyId === user.provisioning.keyId) {
         const binding = bindings.find((row) =>
           row.owner === user.userId && row.role === "provisioning");
+        assert.ok(binding);
+        binding.verified = false;
+      }
+      if (options.rotateExecutionAtLimits && material.keyId === user.execution.keyId) {
+        const binding = bindings.find((row) =>
+          row.owner === user.userId && row.role === "account_setup_execution");
         assert.ok(binding);
         binding.verified = false;
       }
@@ -504,7 +753,17 @@ function operationFixture(
     }
     throw new Error(`unexpected_read:${path}`);
   };
-  return { db, users, bindings, attempts, exchangeReads, kalshiGet };
+  return {
+    db,
+    users,
+    bindings,
+    attempts,
+    exchangeReads,
+    kalshiGet,
+    setInventory(value: "missing" | "gap" | "exists") {
+      inventory = value;
+    },
+  };
 }
 
 async function prepare(
@@ -549,6 +808,7 @@ interface AttemptRow {
   plan: unknown;
   preparedAt: string;
   updatedAt: string;
+  responseStatus?: number | null;
 }
 
 function preparationDatabase(): CredentialDatabase & { rows: AttemptRow[] } {

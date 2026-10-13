@@ -129,6 +129,59 @@ test("setup attempt migration isolates users and durably prevents duplicate life
   }
 });
 
+test("setup execution role migration preserves existing roles and rejects unknown roles", async (t) => {
+  let PGlite: new () => {
+    exec(query: string): Promise<unknown>;
+    query(query: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+    close(): Promise<void>;
+  };
+  try {
+    const loaded = createRequire(process.cwd() + "/package.json")("@electric-sql/pglite") as {
+      PGlite: typeof PGlite;
+    };
+    PGlite = loaded.PGlite;
+  } catch {
+    t.skip("disposable PostgreSQL is not installed");
+    return;
+  }
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE SCHEMA private;
+      CREATE TABLE private.kalshi_connection_credentials (
+        id uuid PRIMARY KEY,
+        role text NOT NULL,
+        CONSTRAINT kalshi_connection_credentials_role_check CHECK (
+          role IN ('provisioning', 'verification', 'restricted_execution')
+        )
+      );
+      INSERT INTO private.kalshi_connection_credentials (id, role)
+      VALUES ('11111111-1111-4111-8111-111111111111', 'provisioning');
+    `);
+    await db.exec(readFileSync(
+      "../../lib/db/drizzle/0016_kalshi_account_setup_execution_role.sql",
+      "utf8",
+    ));
+    await db.query(
+      "INSERT INTO private.kalshi_connection_credentials (id, role) VALUES ($1, $2)",
+      ["22222222-2222-4222-8222-222222222222", "account_setup_execution"],
+    );
+    await assert.rejects(() => db.query(
+      "INSERT INTO private.kalshi_connection_credentials (id, role) VALUES ($1, $2)",
+      ["33333333-3333-4333-8333-333333333333", "unknown"],
+    ));
+    const roles = await db.query(
+      "SELECT role FROM private.kalshi_connection_credentials ORDER BY role",
+    );
+    assert.deepEqual(
+      roles.rows.map((row) => row.role),
+      ["account_setup_execution", "provisioning"],
+    );
+  } finally {
+    await db.close();
+  }
+});
+
 async function insertAttempt(
   db: { query(query: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   owner: string,

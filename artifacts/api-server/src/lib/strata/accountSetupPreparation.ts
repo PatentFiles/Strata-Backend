@@ -62,6 +62,7 @@ export interface AccountSetupNextAuthorizedAction {
   endpoint: string | null;
   requiredConfirmation: string | null;
   effect: string;
+  attemptId: string | null;
 }
 
 export interface PrepareAccountSetupResult {
