@@ -20,6 +20,7 @@ import {
 } from "./accountCredentialLifecycle";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import {
+  inspectProvisioningCredential,
   inspectRestrictedKeyMetadata,
   inspectSubaccount1,
   probeAccountCredential,
@@ -29,6 +30,7 @@ import {
 } from "./accountCredentialProbe";
 import {
   authorizeFutureAccountOperation,
+  futureAccountOperationConfirmation,
   persistAccountFundingAuthorization,
   persistAccountFundingEvidence,
   readAccountFunding,
@@ -36,6 +38,17 @@ import {
   type FutureAccountOperation,
 } from "./accountFunding";
 import { operateAccountWorker, SAFETY_EXPOSURE_SQL, SCOPED_POLICY_SQL } from "./accountScopedExecution";
+import { predictionsApiTier } from "../kalshiSubaccountInventory";
+import {
+  ACCOUNT_SETUP_CONFIRMATIONS,
+  accountSetupPlan,
+  accountSetupPreconditionDigest,
+  listOwnedAccountSetupAttempts,
+  prepareAccountSetupOperation,
+  type AccountSetupNextAuthorizedAction,
+  type AccountSetupOperation,
+  type PublicAccountSetupAttempt,
+} from "./accountSetupPreparation";
 
 const CREDENTIAL_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_connection_credentials') AS name
@@ -46,6 +59,10 @@ const LEASE_TABLE_SQL = `
 const FUNDING_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_funding') AS name
 `;
+const SETUP_ATTEMPT_TABLE_SQL = `
+  SELECT to_regclass('private.kalshi_account_operation_attempts') AS name
+`;
+const ACCOUNT_LIMITS_PATH = "/trade-api/v2/account/limits";
 const OWNED_SECRET_SQL = `
   SELECT decrypted_secret
   FROM vault.decrypted_secrets
@@ -271,21 +288,36 @@ export function accountCredentialControls(
         evidenceSource: "kalshi_balance",
       });
     },
-    async authorizeOperation(_userId: string, body: unknown) {
+    async authorizeOperation(userId: string, body: unknown) {
       const operation = operationOf(body);
-      if (!operation) return { ok: false as const, reason: "explicit_authorization_required", attempted: false as const };
-      return authorizeFutureAccountOperation({
+      if (!operation) {
+        return {
+          ok: false as const,
+          reason: "explicit_authorization_required",
+          attempted: false as const,
+          executable: false as const,
+        };
+      }
+      const authorization = authorizeFutureAccountOperation({
         operation,
         confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
       });
+      if (authorization.reason === "explicit_authorization_required" || !isAccountSetupOperation(operation)) {
+        return { ...authorization, executable: false as const };
+      }
+      return prepareSetupReview(db, database, options.kalshiGet, userId, operation);
     },
     async commissioningStatus(userId: string) {
       if (!await credentialTablesReady(db)) {
+        const setup = unknownAccountSetup("credential_migration_missing");
         return {
           ready: false as const,
           executable: false as const,
           blockers: ["credential_migration_missing"],
-          ...unknownAccountSetup("credential_migration_missing"),
+          ...setup,
+          operationPreparationAvailable: false,
+          operationPreparations: [] as PublicAccountSetupAttempt[],
+          nextAuthorizedAction: nextAuthorizedSetupAction(setup, false, []),
         };
       }
       const commissioning = ports();
@@ -337,7 +369,33 @@ export function accountCredentialControls(
           options.kalshiGet,
         )
         : unknownAccountSetup(resolved.reason);
-      return { ...readiness, ...setup };
+      let operationPreparationAvailable = false;
+      let operationPreparations: PublicAccountSetupAttempt[] = [];
+      if (resolved.ok) {
+        operationPreparationAvailable = await setupAttemptTableReady(db);
+        if (operationPreparationAvailable) {
+          try {
+            operationPreparations = await listOwnedAccountSetupAttempts(
+              database,
+              userId,
+              resolved.context.providerConnectionId,
+            );
+          } catch {
+            operationPreparationAvailable = false;
+          }
+        }
+      }
+      return {
+        ...readiness,
+        ...setup,
+        operationPreparationAvailable,
+        operationPreparations,
+        nextAuthorizedAction: nextAuthorizedSetupAction(
+          setup,
+          operationPreparationAvailable,
+          operationPreparations,
+        ),
+      };
     },
   };
 }
@@ -370,6 +428,15 @@ async function fundingTableReady(db: UserScopeQuery): Promise<boolean> {
   }
 }
 
+async function setupAttemptTableReady(db: UserScopeQuery): Promise<boolean> {
+  try {
+    const ready = await db.query(SETUP_ATTEMPT_TABLE_SQL);
+    return Boolean(ready.rows[0]?.name);
+  } catch {
+    return false;
+  }
+}
+
 async function readOwnedSecret(
   db: UserScopeQuery,
   userId: string,
@@ -392,7 +459,11 @@ type VerifiedAuthorityResult =
 interface AccountSetupStatus {
   subaccount1Exists: boolean | null;
   subaccount1Exchange2Exists: boolean | null;
+  subaccount1SafeToCreate: boolean | null;
   subaccountEvidence: "kalshi_subaccount_balance_inventory" | null;
+  provisioningKeyMetadataVerified: boolean | null;
+  provisioningApiTier: string | null;
+  provisioningSubaccountCreationEligible: boolean | null;
   restrictedKeyMetadataVerified: boolean | null;
   restrictedKeyReadVerified: boolean;
   executionAccountExists: boolean;
@@ -404,7 +475,7 @@ async function readVerifiedRoleAuthority(
   db: UserScopeQuery,
   userId: string,
   providerConnectionId: string,
-  role: "verification",
+  role: "verification" | "provisioning" | "restricted_execution",
 ): Promise<VerifiedAuthorityResult> {
   const rows = await db.query(VERIFIED_ROLE_SECRET_SQL, [userId, providerConnectionId, role]);
   if (rows.rows.length !== 1) {
@@ -412,7 +483,7 @@ async function readVerifiedRoleAuthority(
       ok: false,
       reason: rows.rows.length > 1
         ? "ambiguous_credential_role"
-        : "verified_verification_credential_required",
+        : `verified_${role}_credential_required`,
     };
   }
   const credentialId = text(rows.rows[0]?.credential_id);
@@ -420,10 +491,10 @@ async function readVerifiedRoleAuthority(
   const fingerprint = text(rows.rows[0]?.key_fingerprint);
   const material = parseSecret(rows.rows[0]?.decrypted_secret);
   if (!credentialId || !vaultSecretId || !fingerprint || !material) {
-    return { ok: false, reason: "verification_credential_invalid" };
+    return { ok: false, reason: `${role}_credential_invalid` };
   }
   if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== fingerprint) {
-    return { ok: false, reason: "verification_credential_fingerprint_mismatch" };
+    return { ok: false, reason: `${role}_credential_fingerprint_mismatch` };
   }
   return {
     ok: true,
@@ -456,6 +527,45 @@ async function inspectAccountSetup(
     };
   }
   const subaccount = await inspectSubaccount1(authority.authority, getJson);
+  const provisioningRef = credentials.find((credential) => credential.role === "provisioning");
+  let provisioningMetadataVerified: boolean | null = provisioningRef ? false : null;
+  let provisioningApiTier: string | null = null;
+  let provisioningSubaccountCreationEligible: boolean | null = null;
+  if (provisioningRef) {
+    let provisioningAuthority: VerifiedAuthorityResult;
+    try {
+      provisioningAuthority = await readVerifiedRoleAuthority(
+        db,
+        userId,
+        providerConnectionId,
+        "provisioning",
+      );
+    } catch {
+      provisioningAuthority = { ok: false, reason: "verified_provisioning_credential_required" };
+    }
+    if (provisioningAuthority.ok) {
+      const inspected = await inspectProvisioningCredential(
+        provisioningAuthority.authority.expectedFingerprint,
+        provisioningAuthority.authority.material,
+        getJson,
+      );
+      provisioningMetadataVerified = inspected.ok;
+      if (inspected.ok) {
+        try {
+          const limits = await getJson(
+            provisioningAuthority.authority.material,
+            ACCOUNT_LIMITS_PATH,
+            "",
+          );
+          const tier = predictionsApiTier(limits);
+          provisioningApiTier = tier.apiTier;
+          provisioningSubaccountCreationEligible = tier.subaccountCreationTierEligible;
+        } catch {
+          provisioningSubaccountCreationEligible = null;
+        }
+      }
+    }
+  }
   const restricted = credentials.find((credential) => credential.role === "restricted_execution");
   let metadataVerified: boolean | null = null;
   let metadataReason = restricted ? "restricted_key_metadata_unproven" : "missing_credential";
@@ -507,7 +617,11 @@ async function inspectAccountSetup(
   return {
     subaccount1Exists: subaccount.exists,
     subaccount1Exchange2Exists: subaccount.exchangeIndex2Exists,
+    subaccount1SafeToCreate: subaccount.safeToCreate,
     subaccountEvidence: subaccount.exists === null ? null : "kalshi_subaccount_balance_inventory",
+    provisioningKeyMetadataVerified: provisioningMetadataVerified,
+    provisioningApiTier,
+    provisioningSubaccountCreationEligible,
     restrictedKeyMetadataVerified: metadataVerified,
     restrictedKeyReadVerified: readVerified,
     executionAccountExists: executionAccountId !== null,
@@ -520,12 +634,389 @@ function unknownAccountSetup(reason: string, executionAccountExists = false): Ac
   return {
     subaccount1Exists: null,
     subaccount1Exchange2Exists: null,
+    subaccount1SafeToCreate: null,
     subaccountEvidence: null,
+    provisioningKeyMetadataVerified: null,
+    provisioningApiTier: null,
+    provisioningSubaccountCreationEligible: null,
     restrictedKeyMetadataVerified: null,
     restrictedKeyReadVerified: false,
     executionAccountExists,
     setupReason: reason,
     nextRequirement: null,
+  };
+}
+
+function nextAuthorizedSetupAction(
+  setup: AccountSetupStatus,
+  preparationAvailable: boolean,
+  attempts: PublicAccountSetupAttempt[],
+): AccountSetupNextAuthorizedAction | null {
+  if (setup.nextRequirement === "verify_verification_credential") {
+    return nextAction(
+      "verify_verification_credential",
+      null,
+      "/api/strata/me/credentials/verify",
+      null,
+      "read_only_verification",
+    );
+  }
+  if (setup.nextRequirement === "verify_restricted_execution_credential") {
+    return nextAction(
+      "verify_restricted_execution_credential",
+      null,
+      "/api/strata/me/credentials/verify",
+      null,
+      "read_only_verification",
+    );
+  }
+  const operation = setupOperationForRequirement(setup.nextRequirement);
+  if (!operation) {
+    if (setup.setupReason === "account_setup_verified") return null;
+    return nextAction(
+      "resolve_account_setup_blocker",
+      null,
+      null,
+      null,
+      setup.setupReason,
+    );
+  }
+  if (operation === "create_subaccount") {
+    if (setup.subaccount1SafeToCreate !== true) {
+      return nextAction(
+        "resolve_subaccount_sequence_or_inventory",
+        operation,
+        null,
+        null,
+        setup.setupReason,
+      );
+    }
+    if (setup.provisioningKeyMetadataVerified !== true) {
+      return nextAction(
+        "verify_account_wide_provisioning_key",
+        operation,
+        "/api/strata/me/credentials/verify",
+        null,
+        "prove_exact_read_and_write_scopes",
+      );
+    }
+    if (setup.provisioningSubaccountCreationEligible !== true) {
+      return nextAction(
+        setup.provisioningApiTier ? "obtain_advanced_or_higher_api_tier" : "verify_api_tier",
+        operation,
+        null,
+        null,
+        "subaccount_creation_remains_blocked",
+      );
+    }
+  }
+  if (operation === "generate_api_key" && setup.provisioningKeyMetadataVerified !== true) {
+    return nextAction(
+      "verify_account_wide_provisioning_key",
+      operation,
+      "/api/strata/me/credentials/verify",
+      null,
+      "prove_exact_read_and_write_scopes",
+    );
+  }
+  const attempt = attempts.find((item) => item.operation === operation);
+  if (attempt) {
+    if (attempt.state === "prepared") {
+      return nextAction(
+        "separately_authorize_prepared_operation",
+        operation,
+        null,
+        null,
+        "review_only_preparation_exists_no_mutation_executor_enabled",
+      );
+    }
+    if (attempt.state === "attempted" || attempt.state === "response_received" ||
+        attempt.state === "uncertain") {
+      return nextAction(
+        "reconcile_prior_operation_without_retry",
+        operation,
+        null,
+        null,
+        `operation_${attempt.state}_retry_blocked`,
+      );
+    }
+    return nextAction(
+      "review_prior_operation_state",
+      operation,
+      null,
+      null,
+      `operation_${attempt.state}`,
+    );
+  }
+  if (!preparationAvailable) {
+    return nextAction(
+      "review_and_separately_apply_migration_0015",
+      operation,
+      null,
+      null,
+      "enable_durable_review_only_operation_preparation",
+    );
+  }
+  return nextAction(
+    `prepare_${operation}`,
+    operation,
+    "/api/strata/me/account-operations",
+    futureAccountOperationConfirmation(operation),
+    "persist_review_only_plan_without_external_mutation",
+  );
+}
+
+function setupOperationForRequirement(
+  requirement: AccountSetupNextRequirement | null,
+): AccountSetupOperation | null {
+  if (requirement === "create_subaccount_1") return "create_subaccount";
+  if (requirement === "generate_subaccount_1_restricted_key") return "generate_api_key";
+  if (requirement === "provision_execution_account") return "provision_execution_account";
+  return null;
+}
+
+function nextAction(
+  action: string,
+  operation: AccountSetupOperation | null,
+  endpoint: string | null,
+  requiredConfirmation: string | null,
+  effect: string,
+): AccountSetupNextAuthorizedAction {
+  return { action, operation, endpoint, requiredConfirmation, effect };
+}
+
+async function prepareSetupReview(
+  db: UserScopeQuery,
+  database: CredentialDatabase,
+  getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
+  userId: string,
+  operation: AccountSetupOperation,
+) {
+  if (!await setupAttemptTableReady(db)) {
+    return rejectedPreparation("account_setup_attempt_migration_missing");
+  }
+  if (!getJson) return rejectedPreparation("verification_transport_not_enabled");
+  const commissioning = createDatabaseAccountCommissioningPorts(database);
+  const resolved = await resolveAccountCommissioningContext(userId, commissioning);
+  if (!resolved.ok) return rejectedPreparation(resolved.reason);
+  if (operation === "provision_execution_account" && resolved.context.executionAccountId) {
+    return rejectedPreparation("execution_account_already_exists");
+  }
+
+  let verification: VerifiedAuthorityResult;
+  try {
+    verification = await readVerifiedRoleAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      "verification",
+    );
+  } catch {
+    return rejectedPreparation("verified_verification_credential_required");
+  }
+  if (!verification.ok) return rejectedPreparation(verification.reason);
+  const subaccount = await inspectSubaccount1(verification.authority, getJson);
+  if (!subaccount.ok) return rejectedPreparation(subaccount.reason);
+
+  let authority = verification;
+  let targetCredentialId: string | null = null;
+  let targetFingerprint: string | null = null;
+  let apiTier: string | null = null;
+
+  if (operation === "create_subaccount") {
+    if (subaccount.exists) return rejectedPreparation("subaccount_1_already_exists");
+    if (subaccount.safeToCreate !== true) {
+      return rejectedPreparation(subaccount.reason === "subaccount_1_missing"
+        ? "subaccount_inventory_unproven"
+        : subaccount.reason);
+    }
+    const provisioning = await verifiedProvisioningAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      getJson,
+    );
+    if (!provisioning.ok) return rejectedPreparation(provisioning.reason);
+    authority = provisioning;
+    let limits: unknown;
+    try {
+      limits = await getJson(authority.authority.material, ACCOUNT_LIMITS_PATH, "");
+    } catch {
+      return rejectedPreparation("provisioning_api_tier_unproven");
+    }
+    const tier = predictionsApiTier(limits);
+    apiTier = tier.apiTier;
+    if (!tier.apiTier) return rejectedPreparation("provisioning_api_tier_unproven");
+    if (!tier.subaccountCreationTierEligible) {
+      return rejectedPreparation("advanced_api_tier_required");
+    }
+  } else if (operation === "generate_api_key") {
+    if (!subaccount.exists || !subaccount.exchangeIndex2Exists) {
+      return rejectedPreparation(subaccount.reason);
+    }
+    const restricted = resolved.context.credentials.find((item) =>
+      item.role === "restricted_execution");
+    if (restricted) {
+      if (!restricted.keyFingerprint) return rejectedPreparation("credential_fingerprint_missing");
+      let material: { keyId: string; privateKey: string } | null;
+      try {
+        material = await readOwnedSecret(db, userId, restricted.vaultSecretId);
+      } catch {
+        material = null;
+      }
+      if (!material ||
+          dedicatedSignerFingerprint(material.keyId, material.privateKey) !== restricted.keyFingerprint) {
+        return rejectedPreparation("restricted_credential_recovery_required");
+      }
+      const existing = await inspectRestrictedKeyMetadata(
+        material.keyId,
+        verification.authority,
+        getJson,
+      );
+      if (existing.ok) return rejectedPreparation("restricted_key_already_verified");
+      if (!replaceableRestrictedKeyReason(existing.reason)) {
+        return rejectedPreparation(existing.reason);
+      }
+      targetFingerprint = restricted.keyFingerprint;
+    }
+    const provisioning = await verifiedProvisioningAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      getJson,
+    );
+    if (!provisioning.ok) return rejectedPreparation(provisioning.reason);
+    authority = provisioning;
+  } else {
+    if (!subaccount.exists || !subaccount.exchangeIndex2Exists) {
+      return rejectedPreparation(subaccount.reason);
+    }
+    const restricted = await readVerifiedRoleAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      "restricted_execution",
+    );
+    if (!restricted.ok) return rejectedPreparation(restricted.reason);
+    const probed = await probeAccountCredential(
+      "restricted_execution",
+      restricted.authority.expectedFingerprint,
+      restricted.authority.material,
+      getJson,
+      verification.authority,
+    );
+    if (!probed.ok) return rejectedPreparation(probed.reason);
+    authority = restricted;
+    targetCredentialId = restricted.credentialId;
+    targetFingerprint = restricted.authority.expectedFingerprint;
+  }
+
+  let currentAuthority: VerifiedAuthorityResult;
+  let currentVerification: VerifiedAuthorityResult;
+  try {
+    currentAuthority = await readVerifiedRoleAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      operation === "provision_execution_account" ? "restricted_execution" : "provisioning",
+    );
+    currentVerification = await readVerifiedRoleAuthority(
+      db,
+      userId,
+      resolved.context.providerConnectionId,
+      "verification",
+    );
+  } catch {
+    return rejectedPreparation("setup_authority_rotated");
+  }
+  if (!sameAuthority(authority, currentAuthority)) {
+    return rejectedPreparation("setup_authority_rotated");
+  }
+  if (!sameAuthority(verification, currentVerification)) {
+    return rejectedPreparation("verification_credential_rotated");
+  }
+
+  const plan = accountSetupPlan(operation, resolved.context.providerConnectionId);
+  const preconditionDigest = accountSetupPreconditionDigest({
+    ownerUserId: userId,
+    financialAccountId: resolved.context.financialAccountId,
+    providerConnectionId: resolved.context.providerConnectionId,
+    operation,
+    subaccount1Exists: subaccount.exists,
+    subaccount1Exchange2Exists: subaccount.exchangeIndex2Exists,
+    subaccount1SafeToCreate: subaccount.safeToCreate,
+    numberedSubaccounts: subaccount.numberedSubaccounts,
+    apiTier,
+    verificationCredentialId: verification.credentialId,
+    verificationFingerprint: verification.authority.expectedFingerprint,
+    authorityCredentialId: authority.credentialId,
+    authorityFingerprint: authority.authority.expectedFingerprint,
+    targetCredentialId,
+    targetFingerprint,
+    existingExecutionAccountId: resolved.context.executionAccountId,
+    plan,
+  });
+  return prepareAccountSetupOperation(database, {
+    ownerUserId: userId,
+    financialAccountId: resolved.context.financialAccountId,
+    providerConnectionId: resolved.context.providerConnectionId,
+    operation,
+    authorityCredentialId: authority.credentialId,
+    authorityFingerprint: authority.authority.expectedFingerprint,
+    targetCredentialId,
+    targetFingerprint,
+    plan,
+    preconditionDigest,
+  });
+}
+
+async function verifiedProvisioningAuthority(
+  db: UserScopeQuery,
+  userId: string,
+  providerConnectionId: string,
+  getJson: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>,
+): Promise<VerifiedAuthorityResult> {
+  let authority: VerifiedAuthorityResult;
+  try {
+    authority = await readVerifiedRoleAuthority(db, userId, providerConnectionId, "provisioning");
+  } catch {
+    return { ok: false, reason: "verified_provisioning_credential_required" };
+  }
+  if (!authority.ok) return authority;
+  const inspected = await inspectProvisioningCredential(
+    authority.authority.expectedFingerprint,
+    authority.authority.material,
+    getJson,
+  );
+  return inspected.ok ? authority : { ok: false, reason: inspected.reason };
+}
+
+function sameAuthority(
+  first: VerifiedAuthorityResult,
+  second: VerifiedAuthorityResult,
+): boolean {
+  return first.ok && second.ok &&
+    first.credentialId === second.credentialId &&
+    first.vaultSecretId === second.vaultSecretId &&
+    first.authority.expectedFingerprint === second.authority.expectedFingerprint;
+}
+
+function replaceableRestrictedKeyReason(reason: string): boolean {
+  return reason === "credential_permission_unproven" ||
+    reason === "credential_permission_rejected" ||
+    reason === "restricted_key_not_bound_to_subaccount_1" ||
+    reason === "account_target_pair_mismatch" ||
+    reason === "verification_credential_not_independent";
+}
+
+function rejectedPreparation(reason: string) {
+  return {
+    ok: false as const,
+    reason,
+    attempted: false as const,
+    executable: false as const,
+    idempotent: false,
+    attempt: null,
   };
 }
 
@@ -570,8 +1061,13 @@ function operationOf(body: unknown): FutureAccountOperation | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const operation = (body as Record<string, unknown>).operation;
   if (operation === "create_subaccount" || operation === "generate_api_key" ||
+      operation === "provision_execution_account" ||
       operation === "transfer_funds" || operation === "qualifying_order") return operation;
   return null;
+}
+
+function isAccountSetupOperation(operation: FutureAccountOperation): operation is AccountSetupOperation {
+  return Object.hasOwn(ACCOUNT_SETUP_CONFIRMATIONS, operation);
 }
 
 function roleOf(body: unknown): string | null {

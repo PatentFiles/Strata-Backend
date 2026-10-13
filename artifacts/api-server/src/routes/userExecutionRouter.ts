@@ -7,6 +7,10 @@ import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 import { readQualificationDiagnostics, type QualificationDiagnostic } from "../lib/strata/qualificationDiagnostics";
 import type { AccountSetupNextRequirement } from "../lib/strata/accountCredentialProbe";
+import type {
+  AccountSetupNextAuthorizedAction,
+  PublicAccountSetupAttempt,
+} from "../lib/strata/accountSetupPreparation";
 
 export interface UserCommissioningStatus {
   ready: boolean;
@@ -14,12 +18,19 @@ export interface UserCommissioningStatus {
   blockers: string[];
   subaccount1Exists: boolean | null;
   subaccount1Exchange2Exists: boolean | null;
+  subaccount1SafeToCreate: boolean | null;
   subaccountEvidence: "kalshi_subaccount_balance_inventory" | null;
+  provisioningKeyMetadataVerified: boolean | null;
+  provisioningApiTier: string | null;
+  provisioningSubaccountCreationEligible: boolean | null;
   restrictedKeyMetadataVerified: boolean | null;
   restrictedKeyReadVerified: boolean;
   executionAccountExists: boolean;
   setupReason: string;
   nextRequirement: AccountSetupNextRequirement | null;
+  operationPreparationAvailable: boolean;
+  operationPreparations: PublicAccountSetupAttempt[];
+  nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
 
 export interface UserScopePort {
@@ -41,7 +52,14 @@ export interface UserScopePort {
   verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   authorizeFunding(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   recordFundingEvidence(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
-  authorizeOperation(userId: string, body: unknown): Promise<{ ok: false; reason: string; attempted: false }>;
+  authorizeOperation(userId: string, body: unknown): Promise<{
+    ok: boolean;
+    reason: string;
+    attempted: false;
+    executable?: false;
+    idempotent?: boolean;
+    attempt?: PublicAccountSetupAttempt | null;
+  }>;
   commissioningStatus(userId: string): Promise<UserCommissioningStatus>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
@@ -68,19 +86,32 @@ export function closedUserScopePort(): UserScopePort {
     verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     recordFundingEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
-    authorizeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false }),
+    authorizeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false, executable: false }),
     commissioningStatus: async () => ({
       ready: false,
       executable: false,
       blockers: ["user_scope_not_migrated"],
       subaccount1Exists: null,
       subaccount1Exchange2Exists: null,
+      subaccount1SafeToCreate: null,
       subaccountEvidence: null,
+      provisioningKeyMetadataVerified: null,
+      provisioningApiTier: null,
+      provisioningSubaccountCreationEligible: null,
       restrictedKeyMetadataVerified: null,
       restrictedKeyReadVerified: false,
       executionAccountExists: false,
       setupReason: "user_scope_not_migrated",
       nextRequirement: null,
+      operationPreparationAvailable: false,
+      operationPreparations: [],
+      nextAuthorizedAction: {
+        action: "resolve_account_setup_blocker",
+        operation: null,
+        endpoint: null,
+        requiredConfirmation: null,
+        effect: "user_scope_not_migrated",
+      },
     }),
     stake: async (userId) => refused(userId),
     presets: async () => [],
@@ -200,7 +231,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
     const result = await port.authorizeOperation(userId, req.body ?? {});
-    res.status(409).json(sanitizePublic(result));
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/stake", async (req, res) => {
     const userId = subject(res);

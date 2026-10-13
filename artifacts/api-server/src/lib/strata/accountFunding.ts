@@ -1,6 +1,7 @@
 import { resolveAccountCommissioningContext, type AccountCommissioningPorts } from "./accountCommissioningContext";
 import { accountFundingAuthorization } from "./accountCredentialLifecycle";
 import type { CredentialDatabase } from "./accountCredentialStore";
+import { ACCOUNT_SETUP_CONFIRMATIONS } from "./accountSetupPreparation";
 
 export const RECORD_FUNDING_EVIDENCE_CONFIRMATION = "RECORD_ACCOUNT_FUNDING_EVIDENCE";
 
@@ -157,8 +158,7 @@ export async function readAccountFunding(
 }
 
 const FUTURE_OPERATION_CONFIRMATION = {
-  create_subaccount: "CREATE_ACCOUNT_SUBACCOUNT",
-  generate_api_key: "GENERATE_ACCOUNT_API_KEY",
+  ...ACCOUNT_SETUP_CONFIRMATIONS,
   transfer_funds: "TRANSFER_ACCOUNT_FUNDS",
   qualifying_order: "SUBMIT_QUALIFYING_ORDER",
 } as const;
@@ -174,6 +174,10 @@ export function authorizeFutureAccountOperation(input: {
     return { ok: false, reason: "explicit_authorization_required", attempted: false };
   }
   return { ok: false, reason: "operation_not_enabled", attempted: false };
+}
+
+export function futureAccountOperationConfirmation(operation: FutureAccountOperation): string {
+  return FUTURE_OPERATION_CONFIRMATION[operation];
 }
 
 function funding(

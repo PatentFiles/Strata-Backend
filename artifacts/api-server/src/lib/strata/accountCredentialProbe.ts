@@ -4,6 +4,7 @@ import {
   PRODUCTION_EXCHANGE_INDEX,
   PRODUCTION_SUBACCOUNT,
   subaccountIdentitiesFromBalancePayload,
+  summarizeSubaccountInventory,
 } from "./commissioning";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
 
@@ -39,6 +40,8 @@ export interface Subaccount1Inspection {
   reason: string;
   exists: boolean | null;
   exchangeIndex2Exists: boolean | null;
+  safeToCreate: boolean | null;
+  numberedSubaccounts: number[] | null;
 }
 
 export interface RestrictedKeyMetadataInspection {
@@ -46,6 +49,13 @@ export interface RestrictedKeyMetadataInspection {
   reason: string;
   boundSubaccount: number | null;
   scopesVerified: boolean;
+}
+
+export interface ProvisioningCredentialInspection {
+  ok: boolean;
+  reason: string;
+  scopesVerified: boolean;
+  unrestricted: boolean;
 }
 
 const API_KEYS_PATH = "/trade-api/v2/api_keys";
@@ -211,31 +221,95 @@ export async function inspectSubaccount1(
   getJson: (creds: CredentialProbeMaterial, path: string, query?: string) => Promise<unknown>,
 ): Promise<Subaccount1Inspection> {
   if (!authorityMatchesFingerprint(authority)) {
-    return { ok: false, reason: "verification_credential_fingerprint_mismatch", exists: null, exchangeIndex2Exists: null };
+    return subaccountInspection(false, "verification_credential_fingerprint_mismatch", null, null, null, null);
   }
   let payload: unknown;
   try {
     payload = await getJson(authority.material, SUBACCOUNT_BALANCES_PATH, "");
   } catch {
-    return { ok: false, reason: "subaccount_inventory_unproven", exists: null, exchangeIndex2Exists: null };
+    return subaccountInspection(false, "subaccount_inventory_unproven", null, null, null, null);
   }
   try {
     const identities = subaccountIdentitiesFromBalancePayload(payload);
-    const exists = identities.some((row) => row.subaccount === PRODUCTION_SUBACCOUNT);
+    const summary = summarizeSubaccountInventory(identities);
+    const exists = summary.subaccount1Exists;
     const diagnosis = cleanPairInventoryDiagnosis(identities);
     if (diagnosis === "clean_pair_inventory_missing") {
-      return { ok: true, reason: "subaccount_1_missing", exists: false, exchangeIndex2Exists: false };
+      const safeToCreate = summary.numberedSubaccounts.length === 1 &&
+        summary.numberedSubaccounts[0] === 0;
+      return subaccountInspection(
+        true,
+        safeToCreate ? "subaccount_1_missing" : "next_subaccount_would_not_be_1",
+        false,
+        false,
+        safeToCreate,
+        summary.numberedSubaccounts,
+      );
     }
     if (diagnosis === "clean_pair_exchange_index_2_missing") {
-      return { ok: true, reason: "subaccount_1_exchange_2_missing", exists: true, exchangeIndex2Exists: false };
+      return subaccountInspection(
+        true,
+        "subaccount_1_exchange_2_missing",
+        true,
+        false,
+        false,
+        summary.numberedSubaccounts,
+      );
     }
     if (diagnosis === "clean_pair_inventory_duplicated") {
-      return { ok: false, reason: "subaccount_inventory_ambiguous", exists: true, exchangeIndex2Exists: true };
+      return subaccountInspection(
+        false,
+        "subaccount_inventory_ambiguous",
+        true,
+        true,
+        false,
+        summary.numberedSubaccounts,
+      );
     }
-    return { ok: true, reason: "subaccount_1_verified", exists, exchangeIndex2Exists: true };
+    return subaccountInspection(
+      true,
+      "subaccount_1_verified",
+      exists,
+      true,
+      false,
+      summary.numberedSubaccounts,
+    );
   } catch {
-    return { ok: false, reason: "subaccount_inventory_unproven", exists: null, exchangeIndex2Exists: null };
+    return subaccountInspection(false, "subaccount_inventory_unproven", null, null, null, null);
   }
+}
+
+/** Verifies the user's own account-wide provisioning key without performing a mutation. */
+export async function inspectProvisioningCredential(
+  expectedFingerprint: string,
+  material: CredentialProbeMaterial,
+  getJson: (creds: CredentialProbeMaterial, path: string, query?: string) => Promise<unknown>,
+): Promise<ProvisioningCredentialInspection> {
+  if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== expectedFingerprint) {
+    return provisioningInspection(false, "provisioning_credential_fingerprint_mismatch");
+  }
+  let payload: unknown;
+  try {
+    payload = await getJson(material, API_KEYS_PATH, "");
+  } catch {
+    return provisioningInspection(false, "provisioning_credential_permission_unproven");
+  }
+  if (!apiKeyInventory(payload)) {
+    return provisioningInspection(false, "provisioning_credential_permission_unproven");
+  }
+  const record = keyRecord(payload, material.keyId);
+  if (!record) return provisioningInspection(false, "provisioning_credential_permission_unproven");
+  const scopes = stringList(record.scopes);
+  const exactScopes = scopes.length === 2 && scopes.includes("read") && scopes.includes("write");
+  if (!exactScopes) {
+    return provisioningInspection(false, "provisioning_credential_scopes_rejected", false,
+      !Object.hasOwn(record, "subaccount") || record.subaccount === null);
+  }
+  const unrestricted = !Object.hasOwn(record, "subaccount") || record.subaccount === null;
+  if (!unrestricted) {
+    return provisioningInspection(false, "provisioning_credential_must_be_unrestricted", true, false);
+  }
+  return provisioningInspection(true, "provisioning_credential_verified", true, true);
 }
 
 function keyRecord(payload: unknown, keyId: string): Record<string, unknown> | null {
@@ -292,6 +366,26 @@ export function restrictedMetadataNextRequirement(reason: string): AccountSetupN
     return "generate_subaccount_1_restricted_key";
   }
   return null;
+}
+
+function subaccountInspection(
+  ok: boolean,
+  reason: string,
+  exists: boolean | null,
+  exchangeIndex2Exists: boolean | null,
+  safeToCreate: boolean | null,
+  numberedSubaccounts: number[] | null,
+): Subaccount1Inspection {
+  return { ok, reason, exists, exchangeIndex2Exists, safeToCreate, numberedSubaccounts };
+}
+
+function provisioningInspection(
+  ok: boolean,
+  reason: string,
+  scopesVerified = false,
+  unrestricted = false,
+): ProvisioningCredentialInspection {
+  return { ok, reason, scopesVerified, unrestricted };
 }
 
 function pairEvidence(payload: unknown): { ok: true; evidenceMicros: string } | { ok: false; reason: string } {
