@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Pool } from "@workspace/db";
 import type { AccountCommissioningPorts } from "./accountCommissioningContext";
+import { accountCredentialControls } from "./accountCredentialControls";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { probeAccountCredential } from "./accountCredentialProbe";
 import {
@@ -18,6 +19,7 @@ import {
   type AccountDispatchState,
 } from "./accountProductionSession";
 import { userCommissioningReadiness } from "./accountCredentialLifecycle";
+import type { UserScopeQuery } from "./userScopeDatabase";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -27,10 +29,19 @@ const CONNECTION_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const CONNECTION_B = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 test("credential verification uses the caller key and rejects a mismatched fingerprint before any read", async () => {
-  const generated = keyMaterial();
+  const generated = keyMaterial("restricted-user-key");
+  const verifier = keyMaterial("verified-management-key");
   const material = { keyId: generated.apiKeyId, privateKey: generated.privateKey };
+  const verifierMaterial = { keyId: verifier.apiKeyId, privateKey: verifier.privateKey };
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
+  const verifierFingerprint = dedicatedSignerFingerprint(verifierMaterial.keyId, verifierMaterial.privateKey);
   assert.ok(fingerprint);
+  assert.ok(verifierFingerprint);
+  const verifierRecord = {
+    api_key_id: verifierMaterial.keyId,
+    subaccount: null,
+    scopes: ["read"],
+  };
   let calls = 0;
   const mismatched = await probeAccountCredential("restricted_execution", "ab".repeat(32), material, async () => {
     calls += 1;
@@ -38,24 +49,196 @@ test("credential verification uses the caller key and rejects a mismatched finge
   });
   assert.equal(mismatched.reason, "credential_fingerprint_mismatch");
   assert.equal(calls, 0);
-  const verified = await probeAccountCredential("restricted_execution", fingerprint!, material, async (_creds, path) => {
+  const seen: Array<{ keyId: string; path: string }> = [];
+  const authority = { expectedFingerprint: verifierFingerprint!, material: verifierMaterial };
+  const verified = await probeAccountCredential("restricted_execution", fingerprint!, material, async (creds, path) => {
     calls += 1;
+    seen.push({ keyId: creds.keyId, path });
     if (path.endsWith("/api_keys")) {
-      return { api_keys: [{ api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write::trade"] }] };
+      return { api_keys: [
+        verifierRecord,
+        { api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write::trade"] },
+      ] };
+    }
+    if (path.endsWith("/subaccounts/balances")) {
+      return { subaccount_balances: [
+        { subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+        { subaccount_number: 1, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+      ] };
     }
     return { balance_dollars: "12.3400", subaccount: 1, exchange_index: 2 };
-  });
+  }, authority);
   assert.equal(verified.ok, true);
   assert.equal(verified.evidenceMicros, "12340000");
   assert.notEqual(verified.evidenceMicros, "25000000");
   assert.equal(JSON.stringify(verified).includes("BEGIN"), false);
+  assert.deepEqual(seen, [
+    { keyId: verifierMaterial.keyId, path: "/trade-api/v2/api_keys" },
+    { keyId: verifierMaterial.keyId, path: "/trade-api/v2/portfolio/subaccounts/balances" },
+    { keyId: material.keyId, path: "/trade-api/v2/portfolio/balance" },
+  ]);
   const broad = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => ({
-    api_keys: [{ api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write"] }],
-  }));
+    api_keys: [verifierRecord, { api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write"] }],
+  }), authority);
   assert.equal(broad.reason, "credential_permission_rejected");
+  const unrestricted = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => ({
+    api_keys: [verifierRecord, { api_key_id: material.keyId, subaccount: null, scopes: ["read", "write::trade"] }],
+  }), authority);
+  assert.equal(unrestricted.reason, "restricted_key_not_bound_to_subaccount_1");
+  assert.equal(unrestricted.nextRequirement, "generate_subaccount_1_restricted_key");
+  const wrongSubaccount = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => ({
+    api_keys: [verifierRecord, { api_key_id: material.keyId, subaccount: 2, scopes: ["read", "write::trade"] }],
+  }), authority);
+  assert.equal(wrongSubaccount.reason, "account_target_pair_mismatch");
+  const foreign = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => ({
+    api_keys: [verifierRecord, { api_key_id: "another-users-key", subaccount: 1, scopes: ["read", "write::trade"] }],
+  }), authority);
+  assert.equal(foreign.reason, "credential_permission_unproven");
+  const restrictedVerifier = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => ({
+    api_keys: [
+      { ...verifierRecord, subaccount: 1 },
+      { api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write::trade"] },
+    ],
+  }), authority);
+  assert.equal(restrictedVerifier.reason, "verification_credential_not_authorized");
+  const unavailableMetadata = await probeAccountCredential("restricted_execution", fingerprint!, material, async () => {
+    throw new Error("network_unavailable");
+  }, authority);
+  assert.equal(unavailableMetadata.reason, "credential_metadata_unproven");
+  assert.equal(unavailableMetadata.nextRequirement, null);
+  const missingSubaccount = await probeAccountCredential("restricted_execution", fingerprint!, material, async (_creds, path) => {
+    if (path.endsWith("/api_keys")) {
+      return { api_keys: [
+        verifierRecord,
+        { api_key_id: material.keyId, subaccount: 1, scopes: ["read", "write::trade"] },
+      ] };
+    }
+    return { subaccount_balances: [
+      { subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+    ] };
+  }, authority);
+  assert.equal(missingSubaccount.reason, "subaccount_1_missing");
+  assert.equal(missingSubaccount.subaccount1Exists, false);
+  assert.equal(missingSubaccount.nextRequirement, "create_subaccount_1");
   const source = readFileSync("src/lib/strata/accountCredentialProbe.ts", "utf8");
   assert.equal(source.includes("process.env"), false);
   assert.equal(source.includes("KALSHI_INDEX2"), false);
+});
+
+test("restricted verification uses each user's verified management credential", async () => {
+  const fixture = credentialControlFixture();
+  const calls: Array<{ keyId: string; path: string }> = [];
+  const controls = accountCredentialControls(fixture.db, {
+    async kalshiGet(creds, path) {
+      calls.push({ keyId: creds.keyId, path });
+      const user = fixture.users.find((item) =>
+        item.verifier.apiKeyId === creds.keyId || item.restricted.apiKeyId === creds.keyId);
+      assert.ok(user);
+      if (path.endsWith("/api_keys")) {
+        assert.equal(creds.keyId, user.verifier.apiKeyId);
+        return {
+          api_keys: [
+            { api_key_id: user.verifier.apiKeyId, subaccount: null, scopes: ["read"] },
+            {
+              api_key_id: user.restricted.apiKeyId,
+              subaccount: 1,
+              scopes: ["read", "write::trade"],
+            },
+          ],
+        };
+      }
+      if (path.endsWith("/subaccounts/balances")) {
+        assert.equal(creds.keyId, user.verifier.apiKeyId);
+        return { subaccount_balances: [
+          { subaccount_number: 0, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+          { subaccount_number: 1, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+        ] };
+      }
+      assert.equal(path.endsWith("/portfolio/balance"), true);
+      assert.equal(creds.keyId, user.restricted.apiKeyId);
+      return { balance_dollars: "0.0000", subaccount: 1, exchange_index: 2 };
+    },
+  });
+  const first = await controls.verifyCredential(USER_A, {
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+  });
+  const second = await controls.verifyCredential(USER_B, {
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal("nextRequirement" in first ? first.nextRequirement : null, "provision_execution_account");
+  assert.equal("nextRequirement" in second ? second.nextRequirement : null, "provision_execution_account");
+  for (const user of fixture.users) {
+    assert.deepEqual(calls.filter((call) =>
+      call.keyId === user.verifier.apiKeyId || call.keyId === user.restricted.apiKeyId), [
+      { keyId: user.verifier.apiKeyId, path: "/trade-api/v2/api_keys" },
+      { keyId: user.verifier.apiKeyId, path: "/trade-api/v2/portfolio/subaccounts/balances" },
+      { keyId: user.restricted.apiKeyId, path: "/trade-api/v2/portfolio/balance" },
+    ]);
+  }
+  assert.equal(calls.some((call) =>
+    call.path.endsWith("/api_keys") &&
+    fixture.users.some((user) => user.restricted.apiKeyId === call.keyId)), false);
+  const status = await controls.commissioningStatus(USER_A);
+  assert.equal(status.subaccount1Exists, true);
+  assert.equal(status.subaccount1Exchange2Exists, true);
+  assert.equal(status.subaccountEvidence, "kalshi_subaccount_balance_inventory");
+  assert.equal(status.restrictedKeyMetadataVerified, true);
+  assert.equal(status.restrictedKeyReadVerified, true);
+  assert.equal(status.executionAccountExists, false);
+  assert.equal(status.nextRequirement, "provision_execution_account");
+  assert.equal(status.setupReason, "execution_account_not_provisioned");
+  const callsBeforeForeignVerifier = calls.length;
+  const verifierA = fixture.bindings.find((row) =>
+    row.ownerUserId === USER_A && row.role === "verification");
+  assert.ok(verifierA);
+  verifierA.ownerUserId = USER_B;
+  const refused = await controls.verifyCredential(USER_A, {
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+  });
+  assert.equal(refused.reason, "verified_verification_credential_required");
+  assert.equal(calls.length, callsBeforeForeignVerifier);
+});
+
+test("verification authority rotation cannot mark the restricted key verified", async () => {
+  const fixture = credentialControlFixture();
+  const user = fixture.users[0]!;
+  const controls = accountCredentialControls(fixture.db, {
+    async kalshiGet(_creds, path) {
+      if (path.endsWith("/api_keys")) {
+        return { api_keys: [
+          { api_key_id: user.verifier.apiKeyId, subaccount: null, scopes: ["read"] },
+          {
+            api_key_id: user.restricted.apiKeyId,
+            subaccount: 1,
+            scopes: ["read", "write::trade"],
+          },
+        ] };
+      }
+      if (path.endsWith("/subaccounts/balances")) {
+        return { subaccount_balances: [
+          { subaccount_number: 1, exchange_index: 2, balance: "0.0000", updated_ts: 1 },
+        ] };
+      }
+      const verifier = fixture.bindings.find((row) =>
+        row.ownerUserId === USER_A && row.role === "verification");
+      assert.ok(verifier);
+      verifier.verifiedAt = null;
+      return { balance_dollars: "0.0000", subaccount: 1, exchange_index: 2 };
+    },
+  });
+  const result = await controls.verifyCredential(USER_A, {
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "verification_credential_rotated");
+  assert.equal(fixture.bindings.find((row) =>
+    row.ownerUserId === USER_A && row.role === "restricted_execution")?.verifiedAt, null);
 });
 
 test("funding authorization is per user and does not transfer", async () => {
@@ -155,10 +338,10 @@ test("the per-user worker binds the existing executor and does not start live en
   assert.equal(session.includes("KalshiProductionExchange"), false);
 });
 
-function keyMaterial() {
+function keyMaterial(apiKeyId = "phase5-user-key") {
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return {
-    apiKeyId: "phase5-user-key",
+    apiKeyId,
     privateKey: pair.privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
   };
 }
@@ -186,6 +369,125 @@ function unusedPool(): Pool {
     query: async () => { throw new Error("pool_not_used"); },
     connect: async () => { throw new Error("pool_not_used"); },
   } as unknown as Pool;
+}
+
+function credentialControlFixture() {
+  const users = [
+    {
+      userId: USER_A,
+      financialAccountId: FINANCIAL_A,
+      connectionId: CONNECTION_A,
+      verifier: keyMaterial("verifier-a"),
+      restricted: keyMaterial("restricted-a"),
+    },
+    {
+      userId: USER_B,
+      financialAccountId: FINANCIAL_B,
+      connectionId: CONNECTION_B,
+      verifier: keyMaterial("verifier-b"),
+      restricted: keyMaterial("restricted-b"),
+    },
+  ];
+  const bindings = users.flatMap((user, userIndex) => [
+    {
+      id: `11111111-1111-4111-8111-${String(userIndex * 2 + 1).padStart(12, "0")}`,
+      ownerUserId: user.userId,
+      financialAccountId: user.financialAccountId,
+      connectionId: user.connectionId,
+      role: "verification",
+      vaultSecretId: `22222222-2222-4222-8222-${String(userIndex * 2 + 1).padStart(12, "0")}`,
+      fingerprint: dedicatedSignerFingerprint(user.verifier.apiKeyId, user.verifier.privateKey)!,
+      verifiedAt: "2026-10-12T00:00:00.000Z",
+    },
+    {
+      id: `11111111-1111-4111-8111-${String(userIndex * 2 + 2).padStart(12, "0")}`,
+      ownerUserId: user.userId,
+      financialAccountId: user.financialAccountId,
+      connectionId: user.connectionId,
+      role: "restricted_execution",
+      vaultSecretId: `22222222-2222-4222-8222-${String(userIndex * 2 + 2).padStart(12, "0")}`,
+      fingerprint: dedicatedSignerFingerprint(user.restricted.apiKeyId, user.restricted.privateKey)!,
+      verifiedAt: null as string | null,
+    },
+  ]);
+  const secrets = new Map(bindings.map((binding) => {
+    const user = users.find((item) => item.userId === binding.ownerUserId)!;
+    const material = binding.role === "verification" ? user.verifier : user.restricted;
+    return [binding.vaultSecretId, JSON.stringify({
+      api_key_id: material.apiKeyId,
+      private_key: material.privateKey,
+    })];
+  }));
+  const db: UserScopeQuery = {
+    async query(text, params = []) {
+      if (text.includes("to_regclass('private.kalshi_connection_credentials')")) {
+        return { rows: [{ name: "private.kalshi_connection_credentials" }] };
+      }
+      if (text.includes("account-credential:verified-role-secret")) {
+        const matches = bindings.filter((row) =>
+          row.ownerUserId === params[0] && row.connectionId === params[1] &&
+          row.role === params[2] && row.verifiedAt !== null);
+        return { rows: matches.map((row) => ({
+          credential_id: row.id,
+          vault_secret_id: row.vaultSecretId,
+          key_fingerprint: row.fingerprint,
+          decrypted_secret: secrets.get(row.vaultSecretId),
+        })) };
+      }
+      if (text.includes("account-credential:lock-role")) {
+        const row = bindings.find((item) =>
+          item.ownerUserId === params[0] && item.connectionId === params[1] && item.role === params[2]);
+        return { rows: row ? [{
+          id: row.id,
+          vault_secret_id: row.vaultSecretId,
+          key_fingerprint: row.fingerprint,
+        }] : [] };
+      }
+      if (text.includes("account-credential:verify-record")) {
+        const row = bindings.find((item) =>
+          item.id === params[0] && item.ownerUserId === params[1] &&
+          item.vaultSecretId === params[2] && item.fingerprint === params[3]);
+        if (!row) return { rows: [] };
+        row.verifiedAt = "2026-10-12T00:01:00.000Z";
+        return { rows: [{ id: row.id }] };
+      }
+      if (text.includes("account-credential:list")) {
+        return { rows: bindings.filter((item) =>
+          item.ownerUserId === params[0] && item.connectionId === params[1]).map((item) => ({
+          role: item.role,
+          key_fingerprint: item.fingerprint,
+          verified_at: item.verifiedAt,
+          verification_reason: item.verifiedAt ? "credential_verified" : null,
+          revoked_at: null,
+        })) };
+      }
+      if (text.includes("FROM vault.decrypted_secrets")) {
+        const row = bindings.find((item) =>
+          item.vaultSecretId === params[0] && item.ownerUserId === params[1]);
+        return { rows: row ? [{ decrypted_secret: secrets.get(row.vaultSecretId) }] : [] };
+      }
+      if (text.includes("SELECT fa.user_id::text AS authenticated_user_id")) {
+        const user = users.find((item) => item.userId === params[0]);
+        return { rows: user ? [{
+          authenticated_user_id: user.userId,
+          financial_account_id: user.financialAccountId,
+          provider_connection_id: user.connectionId,
+        }] : [] };
+      }
+      if (text.includes("SELECT c.role,")) {
+        return { rows: bindings.filter((item) =>
+          item.ownerUserId === params[0] && item.connectionId === params[1]).map((item) => ({
+          role: item.role,
+          provider_connection_id: item.connectionId,
+          vault_secret_id: item.vaultSecretId,
+          key_fingerprint: item.fingerprint,
+        })) };
+      }
+      if (text.includes("FROM v13_production_account a")) return { rows: [] };
+      return { rows: [] };
+    },
+  };
+  return { db, users, bindings };
 }
 
 function ports(): AccountCommissioningPorts {

@@ -6,6 +6,21 @@ import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 import { readQualificationDiagnostics, type QualificationDiagnostic } from "../lib/strata/qualificationDiagnostics";
+import type { AccountSetupNextRequirement } from "../lib/strata/accountCredentialProbe";
+
+export interface UserCommissioningStatus {
+  ready: boolean;
+  executable: false;
+  blockers: string[];
+  subaccount1Exists: boolean | null;
+  subaccount1Exchange2Exists: boolean | null;
+  subaccountEvidence: "kalshi_subaccount_balance_inventory" | null;
+  restrictedKeyMetadataVerified: boolean | null;
+  restrictedKeyReadVerified: boolean;
+  executionAccountExists: boolean;
+  setupReason: string;
+  nextRequirement: AccountSetupNextRequirement | null;
+}
 
 export interface UserScopePort {
   migrationReady(): Promise<boolean>;
@@ -27,7 +42,7 @@ export interface UserScopePort {
   authorizeFunding(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   recordFundingEvidence(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   authorizeOperation(userId: string, body: unknown): Promise<{ ok: false; reason: string; attempted: false }>;
-  commissioningStatus(userId: string): Promise<{ ready: boolean; executable: false; blockers: string[] }>;
+  commissioningStatus(userId: string): Promise<UserCommissioningStatus>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
   savePreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
@@ -54,7 +69,19 @@ export function closedUserScopePort(): UserScopePort {
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     recordFundingEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     authorizeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false }),
-    commissioningStatus: async () => ({ ready: false, executable: false, blockers: ["user_scope_not_migrated"] }),
+    commissioningStatus: async () => ({
+      ready: false,
+      executable: false,
+      blockers: ["user_scope_not_migrated"],
+      subaccount1Exists: null,
+      subaccount1Exchange2Exists: null,
+      subaccountEvidence: null,
+      restrictedKeyMetadataVerified: null,
+      restrictedKeyReadVerified: false,
+      executionAccountExists: false,
+      setupReason: "user_scope_not_migrated",
+      nextRequirement: null,
+    }),
     stake: async (userId) => refused(userId),
     presets: async () => [],
     savePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),

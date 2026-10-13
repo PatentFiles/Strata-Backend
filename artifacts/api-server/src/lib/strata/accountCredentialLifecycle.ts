@@ -6,8 +6,10 @@ import {
 } from "./commissioning";
 import {
   resolveAccountCommissioningContext,
+  type AccountCommissioningContext,
   type AccountCommissioningPorts,
 } from "./accountCommissioningContext";
+import type { AccountSetupNextRequirement } from "./accountCredentialProbe";
 import {
   knownCredentialRole,
   replaceOwnedCredentialInTransaction,
@@ -33,6 +35,10 @@ export interface AccountCredentialRegistration {
   role: string | null;
   fingerprint: string | null;
   vaultSecretId: string | null;
+  subaccount1Exists?: boolean | null;
+  subaccount1Exchange2Exists?: boolean | null;
+  restrictedKeyMetadataVerified?: boolean | null;
+  nextRequirement?: AccountSetupNextRequirement | null;
 }
 
 const CREATE_VAULT_SECRET_SQL = `
@@ -198,7 +204,17 @@ export async function verifyAccountCredential(
     role: string;
     confirmation: unknown;
     readSecret: (vaultSecretId: string) => Promise<{ keyId: string; privateKey: string } | null>;
-    probe: (material: { keyId: string; privateKey: string }) => Promise<{ ok: boolean; reason: string }>;
+    probe: (
+      material: { keyId: string; privateKey: string },
+      context: AccountCommissioningContext,
+    ) => Promise<{
+      ok: boolean;
+      reason: string;
+      subaccount1Exists?: boolean | null;
+      subaccount1Exchange2Exists?: boolean | null;
+      restrictedKeyMetadataVerified?: boolean | null;
+      nextRequirement?: AccountSetupNextRequirement | null;
+    }>;
   },
 ): Promise<AccountCredentialRegistration> {
   if (input.confirmation !== VERIFY_CREDENTIAL_CONFIRMATION) {
@@ -224,9 +240,18 @@ export async function verifyAccountCredential(
   if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== fingerprint) {
     return registration(false, "credential_fingerprint_mismatch", input.role);
   }
-  const probed = await input.probe(material);
+  const probed = await input.probe(material, resolved.context);
   const reason = sanitizeReason(probed.ok ? "credential_verified" : probed.reason);
-  if (!probed.ok) return registration(false, reason, input.role);
+  const details = {
+    subaccount1Exists: probed.subaccount1Exists ?? null,
+    subaccount1Exchange2Exists: probed.subaccount1Exchange2Exists ?? null,
+    restrictedKeyMetadataVerified: probed.restrictedKeyMetadataVerified ?? null,
+    nextRequirement: probed.nextRequirement ??
+      (input.role === "restricted_execution" && probed.ok && !resolved.context.executionAccountId
+        ? "provision_execution_account" as const
+        : null),
+  };
+  if (!probed.ok) return { ...registration(false, reason, input.role), ...details };
   const marked = await db.query(VERIFY_RECORD_SQL, [
     credentialId,
     input.authenticatedUserId,
@@ -242,6 +267,7 @@ export async function verifyAccountCredential(
     role: input.role,
     fingerprint,
     vaultSecretId: null,
+    ...details,
   };
 }
 

@@ -1,6 +1,9 @@
 import { emptyUserExecutionView } from "./userExecutionScope";
 import type { UserScopeQuery } from "./userScopeDatabase";
-import { resolveAccountCommissioningContext } from "./accountCommissioningContext";
+import {
+  resolveAccountCommissioningContext,
+  type StoredCredentialRef,
+} from "./accountCommissioningContext";
 import {
   createDatabaseAccountCommissioningPorts,
   credentialDatabaseFromPool,
@@ -13,9 +16,17 @@ import {
   revokeAccountCredential,
   userCommissioningReadiness,
   verifyAccountCredential,
+  type AccountCredentialStatus,
 } from "./accountCredentialLifecycle";
 import { dedicatedSignerFingerprint } from "./commissioning";
-import { probeAccountCredential } from "./accountCredentialProbe";
+import {
+  inspectRestrictedKeyMetadata,
+  inspectSubaccount1,
+  probeAccountCredential,
+  restrictedMetadataNextRequirement,
+  type AccountSetupNextRequirement,
+  type VerifiedCredentialAuthority,
+} from "./accountCredentialProbe";
 import {
   authorizeFutureAccountOperation,
   persistAccountFundingAuthorization,
@@ -45,6 +56,27 @@ const OWNED_SECRET_SQL = `
         AND c.owner_user_id = $2::uuid
         AND c.revoked_at IS NULL
     )
+`;
+const VERIFIED_ROLE_SECRET_SQL = `
+  -- account-credential:verified-role-secret
+  SELECT c.id::text AS credential_id,
+         c.vault_secret_id::text AS vault_secret_id,
+         c.key_fingerprint,
+         s.decrypted_secret
+  FROM private.kalshi_connection_credentials c
+  JOIN private.provider_connections pc
+    ON pc.id = c.provider_connection_id
+   AND pc.financial_account_id = c.financial_account_id
+  JOIN public.financial_accounts fa
+    ON fa.id = c.financial_account_id
+   AND fa.user_id = c.owner_user_id
+  JOIN vault.decrypted_secrets s ON s.id = c.vault_secret_id
+  WHERE c.owner_user_id = $1::uuid
+    AND c.provider_connection_id = $2::uuid
+    AND c.role = $3
+    AND c.revoked_at IS NULL
+    AND c.verified_at IS NOT NULL
+    AND c.verification_reason = 'credential_verified'
 `;
 
 export function accountCredentialControls(
@@ -154,11 +186,52 @@ export function accountCredentialControls(
         role,
         confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
         readSecret: (vaultSecretId) => readOwnedSecret(db, userId, vaultSecretId),
-        async probe(material) {
+        async probe(material, context) {
           const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
           if (!fingerprint) return { ok: false, reason: "credential_fingerprint_mismatch" };
-          const probed = await probeAccountCredential(role, fingerprint, material, getJson);
-          return { ok: probed.ok, reason: probed.reason };
+          let verifiedBinding: Extract<VerifiedAuthorityResult, { ok: true }> | undefined;
+          if (role === "restricted_execution") {
+            let verified: VerifiedAuthorityResult;
+            try {
+              verified = await readVerifiedRoleAuthority(
+                db,
+                userId,
+                context.providerConnectionId,
+                "verification",
+              );
+            } catch {
+              return { ok: false, reason: "verified_verification_credential_required" };
+            }
+            if (!verified.ok) return { ok: false, reason: verified.reason };
+            verifiedBinding = verified;
+          }
+          const probed = await probeAccountCredential(
+            role,
+            fingerprint,
+            material,
+            getJson,
+            verifiedBinding?.authority,
+          );
+          if (probed.ok && verifiedBinding) {
+            let current: VerifiedAuthorityResult;
+            try {
+              current = await readVerifiedRoleAuthority(
+                db,
+                userId,
+                context.providerConnectionId,
+                "verification",
+              );
+            } catch {
+              return { ...probed, ok: false, reason: "verification_credential_rotated" };
+            }
+            if (!current.ok ||
+                current.credentialId !== verifiedBinding.credentialId ||
+                current.vaultSecretId !== verifiedBinding.vaultSecretId ||
+                current.authority.expectedFingerprint !== verifiedBinding.authority.expectedFingerprint) {
+              return { ...probed, ok: false, reason: "verification_credential_rotated" };
+            }
+          }
+          return probed;
         },
       });
     },
@@ -208,7 +281,12 @@ export function accountCredentialControls(
     },
     async commissioningStatus(userId: string) {
       if (!await credentialTablesReady(db)) {
-        return { ready: false as const, executable: false as const, blockers: ["credential_migration_missing"] };
+        return {
+          ready: false as const,
+          executable: false as const,
+          blockers: ["credential_migration_missing"],
+          ...unknownAccountSetup("credential_migration_missing"),
+        };
       }
       const commissioning = ports();
       const resolved = await resolveAccountCommissioningContext(userId, commissioning);
@@ -248,7 +326,18 @@ export function accountCredentialControls(
         policyOwned,
       });
       if (!resolved.ok) readiness.blockers.unshift(resolved.reason);
-      return readiness;
+      const setup = resolved.ok
+        ? await inspectAccountSetup(
+          db,
+          userId,
+          resolved.context.providerConnectionId,
+          resolved.context.executionAccountId,
+          resolved.context.credentials,
+          status.roles,
+          options.kalshiGet,
+        )
+        : unknownAccountSetup(resolved.reason);
+      return { ...readiness, ...setup };
     },
   };
 }
@@ -291,6 +380,155 @@ async function readOwnedSecret(
   return parseSecret(secret.rows[0]?.decrypted_secret);
 }
 
+type VerifiedAuthorityResult =
+  | {
+    ok: true;
+    credentialId: string;
+    vaultSecretId: string;
+    authority: VerifiedCredentialAuthority;
+  }
+  | { ok: false; reason: string };
+
+interface AccountSetupStatus {
+  subaccount1Exists: boolean | null;
+  subaccount1Exchange2Exists: boolean | null;
+  subaccountEvidence: "kalshi_subaccount_balance_inventory" | null;
+  restrictedKeyMetadataVerified: boolean | null;
+  restrictedKeyReadVerified: boolean;
+  executionAccountExists: boolean;
+  setupReason: string;
+  nextRequirement: AccountSetupNextRequirement | null;
+}
+
+async function readVerifiedRoleAuthority(
+  db: UserScopeQuery,
+  userId: string,
+  providerConnectionId: string,
+  role: "verification",
+): Promise<VerifiedAuthorityResult> {
+  const rows = await db.query(VERIFIED_ROLE_SECRET_SQL, [userId, providerConnectionId, role]);
+  if (rows.rows.length !== 1) {
+    return {
+      ok: false,
+      reason: rows.rows.length > 1
+        ? "ambiguous_credential_role"
+        : "verified_verification_credential_required",
+    };
+  }
+  const credentialId = text(rows.rows[0]?.credential_id);
+  const vaultSecretId = text(rows.rows[0]?.vault_secret_id);
+  const fingerprint = text(rows.rows[0]?.key_fingerprint);
+  const material = parseSecret(rows.rows[0]?.decrypted_secret);
+  if (!credentialId || !vaultSecretId || !fingerprint || !material) {
+    return { ok: false, reason: "verification_credential_invalid" };
+  }
+  if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== fingerprint) {
+    return { ok: false, reason: "verification_credential_fingerprint_mismatch" };
+  }
+  return {
+    ok: true,
+    credentialId,
+    vaultSecretId,
+    authority: { expectedFingerprint: fingerprint, material },
+  };
+}
+
+async function inspectAccountSetup(
+  db: UserScopeQuery,
+  userId: string,
+  providerConnectionId: string,
+  executionAccountId: string | null,
+  credentials: StoredCredentialRef[],
+  statuses: AccountCredentialStatus[],
+  getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
+): Promise<AccountSetupStatus> {
+  if (!getJson) return unknownAccountSetup("verification_transport_not_enabled", executionAccountId !== null);
+  let authority: VerifiedAuthorityResult;
+  try {
+    authority = await readVerifiedRoleAuthority(db, userId, providerConnectionId, "verification");
+  } catch {
+    return unknownAccountSetup("verified_verification_credential_required", executionAccountId !== null);
+  }
+  if (!authority.ok) {
+    return {
+      ...unknownAccountSetup(authority.reason, executionAccountId !== null),
+      nextRequirement: "verify_verification_credential",
+    };
+  }
+  const subaccount = await inspectSubaccount1(authority.authority, getJson);
+  const restricted = credentials.find((credential) => credential.role === "restricted_execution");
+  let metadataVerified: boolean | null = null;
+  let metadataReason = restricted ? "restricted_key_metadata_unproven" : "missing_credential";
+  let metadataNextRequirement: AccountSetupNextRequirement | null =
+    restricted ? null : "generate_subaccount_1_restricted_key";
+  if (restricted?.keyFingerprint) {
+    let material: { keyId: string; privateKey: string } | null = null;
+    try {
+      material = await readOwnedSecret(db, userId, restricted.vaultSecretId);
+    } catch {
+      metadataReason = "vault_secret_missing";
+    }
+    if (!material) {
+      metadataReason = "vault_secret_missing";
+    } else if (dedicatedSignerFingerprint(material.keyId, material.privateKey) !== restricted.keyFingerprint) {
+      metadataReason = "credential_fingerprint_mismatch";
+    } else if (restricted.keyFingerprint === authority.authority.expectedFingerprint ||
+        material.keyId.trim() === authority.authority.material.keyId.trim()) {
+      metadataVerified = false;
+      metadataReason = "verification_credential_not_independent";
+      metadataNextRequirement = "generate_subaccount_1_restricted_key";
+    } else {
+      const metadata = await inspectRestrictedKeyMetadata(material.keyId, authority.authority, getJson);
+      metadataVerified = metadata.ok;
+      metadataReason = metadata.reason;
+      metadataNextRequirement = restrictedMetadataNextRequirement(metadata.reason);
+    }
+  }
+  const restrictedStatus = statuses.find((status) =>
+    status.role === "restricted_execution" && !status.revoked);
+  const readVerified = restrictedStatus?.verified === true;
+  let nextRequirement: AccountSetupNextRequirement | null = null;
+  if (subaccount.exists === false) {
+    nextRequirement = "create_subaccount_1";
+  } else if (subaccount.exists === true && subaccount.exchangeIndex2Exists === true) {
+    if (metadataVerified !== true) nextRequirement = metadataNextRequirement;
+    else if (!readVerified) nextRequirement = "verify_restricted_execution_credential";
+    else if (!executionAccountId) nextRequirement = "provision_execution_account";
+  }
+  const setupReason = !subaccount.ok || !subaccount.exists || !subaccount.exchangeIndex2Exists
+    ? subaccount.reason
+    : metadataVerified !== true
+      ? metadataReason
+      : !readVerified
+        ? "restricted_execution_unverified"
+        : !executionAccountId
+          ? "execution_account_not_provisioned"
+          : "account_setup_verified";
+  return {
+    subaccount1Exists: subaccount.exists,
+    subaccount1Exchange2Exists: subaccount.exchangeIndex2Exists,
+    subaccountEvidence: subaccount.exists === null ? null : "kalshi_subaccount_balance_inventory",
+    restrictedKeyMetadataVerified: metadataVerified,
+    restrictedKeyReadVerified: readVerified,
+    executionAccountExists: executionAccountId !== null,
+    setupReason,
+    nextRequirement,
+  };
+}
+
+function unknownAccountSetup(reason: string, executionAccountExists = false): AccountSetupStatus {
+  return {
+    subaccount1Exists: null,
+    subaccount1Exchange2Exists: null,
+    subaccountEvidence: null,
+    restrictedKeyMetadataVerified: null,
+    restrictedKeyReadVerified: false,
+    executionAccountExists,
+    setupReason: reason,
+    nextRequirement: null,
+  };
+}
+
 async function observeBalance(
   db: UserScopeQuery,
   commissioning: ReturnType<typeof createDatabaseAccountCommissioningPorts>,
@@ -299,12 +537,19 @@ async function observeBalance(
 ): Promise<{ ok: boolean; reason: string; evidenceMicros: string | null }> {
   const resolved = await resolveAccountCommissioningContext(userId, commissioning);
   if (!resolved.ok) return { ok: false, reason: resolved.reason, evidenceMicros: null };
-  const role = resolved.context.credentials.find((item) => item.role === "verification") ??
-    resolved.context.credentials.find((item) => item.role === "restricted_execution");
-  if (!role?.keyFingerprint) return { ok: false, reason: "missing_credential", evidenceMicros: null };
-  const material = await readOwnedSecret(db, userId, role.vaultSecretId);
-  if (!material) return { ok: false, reason: "vault_secret_missing", evidenceMicros: null };
-  const probed = await probeAccountCredential(role.role, role.keyFingerprint, material, getJson);
+  const verified = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "verification",
+  );
+  if (!verified.ok) return { ok: false, reason: verified.reason, evidenceMicros: null };
+  const probed = await probeAccountCredential(
+    "verification",
+    verified.authority.expectedFingerprint,
+    verified.authority.material,
+    getJson,
+  );
   return { ok: probed.ok, reason: probed.reason, evidenceMicros: probed.evidenceMicros };
 }
 
