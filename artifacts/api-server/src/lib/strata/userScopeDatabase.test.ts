@@ -7,6 +7,7 @@ import test from "node:test";
 import express from "express";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import { sanitizePublic } from "../v13-production/sanitize";
+import { productionPersonalSession } from "./personalExecutionSupervisor";
 import { createDatabaseUserScopePort, type UserScopeQuery } from "./userScopeDatabase";
 import { createUserExecutionRouter } from "../../routes/userExecutionRouter";
 
@@ -399,10 +400,18 @@ test("stake initializes once, rejects an unsafe revision, and control never repo
   assert.equal(repeated.ok, true);
   assert.equal(repeated.view.configuredStakeCents, 500);
   assert.equal(repeated.view.stakeRevision, 2);
+  let revision = 2;
+  for (const cents of [25_000, 100_000, 500_000, 2_500_000]) {
+    const saved = await port.stake(USER_A, cents, revision);
+    assert.equal(saved.ok, true, `stake ${cents}`);
+    assert.equal(saved.view.configuredStakeCents, cents);
+    revision += 1;
+  }
+  assert.equal(row.configured_stake_cents, 2_500_000);
   const conflict = await port.stake(USER_A, 25_000, null);
   assert.equal(conflict.ok, false);
   assert.equal(conflict.reason, "stake_revision_conflict");
-  assert.equal(row.configured_stake_cents, 500);
+  assert.equal(row.configured_stake_cents, 2_500_000);
   const ceiling = await port.stake(USER_A, 2_500_001, row.stake_revision);
   assert.equal(ceiling.ok, false);
   assert.equal(ceiling.reason, "above_hard_stake_ceiling");
@@ -521,4 +530,82 @@ test("scoped Kalshi reads sign stored Ed25519 keys", async () => {
   );
   assert.equal(method, "GET");
   assert.deepEqual(payload, { balance: 2500, portfolio_value: 1234 });
+});
+
+test("START reports running only after the session schedules a worker, and production refuses submission", async () => {
+  const row: Record<string, unknown> = {
+    ...account(USER_A, "acct-a", true, "25000000"),
+    kill_switch: false,
+    reconciled_at: "2026-10-13T00:00:00.000Z",
+    configured_stake_cents: 100,
+    stake_revision: 4,
+    max_entry_stake_cents: 2_500_000,
+  };
+  let posts = 0;
+  const session = {
+    running: false,
+    isScheduled(userId: string, accountId: string) {
+      return this.running && userId === USER_A && accountId === "acct-a";
+    },
+    async start() {
+      this.running = true;
+      return { ok: true, reason: "worker_scheduled", workerStarted: true };
+    },
+    async stop() {
+      this.running = false;
+      return { workerStopped: true };
+    },
+  };
+  const query = async (text: string, params: unknown[] = []) => {
+    if (text.includes("information_schema")) return { rows: [{ ready: true }] };
+    if (text.includes("WHERE a.owner_user_id")) return { rows: params[0] === USER_A ? [row] : [] };
+    if (text.includes("account-control:restricted-signer")) return { rows: [{ key_fingerprint: "ab".repeat(32) }], rowCount: 1 };
+    if (text.includes("account-control:global-safety")) {
+      return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }], rowCount: 1 };
+    }
+    if (text.includes("account-stake:exposure")) {
+      return { rows: [{ open_positions: 0, prepared: 0, dispatched: 0, unknown: 0, unresolved: 0, running: 0 }], rowCount: 1 };
+    }
+    if (text.includes("account-stake:upsert")) {
+      const [cents, accountId, revision, owner] = params;
+      if (accountId !== "acct-a" || owner !== USER_A || revision !== row.stake_revision) return { rows: [], rowCount: 0 };
+      row.configured_stake_cents = cents;
+      row.stake_revision = Number(revision) + 1;
+      return { rows: [{ revision: row.stake_revision }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  const port = createDatabaseUserScopePort({ query }, {
+    kalshiGet: async () => {
+      posts += 1;
+      throw new Error("control_must_not_call_kalshi");
+    },
+    session,
+  });
+  const started = await port.control(USER_A, "START");
+  assert.equal(started.ok, true);
+  assert.equal(started.reason, "worker_scheduled");
+  assert.equal(started.view.workerRunning, true);
+  assert.equal((await port.settings(USER_A)).workerRunning, true);
+  const duplicate = await port.control(USER_A, "START");
+  assert.equal(duplicate.view.workerRunning, true);
+  const stopped = await port.control(USER_A, "STOP");
+  assert.equal(stopped.reason, "entries_stopped");
+  assert.equal(stopped.view.workerRunning, false);
+  const saved = await port.stake(USER_A, 500, 4);
+  assert.equal(saved.ok, true);
+  assert.equal(saved.view.configuredStakeCents, 500);
+  assert.equal(saved.view.stakeRevision, 5);
+  const production = createDatabaseUserScopePort({ query }, {
+    kalshiGet: async () => {
+      posts += 1;
+      throw new Error("control_must_not_call_kalshi");
+    },
+    session: productionPersonalSession(),
+  });
+  const refused = await production.control(USER_A, "START");
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "personal_submission_not_authorized");
+  assert.equal(refused.view.workerRunning, false);
+  assert.equal(posts, 0);
 });

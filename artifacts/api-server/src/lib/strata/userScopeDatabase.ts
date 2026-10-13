@@ -27,6 +27,7 @@ import {
 } from "./userExecutionScope";
 import type { UserScopePort } from "../../routes/userExecutionRouter";
 import { accountCredentialControls } from "./accountCredentialControls";
+import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -99,7 +100,7 @@ const STAKE_EXPOSURE_SQL = `
   FROM v13_production_account a
   WHERE a.id = $1 AND a.owner_user_id = $2::uuid
 `;
-const UPSERT_STAKE_SQL = `
+export const UPSERT_STAKE_SQL = `
   -- account-stake:upsert
   INSERT INTO strata_configured_stake (
     id, execution_account_id, configured_stake_cents, revision, updated_at
@@ -279,7 +280,7 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
     approvedMaxEntryStakeCents: account.approvedMaxEntryStakeCents,
     policyApproved: account.policyApproved,
     policyVersion: account.policyVersion,
-    workerRunning: false,
+    workerRunning: account.workerRunning === true,
     armed: account.executionEnabled === true && account.killSwitch === false,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
@@ -334,6 +335,7 @@ export function createDatabaseUserScopePort(
     kalshiGenerateRestrictedKey?: RestrictedKeyGenerationTransport;
     qualifyTransport?: QualificationTransport;
     qualificationGuard?: QualificationGuard;
+    session?: PersonalSessionControl;
   } = {},
 ): UserScopePort {
   const kalshiGet = options.kalshiGet ?? ((creds, path, query) => getScopedKalshiJson(creds, path, query ?? ""));
@@ -395,7 +397,9 @@ export function createDatabaseUserScopePort(
     migrationReady,
     async settings(userId) {
       if (!await migrationReady()) return emptyUserExecutionView(userId);
-      return viewFrom(userId, await ownedAccount(userId));
+      const account = await ownedAccount(userId);
+      if (account && options.session?.isScheduled(userId, account.id) === true) account.workerRunning = true;
+      return viewFrom(userId, account);
     },
     async wallet(userId) {
       let connection: { rows: Array<Record<string, unknown>> };
@@ -487,6 +491,7 @@ export function createDatabaseUserScopePort(
         } catch {
           return refused(userId, "account_kill_not_recorded", account);
         }
+        await options.session?.stop({ userId, accountId: account.id });
         return {
           ok: true as const,
           reason: "account_killed",
@@ -503,10 +508,14 @@ export function createDatabaseUserScopePort(
         return refused(userId, "user_execution_signer_not_provisioned", account);
       }
       if (action === "STOP" || action === "DISARM") {
+        await options.session?.stop({ userId, accountId: account.id });
         return {
           ok: true as const,
           reason: "entries_stopped",
-          view: viewFrom(userId, { ...account, workerRunning: false }),
+          view: viewFrom(userId, {
+            ...account,
+            workerRunning: options.session?.isScheduled(userId, account.id) === true,
+          }),
         };
       }
       if (action !== "START" && action !== "ARM") {
@@ -530,7 +539,16 @@ export function createDatabaseUserScopePort(
       if (!flag(gate?.live_execution_enabled)) {
         return refused(userId, "live_execution_not_enabled", account);
       }
-      return refused(userId, "worker_not_scheduled", account);
+      if (!options.session) return refused(userId, "worker_not_scheduled", account);
+      const scheduled = await options.session.start({ userId, accountId: account.id, action });
+      if (!scheduled.workerStarted || options.session.isScheduled(userId, account.id) !== true) {
+        return refused(userId, scheduled.reason || "worker_not_scheduled", account);
+      }
+      return {
+        ok: true as const,
+        reason: "worker_scheduled",
+        view: viewFrom(userId, { ...account, workerRunning: true }),
+      };
     },
     ...accountCredentialControls(db, {
       kalshiGet,
