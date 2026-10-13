@@ -81,6 +81,82 @@ const VAULT_SQL = `
   FROM vault.decrypted_secrets
   WHERE id = $1::uuid
 `;
+const STAKE_EXPOSURE_SQL = `
+  -- account-stake:exposure
+  SELECT
+    (SELECT count(*)::int FROM v13_production_position p
+      WHERE p.account_id = a.id AND p.quantity_hundredths > 0) AS open_positions,
+    (SELECT count(*)::int FROM v13_production_intent i
+      WHERE i.account_id = a.id AND i.state = 'PREPARED') AS prepared,
+    (SELECT count(*)::int FROM v13_production_intent i
+      WHERE i.account_id = a.id AND i.state = 'DISPATCHED') AS dispatched,
+    (SELECT count(*)::int FROM v13_production_intent i
+      WHERE i.account_id = a.id AND i.state = 'UNKNOWN') AS unknown,
+    (SELECT count(*)::int FROM v13_production_intent i
+      WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL','BLOCKED')) AS unresolved,
+    (SELECT count(*)::int FROM private.kalshi_account_worker_lease l
+      WHERE l.execution_account_id = a.id AND l.state = 'owned') AS running
+  FROM v13_production_account a
+  WHERE a.id = $1 AND a.owner_user_id = $2::uuid
+`;
+const UPSERT_STAKE_SQL = `
+  -- account-stake:upsert
+  INSERT INTO strata_configured_stake (
+    id, execution_account_id, configured_stake_cents, revision, updated_at
+  )
+  SELECT a.id, a.id, $1::int, CASE WHEN $3::int IS NULL THEN 1 ELSE $3::int + 1 END, now()
+  FROM v13_production_account a
+  WHERE a.id = $2
+    AND a.owner_user_id = $4::uuid
+    AND a.owner_user_id IS NOT NULL
+    AND ($3::int IS NULL OR EXISTS (
+      SELECT 1 FROM strata_configured_stake existing
+      WHERE existing.execution_account_id = a.id
+    ))
+  ON CONFLICT (execution_account_id) WHERE execution_account_id IS NOT NULL
+  DO UPDATE SET
+    configured_stake_cents = EXCLUDED.configured_stake_cents,
+    revision = strata_configured_stake.revision + 1,
+    updated_at = now()
+  WHERE $3::int IS NOT NULL
+    AND strata_configured_stake.revision = $3::int
+    AND strata_configured_stake.execution_account_id IN (
+      SELECT id FROM v13_production_account WHERE owner_user_id = $4::uuid
+    )
+  RETURNING revision
+`;
+const RESTRICTED_SIGNER_SQL = `
+  -- account-control:restricted-signer
+  SELECT c.key_fingerprint
+  FROM private.kalshi_connection_credentials c
+  JOIN v13_production_account a
+    ON a.owner_user_id = c.owner_user_id
+   AND a.kalshi_connection_id = c.financial_account_id
+   AND a.key_fingerprint = c.key_fingerprint
+  WHERE c.owner_user_id = $1::uuid
+    AND a.id = $2
+    AND c.role = 'restricted_execution'
+    AND c.revoked_at IS NULL
+    AND c.verified_at IS NOT NULL
+    AND c.verification_reason = 'credential_verified'
+    AND a.subaccount = 1
+    AND a.exchange_index = 2
+`;
+const GLOBAL_SAFETY_SQL = `
+  -- account-control:global-safety
+  SELECT live_execution_enabled, manual_kill_switch
+  FROM live_execution_config
+  WHERE id = 'singleton'
+`;
+const KILL_OWNED_ACCOUNT_SQL = `
+  -- account-control:kill
+  UPDATE v13_production_account
+  SET kill_switch = true, execution_enabled = false
+  WHERE id = $1
+    AND owner_user_id = $2::uuid
+    AND owner_user_id IS NOT NULL
+  RETURNING id
+`;
 
 function text(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString();
@@ -400,9 +476,61 @@ export function createDatabaseUserScopePort(
     async control(userId, action: ControlAction) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
-      if (!account?.commissioned) return refused(userId, "user_execution_account_not_commissioned", account);
-      void action;
-      return refused(userId, "user_execution_signer_not_provisioned", account);
+      if (!account) return refused(userId, "execution_account_missing");
+      if (!account.commissioned) return refused(userId, "user_execution_account_not_commissioned", account);
+      if (action === "KILL") {
+        try {
+          const killed = await db.query(KILL_OWNED_ACCOUNT_SQL, [account.id, userId]);
+          if ((killed.rowCount ?? killed.rows.length) !== 1) {
+            return refused(userId, "account_kill_not_recorded", account);
+          }
+        } catch {
+          return refused(userId, "account_kill_not_recorded", account);
+        }
+        return {
+          ok: true as const,
+          reason: "account_killed",
+          view: viewFrom(userId, { ...account, killSwitch: true, executionEnabled: false, workerRunning: false }),
+        };
+      }
+      let signer: { rows: Array<Record<string, unknown>> };
+      try {
+        signer = await db.query(RESTRICTED_SIGNER_SQL, [userId, account.id]);
+      } catch {
+        return refused(userId, "user_execution_signer_not_provisioned", account);
+      }
+      if (signer.rows.length !== 1) {
+        return refused(userId, "user_execution_signer_not_provisioned", account);
+      }
+      if (action === "STOP" || action === "DISARM") {
+        return {
+          ok: true as const,
+          reason: "entries_stopped",
+          view: viewFrom(userId, { ...account, workerRunning: false }),
+        };
+      }
+      if (action !== "START" && action !== "ARM") {
+        return refused(userId, "control_action_rejected", account);
+      }
+      if (account.killSwitch) return refused(userId, "account_kill_switch", account);
+      let safety: { rows: Array<Record<string, unknown>> };
+      try {
+        safety = await db.query(GLOBAL_SAFETY_SQL);
+      } catch {
+        return refused(userId, "global_kill_switch", account);
+      }
+      const gate = safety.rows[0];
+      const killOff = gate?.manual_kill_switch === false || gate?.manual_kill_switch === "f" || gate?.manual_kill_switch === "false";
+      if (safety.rows.length !== 1 || !killOff) {
+        return refused(userId, "global_kill_switch", account);
+      }
+      if (!account.policyApproved) return refused(userId, "policy_not_approved", account);
+      if (account.configuredStakeCents === null) return refused(userId, "configured_stake_missing", account);
+      if (!account.reconciledAt) return refused(userId, "cash_not_reconciled", account);
+      if (!flag(gate?.live_execution_enabled)) {
+        return refused(userId, "live_execution_not_enabled", account);
+      }
+      return refused(userId, "worker_not_scheduled", account);
     },
     ...accountCredentialControls(db, {
       kalshiGet,
@@ -413,20 +541,57 @@ export function createDatabaseUserScopePort(
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
-      const change = changeConfiguredStake(userId, account, cents);
-      if (!change.ok) return refused(userId, change.reason, account);
-      if (revision !== null && revision !== account.stakeRevision) return refused(userId, "stake_revision_conflict", account);
-      const updated = await db.query(
-        `UPDATE strata_configured_stake
-         SET configured_stake_cents = $1, revision = revision + 1, updated_at = now()
-         WHERE execution_account_id = $2 AND ($3::int IS NULL OR revision = $3)
-           AND execution_account_id IN (
-             SELECT id FROM v13_production_account WHERE owner_user_id = $4::uuid
-           )`,
-        [change.cents, account.id, revision, userId],
-      );
-      if ((updated.rowCount ?? 0) !== 1) return refused(userId, "stake_not_updated", account);
-      return { ok: true, view: viewFrom(userId, { ...account, configuredStakeCents: change.cents }) };
+      let exposure: { rows: Array<Record<string, unknown>> };
+      try {
+        exposure = await db.query(STAKE_EXPOSURE_SQL, [account.id, userId]);
+      } catch {
+        return refused(userId, "stake_exposure_unproven", account);
+      }
+      const counts = exposure.rows[0];
+      const openPositionCount = integer(counts?.open_positions);
+      const preparedIntentCount = integer(counts?.prepared);
+      const dispatchedIntentCount = integer(counts?.dispatched);
+      const unknownIntentCount = integer(counts?.unknown);
+      const unresolvedOrderCount = integer(counts?.unresolved);
+      const running = integer(counts?.running);
+      if (exposure.rows.length !== 1 || openPositionCount === null || preparedIntentCount === null ||
+          dispatchedIntentCount === null || unknownIntentCount === null ||
+          unresolvedOrderCount === null || running === null) {
+        return refused(userId, "stake_exposure_unproven", account);
+      }
+      const scoped = {
+        ...account,
+        workerRunning: running > 0,
+        openPositionCount,
+        preparedIntentCount,
+        dispatchedIntentCount,
+        unknownIntentCount,
+        unresolvedOrderCount,
+      };
+      const change = changeConfiguredStake(userId, scoped, cents);
+      if (!change.ok) return refused(userId, change.reason, scoped);
+      if (account.stakeRevision === null ? revision !== null : revision !== account.stakeRevision) {
+        return refused(userId, "stake_revision_conflict", account);
+      }
+      let updated: { rows: Array<Record<string, unknown>>; rowCount?: number | null };
+      try {
+        updated = await db.query(UPSERT_STAKE_SQL, [change.cents, account.id, revision, userId]);
+      } catch {
+        return refused(userId, "stake_not_updated", account);
+      }
+      const nextRevision = integer(updated.rows[0]?.revision);
+      if ((updated.rowCount ?? updated.rows.length) !== 1 || nextRevision === null) {
+        return refused(userId, account.stakeRevision === null ? "stake_not_initialized" : "stake_revision_conflict", account);
+      }
+      return {
+        ok: true,
+        view: viewFrom(userId, {
+          ...scoped,
+          configuredStakeCents: change.cents,
+          stakeRevision: nextRevision,
+          workerRunning: false,
+        }),
+      };
     },
     async presets(userId) {
       if (!await migrationReady()) return [];

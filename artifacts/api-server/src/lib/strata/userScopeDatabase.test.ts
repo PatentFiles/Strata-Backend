@@ -74,12 +74,34 @@ function database(ready: boolean) {
         const secret = secrets.get(String(params[0]));
         return { rows: secret ? [{ decrypted_secret: secret }] : [] };
       }
-      if (text.includes("UPDATE strata_configured_stake")) {
-        const [cents, accountId, , owner] = params;
+      if (text.includes("account-stake:exposure")) {
+        return {
+          rows: [{
+            open_positions: 0,
+            prepared: 0,
+            dispatched: 0,
+            unknown: 0,
+            unresolved: 0,
+            running: 0,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes("account-stake:upsert")) {
+        const [cents, accountId, revision, owner] = params;
         const owned = accounts.find((row) => row.id === accountId && row.owner_user_id === owner);
-        if (!owned || !stakes.has(String(accountId))) return { rows: [], rowCount: 0 };
+        if (!owned) return { rows: [], rowCount: 0 };
+        const current = stakes.get(String(accountId));
+        if (current === undefined) {
+          if (revision !== null) return { rows: [], rowCount: 0 };
+          stakes.set(String(accountId), Number(cents));
+          return { rows: [{ revision: 1 }], rowCount: 1 };
+        }
+        if (revision !== owned.stake_revision) return { rows: [], rowCount: 0 };
+        const next = Number(owned.stake_revision) + 1;
+        owned.stake_revision = next;
         stakes.set(String(accountId), Number(cents));
-        return { rows: [], rowCount: 1 };
+        return { rows: [{ revision: next }], rowCount: 1 };
       }
       if (text.includes("UPDATE v13_shared_preset")) {
         const preset = presets.find((row) => row.id === params[0] && row.creator_user_id === params[1]);
@@ -168,9 +190,12 @@ test("user A cannot read user B credentials, balances, stakes, or presets", asyn
   assert.equal(settings.ownerUserId, USER_A);
   const stake = await port.stake(USER_A, 120, 1);
   assert.equal(stake.ok, true);
+  assert.equal(stake.view.configuredStakeCents, 120);
+  assert.equal(stake.view.stakeRevision, 2);
+  assert.equal(stake.view.workerRunning, false);
   assert.equal(stakes.get("acct-a"), 120);
   assert.equal(stakes.get("acct-b"), 80);
-  const foreignStake = calls.filter((call) => call.text.includes("UPDATE strata_configured_stake"));
+  const foreignStake = calls.filter((call) => call.text.includes("account-stake:upsert"));
   assert.equal(foreignStake.every((call) => call.params[1] === "acct-a" && call.params[3] === USER_A), true);
   const updated = await port.updatePreset(USER_A, "preset-b", {
     name: "stolen", capitalLimitCents: 15000, maxEntryStakeCents: 150, maxEntryAllInCents: 200,
@@ -306,6 +331,141 @@ test("an uncommissioned account cannot be armed and a client owner id is ignored
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("stake initializes once, rejects an unsafe revision, and control never reports a running worker", async () => {
+  const row = {
+    id: "acct-new",
+    owner_user_id: USER_A,
+    kalshi_connection_id: null,
+    subaccount: 1,
+    exchange_index: 2,
+    commissioned: true,
+    execution_enabled: false,
+    kill_switch: true,
+    cash_micros: "100000000",
+    reserved_micros: "0",
+    minimum_exit_micros: 10000,
+    reconciled_at: null,
+    policy_state: "APPROVED",
+    policy_version: 1,
+    max_entry_stake_cents: 2_500_000,
+    configured_stake_cents: null as number | null,
+    stake_revision: null as number | null,
+  };
+  let running = 0;
+  const port = createDatabaseUserScopePort({
+    query: async (text, params = []) => {
+      if (text.includes("information_schema")) return { rows: [{ ready: true }] };
+      if (text.includes("WHERE a.owner_user_id")) {
+        return { rows: params[0] === USER_A ? [row] : [] };
+      }
+      if (text.includes("account-stake:exposure")) {
+        return {
+          rows: [{
+            open_positions: 0,
+            prepared: 0,
+            dispatched: 0,
+            unknown: 0,
+            unresolved: 0,
+            running,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes("account-stake:upsert")) {
+        const [cents, accountId, revision, owner] = params;
+        if (accountId !== row.id || owner !== USER_A) return { rows: [], rowCount: 0 };
+        if (row.stake_revision === null) {
+          if (revision !== null) return { rows: [], rowCount: 0 };
+          row.configured_stake_cents = Number(cents);
+          row.stake_revision = 1;
+          return { rows: [{ revision: 1 }], rowCount: 1 };
+        }
+        if (revision !== row.stake_revision) return { rows: [], rowCount: 0 };
+        row.configured_stake_cents = Number(cents);
+        row.stake_revision += 1;
+        return { rows: [{ revision: row.stake_revision }], rowCount: 1 };
+      }
+      if (text.includes("account-control:restricted-signer")) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    },
+  });
+  const first = await port.stake(USER_A, 100, null);
+  assert.equal(first.ok, true);
+  assert.equal(first.view.configuredStakeCents, 100);
+  assert.equal(first.view.stakeRevision, 1);
+  const repeated = await port.stake(USER_A, 500, 1);
+  assert.equal(repeated.ok, true);
+  assert.equal(repeated.view.configuredStakeCents, 500);
+  assert.equal(repeated.view.stakeRevision, 2);
+  const conflict = await port.stake(USER_A, 25_000, null);
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.reason, "stake_revision_conflict");
+  assert.equal(row.configured_stake_cents, 500);
+  const ceiling = await port.stake(USER_A, 2_500_001, row.stake_revision);
+  assert.equal(ceiling.ok, false);
+  assert.equal(ceiling.reason, "above_hard_stake_ceiling");
+  running = 1;
+  const blocked = await port.stake(USER_A, 250, row.stake_revision);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.reason, "worker_running");
+  const started = await port.control(USER_A, "START");
+  assert.equal(started.ok, false);
+  assert.equal(started.reason, "user_execution_signer_not_provisioned");
+  assert.equal(started.view.workerRunning, false);
+  const source = readFileSync("src/lib/strata/userScopeDatabase.ts", "utf8");
+  assert.match(source, /ON CONFLICT \(execution_account_id\) WHERE execution_account_id IS NOT NULL/);
+  assert.equal(source.includes("id = 'production'"), false);
+  assert.equal(source.includes("kalshiPost"), false);
+  assert.equal(source.includes("live_execution_not_enabled"), true);
+});
+
+test("a verified signer still cannot start while the global kill switch is on", async () => {
+  const row: Record<string, unknown> = {
+    ...account(USER_A, "acct-a", true, "25000000"),
+    kill_switch: false,
+    reconciled_at: "2026-10-13T00:00:00.000Z",
+  };
+  let posts = 0;
+  const port = createDatabaseUserScopePort({
+    query: async (text, params = []) => {
+      if (text.includes("information_schema")) return { rows: [{ ready: true }] };
+      if (text.includes("WHERE a.owner_user_id")) return { rows: params[0] === USER_A ? [row] : [] };
+      if (text.includes("account-control:restricted-signer")) {
+        return { rows: [{ key_fingerprint: "a".repeat(64) }], rowCount: 1 };
+      }
+      if (text.includes("account-control:global-safety")) {
+        return { rows: [{ live_execution_enabled: false, manual_kill_switch: true }], rowCount: 1 };
+      }
+      if (text.includes("account-control:kill")) {
+        assert.equal(params[0], "acct-a");
+        assert.equal(params[1], USER_A);
+        row.kill_switch = true;
+        row.execution_enabled = false;
+        return { rows: [{ id: "acct-a" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  }, {
+    kalshiGet: async () => {
+      posts += 1;
+      throw new Error("control_must_not_call_kalshi");
+    },
+  });
+  const started = await port.control(USER_A, "START");
+  assert.equal(started.ok, false);
+  assert.equal(started.reason, "global_kill_switch");
+  assert.equal(started.view.workerRunning, false);
+  const armed = await port.control(USER_A, "ARM");
+  assert.equal(armed.reason, "global_kill_switch");
+  assert.equal(armed.view.workerRunning, false);
+  const killed = await port.control(USER_A, "KILL");
+  assert.equal(killed.ok, true);
+  assert.equal(killed.reason, "account_killed");
+  assert.equal(killed.view.killSwitch, true);
+  assert.equal(killed.view.workerRunning, false);
+  assert.equal(posts, 0);
 });
 
 test("scoped Kalshi reads are signed GETs and integer cents stay cents", async () => {
