@@ -483,6 +483,23 @@ test("commissioning surfaces execution-account credential fingerprint drift", as
   assert.equal(status.executable, false);
 });
 
+test("credential fingerprint drift is visible without Kalshi transport", async () => {
+  const fixture = operationFixture("provision", {
+    executionAccountFingerprint: "ff".repeat(32),
+  });
+  const controls = accountCredentialControls(fixture.db);
+  const status = await controls.commissioningStatus(USER_A);
+  assert.equal(status.setupReason, "execution_account_credential_fingerprint_mismatch");
+  assert.equal(status.nextRequirement, "repair_execution_account_credential_binding");
+  assert.equal(
+    status.blockers.includes("execution_account_credential_fingerprint_mismatch"),
+    true,
+  );
+  assert.equal(status.ready, false);
+  assert.equal(status.executable, false);
+  assert.equal(fixture.exchangeReads.length, 0);
+});
+
 test("review-only setup migrations stay explicit and the creation transport is fixed and secret-free", () => {
   const migration = readFileSync("../../lib/db/drizzle/0015_kalshi_account_operation_attempts.sql", "utf8");
   const roleMigration = readFileSync("../../lib/db/drizzle/0016_kalshi_account_setup_execution_role.sql", "utf8");

@@ -265,10 +265,15 @@ test("legacy commissioning SQL excludes owner-scoped accounts and policies", () 
   );
   assert.match(
     store,
-    /v13_production_position WHERE execution_account_id IS NULL/,
+    /FROM v13_production_position position JOIN v13_production_account account ON account\.id = position\.account_id WHERE account\.owner_user_id IS NULL/,
   );
   assert.match(
     store,
-    /v13_production_intent WHERE execution_account_id IS NULL/,
+    /FROM v13_production_intent intent JOIN v13_production_account account ON account\.id = intent\.account_id WHERE account\.owner_user_id IS NULL/,
   );
+  assert.equal(store.includes("v13_production_position WHERE execution_account_id IS NULL"), false);
+  assert.equal(store.includes("v13_production_intent WHERE execution_account_id IS NULL"), false);
+  assert.match(store, /openPositionCount = Number\.MAX_SAFE_INTEGER/);
+  const gate = readFileSync("src/lib/strata/v13MasterGate.ts", "utf8");
+  assert.equal(gate.match(/owner_user_id IS NULL/g)?.length, 4);
 });

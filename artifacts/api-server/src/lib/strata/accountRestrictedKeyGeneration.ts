@@ -347,6 +347,7 @@ const LOCK_RECONCILABLE_RESPONSE_SQL = `
   SELECT a.id::text AS attempt_id,
          a.state,
          target.id::text AS target_credential_id,
+         target.revoked_at AS target_revoked_at,
          verification.id::text AS verification_credential_id
   FROM private.kalshi_account_operation_attempts a
   JOIN private.kalshi_connection_credentials target
@@ -355,7 +356,10 @@ const LOCK_RECONCILABLE_RESPONSE_SQL = `
    AND target.financial_account_id = a.financial_account_id
    AND target.provider_connection_id = a.provider_connection_id
    AND target.role = 'restricted_execution'
-   AND target.revoked_at IS NULL
+   AND (
+     target.revoked_at IS NULL
+     OR target.verification_reason = 'generated_reconciliation_required'
+   )
    AND target.key_fingerprint = a.target_fingerprint
   JOIN private.kalshi_connection_credentials verification
     ON verification.id = $7::uuid
@@ -404,6 +408,71 @@ const MARK_RECONCILED_COMPLETED_SQL = `
       completed_at = COALESCE(completed_at, now()),
       uncertainty_reason = NULL,
       result_reference = 'restricted_credential_bound_and_verified',
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND operation = 'generate_api_key'
+    AND state IN ('response_received', 'uncertain')
+    AND response_status = 201
+    AND response_received_at IS NOT NULL
+    AND target_credential_id = $5::uuid
+    AND target_fingerprint = $6
+  RETURNING id::text AS attempt_id
+`;
+
+const ACTIVATE_HELD_RESTRICTED_KEY_SQL = `
+  -- account-restricted-key-generation:activate-held-key
+  UPDATE private.kalshi_connection_credentials
+  SET revoked_at = NULL,
+      verified_at = now(),
+      verification_reason = 'credential_verified',
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND role = 'restricted_execution'
+    AND key_fingerprint = $5
+    AND revoked_at IS NOT NULL
+    AND verification_reason = 'generated_reconciliation_required'
+    AND replaced_by IS NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM private.kalshi_connection_credentials active
+      WHERE active.owner_user_id = $2::uuid
+        AND active.financial_account_id = $3::uuid
+        AND active.provider_connection_id = $4::uuid
+        AND active.role = 'restricted_execution'
+        AND active.revoked_at IS NULL
+    )
+  RETURNING id::text AS credential_id
+`;
+
+const MARK_RETAINED_ACTIVE_VERIFIED_SQL = `
+  -- account-restricted-key-generation:mark-retained-active-verified
+  UPDATE private.kalshi_connection_credentials
+  SET verified_at = COALESCE(verified_at, now()),
+      verification_reason = 'credential_verified',
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND role = 'restricted_execution'
+    AND key_fingerprint = $5
+    AND revoked_at IS NULL
+  RETURNING id::text AS credential_id
+`;
+
+const MARK_HELD_INACTIVE_COMPLETED_SQL = `
+  -- account-restricted-key-generation:mark-held-inactive-completed
+  UPDATE private.kalshi_account_operation_attempts
+  SET state = 'completed',
+      completed_at = COALESCE(completed_at, now()),
+      uncertainty_reason = NULL,
+      result_reference = 'generated_key_held_inactive',
       updated_at = now()
   WHERE id = $1::uuid
     AND owner_user_id = $2::uuid
@@ -593,6 +662,10 @@ export async function reconcileStoredRestrictedKeyGeneration(
     targetFingerprint: string;
     verificationCredentialId: string;
     verificationFingerprint: string;
+    retainedActiveCredential?: {
+      credentialId: string;
+      fingerprint: string;
+    };
   },
 ): Promise<RestrictedKeyGenerationExecutionResult> {
   if (input.confirmation !== RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
@@ -602,8 +675,22 @@ export async function reconcileStoredRestrictedKeyGeneration(
   if (!UUID.test(input.attemptId) || !UUID.test(input.targetCredentialId)) {
     return result(false, "account_setup_attempt_invalid", false, null, null);
   }
+  if (input.retainedActiveCredential &&
+      (!UUID.test(input.retainedActiveCredential.credentialId) ||
+        input.retainedActiveCredential.fingerprint === input.targetFingerprint)) {
+    return result(false, "stored_restricted_key_active_conflict_unresolved",
+      false, input.attemptId, null);
+  }
   try {
     return await db.transaction(async (client) => {
+      const connection = await client.query(LOCK_OWNED_CONNECTION_SQL, [
+        input.authenticatedUserId,
+        input.providerConnectionId,
+        input.financialAccountId,
+      ]);
+      if (connection.rows.length !== 1) {
+        return result(false, "credential_not_owned", false, input.attemptId, null);
+      }
       const locked = await client.query(LOCK_RECONCILABLE_RESPONSE_SQL, [
         input.attemptId,
         input.authenticatedUserId,
@@ -634,18 +721,93 @@ export async function reconcileStoredRestrictedKeyGeneration(
         return result(false, "production_safety_controls_not_fail_closed",
           false, input.attemptId, state);
       }
-      const verified = await client.query(MARK_RECONCILED_CREDENTIAL_VERIFIED_SQL, [
-        input.targetCredentialId,
+      const targetRevoked = locked.rows[0]?.target_revoked_at != null;
+      if (!targetRevoked) {
+        const verified = await client.query(MARK_RECONCILED_CREDENTIAL_VERIFIED_SQL, [
+          input.targetCredentialId,
+          input.authenticatedUserId,
+          input.financialAccountId,
+          input.providerConnectionId,
+          input.targetFingerprint,
+        ]);
+        if (verified.rows.length !== 1) {
+          return result(false, "stored_restricted_key_binding_changed",
+            false, input.attemptId, state);
+        }
+        const completed = await client.query(MARK_RECONCILED_COMPLETED_SQL, [
+          input.attemptId,
+          input.authenticatedUserId,
+          input.financialAccountId,
+          input.providerConnectionId,
+          input.targetCredentialId,
+          input.targetFingerprint,
+        ]);
+        if (completed.rows.length !== 1) {
+          throw new Error("restricted_key_reconciliation_not_recorded");
+        }
+        return result(true, "restricted_key_reconciled_and_verified",
+          false, input.attemptId, "completed", true);
+      }
+      const active = await client.query(LOCK_ACTIVE_RESTRICTED_SQL, [
         input.authenticatedUserId,
         input.financialAccountId,
         input.providerConnectionId,
-        input.targetFingerprint,
       ]);
-      if (verified.rows.length !== 1) {
+      if (active.rows.length > 1) {
+        return result(false, "stored_restricted_key_active_conflict_unresolved",
+          false, input.attemptId, state);
+      }
+      if (active.rows.length === 0) {
+        if (input.retainedActiveCredential) {
+          return result(false, "stored_restricted_key_binding_changed",
+            false, input.attemptId, state);
+        }
+        const activated = await client.query(ACTIVATE_HELD_RESTRICTED_KEY_SQL, [
+          input.targetCredentialId,
+          input.authenticatedUserId,
+          input.financialAccountId,
+          input.providerConnectionId,
+          input.targetFingerprint,
+        ]);
+        if (activated.rows.length !== 1) {
+          return result(false, "stored_restricted_key_active_conflict_unresolved",
+            false, input.attemptId, state);
+        }
+        const completed = await client.query(MARK_RECONCILED_COMPLETED_SQL, [
+          input.attemptId,
+          input.authenticatedUserId,
+          input.financialAccountId,
+          input.providerConnectionId,
+          input.targetCredentialId,
+          input.targetFingerprint,
+        ]);
+        if (completed.rows.length !== 1) {
+          throw new Error("restricted_key_reconciliation_not_recorded");
+        }
+        return result(true, "restricted_key_reconciled_and_verified",
+          false, input.attemptId, "completed", true);
+      }
+      const activeId = text(active.rows[0]?.credential_id);
+      const activeFingerprint = text(active.rows[0]?.key_fingerprint);
+      const retained = input.retainedActiveCredential;
+      if (!activeId || !activeFingerprint || !retained ||
+          retained.credentialId !== activeId ||
+          retained.fingerprint !== activeFingerprint) {
+        return result(false, "stored_restricted_key_active_conflict_unresolved",
+          false, input.attemptId, state);
+      }
+      const marked = await client.query(MARK_RETAINED_ACTIVE_VERIFIED_SQL, [
+        activeId,
+        input.authenticatedUserId,
+        input.financialAccountId,
+        input.providerConnectionId,
+        activeFingerprint,
+      ]);
+      if (marked.rows.length !== 1) {
         return result(false, "stored_restricted_key_binding_changed",
           false, input.attemptId, state);
       }
-      const completed = await client.query(MARK_RECONCILED_COMPLETED_SQL, [
+      const held = await client.query(MARK_HELD_INACTIVE_COMPLETED_SQL, [
         input.attemptId,
         input.authenticatedUserId,
         input.financialAccountId,
@@ -653,10 +815,10 @@ export async function reconcileStoredRestrictedKeyGeneration(
         input.targetCredentialId,
         input.targetFingerprint,
       ]);
-      if (completed.rows.length !== 1) {
+      if (held.rows.length !== 1) {
         throw new Error("restricted_key_reconciliation_not_recorded");
       }
-      return result(true, "restricted_key_reconciled_and_verified",
+      return result(true, "restricted_key_held_inactive_active_key_retained",
         false, input.attemptId, "completed", true);
     });
   } catch {

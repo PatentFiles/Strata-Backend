@@ -335,16 +335,17 @@ export async function readCommissioningSnapshot(
   }
   try {
     const positions = await query(
-      "SELECT count(*)::int AS count FROM v13_production_position WHERE execution_account_id IS NULL AND quantity_hundredths > 0",
+      "SELECT count(*)::int AS count FROM v13_production_position position JOIN v13_production_account account ON account.id = position.account_id WHERE account.owner_user_id IS NULL AND position.quantity_hundredths > 0",
     );
     const intents = await query(
-      "SELECT count(*)::int AS count FROM v13_production_intent WHERE execution_account_id IS NULL AND terminal = false AND state NOT IN ('TERMINAL','BLOCKED')",
+      "SELECT count(*)::int AS count FROM v13_production_intent intent JOIN v13_production_account account ON account.id = intent.account_id WHERE account.owner_user_id IS NULL AND intent.terminal = false AND intent.state NOT IN ('TERMINAL','BLOCKED')",
     );
     snapshot.openPositionCount = Number(positions.rows[0]?.count ?? 0);
     snapshot.unresolvedIntentCount = Number(intents.rows[0]?.count ?? 0);
   } catch {
-    snapshot.openPositionCount = 0;
-    snapshot.unresolvedIntentCount = 0;
+    // Exposure cannot be proven. Refuse disarm instead of reporting a clear book.
+    snapshot.openPositionCount = Number.MAX_SAFE_INTEGER;
+    snapshot.unresolvedIntentCount = Number.MAX_SAFE_INTEGER;
   }
   snapshot.preBoundaryRoundTripAcknowledged = (await readStoredRoundTrip()) !== null;
   snapshot.preBoundaryRoundTripEligibleForAcknowledgment = false;

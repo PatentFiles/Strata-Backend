@@ -604,6 +604,20 @@ test("account execute route reconciles a stored key with GET-only verification",
     assert.equal(reads.length, 3);
     assert.equal(JSON.stringify(reconciled).includes(generated.privateKey), false);
     assert.equal(JSON.stringify(reconciled).includes(generated.keyId), false);
+    const quiet = accountCredentialControls(fixture.db, {
+      async kalshiGet() {
+        throw new Error("completed reconciliation must not call Kalshi");
+      },
+    });
+    const repeated = await quiet.executeOperation(USER_A, {
+      operation: "generate_api_key",
+      attemptId: GENERATE_ATTEMPT_A,
+      confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+    });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated));
+    assert.equal(repeated.reason, "restricted_key_already_generated_and_verified");
+    assert.equal(repeated.state, "completed");
+    assert.equal(posts, 1);
   } finally {
     await fixture.raw.close();
   }
@@ -686,6 +700,24 @@ test("execution provisioning is transactional, idempotent, concurrent-safe, and 
       restrictedFingerprint: FP_OLD_RESTRICTED_B,
     });
     assert.equal(foreign.ok, false);
+    assert.equal((await fixture.raw.query(
+      "SELECT count(*)::int AS count FROM v13_production_account",
+    )).rows[0]?.count, 1);
+    let providerReads = 0;
+    const controls = accountCredentialControls(fixture.db, {
+      async kalshiGet() {
+        providerReads += 1;
+        throw new Error("completed provisioning must not call Kalshi");
+      },
+    });
+    const repeated = await controls.executeOperation(USER_A, {
+      operation: "provision_execution_account",
+      attemptId: PROVISION_ATTEMPT_A,
+      confirmation: EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION,
+    });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated));
+    assert.equal(repeated.reason, "execution_account_already_provisioned");
+    assert.equal(providerReads, 0);
     assert.equal((await fixture.raw.query(
       "SELECT count(*)::int AS count FROM v13_production_account",
     )).rows[0]?.count, 1);
@@ -1040,6 +1072,268 @@ function interceptTransactions(
       },
     })),
   };
+}
+
+test("rotation during generation can be reconciled without another POST", async (t) => {
+  await t.test("retains a different verified active key and leaves the generated key inactive", async (t) => {
+    const fixture = await setup(t);
+    if (!fixture) return;
+    try {
+      const verification = await bindVerificationKey(fixture.raw);
+      await insertGenerationAttempt(fixture.raw);
+      const generated = generatedCredential();
+      const active = generatedCredential();
+      const rotated = await generateDuringRotation(
+        fixture,
+        verification.fingerprint,
+        active,
+        generated,
+      );
+      assert.equal(rotated.outcome.state, "uncertain");
+      assert.equal(rotated.outcome.reason, "restricted_key_stored_rotation_reconciliation_required");
+      const controls = accountCredentialControls(fixture.db, {
+        kalshiGet: inventoryGet(verification.keyId, [generated.keyId, active.keyId]),
+      });
+      const reconciled = await controls.executeOperation(USER_A, {
+        operation: "generate_api_key",
+        attemptId: GENERATE_ATTEMPT_A,
+        confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+      });
+      assert.equal(reconciled.ok, true, JSON.stringify(reconciled));
+      assert.equal(reconciled.reason, "restricted_key_held_inactive_active_key_retained");
+      assert.equal(reconciled.state, "completed");
+      assert.equal(rotated.posts, 1);
+      assert.equal(JSON.stringify(reconciled).includes(generated.privateKey), false);
+      assert.equal(JSON.stringify(reconciled).includes(active.privateKey), false);
+      const held = await fixture.raw.query(
+        `SELECT key_fingerprint, revoked_at IS NOT NULL AS revoked, verification_reason
+         FROM private.kalshi_connection_credentials
+         WHERE owner_user_id = $1::uuid AND role = 'restricted_execution'
+           AND key_fingerprint = $2`,
+        [USER_A, generated.fingerprint],
+      );
+      assert.equal(held.rows[0]?.revoked, true);
+      assert.equal(held.rows[0]?.verification_reason, "generated_reconciliation_required");
+      const activeRow = await fixture.raw.query(
+        `SELECT id::text AS id, revoked_at IS NULL AS active
+         FROM private.kalshi_connection_credentials
+         WHERE id = $1::uuid`,
+        [rotated.rotatedId],
+      );
+      assert.deepEqual(activeRow.rows, [{ id: rotated.rotatedId, active: true }]);
+      const attempt = await fixture.raw.query(
+        `SELECT state, result_reference FROM private.kalshi_account_operation_attempts
+         WHERE id = $1::uuid`,
+        [GENERATE_ATTEMPT_A],
+      );
+      assert.equal(attempt.rows[0]?.state, "completed");
+      assert.equal(attempt.rows[0]?.result_reference, "generated_key_held_inactive");
+    } finally {
+      await fixture.raw.close();
+    }
+  });
+
+  await t.test("activates the held key when no other restricted credential remains", async (t) => {
+    const fixture = await setup(t);
+    if (!fixture) return;
+    try {
+      const verification = await bindVerificationKey(fixture.raw);
+      await insertGenerationAttempt(fixture.raw);
+      const generated = generatedCredential();
+      const active = generatedCredential();
+      const rotated = await generateDuringRotation(
+        fixture,
+        verification.fingerprint,
+        active,
+        generated,
+      );
+      await fixture.raw.query(
+        `UPDATE private.kalshi_connection_credentials
+         SET revoked_at = now() WHERE id = $1::uuid`,
+        [rotated.rotatedId],
+      );
+      const controls = accountCredentialControls(fixture.db, {
+        kalshiGet: inventoryGet(verification.keyId, [generated.keyId]),
+      });
+      const reconciled = await controls.executeOperation(USER_A, {
+        operation: "generate_api_key",
+        attemptId: GENERATE_ATTEMPT_A,
+        confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+      });
+      assert.equal(reconciled.ok, true, JSON.stringify(reconciled));
+      assert.equal(reconciled.reason, "restricted_key_reconciled_and_verified");
+      assert.equal(rotated.posts, 1);
+      const held = await fixture.raw.query(
+        `SELECT revoked_at IS NULL AS active, verification_reason
+         FROM private.kalshi_connection_credentials
+         WHERE owner_user_id = $1::uuid AND role = 'restricted_execution'
+           AND key_fingerprint = $2`,
+        [USER_A, generated.fingerprint],
+      );
+      assert.equal(held.rows[0]?.active, true);
+      assert.equal(held.rows[0]?.verification_reason, "credential_verified");
+      const displaced = await fixture.raw.query(
+        `SELECT revoked_at IS NOT NULL AS revoked
+         FROM private.kalshi_connection_credentials WHERE id = $1::uuid`,
+        [rotated.rotatedId],
+      );
+      assert.equal(displaced.rows[0]?.revoked, true);
+    } finally {
+      await fixture.raw.close();
+    }
+  });
+
+  await t.test("does not swap or complete when the active key fails verification", async (t) => {
+    const fixture = await setup(t);
+    if (!fixture) return;
+    try {
+      const verification = await bindVerificationKey(fixture.raw);
+      await insertGenerationAttempt(fixture.raw);
+      const generated = generatedCredential();
+      const active = generatedCredential();
+      const rotated = await generateDuringRotation(
+        fixture,
+        verification.fingerprint,
+        active,
+        generated,
+      );
+      const controls = accountCredentialControls(fixture.db, {
+        kalshiGet: inventoryGet(verification.keyId, [generated.keyId]),
+      });
+      const reconciled = await controls.executeOperation(USER_A, {
+        operation: "generate_api_key",
+        attemptId: GENERATE_ATTEMPT_A,
+        confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+      });
+      assert.equal(reconciled.ok, false);
+      assert.equal(reconciled.reason, "credential_permission_unproven");
+      assert.equal(rotated.posts, 1);
+      const attempt = await fixture.raw.query(
+        `SELECT state FROM private.kalshi_account_operation_attempts WHERE id = $1::uuid`,
+        [GENERATE_ATTEMPT_A],
+      );
+      assert.equal(attempt.rows[0]?.state, "uncertain");
+      const held = await fixture.raw.query(
+        `SELECT revoked_at IS NOT NULL AS revoked
+         FROM private.kalshi_connection_credentials
+         WHERE key_fingerprint = $1`,
+        [generated.fingerprint],
+      );
+      assert.equal(held.rows[0]?.revoked, true);
+      const activeRow = await fixture.raw.query(
+        `SELECT revoked_at IS NULL AS active, key_fingerprint
+         FROM private.kalshi_connection_credentials WHERE id = $1::uuid`,
+        [rotated.rotatedId],
+      );
+      assert.equal(activeRow.rows[0]?.active, true);
+      assert.equal(activeRow.rows[0]?.key_fingerprint, active.fingerprint);
+    } finally {
+      await fixture.raw.close();
+    }
+  });
+});
+
+async function bindVerificationKey(raw: DisposablePg) {
+  const privateKey = rsaPrivateKey();
+  const keyId = "verification-route-key";
+  const fingerprint = dedicatedSignerFingerprint(keyId, privateKey);
+  assert.ok(fingerprint);
+  const row = await raw.query(
+    `SELECT vault_secret_id::text AS vault_secret_id
+     FROM private.kalshi_connection_credentials WHERE id = $1::uuid`,
+    [VERIFICATION_A],
+  );
+  await raw.query(
+    "UPDATE vault.secrets SET secret = $1 WHERE id = $2::uuid",
+    [
+      JSON.stringify({ api_key_id: keyId, private_key: privateKey }),
+      row.rows[0]?.vault_secret_id,
+    ],
+  );
+  await raw.query(
+    `UPDATE private.kalshi_connection_credentials
+     SET key_fingerprint = $2 WHERE id = $1::uuid`,
+    [VERIFICATION_A, fingerprint],
+  );
+  return { keyId, privateKey, fingerprint };
+}
+
+function inventoryGet(verificationKeyId: string, listedKeyIds: string[]) {
+  return async (material: { keyId: string }, path: string) => {
+    if (path.endsWith("/api_keys")) {
+      assert.equal(material.keyId, verificationKeyId);
+      return {
+        api_keys: [
+          { api_key_id: verificationKeyId, scopes: ["read"], subaccount: null },
+          ...listedKeyIds.map((apiKeyId) => ({
+            api_key_id: apiKeyId,
+            scopes: ["read", "write::trade"],
+            subaccount: 1,
+          })),
+        ],
+      };
+    }
+    if (path.endsWith("/portfolio/subaccounts/balances")) {
+      return {
+        subaccount_balances: [
+          { subaccount_number: 0, exchange_index: 2, balance: "0.0000" },
+          { subaccount_number: 1, exchange_index: 2, balance: "0.0000" },
+        ],
+      };
+    }
+    if (path.endsWith("/portfolio/balance")) {
+      return { balance_dollars: "0.0000", subaccount: 1, exchange_index: 2 };
+    }
+    throw new Error(`unexpected GET ${path}`);
+  };
+}
+
+async function generateDuringRotation(
+  fixture: { raw: DisposablePg; db: CredentialDatabase },
+  verificationFingerprint: string,
+  active: { keyId: string; privateKey: string; fingerprint: string },
+  generated: { keyId: string; privateKey: string; fingerprint: string },
+) {
+  const rotatedId = "10000000-0000-4000-8000-000000000099";
+  let posts = 0;
+  const outcome = await executePreparedRestrictedKeyGeneration(fixture.db, {
+    ...keyGenerationInput(generated),
+    verificationFingerprint,
+    transport: async () => {
+      posts += 1;
+      const secret = await fixture.raw.query(
+        `INSERT INTO vault.secrets(secret,name) VALUES ($1,'rotated')
+         RETURNING id::text AS id`,
+        [JSON.stringify({ api_key_id: active.keyId, private_key: active.privateKey })],
+      );
+      await fixture.raw.query(
+        `UPDATE private.kalshi_connection_credentials
+         SET revoked_at = now() WHERE id = $1::uuid`,
+        [OLD_RESTRICTED_A],
+      );
+      await fixture.raw.query(
+        `INSERT INTO private.kalshi_connection_credentials(
+           id,owner_user_id,financial_account_id,provider_connection_id,role,
+           vault_secret_id,key_fingerprint,verified_at,verification_reason
+         ) VALUES ($1,$2,$3,$4,'restricted_execution',$5,$6,now(),'credential_verified')`,
+        [
+          rotatedId,
+          USER_A,
+          ACCOUNT_A,
+          CONNECTION_A,
+          secret.rows[0]?.id,
+          active.fingerprint,
+        ],
+      );
+      return {
+        status: 201,
+        unreadable: false,
+        body: { api_key_id: generated.keyId, private_key: generated.privateKey },
+      };
+    },
+    verifyGenerated: async () => ({ ok: true, reason: "credential_verified" }),
+  });
+  return { outcome, posts, rotatedId };
 }
 
 async function insertGenerationAttempt(

@@ -153,7 +153,10 @@ const READ_ATTEMPT_SQL = `
                AND stored.provider_connection_id = attempts.provider_connection_id
                AND stored.role = 'restricted_execution'
                AND stored.key_fingerprint = attempts.target_fingerprint
-               AND stored.revoked_at IS NULL
+               AND (
+                 stored.revoked_at IS NULL
+                 OR stored.verification_reason = 'generated_reconciliation_required'
+               )
            )
          ) AS stored_response_available,
          attempts.prepared_at::text AS prepared_at,
@@ -184,7 +187,10 @@ const LIST_ATTEMPTS_SQL = `
                AND stored.provider_connection_id = attempts.provider_connection_id
                AND stored.role = 'restricted_execution'
                AND stored.key_fingerprint = attempts.target_fingerprint
-               AND stored.revoked_at IS NULL
+               AND (
+                 stored.revoked_at IS NULL
+                 OR stored.verification_reason = 'generated_reconciliation_required'
+               )
            )
          ) AS stored_response_available,
          attempts.prepared_at::text AS prepared_at,

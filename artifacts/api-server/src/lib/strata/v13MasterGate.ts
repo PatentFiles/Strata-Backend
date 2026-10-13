@@ -44,6 +44,7 @@ export function isProductionMasterReady(master: ProductionMasterState): boolean 
 export const ARM_ACCOUNT_SQL = `UPDATE v13_production_account
       SET execution_enabled = true, kill_switch = false
       WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true
+        AND owner_user_id IS NULL
         AND execution_enabled = false AND kill_switch = true`;
 
 export const ARM_MASTER_SQL = `UPDATE live_execution_config
@@ -52,7 +53,8 @@ export const ARM_MASTER_SQL = `UPDATE live_execution_config
 
 export const DISARM_ACCOUNT_SQL = `UPDATE v13_production_account
       SET execution_enabled = false, kill_switch = true
-      WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true`;
+      WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true
+        AND owner_user_id IS NULL`;
 
 export const DISARM_MASTER_SQL = `UPDATE live_execution_config
       SET live_execution_enabled = false, manual_kill_switch = true, updated_at = now()
@@ -73,6 +75,7 @@ export async function armProductionAuthority(
   try {
     const account = await client.query(`SELECT id FROM v13_production_account
       WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true
+        AND owner_user_id IS NULL
         AND execution_enabled = false AND kill_switch = true
       FOR UPDATE`);
     if (account.rows.length !== 1) {
@@ -113,6 +116,7 @@ export async function disarmProductionAuthority(
   try {
     const account = await client.query(`SELECT id FROM v13_production_account
       WHERE subaccount = 1 AND exchange_index = 2 AND commissioned = true
+        AND owner_user_id IS NULL
       FOR UPDATE`);
     if (account.rows.length !== 1) {
       await rollback(client);
