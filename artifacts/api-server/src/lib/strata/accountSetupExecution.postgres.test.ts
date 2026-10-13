@@ -3,9 +3,12 @@ import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { accountCredentialControls } from "./accountCredentialControls";
 import {
   EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+  RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
   executePreparedRestrictedKeyGeneration,
+  reconcileStoredRestrictedKeyGeneration,
   type RestrictedKeyGenerationTransport,
 } from "./accountRestrictedKeyGeneration";
 import {
@@ -424,6 +427,188 @@ test("invalid generated scope/subaccount and authority rotation remain fail-clos
   });
 });
 
+test("stored key reconciliation completes GET-verified material without another POST", async (t) => {
+  const fixture = await setup(t);
+  if (!fixture) return;
+  try {
+    await insertGenerationAttempt(fixture.raw);
+    const generated = generatedCredential();
+    let posts = 0;
+    const failed = await executePreparedRestrictedKeyGeneration(fixture.db, {
+      ...keyGenerationInput(generated),
+      transport: async () => {
+        posts += 1;
+        return {
+          status: 201,
+          unreadable: false,
+          body: { api_key_id: generated.keyId, private_key: generated.privateKey },
+        };
+      },
+      verifyGenerated: async () => ({
+        ok: false,
+        reason: "credential_permission_unproven",
+      }),
+    });
+    assert.equal(failed.state, "uncertain");
+    const stored = await fixture.raw.query(
+      `SELECT id::text AS id, key_fingerprint
+       FROM private.kalshi_connection_credentials
+       WHERE owner_user_id = $1::uuid
+         AND role = 'restricted_execution'
+         AND revoked_at IS NULL`,
+      [USER_A],
+    );
+    const credentialId = String(stored.rows[0]?.id);
+    const fingerprint = String(stored.rows[0]?.key_fingerprint);
+    await fixture.raw.query(
+      `UPDATE private.kalshi_connection_credentials
+       SET verified_at = now(), verification_reason = 'credential_verified'
+       WHERE id = $1::uuid`,
+      [credentialId],
+    );
+    const input = {
+      authenticatedUserId: USER_A,
+      financialAccountId: ACCOUNT_A,
+      providerConnectionId: CONNECTION_A,
+      attemptId: GENERATE_ATTEMPT_A,
+      confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+      targetCredentialId: credentialId,
+      targetFingerprint: fingerprint,
+      verificationCredentialId: VERIFICATION_A,
+      verificationFingerprint: FP_VERIFICATION_A,
+    };
+    const reconciled = await reconcileStoredRestrictedKeyGeneration(fixture.db, input);
+    assert.equal(reconciled.ok, true, JSON.stringify(reconciled));
+    assert.equal(reconciled.state, "completed");
+    assert.equal(reconciled.attempted, false);
+    assert.equal(posts, 1);
+    const repeated = await reconcileStoredRestrictedKeyGeneration(fixture.db, input);
+    assert.equal(repeated.ok, true);
+    assert.equal(repeated.state, "completed");
+    assert.equal(posts, 1);
+    const foreign = await reconcileStoredRestrictedKeyGeneration(fixture.db, {
+      ...input,
+      authenticatedUserId: USER_B,
+      financialAccountId: ACCOUNT_B,
+      providerConnectionId: CONNECTION_B,
+      verificationCredentialId: VERIFICATION_B,
+      verificationFingerprint: FP_VERIFICATION_B,
+    });
+    assert.equal(foreign.ok, false);
+    assert.equal(posts, 1);
+  } finally {
+    await fixture.raw.close();
+  }
+});
+
+test("account execute route reconciles a stored key with GET-only verification", async (t) => {
+  const fixture = await setup(t);
+  if (!fixture) return;
+  try {
+    const verification = {
+      keyId: "verification-route-key",
+      privateKey: rsaPrivateKey(),
+    };
+    const verificationFingerprint = dedicatedSignerFingerprint(
+      verification.keyId,
+      verification.privateKey,
+    );
+    assert.ok(verificationFingerprint);
+    const verificationRow = await fixture.raw.query(
+      `SELECT vault_secret_id::text AS vault_secret_id
+       FROM private.kalshi_connection_credentials
+       WHERE id = $1::uuid`,
+      [VERIFICATION_A],
+    );
+    await fixture.raw.query(
+      "UPDATE vault.secrets SET secret = $1 WHERE id = $2::uuid",
+      [
+        JSON.stringify({
+          api_key_id: verification.keyId,
+          private_key: verification.privateKey,
+        }),
+        verificationRow.rows[0]?.vault_secret_id,
+      ],
+    );
+    await fixture.raw.query(
+      `UPDATE private.kalshi_connection_credentials
+       SET key_fingerprint = $2
+       WHERE id = $1::uuid`,
+      [VERIFICATION_A, verificationFingerprint],
+    );
+    await insertGenerationAttempt(fixture.raw);
+    const generated = generatedCredential();
+    let posts = 0;
+    const failed = await executePreparedRestrictedKeyGeneration(fixture.db, {
+      ...keyGenerationInput(generated),
+      verificationFingerprint,
+      transport: async () => {
+        posts += 1;
+        return {
+          status: 201,
+          unreadable: false,
+          body: { api_key_id: generated.keyId, private_key: generated.privateKey },
+        };
+      },
+      verifyGenerated: async () => ({
+        ok: false,
+        reason: "credential_metadata_unproven",
+      }),
+    });
+    assert.equal(failed.state, "uncertain");
+    const reads: Array<{ keyId: string; path: string }> = [];
+    const controls = accountCredentialControls(fixture.db, {
+      async kalshiGet(material, path) {
+        reads.push({ keyId: material.keyId, path });
+        if (path.endsWith("/api_keys")) {
+          assert.equal(material.keyId, verification.keyId);
+          return {
+            api_keys: [
+              {
+                api_key_id: verification.keyId,
+                scopes: ["read"],
+                subaccount: null,
+              },
+              {
+                api_key_id: generated.keyId,
+                scopes: ["read", "write::trade"],
+                subaccount: 1,
+              },
+            ],
+          };
+        }
+        if (path.endsWith("/portfolio/subaccounts/balances")) {
+          assert.equal(material.keyId, verification.keyId);
+          return {
+            subaccount_balances: [
+              { subaccount_number: 0, exchange_index: 2, balance: "0.0000" },
+              { subaccount_number: 1, exchange_index: 2, balance: "0.0000" },
+            ],
+          };
+        }
+        if (path.endsWith("/portfolio/balance")) {
+          assert.equal(material.keyId, generated.keyId);
+          return { balance_dollars: "0.0000", subaccount: 1, exchange_index: 2 };
+        }
+        throw new Error(`unexpected GET ${path}`);
+      },
+    });
+    const reconciled = await controls.executeOperation(USER_A, {
+      operation: "generate_api_key",
+      attemptId: GENERATE_ATTEMPT_A,
+      confirmation: RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+    });
+    assert.equal(reconciled.ok, true, JSON.stringify(reconciled));
+    assert.equal(reconciled.state, "completed");
+    assert.equal(posts, 1);
+    assert.equal(reads.length, 3);
+    assert.equal(JSON.stringify(reconciled).includes(generated.privateKey), false);
+    assert.equal(JSON.stringify(reconciled).includes(generated.keyId), false);
+  } finally {
+    await fixture.raw.close();
+  }
+});
+
 test("execution provisioning is transactional, idempotent, concurrent-safe, and preserves empty safety domains", async (t) => {
   const fixture = await setup(t);
   if (!fixture) return;
@@ -509,7 +694,7 @@ test("execution provisioning is transactional, idempotent, concurrent-safe, and 
   }
 });
 
-test("existing owner account blocks a second provisioning row without touching legacy state", async (t) => {
+test("safe-looking pre-existing row is never adopted by a prepared provisioning attempt", async (t) => {
   const fixture = await setup(t);
   if (!fixture) return;
   try {
@@ -526,10 +711,10 @@ test("existing owner account blocks a second provisioning row without touching l
          key_fingerprint, kill_switch, execution_enabled, commissioned,
          cash_precision_verified, cash_micros, reserved_micros, initial_cash_micros
        ) VALUES (
-         'legacy-owned-row', $1::uuid, $2::uuid, 1, 2, $3,
+         $4, $1::uuid, $2::uuid, 1, 2, $3,
          true, false, false, false, 0, 0, 0
        )`,
-      [USER_A, ACCOUNT_A, FP_OLD_RESTRICTED_A],
+      [USER_A, ACCOUNT_A, FP_OLD_RESTRICTED_A, EXECUTION_ACCOUNT_A],
     );
     const blocked = await executePreparedExecutionAccountProvisioning(fixture.db, {
       authenticatedUserId: USER_A,
@@ -543,12 +728,53 @@ test("existing owner account blocks a second provisioning row without touching l
     assert.equal(blocked.ok, false);
     assert.equal(blocked.reason, "execution_account_already_exists");
     const accounts = await fixture.raw.query("SELECT id FROM v13_production_account");
-    assert.deepEqual(accounts.rows, [{ id: "legacy-owned-row" }]);
+    assert.deepEqual(accounts.rows, [{ id: EXECUTION_ACCOUNT_A }]);
     const attempt = await fixture.raw.query(
       "SELECT state FROM private.kalshi_account_operation_attempts WHERE id = $1::uuid",
       [PROVISION_ATTEMPT_A],
     );
     assert.equal(attempt.rows[0]?.state, "prepared");
+  } finally {
+    await fixture.raw.close();
+  }
+});
+
+test("unresolved key generation transactionally blocks execution provisioning", async (t) => {
+  const fixture = await setup(t);
+  if (!fixture) return;
+  try {
+    await fixture.raw.query(
+      `UPDATE private.kalshi_connection_credentials
+       SET verified_at = now(), verification_reason = 'credential_verified'
+       WHERE id = $1::uuid`,
+      [OLD_RESTRICTED_A],
+    );
+    await insertGenerationAttempt(fixture.raw);
+    await fixture.raw.query(
+      `UPDATE private.kalshi_account_operation_attempts
+       SET state = 'uncertain', attempted_at = now(),
+           uncertainty_reason = 'provider_response_ambiguous'
+       WHERE id = $1::uuid`,
+      [GENERATE_ATTEMPT_A],
+    );
+    await insertProvisioningAttempt(
+      fixture.raw,
+      OLD_RESTRICTED_A,
+      FP_OLD_RESTRICTED_A,
+    );
+    const blocked = await executePreparedExecutionAccountProvisioning(fixture.db, {
+      authenticatedUserId: USER_A,
+      financialAccountId: ACCOUNT_A,
+      providerConnectionId: CONNECTION_A,
+      attemptId: PROVISION_ATTEMPT_A,
+      confirmation: EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION,
+      restrictedCredentialId: OLD_RESTRICTED_A,
+      restrictedFingerprint: FP_OLD_RESTRICTED_A,
+    });
+    assert.equal(blocked.reason, "restricted_key_generation_reconciliation_required");
+    assert.equal(Number((await fixture.raw.query(
+      "SELECT count(*)::int AS count FROM v13_production_account",
+    )).rows[0]?.count), 0);
   } finally {
     await fixture.raw.close();
   }
@@ -659,6 +885,8 @@ async function setup(t: { skip(message: string): void }): Promise<{
       VALUES (created, new_secret, new_name, new_description);
       RETURN created;
     END $$;
+    CREATE VIEW vault.decrypted_secrets AS
+      SELECT id, secret AS decrypted_secret FROM vault.secrets;
     CREATE TABLE private.provider_connections (
       id uuid PRIMARY KEY,
       financial_account_id uuid NOT NULL UNIQUE REFERENCES public.financial_accounts(id),

@@ -47,6 +47,7 @@ function keyMaterial() {
 function harness(failInsert = false) {
   const secrets: Array<{ id: string; payload: string }> = [];
   const bindings: Binding[] = [];
+  const executionAccounts: Array<{ ownerUserId: string; financialAccountId: string }> = [];
   let sequence = 0;
   let fail = failInsert;
   let turn = Promise.resolve();
@@ -73,6 +74,12 @@ function harness(failInsert = false) {
       const used = bindings.find((item) => item.vaultSecretId === params[0]) ||
         connections.find((item) => item.vaultSecretId === params[0]);
       return { rows: used ? [{ id: "used" }] : [] };
+    }
+    if (text.includes("credential-replacement:execution-account") ||
+        text.includes("account-credential:execution-account-before-revoke")) {
+      return { rows: executionAccounts.filter((item) =>
+        item.ownerUserId === params[0] &&
+        item.financialAccountId === params[1]).map(() => ({ id: "execution-account" })) };
     }
     if (text.includes("credential-replacement:lock-active")) {
       return { rows: bindings.filter((item) => item.providerConnectionId === params[0] && item.ownerUserId === params[1] &&
@@ -117,6 +124,14 @@ function harness(failInsert = false) {
       if (!row) return { rows: [] };
       row.revokedAt = new Date().toISOString();
       return { rows: [{ id: row.id }] };
+    }
+    if (text.includes("account-credential:lock-revoke-connection")) {
+      const connection = connections.find((item) =>
+        item.userId === params[0] && item.providerConnectionId === params[1]);
+      return { rows: connection ? [{
+        provider_connection_id: connection.providerConnectionId,
+        financial_account_id: connection.financialAccountId,
+      }] : [] };
     }
     if (text.includes("account-credential:list")) {
       return { rows: bindings.filter((item) => item.ownerUserId === params[0] && item.providerConnectionId === params[1]).map((item) => ({
@@ -204,7 +219,7 @@ function harness(failInsert = false) {
     async readSnapshot() { throw new Error("snapshot_unused"); },
     async openCredential() { throw new Error("vault_opened"); },
   };
-  return { db, ports };
+  return { db, ports, executionAccounts };
 }
 
 test("two users register, rotate, and revoke only their own credential roles", async () => {
@@ -240,6 +255,76 @@ test("two users register, rotate, and revoke only their own credential roles", a
   const status = await listAccountCredentialStatus(db, ports, USER_A);
   assert.equal(status.roles.some((role) => role.revoked), true);
   assert.equal(status.roles.some((role) => role.role === "verification"), false);
+});
+
+test("provisioned execution account blocks restricted credential rotation and revocation", async () => {
+  const { db, ports } = harness();
+  const active = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    ...keyMaterial(),
+  });
+  assert.equal(active.ok, true);
+  ports.readExecutionTarget = async (userId, providerConnectionId) =>
+    userId === USER_A && providerConnectionId === CONNECTION_A
+      ? {
+        ownerUserId: USER_A,
+        providerConnectionId: CONNECTION_A,
+        executionAccountId: "strata-account-existing",
+        subaccount: 1,
+        exchangeIndex: 2,
+        keyFingerprint: active.fingerprint,
+      }
+      : null;
+  const secretCount = db.secrets.length;
+  const rotation = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    ...keyMaterial(),
+  });
+  assert.equal(rotation.reason, "restricted_execution_rebinding_required");
+  assert.equal(db.secrets.length, secretCount);
+  const revocation = await revokeAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+  });
+  assert.equal(revocation.reason, "restricted_execution_rebinding_required");
+  assert.equal(db.bindings.filter((item) =>
+    item.ownerUserId === USER_A && item.role === "restricted_execution" &&
+    !item.revokedAt).length, 1);
+});
+
+test("transactional recheck closes credential rotation and revoke races with provisioning", async () => {
+  const { db, ports, executionAccounts } = harness();
+  const active = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    ...keyMaterial(),
+  });
+  assert.equal(active.ok, true);
+  ports.readExecutionTarget = async () => {
+    if (executionAccounts.length === 0) {
+      executionAccounts.push({
+        ownerUserId: USER_A,
+        financialAccountId: FINANCIAL_A,
+      });
+    }
+    return null;
+  };
+  const rotation = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    ...keyMaterial(),
+  });
+  assert.equal(rotation.reason, "restricted_execution_rebinding_required");
+  const revocation = await revokeAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+  });
+  assert.equal(revocation.reason, "restricted_execution_rebinding_required");
+  assert.equal(db.bindings.filter((item) =>
+    item.ownerUserId === USER_A && item.role === "restricted_execution" &&
+    !item.revokedAt).length, 1);
 });
 
 test("a failed binding rolls the new Vault secret back", async () => {

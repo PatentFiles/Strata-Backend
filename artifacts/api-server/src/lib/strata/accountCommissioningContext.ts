@@ -72,6 +72,7 @@ export interface ExecutionTarget {
   executionAccountId: string | null;
   subaccount: number | null;
   exchangeIndex: number | null;
+  keyFingerprint?: string | null;
 }
 
 export interface AccountCredentialMaterial {
@@ -110,6 +111,7 @@ export interface AccountCommissioningContext {
   executionAccountId: string | null;
   subaccount: number | null;
   exchangeIndex: number | null;
+  executionKeyFingerprint: string | null;
   credentials: StoredCredentialRef[];
   approvedOperations: typeof PHASE1_APPROVED_OPERATIONS;
   executable: false;
@@ -122,6 +124,7 @@ export interface PublicAccountCommissioningContext {
   executionAccountId: string | null;
   subaccount: number | null;
   exchangeIndex: number | null;
+  executionKeyFingerprint: string | null;
   credentialRoles: string[];
   credentialFingerprints: Record<string, string | null>;
   approvedOperations: typeof PHASE1_APPROVED_OPERATIONS;
@@ -265,6 +268,7 @@ export async function resolveAccountCommissioningContext(
       executionAccountId: target?.executionAccountId ?? null,
       subaccount: target?.subaccount ?? null,
       exchangeIndex: target?.exchangeIndex ?? null,
+      executionKeyFingerprint: target?.keyFingerprint ?? null,
       credentials: refs,
       approvedOperations: PHASE1_APPROVED_OPERATIONS,
       executable: false,
@@ -299,6 +303,14 @@ export async function evaluateAccountCommissioning(
     blockers.push("foreign_execution_account");
     plan = null;
   }
+  const restrictedFingerprint = target.credentials.find((ref) =>
+    ref.role === "restricted_execution")?.keyFingerprint ?? null;
+  if (target.executionAccountId &&
+      (!target.executionKeyFingerprint ||
+        restrictedFingerprint !== target.executionKeyFingerprint)) {
+    blockers.push("execution_account_credential_fingerprint_mismatch");
+    plan = null;
+  }
   const arm = phase1ExecutionDecision(planArm(snapshot, "ARM_V13_PRODUCTION"));
   return {
     ok: true,
@@ -323,6 +335,7 @@ function publicContext(context: AccountCommissioningContext): PublicAccountCommi
     executionAccountId: context.executionAccountId,
     subaccount: context.subaccount,
     exchangeIndex: context.exchangeIndex,
+    executionKeyFingerprint: context.executionKeyFingerprint,
     credentialRoles: context.credentials.map((ref) => ref.role),
     credentialFingerprints: Object.fromEntries(context.credentials.map((ref) => [ref.role, ref.keyFingerprint])),
     approvedOperations: context.approvedOperations,

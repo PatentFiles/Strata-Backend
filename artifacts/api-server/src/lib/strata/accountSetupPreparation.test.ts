@@ -146,6 +146,39 @@ test("wrong operation confirmation performs no database or exchange reads", asyn
   assert.equal(reads, 0);
 });
 
+test("foreign execution attempt is rejected before Vault or Kalshi reads", async () => {
+  let vaultReads = 0;
+  let exchangeReads = 0;
+  const controls = accountCredentialControls({
+    async query(sql) {
+      if (sql.includes("to_regclass('private.kalshi_account_operation_attempts')")) {
+        return { rows: [{ name: "private.kalshi_account_operation_attempts" }] };
+      }
+      if (sql.includes("account-setup-execution:owned-attempt")) {
+        return { rows: [] };
+      }
+      if (sql.includes("vault.decrypted_secrets") ||
+          sql.includes("account-credential:verified-role-secret")) {
+        vaultReads += 1;
+      }
+      return { rows: [] };
+    },
+  }, {
+    async kalshiGet() {
+      exchangeReads += 1;
+      throw new Error("must_not_read");
+    },
+  });
+  const result = await controls.executeOperation(USER_A, {
+    operation: "generate_api_key",
+    attemptId: "99999999-9999-4999-8999-999999999999",
+    confirmation: "EXECUTE_GENERATE_STRATA_V13_SUBACCOUNT_1_KEY",
+  });
+  assert.equal(result.reason, "owned_account_setup_attempt_missing");
+  assert.equal(vaultReads, 0);
+  assert.equal(exchangeReads, 0);
+});
+
 test("durable preparation is isolated, idempotent, and blocks uncertain retries", async () => {
   const db = preparationDatabase();
   const first = await prepare(db, USER_A, ACCOUNT_A, CONNECTION_A, CREDENTIAL_A, FINGERPRINT_A);
@@ -387,6 +420,19 @@ test("unrestricted legacy key prepares exact restricted-key replacement and veri
     effect: "one_fixed_key_generation_post_then_vault_storage_and_read_only_verification",
     attemptId: generated.attempt?.attemptId,
   });
+  const generationAttempt = generationFixture.attempts.rows.find((item) =>
+    item.id === generated.attempt?.attemptId);
+  assert.ok(generationAttempt);
+  generationAttempt.state = "response_received";
+  const reconciliationStatus = await generationControls.commissioningStatus(USER_A);
+  assert.deepEqual(reconciliationStatus.nextAuthorizedAction, {
+    action: "reconcile_stored_restricted_key_generation",
+    operation: "generate_api_key",
+    endpoint: "/api/strata/me/account-operations/execute",
+    requiredConfirmation: "RECONCILE_GENERATED_STRATA_V13_SUBACCOUNT_1_KEY",
+    effect: "get_only_metadata_and_scoped_read_verification_without_regeneration",
+    attemptId: generated.attempt?.attemptId,
+  });
 
   const provisionFixture = operationFixture("provision");
   const provisionControls = accountCredentialControls(provisionFixture.db, {
@@ -417,6 +463,24 @@ test("unrestricted legacy key prepares exact restricted-key replacement and veri
   assert.equal(provisionFixture.exchangeReads.some((call) =>
     call.keyId === provisionFixture.users[0]?.restricted.keyId &&
     call.path.endsWith("/portfolio/balance")), true);
+});
+
+test("commissioning surfaces execution-account credential fingerprint drift", async () => {
+  const fixture = operationFixture("provision", {
+    executionAccountFingerprint: "ff".repeat(32),
+  });
+  const controls = accountCredentialControls(fixture.db, {
+    kalshiGet: fixture.kalshiGet,
+  });
+  const status = await controls.commissioningStatus(USER_A);
+  assert.equal(status.setupReason, "execution_account_credential_fingerprint_mismatch");
+  assert.equal(status.nextRequirement, "repair_execution_account_credential_binding");
+  assert.equal(
+    status.blockers.includes("execution_account_credential_fingerprint_mismatch"),
+    true,
+  );
+  assert.equal(status.ready, false);
+  assert.equal(status.executable, false);
 });
 
 test("review-only setup migrations stay explicit and the creation transport is fixed and secret-free", () => {
@@ -470,6 +534,7 @@ function operationFixture(
     executionScopes?: string[];
     rotateProvisioningAtLimits?: boolean;
     rotateExecutionAtLimits?: boolean;
+    executionAccountFingerprint?: string;
   } = {},
 ) {
   const identities = [
@@ -631,6 +696,25 @@ function operationFixture(
         row.state = "completed";
         return { rows: [{ attempt_id: row.id }] };
       }
+      if (sql.includes("account-setup-execution:owned-attempt")) {
+        const row = attempts.rows.find((item) =>
+          item.id === params[0] && item.owner === params[1] &&
+          item.operation === params[2]);
+        return { rows: row ? [{
+          attempt_id: row.id,
+          financial_account_id: row.account,
+          provider_connection_id: row.connection,
+          operation: row.operation,
+          state: row.state,
+        }] : [] };
+      }
+      if (sql.includes("account-setup-execution:unresolved-generation")) {
+        return { rows: attempts.rows.filter((item) =>
+          item.owner === params[0] && item.connection === params[1] &&
+          item.operation === "generate_api_key" &&
+          (item.state === "attempted" || item.state === "response_received" ||
+            item.state === "uncertain")).map((item) => ({ attempt_id: item.id })) };
+      }
       if (sql.includes("account-setup-attempt:")) return attempts.query(sql, params);
       if (sql.includes("to_regclass('private.kalshi_account_operation_attempts')")) {
         return { rows: [{ name: "private.kalshi_account_operation_attempts" }] };
@@ -691,7 +775,23 @@ function operationFixture(
           }),
         }] : [] };
       }
-      if (sql.includes("FROM v13_production_account a")) return { rows: [] };
+      if (sql.includes("FROM v13_production_account a")) {
+        const user = users.find((item) =>
+          item.userId === params[0] && item.connectionId === params[1]);
+        return {
+          rows: user && options.executionAccountFingerprint ? [{
+            execution_account_id: "strata-account-existing",
+            owner_user_id: user.userId,
+            provider_connection_id: user.connectionId,
+            subaccount: 1,
+            exchange_index: 2,
+            commissioned: false,
+            execution_enabled: false,
+            kill_switch: true,
+            key_fingerprint: options.executionAccountFingerprint,
+          }] : [],
+        };
+      }
       return { rows: [] };
     },
   };
@@ -887,6 +987,8 @@ function databaseRow(row: AttemptRow): Record<string, unknown> {
     operation: row.operation,
     state: row.state,
     plan: row.plan,
+    stored_response_available: row.operation === "generate_api_key" &&
+      row.state === "response_received",
     prepared_at: row.preparedAt,
     updated_at: row.updatedAt,
   };

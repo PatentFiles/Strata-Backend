@@ -54,6 +54,7 @@ export interface PublicAccountSetupAttempt {
   plan: AccountSetupPlan;
   preparedAt: string;
   updatedAt: string;
+  storedResponseAvailable?: boolean;
 }
 
 export interface AccountSetupNextAuthorizedAction {
@@ -131,31 +132,67 @@ const UPSERT_PREPARATION_SQL = `
 
 const READ_ATTEMPT_SQL = `
   -- account-setup-attempt:read-one
-  SELECT id::text AS attempt_id,
-         owner_user_id::text AS owner_user_id,
-         financial_account_id::text AS financial_account_id,
-         operation,
-         state,
-         plan,
-         prepared_at::text AS prepared_at,
-         updated_at::text AS updated_at
-  FROM private.kalshi_account_operation_attempts
-  WHERE provider_connection_id = $1::uuid
-    AND operation = $2
+  SELECT attempts.id::text AS attempt_id,
+         attempts.owner_user_id::text AS owner_user_id,
+         attempts.financial_account_id::text AS financial_account_id,
+         attempts.operation,
+         attempts.state,
+         attempts.plan,
+         (
+           attempts.operation = 'generate_api_key'
+           AND attempts.state IN ('response_received', 'uncertain', 'completed')
+           AND attempts.response_status = 201
+           AND attempts.response_received_at IS NOT NULL
+           AND attempts.target_credential_id IS NOT NULL
+           AND attempts.target_fingerprint IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM private.kalshi_connection_credentials stored
+             WHERE stored.id = attempts.target_credential_id
+               AND stored.owner_user_id = attempts.owner_user_id
+               AND stored.provider_connection_id = attempts.provider_connection_id
+               AND stored.role = 'restricted_execution'
+               AND stored.key_fingerprint = attempts.target_fingerprint
+               AND stored.revoked_at IS NULL
+           )
+         ) AS stored_response_available,
+         attempts.prepared_at::text AS prepared_at,
+         attempts.updated_at::text AS updated_at
+  FROM private.kalshi_account_operation_attempts attempts
+  WHERE attempts.provider_connection_id = $1::uuid
+    AND attempts.operation = $2
 `;
 
 const LIST_ATTEMPTS_SQL = `
   -- account-setup-attempt:list-owned
-  SELECT id::text AS attempt_id,
-         operation,
-         state,
-         plan,
-         prepared_at::text AS prepared_at,
-         updated_at::text AS updated_at
-  FROM private.kalshi_account_operation_attempts
-  WHERE owner_user_id = $1::uuid
-    AND provider_connection_id = $2::uuid
-  ORDER BY prepared_at, operation
+  SELECT attempts.id::text AS attempt_id,
+         attempts.operation,
+         attempts.state,
+         attempts.plan,
+         (
+           attempts.operation = 'generate_api_key'
+           AND attempts.state IN ('response_received', 'uncertain', 'completed')
+           AND attempts.response_status = 201
+           AND attempts.response_received_at IS NOT NULL
+           AND attempts.target_credential_id IS NOT NULL
+           AND attempts.target_fingerprint IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM private.kalshi_connection_credentials stored
+             WHERE stored.id = attempts.target_credential_id
+               AND stored.owner_user_id = attempts.owner_user_id
+               AND stored.provider_connection_id = attempts.provider_connection_id
+               AND stored.role = 'restricted_execution'
+               AND stored.key_fingerprint = attempts.target_fingerprint
+               AND stored.revoked_at IS NULL
+           )
+         ) AS stored_response_available,
+         attempts.prepared_at::text AS prepared_at,
+         attempts.updated_at::text AS updated_at
+  FROM private.kalshi_account_operation_attempts attempts
+  WHERE attempts.owner_user_id = $1::uuid
+    AND attempts.provider_connection_id = $2::uuid
+  ORDER BY attempts.prepared_at, attempts.operation
 `;
 
 export function accountSetupPlan(
@@ -315,7 +352,17 @@ function publicAttempt(row: Record<string, unknown>): PublicAccountSetupAttempt 
   const plan = setupPlan(row.plan);
   if (!attemptId || !operation || !state || !preparedAt || !updatedAt || !plan ||
       plan.operation !== operation) return null;
-  return { attemptId, operation, state, plan, preparedAt, updatedAt };
+  return {
+    attemptId,
+    operation,
+    state,
+    plan,
+    preparedAt,
+    updatedAt,
+    ...(row.stored_response_available === true
+      ? { storedResponseAvailable: true }
+      : {}),
+  };
 }
 
 function setupPlan(value: unknown): AccountSetupPlan | null {

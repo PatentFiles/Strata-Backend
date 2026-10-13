@@ -133,6 +133,15 @@ const LOCK_ACTIVE_BINDING_SQL = `
   FOR UPDATE
 `;
 
+const OWNED_EXECUTION_ACCOUNT_SQL = `
+  -- credential-replacement:execution-account
+  SELECT id
+  FROM v13_production_account
+  WHERE owner_user_id = $1::uuid
+    AND kalshi_connection_id = $2::uuid
+  LIMIT 1
+`;
+
 const REVOKE_ACTIVE_BINDING_SQL = `
   -- credential-replacement:revoke
   UPDATE private.kalshi_connection_credentials
@@ -242,6 +251,7 @@ export async function readExecutionTarget(
     executionAccountId: text(row.execution_account_id),
     subaccount: integer(row.subaccount),
     exchangeIndex: integer(row.exchange_index),
+    keyFingerprint: text(row.key_fingerprint),
   };
 }
 
@@ -340,6 +350,15 @@ async function replaceCredentialInTransaction(
     return { ok: false, reason: "credential_not_owned" };
   }
   const financialAccountId = requiredText(owned.financial_account_id, "credential_not_owned");
+  if (input.role === "restricted_execution") {
+    const executionAccount = await client.query(OWNED_EXECUTION_ACCOUNT_SQL, [
+      input.authenticatedUserId,
+      financialAccountId,
+    ]);
+    if (executionAccount.rows.length > 0) {
+      return { ok: false, reason: "restricted_execution_rebinding_required" };
+    }
+  }
   if (text(owned.connection_vault_secret_id) === input.vaultSecretId) {
     return { ok: false, reason: "vault_secret_reused_from_provider_connection" };
   }

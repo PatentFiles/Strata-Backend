@@ -57,6 +57,28 @@ const REVOKE_ROLE_SQL = `
   RETURNING id::text AS id
 `;
 
+const LOCK_REVOKE_CONNECTION_SQL = `
+  -- account-credential:lock-revoke-connection
+  SELECT pc.id::text AS provider_connection_id,
+         fa.id::text AS financial_account_id
+  FROM private.provider_connections pc
+  JOIN public.financial_accounts fa
+    ON fa.id = pc.financial_account_id
+   AND fa.user_id = $1::uuid
+   AND fa.provider = 'kalshi'
+  WHERE pc.id = $2::uuid
+  FOR UPDATE OF pc
+`;
+
+const REVOKE_EXECUTION_ACCOUNT_SQL = `
+  -- account-credential:execution-account-before-revoke
+  SELECT id
+  FROM v13_production_account
+  WHERE owner_user_id = $1::uuid
+    AND kalshi_connection_id = $2::uuid
+  LIMIT 1
+`;
+
 const LIST_ROLE_SQL = `
   -- account-credential:list
   SELECT role,
@@ -116,6 +138,9 @@ export async function registerAccountCredential(
     owner_user_id: "ignored",
   });
   if (!resolved.ok) return registration(false, resolved.reason, input.role);
+  if (input.role === "restricted_execution" && resolved.context.executionAccountId) {
+    return registration(false, "restricted_execution_rebinding_required", input.role);
+  }
   const payload = JSON.stringify({
     api_key_id: input.apiKeyId.trim(),
     private_key: input.privateKey.trim(),
@@ -147,7 +172,8 @@ export async function registerAccountCredential(
   } catch (error) {
     const reason = error instanceof Error ? error.message : "credential_binding_rejected";
     if (reason === "vault_secret_reused_from_provider_connection" || reason === "vault_secret_reused" ||
-        reason === "credential_not_owned" || reason === "ambiguous_credential_role") {
+        reason === "credential_not_owned" || reason === "ambiguous_credential_role" ||
+        reason === "restricted_execution_rebinding_required") {
       return registration(false, reason, input.role);
     }
     return registration(false, "credential_binding_rejected", input.role);
@@ -162,13 +188,40 @@ export async function revokeAccountCredential(
   if (!knownCredentialRole(input.role)) return registration(false, "credential_role_rejected", input.role);
   const resolved = await resolveAccountCommissioningContext(input.authenticatedUserId, ports);
   if (!resolved.ok) return registration(false, resolved.reason, input.role);
-  const revoked = await db.query(REVOKE_ROLE_SQL, [
-    input.authenticatedUserId,
-    resolved.context.providerConnectionId,
-    input.role,
-  ]);
-  if (revoked.rows.length !== 1) return registration(false, "credential_not_active", input.role);
-  return registration(true, "credential_revoked", input.role);
+  if (input.role === "restricted_execution" && resolved.context.executionAccountId) {
+    return registration(false, "restricted_execution_rebinding_required", input.role);
+  }
+  try {
+    return await db.transaction(async (client) => {
+      const locked = await client.query(LOCK_REVOKE_CONNECTION_SQL, [
+        input.authenticatedUserId,
+        resolved.context.providerConnectionId,
+      ]);
+      const financialAccountId = text(locked.rows[0]?.financial_account_id);
+      if (locked.rows.length !== 1 || !financialAccountId) {
+        return registration(false, "credential_not_owned", input.role);
+      }
+      if (input.role === "restricted_execution") {
+        const executionAccount = await client.query(REVOKE_EXECUTION_ACCOUNT_SQL, [
+          input.authenticatedUserId,
+          financialAccountId,
+        ]);
+        if (executionAccount.rows.length > 0) {
+          return registration(false, "restricted_execution_rebinding_required", input.role);
+        }
+      }
+      const revoked = await client.query(REVOKE_ROLE_SQL, [
+        input.authenticatedUserId,
+        resolved.context.providerConnectionId,
+        input.role,
+      ]);
+      return revoked.rows.length === 1
+        ? registration(true, "credential_revoked", input.role)
+        : registration(false, "credential_not_active", input.role);
+    });
+  } catch {
+    return registration(false, "credential_binding_rejected", input.role);
+  }
 }
 
 export async function listAccountCredentialStatus(

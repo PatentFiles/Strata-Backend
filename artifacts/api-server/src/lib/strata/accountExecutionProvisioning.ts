@@ -64,6 +64,31 @@ const MASTER_SAFETY_SQL = `
   FOR SHARE
 `;
 
+const LOCK_OWNED_CONNECTION_SQL = `
+  -- account-execution-provisioning:lock-owned-connection
+  SELECT pc.id::text AS provider_connection_id
+  FROM private.provider_connections pc
+  JOIN public.financial_accounts fa
+    ON fa.id = pc.financial_account_id
+   AND fa.user_id = $1::uuid
+   AND fa.provider = 'kalshi'
+  WHERE pc.id = $2::uuid
+    AND pc.financial_account_id = $3::uuid
+  FOR UPDATE OF pc
+`;
+
+const LOCK_UNRESOLVED_KEY_GENERATION_SQL = `
+  -- account-execution-provisioning:block-unresolved-key-generation
+  SELECT id::text AS attempt_id
+  FROM private.kalshi_account_operation_attempts
+  WHERE owner_user_id = $1::uuid
+    AND financial_account_id = $2::uuid
+    AND provider_connection_id = $3::uuid
+    AND operation = 'generate_api_key'
+    AND state IN ('attempted', 'response_received', 'uncertain')
+  FOR UPDATE
+`;
+
 const LOCK_ACCOUNT_CONFLICTS_SQL = `
   -- account-execution-provisioning:lock-account-conflicts
   SELECT id,
@@ -165,6 +190,14 @@ export async function executePreparedExecutionAccountProvisioning(
   }
   try {
     return await db.transaction(async (client) => {
+      const connection = await client.query(LOCK_OWNED_CONNECTION_SQL, [
+        input.authenticatedUserId,
+        input.providerConnectionId,
+        input.financialAccountId,
+      ]);
+      if (connection.rows.length !== 1) {
+        return result(false, "credential_not_owned", false, input.attemptId, null, null);
+      }
       const locked = await client.query(LOCK_ATTEMPT_SQL, [
         input.attemptId,
         input.authenticatedUserId,
@@ -209,6 +242,18 @@ export async function executePreparedExecutionAccountProvisioning(
         return result(false, retryBlockedReason(state), false,
           input.attemptId, state, null);
       }
+      const unresolvedGeneration = await client.query(
+        LOCK_UNRESOLVED_KEY_GENERATION_SQL,
+        [
+          input.authenticatedUserId,
+          input.financialAccountId,
+          input.providerConnectionId,
+        ],
+      );
+      if (unresolvedGeneration.rows.length > 0) {
+        return result(false, "restricted_key_generation_reconciliation_required",
+          false, input.attemptId, state, null);
+      }
       const master = await client.query(MASTER_SAFETY_SQL);
       if (master.rows.length !== 1 ||
           master.rows[0]?.live_execution_enabled !== false ||
@@ -221,25 +266,11 @@ export async function executePreparedExecutionAccountProvisioning(
         input.authenticatedUserId,
       ]);
       if (accounts.rows.length > 0) {
-        if (!exactSafeAccount(
+        return result(false, accountConflictReason(
           accounts.rows,
           input.authenticatedUserId,
-          input.financialAccountId,
           accountId,
-          input.restrictedFingerprint,
-        )) {
-          return result(false, accountConflictReason(
-            accounts.rows,
-            input.authenticatedUserId,
-            accountId,
-          ), false, input.attemptId, state, null);
-        }
-        const completed = await completeAttempt(client, input, accountId);
-        return completed
-          ? result(true, "execution_account_existing_safe_row_adopted",
-            false, input.attemptId, "completed", accountId, true)
-          : result(false, "execution_account_provisioning_not_recorded",
-            false, input.attemptId, state, null);
+        ), false, input.attemptId, state, null);
       }
       const inserted = await client.query(INSERT_ACCOUNT_SQL, [
         accountId,

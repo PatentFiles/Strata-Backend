@@ -58,7 +58,9 @@ import {
 } from "./accountSubaccountCreation";
 import {
   EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+  RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
   executePreparedRestrictedKeyGeneration,
+  reconcileStoredRestrictedKeyGeneration,
   type RestrictedKeyGenerationTransport,
 } from "./accountRestrictedKeyGeneration";
 import {
@@ -77,6 +79,52 @@ const FUNDING_TABLE_SQL = `
 `;
 const SETUP_ATTEMPT_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_operation_attempts') AS name
+`;
+const OWNED_SETUP_ATTEMPT_SQL = `
+  -- account-setup-execution:owned-attempt
+  SELECT id::text AS attempt_id,
+         financial_account_id::text AS financial_account_id,
+         provider_connection_id::text AS provider_connection_id,
+         state
+  FROM private.kalshi_account_operation_attempts
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND operation = $3
+`;
+const UNRESOLVED_GENERATION_SQL = `
+  -- account-setup-execution:unresolved-generation
+  SELECT id::text AS attempt_id, state
+  FROM private.kalshi_account_operation_attempts
+  WHERE owner_user_id = $1::uuid
+    AND provider_connection_id = $2::uuid
+    AND operation = 'generate_api_key'
+    AND state IN ('attempted', 'response_received', 'uncertain')
+  LIMIT 1
+`;
+const GENERATED_ATTEMPT_SECRET_SQL = `
+  -- account-setup-execution:generated-attempt-secret
+  SELECT a.state,
+         a.response_status,
+         c.id::text AS credential_id,
+         c.vault_secret_id::text AS vault_secret_id,
+         c.key_fingerprint
+  FROM private.kalshi_account_operation_attempts a
+  JOIN private.kalshi_connection_credentials c
+    ON c.id = a.target_credential_id
+   AND c.owner_user_id = a.owner_user_id
+   AND c.financial_account_id = a.financial_account_id
+   AND c.provider_connection_id = a.provider_connection_id
+   AND c.role = 'restricted_execution'
+   AND c.key_fingerprint = a.target_fingerprint
+   AND c.revoked_at IS NULL
+  WHERE a.id = $1::uuid
+    AND a.owner_user_id = $2::uuid
+    AND a.financial_account_id = $3::uuid
+    AND a.provider_connection_id = $4::uuid
+    AND a.operation = 'generate_api_key'
+    AND a.state IN ('response_received', 'uncertain', 'completed')
+    AND a.response_status = 201
+    AND a.response_received_at IS NOT NULL
 `;
 const SETUP_EXECUTION_ROLE_SQL = `
   -- account-setup-execution-role:ready
@@ -393,8 +441,30 @@ export function accountCredentialControls(
     },
     async executeOperation(userId: string, body: unknown) {
       const fields = accountSetupExecutionBody(body);
-      if (!fields) {
+      if (!fields || !executionConfirmationAllowed(fields.operation, fields.confirmation)) {
         return rejectedCreationExecution("explicit_execution_authorization_required");
+      }
+      if (!await setupAttemptTableReady(db)) {
+        return rejectedCreationExecution(
+          "account_setup_attempt_migration_missing",
+          fields.attemptId,
+        );
+      }
+      const ownedAttempt = await readOwnedSetupAttempt(
+        db,
+        userId,
+        fields.attemptId,
+        fields.operation,
+      );
+      if (!ownedAttempt.ok) {
+        return rejectedCreationExecution(ownedAttempt.reason, fields.attemptId);
+      }
+      if (fields.operation === "provision_execution_account" &&
+          await unresolvedGenerationExists(db, userId, ownedAttempt.providerConnectionId)) {
+        return rejectedCreationExecution(
+          "restricted_key_generation_reconciliation_required",
+          fields.attemptId,
+        );
       }
       if (fields.operation === "create_subaccount") {
         return executeSubaccountCreation(
@@ -405,9 +475,21 @@ export function accountCredentialControls(
           userId,
           fields.attemptId,
           fields.confirmation,
+          ownedAttempt,
         );
       }
       if (fields.operation === "generate_api_key") {
+        if (fields.confirmation === RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
+          return executeRestrictedKeyReconciliation(
+            db,
+            database,
+            options.kalshiGet,
+            userId,
+            fields.attemptId,
+            fields.confirmation,
+            ownedAttempt,
+          );
+        }
         return executeRestrictedKeyGeneration(
           db,
           database,
@@ -416,6 +498,7 @@ export function accountCredentialControls(
           userId,
           fields.attemptId,
           fields.confirmation,
+          ownedAttempt,
         );
       }
       return executeExecutionAccountProvisioning(
@@ -425,6 +508,7 @@ export function accountCredentialControls(
         userId,
         fields.attemptId,
         fields.confirmation,
+        ownedAttempt,
       );
     },
     async commissioningStatus(userId: string) {
@@ -485,11 +569,18 @@ export function accountCredentialControls(
           userId,
           resolved.context.providerConnectionId,
           resolved.context.executionAccountId,
+          resolved.context.executionKeyFingerprint,
           resolved.context.credentials,
           status.roles,
           options.kalshiGet,
         )
         : unknownAccountSetup(resolved.reason);
+      if (setup.setupReason === "execution_account_credential_fingerprint_mismatch" &&
+          !readiness.blockers.includes(setup.setupReason)) {
+        readiness.blockers.push(setup.setupReason);
+        readiness.ready = false;
+        readiness.executable = false;
+      }
       let operationPreparationAvailable = false;
       let creationExecutionRoleAvailable = false;
       let operationPreparations: PublicAccountSetupAttempt[] = [];
@@ -571,6 +662,91 @@ async function setupExecutionRoleReady(db: UserScopeQuery): Promise<boolean> {
   }
 }
 
+interface OwnedSetupAttempt {
+  attemptId: string;
+  financialAccountId: string;
+  providerConnectionId: string;
+  state: string;
+}
+
+type OwnedSetupAttemptResult =
+  | ({ ok: true } & OwnedSetupAttempt)
+  | { ok: false; reason: string };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+async function readOwnedSetupAttempt(
+  db: UserScopeQuery,
+  userId: string,
+  attemptId: string,
+  operation: AccountSetupOperation,
+): Promise<OwnedSetupAttemptResult> {
+  if (!UUID.test(attemptId)) return { ok: false, reason: "account_setup_attempt_invalid" };
+  try {
+    const read = await db.query(OWNED_SETUP_ATTEMPT_SQL, [
+      attemptId,
+      userId,
+      operation,
+    ]);
+    if (read.rows.length !== 1) {
+      return { ok: false, reason: "owned_account_setup_attempt_missing" };
+    }
+    const financialAccountId = text(read.rows[0]?.financial_account_id);
+    const providerConnectionId = text(read.rows[0]?.provider_connection_id);
+    const state = text(read.rows[0]?.state);
+    if (!financialAccountId || !providerConnectionId || !state) {
+      return { ok: false, reason: "account_setup_attempt_invalid" };
+    }
+    return {
+      ok: true,
+      attemptId,
+      financialAccountId,
+      providerConnectionId,
+      state,
+    };
+  } catch {
+    return { ok: false, reason: "account_setup_attempt_unavailable" };
+  }
+}
+
+async function unresolvedGenerationExists(
+  db: UserScopeQuery,
+  userId: string,
+  providerConnectionId: string,
+): Promise<boolean> {
+  try {
+    const unresolved = await db.query(UNRESOLVED_GENERATION_SQL, [
+      userId,
+      providerConnectionId,
+    ]);
+    return unresolved.rows.length > 0;
+  } catch {
+    return true;
+  }
+}
+
+function executionConfirmationAllowed(
+  operation: AccountSetupOperation,
+  confirmation: string,
+): boolean {
+  if (operation === "create_subaccount") {
+    return confirmation === EXECUTE_SUBACCOUNT_CREATION_CONFIRMATION;
+  }
+  if (operation === "generate_api_key") {
+    return confirmation === EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION ||
+      confirmation === RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION;
+  }
+  return confirmation === EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION;
+}
+
+function attemptMatchesContext(
+  attempt: OwnedSetupAttempt,
+  context: { financialAccountId: string; providerConnectionId: string },
+): boolean {
+  return attempt.financialAccountId === context.financialAccountId &&
+    attempt.providerConnectionId === context.providerConnectionId;
+}
+
 async function readOwnedSecret(
   db: UserScopeQuery,
   userId: string,
@@ -645,6 +821,7 @@ async function inspectAccountSetup(
   userId: string,
   providerConnectionId: string,
   executionAccountId: string | null,
+  executionKeyFingerprint: string | null,
   credentials: StoredCredentialRef[],
   statuses: AccountCredentialStatus[],
   getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
@@ -737,15 +914,21 @@ async function inspectAccountSetup(
   const restrictedStatus = statuses.find((status) =>
     status.role === "restricted_execution" && !status.revoked);
   const readVerified = restrictedStatus?.verified === true;
+  const executionFingerprintMismatch = executionAccountId !== null &&
+    (!executionKeyFingerprint || restricted?.keyFingerprint !== executionKeyFingerprint);
   let nextRequirement: AccountSetupNextRequirement | null = null;
-  if (subaccount.exists === false) {
+  if (executionFingerprintMismatch) {
+    nextRequirement = "repair_execution_account_credential_binding";
+  } else if (subaccount.exists === false) {
     nextRequirement = "create_subaccount_1";
   } else if (subaccount.exists === true && subaccount.exchangeIndex2Exists === true) {
     if (metadataVerified !== true) nextRequirement = metadataNextRequirement;
     else if (!readVerified) nextRequirement = "verify_restricted_execution_credential";
     else if (!executionAccountId) nextRequirement = "provision_execution_account";
   }
-  const setupReason = !subaccount.ok || !subaccount.exists || !subaccount.exchangeIndex2Exists
+  const setupReason = executionFingerprintMismatch
+    ? "execution_account_credential_fingerprint_mismatch"
+    : !subaccount.ok || !subaccount.exists || !subaccount.exchangeIndex2Exists
     ? subaccount.reason
     : metadataVerified !== true
       ? metadataReason
@@ -802,6 +985,18 @@ function nextAuthorizedSetupAction(
     item.state === "response_received" ||
     item.state === "uncertain");
   if (unresolved) {
+    if (unresolved.operation === "generate_api_key" &&
+        unresolved.storedResponseAvailable === true &&
+        (unresolved.state === "response_received" || unresolved.state === "uncertain")) {
+      return nextAction(
+        "reconcile_stored_restricted_key_generation",
+        unresolved.operation,
+        "/api/strata/me/account-operations/execute",
+        RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+        "get_only_metadata_and_scoped_read_verification_without_regeneration",
+        unresolved.attemptId,
+      );
+    }
     return nextAction(
       "reconcile_prior_operation_without_retry",
       unresolved.operation,
@@ -1040,6 +1235,10 @@ async function prepareSetupReview(
   const commissioning = createDatabaseAccountCommissioningPorts(database);
   const resolved = await resolveAccountCommissioningContext(userId, commissioning);
   if (!resolved.ok) return rejectedPreparation(resolved.reason);
+  if (operation === "provision_execution_account" &&
+      await unresolvedGenerationExists(db, userId, resolved.context.providerConnectionId)) {
+    return rejectedPreparation("restricted_key_generation_reconciliation_required");
+  }
   if (operation === "provision_execution_account" && resolved.context.executionAccountId) {
     return rejectedPreparation("execution_account_already_exists");
   }
@@ -1219,6 +1418,7 @@ async function executeSubaccountCreation(
   userId: string,
   attemptId: string,
   confirmation: string,
+  ownedAttempt: OwnedSetupAttempt,
 ) {
   if (confirmation !== EXECUTE_SUBACCOUNT_CREATION_CONFIRMATION) {
     return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
@@ -1236,6 +1436,9 @@ async function executeSubaccountCreation(
   const commissioning = createDatabaseAccountCommissioningPorts(database);
   const resolved = await resolveAccountCommissioningContext(userId, commissioning);
   if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+  if (!attemptMatchesContext(ownedAttempt, resolved.context)) {
+    return rejectedCreationExecution("account_setup_attempt_context_mismatch", attemptId);
+  }
   if (resolved.context.executionAccountId) {
     return rejectedCreationExecution("execution_account_already_exists", attemptId);
   }
@@ -1379,6 +1582,7 @@ async function executeRestrictedKeyGeneration(
   userId: string,
   attemptId: string,
   confirmation: string,
+  ownedAttempt: OwnedSetupAttempt,
 ) {
   if (confirmation !== EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
     return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
@@ -1399,6 +1603,9 @@ async function executeRestrictedKeyGeneration(
   const commissioning = createDatabaseAccountCommissioningPorts(database);
   const resolved = await resolveAccountCommissioningContext(userId, commissioning);
   if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+  if (!attemptMatchesContext(ownedAttempt, resolved.context)) {
+    return rejectedCreationExecution("account_setup_attempt_context_mismatch", attemptId);
+  }
   if (resolved.context.executionAccountId) {
     return rejectedCreationExecution(
       "execution_account_exists_before_restricted_key_generation",
@@ -1557,6 +1764,116 @@ async function executeRestrictedKeyGeneration(
   });
 }
 
+async function executeRestrictedKeyReconciliation(
+  db: UserScopeQuery,
+  database: CredentialDatabase,
+  getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
+  userId: string,
+  attemptId: string,
+  confirmation: string,
+  ownedAttempt: OwnedSetupAttempt,
+) {
+  if (confirmation !== RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
+    return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
+  }
+  if (!getJson) {
+    return rejectedCreationExecution("verification_transport_not_enabled", attemptId);
+  }
+  if (!["response_received", "uncertain", "completed"].includes(ownedAttempt.state)) {
+    return rejectedCreationExecution(
+      ownedAttempt.state === "attempted"
+        ? "restricted_key_generation_response_not_stored"
+        : "restricted_key_generation_not_reconcilable",
+      attemptId,
+    );
+  }
+
+  const commissioning = createDatabaseAccountCommissioningPorts(database);
+  const resolved = await resolveAccountCommissioningContext(userId, commissioning);
+  if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+  if (!attemptMatchesContext(ownedAttempt, resolved.context)) {
+    return rejectedCreationExecution("account_setup_attempt_context_mismatch", attemptId);
+  }
+
+  let generatedRead: Awaited<ReturnType<UserScopeQuery["query"]>>;
+  try {
+    generatedRead = await db.query(GENERATED_ATTEMPT_SECRET_SQL, [
+      attemptId,
+      userId,
+      resolved.context.financialAccountId,
+      resolved.context.providerConnectionId,
+    ]);
+  } catch {
+    return rejectedCreationExecution("restricted_key_reconciliation_unavailable", attemptId);
+  }
+  if (generatedRead.rows.length !== 1) {
+    return rejectedCreationExecution(
+      "restricted_key_generation_stored_credential_missing",
+      attemptId,
+    );
+  }
+  const generatedCredentialId = text(generatedRead.rows[0]?.credential_id);
+  const generatedVaultSecretId = text(generatedRead.rows[0]?.vault_secret_id);
+  const generatedFingerprint = text(generatedRead.rows[0]?.key_fingerprint);
+  if (!generatedCredentialId || !generatedVaultSecretId || !generatedFingerprint) {
+    return rejectedCreationExecution(
+      "restricted_key_generation_stored_credential_invalid",
+      attemptId,
+    );
+  }
+  if (resolved.context.executionAccountId &&
+      resolved.context.executionKeyFingerprint !== generatedFingerprint) {
+    return rejectedCreationExecution(
+      "execution_account_credential_fingerprint_mismatch",
+      attemptId,
+    );
+  }
+
+  const verification = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "verification",
+  );
+  if (!verification.ok) return rejectedCreationExecution(verification.reason, attemptId);
+  let generatedMaterial: { keyId: string; privateKey: string } | null;
+  try {
+    generatedMaterial = await readOwnedSecret(db, userId, generatedVaultSecretId);
+  } catch {
+    generatedMaterial = null;
+  }
+  if (!generatedMaterial ||
+      dedicatedSignerFingerprint(generatedMaterial.keyId, generatedMaterial.privateKey) !==
+        generatedFingerprint) {
+    return rejectedCreationExecution(
+      "restricted_credential_recovery_required",
+      attemptId,
+    );
+  }
+  const verified = await probeAccountCredential(
+    "restricted_execution",
+    generatedFingerprint,
+    generatedMaterial,
+    getJson,
+    verification.authority,
+  );
+  if (!verified.ok) {
+    return rejectedCreationExecution(verified.reason, attemptId);
+  }
+
+  return reconcileStoredRestrictedKeyGeneration(database, {
+    authenticatedUserId: userId,
+    financialAccountId: resolved.context.financialAccountId,
+    providerConnectionId: resolved.context.providerConnectionId,
+    attemptId,
+    confirmation,
+    verificationCredentialId: verification.credentialId,
+    verificationFingerprint: verification.authority.expectedFingerprint,
+    targetCredentialId: generatedCredentialId,
+    targetFingerprint: generatedFingerprint,
+  });
+}
+
 async function executeExecutionAccountProvisioning(
   db: UserScopeQuery,
   database: CredentialDatabase,
@@ -1564,6 +1881,7 @@ async function executeExecutionAccountProvisioning(
   userId: string,
   attemptId: string,
   confirmation: string,
+  ownedAttempt: OwnedSetupAttempt,
 ) {
   if (confirmation !== EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION) {
     return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
@@ -1577,6 +1895,9 @@ async function executeExecutionAccountProvisioning(
   const commissioning = createDatabaseAccountCommissioningPorts(database);
   const resolved = await resolveAccountCommissioningContext(userId, commissioning);
   if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+  if (!attemptMatchesContext(ownedAttempt, resolved.context)) {
+    return rejectedCreationExecution("account_setup_attempt_context_mismatch", attemptId);
+  }
 
   const verification = await readVerifiedRoleAuthority(
     db,

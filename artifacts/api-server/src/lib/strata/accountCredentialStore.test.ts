@@ -96,6 +96,11 @@ function memory(seed?: {
     if (text.includes("credential-replacement:vault-used")) {
       return { rows: bindings.filter((row) => row.vaultSecretId === params[0]).map((row) => ({ id: row.id })) };
     }
+    if (text.includes("credential-replacement:execution-account")) {
+      return { rows: executions.filter((row) =>
+        row.ownerUserId === params[0] &&
+        row.financialAccountId === params[1]).map((row) => ({ id: row.id })) };
+    }
     if (text.includes("credential-replacement:lock-active")) {
       assert.match(text, /FOR UPDATE/);
       return {
@@ -334,7 +339,44 @@ test("replacement keeps the old secret reference and does not copy the wallet se
   const active = state.bindings.filter((row) => row.role === "restricted_execution" && row.revokedAt === null);
   assert.equal(active.length, 1);
   const markers = state.calls.map((sql) => sql.match(/credential-replacement:([a-z-]+)/)?.[1]).filter(Boolean);
-  assert.deepEqual(markers, ["lock-connection", "vault-used", "lock-active", "revoke", "insert", "link"]);
+  assert.deepEqual(markers, [
+    "lock-connection",
+    "execution-account",
+    "vault-used",
+    "lock-active",
+    "revoke",
+    "insert",
+    "link",
+  ]);
+});
+
+test("credential store transaction refuses restricted replacement after provisioning", async () => {
+  const state = memory({
+    bindings: [binding(USER_A, CONNECTION_A, FINANCIAL_A, "restricted_execution", SECRET_A)],
+    executions: [{
+      id: "strata-account-existing",
+      ownerUserId: USER_A,
+      financialAccountId: FINANCIAL_A,
+      subaccount: 1,
+      exchangeIndex: 2,
+      commissioned: false,
+      executionEnabled: false,
+      killSwitch: true,
+      keyFingerprint: FINGERPRINT,
+    }],
+  });
+  const blocked = await replaceOwnedCredentialBinding(state.db, {
+    authenticatedUserId: USER_A,
+    providerConnectionId: CONNECTION_A,
+    role: "restricted_execution",
+    vaultSecretId: SECRET_NEXT,
+    keyFingerprint: FINGERPRINT,
+  });
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) return;
+  assert.equal(blocked.reason, "restricted_execution_rebinding_required");
+  assert.equal(state.bindings.length, 1);
+  assert.equal(state.bindings[0]?.revokedAt, null);
 });
 
 test("a failed insert rolls the revoked binding back", async () => {
@@ -410,7 +452,10 @@ test("database resolution does not open secrets or fall back to Railway credenti
     assert.equal(evaluation.executable, false);
     assert.equal(evaluation.armEnabled, false);
     assert.equal(evaluation.plan, null);
-    assert.deepEqual(evaluation.blockers, legacy.blockers);
+    assert.deepEqual(evaluation.blockers, [
+      ...legacy.blockers,
+      "execution_account_credential_fingerprint_mismatch",
+    ]);
     assert.equal(JSON.stringify(evaluation).includes(SENTINEL), false);
     assert.equal(JSON.stringify(evaluation).includes("privateKey"), false);
     const resolved = await resolveAccountCommissioningContext(USER_A, ports);

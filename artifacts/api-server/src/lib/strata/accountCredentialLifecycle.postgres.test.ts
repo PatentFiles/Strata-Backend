@@ -61,6 +61,11 @@ test("vault registration commits per user and rolls back a rejected binding", as
         provider text NOT NULL,
         UNIQUE (id, user_id)
       );
+      CREATE TABLE public.v13_production_account (
+        id text PRIMARY KEY,
+        owner_user_id uuid,
+        kalshi_connection_id uuid
+      );
       CREATE TABLE private.provider_connections (
         id uuid PRIMARY KEY,
         financial_account_id uuid NOT NULL UNIQUE REFERENCES public.financial_accounts(id),

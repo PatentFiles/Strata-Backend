@@ -7,6 +7,8 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 
 export const EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION =
   "EXECUTE_GENERATE_STRATA_V13_SUBACCOUNT_1_KEY";
+export const RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION =
+  "RECONCILE_GENERATED_STRATA_V13_SUBACCOUNT_1_KEY";
 
 export interface RestrictedKeyGenerationExchangeResult {
   status: number;
@@ -146,6 +148,15 @@ const LOCK_OWNED_CONNECTION_SQL = `
   WHERE pc.id = $2::uuid
     AND pc.financial_account_id = $3::uuid
   FOR UPDATE OF pc
+`;
+
+const EXISTING_EXECUTION_ACCOUNT_SQL = `
+  -- account-restricted-key-generation:existing-execution-account
+  SELECT id
+  FROM v13_production_account
+  WHERE owner_user_id = $1::uuid
+    AND kalshi_connection_id = $2::uuid
+  LIMIT 1
 `;
 
 const CREATE_VAULT_SECRET_SQL = `
@@ -331,6 +342,82 @@ const MARK_COMPLETED_SQL = `
   RETURNING id::text AS attempt_id
 `;
 
+const LOCK_RECONCILABLE_RESPONSE_SQL = `
+  -- account-restricted-key-generation:lock-reconcilable-response
+  SELECT a.id::text AS attempt_id,
+         a.state,
+         target.id::text AS target_credential_id,
+         verification.id::text AS verification_credential_id
+  FROM private.kalshi_account_operation_attempts a
+  JOIN private.kalshi_connection_credentials target
+    ON target.id = a.target_credential_id
+   AND target.owner_user_id = a.owner_user_id
+   AND target.financial_account_id = a.financial_account_id
+   AND target.provider_connection_id = a.provider_connection_id
+   AND target.role = 'restricted_execution'
+   AND target.revoked_at IS NULL
+   AND target.key_fingerprint = a.target_fingerprint
+  JOIN private.kalshi_connection_credentials verification
+    ON verification.id = $7::uuid
+   AND verification.owner_user_id = a.owner_user_id
+   AND verification.financial_account_id = a.financial_account_id
+   AND verification.provider_connection_id = a.provider_connection_id
+   AND verification.role = 'verification'
+   AND verification.revoked_at IS NULL
+   AND verification.verified_at IS NOT NULL
+   AND verification.verification_reason = 'credential_verified'
+   AND verification.key_fingerprint = $8
+  WHERE a.id = $1::uuid
+    AND a.owner_user_id = $2::uuid
+    AND a.financial_account_id = $3::uuid
+    AND a.provider_connection_id = $4::uuid
+    AND a.operation = 'generate_api_key'
+    AND a.state IN ('response_received', 'uncertain', 'completed')
+    AND a.response_status = 201
+    AND a.response_received_at IS NOT NULL
+    AND target.id = $5::uuid
+    AND target.key_fingerprint = $6
+  FOR UPDATE OF a, target, verification
+`;
+
+const MARK_RECONCILED_CREDENTIAL_VERIFIED_SQL = `
+  -- account-restricted-key-generation:mark-reconciled-credential-verified
+  UPDATE private.kalshi_connection_credentials
+  SET verified_at = COALESCE(verified_at, now()),
+      verification_reason = 'credential_verified',
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND role = 'restricted_execution'
+    AND key_fingerprint = $5
+    AND revoked_at IS NULL
+    AND (verified_at IS NULL OR verification_reason = 'credential_verified')
+  RETURNING id::text AS credential_id
+`;
+
+const MARK_RECONCILED_COMPLETED_SQL = `
+  -- account-restricted-key-generation:mark-reconciled-completed
+  UPDATE private.kalshi_account_operation_attempts
+  SET state = 'completed',
+      completed_at = COALESCE(completed_at, now()),
+      uncertainty_reason = NULL,
+      result_reference = 'restricted_credential_bound_and_verified',
+      updated_at = now()
+  WHERE id = $1::uuid
+    AND owner_user_id = $2::uuid
+    AND financial_account_id = $3::uuid
+    AND provider_connection_id = $4::uuid
+    AND operation = 'generate_api_key'
+    AND state IN ('response_received', 'uncertain')
+    AND response_status = 201
+    AND response_received_at IS NOT NULL
+    AND target_credential_id = $5::uuid
+    AND target_fingerprint = $6
+  RETURNING id::text AS attempt_id
+`;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
@@ -490,6 +577,94 @@ export async function executePreparedRestrictedKeyGeneration(
     true, input.attemptId, "completed", true);
 }
 
+/**
+ * Completes only a previously Vault-stored response. It performs no Kalshi
+ * mutation and cannot create or regenerate a key.
+ */
+export async function reconcileStoredRestrictedKeyGeneration(
+  db: CredentialDatabase,
+  input: {
+    authenticatedUserId: string;
+    financialAccountId: string;
+    providerConnectionId: string;
+    attemptId: string;
+    confirmation: unknown;
+    targetCredentialId: string;
+    targetFingerprint: string;
+    verificationCredentialId: string;
+    verificationFingerprint: string;
+  },
+): Promise<RestrictedKeyGenerationExecutionResult> {
+  if (input.confirmation !== RECONCILE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
+    return result(false, "explicit_reconciliation_authorization_required",
+      false, input.attemptId, null);
+  }
+  if (!UUID.test(input.attemptId) || !UUID.test(input.targetCredentialId)) {
+    return result(false, "account_setup_attempt_invalid", false, null, null);
+  }
+  try {
+    return await db.transaction(async (client) => {
+      const locked = await client.query(LOCK_RECONCILABLE_RESPONSE_SQL, [
+        input.attemptId,
+        input.authenticatedUserId,
+        input.financialAccountId,
+        input.providerConnectionId,
+        input.targetCredentialId,
+        input.targetFingerprint,
+        input.verificationCredentialId,
+        input.verificationFingerprint,
+      ]);
+      if (locked.rows.length !== 1) {
+        return result(false, "stored_restricted_key_reconciliation_not_available",
+          false, input.attemptId, null);
+      }
+      const state = attemptState(locked.rows[0]?.state);
+      if (state === "completed") {
+        return result(true, "restricted_key_already_generated_and_verified",
+          false, input.attemptId, "completed", true);
+      }
+      if (state !== "response_received" && state !== "uncertain") {
+        return result(false, "stored_restricted_key_reconciliation_not_available",
+          false, input.attemptId, state);
+      }
+      const master = await client.query(MASTER_SAFETY_SQL);
+      if (master.rows.length !== 1 ||
+          master.rows[0]?.live_execution_enabled !== false ||
+          master.rows[0]?.manual_kill_switch !== true) {
+        return result(false, "production_safety_controls_not_fail_closed",
+          false, input.attemptId, state);
+      }
+      const verified = await client.query(MARK_RECONCILED_CREDENTIAL_VERIFIED_SQL, [
+        input.targetCredentialId,
+        input.authenticatedUserId,
+        input.financialAccountId,
+        input.providerConnectionId,
+        input.targetFingerprint,
+      ]);
+      if (verified.rows.length !== 1) {
+        return result(false, "stored_restricted_key_binding_changed",
+          false, input.attemptId, state);
+      }
+      const completed = await client.query(MARK_RECONCILED_COMPLETED_SQL, [
+        input.attemptId,
+        input.authenticatedUserId,
+        input.financialAccountId,
+        input.providerConnectionId,
+        input.targetCredentialId,
+        input.targetFingerprint,
+      ]);
+      if (completed.rows.length !== 1) {
+        throw new Error("restricted_key_reconciliation_not_recorded");
+      }
+      return result(true, "restricted_key_reconciled_and_verified",
+        false, input.attemptId, "completed", true);
+    });
+  } catch {
+    return result(false, "restricted_key_reconciliation_transaction_failed",
+      false, input.attemptId, null);
+  }
+}
+
 async function claimAttempt(
   db: CredentialDatabase,
   input: {
@@ -505,6 +680,14 @@ async function claimAttempt(
 ): Promise<{ ok: true } | { ok: false; reason: string; state: AttemptState | null }> {
   try {
     return await db.transaction(async (client) => {
+      const connection = await client.query(LOCK_OWNED_CONNECTION_SQL, [
+        input.authenticatedUserId,
+        input.providerConnectionId,
+        input.financialAccountId,
+      ]);
+      if (connection.rows.length !== 1) {
+        return { ok: false as const, reason: "credential_not_owned", state: null };
+      }
       const locked = await client.query(LOCK_ATTEMPT_SQL, [
         input.attemptId,
         input.authenticatedUserId,
@@ -533,6 +716,17 @@ async function claimAttempt(
         return {
           ok: false as const,
           reason: "restricted_execution_credential_rotated_since_preparation",
+          state,
+        };
+      }
+      const executionAccount = await client.query(EXISTING_EXECUTION_ACCOUNT_SQL, [
+        input.authenticatedUserId,
+        input.financialAccountId,
+      ]);
+      if (executionAccount.rows.length > 0) {
+        return {
+          ok: false as const,
+          reason: "execution_account_exists_before_restricted_key_generation",
           state,
         };
       }
@@ -580,6 +774,12 @@ async function storeGeneratedCredential(
   });
   const name = `kalshi:${input.authenticatedUserId}:restricted_execution:${randomUUID()}`;
   return db.transaction(async (client) => {
+    const connection = await client.query(LOCK_OWNED_CONNECTION_SQL, [
+      input.authenticatedUserId,
+      input.providerConnectionId,
+      input.financialAccountId,
+    ]);
+    if (connection.rows.length !== 1) throw new Error("credential_not_owned");
     const attempt = await client.query(LOCK_ATTEMPTED_SQL, [
       input.attemptId,
       input.authenticatedUserId,
@@ -587,12 +787,6 @@ async function storeGeneratedCredential(
       input.providerConnectionId,
     ]);
     if (attempt.rows.length !== 1) throw new Error("key_generation_attempt_not_attempted");
-    const connection = await client.query(LOCK_OWNED_CONNECTION_SQL, [
-      input.authenticatedUserId,
-      input.providerConnectionId,
-      input.financialAccountId,
-    ]);
-    if (connection.rows.length !== 1) throw new Error("credential_not_owned");
     const active = await client.query(LOCK_ACTIVE_RESTRICTED_SQL, [
       input.authenticatedUserId,
       input.financialAccountId,

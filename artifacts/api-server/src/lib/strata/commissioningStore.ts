@@ -197,9 +197,9 @@ export async function readCommissioningSnapshot(
     };
   }
   const [accounts, policies, approvedPolicies, boundary, funding] = await Promise.all([
-    query("SELECT * FROM v13_production_account"),
-    query("SELECT count(*)::int AS count FROM v13_live_money_policy"),
-    query("SELECT * FROM v13_live_money_policy WHERE state = 'APPROVED' LIMIT 2"),
+    query("SELECT * FROM v13_production_account WHERE owner_user_id IS NULL"),
+    query("SELECT count(*)::int AS count FROM v13_live_money_policy WHERE execution_account_id IS NULL"),
+    query("SELECT * FROM v13_live_money_policy WHERE state = 'APPROVED' AND execution_account_id IS NULL LIMIT 2"),
     query("SELECT * FROM micro_live_pair_boundary WHERE subaccount_number = $1", [PRODUCTION_SUBACCOUNT]),
     query(`SELECT state, amount_cents, transfer_id FROM micro_live_pair_funding_attempts
       WHERE destination_subaccount = $1 AND exchange_index = $2 LIMIT 2`,
@@ -335,10 +335,10 @@ export async function readCommissioningSnapshot(
   }
   try {
     const positions = await query(
-      "SELECT count(*)::int AS count FROM v13_production_position WHERE quantity_hundredths > 0",
+      "SELECT count(*)::int AS count FROM v13_production_position WHERE execution_account_id IS NULL AND quantity_hundredths > 0",
     );
     const intents = await query(
-      "SELECT count(*)::int AS count FROM v13_production_intent WHERE terminal = false AND state NOT IN ('TERMINAL','BLOCKED')",
+      "SELECT count(*)::int AS count FROM v13_production_intent WHERE execution_account_id IS NULL AND terminal = false AND state NOT IN ('TERMINAL','BLOCKED')",
     );
     snapshot.openPositionCount = Number(positions.rows[0]?.count ?? 0);
     snapshot.unresolvedIntentCount = Number(intents.rows[0]?.count ?? 0);
@@ -833,7 +833,7 @@ export async function generateRailwayIndex2Key(
   try {
     const [attempt, account, micro] = await Promise.all([
       query("SELECT state FROM strata_index2_key_attempt WHERE singleton_id = 'singleton'"),
-      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query("SELECT 1 FROM v13_production_account WHERE owner_user_id IS NULL LIMIT 1"),
       query("SELECT 1 FROM micro_live_pair_key_provisioning_attempts LIMIT 1"),
     ]);
     accountExists = account.rows.length > 0;
@@ -998,7 +998,7 @@ export async function createRailwaySubaccount(
   try {
     const [attempt, account, micro] = await Promise.all([
       query("SELECT state FROM strata_subaccount_creation_attempt WHERE singleton_id = 'singleton'"),
-      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query("SELECT 1 FROM v13_production_account WHERE owner_user_id IS NULL LIMIT 1"),
       query("SELECT 1 FROM micro_live_subaccount_creation_attempts LIMIT 1"),
     ]);
     accountExists = account.rows.length > 0;
@@ -1131,7 +1131,7 @@ export async function replaceRailwayIndex2Key(
   try {
     const [attempt, account, replaced] = await Promise.all([
       query("SELECT state FROM strata_index2_key_attempt WHERE singleton_id = 'singleton'"),
-      query("SELECT 1 FROM v13_production_account LIMIT 1"),
+      query("SELECT 1 FROM v13_production_account WHERE owner_user_id IS NULL LIMIT 1"),
       query(`SELECT 1 FROM strata_index2_key_attempt
         WHERE supersession_reason = 'replaced_for_current_kalshi_account' LIMIT 1`),
     ]);
@@ -1422,8 +1422,10 @@ export function createDatabaseCommissioningPort(
       const [drafts, approved] = await Promise.all([
         query(`SELECT capital_limit_cents, max_entry_stake_cents, max_entry_all_in_cents,
           max_daily_loss_cents, max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms
-          FROM v13_live_money_policy WHERE state = 'DRAFT' ORDER BY version DESC LIMIT 1`),
-        query("SELECT 1 FROM v13_live_money_policy WHERE state = 'APPROVED' LIMIT 2"),
+          FROM v13_live_money_policy
+          WHERE state = 'DRAFT' AND execution_account_id IS NULL
+          ORDER BY version DESC LIMIT 1`),
+        query("SELECT 1 FROM v13_live_money_policy WHERE state = 'APPROVED' AND execution_account_id IS NULL LIMIT 2"),
       ]);
       return policyReadFromRows({
         draft: drafts.rows[0] ?? null,
@@ -1435,7 +1437,7 @@ export function createDatabaseCommissioningPort(
       const decision = validatePolicyLimits(parsed);
       if (!decision.ok || !parsed) return { status: "BLOCKED", reason: decision.errors.join(",") };
       const limits = parsed as PolicyLimits;
-      const versionRows = await query("SELECT COALESCE(MAX(version), 0)::int AS version FROM v13_live_money_policy");
+      const versionRows = await query("SELECT COALESCE(MAX(version), 0)::int AS version FROM v13_live_money_policy WHERE execution_account_id IS NULL");
       const version = Number(versionRows.rows[0]?.version ?? 0) + 1;
       await query(`INSERT INTO v13_live_money_policy (
         id, version, state, strategy_version, strategy_parameter_set_id, strategy_parameter_hash,
@@ -1457,7 +1459,7 @@ export function createDatabaseCommissioningPort(
       }
       const entryBlock = policyApprovalEntryBlock();
       if (entryBlock) return { status: "BLOCKED", reason: entryBlock };
-      const drafts = await query("SELECT * FROM v13_live_money_policy WHERE state = 'DRAFT' ORDER BY version DESC LIMIT 1");
+      const drafts = await query("SELECT * FROM v13_live_money_policy WHERE state = 'DRAFT' AND execution_account_id IS NULL ORDER BY version DESC LIMIT 1");
       const draft = drafts.rows[0];
       if (!draft) return { status: "BLOCKED", reason: "policy_draft_missing" };
       const now = new Date();
@@ -1469,7 +1471,7 @@ export function createDatabaseCommissioningPort(
         champion_selected_by = $5, champion_selected_at = $6,
         fee_policy_version = $7, fee_source_url = $8, fee_formula_version = $9,
         entry_policy_version = $10, approved_by = $5, approved_at = $6, policy_hash = $11
-        WHERE id = $1 AND state = 'DRAFT'`, [
+        WHERE id = $1 AND state = 'DRAFT' AND execution_account_id IS NULL`, [
         draft.id, V13_CHAMPION_PARAMETER_SET.id, V13_CHAMPION_PARAMETER_HASH,
         REVIEWED_RELEASE.commit, actor, now.toISOString(),
         STANDING_FEE_POLICY_VERSION, CANONICAL_FEE_SCHEDULE_URL,
@@ -1577,7 +1579,7 @@ export function createDatabaseCommissioningPort(
           };
         }
         const existing = await client.query(
-          "SELECT id, commissioned FROM v13_production_account WHERE subaccount = 1 AND exchange_index = 2 FOR UPDATE",
+          "SELECT id, commissioned FROM v13_production_account WHERE owner_user_id IS NULL AND subaccount = 1 AND exchange_index = 2 FOR UPDATE",
         );
         if (existing.rows.length > 1) {
           await client.query("ROLLBACK");

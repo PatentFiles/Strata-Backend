@@ -218,6 +218,18 @@ test("user-scoped evaluation reuses the legacy decision and does not arm", async
   }));
   assert.equal(mismatched.plan, null);
   assert.equal(mismatched.blockers.includes("account_target_pair_mismatch"), true);
+  const drifted = await evaluateAccountCommissioning(USER_A, ports({
+    snapshot,
+    target: target({
+      executionAccountId: "strata-account-existing",
+      keyFingerprint: "cd".repeat(32),
+    }),
+  }));
+  assert.equal(drifted.plan, null);
+  assert.equal(
+    drifted.blockers.includes("execution_account_credential_fingerprint_mismatch"),
+    true,
+  );
   assert.deepEqual(planCommission(snapshot).blockers, legacy.blockers);
   const held = phase1ExecutionDecision({ ok: true, reason: "arm_database_flags_only" });
   assert.equal(held.executable, false);
@@ -235,4 +247,28 @@ test("the account-scoped module does not read legacy Kalshi environment credenti
   assert.equal(router.includes("legacy_claim_not_executed"), true);
   const database = readFileSync("src/lib/strata/userScopeDatabase.ts", "utf8");
   assert.equal(database.includes("user_execution_account_not_commissioned"), true);
+});
+
+test("legacy commissioning SQL excludes owner-scoped accounts and policies", () => {
+  const store = readFileSync("src/lib/strata/commissioningStore.ts", "utf8");
+  assert.match(
+    store,
+    /SELECT \* FROM v13_production_account WHERE owner_user_id IS NULL/,
+  );
+  assert.match(
+    store,
+    /v13_live_money_policy WHERE state = 'APPROVED' AND execution_account_id IS NULL/,
+  );
+  assert.match(
+    store,
+    /v13_production_account WHERE owner_user_id IS NULL AND subaccount = 1 AND exchange_index = 2 FOR UPDATE/,
+  );
+  assert.match(
+    store,
+    /v13_production_position WHERE execution_account_id IS NULL/,
+  );
+  assert.match(
+    store,
+    /v13_production_intent WHERE execution_account_id IS NULL/,
+  );
 });

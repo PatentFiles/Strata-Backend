@@ -23,7 +23,8 @@ export type AccountSetupNextRequirement =
   | "generate_subaccount_1_restricted_key"
   | "provision_execution_account"
   | "verify_verification_credential"
-  | "verify_restricted_execution_credential";
+  | "verify_restricted_execution_credential"
+  | "repair_execution_account_credential_binding";
 
 export interface CredentialProbeResult {
   ok: boolean;
