@@ -497,7 +497,7 @@ export function createDatabaseUserScopePort(
         } catch {
           return refused(userId, "account_kill_not_recorded", account);
         }
-        await options.session?.stop({ userId, accountId: account.id });
+        await options.session?.stop({ userId, accountId: account.id, action: "KILL" });
         const killedAccount = { ...account, killSwitch: true, executionEnabled: false, workerRunning: false };
         if (options.session?.isScheduled(userId, account.id) === true) {
           return refused(userId, "worker_still_scheduled", { ...killedAccount, workerRunning: true });
@@ -519,15 +519,15 @@ export function createDatabaseUserScopePort(
       }
       if (action === "STOP" || action === "DISARM") {
         const stopped = options.session
-          ? await options.session.stop({ userId, accountId: account.id })
+          ? await options.session.stop({ userId, accountId: account.id, action: "STOP" })
           : { workerStopped: true };
-        if (!stopped.workerStopped || options.session?.isScheduled(userId, account.id) === true) {
+        if (!stopped.workerStopped) {
           return refused(userId, "worker_still_scheduled", account);
         }
         return {
           ok: true as const,
           reason: "entries_stopped",
-          view: viewFrom(userId, { ...account, workerRunning: false }),
+          view: viewFrom(userId, { ...account, workerRunning: stopped.managingExposure === true }),
         };
       }
       if (action !== "START" && action !== "ARM") {

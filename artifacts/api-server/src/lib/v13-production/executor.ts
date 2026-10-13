@@ -67,9 +67,16 @@ export class ProductionExecutor {
         FROM v13_production_account WHERE id=$1`, [a.id]);
       requireProof(owner.rows.length === 1 && owner.rows[0].owner_user_id === this.accountOwnerUserId,
         "foreign_execution_account");
-      const master = await tx.query("SELECT manual_kill_switch FROM live_execution_config");
-      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false,
-        "production_master_kill_switch_or_flag");
+      const master = await tx.query("SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config");
+      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
+        master.rows[0].live_execution_enabled === true, "production_master_kill_switch_or_flag");
+      const policy = await tx.query(`SELECT p.policy_hash
+        FROM v13_live_money_policy p
+        JOIN v13_production_account a ON a.policy_id = p.id AND a.id = p.execution_account_id
+        WHERE a.id = $1 AND a.owner_user_id = $2::uuid AND p.state = 'APPROVED'`,
+      [a.id, this.accountOwnerUserId]);
+      requireProof(policy.rows.length === 1 && /^[0-9a-f]{64}$/.test(String(policy.rows[0].policy_hash ?? "")),
+        "production_policy_missing");
       return;
     }
     if (this.exchange.mode === "SIMULATION") {
@@ -409,7 +416,11 @@ export class ProductionExecutor {
         "production_cancel_gate_changed");
         const p = await this.ledger.policy(tx, a);
         requireProof(p.policyHash === order.policy_hash, "production_cancel_policy_changed");
-        if (this.exchange.mode === "LIVE") requireProof(process.env.LIVE_EXECUTION_ENABLED === "true" &&
+        if (this.exchange.mode === "LIVE" && this.accountOwnerUserId) {
+          const master = await tx.query("SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config");
+          requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
+            master.rows[0].live_execution_enabled === true, "production_cancel_runtime_disabled");
+        } else if (this.exchange.mode === "LIVE") requireProof(process.env.LIVE_EXECUTION_ENABLED === "true" &&
           process.env.V13_PRODUCTION_EXECUTION_ENABLED === "true", "production_cancel_runtime_disabled");
       };
       ProductionExecutor.#fences.add(final);

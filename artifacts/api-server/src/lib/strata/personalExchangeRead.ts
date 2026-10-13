@@ -1,7 +1,7 @@
 import { getScopedKalshiJson } from "../kalshiAccountClient";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
-import { digest, requireProof, type Identity, type MarketEvidence, type Snapshot } from "../v13-production/types";
+import { canonical, digest, requireProof, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 
 export const PERSONAL_KALSHI_HOST = "https://external-api.kalshi.com";
@@ -12,6 +12,10 @@ const ORDER_PATH = "/trade-api/v2/portfolio/orders";
 const FILL_PATH = "/trade-api/v2/portfolio/fills";
 const POSITION_PATH = "/trade-api/v2/portfolio/positions";
 const SETTLEMENT_PATH = "/trade-api/v2/portfolio/settlements";
+const HISTORICAL_ORDER_PATH = "/trade-api/v2/historical/orders";
+const HISTORICAL_FILL_PATH = "/trade-api/v2/historical/fills";
+const PAIR_QUERY = "limit=200&subaccount=1&exchange_index=2";
+const PAGE_CAP = 20;
 
 export interface OwnedKalshiRead {
   ok: true;
@@ -23,29 +27,19 @@ export interface OwnedKalshiRead {
   settlements: unknown[];
 }
 
-/** Authenticated subaccount reads. A missing or paged feed is a blocker, not an empty account. */
+/** Authenticated Exchange Index 2 reads. A truncated page is a blocker, not an empty account. */
 export async function readOwnedKalshiFeeds(
   creds: { keyId: string; privateKey: string },
   nowMs: number,
   get: typeof getScopedKalshiJson = getScopedKalshiJson,
 ): Promise<OwnedKalshiRead | { ok: false; reason: string }> {
-  const query = "?limit=200&subaccount=1";
   let balance: unknown;
-  let orders: unknown;
-  let fills: unknown;
-  let positions: unknown;
-  let settlements: unknown;
   try {
-    [balance, orders, fills, positions, settlements] = await Promise.all([
-      get(creds, BALANCE_PATH, "?subaccount=1"),
-      get(creds, ORDER_PATH, query),
-      get(creds, FILL_PATH, query),
-      get(creds, POSITION_PATH, query),
-      get(creds, SETTLEMENT_PATH, query),
-    ]);
+    balance = await get(creds, BALANCE_PATH, "?subaccount=1&exchange_index=2");
   } catch {
     return { ok: false, reason: "kalshi_read_failed" };
   }
+  if (!scopeEcho(balance)) return { ok: false, reason: "account_target_pair_mismatch" };
   const cash = readSubaccountSpendableCash({
     subaccount: 1,
     exchangeIndex: 2,
@@ -56,54 +50,225 @@ export async function readOwnedKalshiFeeds(
     primaryBalance: {},
   });
   if (!cash.ok) return cash;
-  const lists = {
-    orders: list(orders, ["orders"]),
-    fills: list(fills, ["fills"]),
-    positions: list(positions, ["market_positions", "positions"]),
-    settlements: list(settlements, ["settlements"]),
-  };
-  if (!lists.orders || !lists.fills || !lists.positions || !lists.settlements) {
+  const orders = await pages(get, creds, ORDER_PATH, ["orders"]);
+  const archivedOrders = await pages(get, creds, HISTORICAL_ORDER_PATH, ["orders"]);
+  const fills = await pages(get, creds, FILL_PATH, ["fills"]);
+  const archivedFills = await pages(get, creds, HISTORICAL_FILL_PATH, ["fills"]);
+  const positions = await pages(get, creds, POSITION_PATH, ["market_positions", "positions"]);
+  const settlements = await pages(get, creds, SETTLEMENT_PATH, ["settlements"]);
+  const feeds = [orders, archivedOrders, fills, archivedFills, positions, settlements];
+  const failed = feeds.find((page) => "failed" in page);
+  if (failed && "failed" in failed) return { ok: false, reason: failed.failed };
+  if (!isPage(orders) || !isPage(archivedOrders) || !isPage(fills) || !isPage(archivedFills) ||
+      !isPage(positions) || !isPage(settlements)) {
     return { ok: false, reason: "personal_exchange_history_unreconciled" };
+  }
+  const currentEmpty = orders.rows.length === 0 && fills.rows.length === 0 &&
+    settlements.rows.length === 0 && !openPositions(positions.rows);
+  if ((archivedOrders.unavailable || archivedFills.unavailable) && !currentEmpty) {
+    return { ok: false, reason: "personal_exchange_history_unreconciled" };
+  }
+  const mergedOrders = mergeRows(orders.rows, archivedOrders.unavailable ? [] : archivedOrders.rows, ["order_id"]);
+  const mergedFills = mergeRows(fills.rows, archivedFills.unavailable ? [] : archivedFills.rows, ["trade_id", "fill_id"]);
+  if (!mergedOrders || !mergedFills) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+  if (!scopedRows(mergedOrders) || !scopedRows(mergedFills) || !scopedRows(positions.rows) || !scopedRows(settlements.rows)) {
+    return { ok: false, reason: "account_target_pair_mismatch" };
   }
   return {
     ok: true,
     observedAtMs: nowMs,
     cashMicros: cash.cashMicros,
-    orders: lists.orders,
-    fills: lists.fills,
-    positions: lists.positions,
-    settlements: lists.settlements,
+    orders: mergedOrders,
+    fills: mergedFills,
+    positions: positions.rows,
+    settlements: settlements.rows,
   };
 }
 
-export function emptySnapshot(identity: Identity, read: OwnedKalshiRead): Snapshot | { ok: false; reason: string } {
-  if (read.orders.length || read.fills.length || read.settlements.length || openPositions(read.positions)) {
-    return { ok: false, reason: "personal_exchange_history_unreconciled" };
+/**
+ * Maps exchange rows onto stored intent requests. Unmatched history returns a
+ * reason and no snapshot, so the ledger cannot freeze on a fabricated order.
+ */
+export function personalAccountSnapshot(
+  identity: Identity,
+  read: OwnedKalshiRead,
+  requests: Request[],
+): Snapshot | { ok: false; reason: string } {
+  try {
+    const orders = new Map<string, Snapshot["orders"][number]>();
+    for (const row of read.orders) {
+      const record = recordOf(row);
+      const request = storedRequest(requests, text(record.client_order_id));
+      const status = text(record.status);
+      if (!request || !status || !["executed", "canceled", "cancelled", "resting", "pending"].includes(status)) {
+        return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      }
+      if (text(record.ticker) !== request.market || bookSide(request) !== bookSideOf(record) ||
+          yesPriceMicros(record) !== yesLimit(request) ||
+          countHundredths(record.initial_count_fp ?? record.initial_count) !== BigInt(request.contracts) * 100n ||
+          (request.reduceOnly ? record.reduce_only !== true && record.reduce_only !== "true" : false)) {
+        return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      }
+      const orderId = text(record.order_id);
+      const filled = countHundredths(record.fill_count_fp ?? record.fill_count);
+      if (!orderId || filled === null) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      const order = {
+        orderId,
+        request,
+        terminal: ["executed", "canceled", "cancelled"].includes(status),
+        filledHundredths: String(filled),
+      };
+      const prior = orders.get(orderId);
+      if (prior && canonical(prior) !== canonical(order)) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      orders.set(orderId, order);
+    }
+    const fills: Snapshot["fills"] = [];
+    const seenFills = new Set<string>();
+    for (const row of read.fills) {
+      const record = recordOf(row);
+      const order = orders.get(text(record.order_id) ?? "");
+      const id = text(record.trade_id) ?? text(record.fill_id);
+      const qty = countHundredths(record.count_fp ?? record.count);
+      const price = rowPriceMicros(record, order?.request.side);
+      const fee = feeMicros(record.fee_cost ?? record.fee_cost_dollars);
+      const occurredAtMs = Date.parse(text(record.created_time) ?? text(record.ts) ?? "");
+      if (!order || !id || seenFills.has(id) || qty === null || qty <= 0n || price === null || fee === null ||
+          !Number.isSafeInteger(occurredAtMs)) {
+        return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      }
+      if (text(record.ticker) !== order.request.market) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      const gross = qty * BigInt(price) / 100n;
+      if (qty * BigInt(price) % 100n !== 0n) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      seenFills.add(id);
+      fills.push({
+        id, orderId: order.orderId, clientOrderId: order.request.clientOrderId, market: order.request.market,
+        side: order.request.side, action: order.request.action, quantityHundredths: String(qty),
+        priceMicros: price, grossMicros: String(gross), feeMicros: fee, occurredAtMs,
+      });
+    }
+    const settlements: Snapshot["settlements"] = [];
+    for (const row of read.settlements) {
+      const record = recordOf(row);
+      const yes = countHundredths(record.yes_count_fp);
+      const no = countHundredths(record.no_count_fp);
+      const result = text(record.market_result);
+      const id = text(record.ticker);
+      const occurredAtMs = Date.parse(text(record.settled_time) ?? "");
+      if (yes === null || no === null || (yes > 0n) === (no > 0n) || (result !== "yes" && result !== "no") ||
+          !id || !Number.isSafeInteger(occurredAtMs)) {
+        return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      }
+      const side = yes > 0n ? "YES" : "NO";
+      const payout = payoutMicros(record);
+      if (payout === null) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      settlements.push({
+        id: `${id}:${text(record.settled_time)}`, market: id, side, result: result === "yes" ? "YES" : "NO",
+        quantityHundredths: String(yes || no), payoutMicros: payout, feeMicros: "0", occurredAtMs,
+      });
+    }
+    const positions = read.positions.flatMap((row) => {
+      const record = recordOf(row);
+      const raw = text(record.position_fp) ?? text(record.position);
+      if (!raw || !/^-?\d+(?:\.\d+)?$/.test(raw)) throw new Error("personal_exchange_history_unreconciled");
+      const qty = countHundredths(raw.replace(/^-/, ""));
+      const market = text(record.ticker);
+      if (qty === null || !market) throw new Error("personal_exchange_history_unreconciled");
+      return qty === 0n ? [] : [{ market, side: raw.startsWith("-") ? "NO" as const : "YES" as const, quantityHundredths: String(qty) }];
+    });
+    return {
+      identity, observedAtMs: read.observedAtMs, complete: true, authenticated: true, historyFromMs: 0,
+      cashMicros: read.cashMicros, cashExact: true, orders: [...orders.values()], fills, settlements, positions,
+      unexplainedCashActivity: false,
+    };
+  } catch (error) {
+    const reason = error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
+      ? error.message : "personal_exchange_history_unreconciled";
+    return { ok: false, reason };
   }
-  return {
-    identity,
-    observedAtMs: read.observedAtMs,
-    complete: true,
-    authenticated: true,
-    historyFromMs: 0,
-    cashMicros: read.cashMicros,
-    cashExact: true,
-    orders: [],
-    fills: [],
-    settlements: [],
-    positions: [],
-    unexplainedCashActivity: false,
-  };
 }
 
-function list(payload: unknown, keys: string[]): unknown[] | null {
+export function emptySnapshot(
+  identity: Identity,
+  read: OwnedKalshiRead,
+  requests: Request[] = [],
+): Snapshot | { ok: false; reason: string } {
+  return personalAccountSnapshot(identity, read, requests);
+}
+
+type Page = { rows: unknown[]; unavailable: boolean };
+
+function isPage(page: Page | { failed: string }): page is Page {
+  return !("failed" in page);
+}
+
+async function pages(
+  get: typeof getScopedKalshiJson,
+  creds: { keyId: string; privateKey: string },
+  path: string,
+  keys: string[],
+): Promise<Page | { failed: string }> {
+  const rows: unknown[] = [];
+  let cursor: string | null = null;
+  const seen = new Set<string>();
+  for (let page = 0; page < PAGE_CAP; page += 1) {
+    const query = `?${PAIR_QUERY}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    let payload: unknown;
+    try {
+      payload = await get(creds, path, query);
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number((error as { status: unknown }).status) : NaN;
+      if (status === 404 && rows.length === 0 && (path === HISTORICAL_ORDER_PATH || path === HISTORICAL_FILL_PATH)) {
+        return { rows: [], unavailable: true };
+      }
+      return { failed: "kalshi_read_failed" };
+    }
+    const parsed = pageOf(payload, keys);
+    if (!parsed || (parsed.cursor && seen.has(parsed.cursor))) {
+      return { failed: "personal_exchange_history_unreconciled" };
+    }
+    rows.push(...parsed.rows);
+    if (!parsed.cursor) return { rows, unavailable: false };
+    seen.add(parsed.cursor);
+    cursor = parsed.cursor;
+  }
+  return { failed: "personal_exchange_history_unreconciled" };
+}
+
+function pageOf(payload: unknown, keys: string[]): { rows: unknown[]; cursor: string | null } | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const body = payload as Record<string, unknown>;
-  if (typeof body.cursor === "string" && body.cursor.trim()) return null;
+  const cursor = typeof body.cursor === "string" && body.cursor.trim() ? body.cursor : null;
   for (const key of keys) {
-    if (Array.isArray(body[key])) return body[key] as unknown[];
+    if (Array.isArray(body[key])) return { rows: body[key] as unknown[], cursor };
   }
   return null;
+}
+
+function mergeRows(current: unknown[], archived: unknown[], idKeys: string[]): unknown[] | null {
+  const merged = new Map<string, unknown>();
+  for (const row of [...current, ...archived]) {
+    const record = recordOf(row);
+    const id = idKeys.map((key) => text(record[key])).find((value) => value) ?? "";
+    if (!id) return null;
+    const prior = merged.get(id);
+    if (prior && canonical(prior) !== canonical(row)) return null;
+    merged.set(id, row);
+  }
+  return [...merged.values()];
+}
+
+export function scopeEcho(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const body = payload as Record<string, unknown>;
+  const subaccount = body.subaccount ?? body.subaccount_number;
+  const exchange = body.exchange_index;
+  if (subaccount !== undefined && Number(subaccount) !== 1) return false;
+  if (exchange !== undefined && Number(exchange) !== 2) return false;
+  return true;
+}
+
+function scopedRows(rows: unknown[]): boolean {
+  return rows.every((row) => scopeEcho(row));
 }
 
 /** Binds the verified fee artifact to the live book. A failed metadata read is a blocker. */
@@ -214,6 +379,78 @@ function asksFor(side: "YES" | "NO", book: ReturnType<typeof parseKalshiOrderBoo
 function object(value: unknown): Record<string, unknown> {
   requireProof(value && typeof value === "object" && !Array.isArray(value), "production_market_metadata_invalid");
   return value as Record<string, unknown>;
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("personal_exchange_history_unreconciled");
+  return value as Record<string, unknown>;
+}
+
+function text(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function storedRequest(requests: Request[], clientOrderId: string | null): Request | null {
+  if (!clientOrderId) return null;
+  const found = requests.filter((request) => request.clientOrderId === clientOrderId);
+  return found.length === 1 ? found[0]! : null;
+}
+
+function bookSide(request: Request): "bid" | "ask" {
+  return (request.action === "BUY") === (request.side === "YES") ? "bid" : "ask";
+}
+
+function bookSideOf(record: Record<string, unknown>): string | null {
+  const side = text(record.book_side) ?? text(record.side);
+  return side === "bid" || side === "ask" ? side : null;
+}
+
+function yesLimit(request: Request): number {
+  return request.side === "YES" ? request.limitMicros : 1_000_000 - request.limitMicros;
+}
+
+function dollarMicros(value: unknown): number | null {
+  const raw = typeof value === "number" && Number.isFinite(value) ? value.toFixed(6) : value;
+  if (typeof raw !== "string" || !/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const [whole, fraction = ""] = raw.split(".");
+  if (fraction.length > 6 || !whole) return null;
+  const micros = Number(BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0")));
+  return Number.isSafeInteger(micros) ? micros : null;
+}
+
+function yesPriceMicros(record: Record<string, unknown>): number | null {
+  return dollarMicros(record.yes_price_dollars ?? record.price_dollars ?? record.price);
+}
+
+function rowPriceMicros(record: Record<string, unknown>, side: "YES" | "NO" | undefined): number | null {
+  if (!side) return null;
+  const named = dollarMicros(side === "YES" ? record.yes_price_dollars : record.no_price_dollars);
+  if (named !== null) return named;
+  const yes = dollarMicros(record.price_dollars ?? record.price);
+  if (yes === null) return null;
+  return side === "YES" ? yes : 1_000_000 - yes;
+}
+
+function countHundredths(value: unknown): bigint | null {
+  const raw = text(value);
+  if (!raw || !/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const [whole, fraction = ""] = raw.split(".");
+  if (fraction.length > 2 || !whole) return null;
+  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+}
+
+function feeMicros(value: unknown): string | null {
+  const micros = dollarMicros(value);
+  return micros === null ? null : String(micros);
+}
+
+function payoutMicros(record: Record<string, unknown>): string | null {
+  if (typeof record.revenue === "number" && Number.isSafeInteger(record.revenue) && record.revenue >= 0) {
+    return String(BigInt(record.revenue) * 10_000n);
+  }
+  const dollars = dollarMicros(record.revenue_dollars);
+  return dollars === null ? null : String(dollars);
 }
 
 function openPositions(rows: unknown[]): boolean {

@@ -117,7 +117,7 @@ const LOCK_LEASE_SQL = `
   FOR UPDATE
 `;
 
-const INSERT_LEASE_SQL = `
+export const INSERT_LEASE_SQL = `
   -- account-worker:insert
   INSERT INTO private.kalshi_account_worker_lease (
     execution_account_id, owner_user_id, financial_account_id, provider_connection_id,
@@ -157,7 +157,7 @@ export const ACQUIRE_LEASE_SQL = `
   RETURNING fencing_token::text AS fencing_token
 `;
 
-const RELEASE_LEASE_SQL = `
+export const RELEASE_LEASE_SQL = `
   -- account-worker:release
   UPDATE private.kalshi_account_worker_lease
   SET state = 'released',
@@ -172,7 +172,7 @@ const RELEASE_LEASE_SQL = `
   RETURNING fencing_token::text AS fencing_token
 `;
 
-const KILL_LEASE_SQL = `
+export const KILL_LEASE_SQL = `
   -- account-worker:kill
   UPDATE private.kalshi_account_worker_lease
   SET state = 'killed',
@@ -186,7 +186,7 @@ const KILL_LEASE_SQL = `
   RETURNING fencing_token::text AS fencing_token
 `;
 
-const ARM_LEASE_SQL = `
+export const ARM_LEASE_SQL = `
   -- account-worker:arm
   UPDATE private.kalshi_account_worker_lease
   SET arm_requested = true,
@@ -202,7 +202,7 @@ const ARM_LEASE_SQL = `
   RETURNING fencing_token::text AS fencing_token
 `;
 
-const HOLD_LEASE_SQL = `
+export const HOLD_LEASE_SQL = `
   -- account-worker:hold
   UPDATE private.kalshi_account_worker_lease
   SET arm_requested = false
@@ -237,7 +237,7 @@ const LOCK_OWNER_LEASES_SQL = `
   FOR UPDATE
 `;
 
-const HEARTBEAT_LEASE_SQL = `
+export const HEARTBEAT_LEASE_SQL = `
   -- account-worker:heartbeat
   UPDATE private.kalshi_account_worker_lease
   SET heartbeat_at = $3::timestamptz

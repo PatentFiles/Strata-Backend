@@ -243,7 +243,7 @@ export function accountCredentialControls(
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
     kalshiCreateSubaccount?: SubaccountCreationTransport;
     kalshiGenerateRestrictedKey?: RestrictedKeyGenerationTransport;
-    session?: { stopOwner(userId: string): Promise<{ workerStopped: boolean }> };
+    session?: { stopOwner(userId: string, action?: "STOP" | "KILL"): Promise<{ workerStopped: boolean }> };
   } = {},
 ) {
   const database = executionDatabase(db);
@@ -251,7 +251,7 @@ export function accountCredentialControls(
   return {
     async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
       if (options.session) {
-        const stopped = await options.session.stopOwner(userId);
+        const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
         if (!stopped.workerStopped) {
           return {
             ok: false as const,

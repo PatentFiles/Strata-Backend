@@ -15,7 +15,7 @@ import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCa
 import { authorizeOwnedPolicy, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
 import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession } from "./personalExecutionSupervisor";
 import { commissionOwnedAccount, COMMISSION_OWNED_ACCOUNT_CONFIRMATION, reconcileOwnedSubaccountCash } from "./personalAccountActivation";
-import { emptySnapshot, ownedMarketEvidence, readOwnedKalshiFeeds } from "./personalExchangeRead";
+import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds } from "./personalExchangeRead";
 import type { MarketEvidence, Request } from "../v13-production/types";
 
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -299,8 +299,10 @@ function order(): Request {
 }
 
 test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
-  const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path) => {
-    if (path.includes("balance")) return { balance_dollars: "1.0000" };
+  const queries: string[] = [];
+  const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
+    queries.push(`${path}${query}`);
+    if (path.includes("balance")) return { balance_dollars: "1.0000", subaccount: 1, exchange_index: 2 };
     if (path.includes("orders")) return { orders: [], cursor: "more" };
     if (path.includes("positions")) return { market_positions: [] };
     if (path.includes("fills")) return { fills: [] };
@@ -308,6 +310,17 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   });
   assert.equal(paged.ok, false);
   if (!paged.ok) assert.equal(paged.reason, "personal_exchange_history_unreconciled");
+  assert.equal(queries.some((query) => query.includes("exchange_index=2") && query.includes("balance")), true);
+  const followed = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
+    if (!query.includes("exchange_index=2")) throw new Error("missing_exchange_index");
+    if (path.includes("balance")) return { balance_dollars: "1.0000", subaccount: 1, exchange_index: 1 };
+    if (path.includes("orders")) return { orders: [] };
+    if (path.includes("positions")) return { market_positions: [] };
+    if (path.includes("fills")) return { fills: [] };
+    return { settlements: [] };
+  });
+  assert.equal(followed.ok, false);
+  if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
   const material = keyMaterial();
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
   let feeChecks = 0;
@@ -353,6 +366,37 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
     { ok: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
   );
   assert.equal("reason" in open && open.reason, "personal_exchange_history_unreconciled");
+  const request = order();
+  const mapped = personalAccountSnapshot(
+    { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
+    {
+      ok: true, observedAtMs: NOW, cashMicros: "900000",
+      orders: [{
+        order_id: "ord-1", client_order_id: request.clientOrderId, ticker: request.market,
+        status: "executed", side: "bid", price: "0.5000", initial_count_fp: "1.00", fill_count_fp: "1.00",
+        subaccount: 1, exchange_index: 2,
+      }],
+      fills: [{
+        trade_id: "fill-1", order_id: "ord-1", ticker: request.market, count_fp: "1.00",
+        yes_price_dollars: "0.500000", fee_cost: "0.010000", created_time: new Date(NOW).toISOString(),
+        subaccount: 1, exchange_index: 2,
+      }],
+      positions: [{ ticker: request.market, position_fp: "1.00", subaccount: 1, exchange_index: 2 }],
+      settlements: [],
+    },
+    [request],
+  );
+  assert.equal("orders" in mapped && mapped.orders.length, 1);
+  if ("orders" in mapped) assert.equal(mapped.orders[0]?.request, request);
+  const halted = createOwnedTradingSupervisor(async () => ({
+    ok: true,
+    worker: { isScheduled: () => true, async start() {}, async startRecovery() {}, stop() {} },
+    disarm: async () => ({ entriesBlocked: false, managingExposure: false }),
+  }));
+  assert.equal((await halted.start({ userId: USER, accountId: "acct-a", action: "START" })).workerStarted, true);
+  const blocked = await halted.stop({ userId: USER, accountId: "acct-a" });
+  assert.equal(blocked.workerStopped, false);
+  assert.equal(halted.isScheduled(USER, "acct-a"), true);
 });
 
 test("cash and commissioning writes require explicit confirmation", async () => {

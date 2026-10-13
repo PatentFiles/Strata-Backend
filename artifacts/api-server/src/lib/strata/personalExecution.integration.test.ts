@@ -7,6 +7,7 @@ import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import type { Fill, MarketEvidence, Request, Snapshot } from "../v13-production/types";
 import { openOwnedExecutionSession, type AccountDispatchState } from "./accountProductionSession";
+import { personalAccountSnapshot } from "./personalExchangeRead";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { UPSERT_STAKE_SQL } from "./userScopeDatabase";
 
@@ -128,6 +129,49 @@ test("a mock partial fill reconciles once and a later dispatch does not post aga
   assert.equal(posts.length, 1);
 });
 
+test("a reconciled fill and settlement allow a second order without replaying the first", async () => {
+  const posts: string[] = [];
+  const session = await tradingSession(100, posts);
+  const id = await session.executor.prepareEntry(await source(session.now));
+  const request = await requestOf(id);
+  await session.executor.dispatch(id);
+  const quantity = `${request.contracts}.00`;
+  const hundredths = request.contracts * 100;
+  const gross = BigInt(hundredths) * BigInt(request.limitMicros) / 100n;
+  const spent = gross;
+  const first = personalAccountSnapshot(session.evidence.identity, {
+    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) - spent),
+    orders: [exchangeOrder(request, quantity)],
+    fills: [exchangeFill(request, quantity, session.now)],
+    positions: [{ ticker: request.market, position_fp: quantity, subaccount: 1, exchange_index: 2 }],
+    settlements: [],
+  }, [request]);
+  assert.equal("orders" in first, true);
+  if (!("orders" in first)) return;
+  Object.assign(session.evidence, first);
+  await session.executor.reconcile();
+  const payout = BigInt(hundredths) * 10_000n;
+  const settled = personalAccountSnapshot(session.evidence.identity, {
+    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) + payout),
+    orders: [exchangeOrder(request, quantity)],
+    fills: [exchangeFill(request, quantity, session.now)],
+    positions: [{ ticker: request.market, position_fp: "0.00", subaccount: 1, exchange_index: 2 }],
+    settlements: [{
+      ticker: request.market, yes_count_fp: quantity, no_count_fp: "0.00", market_result: "yes",
+      revenue: Number(payout / 10_000n), settled_time: new Date(session.now).toISOString(),
+      subaccount: 1, exchange_index: 2,
+    }],
+  }, [request]);
+  assert.equal("settlements" in settled, true);
+  if (!("settlements" in settled)) return;
+  Object.assign(session.evidence, settled);
+  await session.executor.reconcile();
+  const second = await session.executor.prepareEntry(await source(session.now));
+  await session.executor.dispatch(second);
+  assert.equal(posts.length, 2);
+  assert.notEqual(posts[0], posts[1]);
+});
+
 test("stake amounts from one dollar through the ceiling are executable sizes, not a hardcoded default", async () => {
   for (const cents of STAKES) {
     const session = await tradingSession(cents, []);
@@ -158,6 +202,9 @@ async function tradingSession(
   fault?: (stage: string) => void,
 ) {
   await reset();
+  await pool.query(`UPDATE live_execution_config
+    SET mode = 'V13_PRODUCTION', live_execution_enabled = true, manual_kill_switch = false
+    WHERE id = 'singleton'`);
   const now = Date.now();
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const material = { keyId: "personal-key", privateKey: pair.privateKey.export({ type: "pkcs1", format: "pem" }).toString() };
@@ -277,6 +324,22 @@ async function requestOf(id: string): Promise<Request> {
   const row = await pool.query("SELECT request FROM v13_production_intent WHERE id=$1", [id]);
   const request = row.rows[0].request;
   return typeof request === "string" ? JSON.parse(request) as Request : request as Request;
+}
+
+function exchangeOrder(request: Request, quantity: string): Record<string, unknown> {
+  return {
+    order_id: `order-${request.clientOrderId}`, client_order_id: request.clientOrderId, ticker: request.market,
+    status: "executed", side: "bid", price: (request.limitMicros / 1_000_000).toFixed(4),
+    initial_count_fp: quantity, fill_count_fp: quantity, subaccount: 1, exchange_index: 2,
+  };
+}
+
+function exchangeFill(request: Request, quantity: string, occurredAtMs: number): Record<string, unknown> {
+  return {
+    trade_id: `fill-${request.clientOrderId}`, order_id: `order-${request.clientOrderId}`, ticker: request.market,
+    count_fp: quantity, yes_price_dollars: (request.limitMicros / 1_000_000).toFixed(6), fee_cost: "0.000000",
+    created_time: new Date(occurredAtMs).toISOString(), subaccount: 1, exchange_index: 2,
+  };
 }
 
 function fill(evidence: Snapshot, request: Request, quantity: string): void {

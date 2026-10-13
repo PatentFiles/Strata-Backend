@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Pool } from "@workspace/db";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
 import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
@@ -7,6 +8,16 @@ import {
   type AccountDispatchState,
   type SchedulableWorker,
 } from "./accountProductionSession";
+import {
+  ACCOUNT_WORKER_LEASE_TTL_MS,
+  ACQUIRE_LEASE_SQL,
+  ARM_LEASE_SQL,
+  HEARTBEAT_LEASE_SQL,
+  HOLD_LEASE_SQL,
+  INSERT_LEASE_SQL,
+  KILL_LEASE_SQL,
+  RELEASE_LEASE_SQL,
+} from "./accountScopedExecution";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import {
   emptySnapshot,
@@ -15,7 +26,9 @@ import {
   PERSONAL_MARKET_METADATA_HOST,
   readOwnedKalshiFeeds,
 } from "./personalExchangeRead";
-import type { Identity } from "../v13-production/types";
+import type { Identity, Request } from "../v13-production/types";
+
+type LeaseAction = "STOP" | "KILL";
 
 export interface PersonalSessionControl {
   isScheduled(userId: string, accountId: string): boolean;
@@ -24,13 +37,18 @@ export interface PersonalSessionControl {
     accountId: string;
     action: "START" | "ARM";
   }): Promise<{ ok: boolean; reason: string; workerStarted: boolean }>;
-  stop(input: { userId: string; accountId: string }): Promise<{ workerStopped: boolean }>;
-  stopOwner(userId: string): Promise<{ workerStopped: boolean }>;
+  stop(input: { userId: string; accountId: string; action?: LeaseAction }): Promise<{
+    workerStopped: boolean;
+    managingExposure?: boolean;
+  }>;
+  stopOwner(userId: string, action?: LeaseAction): Promise<{ workerStopped: boolean; managingExposure?: boolean }>;
 }
 
 interface RunningWorker {
   ownerUserId: string;
   worker: SchedulableWorker;
+  state?: AccountDispatchState;
+  disarm?: (action: LeaseAction) => Promise<{ entriesBlocked: boolean; managingExposure: boolean }>;
 }
 
 const SIGNER_SQL = `
@@ -39,6 +57,9 @@ const SIGNER_SQL = `
          a.commissioned, a.execution_enabled, a.kill_switch, a.fee_artifact_digest,
          a.cash_precision_verified, a.subaccount, a.exchange_index,
          c.key_fingerprint AS credential_fingerprint,
+         c.financial_account_id::text AS financial_account_id,
+         c.provider_connection_id::text AS provider_connection_id,
+         c.vault_secret_id::text AS vault_secret_id,
          s.decrypted_secret,
          p.policy_hash, p.fee_policy_version, p.fee_source_url, p.fee_formula_version, p.state AS policy_state,
          stake.configured_stake_cents
@@ -72,7 +93,7 @@ export async function personalProductionFetch(
 
 export function createOwnedTradingSupervisor(
   open: (input: { userId: string; accountId: string; action: "START" | "ARM" }) => Promise<
-    | { ok: true; worker: SchedulableWorker }
+    | { ok: true; worker: SchedulableWorker; state?: AccountDispatchState; disarm?: RunningWorker["disarm"] }
     | { ok: false; reason: string }
   >,
 ): PersonalSessionControl {
@@ -96,18 +117,24 @@ export function createOwnedTradingSupervisor(
         opened.worker.stop();
         return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
       }
-      workers.set(input.accountId, { ownerUserId: input.userId, worker: opened.worker });
+      workers.set(input.accountId, {
+        ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+      });
       return { ok: true, reason: "worker_scheduled", workerStarted: true };
     },
     async stop(input) {
-      return stopOne(workers, input.userId, input.accountId);
+      return stopOne(workers, input.userId, input.accountId, input.action ?? "STOP");
     },
-    async stopOwner(userId) {
+    async stopOwner(userId, action = "STOP") {
+      let workerStopped = true;
+      let managingExposure = false;
       for (const [accountId, running] of workers) {
-        if (running.ownerUserId === userId) stopOne(workers, userId, accountId);
+        if (running.ownerUserId !== userId) continue;
+        const stopped = await stopOne(workers, userId, accountId, action);
+        if (!stopped.workerStopped) workerStopped = false;
+        if (stopped.managingExposure) managingExposure = true;
       }
-      const stillRunning = [...workers.values()].some((running) => running.ownerUserId === userId && running.worker.isScheduled());
-      return { workerStopped: !stillRunning };
+      return { workerStopped, managingExposure };
     },
   };
 }
@@ -160,30 +187,51 @@ export function createProductionPersonalSession(
     const observedAt = now();
     const feeds = await readOwnedKalshiFeeds(material, observedAt, get);
     if (!feeds.ok) return feeds;
-    if (feeds.cashMicros !== text(loaded.row.cash_micros)) return { ok: false, reason: "cash_evidence_mismatch" };
-    const snapshot = emptySnapshot(
-      { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint },
-      feeds,
-    );
+    const identity: Identity = { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint };
+    const requests = await loadRequests(db, input.accountId);
+    const snapshot = emptySnapshot(identity, feeds, requests);
     if (!("identity" in snapshot)) return snapshot;
+    const flat = snapshot.orders.length === 0 && snapshot.fills.length === 0 &&
+      snapshot.settlements.length === 0 && snapshot.positions.length === 0;
+    if (flat && feeds.cashMicros !== text(loaded.row.cash_micros)) return { ok: false, reason: "cash_evidence_mismatch" };
     const artifact = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
     }
+    const holderId = `personal-${randomUUID()}`;
+    const leaseIds = leaseIdentity(loaded.row);
+    if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
+    const claimed = await claimWorkerLease(db, {
+      ...leaseIds, ownerUserId: input.userId, executionAccountId: input.accountId,
+      holderId, fingerprint, now: new Date(observedAt).toISOString(),
+      staleBefore: new Date(observedAt - ACCOUNT_WORKER_LEASE_TTL_MS).toISOString(),
+    });
+    if (!claimed.ok) return claimed;
+    const state = dispatchState(input.userId, fingerprint, claimed.fencingToken);
     let feeVerifiedAt = artifact.verifiedAt;
     let feeCheckedAt = observedAt;
-    const identity: Identity = snapshot.identity;
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
       executionAccountId: input.accountId,
       material,
       now,
-      state: dispatchState(input.userId, fingerprint),
+      state,
+      entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
       readSnapshot: async () => {
+        const beat = await heartbeatLease(db, {
+          executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
+          fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
+        });
+        if (!beat.ok) {
+          state.presentedToken = -1;
+          state.entriesAuthorized = false;
+          throw new Error(beat.reason);
+        }
+        if (!beat.armRequested) state.entriesAuthorized = false;
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
-        const proven = emptySnapshot(identity, latest);
+        const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));
         if (!("identity" in proven)) throw new Error(proven.reason);
         return proven;
       },
@@ -211,12 +259,27 @@ export function createProductionPersonalSession(
       },
       fetchImpl: personalProductionFetch,
     });
-    const scheduled = await scheduleOwnedAccountWorker(session, "entries");
+    const uncertain = await db.query(
+      `SELECT count(*)::text AS n FROM v13_production_intent
+       WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
+      [input.accountId],
+    );
+    const recovery = Number(uncertain.rows[0]?.n ?? "0") > 0;
+    if (recovery) state.entriesAuthorized = false;
+    const scheduled = await scheduleOwnedAccountWorker(session, recovery ? "recovery" : "entries");
     if (!scheduled.workerStarted) {
+      state.entriesAuthorized = false;
+      state.presentedToken = -1;
+      await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
       session.worker.stop();
       return { ok: false, reason: scheduled.reason };
     }
-    return { ok: true, worker: session.worker };
+    return {
+      ok: true,
+      worker: session.worker,
+      state,
+      disarm: (action) => disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString()),
+    };
   });
 }
 
@@ -224,14 +287,15 @@ export function productionPersonalSession(): PersonalSessionControl {
   return createOwnedTradingSupervisor(async () => ({ ok: false, reason: "personal_signer_unavailable" }));
 }
 
-function dispatchState(ownerUserId: string, fingerprint: string): AccountDispatchState {
+function dispatchState(ownerUserId: string, fingerprint: string, fencingToken: number): AccountDispatchState {
   return {
     leaseState: "owned",
     armRequested: true,
     accountKill: false,
     globalKill: false,
-    fencingToken: 1,
-    presentedToken: 1,
+    entriesAuthorized: true,
+    fencingToken,
+    presentedToken: fencingToken,
     workerActuallyScheduled: true,
     authenticatedUserId: ownerUserId,
     ownerUserId,
@@ -270,18 +334,172 @@ function parseSecret(secret: unknown): { keyId: string; privateKey: string } | n
   }
 }
 
-function stopOne(
+async function stopOne(
   workers: Map<string, RunningWorker>,
   userId: string,
   accountId: string,
-): { workerStopped: boolean } {
+  action: LeaseAction,
+): Promise<{ workerStopped: boolean; managingExposure: boolean }> {
   const running = workers.get(accountId);
-  if (!running) return { workerStopped: true };
-  if (running.ownerUserId !== userId) return { workerStopped: false };
-  running.worker.stop();
-  if (running.worker.isScheduled()) return { workerStopped: false };
-  workers.delete(accountId);
-  return { workerStopped: true };
+  if (!running) return { workerStopped: true, managingExposure: false };
+  if (running.ownerUserId !== userId) return { workerStopped: false, managingExposure: false };
+  if (running.state) {
+    running.state.entriesAuthorized = false;
+    if (action === "KILL") {
+      running.state.accountKill = true;
+      running.state.armRequested = false;
+      running.state.presentedToken = -1;
+    }
+  }
+  const authority = running.disarm
+    ? await running.disarm(action)
+    : { entriesBlocked: !running.state, managingExposure: false };
+  if (!authority.entriesBlocked) return { workerStopped: false, managingExposure: false };
+  const keepManaging = action === "STOP" && authority.managingExposure;
+  if (!keepManaging) running.worker.stop();
+  if (running.worker.isScheduled() && !keepManaging) return { workerStopped: false, managingExposure: false };
+  if (!keepManaging) workers.delete(accountId);
+  return { workerStopped: true, managingExposure: keepManaging };
+}
+
+async function loadRequests(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  accountId: string,
+): Promise<Request[]> {
+  const found = await db.query(
+    "SELECT request FROM v13_production_intent WHERE account_id = $1",
+    [accountId],
+  );
+  return found.rows.flatMap((row) => {
+    const request = typeof row.request === "string" ? JSON.parse(row.request) as Request : row.request as Request;
+    return request && typeof request === "object" ? [request] : [];
+  });
+}
+
+function leaseIdentity(row: Record<string, unknown>): {
+  financialAccountId: string; providerConnectionId: string; vaultSecretId: string;
+} | null {
+  const financialAccountId = text(row.financial_account_id);
+  const providerConnectionId = text(row.provider_connection_id);
+  const vaultSecretId = text(row.vault_secret_id);
+  if (!financialAccountId || !providerConnectionId || !vaultSecretId) return null;
+  return { financialAccountId, providerConnectionId, vaultSecretId };
+}
+
+async function claimWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;
+    financialAccountId: string; providerConnectionId: string; vaultSecretId: string;
+    now: string; staleBefore: string;
+  },
+): Promise<{ ok: true; fencingToken: number } | { ok: false; reason: string }> {
+  try {
+    const present = await db.query("SELECT to_regclass('private.kalshi_account_worker_lease') AS name");
+    if (!present.rows[0]?.name) return { ok: false, reason: "worker_lease_unavailable" };
+    const current = await db.query(
+      `SELECT state, account_kill FROM private.kalshi_account_worker_lease WHERE execution_account_id = $1`,
+      [input.executionAccountId],
+    );
+    if (current.rows[0]?.state === "killed" || current.rows[0]?.account_kill === true) {
+      return { ok: false, reason: "account_kill_switch" };
+    }
+    if (current.rows.length === 0) {
+      await db.query(INSERT_LEASE_SQL, [
+        input.executionAccountId, input.ownerUserId, input.financialAccountId, input.providerConnectionId,
+        input.holderId, 1, "released", input.now, input.now, false, false, input.fingerprint, input.vaultSecretId,
+      ]);
+    }
+    if (current.rows[0]?.state === "owned") {
+      await db.query(
+        `UPDATE private.kalshi_account_worker_lease
+         SET arm_requested = true
+         WHERE execution_account_id = $1 AND owner_user_id = $2::uuid
+           AND state = 'owned' AND account_kill = false AND heartbeat_at < $3::timestamptz`,
+        [input.executionAccountId, input.ownerUserId, input.staleBefore],
+      );
+    } else {
+      const armed = await db.query(ARM_LEASE_SQL, [
+        input.executionAccountId, input.ownerUserId, input.fingerprint, input.vaultSecretId, input.now,
+        input.providerConnectionId, input.financialAccountId,
+      ]);
+      if (armed.rows.length !== 1) return { ok: false, reason: "worker_lease_unavailable" };
+    }
+    const acquired = await db.query(ACQUIRE_LEASE_SQL, [
+      input.executionAccountId, input.holderId, input.now, input.fingerprint, input.vaultSecretId,
+      input.providerConnectionId, input.financialAccountId, input.ownerUserId, input.staleBefore,
+    ]);
+    if (acquired.rows.length !== 1) return { ok: false, reason: "worker_lease_held" };
+    const fencingToken = Number(acquired.rows[0]?.fencing_token);
+    if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) return { ok: false, reason: "worker_lease_unavailable" };
+    return { ok: true, fencingToken };
+  } catch {
+    return { ok: false, reason: "worker_lease_unavailable" };
+  }
+}
+
+async function heartbeatLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    executionAccountId: string; ownerUserId: string; holderId: string;
+    fencingToken: number; fingerprint: string; now: string;
+  },
+): Promise<{ ok: true; armRequested: boolean } | { ok: false; reason: string }> {
+  try {
+    const beat = await db.query(HEARTBEAT_LEASE_SQL, [
+      input.executionAccountId, input.ownerUserId, input.now, input.holderId,
+      input.fencingToken, input.fingerprint,
+    ]);
+    if (beat.rows.length !== 1) return { ok: false, reason: "stale_worker_fence" };
+    const lease = await db.query(
+      `SELECT arm_requested, account_kill, state FROM private.kalshi_account_worker_lease
+       WHERE execution_account_id = $1 AND holder_id = $2 AND fencing_token = $3`,
+      [input.executionAccountId, input.holderId, input.fencingToken],
+    );
+    const row = lease.rows[0];
+    if (!row || row.state !== "owned" || row.account_kill === true) return { ok: false, reason: "stale_worker_fence" };
+    return { ok: true, armRequested: row.arm_requested === true || row.arm_requested === "t" || row.arm_requested === "true" };
+  } catch {
+    return { ok: false, reason: "stale_worker_fence" };
+  }
+}
+
+async function disarmWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  ownerUserId: string,
+  executionAccountId: string,
+  action: LeaseAction,
+  now: string,
+): Promise<{ entriesBlocked: boolean; managingExposure: boolean }> {
+  try {
+    if (action === "KILL") {
+      const killed = await db.query(KILL_LEASE_SQL, [executionAccountId, ownerUserId, now]);
+      return { entriesBlocked: killed.rows.length === 1, managingExposure: false };
+    }
+    const exposure = await db.query(
+      `SELECT
+         (SELECT count(*) FROM v13_production_position WHERE account_id = $1 AND quantity_hundredths > 0) AS positions,
+         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND exchange_order_id IS NOT NULL AND terminal = false) AS orders`,
+      [executionAccountId],
+    );
+    const managingExposure = Number(exposure.rows[0]?.positions ?? 0) > 0 || Number(exposure.rows[0]?.orders ?? 0) > 0;
+    const updated = managingExposure
+      ? await db.query(HOLD_LEASE_SQL, [executionAccountId, ownerUserId])
+      : await releaseWorkerLease(db, ownerUserId, executionAccountId, false, now);
+    return { entriesBlocked: updated.rows.length === 1, managingExposure: managingExposure && updated.rows.length === 1 };
+  } catch {
+    return { entriesBlocked: false, managingExposure: false };
+  }
+}
+
+async function releaseWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  ownerUserId: string,
+  executionAccountId: string,
+  _unused: boolean,
+  now: string,
+): Promise<{ rows: Array<Record<string, unknown>> }> {
+  return db.query(RELEASE_LEASE_SQL, [executionAccountId, ownerUserId, now]);
 }
 
 async function publicKalshiObject(path: string): Promise<unknown> {

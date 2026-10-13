@@ -28,6 +28,8 @@ export interface AccountDispatchState {
   uncertainOrderCount: number;
   duplicateClientOrder: boolean;
   liveExecutionEnabled?: boolean;
+  /** False after STOP. Exit orders stay authorized while the lease remains owned. */
+  entriesAuthorized?: boolean;
 }
 
 export interface AccountDispatchDecision {
@@ -122,6 +124,10 @@ export class AccountScopedExchange implements Exchange {
     return snapshot;
   }
   async submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }> {
+    if (!request.reduceOnly && this.state.entriesAuthorized === false) {
+      this.submitAttempts += 1;
+      throw new Error("entries_stopped");
+    }
     this.refuseBeforeWire();
     await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck);
     return {};
@@ -250,6 +256,7 @@ export function openOwnedExecutionSession(input: {
   now?: () => number;
   intervalMs?: number;
   fault?: (stage: string) => void;
+  entriesOpen?: () => boolean;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -268,7 +275,7 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
-  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500);
+  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {}, input.entriesOpen);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }
 

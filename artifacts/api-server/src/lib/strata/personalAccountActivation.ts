@@ -10,7 +10,7 @@ import {
   type OwnedPolicyFeeEvidence,
   type OwnedPolicyLimits,
 } from "./personalPolicyApproval";
-import { PERSONAL_KALSHI_HOST } from "./personalExchangeRead";
+import { PERSONAL_KALSHI_HOST, scopeEcho } from "./personalExchangeRead";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 
@@ -178,11 +178,14 @@ export async function reconcileOwnedSubaccountCash(
   let primaryBalance: unknown;
   try {
     [subaccountBalance, primaryBalance] = await Promise.all([
-      get(signer.creds, "/trade-api/v2/portfolio/balance", "?subaccount=1"),
+      get(signer.creds, "/trade-api/v2/portfolio/balance", "?subaccount=1&exchange_index=2"),
       get(signer.creds, "/trade-api/v2/portfolio/balance", ""),
     ]);
   } catch {
     return { ok: false, reason: "kalshi_read_failed", transferAttempted: false };
+  }
+  if (!scopeEcho(subaccountBalance)) {
+    return { ok: false, reason: "account_target_pair_mismatch", transferAttempted: false };
   }
   const recorded = await persistOwnedCashReconciliation(db, {
     ownerUserId: input.ownerUserId,
