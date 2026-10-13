@@ -13,7 +13,9 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 import { authorizeOwnedPolicy, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
-import { productionPersonalSession } from "./personalExecutionSupervisor";
+import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession } from "./personalExecutionSupervisor";
+import { commissionOwnedAccount, COMMISSION_OWNED_ACCOUNT_CONFIRMATION, reconcileOwnedSubaccountCash } from "./personalAccountActivation";
+import { emptySnapshot, ownedMarketEvidence, readOwnedKalshiFeeds } from "./personalExchangeRead";
 import type { MarketEvidence, Request } from "../v13-production/types";
 
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -106,13 +108,14 @@ test("policy approval requires the owner, fee evidence, and explicit limits belo
   assert.match(approved.policy.policyHash ?? "", /^[0-9a-f]{64}$/);
   const calls: string[] = [];
   const stored = await persistOwnedPolicyApproval({
-    query: async (text) => {
+    query: async () => { throw new Error("autocommit_not_allowed"); },
+    transaction: async (work) => work(async (text) => {
       calls.push(text);
       assert.equal(text.includes("execution_enabled"), false);
       assert.equal(text.includes("kill_switch"), false);
       assert.equal(text.includes("id = 'production'"), false);
       return { rows: [{ id: "policy-a" }], rowCount: 1 };
-    },
+    }),
   }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
   assert.equal(stored.ok, true);
   assert.equal(calls.length, 2);
@@ -121,6 +124,23 @@ test("policy approval requires the owner, fee evidence, and explicit limits belo
   }, { ownerUserId: OTHER, executionAccountId: "acct-a", policy: approved.policy });
   assert.equal(foreign.ok, false);
   if (!foreign.ok) assert.equal(foreign.reason, "policy_not_owned");
+  const split = await persistOwnedPolicyApproval({
+    query: async () => ({ rows: [{ id: "policy-a" }], rowCount: 1 }),
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(split.ok, false);
+  if (!split.ok) assert.equal(split.reason, "policy_approval_not_transactional");
+  let approvedRows = 0;
+  const linked = await persistOwnedPolicyApproval({
+    query: async () => ({ rows: [], rowCount: 0 }),
+    transaction: async (work) => work(async (text) => {
+      if (text.includes("owned-policy:link")) return { rows: [], rowCount: 0 };
+      approvedRows += 1;
+      return { rows: [{ id: "policy-a" }], rowCount: 1 };
+    }),
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(linked.ok, false);
+  if (!linked.ok) assert.equal(linked.reason, "policy_not_linked");
+  assert.equal(approvedRows, 1);
 });
 
 test("cash reconciliation records the subaccount read and does not transfer or enable execution", async () => {
@@ -185,6 +205,17 @@ test("the market adapter stays disabled until a reader is bound, and global fetc
   assert.equal(productionPersonalSession().isScheduled(USER, "acct-a"), false);
   const production = await productionPersonalSession().start({ userId: USER, accountId: "acct-a", action: "START" });
   assert.equal(production.workerStarted, false);
+  assert.equal(production.reason, "personal_signer_unavailable");
+  const worker = fakeWorker();
+  await worker.start();
+  const supervisor = createOwnedTradingSupervisor(async () => ({ ok: true, worker }));
+  const started = await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  assert.equal(started.reason, "worker_scheduled");
+  assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  assert.equal(supervisor.isScheduled(OTHER, "acct-a"), false);
+  const halted = await supervisor.stopOwner(USER);
+  assert.equal(halted.workerStopped, true);
+  assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
 });
 
 test("entry scheduling starts one worker and a second start does not", async () => {
@@ -266,6 +297,114 @@ function order(): Request {
     timeInForce: "IOC", reduceOnly: false, clientOrderId: `v13p-${USER}`,
   };
 }
+
+test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
+  const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path) => {
+    if (path.includes("balance")) return { balance_dollars: "1.0000" };
+    if (path.includes("orders")) return { orders: [], cursor: "more" };
+    if (path.includes("positions")) return { market_positions: [] };
+    if (path.includes("fills")) return { fills: [] };
+    return { settlements: [] };
+  });
+  assert.equal(paged.ok, false);
+  if (!paged.ok) assert.equal(paged.reason, "personal_exchange_history_unreconciled");
+  const material = keyMaterial();
+  const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
+  let feeChecks = 0;
+  const session = createProductionPersonalSession({
+    async query(text: string) {
+      if (text.includes("personal-session:signer")) {
+        return { rows: [{
+          key_fingerprint: fingerprint, credential_fingerprint: fingerprint,
+          decrypted_secret: JSON.stringify({ api_key_id: material.keyId, private_key: material.privateKey }),
+          commissioned: true, execution_enabled: true, kill_switch: false, cash_precision_verified: true,
+          cash_micros: "1000000", fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
+          fee_policy_version: "standing", fee_source_url: "https://kalshi.com/fees", fee_formula_version: "quadratic",
+          policy_state: "APPROVED", configured_stake_cents: "100", subaccount: 1, exchange_index: 2,
+        }] };
+      }
+      if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      return { rows: [] };
+    },
+  }, {
+    now: () => NOW,
+    verifyFee: async () => {
+      feeChecks += 1;
+      return {
+        status: "verified" as const, valid: true, sourceUrl: "https://kalshi.com/fees",
+        digest: "ab".repeat(32), formulaVersion: "quadratic", verifiedAt: NOW, reason: null,
+      };
+    },
+    kalshiGet: async (_creds, path) => {
+      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("orders")) return { orders: [] };
+      if (path.includes("positions")) return { market_positions: [] };
+      if (path.includes("fills")) return { fills: [] };
+      return { settlements: [] };
+    },
+  });
+  const refused = await session.start({ userId: USER, accountId: "acct-a", action: "START" });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "cash_evidence_mismatch");
+  assert.equal(feeChecks, 0);
+  assert.equal(session.isScheduled(USER, "acct-a"), false);
+  const open = emptySnapshot(
+    { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
+    { ok: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
+  );
+  assert.equal("reason" in open && open.reason, "personal_exchange_history_unreconciled");
+});
+
+test("cash and commissioning writes require explicit confirmation", async () => {
+  const db = { query: async () => { throw new Error("no_write"); } };
+  const cash = await reconcileOwnedSubaccountCash(db, { ownerUserId: USER, confirmation: "no", nowMs: NOW });
+  assert.equal(cash.reason, "explicit_authorization_required");
+  assert.equal(cash.transferAttempted, false);
+  const commission = await commissionOwnedAccount(db, {
+    ownerUserId: USER, confirmation: "no", feeArtifactDigest: "ab".repeat(32),
+  });
+  assert.equal(commission.reason, "explicit_authorization_required");
+  assert.equal(COMMISSION_OWNED_ACCOUNT_CONFIRMATION.includes("COMMISSION_OWNED_STRATA_ACCOUNT"), true);
+});
+
+test("owned market evidence uses the configured stake and rejects an unproven fee grid", () => {
+  const book = { orderbook_fp: { yes_dollars: [["0.4500", "100"]], no_dollars: [["0.5000", "100"]] } };
+  const series = { series: { ticker: "KXBTC15M", fee_type: "quadratic", fee_multiplier: "1" } };
+  const market = { market: { ticker: "KXBTC15M-TEST", exchange_index: 2, status: "active", price_level_structure: "deci_cent" } };
+  const evidence = ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series, marketPayload: market,
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  });
+  assert.equal(evidence.bestAskDollars, "0.5000");
+  assert.equal(evidence.fee.contracts >= 1, true);
+  const tapered = ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series,
+    marketPayload: {
+      market: {
+        ticker: "KXBTC15M-TEST", exchange_index: 2, status: "active",
+        price_level_structure: "tapered_deci_cent",
+        price_ranges: [
+          { start: "0.0000", end: "0.1000", step: "0.0010" },
+          { start: "0.1000", end: "0.9000", step: "0.0100" },
+          { start: "0.9000", end: "1.0000", step: "0.0010" },
+        ],
+      },
+    },
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  });
+  assert.equal(tapered.fee.contracts, evidence.fee.contracts);
+  assert.throws(() => ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book,
+    seriesPayload: { series: { ticker: "OTHER", fee_type: "quadratic", fee_multiplier: "1" } },
+    marketPayload: market, observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  }), /production_fee_or_market_grid_unproven/);
+});
 
 function keyMaterial() {
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });

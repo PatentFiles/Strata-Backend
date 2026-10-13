@@ -158,8 +158,14 @@ export function authorizeOwnedPolicy(input: {
   return { ok: true, policy };
 }
 
+type PolicyQuery = {
+  query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
+};
+
 export async function persistOwnedPolicyApproval(
-  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }> },
+  db: PolicyQuery & {
+    transaction?<T>(work: (query: PolicyQuery["query"]) => Promise<T>): Promise<T>;
+  },
   input: {
     ownerUserId: string;
     executionAccountId: string;
@@ -170,7 +176,24 @@ export async function persistOwnedPolicyApproval(
     return { ok: false, reason: "policy_hash_mismatch" };
   }
   if (input.policy.createdBy !== input.ownerUserId) return { ok: false, reason: "policy_not_owned" };
-  const approved = await db.query(APPROVE_SQL, [
+  if (!db.transaction) return { ok: false, reason: "policy_approval_not_transactional" };
+  try {
+    return await db.transaction(async (query) => approveAndLink(query, input));
+  } catch (error) {
+    const reason = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : "policy_not_approved";
+    return { ok: false, reason };
+  }
+}
+
+async function approveAndLink(
+  query: PolicyQuery["query"],
+  input: {
+    ownerUserId: string;
+    executionAccountId: string;
+    policy: V13ApprovedLiveMoneyPolicy;
+  },
+): Promise<{ ok: true; policyId: string }> {
+  const approved = await query(APPROVE_SQL, [
     input.policy.id,
     input.executionAccountId,
     input.policy.strategyParameterSetId,
@@ -193,8 +216,8 @@ export async function persistOwnedPolicyApproval(
     input.policy.policyHash,
     input.ownerUserId,
   ]);
-  if ((approved.rowCount ?? approved.rows.length) !== 1) return { ok: false, reason: "policy_not_approved" };
-  const linked = await db.query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
-  if ((linked.rowCount ?? linked.rows.length) !== 1) return { ok: false, reason: "policy_not_linked" };
+  if ((approved.rowCount ?? approved.rows.length) !== 1) throw new Error("policy_not_approved");
+  const linked = await query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
+  if ((linked.rowCount ?? linked.rows.length) !== 1) throw new Error("policy_not_linked");
   return { ok: true, policyId: input.policy.id };
 }

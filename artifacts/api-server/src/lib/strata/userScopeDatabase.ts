@@ -29,6 +29,12 @@ import type { UserScopePort } from "../../routes/userExecutionRouter";
 import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
+  approveOwnedPolicyForUser,
+  commissionOwnedAccount,
+  reconcileOwnedSubaccountCash,
+  reportOwnedActivation,
+} from "./personalAccountActivation";
+import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
   qualifyAdvancedApi,
@@ -492,10 +498,14 @@ export function createDatabaseUserScopePort(
           return refused(userId, "account_kill_not_recorded", account);
         }
         await options.session?.stop({ userId, accountId: account.id });
+        const killedAccount = { ...account, killSwitch: true, executionEnabled: false, workerRunning: false };
+        if (options.session?.isScheduled(userId, account.id) === true) {
+          return refused(userId, "worker_still_scheduled", { ...killedAccount, workerRunning: true });
+        }
         return {
           ok: true as const,
           reason: "account_killed",
-          view: viewFrom(userId, { ...account, killSwitch: true, executionEnabled: false, workerRunning: false }),
+          view: viewFrom(userId, killedAccount),
         };
       }
       let signer: { rows: Array<Record<string, unknown>> };
@@ -508,14 +518,16 @@ export function createDatabaseUserScopePort(
         return refused(userId, "user_execution_signer_not_provisioned", account);
       }
       if (action === "STOP" || action === "DISARM") {
-        await options.session?.stop({ userId, accountId: account.id });
+        const stopped = options.session
+          ? await options.session.stop({ userId, accountId: account.id })
+          : { workerStopped: true };
+        if (!stopped.workerStopped || options.session?.isScheduled(userId, account.id) === true) {
+          return refused(userId, "worker_still_scheduled", account);
+        }
         return {
           ok: true as const,
           reason: "entries_stopped",
-          view: viewFrom(userId, {
-            ...account,
-            workerRunning: options.session?.isScheduled(userId, account.id) === true,
-          }),
+          view: viewFrom(userId, { ...account, workerRunning: false }),
         };
       }
       if (action !== "START" && action !== "ARM") {
@@ -554,6 +566,7 @@ export function createDatabaseUserScopePort(
       kalshiGet,
       kalshiCreateSubaccount,
       kalshiGenerateRestrictedKey,
+      session: options.session,
     }),
     async stake(userId, cents, revision) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
@@ -769,6 +782,39 @@ export function createDatabaseUserScopePort(
             return { outcome: "UNCERTAIN" };
           }
         },
+      });
+    },
+    async personalReadiness(userId) {
+      return reportOwnedActivation(db, userId);
+    },
+    async approvePolicy(userId, body) {
+      const account = await ownedAccount(userId);
+      if (!account) return { ok: false, reason: "execution_account_missing" };
+      const connect = (db as { connect?: () => Promise<{ query: UserScopeQuery["query"]; release(): void }> }).connect;
+      return approveOwnedPolicyForUser({
+        query: (text, params) => db.query(text, params),
+        connect: connect ? () => connect.call(db) : undefined,
+      }, {
+        ownerUserId: userId,
+        executionAccountId: account.id,
+        body,
+      });
+    },
+    async reconcileCash(userId, body) {
+      const confirmation = body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null;
+      return reconcileOwnedSubaccountCash(db, {
+        ownerUserId: userId,
+        confirmation,
+        nowMs: Date.now(),
+        get: options.kalshiGet,
+      });
+    },
+    async commissionAccount(userId, body) {
+      const fields = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      return commissionOwnedAccount(db, {
+        ownerUserId: userId,
+        confirmation: fields.confirmation,
+        feeArtifactDigest: fields.feeArtifactDigest,
       });
     },
   };

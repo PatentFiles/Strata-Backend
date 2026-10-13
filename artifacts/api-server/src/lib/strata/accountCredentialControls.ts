@@ -243,12 +243,26 @@ export function accountCredentialControls(
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
     kalshiCreateSubaccount?: SubaccountCreationTransport;
     kalshiGenerateRestrictedKey?: RestrictedKeyGenerationTransport;
+    session?: { stopOwner(userId: string): Promise<{ workerStopped: boolean }> };
   } = {},
 ) {
   const database = executionDatabase(db);
   const ports = () => createDatabaseAccountCommissioningPorts(database);
   return {
     async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
+      if (options.session) {
+        const stopped = await options.session.stopOwner(userId);
+        if (!stopped.workerStopped) {
+          return {
+            ok: false as const,
+            reason: "worker_still_scheduled",
+            executable: false as const,
+            workerStarted: false as const,
+            executionActive: false as const,
+            view: emptyUserExecutionView(userId),
+          };
+        }
+      }
       const closed = {
         ok: false as const,
         reason: "user_scope_not_migrated",
@@ -260,7 +274,19 @@ export function accountCredentialControls(
       try {
         const ready = await db.query(LEASE_TABLE_SQL);
         if (!ready.rows[0]?.name) {
-          if (action !== "KILL") return closed;
+          if (action !== "KILL") {
+            if (options.session) {
+              return {
+                ok: true as const,
+                reason: "entries_stopped",
+                executable: false as const,
+                workerStarted: false as const,
+                executionActive: false as const,
+                view: emptyUserExecutionView(userId),
+              };
+            }
+            return closed;
+          }
           await db.query(
             "UPDATE v13_production_account SET kill_switch = true WHERE owner_user_id = $1::uuid",
             [userId],

@@ -420,11 +420,15 @@ export async function getScopedKalshiJson(
   path: string,
   query = "",
   fetchImpl: typeof fetch = fetch,
+  host = baseUrl(),
 ): Promise<unknown> {
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
+  if (host !== "https://external-api.kalshi.com" && host !== "https://external-api.demo.kalshi.co") {
+    throw new KalshiApiError("INVALID_CREDENTIALS");
+  }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
-  const response = await fetchImpl(`${baseUrl()}${path}${query}`, {
+  const response = await fetchImpl(`${host}${path}${query}`, {
     method: "GET",
     cache: "no-store",
     headers: {

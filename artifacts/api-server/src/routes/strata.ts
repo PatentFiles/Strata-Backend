@@ -14,7 +14,7 @@ import {
 import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
 import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
 import { createDatabaseStakePort } from "../lib/strata/configuredStakeStore";
-import { productionPersonalSession } from "../lib/strata/personalExecutionSupervisor";
+import { createProductionPersonalSession } from "../lib/strata/personalExecutionSupervisor";
 import { createDatabaseUserScopePort } from "../lib/strata/userScopeDatabase";
 import { createStrataRouter } from "./strataRouter";
 
@@ -60,5 +60,5 @@ export default createStrataRouter({
   microLiveState: () => getMicroLiveState(),
   emergencyStop: () => emergencyStopMicroLive(),
   commissioning: createDatabaseCommissioningPort(() => supervisor().view().workerRunning),
-  userScope: createDatabaseUserScopePort(pool, { session: productionPersonalSession() }),
+  userScope: createDatabaseUserScopePort(pool, { session: createProductionPersonalSession(pool) }),
 });

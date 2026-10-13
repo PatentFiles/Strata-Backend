@@ -551,6 +551,10 @@ test("START reports running only after the session schedules a worker, and produ
       this.running = true;
       return { ok: true, reason: "worker_scheduled", workerStarted: true };
     },
+    async stopOwner() {
+      this.running = false;
+      return { workerStopped: true };
+    },
     async stop() {
       this.running = false;
       return { workerStopped: true };
@@ -605,7 +609,7 @@ test("START reports running only after the session schedules a worker, and produ
   });
   const refused = await production.control(USER_A, "START");
   assert.equal(refused.ok, false);
-  assert.equal(refused.reason, "personal_submission_not_authorized");
+  assert.equal(refused.reason, "personal_signer_unavailable");
   assert.equal(refused.view.workerRunning, false);
   assert.equal(posts, 0);
 });

@@ -41,7 +41,10 @@ export class ProductionWorker {
   }
   private schedule(): void {
     const loop = async () => {
-      try { await this.tick(); } catch (error) { this.report(error); }
+      try { await this.tick(); } catch (error) {
+        this.report(error);
+        if (error instanceof Error && error.message === "personal_exchange_history_unreconciled") this.stop();
+      }
       if (this.timer) this.timer = setTimeout(loop, this.intervalMs);
     };
     this.timer = setTimeout(loop, 0);
