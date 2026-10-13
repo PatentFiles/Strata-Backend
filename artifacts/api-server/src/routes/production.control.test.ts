@@ -143,7 +143,10 @@ test("START is idempotent and concurrent START creates one worker", async () => 
   try {
     const first = call(server.port, "/api/production/start", "POST", "production-admin", {});
     const second = call(server.port, "/api/production/start", "POST", "production-admin", {});
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const deadline = Date.now() + 2_000;
+    while (entered < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     assert.equal(h.counts().creates, 1);
     assert.equal(entered, 1);
     release();

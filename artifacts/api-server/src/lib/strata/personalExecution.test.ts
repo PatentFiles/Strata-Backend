@@ -12,9 +12,18 @@ import {
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
-import { authorizeOwnedPolicy, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
+import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
 import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession } from "./personalExecutionSupervisor";
-import { commissionOwnedAccount, COMMISSION_OWNED_ACCOUNT_CONFIRMATION, reconcileOwnedSubaccountCash } from "./personalAccountActivation";
+import {
+  approveOwnedPolicyForUser,
+  commissionOwnedAccount,
+  COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
+  enableOwnedAccountExecution,
+  ENABLE_OWNED_EXECUTION_CONFIRMATION,
+  reconcileOwnedSubaccountCash,
+  REQUEST_OWNED_ACTIVATION_CONFIRMATION,
+  requestOwnedAccountActivation,
+} from "./personalAccountActivation";
 import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds } from "./personalExchangeRead";
 import type { MarketEvidence, Request } from "../v13-production/types";
 
@@ -405,7 +414,7 @@ test("cash and commissioning writes require explicit confirmation", async () => 
   assert.equal(cash.reason, "explicit_authorization_required");
   assert.equal(cash.transferAttempted, false);
   const commission = await commissionOwnedAccount(db, {
-    ownerUserId: USER, confirmation: "no", feeArtifactDigest: "ab".repeat(32),
+    ownerUserId: USER, confirmation: "no", feeArtifactDigest: "ab".repeat(32), minimumExitMicros: 1,
   });
   assert.equal(commission.reason, "explicit_authorization_required");
   assert.equal(COMMISSION_OWNED_ACCOUNT_CONFIRMATION.includes("COMMISSION_OWNED_STRATA_ACCOUNT"), true);
@@ -448,6 +457,91 @@ test("owned market evidence uses the configured stake and rejects an unproven fe
     policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
     artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
   }), /production_fee_or_market_grid_unproven/);
+});
+
+test("commissioning requires an explicit minimum exit and activation does not change flags", async () => {
+  const missingExit = await commissionOwnedAccount(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      confirmation: COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
+      feeArtifactDigest: "ab".repeat(32),
+      minimumExitMicros: 0,
+    },
+  );
+  assert.equal(missingExit.reason, "minimum_exit_missing");
+  const oversized = await createOwnedPolicyDraft(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      executionAccountId: "acct-a",
+      limits: {
+        capitalLimitCents: 100,
+        maxEntryStakeCents: 2_500_001,
+        maxEntryAllInCents: 100,
+        maxDailyLossCents: 100,
+        maxTotalLossCents: 100,
+        maxQuoteAgeMs: 1_000,
+        maxFeeEvidenceAgeMs: 1_000,
+      },
+    },
+  );
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) assert.equal(oversized.reason, "policy_limits_invalid");
+  const mismatch = await approveOwnedPolicyForUser(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      executionAccountId: "acct-a",
+      verifyFee: async () => { throw new Error("fee_called"); },
+      body: {
+        confirmation: APPROVE_OWNED_POLICY_CONFIRMATION,
+        policyId: "policy-1",
+        version: 1,
+        feeArtifactDigest: "ab".repeat(32),
+        limits: {
+          capitalLimitCents: 2_500_000, maxEntryStakeCents: 500, maxEntryAllInCents: 500,
+          maxDailyLossCents: 100, maxTotalLossCents: 100, maxQuoteAgeMs: 1_000, maxFeeEvidenceAgeMs: 1_000,
+        },
+        champion: {
+          reviewId: "not-the-reviewed-release",
+          evidenceHash: "ab".repeat(32),
+          selectedBy: USER,
+          selectedAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    },
+  );
+  assert.equal(mismatch.reason, "champion_evidence_mismatch");
+  const writes: string[] = [];
+  const ready = {
+    id: "acct-a", subaccount: 1, exchange_index: 2,
+    key_fingerprint: "aa".repeat(32), credential_fingerprint: "aa".repeat(32),
+    policy_state: "APPROVED", policy_id: "policy-1", configured_stake_cents: 100,
+    cash_precision_verified: true, minimum_exit_micros: 1_000,
+    fee_artifact_digest: "bb".repeat(32), commissioned: true, execution_enabled: false,
+    kill_switch: true, commissioning_digest: "cc".repeat(32), activation_requests: 0,
+  };
+  const requested = await requestOwnedAccountActivation({
+    query: async (sql) => {
+      writes.push(sql);
+      if (sql.includes("UPDATE")) throw new Error("activation_request_wrote_state");
+      if (sql.includes("INSERT INTO v13_production_observation")) return { rows: [], rowCount: 1 };
+      return { rows: [ready] };
+    },
+  }, { ownerUserId: USER, confirmation: REQUEST_OWNED_ACTIVATION_CONFIRMATION });
+  assert.equal(requested.ok, true);
+  assert.equal(requested.executionEnabled, false);
+  assert.equal(requested.killSwitchCleared, false);
+  assert.equal(requested.liveEnabled, false);
+  assert.equal(writes.some((sql) => sql.includes("UPDATE")), false);
+  const legacy = await enableOwnedAccountExecution(
+    { query: async () => ({ rows: [] }) },
+    { executionAccountId: "legacy-account", confirmation: ENABLE_OWNED_EXECUTION_CONFIRMATION },
+  );
+  assert.equal(legacy.ok, false);
+  assert.equal(legacy.accountsTouched, 0);
+  assert.equal(legacy.globalFlagsChanged, false);
 });
 
 function keyMaterial() {

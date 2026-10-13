@@ -31,9 +31,13 @@ import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
   commissionOwnedAccount,
+  enableOwnedAccountExecution,
+  enableSharedLiveInfrastructure,
   reconcileOwnedSubaccountCash,
   reportOwnedActivation,
+  requestOwnedAccountActivation,
 } from "./personalAccountActivation";
+import { createOwnedPolicyDraft, type OwnedPolicyLimits } from "./personalPolicyApproval";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -815,7 +819,33 @@ export function createDatabaseUserScopePort(
         ownerUserId: userId,
         confirmation: fields.confirmation,
         feeArtifactDigest: fields.feeArtifactDigest,
+        minimumExitMicros: fields.minimumExitMicros,
       });
+    },
+    async draftPolicy(userId, body) {
+      const account = await ownedAccount(userId);
+      if (!account) return { ok: false as const, reason: "execution_account_missing" };
+      const fields = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      return createOwnedPolicyDraft(db, {
+        ownerUserId: userId,
+        executionAccountId: account.id,
+        limits: fields.limits as OwnedPolicyLimits | null,
+      });
+    },
+    async requestActivation(userId, body) {
+      const confirmation = body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null;
+      return requestOwnedAccountActivation(db, { ownerUserId: userId, confirmation });
+    },
+    async enableOwnedExecution(body) {
+      const fields = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      return enableOwnedAccountExecution(db, {
+        executionAccountId: fields.executionAccountId,
+        confirmation: fields.confirmation,
+      });
+    },
+    async enableSharedLive(body) {
+      const confirmation = body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null;
+      return enableSharedLiveInfrastructure(db, { confirmation });
     },
   };
 }

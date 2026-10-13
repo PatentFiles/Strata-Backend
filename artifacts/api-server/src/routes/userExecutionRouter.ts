@@ -78,10 +78,33 @@ export interface UserScopePort {
   applyPreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string; draft?: PolicyDraft; view: UserExecutionView }>;
   qualify(userId: string, body: unknown): Promise<QualificationResult>;
   diagnose(userId: string): Promise<QualificationDiagnostic>;
-  personalReadiness(userId: string): Promise<{ ok: true; accountId: string | null; blockers: string[]; readyForCommissioning: boolean; readyForLive: boolean }>;
+  personalReadiness(userId: string): Promise<{
+    ok: true;
+    accountId: string | null;
+    blockers: string[];
+    readyForCommissioning: boolean;
+    readyForLive: boolean;
+    activationRequested: boolean;
+  }>;
   approvePolicy(userId: string, body: unknown): Promise<{ ok: boolean; reason: string }>;
+  draftPolicy(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; policyId?: string; version?: number }>;
   reconcileCash(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; transferAttempted: false }>;
   commissionAccount(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; blockers: string[] }>;
+  requestActivation(userId: string, body: unknown): Promise<{
+    ok: boolean;
+    reason: string;
+    executionEnabled: false;
+    killSwitchCleared: false;
+    liveEnabled: false;
+  }>;
+  enableOwnedExecution(body: unknown): Promise<{
+    ok: boolean;
+    reason: string;
+    globalFlagsChanged: false;
+    killSwitchCleared: boolean;
+    accountsTouched: number;
+  }>;
+  enableSharedLive(body: unknown): Promise<{ ok: boolean; reason: string; accountsTouched: 0 }>;
 }
 
 /** Fail closed. Does not read the legacy account and does not mutate Kalshi or the database. */
@@ -141,11 +164,21 @@ export function closedUserScopePort(): UserScopePort {
     diagnose: async () => ({ ...await readQualificationDiagnostics({ guard: null }), status: "USER_SCOPE_CLOSED" }),
     personalReadiness: async () => ({
       ok: true as const, accountId: null, blockers: ["user_scope_not_migrated"],
-      readyForCommissioning: false, readyForLive: false,
+      readyForCommissioning: false, readyForLive: false, activationRequested: false,
     }),
     approvePolicy: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
+    draftPolicy: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     reconcileCash: async () => ({ ok: false, reason: "user_scope_not_migrated", transferAttempted: false as const }),
     commissionAccount: async () => ({ ok: false, reason: "user_scope_not_migrated", blockers: ["user_scope_not_migrated"] }),
+    requestActivation: async () => ({
+      ok: false, reason: "user_scope_not_migrated",
+      executionEnabled: false as const, killSwitchCleared: false as const, liveEnabled: false as const,
+    }),
+    enableOwnedExecution: async () => ({
+      ok: false, reason: "user_scope_not_migrated",
+      globalFlagsChanged: false as const, killSwitchCleared: false, accountsTouched: 0,
+    }),
+    enableSharedLive: async () => ({ ok: false, reason: "user_scope_not_migrated", accountsTouched: 0 as const }),
   };
 }
 
@@ -338,6 +371,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.json(sanitizePublic(await port.personalReadiness(userId)));
   });
+  router.post("/policy/draft", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.draftPolicy(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
   router.post("/policy/approve", async (req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
@@ -350,6 +390,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
     const result = await port.reconcileCash(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/activation/request", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    const result = await port.requestActivation(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/commission", async (req, res) => {

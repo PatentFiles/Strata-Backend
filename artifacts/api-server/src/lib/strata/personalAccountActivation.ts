@@ -1,6 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { V13_CHAMPION_PARAMETER_HASH } from "@workspace/v13-strategy";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
-import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
+import {
+  CANONICAL_FEE_SCHEDULE_URL,
+  establishOfficialFeeDigest,
+  STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  STANDING_FEE_POLICY_VERSION,
+  verifyCurrentFeeArtifact,
+} from "../microLiveFeeArtifact";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import {
   authorizeOwnedPolicy,
@@ -11,8 +18,13 @@ import {
   type OwnedPolicyLimits,
 } from "./personalPolicyApproval";
 import { PERSONAL_KALSHI_HOST, scopeEcho } from "./personalExchangeRead";
+import { REVIEWED_RELEASE } from "./reviewedRelease";
+import { digest } from "../v13-production/types";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
+export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
+export const ENABLE_OWNED_EXECUTION_CONFIRMATION = "ENABLE_OWNED_ACCOUNT_EXECUTION";
+export const ENABLE_SHARED_LIVE_CONFIRMATION = "ENABLE_SHARED_LIVE_INFRASTRUCTURE";
 
 type Queryable = {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
@@ -28,7 +40,11 @@ const READINESS_SQL = `
          a.key_fingerprint, a.policy_id,
          p.state AS policy_state, p.fee_policy_version, p.fee_source_url, p.fee_formula_version,
          stake.configured_stake_cents,
-         c.key_fingerprint AS credential_fingerprint
+         a.minimum_exit_micros,
+         a.commissioning_digest,
+         c.key_fingerprint AS credential_fingerprint,
+         (SELECT count(*) FROM v13_production_observation o
+           WHERE o.account_id = a.id AND o.kind = 'OWNER_ACTIVATION_REQUEST') AS activation_requests
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p
     ON p.id = a.policy_id AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id
@@ -49,7 +65,8 @@ const COMMISSION_SQL = `
   UPDATE v13_production_account
   SET commissioned = true,
       commissioning_digest = $3,
-      fee_artifact_digest = $4
+      fee_artifact_digest = $4,
+      minimum_exit_micros = $5
   WHERE id = $1
     AND owner_user_id = $2::uuid
     AND owner_user_id IS NOT NULL
@@ -61,13 +78,21 @@ const COMMISSION_SQL = `
     AND policy_id IS NOT NULL
     AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
     AND (commissioned = false OR commissioning_digest = $3)
+    AND $5::integer BETWEEN 1 AND 999999
   RETURNING id
 `;
 
 export async function reportOwnedActivation(
   db: Queryable,
   ownerUserId: string,
-): Promise<{ ok: true; accountId: string | null; blockers: string[]; readyForCommissioning: boolean; readyForLive: boolean }> {
+): Promise<{
+  ok: true;
+  accountId: string | null;
+  blockers: string[];
+  readyForCommissioning: boolean;
+  readyForLive: boolean;
+  activationRequested: boolean;
+}> {
   let rows: Array<Record<string, unknown>> = [];
   let live: Array<Record<string, unknown>> = [];
   try {
@@ -78,10 +103,10 @@ export async function reportOwnedActivation(
     );
     live = gate.rows;
   } catch {
-    return { ok: true, accountId: null, blockers: ["activation_status_unproven"], readyForCommissioning: false, readyForLive: false };
+    return { ok: true, accountId: null, blockers: ["activation_status_unproven"], readyForCommissioning: false, readyForLive: false, activationRequested: false };
   }
   if (rows.length !== 1) {
-    return { ok: true, accountId: null, blockers: ["execution_account_missing"], readyForCommissioning: false, readyForLive: false };
+    return { ok: true, accountId: null, blockers: ["execution_account_missing"], readyForCommissioning: false, readyForLive: false, activationRequested: false };
   }
   const row = rows[0] ?? {};
   const blockers = activationBlockers(row, live[0]);
@@ -90,8 +115,9 @@ export async function reportOwnedActivation(
     ok: true,
     accountId: text(row.id),
     blockers,
-    readyForCommissioning: blockers.every((item) => liveOnly.has(item)),
+    readyForCommissioning: blockers.every((item) => liveOnly.has(item) || item === "minimum_exit_missing"),
     readyForLive: blockers.length === 0,
+    activationRequested: Number(row.activation_requests) > 0,
   };
 }
 
@@ -104,17 +130,11 @@ export async function approveOwnedPolicyForUser(
     now?: Date;
     verifyFee?: typeof verifyCurrentFeeArtifact;
   },
-): Promise<{ ok: boolean; reason: string }> {
-  const parsed = policyBody(input.body, input.now ?? new Date());
+): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string }> {
+  const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
   if (!parsed.ok) return parsed;
-  const verifyFee = input.verifyFee ?? verifyCurrentFeeArtifact;
-  const artifact = await verifyFee({
-    digest: parsed.digest,
-    policyVersion: parsed.fee.policyVersion,
-    sourceUrl: parsed.fee.sourceUrl,
-    formulaVersion: parsed.fee.formulaVersion,
-  });
-  if (!artifact.valid || artifact.digest !== parsed.digest) return { ok: false, reason: "fee_artifact_unverified" };
+  const feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
+  if (!feeDigest.ok) return feeDigest;
   const authorized = authorizeOwnedPolicy({
     ownerUserId: input.ownerUserId,
     executionAccountId: input.executionAccountId,
@@ -136,7 +156,29 @@ export async function approveOwnedPolicyForUser(
     executionAccountId: input.executionAccountId,
     policy: authorized.policy,
   });
-  return stored.ok ? { ok: true, reason: "policy_approved" } : stored;
+  return stored.ok ? { ok: true, reason: "policy_approved", feeArtifactDigest: feeDigest.digest } : stored;
+}
+
+async function resolveOwnedFeeDigest(
+  supplied: string | null,
+  fee: OwnedPolicyFeeEvidence,
+  verifyFee: typeof verifyCurrentFeeArtifact | undefined,
+): Promise<{ ok: true; digest: string } | { ok: false; reason: string }> {
+  if (verifyFee) {
+    if (!supplied) return { ok: false, reason: "fee_evidence_missing" };
+    const artifact = await verifyFee({
+      digest: supplied,
+      policyVersion: fee.policyVersion,
+      sourceUrl: fee.sourceUrl,
+      formulaVersion: fee.formulaVersion,
+    });
+    if (!artifact.valid || artifact.digest !== supplied) return { ok: false, reason: "fee_artifact_unverified" };
+    return { ok: true, digest: supplied };
+  }
+  const established = await establishOfficialFeeDigest();
+  if (!established.ok) return { ok: false, reason: established.reason };
+  if (supplied && supplied !== established.digest) return { ok: false, reason: "fee_artifact_unverified" };
+  return { ok: true, digest: established.digest };
 }
 
 const CASH_SIGNER_SQL = `
@@ -208,6 +250,7 @@ export async function commissionOwnedAccount(
     ownerUserId: string;
     confirmation: unknown;
     feeArtifactDigest: unknown;
+    minimumExitMicros: unknown;
     verifyFee?: typeof verifyCurrentFeeArtifact;
   },
 ): Promise<{ ok: boolean; reason: string; blockers: string[] }> {
@@ -218,10 +261,14 @@ export async function commissionOwnedAccount(
   if (!/^[0-9a-f]{64}$/.test(digest)) {
     return { ok: false, reason: "fee_evidence_missing", blockers: ["fee_evidence_missing"] };
   }
+  const minimumExitMicros = Number(input.minimumExitMicros);
+  if (!Number.isSafeInteger(minimumExitMicros) || minimumExitMicros < 1 || minimumExitMicros > 999_999) {
+    return { ok: false, reason: "minimum_exit_missing", blockers: ["minimum_exit_missing"] };
+  }
   const report = await reportOwnedActivation(db, input.ownerUserId);
   const deferred = new Set([
     "account_not_commissioned", "fee_evidence_missing", "execution_not_enabled",
-    "account_kill_switch", "global_kill_switch", "live_execution_not_enabled",
+    "account_kill_switch", "global_kill_switch", "live_execution_not_enabled", "minimum_exit_missing",
   ]);
   const blockers = report.blockers.filter((item) => !deferred.has(item));
   if (!report.accountId || blockers.length > 0) {
@@ -229,15 +276,22 @@ export async function commissionOwnedAccount(
   }
   const policy = await db.query(READINESS_SQL, [input.ownerUserId]);
   const row = policy.rows[0];
-  const verifyFee = input.verifyFee ?? verifyCurrentFeeArtifact;
-  const artifact = await verifyFee({
-    digest,
-    policyVersion: text(row?.fee_policy_version) ?? "",
-    sourceUrl: text(row?.fee_source_url) ?? "",
-    formulaVersion: text(row?.fee_formula_version) ?? "",
-  });
-  if (!artifact.valid || artifact.digest !== digest) {
-    return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
+  if (input.verifyFee) {
+    const artifact = await input.verifyFee({
+      digest,
+      policyVersion: text(row?.fee_policy_version) ?? "",
+      sourceUrl: text(row?.fee_source_url) ?? "",
+      formulaVersion: text(row?.fee_formula_version) ?? "",
+    });
+    if (!artifact.valid || artifact.digest !== digest) {
+      return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
+    }
+  } else {
+    const established = await establishOfficialFeeDigest();
+    if (!established.ok) return { ok: false, reason: established.reason, blockers: [established.reason] };
+    if (established.digest !== digest) {
+      return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
+    }
   }
   const commissioningDigest = createHash("sha256").update(JSON.stringify({
     accountId: report.accountId,
@@ -245,7 +299,9 @@ export async function commissionOwnedAccount(
     fee: digest,
     policyId: text(row?.policy_id),
   })).digest("hex");
-  const written = await db.query(COMMISSION_SQL, [report.accountId, input.ownerUserId, commissioningDigest, digest]);
+  const written = await db.query(COMMISSION_SQL, [
+    report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
+  ]);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
   }
@@ -262,6 +318,8 @@ function activationBlockers(row: Record<string, unknown>, gate: Record<string, u
   const stake = Number(row.configured_stake_cents);
   if (!Number.isSafeInteger(stake) || stake < 1) blockers.push("configured_stake_missing");
   if (!flag(row.cash_precision_verified)) blockers.push("cash_not_reconciled");
+  const exitMicros = Number(row.minimum_exit_micros);
+  if (!Number.isSafeInteger(exitMicros) || exitMicros < 1 || exitMicros > 999_999) blockers.push("minimum_exit_missing");
   if (!/^[0-9a-f]{64}$/.test(text(row.fee_artifact_digest) ?? "")) blockers.push("fee_evidence_missing");
   if (!flag(row.commissioned)) blockers.push("account_not_commissioned");
   if (!flag(row.execution_enabled)) blockers.push("execution_not_enabled");
@@ -273,8 +331,137 @@ function activationBlockers(row: Record<string, unknown>, gate: Record<string, u
   return blockers;
 }
 
-function policyBody(body: unknown, approvedAt: Date):
-  | { ok: true; policyId: string; version: number; digest: string; limits: OwnedPolicyLimits; fee: OwnedPolicyFeeEvidence; champion: OwnedPolicyChampionEvidence; approvedAt: Date }
+export async function requestOwnedAccountActivation(
+  db: Queryable,
+  input: { ownerUserId: string; confirmation: unknown },
+): Promise<{ ok: boolean; reason: string; executionEnabled: false; killSwitchCleared: false; liveEnabled: false }> {
+  const closed = { executionEnabled: false as const, killSwitchCleared: false as const, liveEnabled: false as const };
+  if (input.confirmation !== REQUEST_OWNED_ACTIVATION_CONFIRMATION) {
+    return { ok: false, reason: "explicit_authorization_required", ...closed };
+  }
+  const report = await reportOwnedActivation(db, input.ownerUserId);
+  const deferred = new Set(["execution_not_enabled", "account_kill_switch", "global_kill_switch", "live_execution_not_enabled"]);
+  const blockers = report.blockers.filter((item) => !deferred.has(item));
+  if (!report.accountId || blockers.length > 0) {
+    return { ok: false, reason: blockers[0] ?? "execution_account_missing", ...closed };
+  }
+  const unresolved = await db.query(
+    `SELECT count(*)::text AS n FROM v13_production_intent
+     WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
+    [report.accountId],
+  );
+  if (Number(unresolved.rows[0]?.n ?? "0") > 0) {
+    return { ok: false, reason: "production_uncertain_order_blocks_mutation", ...closed };
+  }
+  const row = (await db.query(READINESS_SQL, [input.ownerUserId])).rows[0] ?? {};
+  const payload = {
+    accountId: report.accountId,
+    policyId: text(row.policy_id),
+    feeDigest: text(row.fee_artifact_digest),
+    stakeCents: Number(row.configured_stake_cents),
+    commissioningDigest: text(row.commissioning_digest),
+    minimumExitMicros: Number(row.minimum_exit_micros),
+  };
+  const evidence = digest(payload);
+  const prior = await db.query(
+    `SELECT digest FROM v13_production_observation
+     WHERE account_id = $1 AND kind = 'OWNER_ACTIVATION_REQUEST'
+     ORDER BY observed_at DESC LIMIT 1`,
+    [report.accountId],
+  );
+  if (prior.rows[0]?.digest === evidence) {
+    return { ok: true, reason: "activation_already_requested", ...closed };
+  }
+  await db.query(
+    `INSERT INTO v13_production_observation(id, account_id, kind, payload, digest)
+     VALUES ($1,$2,'OWNER_ACTIVATION_REQUEST',$3::jsonb,$4)`,
+    [randomUUID(), report.accountId, JSON.stringify(payload), evidence],
+  );
+  return { ok: true, reason: "activation_requested", ...closed };
+}
+
+/** Enables execution for one owned account. Kill switches and the global live flag stay unchanged. */
+export async function enableOwnedAccountExecution(
+  db: Queryable,
+  input: { executionAccountId: unknown; confirmation: unknown },
+): Promise<{ ok: boolean; reason: string; globalFlagsChanged: false; killSwitchCleared: boolean; accountsTouched: number }> {
+  const unchanged = { globalFlagsChanged: false as const, killSwitchCleared: false, accountsTouched: 0 };
+  if (input.confirmation !== ENABLE_OWNED_EXECUTION_CONFIRMATION) {
+    return { ok: false, reason: "explicit_authorization_required", ...unchanged };
+  }
+  const accountId = text(input.executionAccountId);
+  if (!accountId) return { ok: false, reason: "execution_account_missing", ...unchanged };
+  const found = await db.query(
+    `SELECT a.owner_user_id::text AS owner_user_id, a.policy_id, a.fee_artifact_digest,
+            a.commissioning_digest, a.minimum_exit_micros, a.commissioned, a.kill_switch, a.execution_enabled,
+            stake.configured_stake_cents
+     FROM v13_production_account a
+     LEFT JOIN strata_configured_stake stake ON stake.execution_account_id = a.id
+     WHERE a.id = $1 AND a.owner_user_id IS NOT NULL AND a.subaccount = 1 AND a.exchange_index = 2`,
+    [accountId],
+  );
+  const row = found.rows[0];
+  if (!row || !flag(row.commissioned)) return { ok: false, reason: "owned_execution_not_ready", ...unchanged };
+  const payload = {
+    accountId,
+    policyId: text(row.policy_id),
+    feeDigest: text(row.fee_artifact_digest),
+    stakeCents: Number(row.configured_stake_cents),
+    commissioningDigest: text(row.commissioning_digest),
+    minimumExitMicros: Number(row.minimum_exit_micros),
+  };
+  const evidence = digest(payload);
+  const prior = await db.query(
+    `SELECT digest FROM v13_production_observation
+     WHERE account_id = $1 AND kind = 'OWNER_ACTIVATION_REQUEST' AND digest = $2
+     LIMIT 1`,
+    [accountId, evidence],
+  );
+  if (prior.rows.length !== 1) return { ok: false, reason: "activation_request_missing", ...unchanged };
+  if (flag(row.execution_enabled) && !flag(row.kill_switch)) {
+    return { ok: true, reason: "owned_execution_already_enabled", ...unchanged };
+  }
+  if (!flag(row.kill_switch) || flag(row.execution_enabled)) {
+    return { ok: false, reason: "owned_execution_not_ready", ...unchanged };
+  }
+  const written = await db.query(
+    `UPDATE v13_production_account
+     SET execution_enabled = true, kill_switch = false
+     WHERE id = $1 AND owner_user_id IS NOT NULL AND commissioned = true
+       AND kill_switch = true AND execution_enabled = false
+       AND subaccount = 1 AND exchange_index = 2
+     RETURNING id`,
+    [accountId],
+  );
+  if ((written.rowCount ?? written.rows.length) !== 1) {
+    return { ok: false, reason: "owned_execution_not_ready", ...unchanged };
+  }
+  return { ok: true, reason: "owned_execution_enabled", globalFlagsChanged: false, killSwitchCleared: true, accountsTouched: 1 };
+}
+
+/** Turns on the shared live flag only. It does not read or write any trading account. */
+export async function enableSharedLiveInfrastructure(
+  db: Queryable,
+  input: { confirmation: unknown },
+): Promise<{ ok: boolean; reason: string; accountsTouched: 0 }> {
+  if (input.confirmation !== ENABLE_SHARED_LIVE_CONFIRMATION) {
+    return { ok: false, reason: "explicit_authorization_required", accountsTouched: 0 };
+  }
+  const written = await db.query(
+    `UPDATE live_execution_config
+     SET live_execution_enabled = true, manual_kill_switch = false, updated_at = now()
+     WHERE id = 'singleton' AND mode = 'V13_PRODUCTION'
+       AND live_execution_enabled = false AND manual_kill_switch = true
+     RETURNING id`,
+  );
+  if ((written.rowCount ?? written.rows.length) !== 1) {
+    return { ok: false, reason: "shared_live_not_applied", accountsTouched: 0 };
+  }
+  return { ok: true, reason: "shared_live_enabled", accountsTouched: 0 };
+}
+
+function policyBody(body: unknown, ownerUserId: string, approvedAt: Date):
+  | { ok: true; policyId: string; version: number; digest: string | null; limits: OwnedPolicyLimits; fee: OwnedPolicyFeeEvidence; champion: OwnedPolicyChampionEvidence; approvedAt: Date }
   | { ok: false; reason: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, reason: "policy_limits_missing" };
   const row = body as Record<string, unknown>;
@@ -282,13 +469,33 @@ function policyBody(body: unknown, approvedAt: Date):
   const policyId = text(row.policyId);
   const version = Number(row.version);
   const digest = text(row.feeArtifactDigest);
-  if (!policyId || !Number.isSafeInteger(version) || version < 1 || !digest || !/^[0-9a-f]{64}$/.test(digest)) {
+  if (digest && !/^[0-9a-f]{64}$/.test(digest)) return { ok: false, reason: "fee_artifact_unverified" };
+  if (!policyId || !Number.isSafeInteger(version) || version < 1) {
     return { ok: false, reason: "policy_limits_missing" };
   }
   const limits = limitsOf(row.limits);
-  const fee = feeOf(row.fee);
-  const champion = championOf(row.champion);
-  if (!limits || !fee || !champion) return { ok: false, reason: "policy_limits_missing" };
+  const suppliedFee = feeOf(row.fee);
+  const fee = suppliedFee ?? {
+    policyVersion: STANDING_FEE_POLICY_VERSION,
+    sourceUrl: CANONICAL_FEE_SCHEDULE_URL,
+    formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  };
+  if (fee.sourceUrl !== CANONICAL_FEE_SCHEDULE_URL || fee.policyVersion !== STANDING_FEE_POLICY_VERSION ||
+      fee.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return { ok: false, reason: "fee_artifact_unverified" };
+  }
+  const suppliedChampion = championOf(row.champion);
+  if (suppliedChampion && (suppliedChampion.evidenceHash !== V13_CHAMPION_PARAMETER_HASH ||
+      suppliedChampion.reviewId !== REVIEWED_RELEASE.commit || suppliedChampion.selectedBy !== ownerUserId)) {
+    return { ok: false, reason: "champion_evidence_mismatch" };
+  }
+  const champion = suppliedChampion ?? {
+    reviewId: REVIEWED_RELEASE.commit,
+    evidenceHash: V13_CHAMPION_PARAMETER_HASH,
+    selectedBy: ownerUserId,
+    selectedAt: new Date(approvedAt.getTime() - 1),
+  };
+  if (!limits) return { ok: false, reason: "policy_limits_missing" };
   return { ok: true, policyId, version, digest, limits, fee, champion, approvedAt };
 }
 

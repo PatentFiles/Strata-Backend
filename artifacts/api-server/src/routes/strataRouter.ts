@@ -143,7 +143,16 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const access = createStrataAccess(deps);
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
-  router.use("/me", createUserExecutionRouter(access.requireUser, deps.userScope ?? closedUserScopePort()));
+  const userScope = deps.userScope ?? closedUserScopePort();
+  router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
+  router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
+    const result = await userScope.enableOwnedExecution(req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.post("/production/shared-live/enable", access.requireDeveloper, async (req, res) => {
+    const result = await userScope.enableSharedLive(req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
   router.use("/commissioning", createStrataCommissioningRouter(
     access.requireDeveloper,
     deps.commissioning ?? blockedCommissioningPort(),

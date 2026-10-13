@@ -409,6 +409,8 @@ function isAllowedGetPath(path: string): boolean {
     path === `${API_PREFIX}/historical/fills` ||
     path === `${API_PREFIX}/api_keys` ||
     path === `${API_PREFIX}/account/limits` ||
+    path === `${API_PREFIX}/series/KXBTC15M` ||
+    path === `${API_PREFIX}/markets` ||
     /^\/trade-api\/v2\/markets\/[^/]+$/.test(path) ||
     /^\/trade-api\/v2\/markets\/[^/]+\/orderbook$/.test(path);
 }

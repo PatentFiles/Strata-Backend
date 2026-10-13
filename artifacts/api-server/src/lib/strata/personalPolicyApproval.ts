@@ -1,12 +1,19 @@
+import { randomUUID } from "node:crypto";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
 } from "@workspace/v13-strategy";
 import {
+  CANONICAL_FEE_SCHEDULE_URL,
+  STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  STANDING_FEE_POLICY_VERSION,
+} from "../microLiveFeeArtifact";
+import {
   computeV13LiveMoneyPolicyHash,
   V13_MAX_ENTRY_STAKE_CENTS,
   type V13ApprovedLiveMoneyPolicy,
 } from "../v13LiveMoneyRisk";
+import { REVIEWED_RELEASE } from "./reviewedRelease";
 
 export const APPROVE_OWNED_POLICY_CONFIRMATION = "APPROVE_OWNED_ACCOUNT_POLICY";
 
@@ -161,6 +168,88 @@ export function authorizeOwnedPolicy(input: {
 type PolicyQuery = {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 };
+
+export async function createOwnedPolicyDraft(
+  db: PolicyQuery,
+  input: { ownerUserId: string; executionAccountId: string; limits: OwnedPolicyLimits | null },
+): Promise<{ ok: true; policyId: string; version: number } | { ok: false; reason: string }> {
+  if (!input.limits) return { ok: false, reason: "policy_limits_missing" };
+  const checked = authorizeOwnedPolicy({
+    ownerUserId: input.ownerUserId,
+    executionAccountId: input.executionAccountId,
+    policyId: "draft-check",
+    version: 1,
+    confirmation: APPROVE_OWNED_POLICY_CONFIRMATION,
+    limits: input.limits,
+    fee: {
+      policyVersion: STANDING_FEE_POLICY_VERSION,
+      sourceUrl: CANONICAL_FEE_SCHEDULE_URL,
+      formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+    },
+    champion: {
+      reviewId: REVIEWED_RELEASE.commit,
+      evidenceHash: V13_CHAMPION_PARAMETER_HASH,
+      selectedBy: input.ownerUserId,
+      selectedAt: new Date(0),
+    },
+    approvedAt: new Date(),
+  });
+  if (!checked.ok) return checked;
+  const linked = await db.query(
+    `SELECT policy_id FROM v13_production_account
+     WHERE id = $1 AND owner_user_id = $2::uuid AND owner_user_id IS NOT NULL`,
+    [input.executionAccountId, input.ownerUserId],
+  );
+  if (linked.rows.length !== 1) return { ok: false, reason: "execution_account_missing" };
+  if (linked.rows[0]?.policy_id) return { ok: false, reason: "policy_already_approved" };
+  const existing = await db.query(
+    `SELECT id, version FROM v13_live_money_policy
+     WHERE execution_account_id = $1 AND created_by = $2 AND state = 'DRAFT'
+     ORDER BY version DESC LIMIT 1`,
+    [input.executionAccountId, input.ownerUserId],
+  );
+  const limits = input.limits;
+  if (existing.rows.length === 1) {
+    const updated = await db.query(
+      `UPDATE v13_live_money_policy
+       SET capital_limit_cents = $3, max_entry_stake_cents = $4, max_entry_all_in_cents = $5,
+           max_daily_loss_cents = $6, max_total_loss_cents = $7, max_quote_age_ms = $8,
+           max_fee_evidence_age_ms = $9
+       WHERE id = $1 AND execution_account_id = $2 AND state = 'DRAFT' AND created_by = $10
+       RETURNING id, version`,
+      [
+        existing.rows[0]?.id, input.executionAccountId, limits.capitalLimitCents, limits.maxEntryStakeCents,
+        limits.maxEntryAllInCents, limits.maxDailyLossCents, limits.maxTotalLossCents,
+        limits.maxQuoteAgeMs, limits.maxFeeEvidenceAgeMs, input.ownerUserId,
+      ],
+    );
+    if (updated.rows.length !== 1) return { ok: false, reason: "policy_not_stored" };
+    return { ok: true, policyId: String(updated.rows[0]?.id), version: Number(updated.rows[0]?.version) };
+  }
+  const versionRow = await db.query(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+     FROM v13_live_money_policy WHERE execution_account_id = $1`,
+    [input.executionAccountId],
+  );
+  const version = Number(versionRow.rows[0]?.next_version);
+  const id = randomUUID();
+  const inserted = await db.query(
+    `INSERT INTO v13_live_money_policy (
+       id, version, state, execution_account_id, created_by,
+       capital_limit_cents, max_entry_stake_cents, max_entry_all_in_cents,
+       max_open_positions, max_daily_loss_cents, max_total_loss_cents,
+       max_quote_age_ms, max_fee_evidence_age_ms
+     ) VALUES ($1,$2,'DRAFT',$3,$4,$5,$6,$7,1,$8,$9,$10,$11)
+     RETURNING id, version`,
+    [
+      id, version, input.executionAccountId, input.ownerUserId,
+      limits.capitalLimitCents, limits.maxEntryStakeCents, limits.maxEntryAllInCents,
+      limits.maxDailyLossCents, limits.maxTotalLossCents, limits.maxQuoteAgeMs, limits.maxFeeEvidenceAgeMs,
+    ],
+  );
+  if (inserted.rows.length !== 1) return { ok: false, reason: "policy_not_stored" };
+  return { ok: true, policyId: id, version };
+}
 
 export async function persistOwnedPolicyApproval(
   db: PolicyQuery & {
