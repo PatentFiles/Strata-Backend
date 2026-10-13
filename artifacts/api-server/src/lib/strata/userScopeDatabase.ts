@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
   createScopedKalshiSubaccountOne,
+  generateScopedKalshiSubaccountOneKey,
   getScopedKalshiJson,
   KalshiApiError,
 } from "../kalshiAccountClient";
 import type { SubaccountCreationTransport } from "./accountSubaccountCreation";
+import type { RestrictedKeyGenerationTransport } from "./accountRestrictedKeyGeneration";
 import { classifyDiagnosticRead, readQualificationDiagnostics, type QualificationDiagnostic } from "./qualificationDiagnostics";
 import {
   assembleKalshiUserRead,
@@ -253,6 +255,7 @@ export function createDatabaseUserScopePort(
   options: {
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
     kalshiCreateSubaccount?: SubaccountCreationTransport;
+    kalshiGenerateRestrictedKey?: RestrictedKeyGenerationTransport;
     qualifyTransport?: QualificationTransport;
     qualificationGuard?: QualificationGuard;
   } = {},
@@ -260,6 +263,8 @@ export function createDatabaseUserScopePort(
   const kalshiGet = options.kalshiGet ?? ((creds, path, query) => getScopedKalshiJson(creds, path, query ?? ""));
   const kalshiCreateSubaccount = options.kalshiCreateSubaccount ??
     ((creds) => createScopedKalshiSubaccountOne(creds));
+  const kalshiGenerateRestrictedKey = options.kalshiGenerateRestrictedKey ??
+    ((creds) => generateScopedKalshiSubaccountOneKey(creds));
   const qualifyTransport = options.qualifyTransport ?? createLiveQualificationTransport();
   const qualificationGuard = options.qualificationGuard ?? createSqlQualificationGuard(db);
   const loadKalshiConnection = async (userId: string): Promise<
@@ -399,7 +404,11 @@ export function createDatabaseUserScopePort(
       void action;
       return refused(userId, "user_execution_signer_not_provisioned", account);
     },
-    ...accountCredentialControls(db, { kalshiGet, kalshiCreateSubaccount }),
+    ...accountCredentialControls(db, {
+      kalshiGet,
+      kalshiCreateSubaccount,
+      kalshiGenerateRestrictedKey,
+    }),
     async stake(userId, cents, revision) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);

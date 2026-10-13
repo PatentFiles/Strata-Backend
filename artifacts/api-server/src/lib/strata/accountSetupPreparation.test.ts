@@ -357,7 +357,7 @@ test("execution authority rotation after read-only checks blocks the creation PO
 });
 
 test("unrestricted legacy key prepares exact restricted-key replacement and verified key prepares disabled execution account", async () => {
-  const generationFixture = operationFixture("generate");
+  const generationFixture = operationFixture("generate", { includeExecution: true });
   const generationControls = accountCredentialControls(generationFixture.db, {
     kalshiGet: generationFixture.kalshiGet,
   });
@@ -378,6 +378,15 @@ test("unrestricted legacy key prepares exact restricted-key replacement and veri
     },
     vaultDestination: "supabase_vault",
   });
+  const generationStatus = await generationControls.commissioningStatus(USER_A);
+  assert.deepEqual(generationStatus.nextAuthorizedAction, {
+    action: "separately_authorize_restricted_key_generation",
+    operation: "generate_api_key",
+    endpoint: "/api/strata/me/account-operations/execute",
+    requiredConfirmation: "EXECUTE_GENERATE_STRATA_V13_SUBACCOUNT_1_KEY",
+    effect: "one_fixed_key_generation_post_then_vault_storage_and_read_only_verification",
+    attemptId: generated.attempt?.attemptId,
+  });
 
   const provisionFixture = operationFixture("provision");
   const provisionControls = accountCredentialControls(provisionFixture.db, {
@@ -396,6 +405,15 @@ test("unrestricted legacy key prepares exact restricted-key replacement and veri
   assert.equal(provisioned.attempt.plan.killSwitch, true);
   assert.equal(provisioned.attempt.plan.commissioned, false);
   assert.equal(provisioned.attempt.plan.cashPrecisionVerified, false);
+  const provisionStatus = await provisionControls.commissioningStatus(USER_A);
+  assert.deepEqual(provisionStatus.nextAuthorizedAction, {
+    action: "separately_authorize_execution_account_provisioning",
+    operation: "provision_execution_account",
+    endpoint: "/api/strata/me/account-operations/execute",
+    requiredConfirmation: "EXECUTE_PROVISION_PERSONAL_STRATA_ACCOUNT",
+    effect: "create_only_owner_disabled_killed_uncommissioned_execution_account",
+    attemptId: provisioned.attempt?.attemptId,
+  });
   assert.equal(provisionFixture.exchangeReads.some((call) =>
     call.keyId === provisionFixture.users[0]?.restricted.keyId &&
     call.path.endsWith("/portfolio/balance")), true);

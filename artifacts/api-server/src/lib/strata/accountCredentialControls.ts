@@ -56,6 +56,15 @@ import {
   executePreparedSubaccountCreation,
   type SubaccountCreationTransport,
 } from "./accountSubaccountCreation";
+import {
+  EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+  executePreparedRestrictedKeyGeneration,
+  type RestrictedKeyGenerationTransport,
+} from "./accountRestrictedKeyGeneration";
+import {
+  EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION,
+  executePreparedExecutionAccountProvisioning,
+} from "./accountExecutionProvisioning";
 
 const CREDENTIAL_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_connection_credentials') AS name
@@ -118,6 +127,7 @@ export function accountCredentialControls(
   options: {
     kalshiGet?: (creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>;
     kalshiCreateSubaccount?: SubaccountCreationTransport;
+    kalshiGenerateRestrictedKey?: RestrictedKeyGenerationTransport;
   } = {},
 ) {
   const database = executionDatabase(db);
@@ -382,15 +392,36 @@ export function accountCredentialControls(
       return prepareSetupReview(db, database, options.kalshiGet, userId, operation);
     },
     async executeOperation(userId: string, body: unknown) {
-      const fields = subaccountCreationExecutionBody(body);
-      if (!fields || fields.confirmation !== EXECUTE_SUBACCOUNT_CREATION_CONFIRMATION) {
+      const fields = accountSetupExecutionBody(body);
+      if (!fields) {
         return rejectedCreationExecution("explicit_execution_authorization_required");
       }
-      return executeSubaccountCreation(
+      if (fields.operation === "create_subaccount") {
+        return executeSubaccountCreation(
+          db,
+          database,
+          options.kalshiGet,
+          options.kalshiCreateSubaccount,
+          userId,
+          fields.attemptId,
+          fields.confirmation,
+        );
+      }
+      if (fields.operation === "generate_api_key") {
+        return executeRestrictedKeyGeneration(
+          db,
+          database,
+          options.kalshiGet,
+          options.kalshiGenerateRestrictedKey,
+          userId,
+          fields.attemptId,
+          fields.confirmation,
+        );
+      }
+      return executeExecutionAccountProvisioning(
         db,
         database,
         options.kalshiGet,
-        options.kalshiCreateSubaccount,
         userId,
         fields.attemptId,
         fields.confirmation,
@@ -766,6 +797,20 @@ function nextAuthorizedSetupAction(
   creationExecutionRoleAvailable: boolean,
   attempts: PublicAccountSetupAttempt[],
 ): AccountSetupNextAuthorizedAction | null {
+  const unresolved = attempts.find((item) =>
+    item.state === "attempted" ||
+    item.state === "response_received" ||
+    item.state === "uncertain");
+  if (unresolved) {
+    return nextAction(
+      "reconcile_prior_operation_without_retry",
+      unresolved.operation,
+      null,
+      null,
+      `operation_${unresolved.state}_retry_blocked`,
+      unresolved.attemptId,
+    );
+  }
   if (setup.nextRequirement === "verify_verification_credential") {
     return nextAction(
       "verify_verification_credential",
@@ -876,12 +921,53 @@ function nextAuthorizedSetupAction(
           attempt.attemptId,
         );
       }
+      if (operation === "generate_api_key") {
+        if (!creationExecutionRoleAvailable) {
+          return nextAction(
+            "review_and_separately_apply_migration_0016",
+            operation,
+            null,
+            null,
+            "enable_independent_account_setup_execution_role",
+            attempt.attemptId,
+          );
+        }
+        if (!setup.subaccountCreationAuthorityPresent) {
+          return nextAction(
+            "register_independent_account_setup_execution_key",
+            operation,
+            "/api/strata/me/credentials",
+            null,
+            "store_new_key_in_user_vault_without_replacing_existing_keys",
+            attempt.attemptId,
+          );
+        }
+        if (!setup.subaccountCreationAuthorityVerified) {
+          return nextAction(
+            "verify_independent_account_setup_execution_key",
+            operation,
+            "/api/strata/me/credentials/verify",
+            null,
+            "prove_account_wide_read_and_write_permissions",
+            attempt.attemptId,
+          );
+        }
+        return nextAction(
+          "separately_authorize_restricted_key_generation",
+          operation,
+          "/api/strata/me/account-operations/execute",
+          EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION,
+          "one_fixed_key_generation_post_then_vault_storage_and_read_only_verification",
+          attempt.attemptId,
+        );
+      }
       return nextAction(
-        "separately_authorize_prepared_operation",
+        "separately_authorize_execution_account_provisioning",
         operation,
-        null,
-        null,
-        "review_only_preparation_exists_no_mutation_executor_enabled",
+        "/api/strata/me/account-operations/execute",
+        EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION,
+        "create_only_owner_disabled_killed_uncommissioned_execution_account",
+        attempt.attemptId,
       );
     }
     if (attempt.state === "attempted" || attempt.state === "response_received" ||
@@ -1134,6 +1220,9 @@ async function executeSubaccountCreation(
   attemptId: string,
   confirmation: string,
 ) {
+  if (confirmation !== EXECUTE_SUBACCOUNT_CREATION_CONFIRMATION) {
+    return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
+  }
   if (!await setupAttemptTableReady(db)) {
     return rejectedCreationExecution("account_setup_attempt_migration_missing", attemptId);
   }
@@ -1282,6 +1371,263 @@ async function executeSubaccountCreation(
   });
 }
 
+async function executeRestrictedKeyGeneration(
+  db: UserScopeQuery,
+  database: CredentialDatabase,
+  getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
+  generateRestrictedKey: RestrictedKeyGenerationTransport | undefined,
+  userId: string,
+  attemptId: string,
+  confirmation: string,
+) {
+  if (confirmation !== EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION) {
+    return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
+  }
+  if (!await setupAttemptTableReady(db)) {
+    return rejectedCreationExecution("account_setup_attempt_migration_missing", attemptId);
+  }
+  if (!await setupExecutionRoleReady(db)) {
+    return rejectedCreationExecution("account_setup_execution_role_migration_missing", attemptId);
+  }
+  if (!getJson) {
+    return rejectedCreationExecution("verification_transport_not_enabled", attemptId);
+  }
+  if (!generateRestrictedKey) {
+    return rejectedCreationExecution("restricted_key_generation_transport_not_enabled", attemptId);
+  }
+
+  const commissioning = createDatabaseAccountCommissioningPorts(database);
+  const resolved = await resolveAccountCommissioningContext(userId, commissioning);
+  if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+  if (resolved.context.executionAccountId) {
+    return rejectedCreationExecution(
+      "execution_account_exists_before_restricted_key_generation",
+      attemptId,
+    );
+  }
+
+  const verification = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "verification",
+  );
+  if (!verification.ok) return rejectedCreationExecution(verification.reason, attemptId);
+  const inventory = await inspectSubaccount1(verification.authority, getJson);
+  if (!inventory.ok || inventory.exists !== true ||
+      inventory.exchangeIndex2Exists !== true) {
+    return rejectedCreationExecution(inventory.reason, attemptId);
+  }
+
+  const provisioning = await verifiedProvisioningAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    getJson,
+  );
+  if (!provisioning.ok) return rejectedCreationExecution(provisioning.reason, attemptId);
+  const execution = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "account_setup_execution",
+  );
+  if (!execution.ok) return rejectedCreationExecution(execution.reason, attemptId);
+  if (!credentialIsIndependent(
+    execution.authority.expectedFingerprint,
+    execution.authority.material.keyId,
+    verification.authority,
+  ) || !credentialIsIndependent(
+    execution.authority.expectedFingerprint,
+    execution.authority.material.keyId,
+    provisioning.authority,
+  )) {
+    return rejectedCreationExecution(
+      "account_setup_execution_credential_not_independent",
+      attemptId,
+    );
+  }
+  const executionMetadata = await inspectAccountSetupExecutionCredential(
+    execution.authority.material.keyId,
+    verification.authority,
+    getJson,
+  );
+  if (!executionMetadata.ok) {
+    return rejectedCreationExecution(executionMetadata.reason, attemptId);
+  }
+  try {
+    const limits = predictionsApiTier(await getJson(
+      execution.authority.material,
+      ACCOUNT_LIMITS_PATH,
+      "",
+    ));
+    if (!limits.apiTier) {
+      return rejectedCreationExecution("account_setup_execution_api_tier_unproven", attemptId);
+    }
+  } catch {
+    return rejectedCreationExecution("account_setup_execution_read_check_failed", attemptId);
+  }
+
+  const existing = resolved.context.credentials.find((item) =>
+    item.role === "restricted_execution");
+  if (existing) {
+    if (!existing.keyFingerprint) {
+      return rejectedCreationExecution("credential_fingerprint_missing", attemptId);
+    }
+    let material: { keyId: string; privateKey: string } | null;
+    try {
+      material = await readOwnedSecret(db, userId, existing.vaultSecretId);
+    } catch {
+      material = null;
+    }
+    if (!material ||
+        dedicatedSignerFingerprint(material.keyId, material.privateKey) !== existing.keyFingerprint) {
+      return rejectedCreationExecution("restricted_credential_recovery_required", attemptId);
+    }
+    const metadata = await inspectRestrictedKeyMetadata(
+      material.keyId,
+      verification.authority,
+      getJson,
+    );
+    if (metadata.ok) {
+      return rejectedCreationExecution("restricted_key_already_verified", attemptId);
+    }
+    if (!replaceableRestrictedKeyReason(metadata.reason)) {
+      return rejectedCreationExecution(metadata.reason, attemptId);
+    }
+  }
+
+  const [currentVerification, currentProvisioning, currentExecution] = await Promise.all([
+    readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "verification"),
+    readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "provisioning"),
+    readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "account_setup_execution"),
+  ]);
+  if (!sameAuthority(verification, currentVerification)) {
+    return rejectedCreationExecution("verification_credential_rotated", attemptId);
+  }
+  if (!sameAuthority(provisioning, currentProvisioning)) {
+    return rejectedCreationExecution("provisioning_credential_rotated", attemptId);
+  }
+  if (!sameAuthority(execution, currentExecution)) {
+    return rejectedCreationExecution("account_setup_execution_credential_rotated", attemptId);
+  }
+
+  return executePreparedRestrictedKeyGeneration(database, {
+    authenticatedUserId: userId,
+    financialAccountId: resolved.context.financialAccountId,
+    providerConnectionId: resolved.context.providerConnectionId,
+    attemptId,
+    confirmation,
+    verificationCredentialId: verification.credentialId,
+    verificationFingerprint: verification.authority.expectedFingerprint,
+    provisioningCredentialId: provisioning.credentialId,
+    executionCredentialId: execution.credentialId,
+    executionFingerprint: execution.authority.expectedFingerprint,
+    executionMaterial: execution.authority.material,
+    transport: generateRestrictedKey,
+    async verifyGenerated(material, fingerprint) {
+      if (!credentialIsIndependent(fingerprint, material.keyId, verification.authority) ||
+          !credentialIsIndependent(fingerprint, material.keyId, provisioning.authority) ||
+          !credentialIsIndependent(fingerprint, material.keyId, execution.authority)) {
+        return { ok: false, reason: "generated_credential_not_independent" };
+      }
+      const [freshVerification, freshProvisioning, freshExecution] = await Promise.all([
+        readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "verification"),
+        readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "provisioning"),
+        readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "account_setup_execution"),
+      ]);
+      if (!sameAuthority(verification, freshVerification)) {
+        return { ok: false, reason: "verification_credential_rotated" };
+      }
+      if (!sameAuthority(provisioning, freshProvisioning)) {
+        return { ok: false, reason: "provisioning_credential_rotated" };
+      }
+      if (!sameAuthority(execution, freshExecution)) {
+        return { ok: false, reason: "account_setup_execution_credential_rotated" };
+      }
+      const probed = await probeAccountCredential(
+        "restricted_execution",
+        fingerprint,
+        material,
+        getJson,
+        verification.authority,
+      );
+      return { ok: probed.ok, reason: probed.reason };
+    },
+  });
+}
+
+async function executeExecutionAccountProvisioning(
+  db: UserScopeQuery,
+  database: CredentialDatabase,
+  getJson: ((creds: { keyId: string; privateKey: string }, path: string, query?: string) => Promise<unknown>) | undefined,
+  userId: string,
+  attemptId: string,
+  confirmation: string,
+) {
+  if (confirmation !== EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION) {
+    return rejectedCreationExecution("explicit_execution_authorization_required", attemptId);
+  }
+  if (!await setupAttemptTableReady(db)) {
+    return rejectedCreationExecution("account_setup_attempt_migration_missing", attemptId);
+  }
+  if (!getJson) {
+    return rejectedCreationExecution("verification_transport_not_enabled", attemptId);
+  }
+  const commissioning = createDatabaseAccountCommissioningPorts(database);
+  const resolved = await resolveAccountCommissioningContext(userId, commissioning);
+  if (!resolved.ok) return rejectedCreationExecution(resolved.reason, attemptId);
+
+  const verification = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "verification",
+  );
+  if (!verification.ok) return rejectedCreationExecution(verification.reason, attemptId);
+  const inventory = await inspectSubaccount1(verification.authority, getJson);
+  if (!inventory.ok || inventory.exists !== true ||
+      inventory.exchangeIndex2Exists !== true) {
+    return rejectedCreationExecution(inventory.reason, attemptId);
+  }
+  const restricted = await readVerifiedRoleAuthority(
+    db,
+    userId,
+    resolved.context.providerConnectionId,
+    "restricted_execution",
+  );
+  if (!restricted.ok) return rejectedCreationExecution(restricted.reason, attemptId);
+  const probed = await probeAccountCredential(
+    "restricted_execution",
+    restricted.authority.expectedFingerprint,
+    restricted.authority.material,
+    getJson,
+    verification.authority,
+  );
+  if (!probed.ok) return rejectedCreationExecution(probed.reason, attemptId);
+
+  const [currentVerification, currentRestricted] = await Promise.all([
+    readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "verification"),
+    readVerifiedRoleAuthority(db, userId, resolved.context.providerConnectionId, "restricted_execution"),
+  ]);
+  if (!sameAuthority(verification, currentVerification)) {
+    return rejectedCreationExecution("verification_credential_rotated", attemptId);
+  }
+  if (!sameAuthority(restricted, currentRestricted)) {
+    return rejectedCreationExecution("restricted_execution_credential_rotated", attemptId);
+  }
+
+  return executePreparedExecutionAccountProvisioning(database, {
+    authenticatedUserId: userId,
+    financialAccountId: resolved.context.financialAccountId,
+    providerConnectionId: resolved.context.providerConnectionId,
+    attemptId,
+    confirmation,
+    restrictedCredentialId: restricted.credentialId,
+    restrictedFingerprint: restricted.authority.expectedFingerprint,
+  });
+}
+
 async function verifiedProvisioningAuthority(
   db: UserScopeQuery,
   userId: string,
@@ -1416,7 +1762,8 @@ function isAccountSetupOperation(operation: FutureAccountOperation): operation i
   return Object.hasOwn(ACCOUNT_SETUP_CONFIRMATIONS, operation);
 }
 
-function subaccountCreationExecutionBody(body: unknown): {
+function accountSetupExecutionBody(body: unknown): {
+  operation: AccountSetupOperation;
   attemptId: string;
   confirmation: string;
 } | null {
@@ -1426,10 +1773,20 @@ function subaccountCreationExecutionBody(body: unknown): {
   delete record.target_user_id;
   delete record.provider_connection_id;
   const attemptId = record.attemptId ?? record.attempt_id;
-  if (record.operation !== "create_subaccount" ||
+  if (!isAccountSetupOperationValue(record.operation) ||
       typeof attemptId !== "string" || !attemptId.trim() ||
       typeof record.confirmation !== "string") return null;
-  return { attemptId: attemptId.trim(), confirmation: record.confirmation };
+  return {
+    operation: record.operation,
+    attemptId: attemptId.trim(),
+    confirmation: record.confirmation,
+  };
+}
+
+function isAccountSetupOperationValue(value: unknown): value is AccountSetupOperation {
+  return value === "create_subaccount" ||
+    value === "generate_api_key" ||
+    value === "provision_execution_account";
 }
 
 function roleOf(body: unknown): string | null {

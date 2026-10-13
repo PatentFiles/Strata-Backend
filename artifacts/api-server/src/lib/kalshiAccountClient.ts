@@ -441,6 +441,7 @@ export async function getScopedKalshiJson(
 const QUALIFICATION_ORDER_PATH = `${API_PREFIX}/portfolio/events/orders`;
 const QUALIFICATION_UPGRADE_PATH = `${API_PREFIX}/account/api_usage_level/upgrade`;
 const SUBACCOUNT_CREATION_PATH = `${API_PREFIX}/portfolio/subaccounts`;
+const RESTRICTED_KEY_GENERATION_PATH = `${API_PREFIX}/api_keys/generate`;
 
 function isAllowedQualificationMutation(method: "POST" | "DELETE", path: string): boolean {
   if (method === "POST") return path === QUALIFICATION_ORDER_PATH || path === QUALIFICATION_UPGRADE_PATH;
@@ -509,6 +510,53 @@ export async function createScopedKalshiSubaccountOne(
       "KALSHI-ACCESS-TIMESTAMP": timestamp,
     },
     body: JSON.stringify({ exchange_index: 2 }),
+  });
+  if (response.status >= 300 && response.status < 400) {
+    return { status: response.status, body: null, unreadable: true };
+  }
+  const text = await response.text();
+  if (!text) return { status: response.status, body: null, unreadable: false };
+  try {
+    return { status: response.status, body: JSON.parse(text) as unknown, unreadable: false };
+  } catch {
+    return { status: response.status, body: null, unreadable: true };
+  }
+}
+
+/**
+ * The only user-scoped key-generation mutation transport. Every request field
+ * is fixed here so callers cannot broaden scopes, remove the subaccount
+ * restriction, change key type, or choose an arbitrary key name.
+ */
+export async function generateScopedKalshiSubaccountOneKey(
+  creds: { keyId: string; privateKey: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  const timestamp = Date.now().toString();
+  const signature = signRequest(
+    creds,
+    "POST",
+    RESTRICTED_KEY_GENERATION_PATH,
+    timestamp,
+  );
+  const response = await fetchImpl(`${baseUrl()}${RESTRICTED_KEY_GENERATION_PATH}`, {
+    method: "POST",
+    cache: "no-store",
+    redirect: "manual",
+    signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE": signature,
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    },
+    body: JSON.stringify({
+      name: "STRATA_V13_SUBACCOUNT_1",
+      key_type: "rsa",
+      scopes: ["read", "write::trade"],
+      subaccount: 1,
+    }),
   });
   if (response.status >= 300 && response.status < 400) {
     return { status: response.status, body: null, unreadable: true };
