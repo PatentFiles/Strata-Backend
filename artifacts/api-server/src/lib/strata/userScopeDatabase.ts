@@ -16,7 +16,7 @@ import {
   normalizeKalshiMoney,
   type KalshiUserRead,
 } from "./kalshiUserRead";
-import { presetFieldError, type PolicyDraft, type SharedPreset } from "./sharedPresets";
+import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 import {
   changeConfiguredStake,
   emptyUserExecutionView,
@@ -51,6 +51,13 @@ import {
 export interface UserScopeQuery {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 }
+
+const CAN_MANAGE_SHARED_PRESETS_SQL = `
+  SELECT 1 FROM public.profiles p
+  JOIN auth.users u ON u.id = p.id
+  JOIN private.role_assignments ra ON lower(ra.email) = lower(u.email)
+  WHERE p.id = $1::uuid AND p.role = 'ADMIN' AND ra.role = 'ADMIN'
+`;
 
 const MIGRATION_SQL = `
   SELECT (
@@ -633,13 +640,18 @@ export function createDatabaseUserScopePort(
       if (!await migrationReady()) return [];
       void userId;
       const result = await db.query("SELECT * FROM v13_shared_preset ORDER BY created_at");
-      return result.rows.flatMap((row) => {
-        const preset = presetFrom(row);
-        return preset ? [preset] : [];
-      });
+      return [
+        STANDARD_PROPORTIONAL_PRESET,
+        ...result.rows.flatMap((row) => {
+          const preset = presetFrom(row);
+          return preset ? [preset] : [];
+        }),
+      ];
     },
     async savePreset(userId, body) {
       if (!await migrationReady()) return { ok: false, reason: "user_scope_not_migrated" };
+      const auth = await db.query(CAN_MANAGE_SHARED_PRESETS_SQL, [userId]);
+      if (auth.rows.length !== 1) return { ok: false, reason: "admin_required_to_manage_shared_presets" };
       if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, reason: "preset_invalid" };
       const input = { ...(body as Record<string, unknown>) };
       delete input.owner_user_id;
@@ -668,6 +680,8 @@ export function createDatabaseUserScopePort(
     },
     async updatePreset(userId, presetId, body) {
       if (!await migrationReady()) return { ok: false, reason: "user_scope_not_migrated" };
+      const auth = await db.query(CAN_MANAGE_SHARED_PRESETS_SQL, [userId]);
+      if (auth.rows.length !== 1) return { ok: false, reason: "admin_required_to_manage_shared_presets" };
       if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, reason: "preset_invalid" };
       const input = { ...(body as Record<string, unknown>) };
       delete input.owner_user_id;
@@ -695,11 +709,38 @@ export function createDatabaseUserScopePort(
     },
     async deletePreset(userId, presetId) {
       if (!await migrationReady()) return { ok: false, reason: "user_scope_not_migrated" };
+      const auth = await db.query(CAN_MANAGE_SHARED_PRESETS_SQL, [userId]);
+      if (auth.rows.length !== 1) return { ok: false, reason: "admin_required_to_manage_shared_presets" };
       const deleted = await db.query(
         "DELETE FROM v13_shared_preset WHERE id = $1 AND creator_user_id = $2::uuid",
         [presetId, userId],
       );
       return (deleted.rowCount ?? 0) === 1 ? { ok: true } : { ok: false, reason: "not_preset_creator" };
+    },
+    async previewPreset(userId, body) {
+      if (!await migrationReady()) return { ok: false, reason: "user_scope_not_migrated" };
+      if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, reason: "preset_preview_invalid" };
+      const fields = body as Record<string, unknown>;
+      if (typeof fields.presetId !== "string" || typeof fields.capitalLimitCents !== "number") {
+        return { ok: false, reason: "preset_preview_invalid" };
+      }
+      void userId; // Authenticated route; previews never mutate an owner account.
+      let preset: SharedPreset | null;
+      if (fields.presetId === STANDARD_PROPORTIONAL_PRESET_ID) {
+        preset = STANDARD_PROPORTIONAL_PRESET;
+      } else {
+        const found = await db.query("SELECT * FROM v13_shared_preset WHERE id = $1", [fields.presetId]);
+        preset = found.rows[0] ? presetFrom(found.rows[0]) : null;
+      }
+      if (!preset) return { ok: false, reason: "preset_not_found" };
+      const scaled = scaleSharedRiskPreset(preset, fields.capitalLimitCents);
+      if (!scaled.ok) return scaled;
+      return {
+        ok: true, presetId: preset.id, presetRevision: preset.revision,
+        referenceCapitalCents: preset.capitalLimitCents,
+        ...scaled,
+        approved: false as const, liveEnabled: false as const,
+      };
     },
     async applyPreset(userId, presetId) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
