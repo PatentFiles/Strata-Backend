@@ -26,6 +26,7 @@ import {
   reconcileOwnedSubaccountCash,
   REQUEST_OWNED_ACTIVATION_CONFIRMATION,
   requestOwnedAccountActivation,
+  reportOwnedActivation,
 } from "./personalAccountActivation";
 import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds } from "./personalExchangeRead";
 import type { MarketEvidence, Request } from "../v13-production/types";
@@ -33,6 +34,42 @@ import type { MarketEvidence, Request } from "../v13-production/types";
 const USER = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const NOW = Date.parse("2026-10-13T18:00:00.000Z");
+
+test("readiness joins TEXT policy owner to UUID account and reports blockers rather than hiding them", async () => {
+  const seen: string[] = [];
+  const db = { query: async (sql: string, params?: unknown[]) => {
+    seen.push(sql);
+    if (sql.includes("personal-activation:readiness")) {
+      assert.match(sql, /p\.created_by\s*=\s*a\.owner_user_id::text/);
+      assert.deepEqual(params, [USER]);
+      return { rows: [{ id: "owner-1", subaccount: 1, exchange_index: 2,
+        key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
+        policy_id: null, policy_state: null, configured_stake_cents: null,
+        cash_precision_verified: false, minimum_exit_micros: null, fee_artifact_digest: null,
+        commissioned: false, execution_enabled: false, kill_switch: true, activation_requests: 0 }] };
+    }
+    if (sql.includes("live_execution_config")) {
+      return { rows: [{ live_execution_enabled: false, manual_kill_switch: true }] };
+    }
+    throw new Error("unexpected readiness query");
+  }};
+  const readiness = await reportOwnedActivation(db, USER);
+  assert.equal(readiness.accountId, "owner-1");
+  assert.equal(readiness.readyForCommissioning, false);
+  assert.equal(readiness.readyForLive, false);
+  for (const blocker of ["policy_not_approved", "configured_stake_missing",
+    "cash_not_reconciled", "minimum_exit_missing", "fee_evidence_missing",
+    "account_not_commissioned", "execution_not_enabled", "account_kill_switch",
+    "global_kill_switch", "live_execution_not_enabled"]) {
+    assert.ok(readiness.blockers.includes(blocker), blocker);
+  }
+  assert.equal(seen.length, 2);
+  const failure = await reportOwnedActivation({ query: async () => {
+    throw new Error("postgres_error");
+  } }, USER);
+  assert.deepEqual(failure.blockers, ["activation_status_unproven"]);
+  assert.equal(failure.readyForLive, false);
+});
 
 test("order book evidence fails closed without a fee, depth, or a fresh clock", () => {
   const book = parseKalshiOrderBook({
