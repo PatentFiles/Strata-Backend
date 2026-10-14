@@ -47,7 +47,7 @@ const READINESS_SQL = `
            WHERE o.account_id = a.id AND o.kind = 'OWNER_ACTIVATION_REQUEST') AS activation_requests
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p
-    ON p.id = a.policy_id AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id
+    ON p.id = a.policy_id AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id::text
   LEFT JOIN strata_configured_stake stake ON stake.execution_account_id = a.id
   LEFT JOIN private.kalshi_connection_credentials c
     ON c.owner_user_id = a.owner_user_id
