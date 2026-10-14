@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
+import { V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY } from "@workspace/v13-strategy";
+import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import type { Pool } from "@workspace/db";
 import {
   AccountScopedExchange,
@@ -114,12 +116,35 @@ test("policy approval requires the owner, fee evidence, and explicit limits belo
   if (!approved.ok) return;
   assert.equal(approved.policy.maxEntryStakeCents, 2_500_000);
   assert.equal(approved.policy.state, "APPROVED");
+  assert.equal(approved.policy.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
   assert.match(approved.policy.policyHash ?? "", /^[0-9a-f]{64}$/);
+  const tamperedVersion = { ...approved.policy, entryPolicyVersion: V13_LEGACY_ENTRY_POLICY };
+  assert.notEqual(computeV13LiveMoneyPolicyHash(tamperedVersion), approved.policy.policyHash);
+  const tampered = await persistOwnedPolicyApproval({
+    query: async () => { throw new Error("tampered_policy_must_not_write"); },
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: tamperedVersion });
+  assert.equal(tampered.ok, false);
+  if (!tampered.ok) assert.equal(tampered.reason, "policy_hash_mismatch");
+  const rehashedLegacy = {
+    ...tamperedVersion,
+    policyHash: computeV13LiveMoneyPolicyHash(tamperedVersion),
+  };
+  const legacy = await persistOwnedPolicyApproval({
+    query: async () => { throw new Error("legacy_policy_must_not_write"); },
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: rehashedLegacy });
+  assert.equal(legacy.ok, false);
+  if (!legacy.ok) assert.equal(legacy.reason, "production_entry_policy_revision_not_approved");
   const calls: string[] = [];
   const stored = await persistOwnedPolicyApproval({
     query: async () => { throw new Error("autocommit_not_allowed"); },
-    transaction: async (work) => work(async (text) => {
+    transaction: async (work) => work(async (text, params) => {
       calls.push(text);
+      if (text.includes("owned-policy:approve")) {
+        assert.match(text, /entry_policy_version = \$22/);
+        assert.match(text, /AND version = \$23/);
+        assert.equal(params?.[21], V13_ENTRY_POLICY_VERSION);
+        assert.equal(params?.[22], approved.policy.version);
+      }
       assert.equal(text.includes("execution_enabled"), false);
       assert.equal(text.includes("kill_switch"), false);
       assert.equal(text.includes("id = 'production'"), false);
