@@ -152,11 +152,15 @@ test("three independently approved owners cannot alter the current owner's V2 en
   );
 
   const evaluationId = await source(session.now);
+  // V2 claims are tied to the market's first qualifying cross, never the
+  // evaluation UUID. Keep the source row and window identity identical.
+  await pool.query(
+    "UPDATE forward_test_evaluations SET entry_policy_version=$2, crossing_key=market_ticker||':first' WHERE id=$1",
+    [evaluationId, V13_ENTRY_POLICY_VERSION],
+  );
   const evaluation = (await pool.query(
     "SELECT market_ticker,target,crossing_key FROM forward_test_evaluations WHERE id=$1", [evaluationId],
   )).rows[0];
-  await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2 WHERE id=$1",
-    [evaluationId, V13_ENTRY_POLICY_VERSION]);
   await pool.query(`INSERT INTO forward_test_windows(
     ticker,target,starts_at,ends_at,entry_policy_version,crossing_consumed,crossing_key)
     VALUES($1,$2,$3,$4,$5,true,$6)`, [
