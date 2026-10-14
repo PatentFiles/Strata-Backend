@@ -72,6 +72,9 @@ export interface UserScopePort {
   commissioningStatus(userId: string): Promise<UserCommissioningStatus>;
   stake(userId: string, cents: number, revision: number | null): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
+  previewPreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; presetId?: string; presetRevision?: number; referenceCapitalCents?: number; limits?: {
+    capitalLimitCents: number; maxEntryStakeCents: number; maxEntryAllInCents: number; maxDailyLossCents: number; maxTotalLossCents: number; maxQuoteAgeMs: number; maxFeeEvidenceAgeMs: number;
+  }; minimumExitMicros?: number | null; approved?: false; liveEnabled?: false }>;
   savePreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
   updatePreset(userId: string, presetId: string, body: unknown): Promise<{ ok: boolean; reason?: string; preset?: SharedPreset }>;
   deletePreset(userId: string, presetId: string): Promise<{ ok: boolean; reason?: string }>;
@@ -159,6 +162,7 @@ export function closedUserScopePort(): UserScopePort {
     }),
     stake: async (userId) => refused(userId),
     presets: async () => [],
+    previewPreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     savePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     updatePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     deletePreset: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
@@ -318,6 +322,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     if (!await migrated(res)) return;
     res.json(sanitizePublic({ presets: await port.presets(userId) }));
+  });
+  router.post("/presets/preview", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    ignoreForeignOwner(req.body);
+    if (!await migrated(res)) return;
+    const result = await port.previewPreset(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/presets", async (req, res) => {
     const userId = subject(res);

@@ -64,6 +64,9 @@ function database(ready: boolean) {
     async query(text, params = []) {
       calls.push({ text, params });
       if (text.includes("information_schema")) return { rows: [{ ready }] };
+      if (text.includes("JOIN private.role_assignments ra")) {
+        return { rows: params[0] === USER_A ? [{ authorized: 1 }] : [] };
+      }
       if (text.includes("WHERE a.owner_user_id")) {
         return { rows: accounts.filter((row) => row.owner_user_id === params[0]) };
       }
@@ -204,6 +207,20 @@ test("user A cannot read user B credentials, balances, stakes, or presets", asyn
   });
   assert.equal(updated.ok, false);
   assert.equal(updated.reason, "not_preset_creator");
+  const standard = await port.previewPreset(USER_A, {
+    presetId: "strata-standard-c52c53-v1", capitalLimitCents: 500,
+  });
+  assert.equal(standard.ok, true);
+  assert.equal(standard.limits?.maxEntryStakeCents, 30);
+  assert.equal(standard.limits?.maxEntryAllInCents, 40);
+  assert.equal(standard.minimumExitMicros, null);
+  assert.equal(standard.approved, false);
+  const missingAuthority = await port.savePreset(USER_B, {
+    name: "Must not save", capitalLimitCents: 2500, maxEntryStakeCents: 150,
+    maxEntryAllInCents: 200, maxDailyLossCents: 500, maxTotalLossCents: 1500,
+    maxQuoteAgeMs: 5000, maxFeeEvidenceAgeMs: 15000, minimumExitMicros: 10000,
+  });
+  assert.equal(missingAuthority.reason, "admin_required_to_manage_shared_presets");
   const applied = await port.applyPreset(USER_A, "preset-b");
   assert.equal(applied.ok, true);
   assert.equal(applied.draft?.state, "DRAFT");
