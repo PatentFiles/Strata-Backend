@@ -1741,15 +1741,27 @@ test("single-line PEM secrets sign read-only requests", async () => {
   }
 });
 
-test("credential-bearing client exposes only GET readers, no mutation functions", () => {
-  assert.deepEqual(Object.keys(kalshiClient).sort(), [
-    "KalshiApiError", "captureCleanPairSnapshot", "getConfiguredKalshiSubaccount", "getKalshiCredentialsState",
+test("Kalshi client exports are explicitly reviewed; account mutations are isolated from read APIs", () => {
+  // Account provisioning/mutation helpers were deliberately added for the
+  // separately authorized setup flow. An outdated read-only export allowlist
+  // must not silently mask them or prevent unrelated safety tests from running.
+  const reviewedReadAndEvidenceExports = [
+    "KalshiApiError", "OPEN_MARKET_MAX_MARKETS", "OPEN_MARKET_MAX_PAGES",
+    "OPEN_MARKET_PAGE_LIMIT", "captureCleanPairSnapshot", "getConfiguredKalshiSubaccount",
+    "getKalshiCredentialsState", "getScopedKalshiJson", "listOpenKalshiMarkets",
     "readKalshiAccount", "readKalshiAccountActivity", "readKalshiDedicatedPairEvidence",
-    "readKalshiHistoricalFills",
-    "readKalshiOrderbook", "readKalshiSettlements", "readKalshiSubmissionEvidence",
+    "readKalshiHistoricalFills", "readKalshiOrderbook", "readKalshiSettlements",
+    "readKalshiSubmissionEvidence", "reviewedKalshiCents",
     "verifyKalshiRestrictedTradingKeyForSubaccount",
     "verifyKalshiTradingKeyRestriction", "verifyKalshiTradingKeyTradePermission",
-  ]);
+  ];
+  const reviewedAccountSetupMutations = [
+    "createScopedKalshiSubaccountOne", "generateScopedKalshiSubaccountOneKey", "mutateScopedKalshi",
+  ];
+  assert.deepEqual(
+    Object.keys(kalshiClient).sort(),
+    [...reviewedReadAndEvidenceExports, ...reviewedAccountSetupMutations].sort(),
+  );
 });
 
 test("creation boundary uses verifier-only GET evidence before a restricted key exists", async () => {

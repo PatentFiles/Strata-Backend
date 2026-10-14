@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
-import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import type { Fill, MarketEvidence, Request, Snapshot } from "../v13-production/types";
@@ -93,6 +93,84 @@ test("a changed owned stake sizes the next mock order, and a crash does not repl
   const legacy = await pool.query("SELECT cash_micros::text AS cash, kill_switch FROM v13_production_account WHERE id='production'");
   assert.equal(legacy.rows[0].cash, "1");
   assert.equal(legacy.rows[0].kill_switch, true);
+});
+
+test("three independently approved owners cannot alter the current owner's V2 entry or policy", async () => {
+  const posts: string[] = [];
+  const session = await tradingSession(100, posts);
+  const approved = { ...policy(), executionAccountId: ACCOUNT, entryPolicyVersion: V13_ENTRY_POLICY_VERSION };
+  approved.policyHash = computeV13LiveMoneyPolicyHash(approved);
+  await pool.query(
+    "UPDATE v13_live_money_policy SET entry_policy_version=$1, policy_hash=$2 WHERE id=$3 AND execution_account_id=$4",
+    [V13_ENTRY_POLICY_VERSION, approved.policyHash, approved.id, ACCOUNT],
+  );
+
+  // Distinct owner-linked APPROVED policies must coexist without affecting
+  // the signed-in owner's ledger. No simulated POST is made for another owner.
+  for (const [ownerId, accountId, policyId] of [
+    [OTHER, "acct-other", "policy-other"],
+    ["33333333-3333-4333-8333-333333333333", "acct-third", "policy-third"],
+  ]) {
+    await pool.query(`INSERT INTO v13_production_account(id,owner_user_id,subaccount,exchange_index,key_fingerprint,
+      cash_precision_verified,commissioned,kill_switch,execution_enabled,cash_micros,initial_cash_micros)
+      VALUES($1,$2,1,2,$3,false,false,true,false,0,0)`, [accountId, ownerId, "e".repeat(64)]);
+    const foreign = {
+      ...policy(), id: policyId, executionAccountId: accountId, createdBy: ownerId,
+      approvedBy: ownerId, championSelectedBy: ownerId, entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
+    };
+    foreign.policyHash = computeV13LiveMoneyPolicyHash(foreign);
+    const keys = Object.keys(foreign);
+    await pool.query(`INSERT INTO v13_live_money_policy(${keys.map((key) => key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)).join(",")})
+      VALUES(${keys.map((_, i) => `$${i + 1}`).join(",")})`, Object.values(foreign));
+    await pool.query("UPDATE v13_production_account SET policy_id=$2 WHERE id=$1", [accountId, policyId]);
+  }
+  assert.equal(Number((await pool.query(
+    "SELECT count(*) AS n FROM v13_live_money_policy WHERE state='APPROVED' AND execution_account_id IS NOT NULL",
+  )).rows[0].n), 3);
+  const inspected = await session.executor.ledger.transaction(
+    (tx, account) => session.executor.ledger.policy(tx, account),
+  );
+  assert.equal(inspected.policyHash, approved.policyHash);
+  assert.equal(inspected.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+
+  // Even if a foreign account ID is supplied, the owned ledger cannot read
+  // that user's policy or obtain their order authority.
+  const foreignProbe = openOwnedExecutionSession({
+    pool, ownerUserId: USER, executionAccountId: "acct-other",
+    state: dispatchState("e".repeat(64)),
+  });
+  await assert.rejects(
+    foreignProbe.executor.ledger.transaction(
+      (tx, account) => foreignProbe.executor.ledger.policy(tx, account),
+    ), /production_policy_missing/,
+  );
+
+  // A V1/NULL evaluation cannot run under an explicit V2-approved policy.
+  await assert.rejects(
+    session.executor.prepareEntry(await source(session.now)),
+    /production_entry_policy_revision_not_approved/,
+  );
+
+  const evaluationId = await source(session.now);
+  // V2 claims are tied to the market's first qualifying cross, never the
+  // evaluation UUID. Keep the source row and window identity identical.
+  await pool.query(
+    "UPDATE forward_test_evaluations SET entry_policy_version=$2, crossing_key=market_ticker||':first' WHERE id=$1",
+    [evaluationId, V13_ENTRY_POLICY_VERSION],
+  );
+  const evaluation = (await pool.query(
+    "SELECT market_ticker,target,crossing_key FROM forward_test_evaluations WHERE id=$1", [evaluationId],
+  )).rows[0];
+  await pool.query(`INSERT INTO forward_test_windows(
+    ticker,target,starts_at,ends_at,entry_policy_version,crossing_consumed,crossing_key)
+    VALUES($1,$2,$3,$4,$5,true,$6)`, [
+    evaluation.market_ticker, evaluation.target, new Date(session.now - 60_000),
+    new Date(session.now + 60_000), V13_ENTRY_POLICY_VERSION, evaluation.crossing_key,
+  ]);
+  const intent = await session.executor.prepareEntry(evaluationId);
+  assert.equal((await requestOf(intent)).limitMicros, 500_000);
+  await session.executor.dispatch(intent);
+  assert.equal(posts.length, 1);
 });
 
 test("insufficient cash, stale depth, kill, and the other owner cannot submit", async () => {

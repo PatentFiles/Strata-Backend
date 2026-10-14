@@ -87,6 +87,9 @@ export interface UserScopePort {
     activationRequested: boolean;
   }>;
   approvePolicy(userId: string, body: unknown): Promise<{ ok: boolean; reason: string }>;
+  approvedPolicyFeeEvidence(userId: string): Promise<{
+    ok: boolean; reason: string; feeArtifactDigest?: string; policyId?: string; version?: number;
+  }>;
   draftPolicy(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; policyId?: string; version?: number }>;
   reconcileCash(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; transferAttempted: false }>;
   commissionAccount(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; blockers: string[] }>;
@@ -167,6 +170,7 @@ export function closedUserScopePort(): UserScopePort {
       readyForCommissioning: false, readyForLive: false, activationRequested: false,
     }),
     approvePolicy: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
+    approvedPolicyFeeEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     draftPolicy: async () => ({ ok: false, reason: "user_scope_not_migrated" }),
     reconcileCash: async () => ({ ok: false, reason: "user_scope_not_migrated", transferAttempted: false as const }),
     commissionAccount: async () => ({ ok: false, reason: "user_scope_not_migrated", blockers: ["user_scope_not_migrated"] }),
@@ -376,6 +380,12 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     ignoreForeignOwner(req.body);
     const result = await port.draftPolicy(userId, req.body ?? {});
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.get("/policy/evidence", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    const result = await port.approvedPolicyFeeEvidence(userId);
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.post("/policy/approve", async (req, res) => {

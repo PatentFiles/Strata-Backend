@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { V13_CHAMPION_PARAMETER_HASH } from "@workspace/v13-strategy";
+import { V13_CHAMPION_PARAMETER_HASH, V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
 import {
   CANONICAL_FEE_SCHEDULE_URL,
@@ -119,6 +119,47 @@ export async function reportOwnedActivation(
     readyForLive: blockers.length === 0,
     activationRequested: Number(row.activation_requests) > 0,
   };
+}
+
+/**
+ * Read-only, owner-scoped receipt for an already APPROVED C52/C53 policy.
+ * It verifies the official fee schedule again instead of trusting a digest
+ * cached in a browser session. It never approves, commissions or activates.
+ */
+export async function readOwnedApprovedFeeEvidence(
+  db: Queryable,
+  ownerUserId: string,
+  establish: typeof establishOfficialFeeDigest = establishOfficialFeeDigest,
+): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; policyId?: string; version?: number }> {
+  const result = await db.query(`
+    SELECT p.id, p.version, p.state, p.entry_policy_version, p.strategy_parameter_hash,
+           p.fee_policy_version, p.fee_source_url, p.fee_formula_version
+    FROM v13_production_account a
+    JOIN v13_live_money_policy p ON p.id = a.policy_id
+      AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id
+    WHERE a.owner_user_id = $1::uuid
+      AND a.owner_user_id IS NOT NULL AND a.subaccount = 1
+      AND a.exchange_index = 2 AND p.state = 'APPROVED'
+  `, [ownerUserId]);
+  if (result.rows.length !== 1) return { ok: false, reason: "policy_not_approved" };
+  const row = result.rows[0]!;
+  if (text(row.entry_policy_version) !== V13_ENTRY_POLICY_VERSION ||
+      text(row.strategy_parameter_hash) !== V13_CHAMPION_PARAMETER_HASH) {
+    return { ok: false, reason: "production_entry_policy_revision_not_approved" };
+  }
+  if (text(row.fee_policy_version) !== STANDING_FEE_POLICY_VERSION ||
+      text(row.fee_source_url) !== CANONICAL_FEE_SCHEDULE_URL ||
+      text(row.fee_formula_version) !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return { ok: false, reason: "fee_artifact_unverified" };
+  }
+  const proof = await establish();
+  if (!proof.ok || !/^[0-9a-f]{64}$/.test(proof.digest)) {
+    return { ok: false, reason: proof.ok ? "fee_artifact_unverified" : proof.reason };
+  }
+  const version = Number(row.version);
+  if (!Number.isSafeInteger(version) || version < 1) return { ok: false, reason: "policy_limits_missing" };
+  return { ok: true, reason: "owned_policy_fee_verified", feeArtifactDigest: proof.digest,
+    policyId: String(row.id), version };
 }
 
 export async function approveOwnedPolicyForUser(

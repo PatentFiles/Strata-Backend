@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
+  V13_ENTRY_POLICY_VERSION,
 } from "@workspace/v13-strategy";
 import {
   CANONICAL_FEE_SCHEDULE_URL,
@@ -45,6 +46,7 @@ const APPROVE_SQL = `
   UPDATE v13_live_money_policy
   SET state = 'APPROVED',
       strategy_version = 'V1.3',
+      entry_policy_version = $22,
       strategy_parameter_set_id = $3,
       strategy_parameter_hash = $4,
       champion_selection_review_id = $5,
@@ -73,6 +75,7 @@ const APPROVE_SQL = `
     AND execution_account_id IS NOT NULL
     AND created_by = $21
     AND state = 'DRAFT'
+    AND version = $23
   RETURNING id
 `;
 
@@ -136,6 +139,7 @@ export function authorizeOwnedPolicy(input: {
     supersedesPolicyId: null,
     state: "APPROVED",
     strategyVersion: "V1.3",
+    entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
     strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
     strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
     championSelectionReviewId: input.champion.reviewId,
@@ -264,6 +268,9 @@ export async function persistOwnedPolicyApproval(
   if (input.policy.state !== "APPROVED" || input.policy.policyHash !== computeV13LiveMoneyPolicyHash(input.policy)) {
     return { ok: false, reason: "policy_hash_mismatch" };
   }
+  if (input.policy.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION) {
+    return { ok: false, reason: "production_entry_policy_revision_not_approved" };
+  }
   if (input.policy.createdBy !== input.ownerUserId) return { ok: false, reason: "policy_not_owned" };
   if (!db.transaction) return { ok: false, reason: "policy_approval_not_transactional" };
   try {
@@ -304,6 +311,8 @@ async function approveAndLink(
     input.policy.approvedAt?.toISOString() ?? null,
     input.policy.policyHash,
     input.ownerUserId,
+    input.policy.entryPolicyVersion,
+    input.policy.version,
   ]);
   if ((approved.rowCount ?? approved.rows.length) !== 1) throw new Error("policy_not_approved");
   const linked = await query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
