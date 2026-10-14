@@ -18,6 +18,7 @@ import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApprova
 import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
+  readOwnedApprovedFeeEvidence,
   commissionOwnedAccount,
   COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
   enableOwnedAccountExecution,
@@ -175,6 +176,34 @@ test("policy approval requires the owner, fee evidence, and explicit limits belo
   assert.equal(linked.ok, false);
   if (!linked.ok) assert.equal(linked.reason, "policy_not_linked");
   assert.equal(approvedRows, 1);
+});
+
+test("approved-policy fee evidence is read-only and rejects foreign or mismatched policy identity", async () => {
+  let calls = 0;
+  const absent = await readOwnedApprovedFeeEvidence({
+    query: async (_sql, params) => {
+      calls++;
+      assert.deepEqual(params, [USER]);
+      return { rows: [] };
+    },
+  }, USER);
+  assert.equal(absent.ok, false);
+  assert.equal(absent.reason, "policy_not_approved");
+
+  const outdated = await readOwnedApprovedFeeEvidence({
+    query: async (_sql, params) => {
+      calls++;
+      assert.deepEqual(params, [USER]);
+      return { rows: [{
+        id: "old-policy", version: 1, state: "APPROVED",
+        entry_policy_version: V13_LEGACY_ENTRY_POLICY,
+        strategy_parameter_hash: "a".repeat(64),
+      }] };
+    },
+  }, USER);
+  assert.equal(outdated.ok, false);
+  assert.equal(outdated.reason, "production_entry_policy_revision_not_approved");
+  assert.equal(calls, 2);
 });
 
 test("cash reconciliation records the subaccount read and does not transfer or enable execution", async () => {
