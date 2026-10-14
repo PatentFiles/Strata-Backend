@@ -30,6 +30,7 @@ import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
+  readOwnedApprovedFeeEvidence,
   commissionOwnedAccount,
   enableOwnedAccountExecution,
   enableSharedLiveInfrastructure,
@@ -790,6 +791,9 @@ export function createDatabaseUserScopePort(
     },
     async personalReadiness(userId) {
       return reportOwnedActivation(db, userId);
+    },
+    async approvedPolicyFeeEvidence(userId) {
+      return readOwnedApprovedFeeEvidence(db, userId);
     },
     async approvePolicy(userId, body) {
       const account = await ownedAccount(userId);
