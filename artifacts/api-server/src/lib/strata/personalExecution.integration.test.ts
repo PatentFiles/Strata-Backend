@@ -27,7 +27,7 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
   // Disposable PostgreSQL includes the public Drizzle schema; supply only the
   // private credential table shape needed by this read-only readiness join.
   await pool.query("CREATE SCHEMA IF NOT EXISTS private");
-  await pool.query(\`CREATE TABLE IF NOT EXISTS private.kalshi_connection_credentials (
+  await pool.query(`CREATE TABLE IF NOT EXISTS private.kalshi_connection_credentials (
     owner_user_id uuid NOT NULL,
     financial_account_id uuid,
     key_fingerprint text,
@@ -35,7 +35,7 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
     revoked_at timestamptz,
     verified_at timestamptz,
     verification_reason text
-  )\`);
+  )`);
   const owner = await reportOwnedActivation(pool, USER);
   assert.equal(owner.ok, true);
   assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
