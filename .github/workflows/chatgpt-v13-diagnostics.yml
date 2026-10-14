@@ -80,6 +80,12 @@ jobs:
             sudo apt-get install -y postgresql-16
           fi
           node scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts
+      - name: Test proportional risk presets and owner isolation
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/sharedPresets.test.ts --bundle --platform=node --format=cjs --outfile=dist/sharedPresets.test.cjs
+          node --test dist/sharedPresets.test.cjs
+          pnpm run test:v13-user-scope
       - name: Test index-2 provisioning route
         working-directory: artifacts/api-server
         run: |
