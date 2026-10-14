@@ -10,6 +10,7 @@ import { openOwnedExecutionSession, type AccountDispatchState } from "./accountP
 import { personalAccountSnapshot } from "./personalExchangeRead";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { UPSERT_STAKE_SQL } from "./userScopeDatabase";
+import { reportOwnedActivation } from "./personalAccountActivation";
 
 const url = process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.ok(url && /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url), "explicit disposable cluster required");
@@ -19,6 +20,33 @@ const ACCOUNT = "acct-personal";
 const STAKES = [100, 500, 25_000, 100_000, 500_000, 2_500_000];
 
 after(() => pool.end());
+
+
+test("owner readiness resolves its account with a UUID owner and text policy creator, while foreign owners stay isolated", async () => {
+  await reset();
+  // Disposable PostgreSQL includes the public Drizzle schema; supply only the
+  // private credential table shape needed by this read-only readiness join.
+  await pool.query("CREATE SCHEMA IF NOT EXISTS private");
+  await pool.query(\`CREATE TABLE IF NOT EXISTS private.kalshi_connection_credentials (
+    owner_user_id uuid NOT NULL,
+    financial_account_id uuid,
+    key_fingerprint text,
+    role text,
+    revoked_at timestamptz,
+    verified_at timestamptz,
+    verification_reason text
+  )\`);
+  const owner = await reportOwnedActivation(pool, USER);
+  assert.equal(owner.ok, true);
+  assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
+  assert.equal(owner.readyForLive, false);
+  assert.equal(owner.blockers.includes("policy_not_approved"), true);
+
+  const foreign = await reportOwnedActivation(pool, OTHER);
+  assert.equal(foreign.accountId, null);
+  assert.deepEqual(foreign.blockers, ["execution_account_missing"]);
+});
+
 
 test("owned stake revisions persist, and a stale revision cannot overwrite", async () => {
   await reset();
