@@ -736,7 +736,7 @@ export function createDatabaseUserScopePort(
       const scaled = scaleSharedRiskPreset(preset, fields.capitalLimitCents);
       if (!scaled.ok) return scaled;
       return {
-        ok: true, presetId: preset.id, presetRevision: preset.revision,
+        presetId: preset.id, presetRevision: preset.revision,
         referenceCapitalCents: preset.capitalLimitCents,
         ...scaled,
         approved: false as const, liveEnabled: false as const,
