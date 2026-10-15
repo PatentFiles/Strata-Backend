@@ -67,6 +67,15 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
       }
     },
   };
+  await pool.query(`CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding (
+    execution_account_id text PRIMARY KEY REFERENCES public.v13_production_account(id),
+    owner_user_id uuid NOT NULL,
+    exchange_transfer_id text NOT NULL UNIQUE,
+    transfer_created_at timestamptz NOT NULL,
+    primary_after_cents bigint NOT NULL CHECK (primary_after_cents = 0),
+    bot_after_cents bigint NOT NULL CHECK (bot_after_cents = 2500),
+    verified_at timestamptz NOT NULL
+  )`);
   const owner = await reportOwnedActivation(diagnosticDb, USER);
   assert.equal(owner.ok, true);
   assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed: " + diagnosticReadinessError);
