@@ -492,6 +492,43 @@ export async function mutateScopedKalshi(
   }
 }
 
+const OWNER_PILOT_TRANSFER_PATH = `${API_PREFIX}/portfolio/subaccounts/transfer`;
+
+/** Precisely one signed pilot transfer path. Never accepts a caller-provided
+ * URL, amount, shard, source, destination, or trading-order parameters.
+ * Only the owner's independently verified account_setup_execution key is used.
+ */
+export async function postScopedKalshiPilotTransfer(
+  creds: { keyId: string; privateKey: string },
+  clientTransferId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  if (!/^[a-f\d]{8}-[a-f\d]{4}-[1-8][a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i.test(clientTransferId)) {
+    throw new KalshiApiError("INVALID_RESPONSE");
+  }
+  if (process.env.KALSHI_API_ENVIRONMENT !== "production") throw new KalshiApiError("INVALID_CREDENTIALS");
+  const timestamp = Date.now().toString();
+  const response = await fetchImpl(`https://external-api.kalshi.com${OWNER_PILOT_TRANSFER_PATH}`, {
+    method: "POST", cache: "no-store", redirect: "manual",
+    signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
+    headers: {
+      Accept: "application/json", "Content-Type": "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE": signRequest(creds, "POST", OWNER_PILOT_TRANSFER_PATH, timestamp),
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    },
+    body: JSON.stringify({
+      client_transfer_id: clientTransferId, from_subaccount: 0,
+      to_subaccount: 1, amount_cents: 2500, exchange_index: 2,
+    }),
+  });
+  if (response.status !== 200) return { status: response.status, body: null, unreadable: true };
+  const raw = await response.text();
+  if (raw.trim()==="") return { status: 200, body: null, unreadable: false };
+  try { return { status: 200, body: JSON.parse(raw) as unknown, unreadable: false }; }
+  catch { return { status: 200, body: null, unreadable: true }; }
+}
+
 /**
  * The only user-scoped setup mutation transport. The path and exchange index
  * are fixed so callers cannot turn account setup authorization into a general
