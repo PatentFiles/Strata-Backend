@@ -32,6 +32,8 @@ export interface UserCommissioningStatus {
   setupReason: string;
   nextRequirement: AccountSetupNextRequirement | null;
   operationPreparationAvailable: boolean;
+  /** Null until an owner-scoped database read proves draft presence or absence. */
+  policyDraftExists: boolean | null;
   operationPreparations: PublicAccountSetupAttempt[];
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
