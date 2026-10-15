@@ -602,3 +602,81 @@ test("uploaded official fee bytes pass only the reviewed July 2026 PDF", async (
   if (!notPdf.ok) assert.equal(notPdf.reason, "invalid");
   assert.equal(JSON.stringify(accepted).includes("%PDF"), false);
 });
+
+
+test("429 cooldown respects Retry-After and never treats previous bytes as current evidence", async () => {
+  let clock = 1_000_000;
+  const official = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  const sequence = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain", retryAfter: "90" },
+    { status: 200, contentType: "application/pdf", body: official,
+      url: CANONICAL_FEE_SCHEDULE_URL },
+  ]);
+  const first = await establishOfficialFeeDigest(sequence.fetch, () => clock);
+  assert.equal(first.ok, false);
+  assert.equal(sequence.calls(), 1);
+
+  const paused = await establishOfficialFeeDigest(sequence.fetch, () => clock);
+  assert.equal(paused.ok, false);
+  assert.equal(sequence.calls(), 1, "no extra Kalshi GET during cooldown");
+  if (!paused.ok) {
+    assert.equal(paused.reason, "official_fee_schedule_http_429");
+    assert.equal(paused.diagnostic.httpStatus, 429);
+    assert.equal(paused.diagnostic.retryAfterSeconds, 90);
+    assert.equal(paused.diagnostic.networkAttempts, 0);
+    assert.equal("digest" in paused, false);
+  }
+  clock += 90_000;
+  const recovered = await establishOfficialFeeDigest(sequence.fetch, () => clock);
+  assert.equal(recovered.ok, true);
+  assert.equal(sequence.calls(), 2, "recovery requires new official bytes");
+  const next = await establishOfficialFeeDigest(sequence.fetch, () => clock);
+  assert.equal(next.ok, true);
+  assert.equal(sequence.calls(), 3, "success must never be cached for future approvals");
+});
+
+test("429 with missing Retry-After throttles repeated approvals for 60 seconds", async () => {
+  let clock = 2_000_000;
+  const seq = sequencedFeeFetch([
+    { status: 429, contentType: "text/plain" },
+  ]);
+  const first = await establishOfficialFeeDigest(seq.fetch, () => clock);
+  assert.equal(first.ok, false);
+  const next = await establishOfficialFeeDigest(seq.fetch, () => clock);
+  assert.equal(next.ok, false);
+  assert.equal(seq.calls(), 1);
+  if (!next.ok) {
+    assert.equal(next.diagnostic.retryAfterSeconds, 60);
+    assert.equal(next.diagnostic.networkAttempts, 0);
+    assert.equal("digest" in next, false);
+  }
+  clock += 60_000;
+  const retry = await establishOfficialFeeDigest(seq.fetch, () => clock);
+  assert.equal(retry.ok, false);
+  assert.equal(seq.calls(), 2, "retry only after delay, no automatic approval");
+});
+
+test("simultaneous official fee validations use one network request, without caching success", async () => {
+  let calls = 0;
+  const official = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls += 1;
+    await Promise.resolve();
+    return mockFeeResponse({
+      contentType: "application/pdf",
+      body: official,
+      url: CANONICAL_FEE_SCHEDULE_URL,
+    })(input, init);
+  }) as typeof fetch;
+  const [left, right] = await Promise.all([
+    establishOfficialFeeDigest(fetchImpl),
+    establishOfficialFeeDigest(fetchImpl),
+  ]);
+  assert.equal(left.ok, true);
+  assert.equal(right.ok, true);
+  assert.equal(calls, 1);
+  await establishOfficialFeeDigest(fetchImpl);
+  assert.equal(calls, 2, "next request independently checks the source");
+});

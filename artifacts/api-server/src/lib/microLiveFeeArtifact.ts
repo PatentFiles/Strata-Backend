@@ -524,10 +524,20 @@ async function validateFetchedOfficialFeePdf(
  * Hash the official PDF from one GET after the reviewed parser accepts it.
  * A 429 may wait once, and only when Retry-After is at most 15 seconds.
  */
-export async function establishOfficialFeeDigest(
-  fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<{ ok: true; digest: string; diagnostic: OfficialFeeFetchDiagnostic } |
-  { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic }> {
+type EstablishedOfficialFeeDigest =
+  | { ok: true; digest: string; diagnostic: OfficialFeeFetchDiagnostic }
+  | { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic };
+
+// One-flight protection and failure-only cooldown per fetch transport.
+// This NEVER caches an approval digest or accepts unverified fee evidence.
+// The default Node fetch is shared by requests in the same worker process.
+const officialFeeInFlight = new WeakMap<typeof fetch, Promise<EstablishedOfficialFeeDigest>>();
+const officialFee429CooldownUntil = new WeakMap<typeof fetch, number>();
+const MIN_429_COOLDOWN_SECONDS = 60;
+
+async function fetchAndEstablishOfficialFeeDigest(
+  fetchImpl: typeof fetch,
+): Promise<EstablishedOfficialFeeDigest> {
   let failure: { ok: false; reason: string; diagnostic: OfficialFeeFetchDiagnostic } | null = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     let response: Response;
@@ -555,4 +565,51 @@ export async function establishOfficialFeeDigest(
     reason: "official_fee_schedule_unavailable",
     diagnostic: { ...EMPTY_FEE_FETCH, networkAttempts: 2 },
   };
+}
+
+/**
+ * Suppress repeat requests while Kalshi is rate limiting the official PDF.
+ * Concurrent requests share exactly one live PDF verification; later requests
+ * never reuse success evidence and must independently fetch current bytes.
+ * The clock injection exists only for deterministic tests, never HTTP input.
+ */
+export async function establishOfficialFeeDigest(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  nowMs: () => number = Date.now,
+): Promise<EstablishedOfficialFeeDigest> {
+  const running = officialFeeInFlight.get(fetchImpl);
+  if (running) return running;
+
+  const retryAt = officialFee429CooldownUntil.get(fetchImpl) ?? 0;
+  const now = nowMs();
+  if (retryAt > now) {
+    return {
+      ok: false,
+      reason: "official_fee_schedule_http_429",
+      diagnostic: {
+        ...EMPTY_FEE_FETCH,
+        httpStatus: 429,
+        retryAfterSeconds: Math.ceil((retryAt - now) / 1000),
+        networkAttempts: 0,
+      },
+    };
+  }
+  const task: Promise<EstablishedOfficialFeeDigest> =
+    fetchAndEstablishOfficialFeeDigest(fetchImpl)
+      .then((result) => {
+        if (!result.ok && result.reason === "official_fee_schedule_http_429") {
+          const seconds = Math.max(
+            MIN_429_COOLDOWN_SECONDS,
+            Math.min(MAX_REPORTED_RETRY_AFTER_SECONDS,
+              result.diagnostic.retryAfterSeconds ?? MIN_429_COOLDOWN_SECONDS),
+          );
+          officialFee429CooldownUntil.set(fetchImpl, nowMs() + seconds * 1000);
+        } else if (result.ok) {
+          officialFee429CooldownUntil.delete(fetchImpl);
+        }
+        return result;
+      })
+      .finally(() => { officialFeeInFlight.delete(fetchImpl); });
+  officialFeeInFlight.set(fetchImpl, task);
+  return task;
 }
