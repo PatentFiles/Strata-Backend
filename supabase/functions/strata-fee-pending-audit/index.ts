@@ -24,7 +24,10 @@ function validPdf(bytes: Uint8Array): boolean {
 }
 
 async function sha256(bytes: Uint8Array): Promise<string> {
-  const hex = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  // WebCrypto requires an owned ArrayBuffer, not an ArrayBufferLike view.
+  const owned = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+  owned.set(bytes);
+  const hex = new Uint8Array(await crypto.subtle.digest("SHA-256", owned.buffer));
   return Array.from(hex, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
