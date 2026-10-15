@@ -35,7 +35,7 @@ function fixture() {
       return {rows:[{id:transferId}]};
     }
     if(sql.includes("pilot-transfer:status")){
-      return {rows:state?[{id:transferId,state,primary_before_cents:3450,
+      return {rows:state&&params?.[0]===OWNER?[{id:transferId,state,primary_before_cents:3450,
         bot_before_cents:0,primary_after_cents:primary,bot_after_cents:bot}]:[]};
     }
     if(sql.includes("pilot-transfer:read-attempt")){
