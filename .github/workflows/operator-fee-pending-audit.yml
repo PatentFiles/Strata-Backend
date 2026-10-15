@@ -1,0 +1,39 @@
+name: Operator fee PDF audit typecheck
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/functions/strata-fee-pending-audit/**'
+      - 'lib/db/drizzle/0022_strata_pending_fee_operator_identity.sql'
+      - '.github/workflows/operator-fee-pending-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  edge-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Typecheck JWT-protected read-only inspector
+        run: deno check --node-modules-dir=auto supabase/functions/strata-fee-pending-audit/index.ts
+      - name: Assert endpoint does not alter production fee authority
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('supabase/functions/strata-fee-pending-audit/index.ts').read_text()
+          assert 'strata_can_inspect_pending_fee_artifact' in s
+          assert 'operator-pending/kalshi-fee-schedule.pdf' in s
+          assert 'public, no-store' not in s
+          assert '.upload(' not in s and '.insert(' not in s and '.update(' not in s
+          assert 'officialFeeApproved: false' in s
+          assert 'canonicalOriginIndependentlyVerified: false' in s
+          print('Read-only safety invariants present')
+          PY
