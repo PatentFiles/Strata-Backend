@@ -45,7 +45,15 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
     bot_after_cents bigint,
     completed_at timestamptz
   )`);
-  const owner = await reportOwnedActivation(pool, USER);
+  const diagnosticDb = {
+    query: async (sql: string, params?: unknown[]) => {
+      try { return await pool.query(sql, params); }
+      catch (error) {
+        assert.fail(`Disposable readiness SQL failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  };
+  const owner = await reportOwnedActivation(diagnosticDb, USER);
   assert.equal(owner.ok, true);
   assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
   assert.equal(owner.readyForLive, false);
