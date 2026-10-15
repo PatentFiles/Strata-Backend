@@ -36,7 +36,21 @@ export interface UserCommissioningStatus {
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
 
+export interface PilotTransferView {
+  ok: boolean;
+  reason: string;
+  state: "unavailable" | "prepared" | "attempted" | "uncertain" | "completed";
+  attemptId: string | null;
+  amountCents: 2500;
+  primaryCents: number | null;
+  botCents: number | null;
+  transferAttempted: boolean;
+}
+
 export interface UserScopePort {
+  ownerPilotTransferStatus(userId:string):Promise<PilotTransferView>;
+  prepareOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
+  executeOwnerPilotTransfer(userId:string, body:unknown):Promise<PilotTransferView>;
   migrationReady(): Promise<boolean>;
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
@@ -126,6 +140,9 @@ export function closedUserScopePort(): UserScopePort {
     registerCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     revokeCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    ownerPilotTransferStatus: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
+    prepareOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
+    executeOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     recordFundingEvidence: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
     authorizeOperation: async () => ({ ok: false, reason: "user_scope_not_migrated", attempted: false, executable: false }),
@@ -277,6 +294,26 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     const result = await port.verifyCredential(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.get("/bot-transfer/status", async (_req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    const report=await port.ownerPilotTransferStatus(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.post("/bot-transfer/prepare", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const report=await port.prepareOwnerPilotTransfer(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.post("/bot-transfer/execute", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const report=await port.executeOwnerPilotTransfer(userId,req.body??{});
+    res.status(report.ok?200:409).json(sanitizePublic(report));
   });
   router.post("/funding-authorization", async (req, res) => {
     const userId = subject(res);
