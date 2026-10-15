@@ -3,7 +3,8 @@ import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus,
-  OWNER_PILOT_TRANSFER_CONFIRMATION, reconcileOwnedPilotTransfer } from "./ownedPilotTransfer";
+  OWNER_PILOT_TRANSFER_CONFIRMATION, reconcileOwnedPilotTransfer,
+  verifyOwnedHistoricalFunding, historicalFundingStatus } from "./ownedPilotTransfer";
 import { postScopedKalshiPilotTransfer } from "../kalshiAccountClient";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -19,6 +20,7 @@ function fixture() {
   let primary=3450,bot=0,posts=0;
   let exchangeRows:Record<string,unknown>[]=[];
   let historyError=false;
+  let storedHistorical:{owner:string;verified_at:string;transfer:string}|null=null;
   let attemptedSeconds=Math.floor(Date.now()/1000);
   const ownerRow={
     id:"owner-acct",owner_user_id:OWNER,financial_account_id:"33333333-3333-4333-8333-333333333333",
@@ -32,6 +34,16 @@ function fixture() {
   const query=async (sql:string,params?:unknown[])=>{
     if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK")return {rows:[]};
     if(sql.includes("pilot-transfer:owner-read"))return {rows:params?.[0]===OWNER?[ownerRow]:[]};
+    if(sql.includes("historical-funding:status")) {
+      return {rows:storedHistorical&&params?.[0]===storedHistorical.owner?
+        [{verified_at:storedHistorical.verified_at}]:[]};
+    }
+    if(sql.includes("historical-funding:record")) {
+      if(params?.[0]!==OWNER||params?.[1]!=="owner-acct"||params?.[4]!==0||params?.[5]!==2500)
+        return {rows:[]};
+      storedHistorical={owner:OWNER,verified_at:new Date().toISOString(),transfer:String(params?.[2])};
+      return {rows:[{verified_at:storedHistorical.verified_at}]};
+    }
     if(sql.includes("pilot-transfer:prepare")){
       assert.match(sql, /RETURNING id::text AS id\s*`?\s*$/m);
       assert.doesNotMatch(sql, /AS id::text/);
@@ -231,4 +243,48 @@ test("foreign owner, wrong index, timestamp, amount, or duplicate receipt never 
 test("signed transport refuses invalid ids and nonproduction environments",async()=>{
   await assert.rejects(()=>postScopedKalshiPilotTransfer(creds,"not-uuid",
     async()=>{throw new Error("unexpected network");}));
+});
+ 
+test("verified October-style historical funding records a distinct receipt without transfer POST",async()=>{
+  const f=fixture();
+  f.setBalances(0,2500);
+  f.setHistory([f.makeHistory()]);
+  const result=await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get});
+  assert.equal(result.ok,true);
+  assert.equal(result.historicalVerified,true);
+  assert.equal(result.transferAttempted,false);
+  assert.equal(f.getPosts(),0);
+  const status=await historicalFundingStatus(f.db,OWNER);
+  assert.equal(status.historicalVerified,true);
+  assert.equal((await historicalFundingStatus(f.db,FOREIGN)).historicalVerified,false);
+  assert.equal((await ownedPilotTransferStatus(f.db,OWNER)).state,"unavailable",
+    "never invent new transfer-ledger receipts");
+});
+
+test("historical evidence fails closed for foreign owner, mismatched cash or stale/outbound receipt",async()=>{
+  const f=fixture();
+  f.setBalances(0,2500);
+  f.setHistory([f.makeHistory()]);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,FOREIGN,{get:f.get})).ok,false);
+  f.setBalances(2500,0);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get})).ok,false);
+  f.setBalances(0,2500);
+  f.setHistory([{...f.makeHistory(),from_subaccount:1,to_subaccount:0}]);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get})).ok,false);
+  f.setHistory([{...f.makeHistory(),exchange_index:0}]);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get})).ok,false);
+  f.setHistory([{...f.makeHistory(),amount_cents:2400}]);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get})).ok,false);
+  f.setHistoryError(true);
+  assert.equal((await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get})).ok,false);
+  assert.equal(f.getPosts(),0);
+});
+
+test("historical verification rejects duplicate unique-latest-time receipts",async()=>{
+  const f=fixture();
+  f.setBalances(0,2500);
+  f.setHistory([f.makeHistory(),{...f.makeHistory(),transfer_id:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}]);
+  const result=await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get});
+  assert.equal(result.reason,"historical_transfer_history_ambiguous");
+  assert.equal(f.getPosts(),0);
 });
