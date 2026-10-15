@@ -12,10 +12,15 @@ const encoder = new TextEncoder();
 const endpoint = Deno.env.get("SUPABASE_URL");
 const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-function json(reason: string, status: number): Response {
-  return new Response(JSON.stringify({ ok: false, reason }), {
-    status, headers: { "content-type": "application/json", "cache-control": "no-store" },
-  });
+function json(reason: string, status: number, retryAfterSeconds?: number): Response {
+  const headers: Record<string, string> = {
+    "content-type": "application/json", "cache-control": "no-store",
+  };
+  if (status === 429 && Number.isSafeInteger(retryAfterSeconds) &&
+      retryAfterSeconds! >= 1 && retryAfterSeconds! <= 1800) {
+    headers["retry-after"] = String(retryAfterSeconds);
+  }
+  return new Response(JSON.stringify({ ok: false, reason }), { status, headers });
 }
 function hex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, "0")).join("");
@@ -107,8 +112,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Atomic project-wide cooldown; service role only. Anonymous clients
     // cannot invoke this RPC and cannot upload/read objects in the bucket.
     const claim = await client.rpc("strata_claim_official_fee_capture");
-    if (claim.error || claim.data !== true) {
-      return json("official_source_refresh_rate_limited_or_unavailable", 429);
+    if (claim.error) return json("capture_throttle_unavailable", 503);
+    if (claim.data !== true) {
+      // Read the shared lease instead of returning an arbitrary short wait.
+      // No network request to Kalshi is made when another worker owns it.
+      const throttle = await client.from("strata_official_fee_capture_throttle")
+        .select("next_allowed_at").eq("id", true).maybeSingle();
+      if (throttle.error || !throttle.data) return json("capture_throttle_unavailable", 503);
+      const next = Date.parse(throttle.data.next_allowed_at);
+      const seconds = Number.isFinite(next)
+        ? Math.max(1, Math.min(1800, Math.ceil((next - Date.now()) / 1000)))
+        : 1800;
+      return json("official_source_refresh_rate_limited_or_unavailable", 429, seconds);
     }
     let response: Response;
     try {
@@ -118,7 +133,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }, signal: AbortSignal.timeout(12000),
       });
     } catch { return json("canonical_source_network_unavailable", 503); }
-    if (!response.ok) return json(`canonical_source_http_${response.status}`, 502);
+    if (!response.ok) {
+      // The atomic capture lease is 30m even when the provider rejects the
+      // request. Return that window to the authenticated caller; never spin.
+      if (response.status === 429) return json("canonical_source_http_429", 429, 1800);
+      return json(`canonical_source_http_${response.status}`, 502);
+    }
     if (response.url !== OFFICIAL_URL ||
         response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()
           !== "application/pdf") return json("canonical_source_identity_invalid", 502);
