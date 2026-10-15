@@ -23,7 +23,7 @@ jobs:
       - name: Typecheck
         run: deno check --node-modules-dir=auto supabase/functions/strata-fee-operator-review/index.ts
       - name: Run operator input validation tests
-        run: deno test -A supabase/functions/strata-fee-operator-review/reviewValidation.test.ts
+        run: deno test --node-modules-dir=auto -A supabase/functions/strata-fee-operator-review/reviewValidation.test.ts
       - name: Ensure no production policy or trading authority is modified
         run: |
           python3 - <<'PY'
