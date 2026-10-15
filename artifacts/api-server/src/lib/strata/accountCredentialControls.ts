@@ -93,7 +93,7 @@ const OWNED_POLICY_DRAFT_SQL = `
     max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms
   FROM public.v13_live_money_policy
   WHERE execution_account_id = $1
-    AND created_by = $2::uuid
+    AND created_by = $2::text
     AND state = 'DRAFT'
   ORDER BY version DESC LIMIT 1
 `;
