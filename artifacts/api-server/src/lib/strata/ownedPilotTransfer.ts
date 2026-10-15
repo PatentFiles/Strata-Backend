@@ -401,15 +401,15 @@ export type HistoricalFundingResult = {
   historicalVerifiedAt: string | null; botCents: number | null;
   transferAttempted: false;
 };
-const HISTORY_STATUS_SQL = String.raw\`
+const HISTORY_STATUS_SQL = `
  -- historical-funding:status
  SELECT h.verified_at::text AS verified_at FROM private.kalshi_owner_historical_funding h
  JOIN v13_production_account a ON a.id=h.execution_account_id
  WHERE a.owner_user_id=$1::uuid AND h.owner_user_id=$1::uuid
    AND a.subaccount=1 AND a.exchange_index=2
  ORDER BY h.verified_at DESC LIMIT 1
-\`;
-const HISTORY_SAVE_SQL = String.raw\`
+`;
+const HISTORY_SAVE_SQL = `
  -- historical-funding:record
  INSERT INTO private.kalshi_owner_historical_funding
    (owner_user_id,execution_account_id,exchange_transfer_id,transfer_created_at,
@@ -424,7 +424,7 @@ const HISTORY_SAVE_SQL = String.raw\`
  WHERE private.kalshi_owner_historical_funding.owner_user_id=EXCLUDED.owner_user_id
    AND private.kalshi_owner_historical_funding.transfer_created_at <= EXCLUDED.transfer_created_at
  RETURNING verified_at::text AS verified_at
-\`;
+`;
 export async function historicalFundingStatus(db:Query,userId:string):Promise<HistoricalFundingResult>{
   try {
     const result=await db.query(HISTORY_STATUS_SQL,[userId]);
@@ -461,7 +461,7 @@ export async function verifyOwnedHistoricalFunding(
   for(let page=0;page<5;page++){
     let payload:unknown;
     try{payload=await read(bound.creds,TRANSFERS,
-      \`?limit=100\${cursor?"&cursor="+encodeURIComponent(cursor):""}\`);}
+      `?limit=100${cursor?"&cursor="+encodeURIComponent(cursor):""}`);}
     catch{return refusal("historical_transfer_history_unavailable",balances.bot);}
     if(!payload||typeof payload!=="object"||Array.isArray(payload))
       return refusal("historical_transfer_history_invalid",balances.bot);
