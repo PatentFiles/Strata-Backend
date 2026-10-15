@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS public.strata_official_fee_captures (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   canonical_url text NOT NULL CHECK (canonical_url = 'https://kalshi.com/docs/kalshi-fee-schedule.pdf'),
   content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
-  storage_path text NOT NULL CHECK (storage_path ~ '^official/[0-9a-f]{64}\\.pdf$'),
+  storage_path text NOT NULL CHECK (storage_path ~ '^official/[0-9a-f]{64}\.pdf$'),
   byte_length integer NOT NULL CHECK (byte_length BETWEEN 100 AND 2000000),
   captured_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
