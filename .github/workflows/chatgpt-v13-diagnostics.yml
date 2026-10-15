@@ -87,6 +87,13 @@ jobs:
           node --test dist/ownedPilotTransfer.test.cjs
           pnpm exec esbuild src/lib/strata/ownedPilotTransfer.postgres.test.ts --bundle --platform=node --format=cjs --external:@electric-sql/pglite --outfile=dist/ownedPilotTransfer.postgres.test.cjs
           node --test dist/ownedPilotTransfer.postgres.test.cjs
+      - name: Test owner-shard 0 to 2 allocation and one-shot safety
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerShardAllocation.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerShardAllocation.test.cjs
+          node --test dist/ownerShardAllocation.test.cjs
+          pnpm exec esbuild src/lib/strata/ownerShardAllocation.postgres.test.ts --bundle --platform=node --format=cjs --external:@electric-sql/pglite --outfile=dist/ownerShardAllocation.postgres.test.cjs
+          node --test dist/ownerShardAllocation.postgres.test.cjs
       - name: Test proportional risk presets and owner isolation
         working-directory: artifacts/api-server
         run: |

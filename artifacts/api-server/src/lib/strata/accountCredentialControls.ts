@@ -1,4 +1,7 @@
 import { emptyUserExecutionView } from "./userExecutionScope";
+import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
+  executeOwnerShardAllocation, reconcileOwnerShardAllocation,
+  type ShardAllocationView } from "./ownerShardAllocation";
 import {
   prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus,
   type PilotResult,
@@ -480,6 +483,22 @@ export function accountCredentialControls(
           return probed;
         },
       });
+    },
+    async ownerShardAllocationStatus(userId: string): Promise<ShardAllocationView> {
+      return ownerShardAllocationStatus(db, userId);
+    },
+    async prepareOwnerShardAllocation(userId: string): Promise<ShardAllocationView> {
+      return prepareOwnerShardAllocation(db, userId, { read: options.kalshiGet });
+    },
+    async executeOwnerShardAllocation(userId: string, body: unknown): Promise<ShardAllocationView> {
+      const input = body && typeof body==="object" && !Array.isArray(body)
+        ? body as Record<string,unknown> : {};
+      return executeOwnerShardAllocation(db, userId, {
+        attemptId: input.attemptId, confirmation: input.confirmation,
+      }, { read: options.kalshiGet });
+    },
+    async reconcileOwnerShardAllocation(userId: string): Promise<ShardAllocationView> {
+      return reconcileOwnerShardAllocation(db, userId, { read: options.kalshiGet });
     },
     async ownerPilotTransferStatus(userId: string): Promise<PilotResult> {
       return ownedPilotTransferStatus(db, userId);

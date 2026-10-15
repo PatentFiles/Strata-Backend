@@ -36,6 +36,13 @@ export interface UserCommissioningStatus {
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
 
+export interface ShardAllocationView {
+  ok:boolean; reason:string;
+  state:"unavailable"|"prepared"|"attempted"|"uncertain"|"completed";
+  attemptId:string|null; amountCents:2500; sourceCents:number|null;
+  destinationCents:number|null; botCents:number|null; exchangeTransferId:string|null;
+  transferAttempted:boolean;
+}
 export interface PilotTransferView {
   ok: boolean;
   reason: string;
@@ -48,6 +55,10 @@ export interface PilotTransferView {
 }
 
 export interface UserScopePort {
+  ownerShardAllocationStatus(userId:string):Promise<ShardAllocationView>;
+  prepareOwnerShardAllocation(userId:string):Promise<ShardAllocationView>;
+  executeOwnerShardAllocation(userId:string,body:unknown):Promise<ShardAllocationView>;
+  reconcileOwnerShardAllocation(userId:string):Promise<ShardAllocationView>;
   ownerPilotTransferStatus(userId:string):Promise<PilotTransferView>;
   prepareOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
   executeOwnerPilotTransfer(userId:string, body:unknown):Promise<PilotTransferView>;
@@ -140,6 +151,10 @@ export function closedUserScopePort(): UserScopePort {
     registerCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     revokeCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
+    ownerShardAllocationStatus: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
+    prepareOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
+    executeOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
+    reconcileOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
     ownerPilotTransferStatus: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     prepareOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     executeOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
@@ -294,6 +309,35 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     const result = await port.verifyCredential(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // The primary index 0 -> index 2 allocation is independently funded and
+  // reconciled. These routes never invoke bot trading or the bot-subaccount POST.
+  router.get("/shard-allocation/status", async (_req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.status(200).json(sanitizePublic(await port.ownerShardAllocationStatus(userId)));
+  });
+  router.post("/shard-allocation/prepare", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const report=await port.prepareOwnerShardAllocation(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.post("/shard-allocation/execute", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const report=await port.executeOwnerShardAllocation(userId,req.body??{});
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.post("/shard-allocation/reconcile", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    // This operation reads Kalshi and persists only verified receipt metadata.
+    const report=await port.reconcileOwnerShardAllocation(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
   });
   router.get("/bot-transfer/status", async (_req, res) => {
     const userId=subject(res);
