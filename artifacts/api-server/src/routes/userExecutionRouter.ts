@@ -34,6 +34,18 @@ export interface UserCommissioningStatus {
   operationPreparationAvailable: boolean;
   /** Null until an owner-scoped database read proves draft presence or absence. */
   policyDraftExists: boolean | null;
+  /** Owner-scoped saved draft; strictly read-only, approval still needs confirmation. */
+  policyDraft: {
+    policyId: string;
+    version: number;
+    capitalLimitCents: number;
+    maxEntryStakeCents: number;
+    maxEntryAllInCents: number;
+    maxDailyLossCents: number;
+    maxTotalLossCents: number;
+    maxQuoteAgeMs: number;
+    maxFeeEvidenceAgeMs: number;
+  } | null;
   operationPreparations: PublicAccountSetupAttempt[];
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
@@ -185,6 +197,7 @@ export function closedUserScopePort(): UserScopePort {
       nextRequirement: null,
       operationPreparationAvailable: false,
       policyDraftExists: null,
+      policyDraft: null,
       operationPreparations: [],
       nextAuthorizedAction: {
         action: "resolve_account_setup_blocker",

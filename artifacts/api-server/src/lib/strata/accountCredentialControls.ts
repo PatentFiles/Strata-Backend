@@ -87,14 +87,48 @@ const FUNDING_TABLE_SQL = `
 
 // Read-only and owner-scoped: a DRAFT is not linked to the execution account until
 // approval. The Wallets checklist must never infer a saved draft from APPROVED alone.
-const OWNED_POLICY_DRAFT_EXISTS_SQL = `
-  SELECT EXISTS (
-    SELECT 1 FROM public.v13_live_money_policy
-    WHERE execution_account_id = $1
-      AND created_by = $2::uuid
-      AND state = 'DRAFT'
-  ) AS draft_exists
+const OWNED_POLICY_DRAFT_SQL = `
+  SELECT id::text AS policy_id, version, capital_limit_cents,
+    max_entry_stake_cents, max_entry_all_in_cents, max_daily_loss_cents,
+    max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms
+  FROM public.v13_live_money_policy
+  WHERE execution_account_id = $1
+    AND created_by = $2::uuid
+    AND state = 'DRAFT'
+  ORDER BY version DESC LIMIT 1
 `;
+
+// Only these public risk limits may leave the trusted backend. No policy approval,
+// strategy parameters, credentials, or authority can be changed by reading them.
+type OwnedDraftView = {
+  policyId: string;
+  version: number;
+  capitalLimitCents: number;
+  maxEntryStakeCents: number;
+  maxEntryAllInCents: number;
+  maxDailyLossCents: number;
+  maxTotalLossCents: number;
+  maxQuoteAgeMs: number;
+  maxFeeEvidenceAgeMs: number;
+};
+function safeOwnedDraft(row: Record<string, unknown>): OwnedDraftView | null {
+  const policyId = row.policy_id;
+  if (typeof policyId !== 'string' || !/^[0-9a-f-]{36}$/i.test(policyId)) return null;
+  const fields = [
+    'version', 'capital_limit_cents', 'max_entry_stake_cents',
+    'max_entry_all_in_cents', 'max_daily_loss_cents', 'max_total_loss_cents',
+    'max_quote_age_ms', 'max_fee_evidence_age_ms',
+  ] as const;
+  const nums = fields.map((field) => Number(row[field]));
+  if (!nums.every((n) => Number.isSafeInteger(n) && n > 0)) return null;
+  return {
+    policyId, version: nums[0]!,
+    capitalLimitCents: nums[1]!, maxEntryStakeCents: nums[2]!,
+    maxEntryAllInCents: nums[3]!, maxDailyLossCents: nums[4]!,
+    maxTotalLossCents: nums[5]!, maxQuoteAgeMs: nums[6]!,
+    maxFeeEvidenceAgeMs: nums[7]!,
+  };
+}
 const SETUP_ATTEMPT_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_operation_attempts') AS name
 `;
@@ -661,6 +695,7 @@ export function accountCredentialControls(
           ...setup,
           operationPreparationAvailable: false,
           policyDraftExists: null as boolean | null,
+          policyDraft: null as OwnedDraftView | null,
           subaccountCreationExecutionRoleAvailable: false,
           operationPreparations: [] as PublicAccountSetupAttempt[],
           nextAuthorizedAction: nextAuthorizedSetupAction(setup, false, false, []),
@@ -673,14 +708,18 @@ export function accountCredentialControls(
         : { roles: [] };
       let policyOwned = false;
       let policyDraftExists: boolean | null = null;
+      let policyDraft: OwnedDraftView | null = null;
       if (resolved.ok && resolved.context.executionAccountId) {
         try {
-          const draft = await db.query(OWNED_POLICY_DRAFT_EXISTS_SQL,
+          const draft = await db.query(OWNED_POLICY_DRAFT_SQL,
             [resolved.context.executionAccountId, userId]);
-          policyDraftExists = draft.rows[0]?.draft_exists === true;
+          policyDraftExists = draft.rows.length === 0 ? false : true;
+          // Bad or unexpected data must not supply an approvable policy.
+          policyDraft = draft.rows.length === 1 ? safeOwnedDraft(draft.rows[0]!) : null;
+          if (policyDraftExists && !policyDraft) policyDraftExists = null;
         } catch {
-          // A failed database read is unknown, never evidence that no draft exists.
           policyDraftExists = null;
+          policyDraft = null;
         }
         try {
           const policy = await db.query(SCOPED_POLICY_SQL, [resolved.context.executionAccountId, userId]);
@@ -754,6 +793,7 @@ export function accountCredentialControls(
         ...setup,
         operationPreparationAvailable,
         policyDraftExists,
+        policyDraft,
         subaccountCreationExecutionRoleAvailable: creationExecutionRoleAvailable,
         operationPreparations,
         nextAuthorizedAction: nextAuthorizedSetupAction(
