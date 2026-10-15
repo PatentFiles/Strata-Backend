@@ -71,7 +71,14 @@ const PREPARE_SQL = `
    provider_connection_id,authority_credential_id,authority_fingerprint,
    source_before_cents,destination_before_cents,bot_before_cents)
  VALUES ($1::uuid,$2::uuid,$3,$4::uuid,$5::uuid,$6::uuid,$7,$8,0,0)
- ON CONFLICT (execution_account_id) DO NOTHING RETURNING id::text AS id
+ ON CONFLICT (execution_account_id) DO UPDATE
+   SET source_before_cents=EXCLUDED.source_before_cents,
+       prepared_at=now(),updated_at=now()
+   WHERE private.kalshi_owner_shard_allocations.state='prepared'
+     AND private.kalshi_owner_shard_allocations.owner_user_id=EXCLUDED.owner_user_id
+     AND private.kalshi_owner_shard_allocations.authority_credential_id=EXCLUDED.authority_credential_id
+     AND private.kalshi_owner_shard_allocations.authority_fingerprint=EXCLUDED.authority_fingerprint
+ RETURNING id::text AS id
 `;
 const ATTEMPT_SQL = `
  -- shard-allocation:attempt
