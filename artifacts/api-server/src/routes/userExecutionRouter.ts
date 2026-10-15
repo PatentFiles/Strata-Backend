@@ -1,5 +1,6 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
+import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -524,6 +525,34 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     const result = await port.draftPolicy(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // Step 6: authenticated, strictly READ-ONLY validation of the currently
+  // published Kalshi fee schedule. No approved policy, fee write, or trading
+  // authorization is necessary. Step 9 and 11 MUST independently verify it
+  // again; this endpoint is informational, not a source of approval authority.
+  router.get("/fees/preflight", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await establishOfficialFeeDigest();
+    if (!result.ok) {
+      return void res.status(409).json(sanitizePublic({
+        ok: false,
+        reason: result.reason,
+        retryAfterSeconds: result.reason === "official_fee_schedule_http_429"
+          ? result.diagnostic.retryAfterSeconds ?? 60
+          : undefined,
+      }));
+    }
+    res.json(sanitizePublic({
+      ok: true,
+      reason: "official_fee_verified_read_only",
+      feeArtifactDigest: result.digest,
+      checkedAt: new Date().toISOString(),
+      sourceUrl: "https://kalshi.com/docs/kalshi-fee-schedule.pdf",
+      policyApproved: false,
+      commissioningPerformed: false,
+    }));
   });
   router.get("/policy/evidence", async (_req, res) => {
     const userId = subject(res);
