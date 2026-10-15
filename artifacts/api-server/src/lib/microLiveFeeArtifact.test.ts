@@ -636,25 +636,28 @@ test("429 cooldown respects Retry-After and never treats previous bytes as curre
   assert.equal(sequence.calls(), 3, "success must never be cached for future approvals");
 });
 
-test("429 with missing Retry-After throttles repeated approvals for 60 seconds", async () => {
+test("repeated Kalshi 429s back off 60s, 120s, 240s without approving or caching bytes", async () => {
   let clock = 2_000_000;
   const seq = sequencedFeeFetch([
     { status: 429, contentType: "text/plain" },
+    { status: 429, contentType: "text/plain" },
+    { status: 429, contentType: "text/plain" },
   ]);
-  const first = await establishOfficialFeeDigest(seq.fetch, () => clock);
-  assert.equal(first.ok, false);
-  const next = await establishOfficialFeeDigest(seq.fetch, () => clock);
-  assert.equal(next.ok, false);
-  assert.equal(seq.calls(), 1);
-  if (!next.ok) {
-    assert.equal(next.diagnostic.retryAfterSeconds, 60);
-    assert.equal(next.diagnostic.networkAttempts, 0);
-    assert.equal("digest" in next, false);
+  for (const [index, expectedCooldown] of [60, 120, 240].entries()) {
+    const blocked = await establishOfficialFeeDigest(seq.fetch, () => clock);
+    assert.equal(blocked.ok, false);
+    assert.equal(seq.calls(), index + 1, "at most one new GET after each cooldown");
+    const stillBlocked = await establishOfficialFeeDigest(seq.fetch, () => clock);
+    assert.equal(stillBlocked.ok, false);
+    assert.equal(seq.calls(), index + 1, "no extra GET while fee source is blocked");
+    if (!stillBlocked.ok) {
+      assert.equal(stillBlocked.reason, "official_fee_schedule_http_429");
+      assert.equal(stillBlocked.diagnostic.retryAfterSeconds, expectedCooldown);
+      assert.equal(stillBlocked.diagnostic.networkAttempts, 0);
+      assert.equal("digest" in stillBlocked, false);
+    }
+    clock += expectedCooldown * 1000;
   }
-  clock += 60_000;
-  const retry = await establishOfficialFeeDigest(seq.fetch, () => clock);
-  assert.equal(retry.ok, false);
-  assert.equal(seq.calls(), 2, "retry only after delay, no automatic approval");
 });
 
 test("simultaneous official fee validations use one network request, without caching success", async () => {
