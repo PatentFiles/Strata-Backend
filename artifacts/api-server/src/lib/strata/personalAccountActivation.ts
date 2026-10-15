@@ -36,7 +36,14 @@ type Transactional = Queryable & {
 const READINESS_SQL = `
   -- personal-activation:readiness
   SELECT a.id, a.commissioned, a.execution_enabled, a.kill_switch,
-         a.cash_precision_verified, a.fee_artifact_digest, a.subaccount, a.exchange_index,
+         a.cash_precision_verified, a.cash_micros::text AS cash_micros,
+         a.reconciled_at,
+         (SELECT MAX(t.completed_at) FROM private.kalshi_owner_pilot_transfers t
+            WHERE t.execution_account_id=a.id
+              AND t.owner_user_id=a.owner_user_id
+              AND t.state='completed' AND t.bot_after_cents >= 2500
+         ) AS verified_funding_at,
+         a.fee_artifact_digest, a.subaccount, a.exchange_index,
          a.key_fingerprint, a.policy_id,
          p.state AS policy_state, p.fee_policy_version, p.fee_source_url, p.fee_formula_version,
          stake.configured_stake_cents,
@@ -75,6 +82,15 @@ const COMMISSION_SQL = `
     AND execution_enabled = false
     AND kill_switch = true
     AND cash_precision_verified = true
+    AND cash_micros >= 25000000
+    AND reconciled_at IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM private.kalshi_owner_pilot_transfers t
+      WHERE t.execution_account_id = v13_production_account.id
+        AND t.owner_user_id = v13_production_account.owner_user_id
+        AND t.state='completed' AND t.bot_after_cents >= 2500
+        AND v13_production_account.reconciled_at >= t.completed_at
+    )
     AND policy_id IS NOT NULL
     AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
     AND (commissioned = false OR commissioning_digest = $3)
@@ -358,7 +374,16 @@ function activationBlockers(row: Record<string, unknown>, gate: Record<string, u
   if (row.policy_state !== "APPROVED" || !text(row.policy_id)) blockers.push("policy_not_approved");
   const stake = Number(row.configured_stake_cents);
   if (!Number.isSafeInteger(stake) || stake < 1) blockers.push("configured_stake_missing");
-  if (!flag(row.cash_precision_verified)) blockers.push("cash_not_reconciled");
+  // A pre-funding $0 read was historically flagged as "verified". Never
+  // commission from that stale receipt: require positive cash and an owner-
+  // scoped reconciliation at/after the real completed $25 bot transfer.
+  const cashMicros = Number(row.cash_micros);
+  const reconciledAt = Date.parse(String(row.reconciled_at ?? ""));
+  const fundedAt = Date.parse(String(row.verified_funding_at ?? ""));
+  if (!flag(row.cash_precision_verified) ||
+      !Number.isSafeInteger(cashMicros) || cashMicros < 25_000_000 ||
+      !Number.isFinite(reconciledAt) || !Number.isFinite(fundedAt) ||
+      reconciledAt < fundedAt) blockers.push("cash_not_reconciled");
   const exitMicros = Number(row.minimum_exit_micros);
   if (!Number.isSafeInteger(exitMicros) || exitMicros < 1 || exitMicros > 999_999) blockers.push("minimum_exit_missing");
   if (!/^[0-9a-f]{64}$/.test(text(row.fee_artifact_digest) ?? "")) blockers.push("fee_evidence_missing");
