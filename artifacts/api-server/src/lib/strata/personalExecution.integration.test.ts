@@ -10,7 +10,7 @@ import { openOwnedExecutionSession, type AccountDispatchState } from "./accountP
 import { personalAccountSnapshot } from "./personalExchangeRead";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { UPSERT_STAKE_SQL } from "./userScopeDatabase";
-import { reportOwnedActivation } from "./personalAccountActivation";
+import { reportOwnedActivation, readOwnedApprovedFeeEvidence } from "./personalAccountActivation";
 
 const url = process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.ok(url && /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url), "explicit disposable cluster required");
@@ -41,6 +41,14 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
   assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
   assert.equal(owner.readyForLive, false);
   assert.equal(owner.blockers.includes("policy_not_approved"), true);
+
+  // Executes the real read-only fee-evidence JOIN against PostgreSQL. The
+  // owner has no approved policy, so this must return a blocker, not throw
+  // SQLSTATE 42883 (operator does not exist: text = uuid).
+  const fee = await readOwnedApprovedFeeEvidence(pool, USER);
+  assert.deepEqual(fee, { ok: false, reason: "policy_not_approved" });
+  const foreignFee = await readOwnedApprovedFeeEvidence(pool, OTHER);
+  assert.deepEqual(foreignFee, { ok: false, reason: "policy_not_approved" });
 
   const foreign = await reportOwnedActivation(pool, OTHER);
   assert.equal(foreign.accountId, null);
