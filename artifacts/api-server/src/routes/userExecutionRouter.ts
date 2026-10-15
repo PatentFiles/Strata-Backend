@@ -184,6 +184,7 @@ export function closedUserScopePort(): UserScopePort {
       setupReason: "user_scope_not_migrated",
       nextRequirement: null,
       operationPreparationAvailable: false,
+      policyDraftExists: null,
       operationPreparations: [],
       nextAuthorizedAction: {
         action: "resolve_account_setup_blocker",
