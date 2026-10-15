@@ -72,8 +72,14 @@ const PREPARE_SQL = `
   (id,owner_user_id,execution_account_id,financial_account_id,provider_connection_id,
    authority_credential_id,authority_fingerprint,primary_before_cents,bot_before_cents)
  VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5::uuid,$6::uuid,$7,$8,0)
- ON CONFLICT (execution_account_id) DO NOTHING
- RETURNING id::text AS id
+ ON CONFLICT (execution_account_id) DO UPDATE
+ SET primary_before_cents=EXCLUDED.primary_before_cents,
+     authority_credential_id=EXCLUDED.authority_credential_id,
+     authority_fingerprint=EXCLUDED.authority_fingerprint,
+     prepared_at=now(),updated_at=now()
+ WHERE private.kalshi_owner_pilot_transfers.state='prepared'
+   AND private.kalshi_owner_pilot_transfers.owner_user_id=EXCLUDED.owner_user_id
+ RETURNING id::text AS id::text AS id
 `;
 const READ_ATTEMPT_SQL = `
  -- pilot-transfer:read-attempt
@@ -88,7 +94,7 @@ const CLAIM_SQL = `
  UPDATE private.kalshi_owner_pilot_transfers
  SET state='attempted',attempted_at=now(),updated_at=now()
  WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared'
- AND prepared_at >= now()-interval '60 seconds'
+ AND prepared_at >= now()-interval '5 minutes'
  AND authority_credential_id=$3::uuid AND authority_fingerprint=$4
  AND EXISTS (
    SELECT 1 FROM v13_production_account a
@@ -200,7 +206,7 @@ export async function prepareOwnedPilotTransfer(db:TxDb,userId:string,options:{g
       return readOnly("existing_transfer_requires_reconciliation",
         row?.state==="completed"?"completed":"uncertain",typeof row?.id==="string"?row.id:null,balances.primary,balances.bot);
     }
-    return readOnly("pilot_prepared","prepared",attemptId,balances.primary,balances.bot);
+    return readOnly("pilot_prepared","prepared",String(inserted.rows[0]?.id),balances.primary,balances.bot);
   }catch{
     try{await client.query("ROLLBACK");}catch{/* fail closed */}
     return readOnly("transfer_preparation_failed");
@@ -226,7 +232,7 @@ export async function executeOwnedPilotTransfer(db:TxDb,userId:string,input:{
   if(plan.authority_credential_id!==bound.row.credential_id ||
     plan.authority_fingerprint!==bound.row.key_fingerprint ||
     plan.execution_account_id!==bound.row.id ||
-    Date.now()-Number(plan.prepared_ms)>60_000)
+    Date.now()-Number(plan.prepared_ms)>300_000)
     return readOnly("transfer_plan_expired_or_changed","prepared",attemptId);
   const get=options.get??defaultGet;
   const balances=await scopedBalances(bound.creds,get);
