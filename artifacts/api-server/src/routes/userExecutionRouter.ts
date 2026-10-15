@@ -68,6 +68,10 @@ export interface PilotTransferView {
   transferAttempted: boolean;
 }
 
+export interface HistoricalFundingView {
+  ok:boolean; reason:string; historicalVerified:boolean;
+  historicalVerifiedAt:string|null; botCents:number|null; transferAttempted:false;
+}
 export interface UserScopePort {
   ownerShardAllocationStatus(userId:string):Promise<ShardAllocationView>;
   prepareOwnerShardAllocation(userId:string):Promise<ShardAllocationView>;
@@ -75,6 +79,8 @@ export interface UserScopePort {
   reconcileOwnerShardAllocation(userId:string):Promise<ShardAllocationView>;
   ownerPilotTransferStatus(userId:string):Promise<PilotTransferView>;
   reconcileOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
+  historicalFundingStatus(userId:string):Promise<HistoricalFundingView>;
+  verifyHistoricalFunding(userId:string):Promise<HistoricalFundingView>;
   prepareOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
   executeOwnerPilotTransfer(userId:string, body:unknown):Promise<PilotTransferView>;
   migrationReady(): Promise<boolean>;
@@ -172,6 +178,8 @@ export function closedUserScopePort(): UserScopePort {
     reconcileOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
     ownerPilotTransferStatus: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     reconcileOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
+    historicalFundingStatus: async () => ({ok:false,reason:"user_scope_not_migrated",historicalVerified:false,historicalVerifiedAt:null,botCents:null,transferAttempted:false}),
+    verifyHistoricalFunding: async () => ({ok:false,reason:"user_scope_not_migrated",historicalVerified:false,historicalVerifiedAt:null,botCents:null,transferAttempted:false}),
     prepareOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     executeOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
@@ -363,6 +371,19 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     // This route NEVER calls a Kalshi transfer POST. Only signed history/balance GETs.
     const report=await port.reconcileOwnerPilotTransfer(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.get("/historical-funding/status", async (_req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.status(200).json(sanitizePublic(await port.historicalFundingStatus(userId)));
+  });
+  router.post("/historical-funding/verify", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    // Signed Kalshi GET and receipt evidence persistence ONLY; no fund transfer.
+    const report=await port.verifyHistoricalFunding(userId);
     res.status(report.ok?200:409).json(sanitizePublic(report));
   });
   router.get("/bot-transfer/status", async (_req, res) => {
