@@ -74,6 +74,7 @@ export interface UserScopePort {
   executeOwnerShardAllocation(userId:string,body:unknown):Promise<ShardAllocationView>;
   reconcileOwnerShardAllocation(userId:string):Promise<ShardAllocationView>;
   ownerPilotTransferStatus(userId:string):Promise<PilotTransferView>;
+  reconcileOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
   prepareOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
   executeOwnerPilotTransfer(userId:string, body:unknown):Promise<PilotTransferView>;
   migrationReady(): Promise<boolean>;
@@ -170,6 +171,7 @@ export function closedUserScopePort(): UserScopePort {
     executeOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
     reconcileOwnerShardAllocation: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, sourceCents:null, destinationCents:null, botCents:null, exchangeTransferId:null, transferAttempted:false }),
     ownerPilotTransferStatus: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
+    reconcileOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     prepareOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     executeOwnerPilotTransfer: async () => ({ ok:false, reason:"user_scope_not_migrated", state:"unavailable" as const, attemptId:null, amountCents:2500 as const, primaryCents:null, botCents:null, transferAttempted:false }),
     authorizeFunding: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, transferAttempted: false }),
