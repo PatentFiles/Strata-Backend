@@ -3,7 +3,7 @@ import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
   executeOwnerShardAllocation, reconcileOwnerShardAllocation,
   type ShardAllocationView } from "./ownerShardAllocation";
 import {
-  prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus,
+  prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus, reconcileOwnedPilotTransfer,
   type PilotResult,
 } from "./ownedPilotTransfer";
 import type { UserScopeQuery } from "./userScopeDatabase";
@@ -547,6 +547,9 @@ export function accountCredentialControls(
     },
     async ownerPilotTransferStatus(userId: string): Promise<PilotResult> {
       return ownedPilotTransferStatus(db, userId);
+    },
+    async reconcileOwnerPilotTransfer(userId: string): Promise<PilotResult> {
+      return reconcileOwnedPilotTransfer(db, userId, { get: options.kalshiGet });
     },
     async prepareOwnerPilotTransfer(userId: string): Promise<PilotResult> {
       return prepareOwnedPilotTransfer(db, userId, { get: options.kalshiGet });
