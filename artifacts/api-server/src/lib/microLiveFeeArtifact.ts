@@ -474,13 +474,81 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
-  return fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
-    method: "GET",
-    headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
-    redirect: "error",
-    signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+/** Trusted alternate egress. The Edge Function accepts NO caller-controlled URL
+ * or file, retrieves Kalshi's exact canonical URL itself, and privately stores
+ * SHA-256-addressed bytes with a <=1h source lease. Never use on arbitrary URLs.
+ * All returned bytes still pass the ordinary strict pdfjs July-schedule parser.
+ */
+const SUPABASE_FEE_PROJECT_URL = "https://wqsmfbzfbiilhtzpqbrb.supabase.co";
+const SUPABASE_FEE_EDGE_URL =
+  SUPABASE_FEE_PROJECT_URL + "/functions/v1/strata-official-fee-source";
+const MAX_FEE_EDGE_CAPTURE_AGE_MS = 60 * 60 * 1000;
+const HEX_SHA256 = /^[a-f0-9]{64}$/;
+
+export async function fetchTrustedFeeFromSupabaseBridge(
+  bridgeFetch: typeof fetch,
+  projectUrl: string | undefined,
+  anonJwt: string | undefined,
+  nowMs: () => number = Date.now,
+): Promise<Response | null> {
+  if (projectUrl?.replace(/\/$/, "") !== SUPABASE_FEE_PROJECT_URL ||
+      !anonJwt || anonJwt.length < 80 || anonJwt.length > 4096) return null;
+  let res: Response;
+  try {
+    res = await bridgeFetch(SUPABASE_FEE_EDGE_URL, {
+      method: "GET", redirect: "error",
+      headers: { Accept: "application/pdf", Authorization: `Bearer ${anonJwt}`,
+        apikey: anonJwt, "Cache-Control": "no-cache" },
+      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS + 8_000),
+    });
+  } catch { return null; }
+  if (res.status !== 200 || res.url && res.url !== SUPABASE_FEE_EDGE_URL ||
+      mediaType(res.headers.get("content-type")) !== "application/pdf" ||
+      res.headers.get("x-strata-canonical-source") !== CANONICAL_FEE_SCHEDULE_URL) {
+    return null;
+  }
+  const recorded = res.headers.get("x-strata-source-sha256") ?? "";
+  const captured = Date.parse(res.headers.get("x-strata-captured-at") ?? "");
+  if (!HEX_SHA256.test(recorded) || !Number.isFinite(captured) ||
+      captured > nowMs() + 10_000 || nowMs() - captured >= MAX_FEE_EDGE_CAPTURE_AGE_MS) {
+    return null;
+  }
+  let bytes: Buffer | null;
+  try { bytes = await readPdfWithinLimit(res); } catch { return null; }
+  if (!bytes || createHash("sha256").update(bytes).digest("hex") !== recorded) return null;
+  // Synthetic response has no URL; validateFetchedOfficialFeePdf treats its
+  // audited, fixed canonical-source attestation as the original location.
+  // The source parser still rejects any new, ambiguous or altered fee schedule.
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: { "content-type": "application/pdf", "content-length": String(bytes.length) },
   });
+}
+
+async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
+      method: "GET",
+      headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
+      redirect: "error",
+      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+    });
+  } catch (error) {
+    // The trusted Edge function is a fallback solely for production transport
+    // failures. Injected test fetches never trigger network access.
+    if (fetchImpl !== globalThis.fetch) throw error;
+    const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
+      process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
+    if (alternate) return alternate;
+    throw error;
+  }
+  if (response.status === 429 && fetchImpl === globalThis.fetch) {
+    const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
+      process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
+    if (alternate) return alternate;
+  }
+  return response;
 }
 
 /**

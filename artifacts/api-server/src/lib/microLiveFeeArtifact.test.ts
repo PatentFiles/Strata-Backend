@@ -31,6 +31,7 @@ import {
   CANONICAL_FEE_SCHEDULE_URL, MAX_FEE_SCHEDULE_BYTES, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   STANDING_FEE_POLICY_VERSION, establishOfficialFeeDigest, parseFeeSchedulePdf, parseFeeScheduleText,
   verifyCurrentFeeArtifact, verifyOfficialFeePdfBytes,
+  fetchTrustedFeeFromSupabaseBridge,
 } from "./microLiveFeeArtifact";
 
 function examplePdf(text: string): Buffer {
@@ -603,6 +604,50 @@ test("uploaded official fee bytes pass only the reviewed July 2026 PDF", async (
   assert.equal(JSON.stringify(accepted).includes("%PDF"), false);
 });
 
+
+test("trusted Supabase bridge requires exact project, official origin, fresh hash-bound PDF", async () => {
+  const bytes = readFileSync(resolve(process.cwd(),
+    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+  const goodHash = createHash("sha256").update(bytes).digest("hex");
+  const now = Date.parse("2026-10-15T20:00:00Z");
+  const origin = "https://wqsmfbzfbiilhtzpqbrb.supabase.co";
+  const anonJwt = "x".repeat(100);
+  const props = {
+    "content-type": "application/pdf",
+    "x-strata-canonical-source": CANONICAL_FEE_SCHEDULE_URL,
+    "x-strata-source-sha256": goodHash,
+    "x-strata-captured-at": new Date(now - 5000).toISOString(),
+  };
+  const responding = (headers: Record<string,string>, body: Buffer = bytes) =>
+    (async (url: string | Request | URL, init?: RequestInit) => {
+      assert.equal(String(url), origin + "/functions/v1/strata-official-fee-source");
+      assert.equal(init?.method, "GET");
+      assert.equal(init?.redirect, "error");
+      assert.equal((init?.headers as Record<string,string>).apikey, anonJwt);
+      return new Response(new Uint8Array(body), { status: 200, headers });
+    }) as typeof fetch;
+  const result = await fetchTrustedFeeFromSupabaseBridge(responding(props), origin,
+    anonJwt, () => now);
+  assert.ok(result);
+  assert.equal((await verifyOfficialFeePdfBytes(Buffer.from(await result!.arrayBuffer()))).ok, true);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props),
+    "https://wrong-project.supabase.co", anonJwt, () => now), null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding({
+    ...props, "x-strata-source-sha256": "0".repeat(64),
+  }), origin, anonJwt, () => now), null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding({
+    ...props, "x-strata-canonical-source": "https://attacker.invalid/fee.pdf",
+  }), origin, anonJwt, () => now), null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding({
+    ...props, "x-strata-captured-at": new Date(now - 3600001).toISOString(),
+  }), origin, anonJwt, () => now), null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding({
+    ...props, "content-type": "text/html",
+  }), origin, anonJwt, () => now), null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props,
+    Buffer.from("%PDF-tampered" + "x".repeat(500) + "%%EOF")),
+    origin, anonJwt, () => now), null);
+});
 
 test("429 cooldown respects Retry-After and never treats previous bytes as current evidence", async () => {
   let clock = 1_000_000;
