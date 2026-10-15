@@ -649,6 +649,28 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
     origin, anonJwt, () => now), null);
 });
 
+test("trusted bridge cooldown reports retry without accepting any fee artifact", async () => {
+  const origin = "https://wqsmfbzfbiilhtzpqbrb.supabase.co";
+  const jwt = "x".repeat(100);
+  const throttled = (async (url: string | Request | URL) => {
+    assert.equal(String(url), origin + "/functions/v1/strata-official-fee-source");
+    return new Response(JSON.stringify({
+      ok: false, reason: "official_source_refresh_rate_limited_or_unavailable",
+    }), { status: 429, headers: {
+      "content-type": "application/json", "retry-after": "1270",
+    } });
+  }) as typeof fetch;
+  const result = await fetchTrustedFeeFromSupabaseBridge(throttled, origin, jwt);
+  assert.equal(result?.status, 429);
+  assert.equal(result?.headers.get("retry-after"), "1270");
+  assert.notEqual(result?.headers.get("content-type"), "application/pdf");
+  // Reject unbounded retry headers rather than deriving authority from them.
+  const unbounded = (async () => new Response("{}", { status: 429, headers: {
+    "content-type": "application/json", "retry-after": "999999",
+  } })) as typeof fetch;
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(unbounded, origin, jwt), null);
+});
+
 test("429 cooldown respects Retry-After and never treats previous bytes as current evidence", async () => {
   let clock = 1_000_000;
   const official = readFileSync(resolve(process.cwd(),
