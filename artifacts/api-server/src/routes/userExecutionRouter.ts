@@ -355,6 +355,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const report=await port.reconcileOwnerShardAllocation(userId);
     res.status(report.ok?200:409).json(sanitizePublic(report));
   });
+  router.post("/bot-transfer/reconcile", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    // This route NEVER calls a Kalshi transfer POST. Only signed history/balance GETs.
+    const report=await port.reconcileOwnerPilotTransfer(userId);
+    res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
   router.get("/bot-transfer/status", async (_req, res) => {
     const userId=subject(res);
     if(!userId)return void res.status(401).json({error:"Unauthorized"});
