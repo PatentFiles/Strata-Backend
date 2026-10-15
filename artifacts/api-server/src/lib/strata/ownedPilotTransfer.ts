@@ -79,7 +79,7 @@ const PREPARE_SQL = `
      prepared_at=now(),updated_at=now()
  WHERE private.kalshi_owner_pilot_transfers.state='prepared'
    AND private.kalshi_owner_pilot_transfers.owner_user_id=EXCLUDED.owner_user_id
- RETURNING id::text AS id::text AS id
+ RETURNING id::text AS id
 `;
 const READ_ATTEMPT_SQL = `
  -- pilot-transfer:read-attempt
