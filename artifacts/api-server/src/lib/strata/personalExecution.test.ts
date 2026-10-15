@@ -71,6 +71,33 @@ test("readiness joins TEXT policy owner to UUID account and reports blockers rat
   assert.equal(failure.readyForLive, false);
 });
 
+test("commissioning readiness rejects stale pre-transfer zero-cash verification", async () => {
+  const owner = {
+    id: "owner-1", subaccount: 1, exchange_index: 2,
+    key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
+    policy_id: "policy-1", policy_state: "APPROVED", configured_stake_cents: 100,
+    cash_precision_verified: true, cash_micros: "0",
+    reconciled_at: "2026-10-15T16:26:22.935Z",
+    verified_funding_at: "2026-10-15T17:52:26.418Z",
+    minimum_exit_micros: 10000, fee_artifact_digest: "a".repeat(64),
+    commissioned: false, execution_enabled: false, kill_switch: true,
+    activation_requests: 0,
+  };
+  const db = { query: async (sql: string) =>
+    ({ rows: sql.includes("personal-activation:readiness")
+      ? [owner] : [{ live_execution_enabled: false, manual_kill_switch: true }] }) };
+  const stale = await reportOwnedActivation(db, USER);
+  assert.ok(stale.blockers.includes("cash_not_reconciled"));
+  assert.equal(stale.readyForCommissioning, false);
+  owner.cash_micros = "25000000";
+  const stillStale = await reportOwnedActivation(db, USER);
+  assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
+  owner.reconciled_at = "2026-10-15T17:53:00.000Z";
+  const fresh = await reportOwnedActivation(db, USER);
+  assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
+  assert.equal(fresh.readyForCommissioning, true); // commissioning still requires separate owner consent
+});
+
 test("order book evidence fails closed without a fee, depth, or a fresh clock", () => {
   const book = parseKalshiOrderBook({
     orderbook_fp: { yes_dollars: [["0.4500", "12.00"]], no_dollars: [["0.5000", "8.00"]] },
@@ -609,7 +636,10 @@ test("commissioning requires an explicit minimum exit and activation does not ch
     id: "acct-a", subaccount: 1, exchange_index: 2,
     key_fingerprint: "aa".repeat(32), credential_fingerprint: "aa".repeat(32),
     policy_state: "APPROVED", policy_id: "policy-1", configured_stake_cents: 100,
-    cash_precision_verified: true, minimum_exit_micros: 1_000,
+    cash_precision_verified: true, cash_micros: "25000000",
+    reconciled_at: "2026-10-13T18:00:00.000Z",
+    verified_funding_at: "2026-10-13T17:59:00.000Z",
+    minimum_exit_micros: 1_000,
     fee_artifact_digest: "bb".repeat(32), commissioned: true, execution_enabled: false,
     kill_switch: true, commissioning_digest: "cc".repeat(32), activation_requests: 0,
   };

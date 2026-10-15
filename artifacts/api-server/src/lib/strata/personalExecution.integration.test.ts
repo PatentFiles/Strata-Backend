@@ -36,6 +36,15 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
     verified_at timestamptz,
     verification_reason text
   )`);
+  // The new personal commissioning read verifies bot-funding provenance.
+  // Supply the owner-ledger schema in the disposable fixture (no live funds).
+  await pool.query(`CREATE TABLE IF NOT EXISTS private.kalshi_owner_pilot_transfers (
+    execution_account_id text NOT NULL,
+    owner_user_id uuid NOT NULL,
+    state text NOT NULL,
+    bot_after_cents bigint,
+    completed_at timestamptz
+  )`);
   const owner = await reportOwnedActivation(pool, USER);
   assert.equal(owner.ok, true);
   assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
