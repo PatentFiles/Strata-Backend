@@ -298,8 +298,11 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   router.get("/bot-transfer/status", async (_req, res) => {
     const userId=subject(res);
     if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    // Status is a read-only receipt, not a mutation acknowledgement.
+    // Uncertain, attempted, and missing records MUST remain inspectable after
+    // a reload; a non-2xx response previously concealed their state in the UI.
     const report=await port.ownerPilotTransferStatus(userId);
-    res.status(report.ok?200:409).json(sanitizePublic(report));
+    res.status(200).json(sanitizePublic(report));
   });
   router.post("/bot-transfer/prepare", async (req, res) => {
     const userId=subject(res);
