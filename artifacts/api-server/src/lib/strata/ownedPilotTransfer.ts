@@ -245,8 +245,11 @@ export async function executeOwnedPilotTransfer(db:TxDb,userId:string,input:{
   try{
     await client.query("BEGIN");
     const x=await client.query(CLAIM_SQL,[attemptId,userId,bound.row.credential_id,bound.row.key_fingerprint]);
-    claimed=x.rows.length===1;
+    const matched=x.rows.length===1;
     await client.query("COMMIT");
+    // Never issue a financial POST if the durable claim's COMMIT failed
+    // or its outcome is unknown: the persisted idempotency fence must exist.
+    claimed=matched;
   }catch{
     try{await client.query("ROLLBACK");}catch{/* fail closed */}
   }finally{client.release();}

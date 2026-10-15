@@ -97,6 +97,29 @@ test("no transfer without separate owner confirmation; strictly one exchange POS
   assert.equal((await ownedPilotTransferStatus(f.db,FOREIGN)).state,"unavailable");
 });
 
+test("uncertain database COMMIT cannot authorize an exchange transfer POST",async()=>{
+  const fixtureState=fixture();
+  const prepared=await prepareOwnedPilotTransfer(fixtureState.db,OWNER,{get:fixtureState.get});
+  assert.equal(prepared.ok,true);
+  const connect=fixtureState.db.connect;
+  fixtureState.db.connect=async()=>{
+    const client=await connect();
+    return {
+      ...client,
+      query:async(sql:string,params?:unknown[])=>{
+        if(sql==="COMMIT")throw new Error("commit_connection_lost");
+        return client.query(sql,params);
+      },
+    };
+  };
+  const result=await executeOwnedPilotTransfer(fixtureState.db,OWNER,{
+    attemptId:prepared.attemptId,
+    confirmation:OWNER_PILOT_TRANSFER_CONFIRMATION,
+  },{get:fixtureState.get,post:fixtureState.post,allowTestTransport:true});
+  assert.equal(result.ok,false);
+  assert.equal(fixtureState.getPosts(),0);
+});
+
 test("foreign identity, disabled safety gates and ambiguous exchange response always block",async()=>{
   const f=fixture();
   assert.equal((await prepareOwnedPilotTransfer(f.db,FOREIGN,{get:f.get})).ok,false);
