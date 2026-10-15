@@ -17,6 +17,7 @@ assert.ok(fingerprint);
 function fixture(){
   let state:string|null=null,attempt:string|null=null,exchangeId:string|null=null;
   let cash0=3450,cash2=0,bot=0,posts=0,preparedAt=Date.now(),allowOwner=true;
+  let receiptStatus="complete",receiptAmount="25.0000",receiptDestinationShard=2;
   const owner={id:"acct-one",owner_user_id:USER,financial_account_id:"33333333-3333-4333-8333-333333333333",
     connection_id:"44444444-4444-4444-8444-444444444444",
     credential_id:"55555555-5555-4555-8555-555555555555",
@@ -65,8 +66,8 @@ function fixture(){
   const read=async (_creds:typeof cred,path:string,qs:string):Promise<unknown>=>{
     if(path.includes("intra_exchange_instance_transfers/")){
       return {transfer:{transfer_id:exchangeId,source:"event_contract",destination:"event_contract",
-        source_exchange_shard:0,destination_exchange_shard:2,
-        amount:"25.0000",status:"completed"}};
+        source_exchange_shard:0,destination_exchange_shard:receiptDestinationShard,
+        amount:receiptAmount,status:receiptStatus}};
     }
     if(path!=="/trade-api/v2/portfolio/balance")throw new Error("unexpected path");
     const mapping:Record<string,[number,number,number]>={
@@ -84,6 +85,9 @@ function fixture(){
   };
   return {db,read,post,posts:()=>posts,setUnsafe:()=>{owner.kill_switch=false;},
     setDestination:(n:number)=>{cash2=n;},setSource:(n:number)=>{cash0=n;},
+    setReceiptStatus:(v:string)=>{receiptStatus=v;},
+    setReceiptAmount:(v:string)=>{receiptAmount=v;},
+    setReceiptDestinationShard:(v:number)=>{receiptDestinationShard=v;},
     rejectPost:async()=>{posts++;throw Error("timeout after acceptance");},
     state:()=>state};
 }
@@ -136,6 +140,36 @@ test("owner confirmation makes exactly ONE accepted POST; completion requires re
   assert.equal(verified.sourceCents,950);
   assert.equal(f.posts(),1);
 });
+test("official Kalshi pending receipt never completes or posts a duplicate",async()=>{
+  const f=fixture();
+  const plan=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
+  await executeOwnerShardAllocation(f.db,USER,
+    {attemptId:plan.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION},
+    {read:f.read,post:f.post,enableTestPost:true});
+  f.setReceiptStatus("pending");
+  const checked=await reconcileOwnerShardAllocation(f.db,USER,{read:f.read});
+  assert.equal(checked.state,"uncertain");
+  assert.equal(checked.reason,"shard_exchange_receipt_not_complete");
+  assert.equal(f.posts(),1);
+  f.setReceiptStatus("complete");
+  assert.equal((await reconcileOwnerShardAllocation(f.db,USER,{read:f.read})).state,"completed");
+  assert.equal(f.posts(),1);
+});
+
+test("Kalshi complete receipt with wrong destination or amount cannot finalize funding",async()=>{
+  const f=fixture();
+  const plan=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
+  await executeOwnerShardAllocation(f.db,USER,
+    {attemptId:plan.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION},
+    {read:f.read,post:f.post,enableTestPost:true});
+  f.setReceiptDestinationShard(1);
+  assert.equal((await reconcileOwnerShardAllocation(f.db,USER,{read:f.read})).state,"uncertain");
+  f.setReceiptDestinationShard(2);
+  f.setReceiptAmount("24.0000");
+  assert.equal((await reconcileOwnerShardAllocation(f.db,USER,{read:f.read})).state,"uncertain");
+  assert.equal(f.posts(),1);
+});
+
 test("timeout is uncertain and unreplayable, with no fabricated cash receipt",async()=>{
   const f=fixture();const p=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
   const result=await executeOwnerShardAllocation(f.db,USER,{

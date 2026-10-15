@@ -306,7 +306,8 @@ export async function reconcileOwnerShardAllocation(db:Pool,uid:string,
     const x=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:null;
     const t=x && x.transfer && typeof x.transfer==="object"&&!Array.isArray(x.transfer)
       ? x.transfer as Row:null;
-    if(!t||t.transfer_id!==plan.exchange_transfer_id||t.status!=="completed"||
+    // Kalshi receipt enum is "pending" | "complete"; "completed" is our DB state.
+    if(!t||t.transfer_id!==plan.exchange_transfer_id||t.status!=="complete"||
       t.source!=="event_contract"||t.destination!=="event_contract"||
       Number(t.source_exchange_shard)!==0||Number(t.destination_exchange_shard)!==2||
       // Authenticated transfer receipt uses a 4-decimal dollar string.
