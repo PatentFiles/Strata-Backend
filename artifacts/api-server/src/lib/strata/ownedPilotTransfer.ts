@@ -395,6 +395,122 @@ export async function reconcileOwnedPilotTransfer(
   return readOnly("pilot_completed","completed",id,balances.primary,balances.bot,true);
 }
 
+
+export type HistoricalFundingResult = {
+  ok: boolean; reason: string; historicalVerified: boolean;
+  historicalVerifiedAt: string | null; botCents: number | null;
+  transferAttempted: false;
+};
+const HISTORY_STATUS_SQL = `
+ -- historical-funding:status
+ SELECT h.verified_at::text AS verified_at FROM private.kalshi_owner_historical_funding h
+ JOIN v13_production_account a ON a.id=h.execution_account_id
+ WHERE a.owner_user_id=$1::uuid AND h.owner_user_id=$1::uuid
+   AND a.subaccount=1 AND a.exchange_index=2
+ ORDER BY h.verified_at DESC LIMIT 1
+`;
+const HISTORY_SAVE_SQL = `
+ -- historical-funding:record
+ INSERT INTO private.kalshi_owner_historical_funding
+   (owner_user_id,execution_account_id,exchange_transfer_id,transfer_created_at,
+    primary_after_cents,bot_after_cents,verified_at)
+ VALUES ($1::uuid,$2,$3,to_timestamp($4::bigint),$5,$6,now())
+ -- Historical provenance is immutable. Never replace a previously
+ -- verified receipt with a later/ambiguous cash movement on repeated clicks.
+ ON CONFLICT (execution_account_id) DO NOTHING
+ RETURNING verified_at::text AS verified_at
+`;
+export async function historicalFundingStatus(db:Query,userId:string):Promise<HistoricalFundingResult>{
+  try {
+    const result=await db.query(HISTORY_STATUS_SQL,[userId]);
+    const verified=result.rows.length===1&&typeof result.rows[0]!.verified_at==="string";
+    return {ok:verified,reason:verified?"historical_funding_verified":"historical_funding_unverified",
+      historicalVerified:verified,historicalVerifiedAt:verified?String(result.rows[0]!.verified_at):null,
+      botCents:null,transferAttempted:false};
+  }catch{
+    return {ok:false,reason:"historical_funding_status_unavailable",
+      historicalVerified:false,historicalVerifiedAt:null,botCents:null,transferAttempted:false};
+  }
+}
+/**
+ * Record a verified EXISTING transfer independently from the newly introduced
+ * transfer-intent ledgers. Signed GETs only. Never creates/retroactively
+ * completes a new transfer attempt; never approves or enables execution.
+ */
+export async function verifyOwnedHistoricalFunding(
+  db:Query,userId:string,options:{get?:Get;nowSeconds?:()=>number}={}
+):Promise<HistoricalFundingResult>{
+  const refusal=(reason:string,botCents:number|null=null):HistoricalFundingResult=>
+    ({ok:false,reason,historicalVerified:false,historicalVerifiedAt:null,botCents,transferAttempted:false});
+  const bound=await boundOwner(db,userId);
+  if(!bound)return refusal("historical_owner_or_safety_unproven");
+  const read=options.get??defaultGet;
+  const balances=await scopedBalances(bound.creds,read);
+  if(!balances)return refusal("historical_cash_unavailable");
+  // This pilot has exactly $25 in bot subaccount 1 on exchange shard 2.
+  if(balances.primary!==0||balances.bot!==PILOT_CENTS)
+    return refusal("historical_cash_pair_mismatch",balances.bot);
+  const seen=new Set<string>();
+  const rows:Array<{id:string;time:number;from:number;to:number;amount:number;index:number}>=[];
+  const visited=new Set<string>();let cursor="";let exhausted=false;
+  for(let page=0;page<5;page++){
+    let payload:unknown;
+    try{payload=await read(bound.creds,TRANSFERS,
+      `?limit=100${cursor?"&cursor="+encodeURIComponent(cursor):""}`);}
+    catch{return refusal("historical_transfer_history_unavailable",balances.bot);}
+    if(!payload||typeof payload!=="object"||Array.isArray(payload))
+      return refusal("historical_transfer_history_invalid",balances.bot);
+    const data=payload as Record<string,unknown>;
+    if(!Array.isArray(data.transfers))return refusal("historical_transfer_history_invalid",balances.bot);
+    for(const raw of data.transfers){
+      if(!raw||typeof raw!=="object"||Array.isArray(raw))
+        return refusal("historical_transfer_history_invalid",balances.bot);
+      const row=raw as Record<string,unknown>;
+      const id=row.transfer_id;
+      const time=row.created_ts;
+      const from=row.from_subaccount,to=row.to_subaccount;
+      const amount=row.amount_cents,index=row.exchange_index;
+      if(typeof id!=="string"||id.length<8||id.length>128||seen.has(id)||
+        !Number.isSafeInteger(time)||Number(time)<=0||
+        !Number.isSafeInteger(from)||!Number.isSafeInteger(to)||
+        !Number.isSafeInteger(amount)||!Number.isSafeInteger(index))
+        return refusal("historical_transfer_history_invalid",balances.bot);
+      seen.add(id);
+      rows.push({id,time:Number(time),from:Number(from),to:Number(to),
+        amount:Number(amount),index:Number(index)});
+    }
+    const next=data.cursor;
+    if(next===undefined||next===null||next===""){exhausted=true;break;}
+    if(typeof next!=="string"||next.length>1024||visited.has(next))
+      return refusal("historical_transfer_history_invalid",balances.bot);
+    visited.add(next);cursor=next;
+  }
+  if(!exhausted)return refusal("historical_transfer_history_incomplete",balances.bot);
+  // The last Index-2 movement involving the bot must be a unique $25 inbound
+  // receipt; older inbound and outbound transfers remain historical context.
+  const relevant=rows.filter(r=>r.index===2&&(r.from===1||r.to===1));
+  if(!relevant.length)return refusal("historical_transfer_receipt_missing",balances.bot);
+  relevant.sort((a,b)=>b.time-a.time);
+  const latest=relevant[0]!;
+  const now=options.nowSeconds?.()??Math.floor(Date.now()/1000);
+  if(relevant.length>1&&relevant[1]!.time===latest.time)
+    return refusal("historical_transfer_history_ambiguous",balances.bot);
+  if(latest.from!==0||latest.to!==1||latest.amount!==PILOT_CENTS||
+    latest.time>now+120||latest.time<now-30*86400)
+    return refusal("historical_transfer_latest_mismatch",balances.bot);
+  // Never attach a receipt to another owner's account, even if it was
+  // previously stored by another user (DB unique receipt constraint).
+  try {
+    const saved=await db.query(HISTORY_SAVE_SQL,
+      [userId,bound.row.id,latest.id,latest.time,balances.primary,balances.bot]);
+    if(saved.rows.length!==1||typeof saved.rows[0]!.verified_at!=="string")
+      return refusal("historical_funding_persistence_unverified",balances.bot);
+    return {ok:true,reason:"historical_funding_verified",historicalVerified:true,
+      historicalVerifiedAt:String(saved.rows[0]!.verified_at),
+      botCents:balances.bot,transferAttempted:false};
+  }catch{return refusal("historical_funding_persistence_unverified",balances.bot);}
+}
+
 export async function ownedPilotTransferStatus(db:Query,userId:string):Promise<PilotResult>{
   try{
     const found=await db.query(STATUS_SQL,[userId]);

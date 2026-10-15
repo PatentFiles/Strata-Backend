@@ -45,9 +45,40 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
     bot_after_cents bigint,
     completed_at timestamptz
   )`);
-  const owner = await reportOwnedActivation(pool, USER);
+  // Readiness uses historical evidence as an alternative to new pilot receipts.
+  // Keep this schema in the disposable PostgreSQL fixture only. Without it,
+  // the read fails closed (accountId:null) even for valid existing owners.
+  await pool.query(`CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding (
+    execution_account_id text PRIMARY KEY,
+    owner_user_id uuid NOT NULL,
+    exchange_transfer_id text NOT NULL UNIQUE,
+    transfer_created_at timestamptz NOT NULL,
+    primary_after_cents bigint NOT NULL CHECK (primary_after_cents = 0),
+    bot_after_cents bigint NOT NULL CHECK (bot_after_cents = 2500),
+    verified_at timestamptz NOT NULL
+  )`);
+  let diagnosticReadinessError = "";
+  const diagnosticDb = {
+    query: async (sql: string, params?: unknown[]) => {
+      try { return await pool.query(sql, params); }
+      catch (error) {
+        diagnosticReadinessError = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    },
+  };
+  await pool.query(`CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding (
+    execution_account_id text PRIMARY KEY REFERENCES public.v13_production_account(id),
+    owner_user_id uuid NOT NULL,
+    exchange_transfer_id text NOT NULL UNIQUE,
+    transfer_created_at timestamptz NOT NULL,
+    primary_after_cents bigint NOT NULL CHECK (primary_after_cents = 0),
+    bot_after_cents bigint NOT NULL CHECK (bot_after_cents = 2500),
+    verified_at timestamptz NOT NULL
+  )`);
+  const owner = await reportOwnedActivation(diagnosticDb, USER);
   assert.equal(owner.ok, true);
-  assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed due to a PostgreSQL type mismatch");
+  assert.equal(owner.accountId, ACCOUNT, "valid owned account must not fail closed: " + diagnosticReadinessError);
   assert.equal(owner.readyForLive, false);
   assert.equal(owner.blockers.includes("policy_not_approved"), true);
 
