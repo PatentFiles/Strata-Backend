@@ -317,12 +317,9 @@ export async function verifyCurrentFeeArtifact(
 
   let response: Response;
   try {
-    response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
-      method: "GET",
-      headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
-      redirect: "error",
-      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
-    });
+    // Reuse the same fixed-source, short-lived, integrity-checked bridge
+    // as policy approval. Test-injected fetches NEVER acquire a fallback.
+    response = await fetchOfficialFeeSchedule(fetchImpl);
   } catch {
     return failure("unavailable", "official_fee_schedule_unavailable");
   }
