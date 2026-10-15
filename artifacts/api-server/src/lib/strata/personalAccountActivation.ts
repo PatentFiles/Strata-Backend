@@ -136,7 +136,7 @@ export async function readOwnedApprovedFeeEvidence(
            p.fee_policy_version, p.fee_source_url, p.fee_formula_version
     FROM v13_production_account a
     JOIN v13_live_money_policy p ON p.id = a.policy_id
-      AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id
+      AND p.execution_account_id = a.id AND p.created_by = a.owner_user_id::text
     WHERE a.owner_user_id = $1::uuid
       AND a.owner_user_id IS NOT NULL AND a.subaccount = 1
       AND a.exchange_index = 2 AND p.state = 'APPROVED'
