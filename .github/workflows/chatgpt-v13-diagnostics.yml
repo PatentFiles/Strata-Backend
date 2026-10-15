@@ -92,6 +92,8 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/ownerShardAllocation.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerShardAllocation.test.cjs
           node --test dist/ownerShardAllocation.test.cjs
+          pnpm exec esbuild src/lib/strata/ownerShardAllocation.postgres.test.ts --bundle --platform=node --format=cjs --external:@electric-sql/pglite --outfile=dist/ownerShardAllocation.postgres.test.cjs
+          node --test dist/ownerShardAllocation.postgres.test.cjs
       - name: Test proportional risk presets and owner isolation
         working-directory: artifacts/api-server
         run: |
