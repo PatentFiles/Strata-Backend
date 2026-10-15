@@ -32,6 +32,8 @@ export interface UserCommissioningStatus {
   setupReason: string;
   nextRequirement: AccountSetupNextRequirement | null;
   operationPreparationAvailable: boolean;
+  /** Null until an owner-scoped database read proves draft presence or absence. */
+  policyDraftExists: boolean | null;
   operationPreparations: PublicAccountSetupAttempt[];
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
@@ -182,6 +184,7 @@ export function closedUserScopePort(): UserScopePort {
       setupReason: "user_scope_not_migrated",
       nextRequirement: null,
       operationPreparationAvailable: false,
+      policyDraftExists: null,
       operationPreparations: [],
       nextAuthorizedAction: {
         action: "resolve_account_setup_blocker",

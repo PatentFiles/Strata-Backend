@@ -84,6 +84,17 @@ const LEASE_TABLE_SQL = `
 const FUNDING_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_funding') AS name
 `;
+
+// Read-only and owner-scoped: a DRAFT is not linked to the execution account until
+// approval. The Wallets checklist must never infer a saved draft from APPROVED alone.
+const OWNED_POLICY_DRAFT_EXISTS_SQL = `
+  SELECT EXISTS (
+    SELECT 1 FROM public.v13_live_money_policy
+    WHERE execution_account_id = $1
+      AND created_by = $2::uuid
+      AND state = 'DRAFT'
+  ) AS draft_exists
+`;
 const SETUP_ATTEMPT_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_operation_attempts') AS name
 `;
@@ -649,6 +660,7 @@ export function accountCredentialControls(
           blockers: ["credential_migration_missing"],
           ...setup,
           operationPreparationAvailable: false,
+          policyDraftExists: null as boolean | null,
           subaccountCreationExecutionRoleAvailable: false,
           operationPreparations: [] as PublicAccountSetupAttempt[],
           nextAuthorizedAction: nextAuthorizedSetupAction(setup, false, false, []),
@@ -660,7 +672,16 @@ export function accountCredentialControls(
         ? await listAccountCredentialStatus(database, commissioning, userId)
         : { roles: [] };
       let policyOwned = false;
+      let policyDraftExists: boolean | null = null;
       if (resolved.ok && resolved.context.executionAccountId) {
+        try {
+          const draft = await db.query(OWNED_POLICY_DRAFT_EXISTS_SQL,
+            [resolved.context.executionAccountId, userId]);
+          policyDraftExists = draft.rows[0]?.draft_exists === true;
+        } catch {
+          // A failed database read is unknown, never evidence that no draft exists.
+          policyDraftExists = null;
+        }
         try {
           const policy = await db.query(SCOPED_POLICY_SQL, [resolved.context.executionAccountId, userId]);
           policyOwned = policy.rows.length === 1;
@@ -732,6 +753,7 @@ export function accountCredentialControls(
         ...readiness,
         ...setup,
         operationPreparationAvailable,
+        policyDraftExists,
         subaccountCreationExecutionRoleAvailable: creationExecutionRoleAvailable,
         operationPreparations,
         nextAuthorizedAction: nextAuthorizedSetupAction(
