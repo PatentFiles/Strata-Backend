@@ -533,7 +533,13 @@ type EstablishedOfficialFeeDigest =
 // The default Node fetch is shared by requests in the same worker process.
 const officialFeeInFlight = new WeakMap<typeof fetch, Promise<EstablishedOfficialFeeDigest>>();
 const officialFee429CooldownUntil = new WeakMap<typeof fetch, number>();
+// A website security checkpoint can persist beyond a nominal 60-second retry.
+// Back off repeated failures within the same server process instead of causing
+// every owner's policy approval attempt to hit Kalshi again. No evidence is
+// cached here; a successful approval still fetches and validates fresh bytes.
+const officialFee429Failures = new WeakMap<typeof fetch, number>();
 const MIN_429_COOLDOWN_SECONDS = 60;
+const MAX_429_BACKOFF_SECONDS = 30 * 60;
 
 async function fetchAndEstablishOfficialFeeDigest(
   fetchImpl: typeof fetch,
@@ -598,14 +604,19 @@ export async function establishOfficialFeeDigest(
     fetchAndEstablishOfficialFeeDigest(fetchImpl)
       .then((result) => {
         if (!result.ok && result.reason === "official_fee_schedule_http_429") {
-          const seconds = Math.max(
-            MIN_429_COOLDOWN_SECONDS,
+          const failures = Math.min(10, (officialFee429Failures.get(fetchImpl) ?? 0) + 1);
+          officialFee429Failures.set(fetchImpl, failures);
+          // 1st failure: 60s, 2nd: 120s, 3rd: 240s, capped at 30min.
+          // Respect an official Retry-After up to the existing 24-hour maximum.
+          const exponential = Math.min(MAX_429_BACKOFF_SECONDS,
+            MIN_429_COOLDOWN_SECONDS * 2 ** (failures - 1));
+          const seconds = Math.max(exponential,
             Math.min(MAX_REPORTED_RETRY_AFTER_SECONDS,
-              result.diagnostic.retryAfterSeconds ?? MIN_429_COOLDOWN_SECONDS),
-          );
+              result.diagnostic.retryAfterSeconds ?? 0));
           officialFee429CooldownUntil.set(fetchImpl, nowMs() + seconds * 1000);
         } else if (result.ok) {
           officialFee429CooldownUntil.delete(fetchImpl);
+          officialFee429Failures.delete(fetchImpl);
         }
         return result;
       })
