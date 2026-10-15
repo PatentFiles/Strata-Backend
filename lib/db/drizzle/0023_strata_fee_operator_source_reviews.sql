@@ -29,8 +29,7 @@ CREATE TABLE IF NOT EXISTS public.strata_fee_operator_source_reviews (
   ),
   CONSTRAINT source_review_bounded CHECK (
     expires_at > reviewed_at AND expires_at <= reviewed_at + INTERVAL '2 hours'
-  ),
-  CONSTRAINT independent_reviewer_unique UNIQUE(content_sha256, reviewer_user_id)
+  )
 );
 
 CREATE INDEX IF NOT EXISTS strata_fee_operator_source_reviews_active_idx
