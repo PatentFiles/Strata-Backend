@@ -4,6 +4,7 @@ import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
   type ShardAllocationView } from "./ownerShardAllocation";
 import {
   prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus, reconcileOwnedPilotTransfer,
+  historicalFundingStatus, verifyOwnedHistoricalFunding, type HistoricalFundingResult,
   type PilotResult,
 } from "./ownedPilotTransfer";
 import type { UserScopeQuery } from "./userScopeDatabase";
@@ -550,6 +551,12 @@ export function accountCredentialControls(
     },
     async reconcileOwnerPilotTransfer(userId: string): Promise<PilotResult> {
       return reconcileOwnedPilotTransfer(db, userId, { get: options.kalshiGet });
+    },
+    async historicalFundingStatus(userId: string): Promise<HistoricalFundingResult> {
+      return historicalFundingStatus(db, userId);
+    },
+    async verifyHistoricalFunding(userId: string): Promise<HistoricalFundingResult> {
+      return verifyOwnedHistoricalFunding(db, userId, { get: options.kalshiGet });
     },
     async prepareOwnerPilotTransfer(userId: string): Promise<PilotResult> {
       return prepareOwnedPilotTransfer(db, userId, { get: options.kalshiGet });
