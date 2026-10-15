@@ -187,7 +187,7 @@ export async function approveOwnedPolicyForUser(
     now?: Date;
     verifyFee?: typeof verifyCurrentFeeArtifact;
   },
-): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string }> {
+): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; retryAfterSeconds?: number }> {
   const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
   if (!parsed.ok) return parsed;
   const feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
@@ -220,7 +220,7 @@ async function resolveOwnedFeeDigest(
   supplied: string | null,
   fee: OwnedPolicyFeeEvidence,
   verifyFee: typeof verifyCurrentFeeArtifact | undefined,
-): Promise<{ ok: true; digest: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; digest: string } | { ok: false; reason: string; retryAfterSeconds?: number }> {
   if (verifyFee) {
     if (!supplied) return { ok: false, reason: "fee_evidence_missing" };
     const artifact = await verifyFee({
@@ -233,7 +233,17 @@ async function resolveOwnedFeeDigest(
     return { ok: true, digest: supplied };
   }
   const established = await establishOfficialFeeDigest();
-  if (!established.ok) return { ok: false, reason: established.reason };
+  if (!established.ok) {
+    // Never accept old/unverified evidence. Only disclose the backend's
+    // sanitized retry delay so the Wallets UI can avoid hammering Kalshi.
+    return {
+      ok: false, reason: established.reason,
+      ...(established.reason === "official_fee_schedule_http_429" ? {
+        retryAfterSeconds: Math.max(60, Math.min(86_400,
+          established.diagnostic.retryAfterSeconds ?? 60)),
+      } : {}),
+    };
+  }
   if (supplied && supplied !== established.digest) return { ok: false, reason: "fee_artifact_unverified" };
   return { ok: true, digest: established.digest };
 }
