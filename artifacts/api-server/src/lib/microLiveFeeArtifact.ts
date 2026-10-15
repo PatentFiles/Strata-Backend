@@ -499,6 +499,18 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS + 8_000),
     });
   } catch { return null; }
+  // The bridge may be on its project-wide provider cooldown even while the
+  // local worker's backoff has elapsed. Propagate ONLY the bounded wait, NEVER
+  // evidence or an approval, from our exact authenticated Edge Function.
+  if (res.status === 429 &&
+      (!res.url || res.url === SUPABASE_FEE_EDGE_URL) &&
+      mediaType(res.headers.get("content-type")) === "application/json") {
+    const retry = Number(res.headers.get("retry-after"));
+    if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 1800) {
+      return new Response(null, { status: 429,
+        headers: { "retry-after": String(retry) } });
+    }
+  }
   if (res.status !== 200 || res.url && res.url !== SUPABASE_FEE_EDGE_URL ||
       mediaType(res.headers.get("content-type")) !== "application/pdf" ||
       res.headers.get("x-strata-canonical-source") !== CANONICAL_FEE_SCHEDULE_URL) {
@@ -537,13 +549,13 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (fetchImpl !== globalThis.fetch) throw error;
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate;
+    if (alternate) return alternate; // Verified PDF, or fail-closed 429 cooldown.
     throw error;
   }
   if (response.status === 429 && fetchImpl === globalThis.fetch) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate;
+    if (alternate) return alternate; // May carry the bridge's longer cooldown.
   }
   return response;
 }
