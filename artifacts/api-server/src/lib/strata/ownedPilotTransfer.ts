@@ -11,6 +11,7 @@ import { getScopedKalshiJson, postScopedKalshiPilotTransfer } from "../kalshiAcc
  */
 const PILOT_CENTS = 2500;
 const BALANCE = "/trade-api/v2/portfolio/balance";
+const TRANSFERS = "/trade-api/v2/portfolio/subaccounts/transfers";
 export const OWNER_PILOT_TRANSFER_CONFIRMATION = "TRANSFER_25_USD_PRIMARY_TO_BOT_SUBACCOUNT_1_INDEX_2";
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[1-8][a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
 type Row = Record<string, unknown>;
@@ -56,6 +57,29 @@ const ACCOUNT_SQL = `
  CROSS JOIN live_execution_config gate
  WHERE a.owner_user_id=$1::uuid AND a.owner_user_id IS NOT NULL
    AND gate.id='singleton'
+`;
+const RECONCILE_READ_SQL = `
+ -- pilot-transfer:reconcile-read
+ SELECT t.id::text AS id,t.owner_user_id::text AS owner_user_id,
+        t.execution_account_id,t.authority_credential_id::text AS authority_credential_id,
+        t.authority_fingerprint,t.state,t.primary_before_cents,t.bot_before_cents,
+        (extract(epoch FROM t.attempted_at))::bigint AS attempted_seconds
+ FROM private.kalshi_owner_pilot_transfers t
+ JOIN v13_production_account a ON a.id=t.execution_account_id
+ WHERE t.owner_user_id=$1::uuid AND a.owner_user_id=$1::uuid
+ ORDER BY t.prepared_at DESC LIMIT 1
+`;
+const RECONCILE_COMPLETE_SQL = `
+ -- pilot-transfer:reconcile-complete
+ UPDATE private.kalshi_owner_pilot_transfers
+ SET state='completed', completed_at=now(),
+     primary_after_cents=$3,bot_after_cents=$4,
+     failure_reason=NULL,verified_exchange_transfer_id=$5,verified_at=now(),
+     updated_at=now()
+ WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state IN ('attempted','uncertain')
+   AND primary_before_cents=$3+2500 AND bot_before_cents=0
+   AND verified_exchange_transfer_id IS NULL
+ RETURNING id
 `;
 const STATUS_SQL = `
  -- pilot-transfer:status
@@ -277,6 +301,100 @@ export async function executeOwnedPilotTransfer(db:TxDb,userId:string,input:{
     after?.primary??null,after?.bot??null,true);}
   return readOnly(reason,state,attemptId,after?.primary??null,after?.bot??null,true);
 }
+/**
+ * Non-money-moving reconciliation. Kalshi's subaccount-transfer POST can
+ * return 200 before its shard-scoped balance read catches up. Never retry it.
+ * Require BOTH a unique eligible transfer-history receipt and exact scoped
+ * after-balances; a balance alone is not proof of this particular transfer.
+ *
+ * No live orders, credentials, strategies, approvals, or kill switches change.
+ */
+export async function reconcileOwnedPilotTransfer(
+  db:Query,userId:string,options:{get?:Get}={}
+):Promise<PilotResult>{
+  const found=await db.query(RECONCILE_READ_SQL,[userId]).catch(()=>null);
+  if(!found||found.rows.length!==1)return readOnly("pilot_reconciliation_record_unavailable");
+  const plan=found.rows[0]!;
+  const id=String(plan.id??"");
+  if(!UUID.test(id))return readOnly("pilot_reconciliation_record_invalid");
+  if(plan.state==="completed")return ownedPilotTransferStatus(db,userId);
+  if(plan.state!=="attempted"&&plan.state!=="uncertain")
+    return readOnly("pilot_transfer_not_submitted",plan.state==="prepared"?"prepared":"unavailable",id);
+  const bound=await boundOwner(db,userId);
+  if(!bound||String(bound.row.id)!==String(plan.execution_account_id)||
+     String(bound.row.credential_id)!==String(plan.authority_credential_id)||
+     bound.row.key_fingerprint!==plan.authority_fingerprint)
+    return readOnly("pilot_reconciliation_owner_or_safety_unproven","uncertain",id);
+  const pre=Number(plan.primary_before_cents), attempted=Number(plan.attempted_seconds);
+  if(!Number.isSafeInteger(pre)||pre<2500||!Number.isSafeInteger(attempted)||attempted<=0||
+     Number(plan.bot_before_cents)!==0)
+    return readOnly("pilot_reconciliation_baseline_invalid","uncertain",id);
+  const get=options.get??defaultGet;
+  const balances=await scopedBalances(bound.creds,get);
+  if(!balances)return readOnly("pilot_reconciliation_cash_unavailable","uncertain",id);
+  if(balances.primary!==pre-2500||balances.bot!==2500)
+    return readOnly("pilot_reconciliation_cash_not_settled","uncertain",id,
+      balances.primary,balances.bot,true);
+
+  // Kalshi records contain transfer_id, amount_cents, origin, destination,
+  // exchange_index and created_ts. Paginate fully within a strict bounded
+  // scan; incomplete pagination or ambiguous duplicates cannot prove history.
+  const seenIds=new Set<string>();
+  const matches:{id:string;clientId:string|null}[]=[];
+  const visited=new Set<string>();
+  let cursor="";
+  let exhausted=false;
+  for(let page=0;page<5;page++){
+    let payload:unknown;
+    try{
+      payload=await get(bound.creds,TRANSFERS,
+        `?limit=100${cursor?"&cursor="+encodeURIComponent(cursor):""}`);
+    }catch{return readOnly("pilot_reconciliation_history_unavailable","uncertain",id,
+      balances.primary,balances.bot,true);}
+    if(!payload||typeof payload!=="object"||Array.isArray(payload))
+      return readOnly("pilot_reconciliation_history_invalid","uncertain",id,balances.primary,balances.bot,true);
+    const obj=payload as Record<string,unknown>;
+    if(!Array.isArray(obj.transfers))
+      return readOnly("pilot_reconciliation_history_invalid","uncertain",id,balances.primary,balances.bot,true);
+    for(const record of obj.transfers){
+      if(!record||typeof record!=="object"||Array.isArray(record))
+        return readOnly("pilot_reconciliation_history_invalid","uncertain",id,balances.primary,balances.bot,true);
+      const row=record as Record<string,unknown>;
+      const receipt=row.transfer_id;
+      if(typeof receipt!=="string"||receipt.length<8||receipt.length>128||seenIds.has(receipt))
+        return readOnly("pilot_reconciliation_history_invalid","uncertain",id,balances.primary,balances.bot,true);
+      seenIds.add(receipt);
+      // Refuse missing exchange-index, invalid timestamp or approximate money.
+      if(row.from_subaccount!==0||row.to_subaccount!==1||
+         row.exchange_index!==2||row.amount_cents!==2500)continue;
+      const ts=Number(row.created_ts);
+      if(!Number.isSafeInteger(ts)||ts<attempted-120||ts>attempted+300)continue;
+      const client=row.client_transfer_id;
+      if(client!==undefined&&client!==null&&client!==id)continue;
+      matches.push({id:receipt,clientId:typeof client==="string"?client:null});
+    }
+    const next=obj.cursor;
+    if(next===undefined||next===null||next===""){exhausted=true;break;}
+    if(typeof next!=="string"||next.length>1024||visited.has(next))
+      return readOnly("pilot_reconciliation_history_invalid","uncertain",id,balances.primary,balances.bot,true);
+    visited.add(next);cursor=next;
+  }
+  if(!exhausted)return readOnly("pilot_reconciliation_history_incomplete","uncertain",id,balances.primary,balances.bot,true);
+  if(matches.length!==1)return readOnly(
+    matches.length?"pilot_reconciliation_history_ambiguous":"pilot_reconciliation_receipt_missing",
+    "uncertain",id,balances.primary,balances.bot,true);
+  // Kalshi history does not always expose client_transfer_id. A unique
+  // timestamped receipt PLUS exact scoped cash movement is required.
+  try{
+    const saved=await db.query(RECONCILE_COMPLETE_SQL,
+      [id,userId,balances.primary,balances.bot,matches[0]!.id]);
+    if(saved.rows.length!==1)return readOnly("pilot_reconciliation_persistence_unverified",
+      "uncertain",id,balances.primary,balances.bot,true);
+  }catch{return readOnly("pilot_reconciliation_persistence_unverified",
+    "uncertain",id,balances.primary,balances.bot,true);}
+  return readOnly("pilot_completed","completed",id,balances.primary,balances.bot,true);
+}
+
 export async function ownedPilotTransferStatus(db:Query,userId:string):Promise<PilotResult>{
   try{
     const found=await db.query(STATUS_SQL,[userId]);
