@@ -6,7 +6,7 @@ import {
   prepareOwnerShardAllocation, executeOwnerShardAllocation,
   ownerShardAllocationStatus, reconcileOwnerShardAllocation, SHARD_ALLOCATION_CONFIRMATION,
 } from "./ownerShardAllocation";
-import { postScopedKalshiShardAllocation } from "../kalshiAccountClient";
+import { postScopedKalshiShardAllocation, getScopedKalshiJson } from "../kalshiAccountClient";
 
 const USER="11111111-1111-4111-8111-111111111111";
 const OTHER="22222222-2222-4222-8222-222222222222";
@@ -151,4 +151,44 @@ test("signed fixed request refuses invalid transfer IDs before network",async()=
   await assert.rejects(()=>postScopedKalshiShardAllocation(cred,"invalid-id",async()=>{
     throw Error("network must never be called");
   }));
+});
+
+test("signed transport uses exact primary-to-primary shards and centicent $25, receipt GET is allowlisted",async()=>{
+  const prior=process.env.KALSHI_API_ENVIRONMENT;
+  process.env.KALSHI_API_ENVIRONMENT="production";
+  const transferId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const seen:Array<{url:string;method:string;body:unknown;signature:string|null}>=[];
+  const fake:typeof fetch=async(input,init)=>{
+    const url=String(input);
+    const headers=new Headers(init?.headers);
+    seen.push({url,method:init?.method??"GET",body:init?.body?JSON.parse(String(init.body)) as unknown:null,
+      signature:headers.get("KALSHI-ACCESS-SIGNATURE")});
+    return new Response(JSON.stringify(url.endsWith("instance_transfer")
+      ? {transfer_id:"accepted-kalshi-id"} : {transfer:{transfer_id:"accepted-kalshi-id"}}),
+      {status:200,headers:{"Content-Type":"application/json"}});
+  };
+  try{
+    const posted=await postScopedKalshiShardAllocation(cred,transferId,fake);
+    assert.equal(posted.status,200);
+    assert.equal(seen[0]!.method,"POST");
+    assert.deepEqual(seen[0]!.body,{
+      source:"event_contract",destination:"event_contract",
+      amount:250000,client_transfer_id:transferId,
+      source_exchange_shard:0,destination_exchange_shard:2,
+      source_subaccount:0,destination_subaccount:0,
+    });
+    assert.ok(seen[0]!.signature);
+    await getScopedKalshiJson(cred,
+      "/trade-api/v2/portfolio/intra_exchange_instance_transfers/accepted-kalshi-id",
+      "",fake,"https://external-api.kalshi.com");
+    assert.equal(seen[1]!.method,"GET");
+    assert.ok(seen[1]!.signature);
+    await assert.rejects(()=>getScopedKalshiJson(cred,
+      "/trade-api/v2/portfolio/intra_exchange_instance_transfers/../../api_keys",
+      "",fake,"https://external-api.kalshi.com"));
+    assert.equal(seen.length,2);
+  }finally{
+    if(prior===undefined)delete process.env.KALSHI_API_ENVIRONMENT;
+    else process.env.KALSHI_API_ENVIRONMENT=prior;
+  }
 });
