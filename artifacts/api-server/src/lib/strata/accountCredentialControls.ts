@@ -1,4 +1,8 @@
 import { emptyUserExecutionView } from "./userExecutionScope";
+import {
+  prepareOwnedPilotTransfer, executeOwnedPilotTransfer, ownedPilotTransferStatus,
+  type PilotResult,
+} from "./ownedPilotTransfer";
 import type { UserScopeQuery } from "./userScopeDatabase";
 import {
   resolveAccountCommissioningContext,
@@ -476,6 +480,19 @@ export function accountCredentialControls(
           return probed;
         },
       });
+    },
+    async ownerPilotTransferStatus(userId: string): Promise<PilotResult> {
+      return ownedPilotTransferStatus(db, userId);
+    },
+    async prepareOwnerPilotTransfer(userId: string): Promise<PilotResult> {
+      return prepareOwnedPilotTransfer(db, userId, { get: options.kalshiGet });
+    },
+    async executeOwnerPilotTransfer(userId: string, body: unknown): Promise<PilotResult> {
+      const input = body && typeof body === "object" && !Array.isArray(body)
+        ? body as Record<string,unknown> : {};
+      return executeOwnedPilotTransfer(db, userId, {
+        attemptId: input.attemptId, confirmation: input.confirmation,
+      }, { get: options.kalshiGet });
     },
     async authorizeFunding(userId: string, body: unknown) {
       if (!await fundingTableReady(db)) {
