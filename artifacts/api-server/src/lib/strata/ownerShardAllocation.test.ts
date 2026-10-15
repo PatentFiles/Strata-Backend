@@ -28,6 +28,7 @@ function fixture(){
     if(["BEGIN","ROLLBACK","COMMIT"].includes(sql))return {rows:[]};
     if(sql.includes("shard-allocation:owner"))return {rows:params[0]===USER&&allowOwner?[owner]:[]};
     if(sql.includes("shard-allocation:prepare")){
+      if(state==="prepared"){preparedAt=Date.now();return {rows:[{id:attempt}]};}
       if(state)return {rows:[]};
       attempt=String(params[0]);state="prepared";preparedAt=Date.now();
       return {rows:[{id:attempt}]};
