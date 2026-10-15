@@ -1,0 +1,47 @@
+name: Fee operator source review safety
+
+on:
+  pull_request:
+    paths:
+      - "supabase/functions/strata-fee-operator-review/**"
+      - "lib/db/drizzle/0023_strata_fee_operator_source_reviews.sql"
+      - ".github/workflows/fee-operator-review-safety.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Typecheck
+        run: deno check --node-modules-dir=auto supabase/functions/strata-fee-operator-review/index.ts
+      - name: Run operator input validation tests
+        run: deno test --node-modules-dir=auto -A supabase/functions/strata-fee-operator-review/reviewValidation.test.ts
+      - name: Ensure no production policy or trading authority is modified
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path("supabase/functions/strata-fee-operator-review/index.ts").read_text()
+          migration = Path("lib/db/drizzle/0023_strata_fee_operator_source_reviews.sql").read_text()
+          assert 'officialFeeCapture' not in source
+          assert '"strata_fee_operator_source_reviews"' in source
+          assert 'ownerPolicyApproved: false' in source
+          assert 'accountCommissioned: false' in source
+          assert 'tradingAuthorityChanged: false' in source
+          assert 'currentCanonicalByteIdentityVerified: false' in source
+          assert 'strata_can_inspect_pending_fee_artifact' in source
+          assert 'operator-pending/kalshi-fee-schedule.pdf' in source
+          assert '.upload(' not in source and '.update(' not in source and '.upsert(' not in source
+          assert 'ENABLE ROW LEVEL SECURITY' in migration
+          assert 'REVOKE ALL' in migration and 'GRANT SELECT, INSERT' in migration
+          assert 'strata_official_fee_captures' not in migration
+          assert 'v13_production_account' not in migration
+          print("Staged attestation writes only append-only review claims.")
+          PY
