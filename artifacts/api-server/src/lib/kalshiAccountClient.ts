@@ -530,6 +530,45 @@ export async function postScopedKalshiPilotTransfer(
 }
 
 /**
+ * Fixed-amount primary shard transfer. This is NOT the bot subaccount transfer.
+ * Amount is in Kalshi centicents (100 centicents per cent): $25 = 250000.
+ * Only account-setup RSA server key may sign. No arbitrary POST body or URL.
+ * Caller has separately recorded an immutable once-only DB claim.
+ */
+export async function postScopedKalshiShardAllocation(
+  creds: { keyId: string; privateKey: string },
+  clientTransferId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{status:number;body:unknown;unreadable:boolean}> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientTransferId))
+    throw new KalshiApiError("INVALID_RESPONSE");
+  if (process.env.KALSHI_API_ENVIRONMENT !== "production")
+    throw new KalshiApiError("INVALID_CREDENTIALS");
+  const path = `${API_PREFIX}/portfolio/intra_exchange_instance_transfer`;
+  const timestamp=Date.now().toString();
+  const response=await fetchImpl(`https://external-api.kalshi.com${path}`,{
+    method:"POST",cache:"no-store",redirect:"manual",
+    signal:AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
+    headers:{
+      Accept:"application/json","Content-Type":"application/json",
+      "KALSHI-ACCESS-KEY":creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE":signRequest(creds,"POST",path,timestamp),
+      "KALSHI-ACCESS-TIMESTAMP":timestamp,
+    },
+    body:JSON.stringify({
+      source:"event_contract",destination:"event_contract",
+      amount:250000,client_transfer_id:clientTransferId,
+      source_exchange_shard:0,destination_exchange_shard:2,
+      source_subaccount:0,destination_subaccount:0,
+    }),
+  });
+  if(response.status!==200)return {status:response.status,body:null,unreadable:true};
+  const raw=await response.text();
+  try{return {status:200,body:JSON.parse(raw) as unknown,unreadable:false};}
+  catch{return {status:200,body:null,unreadable:true};}
+}
+
+/**
  * The only user-scoped setup mutation transport. The path and exchange index
  * are fixed so callers cannot turn account setup authorization into a general
  * Kalshi write capability.
