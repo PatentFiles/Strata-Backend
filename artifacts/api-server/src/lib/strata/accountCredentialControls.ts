@@ -85,16 +85,30 @@ const FUNDING_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_funding') AS name
 `;
 
-// Read-only and owner-scoped: a DRAFT is not linked to the execution account until
-// approval. The Wallets checklist must never infer a saved draft from APPROVED alone.
-const OWNED_POLICY_DRAFT_EXISTS_SQL = `
-  SELECT EXISTS (
-    SELECT 1 FROM public.v13_live_money_policy
-    WHERE execution_account_id = $1
-      AND created_by = $2::uuid
-      AND state = 'DRAFT'
-  ) AS draft_exists
+// Owner-scoped read-only DRAFT: a saved draft is not execution authority.
+const OWNED_POLICY_DRAFT_SQL = `
+  SELECT id::text AS policy_id, version, capital_limit_cents,
+         max_entry_stake_cents, max_entry_all_in_cents, max_daily_loss_cents,
+         max_total_loss_cents, max_quote_age_ms, max_fee_evidence_age_ms
+  FROM public.v13_live_money_policy
+  WHERE execution_account_id = $1
+    AND created_by = $2::text
+    AND state = 'DRAFT'
+  ORDER BY version DESC, created_at DESC LIMIT 1
 `;
+type OwnedDraftSnapshot = {
+  policyId: string;
+  version: number;
+  limits: {
+    capitalLimitCents: number;
+    maxEntryStakeCents: number;
+    maxEntryAllInCents: number;
+    maxDailyLossCents: number;
+    maxTotalLossCents: number;
+    maxQuoteAgeMs: number;
+    maxFeeEvidenceAgeMs: number;
+  };
+};
 const SETUP_ATTEMPT_TABLE_SQL = `
   SELECT to_regclass('private.kalshi_account_operation_attempts') AS name
 `;
@@ -661,6 +675,7 @@ export function accountCredentialControls(
           ...setup,
           operationPreparationAvailable: false,
           policyDraftExists: null as boolean | null,
+          policyDraft: null as OwnedDraftSnapshot | null,
           subaccountCreationExecutionRoleAvailable: false,
           operationPreparations: [] as PublicAccountSetupAttempt[],
           nextAuthorizedAction: nextAuthorizedSetupAction(setup, false, false, []),
@@ -673,14 +688,36 @@ export function accountCredentialControls(
         : { roles: [] };
       let policyOwned = false;
       let policyDraftExists: boolean | null = null;
+      let policyDraft: OwnedDraftSnapshot | null = null;
       if (resolved.ok && resolved.context.executionAccountId) {
         try {
-          const draft = await db.query(OWNED_POLICY_DRAFT_EXISTS_SQL,
+          const draft = await db.query(OWNED_POLICY_DRAFT_SQL,
             [resolved.context.executionAccountId, userId]);
-          policyDraftExists = draft.rows[0]?.draft_exists === true;
+          const row = draft.rows[0];
+          policyDraftExists = !!row;
+          if (row) {
+            const limits = {
+              capitalLimitCents: Number(row.capital_limit_cents),
+              maxEntryStakeCents: Number(row.max_entry_stake_cents),
+              maxEntryAllInCents: Number(row.max_entry_all_in_cents),
+              maxDailyLossCents: Number(row.max_daily_loss_cents),
+              maxTotalLossCents: Number(row.max_total_loss_cents),
+              maxQuoteAgeMs: Number(row.max_quote_age_ms),
+              maxFeeEvidenceAgeMs: Number(row.max_fee_evidence_age_ms),
+            };
+            const version = Number(row.version);
+            if (typeof row.policy_id === 'string' && row.policy_id.length > 0 &&
+                Number.isSafeInteger(version) && version > 0 &&
+                Object.values(limits).every((value) => Number.isSafeInteger(value) && value > 0)) {
+              policyDraft = { policyId: row.policy_id, version, limits };
+            } else {
+              // Fail closed on malformed values; do not create approval authority.
+              policyDraftExists = null;
+            }
+          }
         } catch {
-          // A failed database read is unknown, never evidence that no draft exists.
           policyDraftExists = null;
+          policyDraft = null;
         }
         try {
           const policy = await db.query(SCOPED_POLICY_SQL, [resolved.context.executionAccountId, userId]);
@@ -689,7 +726,7 @@ export function accountCredentialControls(
           policyOwned = false;
         }
       }
-      let authorizedMicros: string | null = null;
+            let authorizedMicros: string | null = null;
       let evidenceMicros: string | null = null;
       let evidenceSource: string | null = null;
       if (resolved.ok && await fundingTableReady(db)) {
@@ -754,6 +791,7 @@ export function accountCredentialControls(
         ...setup,
         operationPreparationAvailable,
         policyDraftExists,
+        policyDraft,
         subaccountCreationExecutionRoleAvailable: creationExecutionRoleAvailable,
         operationPreparations,
         nextAuthorizedAction: nextAuthorizedSetupAction(
