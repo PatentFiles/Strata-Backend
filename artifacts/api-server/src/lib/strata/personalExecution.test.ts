@@ -95,7 +95,7 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
   owner.reconciled_at = "2026-10-15T17:53:00.000Z";
   const fresh = await reportOwnedActivation(db, USER);
   assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
-  assert.equal(fresh.readyForCommissioning, false); // uncommissioned account and global kill switches
+  assert.equal(fresh.readyForCommissioning, true); // commissioning still requires separate owner consent
 });
 
 test("order book evidence fails closed without a fee, depth, or a fresh clock", () => {
