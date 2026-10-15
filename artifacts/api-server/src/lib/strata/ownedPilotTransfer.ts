@@ -90,6 +90,21 @@ const CLAIM_SQL = `
  WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared'
  AND prepared_at >= now()-interval '60 seconds'
  AND authority_credential_id=$3::uuid AND authority_fingerprint=$4
+ AND EXISTS (
+   SELECT 1 FROM v13_production_account a
+   JOIN live_execution_config g ON g.id='singleton'
+   WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
+     AND a.subaccount=1 AND a.exchange_index=2
+     AND a.commissioned=false AND a.execution_enabled=false
+     AND a.kill_switch=true AND g.manual_kill_switch=true
+     AND g.live_execution_enabled=false AND a.reserved_micros=0
+     AND NOT EXISTS(SELECT 1 FROM v13_production_position p
+       WHERE p.account_id=a.id AND p.quantity_hundredths>0)
+     AND NOT EXISTS(SELECT 1 FROM v13_production_intent i
+       WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED'))
+     AND NOT EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease l
+       WHERE l.execution_account_id=a.id AND l.state='owned')
+ )
  RETURNING id::text AS id
 `;
 const RESOLVE_SQL = `
