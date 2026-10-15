@@ -34,6 +34,20 @@ export interface UserCommissioningStatus {
   operationPreparationAvailable: boolean;
   /** Null until an owner-scoped database read proves draft presence or absence. */
   policyDraftExists: boolean | null;
+  /** An unapproved, owner-scoped snapshot for explicit review; never execution authority. */
+  policyDraft: {
+    policyId: string;
+    version: number;
+    limits: {
+      capitalLimitCents: number;
+      maxEntryStakeCents: number;
+      maxEntryAllInCents: number;
+      maxDailyLossCents: number;
+      maxTotalLossCents: number;
+      maxQuoteAgeMs: number;
+      maxFeeEvidenceAgeMs: number;
+    };
+  } | null;
   operationPreparations: PublicAccountSetupAttempt[];
   nextAuthorizedAction: AccountSetupNextAuthorizedAction | null;
 }
@@ -185,6 +199,7 @@ export function closedUserScopePort(): UserScopePort {
       nextRequirement: null,
       operationPreparationAvailable: false,
       policyDraftExists: null,
+      policyDraft: null,
       operationPreparations: [],
       nextAuthorizedAction: {
         action: "resolve_account_setup_blocker",
