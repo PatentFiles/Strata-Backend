@@ -10,7 +10,6 @@ import { getScopedKalshiJson, postScopedKalshiPilotTransfer } from "../kalshiAcc
  * This endpoint never commissions or enables trading.
  */
 const PILOT_CENTS = 2500;
-const USD = 100;
 const BALANCE = "/trade-api/v2/portfolio/balance";
 export const OWNER_PILOT_TRANSFER_CONFIRMATION = "TRANSFER_25_USD_PRIMARY_TO_BOT_SUBACCOUNT_1_INDEX_2";
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[1-8][a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
@@ -127,9 +126,9 @@ function scopedMoney(value:unknown,subaccount:0|1):number|null{
   const nested=root.balance;
   const row=nested&&typeof nested==="object"&&!Array.isArray(nested)
     ? nested as Record<string,unknown>:root;
-  if(row.subaccount!==undefined&&row.subaccount!==subaccount &&
-     row.subaccount_number!==subaccount)return null;
-  if(row.exchange_index!==undefined&&row.exchange_index!==2)return null;
+  if(row.subaccount!==undefined&&Number(row.subaccount)!==subaccount)return null;
+  if(row.subaccount_number!==undefined&&Number(row.subaccount_number)!==subaccount)return null;
+  if(row.exchange_index!==undefined&&Number(row.exchange_index)!==2)return null;
   // Legacy cash is integer cents; fixed-point balance_dollars is exact.
   const cents=normalizeKalshiMoney(row).cashCents;
   return cents!==null&&Number.isSafeInteger(cents)&&cents>=0?cents:null;
