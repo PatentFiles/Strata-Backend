@@ -30,6 +30,8 @@ function fixture() {
     if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK")return {rows:[]};
     if(sql.includes("pilot-transfer:owner-read"))return {rows:params?.[0]===OWNER?[ownerRow]:[]};
     if(sql.includes("pilot-transfer:prepare")){
+      assert.match(sql, /RETURNING id::text AS id\s*`?\s*$/m);
+      assert.doesNotMatch(sql, /AS id::text/);
       if(state)return {rows:[]};
       transferId=params?.[0] as string; state="prepared";
       return {rows:[{id:transferId}]};
