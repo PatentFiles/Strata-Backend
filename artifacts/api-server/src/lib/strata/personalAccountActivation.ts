@@ -38,11 +38,15 @@ const READINESS_SQL = `
   SELECT a.id, a.commissioned, a.execution_enabled, a.kill_switch,
          a.cash_precision_verified, a.cash_micros::text AS cash_micros,
          a.reconciled_at,
-         (SELECT MAX(t.completed_at) FROM private.kalshi_owner_pilot_transfers t
-            WHERE t.execution_account_id=a.id
-              AND t.owner_user_id=a.owner_user_id
-              AND t.state='completed' AND t.bot_after_cents >= 2500
-         ) AS verified_funding_at,
+         (SELECT MAX(proof_at) FROM (
+           SELECT t.completed_at AS proof_at FROM private.kalshi_owner_pilot_transfers t
+             WHERE t.execution_account_id=a.id AND t.owner_user_id=a.owner_user_id
+               AND t.state='completed' AND t.bot_after_cents >= 2500
+           UNION ALL
+           SELECT h.verified_at AS proof_at FROM private.kalshi_owner_historical_funding h
+             WHERE h.execution_account_id=a.id AND h.owner_user_id=a.owner_user_id
+               AND h.bot_after_cents=2500 AND h.primary_after_cents=0
+         ) verified) AS verified_funding_at,
          a.fee_artifact_digest, a.subaccount, a.exchange_index,
          a.key_fingerprint, a.policy_id,
          p.state AS policy_state, p.fee_policy_version, p.fee_source_url, p.fee_formula_version,
@@ -84,12 +88,21 @@ const COMMISSION_SQL = `
     AND cash_precision_verified = true
     AND cash_micros >= 25000000
     AND reconciled_at IS NOT NULL
-    AND EXISTS (
-      SELECT 1 FROM private.kalshi_owner_pilot_transfers t
-      WHERE t.execution_account_id = v13_production_account.id
-        AND t.owner_user_id = v13_production_account.owner_user_id
-        AND t.state='completed' AND t.bot_after_cents >= 2500
-        AND v13_production_account.reconciled_at >= t.completed_at
+    AND (
+      EXISTS (
+        SELECT 1 FROM private.kalshi_owner_pilot_transfers t
+        WHERE t.execution_account_id = v13_production_account.id
+          AND t.owner_user_id = v13_production_account.owner_user_id
+          AND t.state='completed' AND t.bot_after_cents >= 2500
+          AND v13_production_account.reconciled_at >= t.completed_at
+      )
+      OR EXISTS (
+        SELECT 1 FROM private.kalshi_owner_historical_funding h
+        WHERE h.execution_account_id = v13_production_account.id
+          AND h.owner_user_id = v13_production_account.owner_user_id
+          AND h.primary_after_cents=0 AND h.bot_after_cents=2500
+          AND v13_production_account.reconciled_at >= h.verified_at
+      )
     )
     AND policy_id IS NOT NULL
     AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
@@ -386,7 +399,9 @@ function activationBlockers(row: Record<string, unknown>, gate: Record<string, u
   if (!Number.isSafeInteger(stake) || stake < 1) blockers.push("configured_stake_missing");
   // A pre-funding $0 read was historically flagged as "verified". Never
   // commission from that stale receipt: require positive cash and an owner-
-  // scoped reconciliation at/after the real completed $25 bot transfer.
+  // scoped reconciliation at/after the independently verified $25 funding
+  // evidence (new transfer receipt OR separate signed historical receipt).
+  // Historical evidence alone can NEVER satisfy cash freshness.
   const cashMicros = Number(row.cash_micros);
   const reconciledAt = Date.parse(String(row.reconciled_at ?? ""));
   const fundedAt = Date.parse(String(row.verified_funding_at ?? ""));
