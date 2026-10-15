@@ -401,6 +401,7 @@ function isAllowedGetPath(path: string): boolean {
     path === `${API_PREFIX}/portfolio/subaccounts/balances` ||
     path === `${API_PREFIX}/portfolio/subaccounts/transfers` ||
     path === `${API_PREFIX}/portfolio/intra_exchange_instance_transfers` ||
+    /^\/trade-api\/v2\/portfolio\/intra_exchange_instance_transfers\/[A-Za-z0-9_-]{8,128}$/.test(path) ||
     path === `${API_PREFIX}/portfolio/orders` ||
     path === `${API_PREFIX}/portfolio/positions` ||
     path === `${API_PREFIX}/portfolio/fills` ||
