@@ -415,14 +415,9 @@ const HISTORY_SAVE_SQL = `
    (owner_user_id,execution_account_id,exchange_transfer_id,transfer_created_at,
     primary_after_cents,bot_after_cents,verified_at)
  VALUES ($1::uuid,$2,$3,to_timestamp($4::bigint),$5,$6,now())
- ON CONFLICT (execution_account_id) DO UPDATE
-   SET exchange_transfer_id=EXCLUDED.exchange_transfer_id,
-       transfer_created_at=EXCLUDED.transfer_created_at,
-       primary_after_cents=EXCLUDED.primary_after_cents,
-       bot_after_cents=EXCLUDED.bot_after_cents,
-       verified_at=now()
- WHERE private.kalshi_owner_historical_funding.owner_user_id=EXCLUDED.owner_user_id
-   AND private.kalshi_owner_historical_funding.transfer_created_at <= EXCLUDED.transfer_created_at
+ -- Historical provenance is immutable. Never replace a previously
+ -- verified receipt with a later/ambiguous cash movement on repeated clicks.
+ ON CONFLICT (execution_account_id) DO NOTHING
  RETURNING verified_at::text AS verified_at
 `;
 export async function historicalFundingStatus(db:Query,userId:string):Promise<HistoricalFundingResult>{
