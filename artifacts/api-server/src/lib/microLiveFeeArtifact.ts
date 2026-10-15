@@ -491,7 +491,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   anonJwt: string | undefined,
   nowMs: () => number = Date.now,
 ): Promise<Response | null> {
-  if (projectUrl?.replace(/\\/$/, "") !== SUPABASE_FEE_PROJECT_URL ||
+  if (projectUrl?.replace(/\/$/, "") !== SUPABASE_FEE_PROJECT_URL ||
       !anonJwt || anonJwt.length < 80 || anonJwt.length > 4096) return null;
   let res: Response;
   try {
