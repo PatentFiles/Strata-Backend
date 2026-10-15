@@ -7,6 +7,7 @@ import { startShadowObserver } from "./lib/shadowLive";
 import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
 import { verifyProductionShadowReads } from "./lib/productionShadowPreflight";
 import { auditMicroLiveReadOnly, reconcileMicroLiveAtStartup } from "./lib/microLive";
+import { establishOfficialFeeDigest } from "./lib/microLiveFeeArtifact";
 
 const rawPort = process.env["PORT"];
 
@@ -35,6 +36,22 @@ app.listen(port, "0.0.0.0", (err) => {
     return;
   }
   startFeeArtifactMonitor();
+  if (process.env.NODE_ENV === "production" &&
+      process.env.STRATA_FEE_BRIDGE_CANARY_ON_BOOT === "true") {
+    // Explicitly enabled, GET-only production proof for the alternate fee
+    // source. Do not write policy approvals, cash, risk limits, or trading flags.
+    void establishOfficialFeeDigest().then((result) => {
+      logger.info({
+        verified: result.ok,
+        reason: result.ok ? "canonical_pdf_strict_parser_verified" : result.reason,
+        httpStatus: result.diagnostic.httpStatus,
+        networkAttempts: result.diagnostic.networkAttempts,
+      }, "Official Kalshi fee source canary completed; execution authority unchanged");
+    }, (err: unknown) => {
+      logger.error({ errorType: err instanceof Error ? err.name : "UnknownError" },
+        "Official Kalshi fee source canary failed; execution authority unchanged");
+    });
+  }
   if (process.env.NODE_ENV === "production" &&
       process.env.SHADOW_LIVE_PRODUCTION_PREFLIGHT_ENABLED === "true" &&
       process.env.SHADOW_LIVE_PRODUCTION_ENABLED !== "true") {
