@@ -181,3 +181,53 @@ export async function revokeReviewedFeeSourceGrant(
       no("grant_not_active_or_unknown");
   }catch{return no("fee_source_grant_revocation_failed");}
 }
+
+/** Administrative discovery only; no balances, emails or credentials returned. */
+export async function listEligibleFeeSourceOwners(adminId:string):
+  Promise<{ok:boolean;reason:string;ownerUserIds:string[]}>{
+  if(!await adminVerified(adminId))return {ok:false,reason:"administrator_required",ownerUserIds:[]};
+  try{
+    const rows=await pool.query(`
+      SELECT DISTINCT owner_user_id FROM public.v13_production_account
+      WHERE owner_user_id IS NOT NULL AND subaccount=1 AND exchange_index=2
+      ORDER BY owner_user_id LIMIT 100`);
+    return {ok:true,reason:"owner_ids_read_only",ownerUserIds:
+      rows.rows.map(r=>String(r.owner_user_id)).filter(x=>UUID.test(x))};
+  }catch{return {ok:false,reason:"owners_unavailable",ownerUserIds:[]};}
+}
+/** Only the separate policy reviewers and issuer can see review count. */
+export async function inspectFeePolicySigningStatus(adminId:string,ownerUserId:string):
+  Promise<{ok:boolean;reason:string;currentReleaseId:string|null;reviewerCount:number;
+    grantId:string|null;grantExpiresAt:string|null}> {
+  const denied=(reason:string)=>({ok:false,reason,currentReleaseId:null,
+    reviewerCount:0,grantId:null,grantExpiresAt:null});
+  if(!await adminVerified(adminId))return denied("administrator_required");
+  if(!UUID.test(ownerUserId))return denied("owner_id_invalid");
+  const release=await inspectOperatorFeeCandidate();
+  if(!release.ok||!release.releaseId)return denied("operator_release_not_current");
+  try{
+    const [reviews,grants]=await Promise.all([
+      pool.query(`
+        SELECT count(DISTINCT p.reviewer_user_id)::integer AS n
+        FROM private.strata_fee_source_policy_reviews p
+        JOIN auth.users u ON u.id=p.reviewer_user_id
+        JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
+        WHERE p.owner_user_id=$1::uuid AND p.release_id=$2::uuid
+          AND p.policy_decision_sha256=$3 AND p.revoked_at IS NULL
+          AND p.expires_at>now() AND u.email_confirmed_at IS NOT NULL
+          AND ra.role='ADMIN'`,[ownerUserId,release.releaseId,FEE_SOURCE_DECISION_SHA256]),
+      pool.query(`
+        SELECT grant_id,expires_at
+        FROM private.strata_fee_source_grants
+        WHERE owner_user_id=$1::uuid AND release_id=$2::uuid
+        AND revoked_at IS NULL AND expires_at>now()
+        ORDER BY approved_at DESC LIMIT 2`,[ownerUserId,release.releaseId]),
+    ]);
+    if(grants.rows.length>1)return denied("multiple_grants_ambiguous");
+    const grant=grants.rows[0];
+    return {ok:true,reason:"policy_signing_status_read_only",currentReleaseId:release.releaseId,
+      reviewerCount:Number(reviews.rows[0]?.n??0),
+      grantId:grant?String(grant.grant_id):null,
+      grantExpiresAt:grant?new Date(grant.expires_at).toISOString():null};
+  }catch{return denied("policy_signing_status_unavailable");}
+}
