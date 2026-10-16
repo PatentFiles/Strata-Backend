@@ -35,6 +35,14 @@ export function createGuardedOwnerFeeFetch(
     if(typeof ticker!=="string"||!/^KXBTC15M[A-Za-z0-9._-]+$/.test(ticker)||
       order.subaccount!==1||order.exchange_index!==2)
       throw new Error("owner_order_scope_invalid");
+    // Temporary fail-closed new-risk gate (see GitHub issue #46).
+    // The alternative fee source cannot open/increase a position until a
+    // separately reviewed protective-exit procedure has been validated.
+    // DELETE cancellation is intentionally unaffected. Existing reduce-only
+    // POSTs still require ALL original authorization and market/ledger checks:
+    // this is NOT an emergency exit bypass or permission to trade.
+    if(order.reduce_only!==true)
+      throw new Error("operator_source_new_entries_paused_pending_protective_exit");
     const assessment=await (testOverrides.verifyStage??verifyOwnerFeeSourceStage)(ownerUserId,"ORDER_ENTRY",
       sourceUrl,ticker);
     if(!assessment.ok)throw new Error("owner_fee_source_order_fence_closed");
