@@ -11,10 +11,21 @@ const OBJECT_PATH = "operator-pending/kalshi-fee-schedule.pdf";
 const EXPECTED_SHA = "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601";
 const EXPECTED_BYTES = 281_129;
 const TABLE = "strata_fee_operator_source_reviews";
+// Browser access is limited to the configured Strata frontend, not to arbitrary origins.
+// JWT verification and the private ADMIN role check remain independently mandatory.
+const ALLOWED_ORIGIN = Deno.env.get("STRATA_WEB_ORIGIN")?.trim() ||
+  "https://private-multi-asset-eviv.bolt.host";
+const CORS = {
+  "access-control-allow-origin": ALLOWED_ORIGIN,
+  "access-control-allow-headers": "authorization, apikey, content-type, x-client-info, x-supabase-client-platform, x-supabase-client-version",
+  "access-control-allow-methods": "POST, OPTIONS",
+  "vary": "Origin",
+};
 const HEADERS = {
   "content-type": "application/json",
   "cache-control": "private, no-store",
   "x-content-type-options": "nosniff",
+  ...CORS,
 };
 
 function error(reason: string, status: number): Response {
@@ -35,6 +46,12 @@ function validPdfEnvelope(bytes: Uint8Array): boolean {
 }
 
 Deno.serve(async (request: Request) => {
+  if (request.method === "OPTIONS") {
+    if (request.headers.get("origin") !== ALLOWED_ORIGIN) {
+      return new Response(null, { status: 403, headers: { vary: "Origin" } });
+    }
+    return new Response(null, { status: 204, headers: CORS });
+  }
   if (request.method !== "POST") return error("method_not_allowed", 405);
   const url = new URL(request.url);
   if (url.search || url.pathname.split("/").pop() !== "strata-fee-operator-review") {
