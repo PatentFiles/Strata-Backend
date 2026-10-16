@@ -5,7 +5,7 @@ import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
-import { recordOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
+import { recordOwnerFeeSourceConsent, revokeOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
 import { verifyOwnerFeeSourceStage } from "../lib/strata/ownerFeeSourceStage";
 import { feeSourcePolicyDocument, signIndependentFeePolicyReview,
   issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant
@@ -586,6 +586,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
 
   // Human-signed policy authority requires current admin roles and separate
   // distinct review records; none of these endpoints arm or submit orders.
+  router.post("/fees/owner-consent/revoke", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeOwnerFeeSourceConsent(userId,req.body ?? {});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
   router.get("/fees/source-policy-document", (_req, res) => {
     const userId=subject(res);
     if (!userId) return void res.status(401).json({error:"Unauthorized"});
