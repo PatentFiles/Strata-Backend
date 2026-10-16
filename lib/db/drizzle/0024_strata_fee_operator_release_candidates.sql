@@ -50,7 +50,7 @@ CREATE OR REPLACE FUNCTION public.strata_two_operator_fee_reviews_valid(
   first_review uuid, second_review uuid, expected_digest text
 ) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
-AS $
+AS $fee_guard$
  SELECT first_review IS NOT NULL AND second_review IS NOT NULL
     AND first_review <> second_review
     AND expected_digest = 'c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601'
@@ -66,7 +66,7 @@ AS $
         AND r.review_kind = 'human_canonical_source_claim'
         AND u.email_confirmed_at IS NOT NULL
     );
-$;
+$fee_guard$;
 REVOKE ALL ON FUNCTION public.strata_two_operator_fee_reviews_valid(uuid,uuid,text)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.strata_two_operator_fee_reviews_valid(uuid,uuid,text)
