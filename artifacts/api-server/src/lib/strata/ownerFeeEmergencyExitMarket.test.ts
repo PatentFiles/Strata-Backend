@@ -25,7 +25,7 @@ function fixture(overrides:{status?:string;ticker?:string;index?:number;override
       event_fee_changes:[],cursor:""},
   };
   const calls:string[]=[];
-  const transport=(async(request:RequestInfo|URL,init?:RequestInit)=>{
+  const transport=(async(request:Parameters<typeof fetch>[0],init?:RequestInit)=>{
     const u=String(request);
     calls.push(u);
     if(init?.method!=="GET")throw Error("unexpected mutation");
