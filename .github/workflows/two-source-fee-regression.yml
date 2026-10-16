@@ -30,7 +30,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - name: Typecheck workspace
-        run: pnpm --filter @workspace/api-server typecheck
+        run: pnpm run typecheck
       - name: Bundle deterministic read-only Kalshi API fee tests
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts \
