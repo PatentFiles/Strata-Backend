@@ -110,6 +110,23 @@ const COMMISSION_SQL = `
     AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
     AND (commissioned = false OR commissioning_digest = $3)
     AND $5::integer BETWEEN 1 AND 999999
+    AND ($6::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_fee_source_grants g
+      JOIN private.strata_fee_source_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN public.strata_fee_operator_release_candidates r
+        ON r.release_id=g.release_id
+      JOIN v13_live_money_policy p ON p.id=v13_production_account.policy_id
+      WHERE g.grant_id=$6::uuid AND g.owner_user_id=$2::uuid
+        AND g.revoked_at IS NULL AND g.expires_at>now()
+        AND c.revoked_at IS NULL AND c.confirmation='CONFIRM_OPERATOR_FEE_SOURCE_ONLY'
+        AND r.revoked_at IS NULL AND r.expires_at>now()
+        AND r.content_sha256=g.reviewed_pdf_sha256 AND c.release_id=g.release_id
+        AND g.authorized_stages @> ARRAY['STEP_11']::text[]
+        AND p.state='APPROVED' AND p.fee_policy_version=g.policy_version
+        AND p.fee_source_url='strata-operator-attested://kxbtc15m/' ||
+          g.grant_id::text || '/' || g.release_id::text
+    ))
   RETURNING id
 `;
 
