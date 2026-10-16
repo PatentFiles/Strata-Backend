@@ -73,6 +73,7 @@ export interface EmergencyExitDecision {
 }
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLIENT_ORDER_ID=/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
 const SHA=/^[0-9a-f]{64}$/;
 const DENY=(reason:string):EmergencyExitDecision=>({
@@ -120,7 +121,7 @@ export function inspectEmergencyExitCandidate(
     return DENY("emergency_exit_execution_gate_closed");
   if(order.subaccount!==1||order.exchange_index!==2||
       typeof order.ticker!=="string"||!MARKET.test(order.ticker)||
-      typeof order.client_order_id!=="string"||!UUID.test(order.client_order_id))
+      typeof order.client_order_id!=="string"||!CLIENT_ORDER_ID.test(order.client_order_id))
     return DENY("emergency_exit_order_identity_invalid");
   if(order.reduce_only!==true||order.time_in_force!=="immediate_or_cancel"||
       order.post_only===true||order.expiration_time!==undefined||
