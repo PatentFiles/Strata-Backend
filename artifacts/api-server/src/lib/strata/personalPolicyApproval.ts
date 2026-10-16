@@ -15,6 +15,7 @@ import {
   type V13ApprovedLiveMoneyPolicy,
 } from "../v13LiveMoneyRisk";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
+import { parseAttestedFeeSource } from "./approvedOperatorFeeSource";
 
 export const APPROVE_OWNED_POLICY_CONFIRMATION = "APPROVE_OWNED_ACCOUNT_POLICY";
 
@@ -76,6 +77,12 @@ const APPROVE_SQL = `
     AND created_by = $21
     AND state = 'DRAFT'
     AND version = $23
+    AND ($24::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM public.strata_fee_operator_approved_releases ar
+      JOIN public.strata_fee_operator_release_candidates c ON c.release_id=ar.candidate_id
+      WHERE ar.approval_id=$24::uuid AND ar.revoked_at IS NULL AND ar.expires_at>now()
+        AND c.revoked_at IS NULL AND ar.content_sha256=c.content_sha256
+    ))
   RETURNING id
 `;
 
@@ -313,6 +320,8 @@ async function approveAndLink(
     input.ownerUserId,
     input.policy.entryPolicyVersion,
     input.policy.version,
+    parseAttestedFeeSource(input.policy.feeSourceUrl ?? "",
+      input.policy.feePolicyVersion ?? "", input.policy.feeFormulaVersion ?? "")?.approvalId ?? null,
   ]);
   if ((approved.rowCount ?? approved.rows.length) !== 1) throw new Error("policy_not_approved");
   const linked = await query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
