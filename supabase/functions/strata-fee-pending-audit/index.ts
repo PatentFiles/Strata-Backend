@@ -9,8 +9,18 @@ const EXPECTED_SHA256 = "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d
 const EXPECTED_SIZE = 281129;
 const MAX_BYTES = 2_000_000;
 const OFFICIAL_SOURCE = "https://kalshi.com/docs/kalshi-fee-schedule.pdf";
+// Browser access is limited to the configured Strata frontend, not to arbitrary origins.
+// JWT verification and the private ADMIN role check remain independently mandatory.
+const ALLOWED_ORIGIN = Deno.env.get("STRATA_WEB_ORIGIN")?.trim() ||
+  "https://private-multi-asset-eviv.bolt.host";
+const CORS = {
+  "access-control-allow-origin": ALLOWED_ORIGIN,
+  "access-control-allow-headers": "authorization, apikey, content-type, x-client-info, x-supabase-client-platform, x-supabase-client-version",
+  "access-control-allow-methods": "GET, OPTIONS",
+  "vary": "Origin",
+};
 const jsonHeaders = { "content-type": "application/json", "cache-control": "private, no-store",
-  "x-content-type-options": "nosniff" };
+  "x-content-type-options": "nosniff", ...CORS };
 
 function failure(reason: string, status: number): Response {
   return new Response(JSON.stringify({ ok: false, reason }), { status, headers: jsonHeaders });
@@ -32,6 +42,12 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
+  if (request.method === "OPTIONS") {
+    if (request.headers.get("origin") !== ALLOWED_ORIGIN) {
+      return new Response(null, { status: 403, headers: { vary: "Origin" } });
+    }
+    return new Response(null, { status: 204, headers: CORS });
+  }
   if (request.method !== "GET") return failure("method_not_allowed", 405);
   const url = new URL(request.url);
   if (url.search || url.pathname.split("/").pop() !== "strata-fee-pending-audit") {
