@@ -85,6 +85,14 @@ jobs:
             sudo apt-get install -y postgresql-16
           fi
           node scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts
+      - name: Test private owner fee-source grant and consent readiness
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/operatorFeeAuthorizationReadiness.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/operatorFeeAuthorizationReadiness.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/operatorFeeAuthorizationReadiness.test.cjs
       - name: Test explicit operator fee-source authorization refusal and scope
         working-directory: artifacts/api-server
         run: |
