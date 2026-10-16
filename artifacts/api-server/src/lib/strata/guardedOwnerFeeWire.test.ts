@@ -35,8 +35,7 @@ function harness(open:boolean,authorized:boolean){
     release:()=>{released++;},
   };
   const wire=createGuardedOwnerFeeFetch(owner,source,transport,{
-    verifyStage:(async()=>open?result:{ok:false as const,reason:"revoked_or_expired"})
-      as typeof verifyOwnerFeeSourceStage,
+    verifyStage:(async()=>open?result:{ok:false as const,reason:"revoked_or_expired"}) as typeof verifyOwnerFeeSourceStage,
     connect:async()=>{connected++;return client as unknown as PoolClient;},
   });
   return {wire,stats:()=>({posted,connected,rolledBack,committed,released})};
