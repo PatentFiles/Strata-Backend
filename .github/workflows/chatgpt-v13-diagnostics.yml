@@ -80,6 +80,13 @@ jobs:
             sudo apt-get install -y postgresql-16
           fi
           node scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts
+      - name: Test explicit operator fee-source authorization refusal and scope
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/operatorFeeSourceAuthorization.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/operatorFeeSourceAuthorization.test.cjs
+          node --test dist/operatorFeeSourceAuthorization.test.cjs
       - name: Test owner pilot transfer one-shot safety and isolation
         working-directory: artifacts/api-server
         run: |
