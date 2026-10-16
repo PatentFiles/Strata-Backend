@@ -12,7 +12,9 @@ const source=encodeOwnerFeeSource(grant,release)!;
 const url="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders";
 function order(reduceOnly=false, ticker=market){
   return {method:"POST",body:JSON.stringify({ticker,subaccount:1,exchange_index:2,
-    reduce_only:reduceOnly})};
+    side:"ask",count:"1.00",price:"0.5600",
+    client_order_id:"v13p-99999999-9999-4999-8999-999999999999",
+    time_in_force:"immediate_or_cancel",post_only:false,reduce_only:reduceOnly})};
 }
 const result={ok:true as const,identity:{
   sourceKind:"operator_attested_not_provider" as const,
@@ -60,6 +62,25 @@ describe("final order source fence",()=>{
     await assert.rejects(h.wire(url,{method:"POST",body:JSON.stringify({
       ticker:market,subaccount:1,exchange_index:2,reduce_only:"true",
     })}),/new_entries_paused_pending_protective_exit/);
+    assert.deepEqual(h.stats(),{posted:0,connected:0,rolledBack:0,committed:0,released:0});
+  });
+  it("rejects malformed V2 reduce-only orders before any network or database call",async()=>{
+    const h=harness(true,true);
+    const good=JSON.parse(order(true).body) as Record<string,unknown>;
+    for(const changed of [
+      {time_in_force:"good_till_canceled"},
+      {time_in_force:"fill_or_kill"},
+      {post_only:true},
+      {expiration_time:1234567890},
+      {client_order_id:"unknown"},
+      {side:"yes"},
+      {count:"0.00"},
+      {count:"1"},
+      {price:"1.0000"},
+    ]){
+      await assert.rejects(h.wire(url,{method:"POST",body:JSON.stringify({...good,...changed})}),
+        /exit_order_shape_unverified/);
+    }
     assert.deepEqual(h.stats(),{posted:0,connected:0,rolledBack:0,committed:0,released:0});
   });
   it("DELETE cancellation is still forwarded when fee authorization is revoked",async()=>{
