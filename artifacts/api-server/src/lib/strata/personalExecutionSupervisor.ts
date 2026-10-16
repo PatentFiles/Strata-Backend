@@ -5,6 +5,7 @@ import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
 import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
+import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -289,7 +290,7 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: personalProductionFetch,
+      fetchImpl: alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
     });
     const uncertain = await db.query(
       `SELECT count(*)::text AS n FROM v13_production_intent
