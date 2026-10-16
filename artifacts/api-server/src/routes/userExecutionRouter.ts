@@ -636,6 +636,27 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const result=await revokeReviewedFeeSourceGrant(userId, req.body ?? {});
     res.status(result.ok?200:409).json(sanitizePublic(result));
   });
+  router.get("/fees/authorized-preflight", async (_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const proof=await verifyOwnerFeeSourceStage(userId,"STEP_6");
+    if(!proof.ok)return void res.status(200).json(sanitizePublic({
+      ok:false,reason:proof.reason,
+      providerPdfVerified:false,policyApproved:false,commissioningPerformed:false,
+      tradingAuthorized:false,
+    }));
+    res.status(200).json(sanitizePublic({
+      ok:true,reason:"operator_attested_source_verified_read_only",
+      feeArtifactDigest:proof.identity.digest,
+      checkedAt:new Date(proof.identity.verifiedAtMs).toISOString(),
+      sourceUrl:proof.identity.sourceUrl,
+      provenanceType:"operator_attested_not_provider",
+      feePolicyVersion:proof.identity.policyVersion,
+      providerPdfVerified:false,policyApproved:false,commissioningPerformed:false,
+      tradingAuthorized:false,
+    }));
+  });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
