@@ -9,6 +9,7 @@
  * Importantly: no official capture write, policy write, or Kalshi credential.
  */
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { selectLiveDistinctReviews, boundedCandidateExpiry, type SourceReviewRow } from "./releaseCandidateValidation.ts";
 
 const BUCKET = "strata-official-fee-artifacts";
 const PATH = "operator-pending/kalshi-fee-schedule.pdf";
@@ -34,7 +35,6 @@ function sha256(bytes: Uint8Array): Promise<string> {
   return crypto.subtle.digest("SHA-256", owned.buffer)
     .then(buffer => Array.from(new Uint8Array(buffer), n => n.toString(16).padStart(2, "0")).join(""));
 }
-type Review = { review_id: string; reviewer_user_id: string; expires_at: string };
 Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") {
     return req.headers.get("origin") === HOST
@@ -72,13 +72,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("content_sha256", SHA).gt("expires_at", now.toISOString())
       .order("reviewed_at", { ascending: false }).limit(12);
     if (claims.error) return fail(503, "review_database_unavailable");
-    const active = (claims.data ?? []) as Review[];
-    const unique = new Map<string, Review>();
-    for (const row of active) if (!unique.has(row.reviewer_user_id)) unique.set(row.reviewer_user_id, row);
-    const distinct = [...unique.values()];
-    const ids = distinct.slice(0, 2).map(x => x.review_id).sort();
+    const selected = selectLiveDistinctReviews((claims.data ?? []) as SourceReviewRow[], now.getTime());
+    const ids = selected.ok ? selected.ids : null;
     let reviewerClaimsValid = false;
-    if (ids.length === 2) {
+    if (ids) {
       const approved = await server.rpc("strata_two_operator_fee_reviews_valid", {
         first_review: ids[0], second_review: ids[1], expected_digest: SHA,
       });
@@ -125,16 +122,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
         !new TextDecoder().decode(bytes.subarray(-2048)).includes("%%EOF") ||
         await sha256(bytes) !== SHA)
       return fail(409, "reviewed_storage_digest_mismatch");
-    const claimsExpire = Math.min(...distinct.slice(0,2).map(z => Date.parse(z.expires_at)));
-    const expiry = new Date(Math.min(Date.now() + 15 * 60_000, claimsExpire));
-    if (!Number.isFinite(expiry.getTime()) || expiry.getTime() <= Date.now() + 30_000)
-      return fail(409, "review_claims_expired");
+    if (!selected.ok || !ids) return fail(409, "review_claims_expired");
+    const expiresAt = boundedCandidateExpiry(Date.now(), selected.latestPossibleExpiryMs);
+    if (!expiresAt) return fail(409, "review_claims_expired");
     // Release candidates are written to an isolated ledger. They do NOT
     // become provider captures or trading evidence.
     const written = await server.from(RELEASES).insert({
       content_sha256: SHA, reviewer_1: ids[0], reviewer_2: ids[1],
       released_by: user.id, reviewer_note: note, release_confirmation: CONFIRMATION,
-      expires_at: expiry.toISOString(),
+      expires_at: expiresAt,
     }).select("release_id,recorded_at,expires_at").single();
     if (written.error || !written.data) return fail(409, "release_candidate_not_recorded");
     return result(201, { ok: true, reason: "operator_release_candidate_recorded_only",
