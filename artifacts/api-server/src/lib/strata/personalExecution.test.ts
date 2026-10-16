@@ -541,9 +541,19 @@ test("cash and commissioning writes require explicit confirmation", async () => 
 test("owned market evidence uses the configured stake and rejects an unproven fee grid", () => {
   const book = { orderbook_fp: { yes_dollars: [["0.4500", "100"]], no_dollars: [["0.5000", "100"]] } };
   const series = { series: { ticker: "KXBTC15M", fee_type: "quadratic", fee_multiplier: "1" } };
-  const market = { market: { ticker: "KXBTC15M-TEST", exchange_index: 2, status: "active", price_level_structure: "deci_cent" } };
+  const eventTicker = "KXBTC15M-TEST-EVENT";
+  const close = new Date(NOW + 15*60_000).toISOString();
+  const expires = new Date(NOW + 16*60_000).toISOString();
+  const eventPayload = { event: { event_ticker: eventTicker, series_ticker: "KXBTC15M",
+    fee_type_override: null, fee_multiplier_override: null } };
+  const seriesChangesPayload = { series_fee_change_arr: [], cursor: "" };
+  const eventChangesPayload = { event_fee_changes: [], cursor: "" };
+  const market = { market: { ticker: "KXBTC15M-TEST", event_ticker: eventTicker,
+    close_time: close, expiration_time: expires, latest_expiration_time: expires,
+    expected_expiration_time: expires, exchange_index: 2, status: "active", price_level_structure: "deci_cent" } };
   const evidence = ownedMarketEvidence({
     market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series, marketPayload: market,
+    eventPayload, seriesChangesPayload, eventChangesPayload,
     observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
     policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
     artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
@@ -554,8 +564,9 @@ test("owned market evidence uses the configured stake and rejects an unproven fe
     market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series,
     marketPayload: {
       market: {
-        ticker: "KXBTC15M-TEST", exchange_index: 2, status: "active",
-        price_level_structure: "tapered_deci_cent",
+        ticker: "KXBTC15M-TEST", event_ticker: eventTicker, exchange_index: 2, status: "active",
+        close_time: close, expiration_time: expires, latest_expiration_time: expires,
+        expected_expiration_time: expires, price_level_structure: "tapered_deci_cent",
         price_ranges: [
           { start: "0.0000", end: "0.1000", step: "0.0010" },
           { start: "0.1000", end: "0.9000", step: "0.0100" },
@@ -563,6 +574,7 @@ test("owned market evidence uses the configured stake and rejects an unproven fe
         ],
       },
     },
+    eventPayload, seriesChangesPayload, eventChangesPayload,
     observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
     policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
     artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
@@ -571,10 +583,11 @@ test("owned market evidence uses the configured stake and rejects an unproven fe
   assert.throws(() => ownedMarketEvidence({
     market: "KXBTC15M-TEST", side: "YES", bookPayload: book,
     seriesPayload: { series: { ticker: "OTHER", fee_type: "quadratic", fee_multiplier: "1" } },
-    marketPayload: market, observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    marketPayload: market, eventPayload, seriesChangesPayload, eventChangesPayload,
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
     policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
     artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
-  }), /production_fee_or_market_grid_unproven/);
+  }), /production_event_fee_evidence_unverified/);
 });
 
 test("commissioning requires an explicit minimum exit and activation does not change flags", async () => {
