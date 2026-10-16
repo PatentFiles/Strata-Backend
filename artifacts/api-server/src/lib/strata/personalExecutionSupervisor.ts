@@ -250,9 +250,20 @@ export function createProductionPersonalSession(
           publicKalshiObject(`/series/KXBTC15M`),
           publicKalshiObject(`/markets/${encodeURIComponent(market)}`),
         ]);
+        const eventTicker = (marketPayload as { market?: { event_ticker?: unknown } })?.market?.event_ticker;
+        if (typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker))
+          throw new Error("production_event_fee_evidence_unverified");
+        // Repeat these reads when executor re-invokes readMarket immediately
+        // before POST. Missing, paginated or changed fee metadata fails closed.
+        const [eventPayload, seriesChangesPayload, eventChangesPayload] = await Promise.all([
+          publicKalshiObject(`/events/${encodeURIComponent(eventTicker)}`),
+          publicKalshiObject("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100"),
+          publicKalshiObject(`/events/fee_changes?event_ticker=${encodeURIComponent(eventTicker)}&show_historical=false&limit=100`),
+        ]);
         return ownedMarketEvidence({
           market, side, bookPayload, seriesPayload, marketPayload,
-          observedAtMs: clock, nowMs: clock, configuredStakeCents: configuredStake,
+          eventPayload, seriesChangesPayload, eventChangesPayload,
+          observedAtMs: clock, nowMs: now(), configuredStakeCents: configuredStake,
           policyVersion, sourceUrl, formulaVersion, artifactDigest: digest, policyHash,
           verifiedAtMs: feeVerifiedAt,
         });
@@ -505,12 +516,25 @@ async function releaseWorkerLease(
 async function publicKalshiObject(path: string): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(`${PERSONAL_MARKET_METADATA_HOST}${path}`, { signal: AbortSignal.timeout(8_000) });
+    response = await fetch(`${PERSONAL_MARKET_METADATA_HOST}${path}`, {
+      method: "GET", redirect: "error", cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
   } catch {
     throw new Error("production_market_metadata_unavailable");
   }
-  if (!response.ok) throw new Error("production_market_metadata_unavailable");
-  return await response.json() as unknown;
+  if (response.status !== 200 ||
+      response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
+      (response.url && response.url !== `${PERSONAL_MARKET_METADATA_HOST}${path}`)) {
+    throw new Error("production_market_metadata_unavailable");
+  }
+  const length = Number(response.headers.get("content-length") ?? "0");
+  if (!Number.isSafeInteger(length) || length > 256_000) throw new Error("production_market_metadata_unavailable");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 2 || bytes.length > 256_000) throw new Error("production_market_metadata_unavailable");
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  catch { throw new Error("production_market_metadata_unavailable"); }
 }
 
 function number(value: unknown): number | null {
