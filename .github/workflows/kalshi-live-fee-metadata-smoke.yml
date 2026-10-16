@@ -1,0 +1,51 @@
+name: Kalshi live fee metadata smoke (read only)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/kalshi-live-fee-metadata-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-source-live-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read KXBTC15M live fee series and change metadata without API keys
+        shell: bash
+        run: |
+          node <<'NODE'
+          const base = "https://api.elections.kalshi.com/trade-api/v2";
+          async function get(path) {
+            const url=base+path;
+            const r=await fetch(url,{redirect:"error",headers:{Accept:"application/json"},
+              signal:AbortSignal.timeout(10000)});
+            if(r.status!==200 || r.url!==url ||
+              !r.headers.get("content-type")?.includes("application/json"))
+                throw Error("source_http_or_identity_invalid:"+r.status);
+            return r.json();
+          }
+          try {
+            const s=await get("/series/KXBTC15M");
+            const series=s.series;
+            if(series?.ticker!=="KXBTC15M" || series.fee_type!=="quadratic" ||
+              Number(series.fee_multiplier)!==1)
+                throw Error("series_current_fee_metadata_changed_or_unverified");
+            const c=await get("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100");
+            if(!Array.isArray(c.series_fee_change_arr) ||
+              typeof c.cursor!=="string" && c.cursor!==undefined)
+                throw Error("scheduled_fee_change_response_invalid");
+            console.log(JSON.stringify({
+              source:"official_kalshi_api",series:"KXBTC15M",feeType:series.fee_type,
+              multiplier:series.fee_multiplier,seriesScheduledChanges:c.series_fee_change_arr.length,
+              hasAdditionalPage:Boolean(c.cursor),checkedAt:new Date().toISOString(),
+              pdfApproved:false,policyApproved:false,tradingEnabled:false
+            }));
+          } catch (e) {
+            console.error("Live Kalshi API fee diagnostic unavailable:", e.message);
+            process.exitCode=1;
+          }
+          NODE
