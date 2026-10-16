@@ -1,5 +1,7 @@
 name: Operator fee-source authorization and final-order regression
 on:
+  push:
+    branches: [main]
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
@@ -10,6 +12,7 @@ on:
       - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - 'sql/strata_fee_source_policy_independent_reviews.sql'
+      - 'sql/strata_emergency_exit_reservation_private.sql'
       - '.github/workflows/owner-fee-source-regression.yml'
 permissions:
   contents: read
