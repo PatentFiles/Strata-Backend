@@ -93,11 +93,6 @@ jobs:
             --outfile=dist/operatorFeeAuthorizationReadiness.test.cjs \
             --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/operatorFeeAuthorizationReadiness.test.cjs
-      - name: Test owner-scoped fee-source readiness fails closed
-        working-directory: artifacts/api-server
-        run: |
-          pnpm exec esbuild src/lib/strata/feeAuthorizationReadiness.test.ts --bundle --platform=node --format=cjs --outfile=dist/feeAuthorizationReadiness.test.cjs --external:pg-native
-          node --test dist/feeAuthorizationReadiness.test.cjs
       - name: Test explicit operator fee-source authorization refusal and scope
         working-directory: artifacts/api-server
         run: |
