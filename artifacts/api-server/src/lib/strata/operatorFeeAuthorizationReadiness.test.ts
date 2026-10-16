@@ -29,6 +29,8 @@ const grant=()=>({
   grant_id:grantId,owner_user_id:owner,release_id:releaseId,
   reviewed_pdf_sha256:"c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601",
   policy_version:"operator_attested_fee_source_v1",approved_by_admin_id:approver,
+  policy_decision_sha256:"d".repeat(64),
+  approver_is_current_admin:true,approver_independent:true,
   approved_at:iso(NOW-1000),expires_at:iso(NOW+300_000),revoked_at:null,
   authorized_stages:["STEP_6","STEP_9","STEP_11","ORDER_ENTRY"],
 });
@@ -82,6 +84,20 @@ test("rejects missing, duplicate, foreign owner or revoked source grants",async(
   assert.equal((await run({grantRows:[grant(),grant()]})).answer.reason,"multiple_active_source_grants");
   assert.equal((await run({grantRows:[{...grant(),owner_user_id:stranger}]})).answer.diagnosticEligible,false);
   assert.equal((await run({grantRows:[{...grant(),revoked_at:iso(NOW-1)}]})).answer.diagnosticEligible,false);
+});
+test("requires independent current administrator and fixed policy decision digest",async()=>{
+  for (const changed of [
+    {approver_is_current_admin:false},
+    {approver_independent:false},
+    {policy_decision_sha256:"not-a-digest"},
+    {policy_decision_sha256:null},
+    {approved_by_admin_id:owner},
+  ]) {
+    const {answer}=await run({grantRows:[{...grant(),...changed}]});
+    assert.equal(answer.reason,"independent_source_policy_approval_unverified");
+    assert.equal(answer.diagnosticEligible,false);
+    assert.deepEqual(Object.values(answer.stageChecks),[false,false,false,false]);
+  }
 });
 test("rejects absent, ambiguous, revoked, and foreign owner consent",async()=>{
   assert.equal((await run({consentRows:[]})).answer.reason,"owner_source_consent_missing_or_ambiguous");
