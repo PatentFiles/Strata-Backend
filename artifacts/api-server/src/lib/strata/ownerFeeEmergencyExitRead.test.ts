@@ -3,10 +3,10 @@ import test from "node:test";
 import {inspectOwnedEmergencyExitRead} from "./ownerFeeEmergencyExitRead";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {readOwnedKalshiFeeds} from "./personalExchangeRead";
-import type {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
+import type {readExactEmergencyFeeEvidence} from "./ownerFeeEmergencyExitMarket";
 import type {dedicatedSignerFingerprint} from "./commissioning";
 const OWNER="11111111-1111-4111-8111-111111111111";
-const ACCOUNT="22222222-2222-4222-8222-222222222222";
+const ACCOUNT="owner-execution-2";
 const MARKET="KXBTC15M-26OCT161045-45";
 const NOW=Date.parse("2026-10-16T19:45:00Z");
 const order:EmergencyExitOrder={
@@ -21,15 +21,21 @@ function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
   let dbReads=0,feedReads=0,feeReads=0;
   const db={query:async(sql:string)=>{
     dbReads++;
-    if(sql.includes("v13_production_account"))return {rows:[{
+    if(sql.includes("v13_production_account")){
+      assert.match(sql,/id=\$1::text/);
+      return {rows:[{
       owner_user_id:opt.owner??OWNER,subaccount:1,exchange_index:2,
       key_fingerprint:"validated_fingerprint",execution_enabled:true,
       kill_switch:opt.kill??false,
     }]};
+    }
     if(sql.includes("live_execution_config"))return {rows:[{
       manual_kill_switch:opt.globalKill??false,live_execution_enabled:true,
     }]};
-    if(sql.includes("v13_production_intent"))return {rows:[{n:opt.pending??0}]};
+    if(sql.includes("v13_production_intent")){
+      assert.match(sql,/account_id=\$1::text/);
+      return {rows:[{n:opt.pending??0}]};
+    }
     throw Error("unexpected_database_read");
   }};
   const readFeeds=(async()=>{feedReads++;return opt.incomplete?
@@ -37,15 +43,10 @@ function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
     {ok:true as const,observedAtMs:NOW-100,cashMicros:"0",
       positions:opt.positions??[{ticker:MARKET,position_fp:"1.00",exchange_index:2}],
       orders:opt.orders??[],fills:[],settlements:[]};}) as typeof readOwnedKalshiFeeds;
-  const readFees=(async()=>{feeReads++;return {
-    ok:opt.badFee!==true,reason:opt.badFee?"fee_unavailable":"ok",
-    series:"KXBTC15M" as const,exchangeIndex:2 as const,referenceDigest:"a".repeat(64),
-    liveVerifiedAt:new Date(NOW-100).toISOString(),marketTicker:MARKET,
-    eventTicker:"KXBTC15M-26OCT161045",
-    feeType:"quadratic" as const,feeMultiplier:"1" as const,
-    metadataDigest:"b".repeat(64),pdfProvenanceApproved:false as const,
-    ownerPolicyApproved:false as const,commissioningApproved:false as const,
-    tradingEnabled:false as const};}) as typeof probeCurrentKalshiFeeApi;
+  const readFees=(async(ticker:string)=>{feeReads++;return opt.badFee?
+    {ok:false as const,reason:"fee_unavailable"}:
+    {ok:true as const,marketTicker:ticker,fingerprint:"b".repeat(64),
+     observedAtMs:NOW-100,marketOpen:true as const};}) as typeof readExactEmergencyFeeEvidence;
   const signerFingerprint=(()=> "validated_fingerprint") as typeof dedicatedSignerFingerprint;
   const run=()=>inspectOwnedEmergencyExitRead(OWNER,ACCOUNT,
     {keyId:"mock-key",privateKey:"not_used"},order,

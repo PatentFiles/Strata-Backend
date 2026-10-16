@@ -1,7 +1,7 @@
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {readOwnedKalshiFeeds} from "./personalExchangeRead";
-import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
+import {readExactEmergencyFeeEvidence} from "./ownerFeeEmergencyExitMarket";
 import {inspectEmergencyExitCandidate,type EmergencyExitOrder,
   type EmergencyExitDecision,type EmergencyExitEvidence} from "./ownerFeeEmergencyExit";
 
@@ -12,6 +12,7 @@ import {inspectEmergencyExitCandidate,type EmergencyExitOrder,
  */
 type DB={query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ACCOUNT_ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const yes=(x:unknown)=>x===true||x==="t"||x==="true";
 const no=(x:unknown)=>x===false||x==="f"||x==="false";
 const obj=(x:unknown):Record<string,unknown>|null=>
@@ -24,16 +25,16 @@ export async function inspectOwnedEmergencyExitRead(
   ownerId:string,accountId:string,material:{keyId:string;privateKey:string},
   order:EmergencyExitOrder,
   deps:{db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;
-    readFees?:typeof probeCurrentKalshiFeeApi;
+    readFees?:typeof readExactEmergencyFeeEvidence;
     signerFingerprint?:typeof dedicatedSignerFingerprint;now?:()=>number}={},
 ):Promise<EmergencyExitDecision>{
-  if(!UUID.test(ownerId)||!UUID.test(accountId))return deny("emergency_exit_owner_invalid");
+  if(!UUID.test(ownerId)||!ACCOUNT_ID.test(accountId))return deny("emergency_exit_owner_invalid");
   const db=deps.db??pool;
   const now=deps.now??Date.now,started=now();
   if(!Number.isSafeInteger(started)||started<=0)return deny("emergency_exit_clock_invalid");
   try{
     const account=await db.query(
-      "SELECT owner_user_id,subaccount,exchange_index,execution_enabled,kill_switch,key_fingerprint FROM public.v13_production_account WHERE id=$1::uuid AND owner_user_id=$2::uuid LIMIT 2",
+      "SELECT owner_user_id,subaccount,exchange_index,execution_enabled,kill_switch,key_fingerprint FROM public.v13_production_account WHERE id=$1::text AND owner_user_id=$2::uuid LIMIT 2",
       [accountId,ownerId]);
     const global=await db.query(
       "SELECT live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
@@ -64,14 +65,14 @@ export async function inspectOwnedEmergencyExitRead(
       if(status==="resting"||status==="pending")resting++;
     }
     const unknown=await db.query(
-      "SELECT count(*)::integer AS n FROM public.v13_production_intent WHERE account_id=$1::uuid AND state IN ('DISPATCHED','UNKNOWN')",
+      "SELECT count(*)::integer AS n FROM public.v13_production_intent WHERE account_id=$1::text AND state IN ('DISPATCHED','UNKNOWN')",
       [accountId]);
     const pending=Number(unknown.rows[0]?.n);
     if(unknown.rows.length!==1||!Number.isSafeInteger(pending)||pending<0)
       return deny("emergency_exit_orders_unreconciled");
-    const fee=await (deps.readFees??probeCurrentKalshiFeeApi)();
-    const fingerprint=fee.metadataDigest;
-    const readAt=Date.parse(String(fee.liveVerifiedAt??""));
+    const fee=await (deps.readFees??readExactEmergencyFeeEvidence)(
+      String(order.ticker??""),now);
+    // No inferred marketOpen, no list-first market, no synthetic fee provenance.
     const evidence:EmergencyExitEvidence={
       authenticatedOwnerId:ownerId,accountOwnerId:ownerId,
       accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,
@@ -79,13 +80,11 @@ export async function inspectOwnedEmergencyExitRead(
       positionsComplete:true,positionMarket:String(matching[0]!.ticker),
       positionFp,positionsObservedAtMs:feeds.observedAtMs,
       restingOrderCount:resting,uncertainOrderCount:pending,
-      kalshiFee:fee.ok&&typeof fee.marketTicker==="string"&&fee.marketTicker===order.ticker&&
-        fee.series==="KXBTC15M"&&fee.exchangeIndex===2&&
-        fee.feeType==="quadratic"&&fee.feeMultiplier==="1"&&
-        typeof fingerprint==="string"?
+      kalshiFee:fee.ok&&fee.marketOpen===true&&fee.marketTicker===order.ticker?
         {source:"kalshi_live_api",market:fee.marketTicker,
-         fingerprint,observedAtMs:readAt,feeType:"quadratic",
-         feeMultiplier:1,noUnverifiedOverridesOrChanges:true,marketOpen:true}:null,
+         fingerprint:fee.fingerprint,observedAtMs:fee.observedAtMs,
+         feeType:"quadratic",feeMultiplier:1,
+         noUnverifiedOverridesOrChanges:true,marketOpen:fee.marketOpen}:null,
     };
     return inspectEmergencyExitCandidate(ownerId,order,evidence,now());
   }catch{return deny("emergency_exit_independent_reads_unavailable");}
