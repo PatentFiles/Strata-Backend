@@ -8,7 +8,8 @@ import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthori
 import { recordOwnerFeeSourceConsent, revokeOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
 import { verifyOwnerFeeSourceStage } from "../lib/strata/ownerFeeSourceStage";
 import { feeSourcePolicyDocument, signIndependentFeePolicyReview,
-  issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant
+  issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant,
+  listEligibleFeeSourceOwners, inspectFeePolicySigningStatus
 } from "../lib/strata/operatorFeePolicyAuthority";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
@@ -598,6 +599,21 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({error:"Unauthorized"});
     res.setHeader("Cache-Control","private, no-store");
     res.json(sanitizePublic(feeSourcePolicyDocument()));
+  });
+  router.get("/fees/source-policy-owners", async (_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await listEligibleFeeSourceOwners(userId);
+    res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-policy-status", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    const ownerId=typeof req.body?.ownerUserId==="string"?req.body.ownerUserId:"";
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await inspectFeePolicySigningStatus(userId,ownerId);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.post("/fees/source-policy-review", async (req, res) => {
     const userId=subject(res);
