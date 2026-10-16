@@ -20,9 +20,10 @@ export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unkno
   if(values.confirmation!==FEE_SOURCE_CONSENT_CONFIRMATION||
     typeof values.grantId!=="string"||!UUID.test(values.grantId))
     return denied("explicit_owner_source_consent_required");
-  const client=await pool.connect();
+  let client;
   let completed=false;
   try {
+    client=await pool.connect();
     await client.query("BEGIN");
     const accounts=await client.query(`
       SELECT id FROM public.v13_production_account
@@ -58,7 +59,32 @@ export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unkno
       policyApproved:false,commissioningApproved:false,tradingAuthorized:false};
   }catch{return denied("owner_source_consent_unavailable");}
   finally {
-    if(!completed){try{await client.query("ROLLBACK");}catch{}}
-    client.release();
+    if(client){
+      if(!completed){try{await client.query("ROLLBACK");}catch{}}
+      client.release();
+    }
   }
+}
+
+/** Revocation is owned-user-scoped and append-only; it cannot widen authority. */
+export async function revokeOwnerFeeSourceConsent(ownerUserId:string,body:unknown):
+  Promise<ConsentResult>{
+  if(!UUID.test(ownerUserId)||!body||typeof body!=="object"||Array.isArray(body))
+    return denied("owner_revocation_invalid");
+  const value=body as Record<string,unknown>;
+  if(value.confirmation!=="REVOKE_OPERATOR_FEE_SOURCE_CONSENT"||
+    typeof value.grantId!=="string"||!UUID.test(value.grantId)||
+    typeof value.reason!=="string"||value.reason.trim().length<8||
+    value.reason.trim().length>300)return denied("explicit_revocation_required");
+  try{
+    const revoked=await pool.query(`
+      UPDATE private.strata_fee_source_owner_consents
+      SET revoked_at=now(),revocation_reason=$3
+      WHERE grant_id=$1::uuid AND owner_user_id=$2::uuid AND revoked_at IS NULL
+      RETURNING consent_id`,[value.grantId,ownerUserId,value.reason.trim()]);
+    return revoked.rows.length===1?
+      {ok:true,reason:"source_consent_revoked_only",policyApproved:false,
+       commissioningApproved:false,tradingAuthorized:false}:
+      denied("consent_already_revoked_or_missing");
+  }catch{return denied("consent_revocation_unavailable");}
 }
