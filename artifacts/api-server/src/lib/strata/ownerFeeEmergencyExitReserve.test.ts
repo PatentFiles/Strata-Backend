@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {readFileSync} from "node:fs";
 import {reserveOwnedEmergencyExitProof} from "./ownerFeeEmergencyExitReserve";
 import type {inspectOwnedEmergencyExitRead} from "./ownerFeeEmergencyExitRead";
 import type {dedicatedSignerFingerprint} from "./commissioning";
@@ -79,8 +80,13 @@ test("missing lock or duplicate reservation denies and rolls back",async()=>{
     assert.equal(x.stats().release,1);
   }
 });
-test("SQL constraints separate owner and prevent two unresolved same-market exits",()=>{
-  // The migration owns concurrency protection, not an in-memory Set().
-  const uniqueness="CREATE UNIQUE INDEX IF NOT EXISTS strata_emergency_exit_single_unresolved_market";
-  assert.match(uniqueness,/strata_emergency_exit_single_unresolved_market/);
+test("migration truly enforces private access and one unresolved exit per account-market",()=>{
+  const sql=readFileSync("sql/strata_emergency_exit_reservation_private.sql","utf8");
+  assert.match(sql,/CREATE UNIQUE INDEX IF NOT EXISTS strata_emergency_exit_single_unresolved_market/);
+  assert.match(sql,/ON private\.strata_emergency_exit_reservations\(execution_account_id,market_ticker\)/);
+  assert.match(sql,/WHERE state IN \('PREPARED','DISPATCHED','UNKNOWN'\)/);
+  assert.match(sql,/client_order_id text NOT NULL UNIQUE/);
+  assert.match(sql,/ALTER TABLE private\.strata_emergency_exit_reservations ENABLE ROW LEVEL SECURITY/);
+  assert.match(sql,/REVOKE ALL ON private\.strata_emergency_exit_reservations FROM PUBLIC,anon,authenticated/);
+  assert.match(sql,/trading_authorized boolean NOT NULL DEFAULT false CHECK \(trading_authorized=false\)/);
 });
