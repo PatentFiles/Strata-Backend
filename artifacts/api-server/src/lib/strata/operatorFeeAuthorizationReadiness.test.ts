@@ -95,6 +95,13 @@ test("SQL joins review IDs to review authors before checking administrator indep
   assert.match(sql,/g\.approved_by_admin_id\s*<>\s*second_review\.reviewer_user_id/);
   assert.match(sql,/first_review\.reviewer_user_id\s*<>\s*second_review\.reviewer_user_id/);
   assert.match(sql,/candidate\.content_sha256\s*=\s*g\.reviewed_pdf_sha256/);
+  assert.match(sql,/candidate\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/first_review\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/second_review\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/candidate\.recorded_at\s*<=\s*now\(\)/);
+  assert.match(sql,/first_review\.reviewed_at\s*<=\s*now\(\)/);
+  assert.match(sql,/second_review\.reviewed_at\s*<=\s*now\(\)/);
+  assert.match(sql,/candidate\.evidence_kind\s*=\s*'operator_attested_commissioning_candidate'/);
   assert.doesNotMatch(sql,/g\.approved_by_admin_id\s*<>\s*candidate\.reviewer_[12]/);
 });
 test("requires independent current administrator and fixed policy decision digest",async()=>{
