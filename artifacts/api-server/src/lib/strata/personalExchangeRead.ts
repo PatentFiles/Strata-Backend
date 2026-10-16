@@ -1,4 +1,5 @@
 import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { canonical, digest, requireProof, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
@@ -278,6 +279,9 @@ export function ownedMarketEvidence(input: {
   bookPayload: unknown;
   seriesPayload: unknown;
   marketPayload: unknown;
+  eventPayload: unknown;
+  seriesChangesPayload: unknown;
+  eventChangesPayload: unknown;
   observedAtMs: number;
   nowMs: number;
   configuredStakeCents: number;
@@ -288,6 +292,16 @@ export function ownedMarketEvidence(input: {
   policyHash: string;
   verifiedAtMs: number;
 }): MarketEvidence {
+  // All fee metadata is bound to the SAME market used for the book and the
+  // final POST re-read. Never rely on series multiplier alone.
+  const feeProof = verifyOwnedFeeMetadata({
+    marketTicker: input.market, seriesPayload: input.seriesPayload,
+    marketPayload: input.marketPayload, eventPayload: input.eventPayload,
+    seriesChangesPayload: input.seriesChangesPayload,
+    eventChangesPayload: input.eventChangesPayload,
+    observedAtMs: input.observedAtMs, nowMs: input.nowMs,
+  });
+  if (!feeProof.ok) throw new Error(feeProof.reason);
   const seriesBody = object(input.seriesPayload);
   const marketBody = object(input.marketPayload);
   const series = object(seriesBody.series);
@@ -320,7 +334,9 @@ export function ownedMarketEvidence(input: {
   requireProof(entry !== null && exit !== null && Number.isSafeInteger(input.verifiedAtMs), "fee_evidence_missing");
   const bound = digest({ policyHash: input.policyHash, artifact: input.artifactDigest });
   const fingerprint = digest({
-    bound, series, grid: metadata.price_level_structure, count, limit, entry, exit,
+    bound, series, verifiedEvent: feeProof.eventTicker,
+    liveFeeMetadata: feeProof.fingerprint,
+    grid: metadata.price_level_structure, count, limit, entry, exit,
   });
   return marketEvidenceFromBook({
     market: input.market,
