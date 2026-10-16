@@ -123,9 +123,16 @@ export async function inspectOwnerFeeSourceReadiness(
                   ON second_review.review_id=candidate.reviewer_2
                 WHERE candidate.release_id=g.release_id
                   AND candidate.revoked_at IS NULL
+                  AND candidate.evidence_kind='operator_attested_commissioning_candidate'
+                  AND candidate.recorded_at <= now()
+                  AND candidate.expires_at > now()
                   AND candidate.content_sha256=g.reviewed_pdf_sha256
                   AND first_review.content_sha256=candidate.content_sha256
                   AND second_review.content_sha256=candidate.content_sha256
+                  AND first_review.reviewed_at <= now()
+                  AND second_review.reviewed_at <= now()
+                  AND first_review.expires_at > now()
+                  AND second_review.expires_at > now()
                   AND first_review.reviewer_user_id <> second_review.reviewer_user_id
                   AND g.approved_by_admin_id <> first_review.reviewer_user_id
                   AND g.approved_by_admin_id <> second_review.reviewer_user_id
@@ -143,8 +150,9 @@ export async function inspectOwnerFeeSourceReadiness(
       return denied;
     }
     // An arbitrary grant row or digest is NOT proof of independent approval.
-    // Re-check live administrator authority and separation from both reviewers
-    // on each read. Policy issuance signatures are still a separate future gate.
+    // Re-check live administrator authority, source/review freshness and
+    // separation from both reviewer identities on every read. Policy issuance
+    // signatures remain a separate, mandatory future gate.
     const grantRow = grants.rows[0]!;
     if (!/^[0-9a-f]{64}$/.test(String(grantRow.policy_decision_sha256 ?? "")) ||
         grantRow.approver_is_current_admin !== true ||
