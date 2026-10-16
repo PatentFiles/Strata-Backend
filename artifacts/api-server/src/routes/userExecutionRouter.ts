@@ -6,6 +6,7 @@ import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateR
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
 import { recordOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
+import { verifyOwnerFeeSourceStage } from "../lib/strata/ownerFeeSourceStage";
 import { feeSourcePolicyDocument, signIndependentFeePolicyReview,
   issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant
 } from "../lib/strata/operatorFeePolicyAuthority";
@@ -616,11 +617,28 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
+    // Prefer a separately signed, owner-consented alternative when present.
+    // Operator source evidence is never falsely labeled provider PDF capture.
+    const reviewed = await verifyOwnerFeeSourceStage(userId, "STEP_6");
+    if (reviewed.ok) {
+      return void res.status(200).json(sanitizePublic({
+        ok: true, reason: "operator_attested_fee_source_verified_read_only",
+        feeArtifactDigest: reviewed.identity.digest,
+        checkedAt: new Date(reviewed.identity.verifiedAtMs).toISOString(),
+        sourceUrl: reviewed.identity.sourceUrl,
+        feePolicyVersion: reviewed.identity.policyVersion,
+        provenanceType: "operator_attested_not_provider",
+        providerPdfVerified: false,
+        policyApproved: false, commissioningPerformed: false,
+        tradingAuthorized: false,
+      }));
+    }
     const result = await establishOfficialFeeDigest();
     if (!result.ok) {
       return void res.status(409).json(sanitizePublic({
         ok: false,
         reason: result.reason,
+        alternateAuthorizationReason: reviewed.reason,
         retryAfterSeconds: result.reason === "official_fee_schedule_http_429"
           ? result.diagnostic.retryAfterSeconds ?? 60
           : undefined,
