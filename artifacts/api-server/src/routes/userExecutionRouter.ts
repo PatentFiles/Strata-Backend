@@ -3,6 +3,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
+import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -549,6 +550,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
     const result = await inspectOperatorFeeCandidate();
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  router.get("/fees/reviewed-evidence", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await inspectCommissioningFeeEvidence();
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.get("/fees/preflight", async (_req, res) => {
