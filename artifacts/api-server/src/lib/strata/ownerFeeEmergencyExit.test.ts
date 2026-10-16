@@ -9,7 +9,7 @@ const MARKET="KXBTC15M-26OCT161045-45";
 const NOW=Date.parse("2026-10-16T19:45:00Z");
 const order=():EmergencyExitOrder=>({
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5600",
-  client_order_id:"22222222-2222-4222-8222-222222222222",
+  client_order_id:"v13p-22222222-2222-4222-8222-222222222222",
   time_in_force:"immediate_or_cancel",reduce_only:true,
   post_only:false,subaccount:1,exchange_index:2,
 });
