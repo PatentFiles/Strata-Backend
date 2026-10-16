@@ -35,8 +35,10 @@ jobs:
               assert 'request.headers.get("origin") !== ALLOWED_ORIGIN' in s
               assert '"access-control-allow-origin": ALLOWED_ORIGIN' in s
               assert 'strata_can_inspect_pending_fee_artifact' in s
-              assert 'service_role' not in s.lower().split('const ')[0] or True
               assert '.upload(' not in s and '.update(' not in s
-              assert 'canonicalOriginIndependentlyVerified: false' in s
+              if name == 'strata-fee-pending-audit':
+                  assert 'canonicalOriginIndependentlyVerified: false' in s
+              else:
+                  assert 'currentCanonicalByteIdentityVerified: false' in s
           print('Exact-origin browser support preserves JWT + private ADMIN checks')
           PY
