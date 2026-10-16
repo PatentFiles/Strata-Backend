@@ -15,6 +15,7 @@ import {
   type V13ApprovedLiveMoneyPolicy,
 } from "../v13LiveMoneyRisk";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
+import { parseOwnerFeeSource } from "./ownerFeeSourceStage";
 
 export const APPROVE_OWNED_POLICY_CONFIRMATION = "APPROVE_OWNED_ACCOUNT_POLICY";
 
@@ -76,6 +77,23 @@ const APPROVE_SQL = `
     AND created_by = $21
     AND state = 'DRAFT'
     AND version = $23
+    AND ($24::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_fee_source_grants g
+      JOIN private.strata_fee_source_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN public.strata_fee_operator_release_candidates r
+        ON r.release_id=g.release_id
+      WHERE g.grant_id=$24::uuid AND g.owner_user_id=$21::uuid
+        AND g.revoked_at IS NULL AND g.expires_at>now()
+        AND c.revoked_at IS NULL
+        AND c.confirmation='CONFIRM_OPERATOR_FEE_SOURCE_ONLY'
+        AND r.revoked_at IS NULL AND r.expires_at>now()
+        AND g.release_id=c.release_id AND r.content_sha256=g.reviewed_pdf_sha256
+        AND g.policy_version=$16 AND g.policy_decision_sha256=
+          'f8f7e0920168ab4601c59a3a9343e940d78dd974512c7ec97f7d052bf5fd685e'
+        AND g.authorized_stages @> ARRAY['STEP_9']::text[]
+        AND $17='strata-operator-attested://kxbtc15m/' || g.grant_id::text || '/' || g.release_id::text
+    ))
   RETURNING id
 `;
 
