@@ -20,6 +20,8 @@ import {
 import { PERSONAL_KALSHI_HOST, scopeEcho } from "./personalExchangeRead";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
 import { digest } from "../v13-production/types";
+import { verifyOwnerFeeSourceStage, parseOwnerFeeSource } from "./ownerFeeSourceStage";
+import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -176,8 +178,22 @@ export async function readOwnedApprovedFeeEvidence(
       text(row.strategy_parameter_hash) !== V13_CHAMPION_PARAMETER_HASH) {
     return { ok: false, reason: "production_entry_policy_revision_not_approved" };
   }
+  const sourceUrl=text(row.fee_source_url) ?? "";
+  const altIdentity=parseOwnerFeeSource(sourceUrl);
+  const altMode=text(row.fee_policy_version)===OPERATOR_FEE_SOURCE_POLICY &&
+    text(row.fee_formula_version)===STANDARD_QUADRATIC_FEE_FORMULA_VERSION &&
+    altIdentity!==null;
+  if(altMode){
+    const checked=await verifyOwnerFeeSourceStage(ownerUserId,"STEP_9",sourceUrl);
+    if(!checked.ok)return {ok:false,reason:checked.reason};
+    const version=Number(row.version);
+    if(!Number.isSafeInteger(version)||version<1)
+      return {ok:false,reason:"policy_limits_missing"};
+    return {ok:true,reason:"owned_policy_operator_fee_source_current",
+      feeArtifactDigest:checked.identity.digest,policyId:String(row.id),version};
+  }
   if (text(row.fee_policy_version) !== STANDING_FEE_POLICY_VERSION ||
-      text(row.fee_source_url) !== CANONICAL_FEE_SCHEDULE_URL ||
+      sourceUrl !== CANONICAL_FEE_SCHEDULE_URL ||
       text(row.fee_formula_version) !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return { ok: false, reason: "fee_artifact_unverified" };
   }
@@ -203,7 +219,25 @@ export async function approveOwnedPolicyForUser(
 ): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; retryAfterSeconds?: number }> {
   const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
   if (!parsed.ok) return parsed;
-  const feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
+  const request = input.body as Record<string,unknown>;
+  const altRequested=request.feeSourceKind==="operator_attested_not_provider";
+  if(request.feeSourceKind!==undefined&&!altRequested)
+    return {ok:false,reason:"fee_source_mode_not_supported"};
+  let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
+  if(altRequested){
+    const verified=await verifyOwnerFeeSourceStage(input.ownerUserId,"STEP_9");
+    if(!verified.ok)return {ok:false,reason:verified.reason};
+    // Never trust source URL or provenance from an HTTP client.
+    parsed.fee={
+      policyVersion:verified.identity.policyVersion,
+      sourceUrl:verified.identity.sourceUrl,
+      formulaVersion:verified.identity.formulaVersion,
+    };
+    parsed.digest=verified.identity.digest;
+    feeDigest={ok:true,digest:verified.identity.digest};
+  }else{
+    feeDigest=await resolveOwnedFeeDigest(parsed.digest,parsed.fee,input.verifyFee);
+  }
   if (!feeDigest.ok) return feeDigest;
   const authorized = authorizeOwnedPolicy({
     ownerUserId: input.ownerUserId,
