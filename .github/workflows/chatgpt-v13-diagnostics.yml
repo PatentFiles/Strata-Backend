@@ -1,6 +1,9 @@
 name: ChatGPT V13 diagnostics
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
