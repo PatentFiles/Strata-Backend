@@ -72,6 +72,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("content_sha256", SHA).gt("expires_at", now.toISOString())
       .order("reviewed_at", { ascending: false }).limit(12);
     if (claims.error) return fail(503, "review_database_unavailable");
+    const observedDistinctClaims = new Set((claims.data ?? [])
+      .filter(row => typeof row.reviewer_user_id === "string" &&
+        typeof row.expires_at === "string" && Date.parse(row.expires_at) > now.getTime())
+      .map(row => row.reviewer_user_id)).size;
     const selected = selectLiveDistinctReviews((claims.data ?? []) as SourceReviewRow[], now.getTime());
     const ids = selected.ok ? selected.ids : null;
     let reviewerClaimsValid = false;
@@ -91,6 +95,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return result(200, { ok: true,
         reason: "operator_source_claims_reviewed_only",
         validDistinctClaims: reviewerClaimsValid ? 2 : 0,
+        observedUnexpiredDistinctClaims: observedDistinctClaims,
+        releaseEligibilityReason: reviewerClaimsValid ? "two_independent_admin_claims_valid" :
+          selected.ok ? "independent_admin_validation_not_satisfied" : selected.reason,
+        checkedAt: new Date().toISOString(),
         readyForSeparateReleaseSignature: reviewerClaimsValid && !live,
         candidateActive: Boolean(live),
         candidateExpiresAt: live?.expires_at ?? null,
