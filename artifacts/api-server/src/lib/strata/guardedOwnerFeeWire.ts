@@ -13,6 +13,8 @@ import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSource
  */
 export function createGuardedOwnerFeeFetch(
   ownerUserId:string, sourceUrl:string, transport:typeof fetch,
+  testOverrides: {verifyStage?:typeof verifyOwnerFeeSourceStage;
+    connect?:()=>ReturnType<typeof pool.connect>}={},
 ):typeof fetch {
   const identity=parseOwnerFeeSource(sourceUrl);
   if(!identity)throw new Error("owner_fee_source_identity_invalid");
@@ -33,10 +35,10 @@ export function createGuardedOwnerFeeFetch(
     if(typeof ticker!=="string"||!/^KXBTC15M[A-Za-z0-9._-]+$/.test(ticker)||
       order.subaccount!==1||order.exchange_index!==2)
       throw new Error("owner_order_scope_invalid");
-    const assessment=await verifyOwnerFeeSourceStage(ownerUserId,"ORDER_ENTRY",
+    const assessment=await (testOverrides.verifyStage??verifyOwnerFeeSourceStage)(ownerUserId,"ORDER_ENTRY",
       sourceUrl,ticker);
     if(!assessment.ok)throw new Error("owner_fee_source_order_fence_closed");
-    const client=await pool.connect();
+    const client=await (testOverrides.connect?.() ?? pool.connect());
     let committed=false;
     try{
       await client.query("BEGIN");
