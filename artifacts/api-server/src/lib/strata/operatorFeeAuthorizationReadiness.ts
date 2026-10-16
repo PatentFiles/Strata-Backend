@@ -114,14 +114,14 @@ export async function inspectOwnerFeeSourceReadiness(
     const grants = await db.query(
       `SELECT grant_id,owner_user_id,release_id,reviewed_pdf_sha256,policy_version,
               approved_by_admin_id,approved_at,expires_at,revoked_at,authorized_stages
-         FROM private.strata_fee_source_grants
-        WHERE owner_user_id=$1::uuid AND release_id=$2::uuid
-          AND revoked_at IS NULL AND expires_at>now()
-          AND policy_decision_sha256=$3
+         FROM private.strata_fee_source_grants g
+        WHERE g.owner_user_id=$1::uuid AND g.release_id=$2::uuid
+          AND g.revoked_at IS NULL AND g.expires_at>now()
+          AND g.policy_decision_sha256=$3
           AND EXISTS (
             SELECT 1 FROM auth.users issuing
             JOIN private.role_assignments ar ON lower(btrim(ar.email))=lower(btrim(issuing.email))
-            WHERE issuing.id=approved_by_admin_id AND issuing.email_confirmed_at IS NOT NULL
+            WHERE issuing.id=g.approved_by_admin_id AND issuing.email_confirmed_at IS NOT NULL
               AND ar.role='ADMIN'
           )
           AND (
@@ -132,11 +132,11 @@ export async function inspectOwnerFeeSourceReadiness(
               ON lower(btrim(sr.email))=lower(btrim(signer.email))
             WHERE reviewers.owner_user_id=$1::uuid AND reviewers.release_id=$2::uuid
               AND reviewers.policy_decision_sha256=$3
-              AND reviewers.reviewed_pdf_sha256=reviewed_pdf_sha256
+              AND reviewers.reviewed_pdf_sha256=g.reviewed_pdf_sha256
               AND reviewers.revoked_at IS NULL AND reviewers.expires_at>now()
               AND signer.email_confirmed_at IS NOT NULL AND sr.role='ADMIN'
           ) >= 2
-        ORDER BY approved_at DESC LIMIT 2`,
+        ORDER BY g.approved_at DESC LIMIT 2`,
       [ownerUserId, candidate.releaseId, FEE_SOURCE_DECISION_SHA256],
     );
     if (grants.rows.length !== 1) {
