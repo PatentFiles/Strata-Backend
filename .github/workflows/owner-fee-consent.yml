@@ -1,0 +1,18 @@
+name: Owner fee-source consent safety
+on:
+  pull_request:
+    paths:
+      - 'supabase/functions/strata-fee-owner-consent/**'
+      - '.github/workflows/owner-fee-consent.yml'
+permissions:
+  contents: read
+jobs:
+  deno-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno check supabase/functions/strata-fee-owner-consent/index.ts
