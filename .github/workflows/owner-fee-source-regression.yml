@@ -31,8 +31,8 @@ jobs:
       - name: Bundle stage tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeSourceStage.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeSourceStage.test.cjs
       - name: Run stage negative cases
-        run: node --test artifacts/api-server/dist/ownerFeeSourceStage.test.cjs
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeSourceStage.test.cjs
       - name: Bundle final POST tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/guardedOwnerFeeWire.test.ts --bundle --platform=node --format=cjs --outfile=dist/guardedOwnerFeeWire.test.cjs
       - name: Run POST denial and protective exits
-        run: node --test artifacts/api-server/dist/guardedOwnerFeeWire.test.cjs
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/guardedOwnerFeeWire.test.cjs
