@@ -79,13 +79,13 @@ test("requires native V2 strict reduce-only IOC, nonresting order",()=>{
 });
 test("cannot over-close or accept fractional/overflow quantity",()=>{
   for(const o of [
-    {...order(),count:"2.01"},
     {...order(),count:"0.00"},
     {...order(),count:"-1.00"},
     {...order(),count:"not-a-count"},
     {...order(),count:"2"},
     {...order(),count:"1001.00"},
   ]) assert.equal(check(o).reason,"emergency_exit_quantity_invalid");
+  assert.equal(check({...order(),count:"2.01"}).reason,"emergency_exit_exceeds_position");
   assert.equal(check(order(),{...evidence(),positionFp:"1.00"}).reason,"emergency_exit_exceeds_position");
 });
 test("position evidence must be complete, exact, fresh and parseable",()=>{
