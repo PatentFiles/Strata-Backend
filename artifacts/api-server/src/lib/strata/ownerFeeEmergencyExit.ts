@@ -22,6 +22,8 @@ export interface EmergencyExitOrder {
   price: unknown;
   client_order_id: unknown;
   time_in_force: unknown;
+  // Mandatory Kalshi V2 self-trade prevention must be explicit and safe.
+  self_trade_prevention_type?: unknown;
   reduce_only: unknown;
   post_only?: unknown;
   subaccount: unknown;
@@ -127,7 +129,8 @@ export function inspectEmergencyExitCandidate(
       typeof order.client_order_id!=="string"||!CLIENT_ORDER_ID.test(order.client_order_id))
     return DENY("emergency_exit_order_identity_invalid");
   if(order.reduce_only!==true||order.time_in_force!=="immediate_or_cancel"||
-      order.post_only===true||order.expiration_time!==undefined||
+      order.self_trade_prevention_type!=="taker_at_cross"||
+      order.post_only!==false||order.expiration_time!==undefined||
       !strictPrice(order.price))
     return DENY("emergency_exit_order_constraints_invalid");
   const quantity=fixedHundredths(order.count);

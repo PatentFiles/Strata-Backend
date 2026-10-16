@@ -10,7 +10,7 @@ const NOW=Date.parse("2026-10-16T19:45:00Z");
 const order=():EmergencyExitOrder=>({
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5600",
   client_order_id:"v13p-22222222-2222-4222-8222-222222222222",
-  time_in_force:"immediate_or_cancel",reduce_only:true,
+  time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",reduce_only:true,
   post_only:false,subaccount:1,exchange_index:2,
 });
 const evidence=():EmergencyExitEvidence=>({
@@ -73,6 +73,9 @@ test("requires native V2 strict reduce-only IOC, nonresting order",()=>{
     {...order(),reduce_only:"true"},
     {...order(),time_in_force:"good_till_canceled"},
     {...order(),post_only:true},
+    {...order(),post_only:undefined},
+    {...order(),self_trade_prevention_type:undefined},
+    {...order(),self_trade_prevention_type:"maker"},
     {...order(),expiration_time:123},
     {...order(),price:"0"},
     {...order(),price:"1.0000"},

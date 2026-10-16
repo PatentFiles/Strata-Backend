@@ -46,7 +46,9 @@ export function createGuardedOwnerFeeFetch(
     // Kalshi V2 reduce_only is only supported with IOC. Independent of grants,
     // reject orders which could rest or whose client ID is not our ledger's.
     // No exception for expired grants exists here; issue #46 remains open.
-    if(order.time_in_force!=="immediate_or_cancel"||order.post_only!==false||
+    if(order.time_in_force!=="immediate_or_cancel"||
+       order.self_trade_prevention_type!=="taker_at_cross"||
+       order.post_only!==false||
        order.expiration_time!==undefined||
        typeof order.client_order_id!=="string"||
        !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id)||

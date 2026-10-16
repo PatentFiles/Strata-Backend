@@ -10,6 +10,7 @@ const CLIENT="v13p-22222222-2222-4222-8222-222222222222";
 function fixture(fill:"0.00"|"1.00"|"2.00"="1.00"):ExitDryRunScenario {
   const order:EmergencyExitOrder={ticker:MARKET,side:"ask",count:"2.00",price:"0.5600",
     client_order_id:CLIENT,reduce_only:true,time_in_force:"immediate_or_cancel",
+    self_trade_prevention_type:"taker_at_cross",
     post_only:false,subaccount:1,exchange_index:2};
   const evidence:EmergencyExitEvidence={authenticatedOwnerId:OWNER,accountOwnerId:OWNER,
     accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,

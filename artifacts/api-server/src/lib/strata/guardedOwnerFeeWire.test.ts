@@ -14,7 +14,8 @@ function order(reduceOnly=false, ticker=market){
   return {method:"POST",body:JSON.stringify({ticker,subaccount:1,exchange_index:2,
     side:"ask",count:"1.00",price:"0.5600",
     client_order_id:"v13p-99999999-9999-4999-8999-999999999999",
-    time_in_force:"immediate_or_cancel",post_only:false,reduce_only:reduceOnly})};
+    time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
+    post_only:false,reduce_only:reduceOnly})};
 }
 const result={ok:true as const,identity:{
   sourceKind:"operator_attested_not_provider" as const,
@@ -71,6 +72,9 @@ describe("final order source fence",()=>{
       {time_in_force:"good_till_canceled"},
       {time_in_force:"fill_or_kill"},
       {post_only:true},
+      {post_only:undefined},
+      {self_trade_prevention_type:undefined},
+      {self_trade_prevention_type:"maker"},
       {expiration_time:1234567890},
       {client_order_id:"unknown"},
       {side:"yes"},

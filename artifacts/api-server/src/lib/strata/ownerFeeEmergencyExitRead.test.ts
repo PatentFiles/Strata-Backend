@@ -13,6 +13,7 @@ const order:EmergencyExitOrder={
   ticker:MARKET,side:"ask",count:"1.00",price:"0.5600",
   client_order_id:"v13p-33333333-3333-4333-8333-333333333333",
   reduce_only:true,time_in_force:"immediate_or_cancel",
+  self_trade_prevention_type:"taker_at_cross",
   post_only:false,subaccount:1,exchange_index:2,
 };
 function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;

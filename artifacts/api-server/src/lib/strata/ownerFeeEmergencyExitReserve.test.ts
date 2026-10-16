@@ -12,6 +12,7 @@ const order:EmergencyExitOrder={
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5500",
   client_order_id:"v13p-33333333-3333-4333-8333-333333333333",
   time_in_force:"immediate_or_cancel",post_only:false,reduce_only:true,
+  self_trade_prevention_type:"taker_at_cross",
   subaccount:1,exchange_index:2,
 };
 const lease={holderId:"personal-22222222-2222-4222-8222-222222222222",fencingToken:7};
