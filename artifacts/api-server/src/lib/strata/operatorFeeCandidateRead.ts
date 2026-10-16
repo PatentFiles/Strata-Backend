@@ -52,7 +52,7 @@ export async function inspectOperatorFeeCandidate(): Promise<{
     }));
     const eligibility = validateOperatorFeeRelease(candidate, claims, Date.now());
     if (!eligibility.ok) return blocked(eligibility.reason);
-    return { ...eligibility, approvedOfficialPdf: false, policyApproved: false,
+    return { ...eligibility, reason: "operator_candidate_reviewed_only", approvedOfficialPdf: false, policyApproved: false,
       commissioningApproved: false, tradingAuthorized: false };
   } catch {
     return blocked("operator_fee_review_unavailable");
