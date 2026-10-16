@@ -1,0 +1,40 @@
+name: KXBTC15M two-source fee preflight regression
+
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - '.github/workflows/two-source-fee-regression.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - '.github/workflows/two-source-fee-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-fail-closed-market-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+      - name: Bundle deterministic read-only Kalshi API fee tests
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/twoSourceFeeEvidence.test.cjs
+      - name: Execute positive, changed-fee and API-failure regression tests
+        run: node artifacts/api-server/dist/twoSourceFeeEvidence.test.cjs
