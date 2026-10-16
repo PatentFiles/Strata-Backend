@@ -67,8 +67,11 @@ export async function inspectOwnedEmergencyExitRead(
     const unknown=await db.query(
       "SELECT count(*)::integer AS n FROM public.v13_production_intent WHERE account_id=$1::text AND state IN ('DISPATCHED','UNKNOWN')",
       [accountId]);
-    const pending=Number(unknown.rows[0]?.n);
-    if(unknown.rows.length!==1||!Number.isSafeInteger(pending)||pending<0)
+    // Postgres count(*)::integer should be a real integer. Number(null)=0
+    // would silently treat missing/unreadable reconciliation evidence as clear.
+    const pending=unknown.rows[0]?.n;
+    if(unknown.rows.length!==1||typeof pending!=="number"||
+       !Number.isSafeInteger(pending)||pending<0)
       return deny("emergency_exit_orders_unreconciled");
     const fee=await (deps.readFees??readExactEmergencyFeeEvidence)(
       String(order.ticker??""),now);
