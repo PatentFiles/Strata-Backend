@@ -35,7 +35,7 @@ function responses() {
 }
 function transport(pages: Record<string, Record<string, unknown>>,
   opts: { status?: number; redirects?: boolean } = {}): typeof fetch {
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = String(input), origin = "https://api.elections.kalshi.com/trade-api/v2";
     assert.equal(init?.method, "GET");
     assert.equal(init?.redirect, "error");
