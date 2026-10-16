@@ -573,7 +573,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
     const status = await inspectOwnerFeeSourceReadiness(userId);
-    res.status(status.diagnosticEligible ? 200 : 409).json(sanitizePublic(status));
+    res.status(200).json(sanitizePublic(status));
   });
   // Explicit owner action: records source consent only. Never approves policy,
   // commissions an account or changes the execution kill-switch.
@@ -613,7 +613,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const ownerId=typeof req.body?.ownerUserId==="string"?req.body.ownerUserId:"";
     res.setHeader("Cache-Control","private, no-store");
     const result=await inspectFeePolicySigningStatus(userId,ownerId);
-    res.status(result.ok?200:409).json(sanitizePublic(result));
+    res.status(200).json(sanitizePublic(result));
   });
   router.post("/fees/source-policy-review", async (req, res) => {
     const userId=subject(res);
