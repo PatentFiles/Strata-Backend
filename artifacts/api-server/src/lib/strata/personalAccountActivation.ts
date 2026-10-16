@@ -20,6 +20,8 @@ import {
 import { PERSONAL_KALSHI_HOST, scopeEcho } from "./personalExchangeRead";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
 import { digest } from "../v13-production/types";
+import { ATTESTED_FEE_POLICY_VERSION, parseAttestedFeeSource,
+  verifyAttestedFeeIdentity } from "./approvedOperatorFeeSource";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -176,10 +178,22 @@ export async function readOwnedApprovedFeeEvidence(
       text(row.strategy_parameter_hash) !== V13_CHAMPION_PARAMETER_HASH) {
     return { ok: false, reason: "production_entry_policy_revision_not_approved" };
   }
-  if (text(row.fee_policy_version) !== STANDING_FEE_POLICY_VERSION ||
-      text(row.fee_source_url) !== CANONICAL_FEE_SCHEDULE_URL ||
-      text(row.fee_formula_version) !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
-    return { ok: false, reason: "fee_artifact_unverified" };
+  const officialMode = text(row.fee_policy_version) === STANDING_FEE_POLICY_VERSION &&
+    text(row.fee_source_url) === CANONICAL_FEE_SCHEDULE_URL &&
+    text(row.fee_formula_version) === STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
+  const operatorMode = parseAttestedFeeSource(text(row.fee_source_url) ?? "",
+    text(row.fee_policy_version) ?? "", text(row.fee_formula_version) ?? "");
+  if (!officialMode && !operatorMode) return {ok:false,reason:"fee_artifact_unverified"};
+  const attested = parseAttestedFeeSource(text(row.fee_source_url) ?? "",
+    text(row.fee_policy_version) ?? "", text(row.fee_formula_version) ?? "");
+  if (attested) {
+    const verified = await verifyAttestedFeeIdentity(text(row.fee_source_url)!,
+      text(row.fee_policy_version)!, text(row.fee_formula_version)!, attested.digest);
+    if (!verified.ok) return {ok:false, reason:verified.reason};
+    const version=Number(row.version);
+    if (!Number.isSafeInteger(version)||version<1) return {ok:false,reason:"policy_limits_missing"};
+    return {ok:true,reason:"owned_policy_operator_attested_fee_verified",
+      feeArtifactDigest:verified.digest,policyId:String(row.id),version};
   }
   const proof = await establish();
   if (!proof.ok || !/^[0-9a-f]{64}$/.test(proof.digest)) {
@@ -203,7 +217,19 @@ export async function approveOwnedPolicyForUser(
 ): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; retryAfterSeconds?: number }> {
   const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
   if (!parsed.ok) return parsed;
-  const feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
+  const source = parseAttestedFeeSource(parsed.fee.sourceUrl,
+    parsed.fee.policyVersion, parsed.fee.formulaVersion);
+  let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
+  if (source) {
+    if (parsed.digest !== source.digest)
+      return {ok:false,reason:"attested_fee_digest_mismatch"};
+    const evidence = await verifyAttestedFeeIdentity(parsed.fee.sourceUrl,
+      parsed.fee.policyVersion, parsed.fee.formulaVersion, source.digest);
+    feeDigest = evidence.ok ? {ok:true,digest:evidence.digest} :
+      {ok:false,reason:evidence.reason};
+  } else {
+    feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
+  }
   if (!feeDigest.ok) return feeDigest;
   const authorized = authorizeOwnedPolicy({
     ownerUserId: input.ownerUserId,
@@ -356,7 +382,13 @@ export async function commissionOwnedAccount(
   }
   const policy = await db.query(READINESS_SQL, [input.ownerUserId]);
   const row = policy.rows[0];
-  if (input.verifyFee) {
+  const attested = parseAttestedFeeSource(text(row?.fee_source_url) ?? "",
+    text(row?.fee_policy_version) ?? "", text(row?.fee_formula_version) ?? "");
+  if (attested) {
+    const verified = await verifyAttestedFeeIdentity(text(row?.fee_source_url)!,
+      text(row?.fee_policy_version)!, text(row?.fee_formula_version)!, digest);
+    if (!verified.ok) return {ok:false,reason:verified.reason,blockers:[verified.reason]};
+  } else if (input.verifyFee) {
     const artifact = await input.verifyFee({
       digest,
       policyVersion: text(row?.fee_policy_version) ?? "",
@@ -571,8 +603,10 @@ function policyBody(body: unknown, ownerUserId: string, approvedAt: Date):
     sourceUrl: CANONICAL_FEE_SCHEDULE_URL,
     formulaVersion: STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   };
-  if (fee.sourceUrl !== CANONICAL_FEE_SCHEDULE_URL || fee.policyVersion !== STANDING_FEE_POLICY_VERSION ||
-      fee.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+  const operatorSource = parseAttestedFeeSource(fee.sourceUrl, fee.policyVersion, fee.formulaVersion);
+  if (!operatorSource && (fee.sourceUrl !== CANONICAL_FEE_SCHEDULE_URL ||
+      fee.policyVersion !== STANDING_FEE_POLICY_VERSION ||
+      fee.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION)) {
     return { ok: false, reason: "fee_artifact_unverified" };
   }
   const suppliedChampion = championOf(row.champion);
