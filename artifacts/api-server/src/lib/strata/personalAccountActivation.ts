@@ -390,7 +390,24 @@ export async function commissionOwnedAccount(
   }
   const policy = await db.query(READINESS_SQL, [input.ownerUserId]);
   const row = policy.rows[0];
-  if (input.verifyFee) {
+  const policySource=text(row?.fee_source_url)??"";
+  const operatorIdentity=parseOwnerFeeSource(policySource);
+  let alternateGrantId:string|null=null;
+  if(operatorIdentity){
+    if(text(row?.fee_policy_version)!==OPERATOR_FEE_SOURCE_POLICY ||
+       text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)
+      return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
+    const checked=await verifyOwnerFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
+    if(!checked.ok||checked.identity.digest!==digest)
+      return {ok:false,reason:checked.ok?"fee_digest_mismatch":checked.reason,
+        blockers:[checked.ok?"fee_digest_mismatch":checked.reason]};
+    alternateGrantId=checked.identity.grantId;
+  } else if (text(row?.fee_policy_version)!==STANDING_FEE_POLICY_VERSION ||
+             policySource!==CANONICAL_FEE_SCHEDULE_URL ||
+             text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
+  }
+  if (!operatorIdentity && input.verifyFee) {
     const artifact = await input.verifyFee({
       digest,
       policyVersion: text(row?.fee_policy_version) ?? "",
@@ -400,7 +417,7 @@ export async function commissionOwnedAccount(
     if (!artifact.valid || artifact.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
-  } else {
+  } else if (!operatorIdentity) {
     const established = await establishOfficialFeeDigest();
     if (!established.ok) return { ok: false, reason: established.reason, blockers: [established.reason] };
     if (established.digest !== digest) {
@@ -415,6 +432,7 @@ export async function commissionOwnedAccount(
   })).digest("hex");
   const written = await db.query(COMMISSION_SQL, [
     report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
+    alternateGrantId,
   ]);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
