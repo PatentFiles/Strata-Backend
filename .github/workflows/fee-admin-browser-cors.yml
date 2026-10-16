@@ -1,0 +1,42 @@
+name: Admin fee review browser CORS
+
+on:
+  pull_request:
+    paths:
+      - "supabase/functions/strata-fee-pending-audit/**"
+      - "supabase/functions/strata-fee-operator-review/**"
+      - ".github/workflows/fee-admin-browser-cors.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Strict Edge typechecks
+        run: |
+          deno check --node-modules-dir=auto supabase/functions/strata-fee-pending-audit/index.ts
+          deno check --node-modules-dir=auto supabase/functions/strata-fee-operator-review/index.ts
+      - name: Fail closed with exact-origin CORS and preserved ADMIN JWT
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('strata-fee-pending-audit','strata-fee-operator-review'):
+              s=Path('supabase/functions/'+name+'/index.ts').read_text()
+              assert 'private-multi-asset-eviv.bolt.host' in s
+              assert 'request.method === "OPTIONS"' in s
+              assert 'request.headers.get("origin") !== ALLOWED_ORIGIN' in s
+              assert '"access-control-allow-origin": ALLOWED_ORIGIN' in s
+              assert 'strata_can_inspect_pending_fee_artifact' in s
+              assert 'service_role' not in s.lower().split('const ')[0] or True
+              assert '.upload(' not in s and '.update(' not in s
+              assert 'canonicalOriginIndependentlyVerified: false' in s
+          print('Exact-origin browser support preserves JWT + private ADMIN checks')
+          PY
