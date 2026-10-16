@@ -70,6 +70,8 @@ export interface EmergencyExitDecision {
   /** No advisory assessment can grant trading authority. */
   tradingAuthorized: false;
   needsIndependentApproval: true;
+  /** Indicates only whether the presented read-only evidence was internally consistent. */
+  diagnosticEligible: boolean;
 }
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -78,6 +80,7 @@ const MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
 const SHA=/^[0-9a-f]{64}$/;
 const DENY=(reason:string):EmergencyExitDecision=>({
   ok:false,reason,tradingAuthorized:false,needsIndependentApproval:true,
+  diagnosticEligible:false,
 });
 function fixedHundredths(value:unknown):bigint|null{
   if(typeof value!=="string"||!/^\d{1,9}\.\d{2}$/.test(value))return null;
@@ -155,5 +158,6 @@ export function inspectEmergencyExitCandidate(
       fee.observedAtMs>nowMs||nowMs-fee.observedAtMs>3_000)
     return DENY("emergency_exit_exact_fee_evidence_unverified");
   // No signed live or risk-bearing authority is issued here.
-  return DENY("emergency_exit_candidate_verified_requires_fenced_dispatch");
+  return {...DENY("emergency_exit_candidate_verified_requires_fenced_dispatch"),
+    diagnosticEligible:true};
 }
