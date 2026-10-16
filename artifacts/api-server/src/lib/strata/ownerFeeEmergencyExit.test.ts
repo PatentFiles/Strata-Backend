@@ -33,6 +33,7 @@ test("positive proof is read-only: never authorizes or submits orders",()=>{
   assert.equal(x.reason,"emergency_exit_candidate_verified_requires_fenced_dispatch");
   assert.equal(x.tradingAuthorized,false);
   assert.equal(x.needsIndependentApproval,true);
+  assert.equal(x.diagnosticEligible,true);
 });
 test("NO holdings can only be reduced with bid book side",()=>{
   assert.equal(check({...order(),side:"bid"}, {...evidence(),positionFp:"-2.00"}).reason,
