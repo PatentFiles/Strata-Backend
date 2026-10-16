@@ -6,14 +6,22 @@ import { pool } from "@workspace/db";
  * A consent is NOT fee policy approval, commissioning, arming or order consent.
  * A single database transaction binds ownership, current grant and release.
  */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Canonical UUID format: 8-4-4-4-12 hexadecimal digits.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export type FeeConsentDb = {
+  connect(): Promise<{
+    query(sql:string, params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>;
+    release():void;
+  }>;
+  query(sql:string, params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>;
+};
 export const FEE_SOURCE_CONSENT_CONFIRMATION = "CONFIRM_OPERATOR_FEE_SOURCE_ONLY";
 type ConsentResult = { ok: boolean; reason: string; consentId?: string;
   policyApproved: false; commissioningApproved: false; tradingAuthorized: false };
 const denied = (reason:string):ConsentResult => ({
   ok:false,reason,policyApproved:false,commissioningApproved:false,tradingAuthorized:false,
 });
-export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unknown):Promise<ConsentResult> {
+export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unknown, db:FeeConsentDb=pool):Promise<ConsentResult> {
   if(!UUID.test(ownerUserId)||!body||typeof body!=="object"||Array.isArray(body))
     return denied("owner_identity_or_confirmation_invalid");
   const values=body as Record<string,unknown>;
@@ -23,7 +31,7 @@ export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unkno
   let client;
   let completed=false;
   try {
-    client=await pool.connect();
+    client=await db.connect();
     await client.query("BEGIN");
     const accounts=await client.query(`
       SELECT id FROM public.v13_production_account
@@ -67,7 +75,7 @@ export async function recordOwnerFeeSourceConsent(ownerUserId:string, body:unkno
 }
 
 /** Revocation is owned-user-scoped and append-only; it cannot widen authority. */
-export async function revokeOwnerFeeSourceConsent(ownerUserId:string,body:unknown):
+export async function revokeOwnerFeeSourceConsent(ownerUserId:string,body:unknown,db:FeeConsentDb=pool):
   Promise<ConsentResult>{
   if(!UUID.test(ownerUserId)||!body||typeof body!=="object"||Array.isArray(body))
     return denied("owner_revocation_invalid");
@@ -77,7 +85,7 @@ export async function revokeOwnerFeeSourceConsent(ownerUserId:string,body:unknow
     typeof value.reason!=="string"||value.reason.trim().length<8||
     value.reason.trim().length>300)return denied("explicit_revocation_required");
   try{
-    const revoked=await pool.query(`
+    const revoked=await db.query(`
       UPDATE private.strata_fee_source_owner_consents
       SET revoked_at=now(),revocation_reason=$3
       WHERE grant_id=$1::uuid AND owner_user_id=$2::uuid AND revoked_at IS NULL
