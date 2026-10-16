@@ -43,4 +43,32 @@ REVOKE ALL ON public.strata_fee_operator_release_candidates FROM PUBLIC, anon, a
 GRANT SELECT, INSERT ON public.strata_fee_operator_release_candidates TO service_role;
 COMMENT ON TABLE public.strata_fee_operator_release_candidates IS
   'Signed operator release CANDIDATES only; never official-source captures or authority to approve policies, commission accounts or trade.';
+
+-- Service-only validation of two DIFFERENT, still-authorized verified administrators.
+-- Re-checks role revocation and expiration at the release decision boundary.
+CREATE OR REPLACE FUNCTION public.strata_two_operator_fee_reviews_valid(
+  first_review uuid, second_review uuid, expected_digest text
+) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $
+ SELECT first_review IS NOT NULL AND second_review IS NOT NULL
+    AND first_review <> second_review
+    AND expected_digest = 'c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601'
+    AND (
+      SELECT count(DISTINCT r.reviewer_user_id) = 2
+      FROM public.strata_fee_operator_source_reviews r
+      JOIN auth.users u ON u.id = r.reviewer_user_id
+      JOIN private.role_assignments ra
+        ON lower(btrim(ra.email)) = lower(btrim(u.email)) AND ra.role = 'ADMIN'
+      WHERE r.review_id IN (first_review, second_review)
+        AND r.content_sha256 = expected_digest
+        AND r.expires_at > now()
+        AND r.review_kind = 'human_canonical_source_claim'
+        AND u.email_confirmed_at IS NOT NULL
+    );
+$;
+REVOKE ALL ON FUNCTION public.strata_two_operator_fee_reviews_valid(uuid,uuid,text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.strata_two_operator_fee_reviews_valid(uuid,uuid,text)
+  TO service_role;
 COMMIT;
