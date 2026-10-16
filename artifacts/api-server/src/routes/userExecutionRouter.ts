@@ -4,6 +4,7 @@ import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
+import { inspectFeeSourceAuthorizationReadiness } from "../lib/strata/feeSourceAuthorizationReadiness";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
@@ -568,6 +569,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const status = await inspectOwnerFeeSourceReadiness(userId);
     res.status(status.diagnosticEligible ? 200 : 409).json(sanitizePublic(status));
+  });
+  // Explain missing audited authorization records; NEVER an approval endpoint.
+  router.get("/fees/authorization-readiness", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await inspectFeeSourceAuthorizationReadiness();
+    res.json(sanitizePublic(result));
   });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
