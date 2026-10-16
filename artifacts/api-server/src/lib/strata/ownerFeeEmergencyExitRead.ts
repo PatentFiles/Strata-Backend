@@ -79,7 +79,7 @@ export async function inspectOwnedEmergencyExitRead(
       positionsComplete:true,positionMarket:String(matching[0]!.ticker),
       positionFp,positionsObservedAtMs:feeds.observedAtMs,
       restingOrderCount:resting,uncertainOrderCount:pending,
-      kalshiFee:fee.ok&&fee.marketTicker===order.ticker&&
+      kalshiFee:fee.ok&&typeof fee.marketTicker==="string"&&fee.marketTicker===order.ticker&&
         fee.series==="KXBTC15M"&&fee.exchangeIndex===2&&
         fee.feeType==="quadratic"&&fee.feeMultiplier==="1"&&
         typeof fingerprint==="string"?
