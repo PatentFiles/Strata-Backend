@@ -44,6 +44,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExit.test.cjs
       - name: Test expired grant recovery evidence and zero-authority fail-closed cases
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExit.test.cjs
+      - name: Bundle authenticated emergency-exit read tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRead.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRead.test.cjs
+      - name: Test emergency recovery scoped reads and isolation
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRead.test.cjs
       - name: Bundle exact policy digest test
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/operatorFeePolicyDecision.test.ts --bundle --platform=node --format=cjs --outfile=dist/operatorFeePolicyDecision.test.cjs
       - name: Validate pinned human policy approval decision hash
