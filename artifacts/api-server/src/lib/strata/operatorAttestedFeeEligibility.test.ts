@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
 import { validateOperatorFeeRelease, REVIEWED_FEE_DIGEST, RELEASE_KIND,
   type FeeReview, type FeeReleaseCandidate } from "./operatorAttestedFeeEligibility";
 
@@ -23,7 +24,7 @@ const reviews: FeeReview[] = [
 ];
 describe("operator-attested fee candidate eligibility", () => {
   it("recognizes exactly the unexpired independent candidate, never provider provenance", () => {
-    expect(validateOperatorFeeRelease(base, reviews, now)).toEqual({
+    assert.deepEqual(validateOperatorFeeRelease(base, reviews, now), {
       ok: true, releaseId: ids[0], expiresAt: base.expiresAt, provenance: "operator_attested",
     });
   });
@@ -41,6 +42,6 @@ describe("operator-attested fee candidate eligibility", () => {
     ["ambiguous row", base, [...reviews, reviews[0]], now],
     ["stale observation", base, reviews, now + 20 * 60_000],
   ] as const)("%s fails closed", (_label, candidate, source, at) => {
-    expect(validateOperatorFeeRelease(candidate, source, at).ok).toBe(false);
+    assert.equal(validateOperatorFeeRelease(candidate, source, at).ok, false);
   });
 });
