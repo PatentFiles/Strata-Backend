@@ -6,6 +6,9 @@ import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateR
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
 import { recordOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
+import { feeSourcePolicyDocument, signIndependentFeePolicyReview,
+  issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant
+} from "../lib/strata/operatorFeePolicyAuthority";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -578,6 +581,36 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const result = await recordOwnerFeeSourceConsent(userId, req.body ?? {});
     res.status(result.ok ? 201 : 409).json(sanitizePublic(result));
+  });
+
+  // Human-signed policy authority requires current admin roles and separate
+  // distinct review records; none of these endpoints arm or submit orders.
+  router.get("/fees/source-policy-document", (_req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    res.json(sanitizePublic(feeSourcePolicyDocument()));
+  });
+  router.post("/fees/source-policy-review", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await signIndependentFeePolicyReview(userId, req.body ?? {});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-grants", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await issueReviewedOwnerFeeSourceGrant(userId, req.body ?? {});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-grants/revoke", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeReviewedFeeSourceGrant(userId, req.body ?? {});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
