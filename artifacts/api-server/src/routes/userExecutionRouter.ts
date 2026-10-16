@@ -1,6 +1,7 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
+import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -530,6 +531,16 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   // published Kalshi fee schedule. No approved policy, fee write, or trading
   // authorization is necessary. Step 9 and 11 MUST independently verify it
   // again; this endpoint is informational, not a source of approval authority.
+  // Standalone read-only market metadata diagnostic. This explicitly cannot
+  // approve the separate PDF provenance, policy, commissioning, or live orders.
+  // The account owner must authenticate; no caller-supplied ticker or URL.
+  router.get("/fees/market-preflight", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const evidence = await probeCurrentKalshiFeeApi();
+    res.status(evidence.ok ? 200 : 409).json(sanitizePublic(evidence));
+  });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
