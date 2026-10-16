@@ -48,6 +48,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitMarket.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitMarket.test.cjs
       - name: Test exact named Kalshi market lifecycle and override rejection
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitMarket.test.cjs
+      - name: Bundle offline end-to-end emergency recovery simulations
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitDryRun.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitDryRun.test.cjs
+      - name: Test offline recovery without transport, authority or retry
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitDryRun.test.cjs
       - name: Bundle read-only IOC fill and uncertain-response reconciliation tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitReconcile.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitReconcile.test.cjs
       - name: Test zero/partial/full and UNKNOWN IOC recovery without retries
