@@ -28,7 +28,7 @@ describe("operator-attested fee candidate eligibility", () => {
       ok: true, releaseId: ids[0], expiresAt: base.expiresAt, provenance: "operator_attested",
     });
   });
-  it.each([
+  const cases = [
     ["no candidate", null, reviews, now],
     ["expired", { ...base, expiresAt: "2026-10-16T03:29:00Z" }, reviews, now],
     ["revoked", { ...base, revokedAt: "2026-10-16T03:29:00Z" }, reviews, now],
@@ -41,7 +41,10 @@ describe("operator-attested fee candidate eligibility", () => {
     ["review revoked", base, [{ ...reviews[0]!, revokedAt: "2026-10-16T03:29:00Z" }, reviews[1]], now],
     ["ambiguous row", base, [...reviews, reviews[0]], now],
     ["stale observation", base, reviews, now + 20 * 60_000],
-  ] as const)("%s fails closed", (_label, candidate, source, at) => {
-    assert.equal(validateOperatorFeeRelease(candidate, source, at).ok, false);
-  });
+  ] as const;
+  for (const [label, candidate, source, at] of cases) {
+    it(`${label} fails closed`, () => {
+      assert.equal(validateOperatorFeeRelease(candidate, source, at).ok, false);
+    });
+  }
 });
