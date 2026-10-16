@@ -108,7 +108,7 @@ export async function probeCurrentKalshiFeeApi(
       return fail("market_listing_incomplete");
     const now = clock();
     const open = listing.markets.map(plain).filter((m): m is JsonObject =>
-      !!m && m.status === "open" &&
+      !!m && (m.status === "open" || m.status === "active") &&
       canonicalTime(m.close_time) !== null &&
       canonicalTime(m.close_time)! > now &&
       tickerPattern.test(String(m.ticker ?? ""))).sort((a, b) =>
