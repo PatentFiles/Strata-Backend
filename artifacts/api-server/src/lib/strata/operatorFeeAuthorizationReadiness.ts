@@ -156,6 +156,12 @@ export async function inspectOwnerFeeSourceReadiness(
         consents.rows[0]?.confirmation !== "CONFIRM_OPERATOR_FEE_SOURCE_ONLY") {
       const denied = blocked("owner_source_consent_missing_or_ambiguous");
       denied.candidateExpiresAt = candidate.expiresAt;
+      // Only expose the owner-scoped grant ID to its authenticated owner so
+      // the owner can explicitly sign consent; no active trading authority.
+      denied.grantId=grant.grantId;
+      denied.releaseId=candidate.releaseId;
+      denied.grantExpiresAt=Number.isFinite(grant.expiresAtMs)
+        ? new Date(grant.expiresAtMs).toISOString():null;
       return denied;
     }
     const consent = dbConsent(consents.rows[0]!);
