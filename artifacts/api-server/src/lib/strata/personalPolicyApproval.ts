@@ -331,6 +331,7 @@ async function approveAndLink(
     input.ownerUserId,
     input.policy.entryPolicyVersion,
     input.policy.version,
+    parseOwnerFeeSource(input.policy.feeSourceUrl??"")?.grantId ?? null,
   ]);
   if ((approved.rowCount ?? approved.rows.length) !== 1) throw new Error("policy_not_approved");
   const linked = await query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
