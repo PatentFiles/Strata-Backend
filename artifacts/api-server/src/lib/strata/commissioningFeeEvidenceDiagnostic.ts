@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { pool } from "@workspace/db";
 import { inspectOperatorFeeCandidate } from "./operatorFeeCandidateRead";
 import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
 import { verifyOfficialFeePdfBytes } from "../microLiveFeeArtifact";
