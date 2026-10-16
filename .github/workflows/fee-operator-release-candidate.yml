@@ -23,7 +23,7 @@ jobs:
       - name: Typecheck release candidate Edge Function
         run: deno check --node-modules-dir=auto supabase/functions/strata-fee-release-candidate/index.ts
       - name: Test explicit reviewer and expiry guards
-        run: deno test --allow-none supabase/functions/strata-fee-release-candidate/releaseCandidateValidation.test.ts
+        run: deno test supabase/functions/strata-fee-release-candidate/releaseCandidateValidation.test.ts
       - name: Assert no production approval/execution writes
         shell: bash
         run: |
