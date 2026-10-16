@@ -5,6 +5,7 @@ import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
+import { recordOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -568,6 +569,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const status = await inspectOwnerFeeSourceReadiness(userId);
     res.status(status.diagnosticEligible ? 200 : 409).json(sanitizePublic(status));
+  });
+  // Explicit owner action: records source consent only. Never approves policy,
+  // commissions an account or changes the execution kill-switch.
+  router.post("/fees/owner-consent", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await recordOwnerFeeSourceConsent(userId, req.body ?? {});
+    res.status(result.ok ? 201 : 409).json(sanitizePublic(result));
   });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
