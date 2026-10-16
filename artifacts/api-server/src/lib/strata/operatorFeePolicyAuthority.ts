@@ -37,7 +37,7 @@ const eligibleRelease=async (releaseId:string)=>{
   if(!UUID.test(releaseId))return null;
   const candidate=await inspectOperatorFeeCandidate();
   return candidate.ok&&candidate.releaseId===releaseId&&candidate.expiresAt&&
-    Date.parse(candidate.expiresAt)>Date.now()?candidate:null;
+    Date.parse(candidate.expiresAt ?? '')>Date.now()?candidate:null;
 };
 type ReviewRequest={releaseId:unknown;ownerUserId:unknown;confirmation:unknown;note:unknown};
 export function feeSourcePolicyDocument(){
@@ -75,7 +75,7 @@ export async function signIndependentFeePolicyReview(
     if(release.rows.length!==1)return no("release_changed_during_review");
     const reviewedAt=new Date();
     const ends=new Date(Math.min(reviewedAt.getTime()+15*60_000,
-      Date.parse(candidate.expiresAt),new Date(release.rows[0]!.expires_at).getTime()));
+      Date.parse(candidate.expiresAt ?? ''),new Date(release.rows[0]!.expires_at).getTime()));
     if(ends.getTime()<=reviewedAt.getTime())return no("release_expired");
     const inserted=await client.query(`
       INSERT INTO private.strata_fee_source_policy_reviews
@@ -138,7 +138,7 @@ export async function issueReviewedOwnerFeeSourceGrant(
     if(distinct.size<2||reviewers.rows.length!==2)
       return no("two_independent_current_fee_policy_signers_required");
     const now=Date.now();
-    const expiry=Math.min(Date.parse(candidate.expiresAt),
+    const expiry=Math.min(Date.parse(candidate.expiresAt ?? ''),
       new Date(release.rows[0]!.expires_at).getTime(),
       ...reviewers.rows.map(x=>new Date(x.expires_at).getTime()),now+15*60_000);
     if(!Number.isFinite(expiry)||expiry<=now+10_000)
