@@ -85,6 +85,18 @@ test("rejects missing, duplicate, foreign owner or revoked source grants",async(
   assert.equal((await run({grantRows:[{...grant(),owner_user_id:stranger}]})).answer.diagnosticEligible,false);
   assert.equal((await run({grantRows:[{...grant(),revoked_at:iso(NOW-1)}]})).answer.diagnosticEligible,false);
 });
+test("SQL joins review IDs to review authors before checking administrator independence",async()=>{
+  const {reads}=await run();
+  const sql=reads.find(statement=>statement.includes("private.strata_fee_source_grants"));
+  assert.ok(sql,"readiness must load private source grants");
+  assert.match(sql,/first_review\.review_id\s*=\s*candidate\.reviewer_1/);
+  assert.match(sql,/second_review\.review_id\s*=\s*candidate\.reviewer_2/);
+  assert.match(sql,/g\.approved_by_admin_id\s*<>\s*first_review\.reviewer_user_id/);
+  assert.match(sql,/g\.approved_by_admin_id\s*<>\s*second_review\.reviewer_user_id/);
+  assert.match(sql,/first_review\.reviewer_user_id\s*<>\s*second_review\.reviewer_user_id/);
+  assert.match(sql,/candidate\.content_sha256\s*=\s*g\.reviewed_pdf_sha256/);
+  assert.doesNotMatch(sql,/g\.approved_by_admin_id\s*<>\s*candidate\.reviewer_[12]/);
+});
 test("requires independent current administrator and fixed policy decision digest",async()=>{
   for (const changed of [
     {approver_is_current_admin:false},
