@@ -112,8 +112,31 @@ export async function inspectOwnerFeeSourceReadiness(
       return blocked(candidate.reason || "operator_candidate_missing");
     // Multiple independently issued grants are ambiguous; never choose one.
     const grants = await db.query(
-      `SELECT grant_id,owner_user_id,release_id,reviewed_pdf_sha256,policy_version,
-              approved_by_admin_id,approved_at,expires_at,revoked_at,authorized_stages
+      `SELECT g.grant_id,g.owner_user_id,g.release_id,g.reviewed_pdf_sha256,g.policy_version,
+              g.approved_by_admin_id,g.policy_decision_sha256,g.approved_at,g.expires_at,
+              g.revoked_at,g.authorized_stages,
+              EXISTS (
+                SELECT 1 FROM public.strata_fee_operator_release_candidates candidate
+                JOIN public.strata_fee_operator_source_reviews first_review
+                  ON first_review.review_id=candidate.reviewer_1
+                JOIN public.strata_fee_operator_source_reviews second_review
+                  ON second_review.review_id=candidate.reviewer_2
+                WHERE candidate.release_id=g.release_id
+                  AND candidate.revoked_at IS NULL
+                  AND candidate.evidence_kind='operator_attested_commissioning_candidate'
+                  AND candidate.recorded_at <= now() AND candidate.expires_at > now()
+                  AND candidate.content_sha256=g.reviewed_pdf_sha256
+                  AND first_review.content_sha256=candidate.content_sha256
+                  AND second_review.content_sha256=candidate.content_sha256
+                  AND first_review.reviewed_at <= now()
+                  AND second_review.reviewed_at <= now()
+                  AND first_review.expires_at > now()
+                  AND second_review.expires_at > now()
+                  AND first_review.reviewer_user_id <> second_review.reviewer_user_id
+                  AND g.approved_by_admin_id <> first_review.reviewer_user_id
+                  AND g.approved_by_admin_id <> second_review.reviewer_user_id
+                  AND g.approved_by_admin_id <> g.owner_user_id
+              ) AS approver_independent
          FROM private.strata_fee_source_grants g
         WHERE g.owner_user_id=$1::uuid AND g.release_id=$2::uuid
           AND g.revoked_at IS NULL AND g.expires_at>now()
@@ -131,6 +154,7 @@ export async function inspectOwnerFeeSourceReadiness(
             JOIN private.role_assignments sr
               ON lower(btrim(sr.email))=lower(btrim(signer.email))
             WHERE reviewers.owner_user_id=$1::uuid AND reviewers.release_id=$2::uuid
+              AND reviewers.reviewer_user_id <> g.owner_user_id
               AND reviewers.policy_decision_sha256=$3
               AND reviewers.reviewed_pdf_sha256=g.reviewed_pdf_sha256
               AND reviewers.revoked_at IS NULL AND reviewers.expires_at>now()
@@ -144,7 +168,18 @@ export async function inspectOwnerFeeSourceReadiness(
       denied.candidateExpiresAt = candidate.expiresAt;
       return denied;
     }
-    const grant = dbGrant(grants.rows[0]!);
+    // PR #44's signed-policy review is separate from the source-PDF reviews.
+    // Reviewer_1/2 hold review RECORD IDs, not reviewer USER IDs.
+    // Revalidate issuer independence and review/release freshness each read.
+    const grantRow = grants.rows[0]!;
+    if (grantRow.approver_independent !== true ||
+        grantRow.policy_decision_sha256 !== FEE_SOURCE_DECISION_SHA256 ||
+        String(grantRow.approved_by_admin_id).toLowerCase() === ownerUserId.toLowerCase()) {
+      const denied = blocked("fee_grant_independent_reviewers_unverified");
+      denied.candidateExpiresAt = candidate.expiresAt;
+      return denied;
+    }
+    const grant = dbGrant(grantRow);
     const consents = await db.query(
       `SELECT grant_id,owner_user_id,release_id,confirmed_at,revoked_at,confirmation
          FROM private.strata_fee_source_owner_consents

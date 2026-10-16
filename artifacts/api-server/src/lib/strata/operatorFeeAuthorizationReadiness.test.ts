@@ -29,6 +29,8 @@ const grant=()=>({
   grant_id:grantId,owner_user_id:owner,release_id:releaseId,
   reviewed_pdf_sha256:"c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601",
   policy_version:"operator_attested_fee_source_v1",approved_by_admin_id:approver,
+  policy_decision_sha256:"f8f7e0920168ab4601c59a3a9343e940d78dd974512c7ec97f7d052bf5fd685e",
+  approver_independent:true,
   approved_at:iso(NOW-1000),expires_at:iso(NOW+300_000),revoked_at:null,
   authorized_stages:["STEP_6","STEP_9","STEP_11","ORDER_ENTRY"],
 });
@@ -82,6 +84,33 @@ test("rejects missing, duplicate, foreign owner or revoked source grants",async(
   assert.equal((await run({grantRows:[grant(),grant()]})).answer.reason,"multiple_active_source_grants");
   assert.equal((await run({grantRows:[{...grant(),owner_user_id:stranger}]})).answer.diagnosticEligible,false);
   assert.equal((await run({grantRows:[{...grant(),revoked_at:iso(NOW-1)}]})).answer.diagnosticEligible,false);
+});
+test("source reviewer independence binds authors, active release, and matching digests",async()=>{
+  const {reads}=await run();
+  const sql=reads.find(s=>s.includes("private.strata_fee_source_grants"));
+  assert.ok(sql);
+  assert.match(sql,/first_review\.review_id\s*=\s*candidate\.reviewer_1/);
+  assert.match(sql,/second_review\.review_id\s*=\s*candidate\.reviewer_2/);
+  assert.match(sql,/g\.approved_by_admin_id\s*<>\s*first_review\.reviewer_user_id/);
+  assert.match(sql,/g\.approved_by_admin_id\s*<>\s*second_review\.reviewer_user_id/);
+  assert.match(sql,/first_review\.reviewer_user_id\s*<>\s*second_review\.reviewer_user_id/);
+  assert.match(sql,/candidate\.content_sha256\s*=\s*g\.reviewed_pdf_sha256/);
+  assert.match(sql,/candidate\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/first_review\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/second_review\.expires_at\s*>\s*now\(\)/);
+  assert.match(sql,/reviewers\.reviewer_user_id\s*<>\s*g\.owner_user_id/);
+  assert.doesNotMatch(sql,/g\.approved_by_admin_id\s*<>\s*candidate\.reviewer_[12]/);
+  for(const changed of [
+    {approver_independent:false},
+    {approver_independent:null},
+    {approved_by_admin_id:owner},
+    {policy_decision_sha256:"f".repeat(64)},
+  ]){
+    const {answer}=await run({grantRows:[{...grant(),...changed}]});
+    assert.equal(answer.reason,"fee_grant_independent_reviewers_unverified");
+    assert.equal(answer.diagnosticEligible,false);
+    assert.equal(answer.tradingAuthorized,false);
+  }
 });
 test("rejects absent, ambiguous, revoked, and foreign owner consent",async()=>{
   assert.equal((await run({consentRows:[]})).answer.reason,"owner_source_consent_missing_or_ambiguous");
