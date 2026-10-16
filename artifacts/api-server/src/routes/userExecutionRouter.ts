@@ -4,7 +4,6 @@ import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
-import { inspectFeeAuthorizationReadiness } from "../lib/strata/feeAuthorizationReadiness";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
@@ -552,16 +551,6 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
     const result = await inspectOperatorFeeCandidate();
-    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
-  });
-  // Owner-scoped, read-only report of fee authorization blockers. Explicitly
-  // does not issue policy grants, store owner consent, commission or arm.
-  router.get("/fees/authorization-readiness", async (req, res) => {
-    const userId = subject(res);
-    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-    res.setHeader("Cache-Control", "private, no-store");
-    const requestedStage = typeof req.query.stage === "string" ? req.query.stage : "STEP_6";
-    const result = await inspectFeeAuthorizationReadiness(userId, requestedStage);
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.get("/fees/reviewed-evidence", async (_req, res) => {
