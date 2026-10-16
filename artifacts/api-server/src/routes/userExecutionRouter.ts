@@ -4,6 +4,7 @@ import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
+import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -558,6 +559,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const result = await inspectCommissioningFeeEvidence();
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // Authenticated, owner-scoped grant + consent diagnostic. Even a positive
+  // readiness response NEVER approves Step 6/9/11 or an order.
+  router.get("/fees/authorization-readiness", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const status = await inspectOwnerFeeSourceReadiness(userId);
+    res.status(status.diagnosticEligible ? 200 : 409).json(sanitizePublic(status));
   });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
