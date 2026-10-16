@@ -117,10 +117,18 @@ export async function inspectOwnerFeeSourceReadiness(
               ) AS approver_is_current_admin,
               EXISTS (
                 SELECT 1 FROM public.strata_fee_operator_release_candidates candidate
+                JOIN public.strata_fee_operator_source_reviews first_review
+                  ON first_review.review_id=candidate.reviewer_1
+                JOIN public.strata_fee_operator_source_reviews second_review
+                  ON second_review.review_id=candidate.reviewer_2
                 WHERE candidate.release_id=g.release_id
                   AND candidate.revoked_at IS NULL
-                  AND g.approved_by_admin_id <> candidate.reviewer_1
-                  AND g.approved_by_admin_id <> candidate.reviewer_2
+                  AND candidate.content_sha256=g.reviewed_pdf_sha256
+                  AND first_review.content_sha256=candidate.content_sha256
+                  AND second_review.content_sha256=candidate.content_sha256
+                  AND first_review.reviewer_user_id <> second_review.reviewer_user_id
+                  AND g.approved_by_admin_id <> first_review.reviewer_user_id
+                  AND g.approved_by_admin_id <> second_review.reviewer_user_id
                   AND g.approved_by_admin_id <> g.owner_user_id
               ) AS approver_independent
          FROM private.strata_fee_source_grants g
