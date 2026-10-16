@@ -68,6 +68,11 @@ jobs:
           node --test dist/kalshiAccountClient.test.cjs
           pnpm exec esbuild src/lib/kalshiTradingClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiTradingClient.test.cjs             --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/kalshiTradingClient.test.cjs
+      - name: Test personal event/series fee changes and stale/override refusal
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownedMarketFeeMetadata.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedMarketFeeMetadata.test.cjs
+          node --test dist/ownedMarketFeeMetadata.test.cjs
       - name: Test V13 production and micro-live safety suites
         working-directory: artifacts/api-server
         run: pnpm run test:v13-safety-all
