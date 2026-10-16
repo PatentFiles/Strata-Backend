@@ -20,6 +20,8 @@ import {
 import { PERSONAL_KALSHI_HOST, scopeEcho } from "./personalExchangeRead";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
 import { digest } from "../v13-production/types";
+import { verifyOwnerFeeSourceStage, parseOwnerFeeSource } from "./ownerFeeSourceStage";
+import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -108,6 +110,23 @@ const COMMISSION_SQL = `
     AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
     AND (commissioned = false OR commissioning_digest = $3)
     AND $5::integer BETWEEN 1 AND 999999
+    AND ($6::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_fee_source_grants g
+      JOIN private.strata_fee_source_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN public.strata_fee_operator_release_candidates r
+        ON r.release_id=g.release_id
+      JOIN v13_live_money_policy p ON p.id=v13_production_account.policy_id
+      WHERE g.grant_id=$6::uuid AND g.owner_user_id=$2::uuid
+        AND g.revoked_at IS NULL AND g.expires_at>now()
+        AND c.revoked_at IS NULL AND c.confirmation='CONFIRM_OPERATOR_FEE_SOURCE_ONLY'
+        AND r.revoked_at IS NULL AND r.expires_at>now()
+        AND r.content_sha256=g.reviewed_pdf_sha256 AND c.release_id=g.release_id
+        AND g.authorized_stages @> ARRAY['STEP_11']::text[]
+        AND p.state='APPROVED' AND p.fee_policy_version=g.policy_version
+        AND p.fee_source_url='strata-operator-attested://kxbtc15m/' ||
+          g.grant_id::text || '/' || g.release_id::text
+    ))
   RETURNING id
 `;
 
@@ -176,8 +195,22 @@ export async function readOwnedApprovedFeeEvidence(
       text(row.strategy_parameter_hash) !== V13_CHAMPION_PARAMETER_HASH) {
     return { ok: false, reason: "production_entry_policy_revision_not_approved" };
   }
+  const sourceUrl=text(row.fee_source_url) ?? "";
+  const altIdentity=parseOwnerFeeSource(sourceUrl);
+  const altMode=text(row.fee_policy_version)===OPERATOR_FEE_SOURCE_POLICY &&
+    text(row.fee_formula_version)===STANDARD_QUADRATIC_FEE_FORMULA_VERSION &&
+    altIdentity!==null;
+  if(altMode){
+    const checked=await verifyOwnerFeeSourceStage(ownerUserId,"STEP_9",sourceUrl);
+    if(!checked.ok)return {ok:false,reason:checked.reason};
+    const version=Number(row.version);
+    if(!Number.isSafeInteger(version)||version<1)
+      return {ok:false,reason:"policy_limits_missing"};
+    return {ok:true,reason:"owned_policy_operator_fee_source_current",
+      feeArtifactDigest:checked.identity.digest,policyId:String(row.id),version};
+  }
   if (text(row.fee_policy_version) !== STANDING_FEE_POLICY_VERSION ||
-      text(row.fee_source_url) !== CANONICAL_FEE_SCHEDULE_URL ||
+      sourceUrl !== CANONICAL_FEE_SCHEDULE_URL ||
       text(row.fee_formula_version) !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return { ok: false, reason: "fee_artifact_unverified" };
   }
@@ -203,7 +236,25 @@ export async function approveOwnedPolicyForUser(
 ): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; retryAfterSeconds?: number }> {
   const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
   if (!parsed.ok) return parsed;
-  const feeDigest = await resolveOwnedFeeDigest(parsed.digest, parsed.fee, input.verifyFee);
+  const request = input.body as Record<string,unknown>;
+  const altRequested=request.feeSourceKind==="operator_attested_not_provider";
+  if(request.feeSourceKind!==undefined&&!altRequested)
+    return {ok:false,reason:"fee_source_mode_not_supported"};
+  let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
+  if(altRequested){
+    const verified=await verifyOwnerFeeSourceStage(input.ownerUserId,"STEP_9");
+    if(!verified.ok)return {ok:false,reason:verified.reason};
+    // Never trust source URL or provenance from an HTTP client.
+    parsed.fee={
+      policyVersion:verified.identity.policyVersion,
+      sourceUrl:verified.identity.sourceUrl,
+      formulaVersion:verified.identity.formulaVersion,
+    };
+    parsed.digest=verified.identity.digest;
+    feeDigest={ok:true,digest:verified.identity.digest};
+  }else{
+    feeDigest=await resolveOwnedFeeDigest(parsed.digest,parsed.fee,input.verifyFee);
+  }
   if (!feeDigest.ok) return feeDigest;
   const authorized = authorizeOwnedPolicy({
     ownerUserId: input.ownerUserId,
@@ -356,7 +407,24 @@ export async function commissionOwnedAccount(
   }
   const policy = await db.query(READINESS_SQL, [input.ownerUserId]);
   const row = policy.rows[0];
-  if (input.verifyFee) {
+  const policySource=text(row?.fee_source_url)??"";
+  const operatorIdentity=parseOwnerFeeSource(policySource);
+  let alternateGrantId:string|null=null;
+  if(operatorIdentity){
+    if(text(row?.fee_policy_version)!==OPERATOR_FEE_SOURCE_POLICY ||
+       text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)
+      return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
+    const checked=await verifyOwnerFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
+    if(!checked.ok||checked.identity.digest!==digest)
+      return {ok:false,reason:checked.ok?"fee_digest_mismatch":checked.reason,
+        blockers:[checked.ok?"fee_digest_mismatch":checked.reason]};
+    alternateGrantId=checked.identity.grantId;
+  } else if (text(row?.fee_policy_version)!==STANDING_FEE_POLICY_VERSION ||
+             policySource!==CANONICAL_FEE_SCHEDULE_URL ||
+             text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
+    return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
+  }
+  if (!operatorIdentity && input.verifyFee) {
     const artifact = await input.verifyFee({
       digest,
       policyVersion: text(row?.fee_policy_version) ?? "",
@@ -366,7 +434,7 @@ export async function commissionOwnedAccount(
     if (!artifact.valid || artifact.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
-  } else {
+  } else if (!operatorIdentity) {
     const established = await establishOfficialFeeDigest();
     if (!established.ok) return { ok: false, reason: established.reason, blockers: [established.reason] };
     if (established.digest !== digest) {
@@ -381,6 +449,7 @@ export async function commissionOwnedAccount(
   })).digest("hex");
   const written = await db.query(COMMISSION_SQL, [
     report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
+    alternateGrantId,
   ]);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };

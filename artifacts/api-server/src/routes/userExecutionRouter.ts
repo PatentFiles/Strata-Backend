@@ -5,6 +5,12 @@ import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
+import { recordOwnerFeeSourceConsent, revokeOwnerFeeSourceConsent } from "../lib/strata/ownerFeeSourceConsent";
+import { verifyOwnerFeeSourceStage } from "../lib/strata/ownerFeeSourceStage";
+import { feeSourcePolicyDocument, signIndependentFeePolicyReview,
+  issueReviewedOwnerFeeSourceGrant, revokeReviewedFeeSourceGrant,
+  listEligibleFeeSourceOwners, inspectFeePolicySigningStatus
+} from "../lib/strata/operatorFeePolicyAuthority";
 import { emptyUserExecutionView, type ControlAction, type UserExecutionView } from "../lib/strata/userExecutionScope";
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
@@ -567,17 +573,116 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
     const status = await inspectOwnerFeeSourceReadiness(userId);
-    res.status(status.diagnosticEligible ? 200 : 409).json(sanitizePublic(status));
+    res.status(200).json(sanitizePublic(status));
+  });
+  // Explicit owner action: records source consent only. Never approves policy,
+  // commissions an account or changes the execution kill-switch.
+  router.post("/fees/owner-consent", async (req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await recordOwnerFeeSourceConsent(userId, req.body ?? {});
+    res.status(result.ok ? 201 : 409).json(sanitizePublic(result));
+  });
+
+  // Human-signed policy authority requires current admin roles and separate
+  // distinct review records; none of these endpoints arm or submit orders.
+  router.post("/fees/owner-consent/revoke", async (req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeOwnerFeeSourceConsent(userId,req.body ?? {});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.get("/fees/source-policy-document", (_req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    res.json(sanitizePublic(feeSourcePolicyDocument()));
+  });
+  router.get("/fees/source-policy-owners", async (_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await listEligibleFeeSourceOwners(userId);
+    res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-policy-status", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    const ownerId=typeof req.body?.ownerUserId==="string"?req.body.ownerUserId:"";
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await inspectFeePolicySigningStatus(userId,ownerId);
+    res.status(200).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-policy-review", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await signIndependentFeePolicyReview(userId, req.body ?? {});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-grants", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await issueReviewedOwnerFeeSourceGrant(userId, req.body ?? {});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/source-grants/revoke", async (req, res) => {
+    const userId=subject(res);
+    if (!userId) return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeReviewedFeeSourceGrant(userId, req.body ?? {});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.get("/fees/authorized-preflight", async (_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const proof=await verifyOwnerFeeSourceStage(userId,"STEP_6");
+    if(!proof.ok)return void res.status(200).json(sanitizePublic({
+      ok:false,reason:proof.reason,
+      providerPdfVerified:false,policyApproved:false,commissioningPerformed:false,
+      tradingAuthorized:false,
+    }));
+    res.status(200).json(sanitizePublic({
+      ok:true,reason:"operator_attested_source_verified_read_only",
+      feeArtifactDigest:proof.identity.digest,
+      checkedAt:new Date(proof.identity.verifiedAtMs).toISOString(),
+      sourceUrl:proof.identity.sourceUrl,
+      provenanceType:"operator_attested_not_provider",
+      feePolicyVersion:proof.identity.policyVersion,
+      providerPdfVerified:false,policyApproved:false,commissioningPerformed:false,
+      tradingAuthorized:false,
+    }));
   });
   router.get("/fees/preflight", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
+    // Prefer a separately signed, owner-consented alternative when present.
+    // Operator source evidence is never falsely labeled provider PDF capture.
+    const reviewed = await verifyOwnerFeeSourceStage(userId, "STEP_6");
+    if (reviewed.ok) {
+      return void res.status(200).json(sanitizePublic({
+        ok: true, reason: "operator_attested_fee_source_verified_read_only",
+        feeArtifactDigest: reviewed.identity.digest,
+        checkedAt: new Date(reviewed.identity.verifiedAtMs).toISOString(),
+        sourceUrl: reviewed.identity.sourceUrl,
+        feePolicyVersion: reviewed.identity.policyVersion,
+        provenanceType: "operator_attested_not_provider",
+        providerPdfVerified: false,
+        policyApproved: false, commissioningPerformed: false,
+        tradingAuthorized: false,
+      }));
+    }
     const result = await establishOfficialFeeDigest();
     if (!result.ok) {
       return void res.status(409).json(sanitizePublic({
         ok: false,
         reason: result.reason,
+        alternateAuthorizationReason: reviewed.reason,
         retryAfterSeconds: result.reason === "official_fee_schedule_http_429"
           ? result.diagnostic.retryAfterSeconds ?? 60
           : undefined,

@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "@workspace/db";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
 import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
+import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
+import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
+import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
+import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -194,7 +198,18 @@ export function createProductionPersonalSession(
     const flat = snapshot.orders.length === 0 && snapshot.fills.length === 0 &&
       snapshot.settlements.length === 0 && snapshot.positions.length === 0;
     if (flat && feeds.cashMicros !== text(loaded.row.cash_micros)) return { ok: false, reason: "cash_evidence_mismatch" };
-    const artifact = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
+    const alternate=parseOwnerFeeSource(sourceUrl);
+    if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
+       formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
+      return {ok:false,reason:"source_policy_identity_invalid"};
+    const operatorAtStart=alternate?
+      await verifyOwnerFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
+    if(alternate && (!operatorAtStart?.ok || operatorAtStart.identity.digest!==digest))
+      return {ok:false,reason:"operator_source_release_unavailable"};
+    const artifact=alternate && operatorAtStart?.ok?
+      {valid:true,digest:operatorAtStart.identity.digest,
+       verifiedAt:operatorAtStart.identity.verifiedAtMs}:
+      await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
     }
@@ -237,7 +252,14 @@ export function createProductionPersonalSession(
       },
       readMarket: async (market, side) => {
         const clock = now();
-        if (clock - feeCheckedAt > 10_000) {
+        if(alternate){
+          const checked=await verifyOwnerFeeSourceStage(input.userId,"ORDER_ENTRY",
+            sourceUrl,market);
+          if(!checked.ok || checked.identity.digest!==digest)
+            throw new Error("owner_operator_fee_source_unavailable");
+          feeVerifiedAt=checked.identity.verifiedAtMs;
+          feeCheckedAt=clock;
+        }else if (clock - feeCheckedAt > 10_000) {
           const refreshed = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
           if (!refreshed.valid || refreshed.digest !== digest || !refreshed.verifiedAt) {
             throw new Error("fee_evidence_missing");
@@ -268,7 +290,7 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: personalProductionFetch,
+      fetchImpl: alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
     });
     const uncertain = await db.query(
       `SELECT count(*)::text AS n FROM v13_production_intent

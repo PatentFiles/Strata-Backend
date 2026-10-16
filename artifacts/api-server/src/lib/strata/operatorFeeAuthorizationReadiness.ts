@@ -1,5 +1,6 @@
 import { pool } from "@workspace/db";
 import { REVIEWED_FEE_DIGEST } from "./operatorAttestedFeeEligibility";
+import { FEE_SOURCE_DECISION_SHA256 } from "./operatorFeePolicyDecision";
 import { inspectOperatorFeeCandidate } from "./operatorFeeCandidateRead";
 import { evaluateOperatorSourceGrant, OPERATOR_FEE_SOURCE_POLICY,
   type ApprovedOperatorFeeSourceGrant, type FeeAuthorizationStage,
@@ -26,6 +27,11 @@ export interface OwnerFeeSourceReadiness {
   stageChecks: Record<FeeAuthorizationStage, boolean>;
   candidateExpiresAt: string | null;
   grantExpiresAt: string | null;
+  grantId: string | null;
+  releaseId: string | null;
+  marketTicker: string | null;
+  metadataFingerprint: string | null;
+  metadataVerifiedAt: string | null;
 }
 
 const ALL_STAGES: readonly FeeAuthorizationStage[] = ["STEP_6","STEP_9","STEP_11","ORDER_ENTRY"];
@@ -37,6 +43,8 @@ function blocked(reason: string): OwnerFeeSourceReadiness {
     commissioningApproved: false, tradingAuthorized: false,
     stageChecks: { STEP_6:false, STEP_9:false, STEP_11:false, ORDER_ENTRY:false },
     candidateExpiresAt: null, grantExpiresAt: null,
+    grantId: null, releaseId: null, marketTicker: null,
+    metadataFingerprint: null,metadataVerifiedAt: null,
   };
 }
 function isoMs(value: unknown): number {
@@ -106,11 +114,30 @@ export async function inspectOwnerFeeSourceReadiness(
     const grants = await db.query(
       `SELECT grant_id,owner_user_id,release_id,reviewed_pdf_sha256,policy_version,
               approved_by_admin_id,approved_at,expires_at,revoked_at,authorized_stages
-         FROM private.strata_fee_source_grants
-        WHERE owner_user_id=$1::uuid AND release_id=$2::uuid
-          AND revoked_at IS NULL AND expires_at>now()
-        ORDER BY approved_at DESC LIMIT 2`,
-      [ownerUserId, candidate.releaseId],
+         FROM private.strata_fee_source_grants g
+        WHERE g.owner_user_id=$1::uuid AND g.release_id=$2::uuid
+          AND g.revoked_at IS NULL AND g.expires_at>now()
+          AND g.policy_decision_sha256=$3
+          AND EXISTS (
+            SELECT 1 FROM auth.users issuing
+            JOIN private.role_assignments ar ON lower(btrim(ar.email))=lower(btrim(issuing.email))
+            WHERE issuing.id=g.approved_by_admin_id AND issuing.email_confirmed_at IS NOT NULL
+              AND ar.role='ADMIN'
+          )
+          AND (
+            SELECT count(DISTINCT reviewers.reviewer_user_id)
+            FROM private.strata_fee_source_policy_reviews reviewers
+            JOIN auth.users signer ON signer.id=reviewers.reviewer_user_id
+            JOIN private.role_assignments sr
+              ON lower(btrim(sr.email))=lower(btrim(signer.email))
+            WHERE reviewers.owner_user_id=$1::uuid AND reviewers.release_id=$2::uuid
+              AND reviewers.policy_decision_sha256=$3
+              AND reviewers.reviewed_pdf_sha256=g.reviewed_pdf_sha256
+              AND reviewers.revoked_at IS NULL AND reviewers.expires_at>now()
+              AND signer.email_confirmed_at IS NOT NULL AND sr.role='ADMIN'
+          ) >= 2
+        ORDER BY g.approved_at DESC LIMIT 2`,
+      [ownerUserId, candidate.releaseId, FEE_SOURCE_DECISION_SHA256],
     );
     if (grants.rows.length !== 1) {
       const denied = blocked(grants.rows.length ? "multiple_active_source_grants" : "source_policy_grant_missing");
@@ -129,6 +156,12 @@ export async function inspectOwnerFeeSourceReadiness(
         consents.rows[0]?.confirmation !== "CONFIRM_OPERATOR_FEE_SOURCE_ONLY") {
       const denied = blocked("owner_source_consent_missing_or_ambiguous");
       denied.candidateExpiresAt = candidate.expiresAt;
+      // Only expose the owner-scoped grant ID to its authenticated owner so
+      // the owner can explicitly sign consent; no active trading authority.
+      denied.grantId=grant.grantId;
+      denied.releaseId=candidate.releaseId;
+      denied.grantExpiresAt=Number.isFinite(grant.expiresAtMs)
+        ? new Date(grant.expiresAtMs).toISOString():null;
       return denied;
     }
     const consent = dbConsent(consents.rows[0]!);
@@ -153,6 +186,12 @@ export async function inspectOwnerFeeSourceReadiness(
       grantExpiresAt:Number.isFinite(grant.expiresAtMs)
         ? new Date(grant.expiresAtMs).toISOString() : null,
       stageChecks:stages,
+      grantId: grant.grantId,
+      releaseId: candidate.releaseId,
+      marketTicker: market?.ticker ?? null,
+      metadataFingerprint: market?.metadataFingerprint ?? null,
+      metadataVerifiedAt: market && Number.isFinite(market.verifiedAtMs)
+        ? new Date(market.verifiedAtMs).toISOString():null,
     };
   } catch {
     return blocked("private_fee_authorization_ledger_unavailable");

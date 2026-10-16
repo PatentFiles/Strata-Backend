@@ -1,0 +1,42 @@
+name: Operator fee-source authorization and final-order regression
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/operatorFee*'
+      - 'artifacts/api-server/src/lib/strata/ownerFee*'
+      - 'artifacts/api-server/src/lib/strata/guardedOwnerFeeWire*'
+      - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
+      - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
+      - 'sql/strata_fee_source_policy_independent_reviews.sql'
+      - '.github/workflows/owner-fee-source-regression.yml'
+permissions:
+  contents: read
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Bundle stage tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeSourceStage.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeSourceStage.test.cjs
+      - name: Run stage negative cases
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeSourceStage.test.cjs
+      - name: Bundle final POST tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/guardedOwnerFeeWire.test.ts --bundle --platform=node --format=cjs --outfile=dist/guardedOwnerFeeWire.test.cjs
+      - name: Run POST denial and protective exits
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/guardedOwnerFeeWire.test.cjs
+      - name: Bundle exact policy digest test
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/operatorFeePolicyDecision.test.ts --bundle --platform=node --format=cjs --outfile=dist/operatorFeePolicyDecision.test.cjs
+      - name: Validate pinned human policy approval decision hash
+        run: node --test artifacts/api-server/dist/operatorFeePolicyDecision.test.cjs
