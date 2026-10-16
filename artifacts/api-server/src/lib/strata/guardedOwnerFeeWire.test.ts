@@ -12,7 +12,10 @@ const source=encodeOwnerFeeSource(grant,release)!;
 const url="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders";
 function order(reduceOnly=false, ticker=market){
   return {method:"POST",body:JSON.stringify({ticker,subaccount:1,exchange_index:2,
-    reduce_only:reduceOnly})};
+    side:"ask",count:"1.00",price:"0.5600",
+    client_order_id:"v13p-99999999-9999-4999-8999-999999999999",
+    time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
+    post_only:false,reduce_only:reduceOnly})};
 }
 const result={ok:true as const,identity:{
   sourceKind:"operator_attested_not_provider" as const,
@@ -41,9 +44,9 @@ function harness(open:boolean,authorized:boolean){
   return {wire,stats:()=>({posted,connected,rolledBack,committed,released})};
 }
 describe("final order source fence",()=>{
-  it("revoked grant prevents new entry before transport and database access",async()=>{
+  it("revoked grant also prevents reduce-only exit before transport and database access",async()=>{
     const h=harness(false,true);
-    await assert.rejects(h.wire(url,order()),/source_order_fence_closed/);
+    await assert.rejects(h.wire(url,order(true)),/source_order_fence_closed/);
     assert.equal(h.stats().posted,0);assert.equal(h.stats().connected,0);
   });
   it("expired authorization also blocks reduce-only protective exit POST",async()=>{
@@ -51,17 +54,57 @@ describe("final order source fence",()=>{
     await assert.rejects(h.wire(url,order(true)),/source_order_fence_closed/);
     assert.equal(h.stats().posted,0);
   });
+  it("new risk is blocked even with a valid grant until protective exits are reviewed",async()=>{
+    const h=harness(true,true);
+    await assert.rejects(h.wire(url,order(false)),/new_entries_paused_pending_protective_exit/);
+    await assert.rejects(h.wire(url,{method:"POST",body:JSON.stringify({
+      ticker:market,subaccount:1,exchange_index:2,
+    })}),/new_entries_paused_pending_protective_exit/);
+    await assert.rejects(h.wire(url,{method:"POST",body:JSON.stringify({
+      ticker:market,subaccount:1,exchange_index:2,reduce_only:"true",
+    })}),/new_entries_paused_pending_protective_exit/);
+    assert.deepEqual(h.stats(),{posted:0,connected:0,rolledBack:0,committed:0,released:0});
+  });
+  it("rejects malformed V2 reduce-only orders before any network or database call",async()=>{
+    const h=harness(true,true);
+    const good=JSON.parse(order(true).body) as Record<string,unknown>;
+    for(const changed of [
+      {time_in_force:"good_till_canceled"},
+      {time_in_force:"fill_or_kill"},
+      {post_only:true},
+      {post_only:undefined},
+      {self_trade_prevention_type:undefined},
+      {self_trade_prevention_type:"maker"},
+      {expiration_time:1234567890},
+      {client_order_id:"unknown"},
+      {side:"yes"},
+      {count:"0.00"},
+      {count:"1"},
+      {price:"1.0000"},
+    ]){
+      await assert.rejects(h.wire(url,{method:"POST",body:JSON.stringify({...good,...changed})}),
+        /exit_order_shape_unverified/);
+    }
+    assert.deepEqual(h.stats(),{posted:0,connected:0,rolledBack:0,committed:0,released:0});
+  });
+  it("DELETE cancellation is still forwarded when fee authorization is revoked",async()=>{
+    const h=harness(false,false);
+    const res=await h.wire(url+"/resting-order-id",{method:"DELETE"});
+    assert.equal(res.ok,true);
+    assert.equal(h.stats().posted,1);
+    assert.equal(h.stats().connected,0);
+  });
   it("a missing or revoked ledger lock prevents the last POST",async()=>{
     const h=harness(true,false);
-    await assert.rejects(h.wire(url,order()),/not_unique/);
+    await assert.rejects(h.wire(url,order(true)),/not_unique/);
     assert.equal(h.stats().posted,0);
     assert.equal(h.stats().committed,0);
     assert.equal(h.stats().rolledBack,1);
     assert.equal(h.stats().released,1);
   });
-  it("a fresh matching locked source allows one POST and commits",async()=>{
+  it("a fresh matching locked source permits only a reduce-only POST and commits",async()=>{
     const h=harness(true,true);
-    const response=await h.wire(url,order());
+    const response=await h.wire(url,order(true));
     assert.equal(response.ok,true);
     assert.deepEqual(h.stats(),{posted:1,connected:1,rolledBack:0,committed:1,released:1});
   });
@@ -73,7 +116,7 @@ describe("final order source fence",()=>{
   });
   it("restart repeats source decision; it does not cache prior authority",async()=>{
     const before=harness(true,true);
-    await before.wire(url,order());
+    await before.wire(url,order(true));
     const restarted=harness(false,true);
     await assert.rejects(restarted.wire(url,order(true)),/source_order_fence_closed/);
     assert.equal(restarted.stats().posted,0);

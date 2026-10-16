@@ -35,6 +35,29 @@ export function createGuardedOwnerFeeFetch(
     if(typeof ticker!=="string"||!/^KXBTC15M[A-Za-z0-9._-]+$/.test(ticker)||
       order.subaccount!==1||order.exchange_index!==2)
       throw new Error("owner_order_scope_invalid");
+    // Temporary fail-closed new-risk gate (see GitHub issue #46).
+    // The alternative fee source cannot open/increase a position until a
+    // separately reviewed protective-exit procedure has been validated.
+    // DELETE cancellation is intentionally unaffected. Existing reduce-only
+    // POSTs still require ALL original authorization and market/ledger checks:
+    // this is NOT an emergency exit bypass or permission to trade.
+    if(order.reduce_only!==true)
+      throw new Error("operator_source_new_entries_paused_pending_protective_exit");
+    // Kalshi V2 reduce_only is only supported with IOC. Independent of grants,
+    // reject orders which could rest or whose client ID is not our ledger's.
+    // No exception for expired grants exists here; issue #46 remains open.
+    if(order.time_in_force!=="immediate_or_cancel"||
+       order.self_trade_prevention_type!=="taker_at_cross"||
+       order.post_only!==false||
+       order.expiration_time!==undefined||
+       typeof order.client_order_id!=="string"||
+       !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id)||
+       (order.side!=="bid"&&order.side!=="ask")||
+       typeof order.count!=="string"||!/^\d{1,9}\.\d{2}$/.test(order.count)||
+       !Number.isFinite(Number(order.count))||Number(order.count)<=0||
+       typeof order.price!=="string"||!/^0\.\d{4}$/.test(order.price)||
+       Number(order.price)<=0)
+      throw new Error("operator_source_exit_order_shape_unverified");
     const assessment=await (testOverrides.verifyStage??verifyOwnerFeeSourceStage)(ownerUserId,"ORDER_ENTRY",
       sourceUrl,ticker);
     if(!assessment.ok)throw new Error("owner_fee_source_order_fence_closed");
