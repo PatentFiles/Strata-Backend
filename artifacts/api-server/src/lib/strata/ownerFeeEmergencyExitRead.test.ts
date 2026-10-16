@@ -17,7 +17,7 @@ const order:EmergencyExitOrder={
   post_only:false,subaccount:1,exchange_index:2,
 };
 function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
-  positions?:unknown[];orders?:unknown[];pending?:number;badFee?:boolean;
+  positions?:unknown[];orders?:unknown[];pending?:number|null;badFee?:boolean;
   incomplete?:boolean}={}){
   let dbReads=0,feedReads=0,feeReads=0;
   const db={query:async(sql:string)=>{
@@ -35,7 +35,7 @@ function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
     }]};
     if(sql.includes("v13_production_intent")){
       assert.match(sql,/account_id=\$1::text/);
-      return {rows:[{n:opt.pending??0}]};
+      return {rows:[{n:opt.pending===undefined?0:opt.pending}]};
     }
     throw Error("unexpected_database_read");
   }};
@@ -84,7 +84,7 @@ test("missing/duplicate/incomplete positions fail",async()=>{
 test("resting or unknown orders, unresolved intent, failed fee probe all fail",async()=>{
   for(const opt of [
     {orders:[{status:"resting"}]},{orders:[{status:"mystery"}]},
-    {pending:1},{badFee:true},
+    {pending:1},{pending:null},{badFee:true},
   ]){
     const r=await harness(opt).run();
     assert.equal(r.diagnosticEligible,false);
