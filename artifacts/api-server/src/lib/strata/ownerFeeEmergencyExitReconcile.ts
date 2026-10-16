@@ -65,9 +65,13 @@ export function reconcileIocEmergencyExit(x:IocRecoveryObservation):IocRecoveryR
     return deny("REJECTED","emergency_reconcile_identity_invalid");
   const qty=decimal(x.requestedCountFp,false);
   const start=signed(x.initialPositionFp),finish=signed(x.observedPositionFp);
-  if(qty===null||start===null||finish===null||start===0n||
+  if(qty===null||start===null||start===0n||
      qty>(start<0n?-start:start))
     return deny("REJECTED","emergency_reconcile_position_invalid");
+  // Unparseable *post-order* inventory is not proof that an order was
+  // rejected; the exchange might already have filled it. Keep it UNKNOWN.
+  if(finish===null)
+    return deny("UNKNOWN","emergency_reconcile_current_position_unverified");
   if((start>0n&&x.reducingBookSide!=="ask")||
      (start<0n&&x.reducingBookSide!=="bid"))
     return deny("REJECTED","emergency_reconcile_side_invalid");
