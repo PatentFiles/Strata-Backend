@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { probeCurrentKalshiFeeApi, REVIEWED_REFERENCE_PDF_SHA256 } from "./twoSourceFeeEvidence";
+import { probeCurrentKalshiFeeApi, REVIEWED_REFERENCE_PDF_SHA256, KALSHI_API_ORIGIN } from "./twoSourceFeeEvidence";
 
 const now = Date.parse("2026-10-15T22:00:00Z");
 const future = "2026-10-15T22:12:00Z";
@@ -23,7 +23,7 @@ function responses() {
         fee_type_override: null, fee_multiplier_override: null },
     },
     "/series/KXBTC15M": {
-      series: { ticker: "KXBTC15M", fee_type: "quadratic", fee_multiplier: 1 },
+      series: { ticker: "KXBTC15M", exchange_index: 2, fee_type: "quadratic", fee_multiplier: 1 },
     },
     "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100": {
       series_fee_change_arr: [], cursor: "",
@@ -36,7 +36,7 @@ function responses() {
 function transport(pages: Record<string, Record<string, unknown>>,
   opts: { status?: number; redirects?: boolean } = {}): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    const url = String(input), origin = "https://api.elections.kalshi.com/trade-api/v2";
+    const url = String(input), origin = "https://external-api.kalshi.com/trade-api/v2";
     assert.equal(init?.method, "GET");
     assert.equal(init?.redirect, "error");
     assert.ok(url.startsWith(origin + "/"), "no caller-controlled URL");
@@ -85,4 +85,27 @@ test("rejects incomplete pagination, missing metadata, ambiguous target and prov
   broken["/series/KXBTC15M"]={series:null};
   assert.equal((await probeCurrentKalshiFeeApi(transport(broken),()=>now)).ok,false);
   assert.equal((await probeCurrentKalshiFeeApi(transport(responses(),{status:429}),()=>now)).ok,false);
+});
+
+test("pins the documented official Kalshi Predictions API origin", () => {
+  assert.equal(KALSHI_API_ORIGIN,"https://external-api.kalshi.com/trade-api/v2");
+});
+test("rejects wrong-exchange series metadata and conflicting market/event shard", async () => {
+  for (const [page,field] of [
+    ["/series/KXBTC15M","series"],
+    ["/markets/" + ticker,"market"],
+    ["/events/" + eventTicker,"event"],
+  ] as const) {
+    const pages = responses();
+    (pages[page]![field] as Record<string, unknown>).exchange_index = 0;
+    const result = await probeCurrentKalshiFeeApi(transport(pages), () => now);
+    assert.equal(result.ok, false, page);
+    assert.equal(result.tradingEnabled, false);
+    assert.equal(result.pdfProvenanceApproved, false);
+  }
+});
+test("ignores other-exchange listing candidates instead of misattributing fees", async () => {
+  const pages = responses();
+  (pages["/markets?series_ticker=KXBTC15M&status=open&limit=100"]!.markets as Record<string,unknown>[])[0]!.exchange_index=0;
+  assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now)).ok,false);
 });

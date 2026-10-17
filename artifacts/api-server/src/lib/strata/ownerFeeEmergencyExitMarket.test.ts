@@ -17,8 +17,8 @@ function fixture(overrides:{status?:string;ticker?:string;index?:number;override
     }},
     ["/events/"+EVENT]:{event:{event_ticker:EVENT,series_ticker:"KXBTC15M",
       fee_type_override:overrides.overrideFee??null,fee_multiplier_override:null}},
-    "/series/KXBTC15M":{series:{ticker:"KXBTC15M",fee_type:overrides.seriesFee??"quadratic",
-      fee_multiplier:1}},
+    "/series/KXBTC15M":{series:{ticker:"KXBTC15M",exchange_index:2,
+      fee_type:overrides.seriesFee??"quadratic",fee_multiplier:1}},
     "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100":{
       series_fee_change_arr:overrides.scheduled?[{id:"scheduled",scheduled_ts:overrides.scheduled}]:[],cursor:""},
     ["/events/fee_changes?event_ticker="+EVENT+"&show_historical=false&limit=100"]:{
@@ -29,7 +29,7 @@ function fixture(overrides:{status?:string;ticker?:string;index?:number;override
     const u=String(request);
     calls.push(u);
     if(init?.method!=="GET")throw Error("unexpected mutation");
-    const path=u.replace("https://api.elections.kalshi.com/trade-api/v2","");
+    const path=u.replace("https://external-api.kalshi.com/trade-api/v2","");
     if(overrides.fail||!(path in payloads))return new Response("denied",{status:503});
     const response=new Response(JSON.stringify(payloads[path]),{status:200,
       headers:{"content-type":"application/json"}});
@@ -48,7 +48,7 @@ test("exact named market open and unmodified fees give only read-only metadata",
     assert.match(answer.fingerprint,/^[0-9a-f]{64}$/);
   }
   assert.equal(f.calls.length,5);
-  assert.ok(f.calls.every(url=>url.startsWith("https://api.elections.kalshi.com/trade-api/v2")));
+  assert.ok(f.calls.every(url=>url.startsWith("https://external-api.kalshi.com/trade-api/v2")));
 });
 test("closed, wrong ticker or exchange and fee overrides reject",async()=>{
   for(const v of [{status:"closed"},{ticker:"KXBTC15M-OTHER"},{index:0},
