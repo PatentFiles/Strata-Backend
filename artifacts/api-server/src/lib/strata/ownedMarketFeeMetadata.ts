@@ -53,9 +53,12 @@ export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMe
   const eventTicker=market?.event_ticker;
   if (!market || !series || !event ||
       market.ticker !== input.marketTicker ||
+      market.exchange_index !== 2 ||
       typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker) ||
       event.event_ticker !== eventTicker || event.series_ticker !== "KXBTC15M" ||
-      series.ticker !== "KXBTC15M" || series.fee_type !== "quadratic" ||
+      (event.exchange_index !== undefined && event.exchange_index !== 2) ||
+      series.ticker !== "KXBTC15M" || series.exchange_index !== 2 ||
+      series.fee_type !== "quadratic" ||
       ![1,"1","1.0"].includes(series.fee_multiplier as string|number) ||
       (event.fee_type_override !== null && event.fee_type_override !== undefined) ||
       (event.fee_multiplier_override !== null && event.fee_multiplier_override !== undefined) ||

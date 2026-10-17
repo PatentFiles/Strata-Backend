@@ -6,7 +6,7 @@ import { canonical, digest, requireProof, type Identity, type MarketEvidence, ty
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 
 export const PERSONAL_KALSHI_HOST = "https://external-api.kalshi.com";
-export const PERSONAL_MARKET_METADATA_HOST = "https://api.elections.kalshi.com/trade-api/v2";
+export const PERSONAL_MARKET_METADATA_HOST = "https://external-api.kalshi.com/trade-api/v2";
 
 const BALANCE_PATH = "/trade-api/v2/portfolio/balance";
 const ORDER_PATH = "/trade-api/v2/portfolio/orders";
