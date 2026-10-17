@@ -152,11 +152,12 @@ FROM ${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
 `;
 
 export async function sweepAvailability(userId: string, minimumRetainedCents = 0,
-  get: Get = getScopedKalshiJson): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson,
+  origin: "manual" | "automatic" = "manual"): Promise<SweepResult> {
   const retain = exact(minimumRetainedCents);
   if (retain === null) return fail("invalid_minimum_retained_cash");
   try {
-    const account = await owned(userId);
+    const account = await owned(userId, origin);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     // Preserve the audit record but release unused quotes after their 5m TTL.
     await pool.query(`UPDATE ${TABLE} SET state='expired',updated_at=now()
@@ -183,13 +184,14 @@ export async function sweepAvailability(userId: string, minimumRetainedCents = 0
 }
 
 export async function quoteManualSweep(userId: string, input: unknown,
-  get: Get = getScopedKalshiJson): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson,
+  origin: "manual" | "automatic" = "manual"): Promise<SweepResult> {
   if (!enabled()) return fail("withdrawal_feature_disabled");
   if (!input || typeof input !== "object" || Array.isArray(input)) return fail("invalid_request");
   const data = input as Row;
   const amount = exact(data.amountCents), retain = exact(data.minimumRetainedCents);
   if (amount === null || amount < 1 || amount > 100_000_000_000 || retain === null) return fail("invalid_amount");
-  const availability = await sweepAvailability(userId, retain, get);
+  const availability = await sweepAvailability(userId, retain, get, origin);
   if (!availability.ok || availability.maximumCents === null ||
       amount > availability.maximumCents || availability.botCashCents === null ||
       availability.cashierCashCents === null || availability.minimumRetainedCents === null) {
