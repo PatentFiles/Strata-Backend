@@ -1,4 +1,5 @@
 import { readAutoRule, saveAutoRule } from "../lib/strata/autoProfitWithdrawals";
+import { readAutoWithdrawalMaintenance } from "../lib/strata/autoWithdrawalMaintenance";
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   CASHIER_SWEEP_CONFIRMATION, confirmManualSweep, listManualSweeps,
@@ -32,6 +33,11 @@ export function createManualProfitWithdrawalRouter(requireUser: RequestHandler):
     const id=owner(res);
     if(!id){res.status(401).json({error:"Unauthorized"});return;}
     res.json(await inspectCashierRouteReadOnly(id));
+  });
+  router.get("/automatic-maintenance", async(_req,res)=>{
+    const id=owner(res);
+    if(!id){res.status(401).json({error:"Unauthorized"});return;}
+    res.json(await readAutoWithdrawalMaintenance(id));
   });
   router.get("/automatic-rule", async(_req,res)=>{
     const id=owner(res);
