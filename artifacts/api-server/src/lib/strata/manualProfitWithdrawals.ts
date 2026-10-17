@@ -197,7 +197,7 @@ export async function quoteManualSweep(userId: string, input: unknown,
       availability.cashierCashCents === null || availability.minimumRetainedCents === null) {
     return fail("withdrawal_exceeds_verified_unreserved_cash");
   }
-  const account = await owned(userId);
+  const account = await owned(userId,origin);
   if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
   const id = randomUUID();
   const db = await pool.connect();
