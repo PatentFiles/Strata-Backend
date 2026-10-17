@@ -452,7 +452,7 @@ export function createDatabaseUserScopePort(
       };
       const botQuery = `?subaccount=${BOT_SUBACCOUNT}&exchange_index=${BOT_EXCHANGE_INDEX}`;
       const activityQuery = `?limit=200&subaccount=${BOT_SUBACCOUNT}`;
-      const primaryOutcome = await read("/trade-api/v2/portfolio/balance").then(
+      const primaryOutcome = await read("/trade-api/v2/portfolio/balance", "?subaccount=0").then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       );
