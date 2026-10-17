@@ -111,6 +111,14 @@ jobs:
             --outfile=dist/autoProfitWithdrawals.test.cjs \
             --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
           node --test dist/autoProfitWithdrawals.test.cjs
+      - name: Test strict automatic restart refusal after kill or manual interruption
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/autoWithdrawalMaintenance.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/autoWithdrawalMaintenance.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/autoWithdrawalMaintenance.test.cjs
       - name: Test owner pilot transfer one-shot safety and isolation
         working-directory: artifacts/api-server
         run: |
