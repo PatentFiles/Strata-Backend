@@ -231,7 +231,7 @@ function installPristineRestartGetMocks(
   const expirationTime = new Date(Date.parse(closeTime) + 7 * 24 * 60 * 60_000).toISOString();
   const priceRanges = [{ start: "0.0100", end: "0.9900", step: "0.0100" }];
   const market = {
-    ticker: marketTicker, status: "open", close_time: closeTime,
+    ticker: marketTicker, status: "open", exchange_index: 2, close_time: closeTime,
     expiration_time: expirationTime, latest_expiration_time: expirationTime,
     expected_expiration_time: closeTime,
     event_ticker: eventTicker, price_ranges: priceRanges,
@@ -259,7 +259,7 @@ function installPristineRestartGetMocks(
       });
     }
 
-    assert.equal(url.origin, "https://api.elections.kalshi.com");
+    assert.equal(url.origin, "https://external-api.kalshi.com");
     assert.equal(url.pathname.startsWith("/trade-api/v2/"), true,
       `restart recovery requested an unapproved isolated URL: ${url.href}`);
     marketEvidenceGets++;
@@ -271,12 +271,14 @@ function installPristineRestartGetMocks(
       return Response.json({ market });
     }
     if (url.pathname === "/trade-api/v2/series/KXBTC15M") {
-      return Response.json({ series: { ticker: "KXBTC15M", fee_type: "quadratic",
-        fee_multiplier: "1", last_updated_ts: new Date(Date.now() - 60_000).toISOString() } });
+      return Response.json({ series: { ticker: "KXBTC15M", exchange_index: 2,
+        fee_type: "quadratic", fee_multiplier: "1",
+        last_updated_ts: new Date(Date.now() - 60_000).toISOString() } });
     }
     if (url.pathname === `/trade-api/v2/events/${eventTicker}`) {
       return Response.json({ event: {
         event_ticker: eventTicker, series_ticker: "KXBTC15M",
+        exchange_index: 2,
         last_updated_ts: "0001-01-01T00:00:00Z",
         fee_type_override: null, fee_multiplier_override: null,
       } });
