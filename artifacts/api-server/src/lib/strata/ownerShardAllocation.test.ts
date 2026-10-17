@@ -363,7 +363,7 @@ test("completed $25 receipt reconciles exact fractional source remainder without
         .find(x=>x.subaccount_number===0&&x.exchange_index===0)!;
       // Source starts at $34.500031; after exactly $25 it is $9.500031.
       const amount=String(row.balance);
-      row.balance=amount.slice(0,-2)+"31";
+      row.balance=amount.slice(0,-2)+"0031";
     }
     return response;
   };
