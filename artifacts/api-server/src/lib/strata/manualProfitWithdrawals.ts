@@ -233,7 +233,7 @@ export async function confirmManualSweep(userId: string, input: unknown,
   if (data.confirmation !== CASHIER_SWEEP_CONFIRMATION ||
       typeof data.quoteId !== "string" || !UUID.test(data.quoteId)) return fail("explicit_confirmation_required");
   try {
-    const account = await owned(userId);
+    const account = await owned(userId, automaticAuthorization ? "automatic" : "manual");
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     const plan = await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
       cashier_before_cents,authority_fingerprint,expires_at,origin,auto_rule_id,auto_rule_revision FROM ${TABLE}
