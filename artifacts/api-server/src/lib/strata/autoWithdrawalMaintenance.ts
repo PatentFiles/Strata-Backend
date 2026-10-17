@@ -17,6 +17,15 @@ export interface MaintenanceView {
  wasArmed:boolean;interrupted:boolean;transferId:string|null;changedAt:string|null;
 }
 const txt=(x:unknown)=>typeof x==="string"?x:null;
+/** Pure fail-closed restart decision. Live START still rechecks every risk gate. */
+export function automaticResumeAuthorized(input:{
+  wasRunning:boolean;wasArmed:boolean;initialKillSwitch:boolean;
+  ownerInterrupted:boolean;ruleEnabled:boolean;ruleMatches:boolean;
+}):boolean{
+  return input.wasRunning && input.wasArmed && !input.initialKillSwitch &&
+    !input.ownerInterrupted && input.ruleEnabled && input.ruleMatches;
+}
+
 async function read(owner:string):Promise<Row|null>{
  const r=await pool.query(`SELECT m.execution_account_id,m.owner_user_id::text,m.rule_id::text,m.rule_revision,
  m.cycle,m.state,m.was_running,m.was_armed,m.initial_kill_switch,m.operator_interrupted,
@@ -169,8 +178,12 @@ async function resume(owner:string,m:Row,rule:AutoRule):Promise<string>{
   ownerUserId:owner,confirmation:RECORD_OWNED_CASH_CONFIRMATION,nowMs:Date.now(),
  });
  if(!cash.ok)return "post_transfer_cash_reconciliation_pending";
- const canRestart=m.was_running===true && m.was_armed===true && m.initial_kill_switch===false
-  && rule.enabled && m.rule_id===rule.id && Number(m.rule_revision)===rule.revision;
+ const canRestart=automaticResumeAuthorized({
+  wasRunning:m.was_running===true,wasArmed:m.was_armed===true,
+  initialKillSwitch:m.initial_kill_switch!==false,
+  ownerInterrupted:m.operator_interrupted!==false,ruleEnabled:rule.enabled,
+  ruleMatches:m.rule_id===rule.id && Number(m.rule_revision)===rule.revision,
+ });
  if(!await change(owner,"completed","verified_auto_withdrawal","resume_requested"))return "maintenance_changed";
  if(!canRestart)return "auto_completed_bot_remains_stopped";
  const result=await personalTradingControls.control(owner,"START");
