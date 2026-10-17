@@ -57,7 +57,7 @@ function observation(fill:string,remaining:string):IocRecoveryObservation {
 function harness(opts:{
   filled?:string;remaining?:string;
   status?:number;networkFailure?:boolean;badHistory?:boolean;
-  throwHistory?:boolean;denyMark?:boolean;throwMark?:boolean;
+  throwHistory?:boolean;denyMark?:boolean;throwMark?:boolean;denyFinalize?:boolean;
 }={}){
   let marks=0,posts=0,reads=0;
   const fill=opts.filled??"2.00",remaining=opts.remaining??"0.00";
@@ -97,6 +97,11 @@ function harness(opts:{
       return new Response(JSON.stringify(receipt(fill,remaining)),
         {status:code,headers:{"content-type":"application/json"}});
     }) as typeof fetch,
+    commitVerifiedReconciliation:async(clientOrderId:string,verified:true)=>{
+      assert.equal(clientOrderId,id);
+      assert.equal(verified,true);
+      return !opts.denyFinalize;
+    },
     readVerifiedExchangeHistory:async()=>{
       reads++;
       if(opts.throwHistory)throw Error("history unavailable");
@@ -185,6 +190,15 @@ test("Receipt success without verified independent history remains UNKNOWN",asyn
   assert.equal(r.mayRetry,false);
   assert.deepEqual(h.stats(),{marks:1,posts:1,reads:1});
  }
+});
+test("Reconciliation read is insufficient without durable terminal database commit",async()=>{
+ const h=harness({denyFinalize:true});
+ const r=await executeOneSignedDemoProtectiveIoc({
+   keyId,privateKeyPem:pem,order,approval,deps:h.deps,
+ });
+ assert.equal(r.state,"UNKNOWN");
+ assert.equal(r.mayRetry,false);
+ assert.deepEqual(h.stats(),{marks:1,posts:1,reads:1});
 });
 test("Signatures bind to exact method/path; signer fingerprint is deterministic",()=>{
  assert.equal(fp.length,64);
