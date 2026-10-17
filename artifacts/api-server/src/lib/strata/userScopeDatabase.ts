@@ -89,7 +89,9 @@ const ACCOUNT_SQL = `
 
 const CONNECTION_SQL = `
   SELECT fa.id::text AS financial_account_id, pc.id::text AS provider_connection_id,
-         COALESCE(vc.vault_secret_id,pc.vault_secret_id)::text AS vault_secret_id, pc.key_fingerprint, pc.verified_at
+         COALESCE(vc.vault_secret_id,pc.vault_secret_id)::text AS vault_secret_id,
+         COALESCE(vc.key_fingerprint,pc.key_fingerprint) AS key_fingerprint,
+         COALESCE(vc.verified_at,pc.verified_at) AS verified_at
   FROM public.financial_accounts fa
   LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
   LEFT JOIN LATERAL (
