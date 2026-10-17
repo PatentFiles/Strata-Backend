@@ -87,6 +87,8 @@ export interface DemoIocDependencies {
   commitUnknownBeforePost:(order:Readonly<EmergencyExitOrder>,fingerprint:string)=>Promise<DurableDemoUnknown>;
   /** Independently authenticated exchange GET history, not an HTTP 201 echo. */
   readVerifiedExchangeHistory:VerifiedRead;
+  /** Only a verified, durable DB finalization permits terminal RECONCILED. */
+  commitVerifiedReconciliation:(clientOrderId:string,verified:true)=>Promise<boolean>;
   /** Test transport injection; defaults to real DEMO fetch, NEVER production. */
   fetchImpl?:typeof fetch;
   nowMs?:()=>number;
@@ -231,6 +233,12 @@ export async function executeOneSignedDemoProtectiveIoc(input:{
   const reconciled=reconcileIocEmergencyExit(observation);
   if(reconciled.state!=="RECONCILED")
     return unknown(reconciled.reason,status);
+  let closed=false;
+  try {
+    closed=await deps.commitVerifiedReconciliation(order.client_order_id as string,true);
+  } catch {}
+  if(closed!==true)
+    return unknown("demo_ioc_verified_finalization_not_durable",status);
   return {...result("RECONCILED","demo_ioc_completed_with_authenticated_history",status,
      true,order.client_order_id as string),
     filledHundredths:reconciled.filledHundredths};
