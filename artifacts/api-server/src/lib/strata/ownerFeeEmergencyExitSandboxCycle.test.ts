@@ -27,7 +27,7 @@ function observation(fill="2.00",remaining="0.00"):IocRecoveryObservation{
 function sandbox(options:{
   fill?:string;remaining?:string;
   failSubmit?:boolean;failRead?:boolean;badIdentity?:boolean;
-  invalidHistory?:boolean;
+  invalidHistory?:boolean;badReceipt?:boolean;
 }={}){
   let submitted=0,reads=0;
   const transport:SandboxSignedTransport={
@@ -43,6 +43,7 @@ function sandbox(options:{
       const o=observation(options.fill??"2.00",options.remaining??"0.00");
       if(options.badIdentity)o.clientOrderId="wrong-client";
       if(options.invalidHistory)o.orderAndFillHistoryMatched=false;
+      if(options.badReceipt && o.response)o.response={...o.response,order_id:"different-order"};
       return o;
     },
   };
@@ -81,7 +82,7 @@ test("no durable UNKNOWN marker, wrong scope, or malformed identity means zero P
 test("timeouts, missing history, identity mismatch or malformed fills become UNKNOWN with no retry",async()=>{
   for(const options of [
     {failSubmit:true},{failRead:true},{badIdentity:true},
-    {invalidHistory:true},{fill:"1.00",remaining:"0.00"}
+    {invalidHistory:true},{badReceipt:true},{fill:"1.00",remaining:"0.00"}
   ]){
     const x=sandbox(options);
     const result=await exerciseSandboxExitAfterUnknown({order,durableMarker:marked,sandbox:x.transport});
