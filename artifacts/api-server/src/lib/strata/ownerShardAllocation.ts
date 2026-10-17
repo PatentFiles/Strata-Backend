@@ -163,6 +163,24 @@ function money(value:unknown, shard:0|2, sub:0|1):number|null {
   return cash!==null && Number.isSafeInteger(cash) && cash>=0?cash:null;
 }
 type Balances={source:number;destination:number;bot:number};
+/** Kalshi inventory fields are decimal-dollar strings, unlike scoped integer balance cents. */
+function inventoryMatches(payload:unknown,scoped:Balances):boolean{
+  if(!payload||typeof payload!=="object"||Array.isArray(payload))return false;
+  const records=(payload as Row).subaccount_balances;
+  if(!Array.isArray(records)||records.length>100)return false;
+  for(const [sub,shard,cents] of [[0,0,scoped.source],[0,2,scoped.destination],[1,2,scoped.bot]] as const){
+    const matches=records.filter(x=>x&&typeof x==="object"&&!Array.isArray(x)&&
+      Number((x as Row).subaccount_number)===sub&&Number((x as Row).exchange_index)===shard);
+    if(matches.length===0 && cents===0)continue; // A zero shard may be omitted.
+    if(matches.length!==1)return false;
+    const dollar=(matches[0] as Row).balance;
+    if(typeof dollar!=="string"||!/^(?:0|[1-9]\\d*)(?:\\.\\d{1,4})?$/.test(dollar))return false;
+    const [whole,fraction=""]=dollar.split(".");
+    const micros=BigInt(whole!)*10000n+BigInt(fraction.padEnd(4,"0"));
+    if(micros%100n!==0n||micros/100n!==BigInt(cents))return false;
+  }
+  return true;
+}
 async function balances(creds:Creds,get:Read,diagnostic?:{reason:string}):Promise<Balances|null>{
   try{
     // These share Kalshi's strict balance-read quota; never burst them.
