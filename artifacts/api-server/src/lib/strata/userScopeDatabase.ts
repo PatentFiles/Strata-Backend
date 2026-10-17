@@ -512,6 +512,15 @@ export function createDatabaseUserScopePort(
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
       if (!account.commissioned) return refused(userId, "user_execution_account_not_commissioned", account);
+      // Human STOP/DISARM/KILL overrides any previously scheduled automatic
+      // restart. Never let the withdrawal worker undo a deliberate stop.
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" &&
+          (action === "STOP" || action === "DISARM" || action === "KILL")) {
+        await db.query(
+          "UPDATE private.strata_auto_withdrawal_maintenance SET operator_interrupted=true,last_reason='manual_stop_or_kill',changed_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state NOT IN ('completed','blocked')",
+          [userId,account.id],
+        ).catch(()=>null);
+      }
       if (action === "KILL") {
         try {
           const killed = await db.query(KILL_OWNED_ACCOUNT_SQL, [account.id, userId]);
