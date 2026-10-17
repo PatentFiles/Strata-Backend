@@ -126,7 +126,7 @@ try{
    assert.equal(stale.rowCount,0);
  });
  await verify("actual backend prepare, UNKNOWN and finalize helpers use real transactions",async()=>{
-  const handlers=createRequire(resolve(root,"artifacts/api-server/dist/kalshiDemoIocLedger.integration.cjs"));
+  const handlers=createRequire(resolve(root,"package.json"))(resolve(root,"artifacts/api-server/dist/kalshiDemoIocLedger.integration.cjs"));
   const identity={
     ownerId:owner,demoAccountId:"DEMO-2",attemptId:uid(8),
     operatorApprovalId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
