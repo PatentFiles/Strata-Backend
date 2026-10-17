@@ -109,6 +109,8 @@ test("wrong owner, lease, order identity or unchecked advisory cannot mark UNKNO
     {order:{...ORDER,price:"1.0100"}},
     {order:{...ORDER,price:"0.55"}},
     {order:{...ORDER,price:"0.00001"}},
+    {order:{...ORDER,price:"0.0000"}},
+    {order:{...ORDER,price:"1.0000"}},
   ]){
     const x=mock();
     const result=await x.run(invalid);
