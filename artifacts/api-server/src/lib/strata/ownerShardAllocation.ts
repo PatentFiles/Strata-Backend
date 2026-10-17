@@ -164,11 +164,10 @@ function money(value:unknown, shard:0|2, sub:0|1):number|null {
 type Balances={source:number;destination:number;bot:number};
 async function balances(creds:Creds,get:Read):Promise<Balances|null>{
   try{
-    const [a,b,c]=await Promise.all([
-      get(creds,BALANCE,"?subaccount=0&exchange_index=0"),
-      get(creds,BALANCE,"?subaccount=0&exchange_index=2"),
-      get(creds,BALANCE,"?subaccount=1&exchange_index=2"),
-    ]);
+    // These share Kalshi's strict balance-read quota; never burst them.
+    const a=await get(creds,BALANCE,"?subaccount=0&exchange_index=0");
+    const b=await get(creds,BALANCE,"?subaccount=0&exchange_index=2");
+    const c=await get(creds,BALANCE,"?subaccount=1&exchange_index=2");
     const source=money(a,0,0),destination=money(b,2,0),bot=money(c,2,1);
     return source===null||destination===null||bot===null?null:{source,destination,bot};
   }catch{return null;}
