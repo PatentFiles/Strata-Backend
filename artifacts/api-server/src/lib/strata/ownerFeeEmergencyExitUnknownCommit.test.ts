@@ -40,6 +40,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
       assert.match(sql,/r\.execution_account_id=\$3::text/);
       assert.match(sql,/r\.worker_fencing_token=\$10::bigint/);
       assert.match(sql,/r\.state='PREPARED'/);
+      assert.match(sql,/r\.created_at > now\(\)-interval '30 seconds'/);
       assert.match(sql,/a\.subaccount=1 AND a\.exchange_index=2/);
       assert.match(sql,/g\.manual_kill_switch=false/);
       assert.match(sql,/pos\.quantity_hundredths >= r\.quantity_hundredths/);
@@ -105,6 +106,9 @@ test("wrong owner, lease, order identity or unchecked advisory cannot mark UNKNO
     {order:{...ORDER,exchange_index:1}},
     {order:{...ORDER,client_order_id:"forged"}},
     {order:{...ORDER,time_in_force:"good_til_canceled"}},
+    {order:{...ORDER,price:"1.0100"}},
+    {order:{...ORDER,price:"0.55"}},
+    {order:{...ORDER,price:"0.00001"}},
   ]){
     const x=mock();
     const result=await x.run(invalid);
