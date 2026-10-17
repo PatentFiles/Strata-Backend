@@ -338,6 +338,34 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
       exposed(record,"withdrawal_status_changed_refresh",false);
   }catch{return fail("withdrawal_reconciliation_unavailable");}
 }
+export interface CashierRouteDiagnostic {
+  ok:boolean;reason:string;documentedRoute:boolean;signedBalancesVerified:boolean;
+  transferHistoryReadVerified:boolean;liveTransfersEnabled:boolean;
+  source:string;destination:string;cashierCashCents:number|null;botCashCents:number|null;
+}
+/** Owner-scoped authenticated GETs only. Never attest that a POST has worked. */
+export async function inspectCashierRouteReadOnly(userId:string):Promise<CashierRouteDiagnostic>{
+  const result:CashierRouteDiagnostic={ok:false,reason:"signed_route_not_verified",
+    documentedRoute:true,signedBalancesVerified:false,transferHistoryReadVerified:false,
+    liveTransfersEnabled:enabled(),source:"subaccount_1_index_2",
+    destination:"primary_subaccount_0_index_0",botCashCents:null,cashierCashCents:null};
+  try{
+    const account=await owned(userId);
+    if(!account)return {...result,reason:"account_not_flat_stopped_or_execution_authority_unavailable"};
+    const balances=await signedBalances(account.creds,getScopedKalshiJson);
+    if(!balances)return {...result,reason:"scoped_bot_or_cashier_cash_unverified"};
+    const history=await getScopedKalshiJson(account.creds,TRANSFER_PATH,"?limit=1");
+    if(!history||typeof history!=="object"||Array.isArray(history)||
+       !Array.isArray((history as Row).transfers))
+      return {...result,reason:"authenticated_transfer_history_invalid",
+        signedBalancesVerified:true,botCashCents:balances.botCents,cashierCashCents:balances.cashierCents};
+    return {...result,ok:true,reason:enabled()?"read_only_routing_verified_money_movement_enabled":
+        "read_only_routing_verified_live_destination_receipt_unproven",
+      signedBalancesVerified:true,transferHistoryReadVerified:true,
+      botCashCents:balances.botCents,cashierCashCents:balances.cashierCents};
+  }catch{return {...result,reason:"signed_cashier_route_read_unavailable"};}
+}
+
 export async function listManualSweeps(userId:string):Promise<SweepResult[]>{
   try{
     const r=await pool.query(SELECT_HISTORY,[userId]);
