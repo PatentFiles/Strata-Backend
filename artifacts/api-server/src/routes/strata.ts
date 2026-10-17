@@ -14,8 +14,7 @@ import {
 import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
 import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
 import { createDatabaseStakePort } from "../lib/strata/configuredStakeStore";
-import { createProductionPersonalSession } from "../lib/strata/personalExecutionSupervisor";
-import { createDatabaseUserScopePort } from "../lib/strata/userScopeDatabase";
+import { personalTradingControls } from "../lib/strata/sharedPersonalTradingControls";
 import { createStrataRouter } from "./strataRouter";
 
 let keys: ReturnType<typeof remoteJwks> | null = null;
@@ -60,5 +59,5 @@ export default createStrataRouter({
   microLiveState: () => getMicroLiveState(),
   emergencyStop: () => emergencyStopMicroLive(),
   commissioning: createDatabaseCommissioningPort(() => supervisor().view().workerRunning),
-  userScope: createDatabaseUserScopePort(pool, { session: createProductionPersonalSession(pool) }),
+  userScope: personalTradingControls,
 });
