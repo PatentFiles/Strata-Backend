@@ -146,6 +146,10 @@ export async function sweepAvailability(userId: string, minimumRetainedCents = 0
   try {
     const account = await owned(userId);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
+    // Preserve the audit record but release unused quotes after their 5m TTL.
+    await pool.query(`UPDATE ${TABLE} SET state='expired',updated_at=now()
+      WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+        AND state='prepared' AND expires_at < now()`, [userId,account.row.id]);
     const active = await pool.query(`SELECT id FROM ${TABLE}
       WHERE execution_account_id=$1 AND state IN ${ACTIVE} LIMIT 1`, [account.row.id]);
     if (active.rows.length) return fail("existing_withdrawal_requires_reconciliation");
@@ -306,8 +310,11 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     if(micros!==BigInt(amount)*10_000n)return exposed(record,"exchange_receipt_amount_mismatch",false);
     if(t.status!=="complete")return exposed(record,"exchange_transfer_still_pending",false);
     const balances=await signedBalances(account.creds,get);
-    if(!balances || balances.botCents!==amountValue(record,"bot_before_cents")-amount ||
-       balances.cashierCents!==amountValue(record,"cashier_before_cents")+amount)
+    const beforeBot=amountValue(record,"bot_before_cents");
+    const beforeCashier=amountValue(record,"cashier_before_cents");
+    if(!balances || beforeBot===null || beforeCashier===null ||
+       balances.botCents!==beforeBot-amount ||
+       balances.cashierCents!==beforeCashier+amount)
       return exposed(record,"cashier_and_bot_balance_reconciliation_pending",false);
     const update=await pool.query(`UPDATE ${TABLE}
       SET state='completed',completed_at=now(),updated_at=now(),failure_reason=NULL
