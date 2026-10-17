@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/kalshi-live-fee-metadata-smoke.yml'
+      - 'artifacts/api-server/src/lib/microLiveEntryFees.ts'
+      - 'artifacts/api-server/src/lib/microLiveEntryFees.test.ts'
   workflow_dispatch:
 
 permissions:
@@ -18,7 +20,7 @@ jobs:
         shell: bash
         run: |
           node <<'NODE'
-          const base = "https://api.elections.kalshi.com/trade-api/v2";
+          const base = "https://external-api.kalshi.com/trade-api/v2";
           async function get(path) {
             const url=base+path;
             const r=await fetch(url,{redirect:"error",headers:{Accept:"application/json"},
@@ -31,7 +33,8 @@ jobs:
           try {
             const s=await get("/series/KXBTC15M");
             const series=s.series;
-            if(series?.ticker!=="KXBTC15M" || series.fee_type!=="quadratic" ||
+            if(series?.ticker!=="KXBTC15M" || series.exchange_index!==2 ||
+              series.fee_type!=="quadratic" ||
               Number(series.fee_multiplier)!==1)
                 throw Error("series_current_fee_metadata_changed_or_unverified");
             const c=await get("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100");
