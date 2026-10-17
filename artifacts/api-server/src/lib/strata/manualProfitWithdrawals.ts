@@ -73,6 +73,7 @@ SELECT a.id, a.owner_user_id, a.subaccount, a.exchange_index,
        a.kill_switch, a.execution_enabled, a.cash_precision_verified,
        a.reserved_micros::text AS reserved_micros,
        a.initial_cash_micros::text AS initial_cash_micros,
+       m.state AS maintenance_state, m.owner_user_id AS maintenance_owner,
        c.id AS credential_id,c.key_fingerprint,s.decrypted_secret,
        (SELECT count(*)::int FROM v13_production_position p
          WHERE p.account_id=a.id AND p.quantity_hundredths>0) AS open_positions,
@@ -90,6 +91,8 @@ JOIN private.kalshi_connection_credentials c
   AND c.role='account_setup_execution' AND c.revoked_at IS NULL
   AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
 JOIN vault.decrypted_secrets s ON s.id=c.vault_secret_id
+LEFT JOIN private.strata_auto_withdrawal_maintenance m
+  ON m.execution_account_id=a.id AND m.owner_user_id=a.owner_user_id
 WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
 `;
 /**
@@ -97,17 +100,23 @@ WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
  * no intents, no reservations. This ensures order submission cannot race
  * the cross-shard movement without modifying the trading engine.
  */
-function ownerSafe(row: Row): boolean {
-  return row.kill_switch === true &&
+function ownerSafe(row: Row, origin: "manual" | "automatic" = "manual"): boolean {
+  // Automated sweeps use a separate persisted entry-maintenance fence instead
+  // of turning off a user's live kill switch and restoring it later.
+  const maintenance = origin === "automatic" &&
+    (row.maintenance_state === "ready_to_transfer" ||
+     row.maintenance_state === "reconciling") &&
+    row.maintenance_owner === row.owner_user_id;
+  return (origin === "manual" ? row.kill_switch === true : maintenance) &&
     row.cash_precision_verified === true &&
     row.reserved_micros === "0" &&
     Number(row.open_positions) === 0 &&
     Number(row.unresolved_intents) === 0 &&
     Number(row.active_workers) === 0;
 }
-async function owned(userId: string): Promise<{ row: Row; creds: Credential } | null> {
+async function owned(userId: string, origin: "manual" | "automatic" = "manual"): Promise<{ row: Row; creds: Credential } | null> {
   const r = await pool.query(OWNER_SQL, [userId]);
-  if (r.rows.length !== 1 || !ownerSafe(r.rows[0]!)) return null;
+  if (r.rows.length !== 1 || !ownerSafe(r.rows[0]!,origin)) return null;
   const creds = parseCredential(r.rows[0]!);
   return creds ? { row: r.rows[0]!, creds } : null;
 }
@@ -134,6 +143,30 @@ async function signedBalances(creds: Credential, get: Get): Promise<Snapshot | n
       ? { botCents: b, cashierCents: c } : null;
   } catch { return null; }
 }
+/** Read-only observation may run while trading; never authorizes a transfer. */
+export async function observeAutomaticSweepCash(userId:string):Promise<{
+  accountId:string;botCashCents:number;cashierCashCents:number;
+  initialCapitalCents:number;killSwitch:boolean;executionEnabled:boolean;cashPrecisionVerified:boolean;
+}|null>{
+  try{
+    const result=await pool.query(OWNER_SQL,[userId]);
+    if(result.rows.length!==1)return null;
+    const row=result.rows[0]!;
+    const material=parseCredential(row);
+    if(!material)return null;
+    const balances=await signedBalances(material,getScopedKalshiJson);
+    if(!balances)return null;
+    const original=BigInt(String(row.initial_cash_micros??"-1"));
+    if(original<0n||original%10000n!==0n||original/10000n>BigInt(Number.MAX_SAFE_INTEGER))return null;
+    return {
+      accountId:String(row.id),botCashCents:balances.botCents,cashierCashCents:balances.cashierCents,
+      initialCapitalCents:Number(original/10000n),
+      killSwitch:row.kill_switch===true,executionEnabled:row.execution_enabled===true,
+      cashPrecisionVerified:row.cash_precision_verified===true,
+    };
+  }catch{return null;}
+}
+
 const ACTIVE = "('prepared','attempted','pending','uncertain')";
 const SELECT_HISTORY = `
 SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
@@ -143,11 +176,12 @@ FROM ${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
 `;
 
 export async function sweepAvailability(userId: string, minimumRetainedCents = 0,
-  get: Get = getScopedKalshiJson): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson,
+  origin: "manual" | "automatic" = "manual"): Promise<SweepResult> {
   const retain = exact(minimumRetainedCents);
   if (retain === null) return fail("invalid_minimum_retained_cash");
   try {
-    const account = await owned(userId);
+    const account = await owned(userId, origin);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     // Preserve the audit record but release unused quotes after their 5m TTL.
     await pool.query(`UPDATE ${TABLE} SET state='expired',updated_at=now()
@@ -174,19 +208,20 @@ export async function sweepAvailability(userId: string, minimumRetainedCents = 0
 }
 
 export async function quoteManualSweep(userId: string, input: unknown,
-  get: Get = getScopedKalshiJson): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson,
+  origin: "manual" | "automatic" = "manual"): Promise<SweepResult> {
   if (!enabled()) return fail("withdrawal_feature_disabled");
   if (!input || typeof input !== "object" || Array.isArray(input)) return fail("invalid_request");
   const data = input as Row;
   const amount = exact(data.amountCents), retain = exact(data.minimumRetainedCents);
   if (amount === null || amount < 1 || amount > 100_000_000_000 || retain === null) return fail("invalid_amount");
-  const availability = await sweepAvailability(userId, retain, get);
+  const availability = await sweepAvailability(userId, retain, get, origin);
   if (!availability.ok || availability.maximumCents === null ||
       amount > availability.maximumCents || availability.botCashCents === null ||
       availability.cashierCashCents === null || availability.minimumRetainedCents === null) {
     return fail("withdrawal_exceeds_verified_unreserved_cash");
   }
-  const account = await owned(userId);
+  const account = await owned(userId,origin);
   if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
   const id = randomUUID();
   const db = await pool.connect();
@@ -222,7 +257,7 @@ export async function confirmManualSweep(userId: string, input: unknown,
   if (data.confirmation !== CASHIER_SWEEP_CONFIRMATION ||
       typeof data.quoteId !== "string" || !UUID.test(data.quoteId)) return fail("explicit_confirmation_required");
   try {
-    const account = await owned(userId);
+    const account = await owned(userId, automaticAuthorization ? "automatic" : "manual");
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     const plan = await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
       cashier_before_cents,authority_fingerprint,expires_at,origin,auto_rule_id,auto_rule_revision FROM ${TABLE}
@@ -259,7 +294,16 @@ export async function confirmManualSweep(userId: string, input: unknown,
               AND r.latched=true AND r.last_attempt_id=strata_manual_profit_withdrawals.id))
           AND EXISTS(SELECT 1 FROM public.v13_production_account a
             WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
-              AND a.kill_switch=true AND a.reserved_micros=0
+              AND ((strata_manual_profit_withdrawals.origin='manual' AND a.kill_switch=true) OR (
+                strata_manual_profit_withdrawals.origin='automatic'
+                AND EXISTS(SELECT 1 FROM private.strata_auto_withdrawal_maintenance m
+                  WHERE m.execution_account_id=a.id AND m.owner_user_id=$2::uuid
+                    AND m.state='reconciling'
+                    AND m.transfer_id=strata_manual_profit_withdrawals.id
+                    AND m.operator_interrupted=false
+                    AND m.rule_id=strata_manual_profit_withdrawals.auto_rule_id
+                    AND m.rule_revision=strata_manual_profit_withdrawals.auto_rule_revision)))
+              AND a.reserved_micros=0
               AND NOT EXISTS(SELECT 1 FROM v13_production_position p
                 WHERE p.account_id=a.id AND p.quantity_hundredths>0)
               AND NOT EXISTS(SELECT 1 FROM v13_production_intent i
@@ -294,16 +338,17 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
   if(typeof withdrawalId!=="string" || !UUID.test(withdrawalId))return fail("invalid_withdrawal_id");
   try{
     const result=await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
-      cashier_before_cents,exchange_transfer_id,expires_at,execution_account_id
+      cashier_before_cents,exchange_transfer_id,expires_at,execution_account_id,origin
       FROM ${TABLE} WHERE owner_user_id=$1::uuid AND id=$2::uuid`,[userId,withdrawalId]);
     if(result.rows.length!==1)return fail("withdrawal_not_found");
     const record=result.rows[0]!;
     if(record.state==="completed")return exposed(record,"withdrawal_completed");
     if(record.state==="prepared")return exposed(record,"withdrawal_not_submitted");
     if(typeof record.exchange_transfer_id!=="string")return exposed(record,"transfer_unconfirmed_manual_review_required",false);
-    const account=await owned(userId);
+    const origin=record.origin==="automatic"?"automatic":"manual";
+    const account=await owned(userId,origin);
     if(!account || account.row.id!==record.execution_account_id ||
-        !ownerSafe(account.row))return exposed(record,"reconciliation_owner_or_safety_unproven",false);
+        !ownerSafe(account.row,origin))return exposed(record,"reconciliation_owner_or_safety_unproven",false);
     const payload=await get(account.creds,`${TRANSFER_PATH}/${record.exchange_transfer_id}`,"");
     if(!payload || typeof payload!=="object" || Array.isArray(payload))return exposed(record,"exchange_receipt_unavailable",false);
     const transfer=(payload as Row).transfer;

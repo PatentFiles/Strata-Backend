@@ -6,7 +6,7 @@ import {
   prepareOwnerShardAllocation, executeOwnerShardAllocation,
   ownerShardAllocationStatus, reconcileOwnerShardAllocation, SHARD_ALLOCATION_CONFIRMATION,
 } from "./ownerShardAllocation";
-import { postScopedKalshiShardAllocation, getScopedKalshiJson } from "../kalshiAccountClient";
+import { postScopedKalshiShardAllocation, getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 
 const USER="11111111-1111-4111-8111-111111111111";
 const OTHER="22222222-2222-4222-8222-222222222222";
@@ -69,6 +69,12 @@ function fixture(){
         source_exchange_shard:0,destination_exchange_shard:receiptDestinationShard,
         amount:receiptAmount,status:receiptStatus}};
     }
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances")
+      return {subaccount_balances:[
+        {subaccount_number:0,exchange_index:0,balance:(cash0/100).toFixed(4),updated_ts:1700000000},
+        {subaccount_number:0,exchange_index:2,balance:(cash2/100).toFixed(4),updated_ts:1700000000},
+        {subaccount_number:1,exchange_index:2,balance:(bot/100).toFixed(4),updated_ts:1700000000},
+      ]};
     if(path!=="/trade-api/v2/portfolio/balance")throw new Error("unexpected path");
     const mapping:Record<string,[number,number,number]>={
       "?subaccount=0&exchange_index=0":[cash0,0,0],
@@ -226,4 +232,35 @@ test("signed transport uses exact primary-to-primary shards and centicent $25, r
     if(prior===undefined)delete process.env.KALSHI_API_ENVIRONMENT;
     else process.env.KALSHI_API_ENVIRONMENT=prior;
   }
+});
+
+test("429 from scoped primary cash is distinguishable from unverified cash and never transfers",async()=>{
+ const f=fixture();
+ const prepared=await prepareOwnerShardAllocation(f.db,USER,{
+   read:async(c,p,q)=>{
+     if(p==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=0")
+       throw new KalshiApiError("HTTP_ERROR",429);
+     return f.read(c,p,q);
+   },
+ });
+ assert.equal(prepared.ok,false);
+ assert.equal(prepared.reason,"shard_cash_http_429");
+ assert.equal(f.posts(),0);
+});
+test("missing or conflicting cross-shard inventory refuses preflight without submitting",async()=>{
+ const f=fixture();
+ const result=await prepareOwnerShardAllocation(f.db,USER,{
+   read:async(c,p,q)=>{
+     if(p==="/trade-api/v2/portfolio/subaccounts/balances")
+       return {subaccount_balances:[
+         {subaccount_number:0,exchange_index:0,balance:"1.0000"},
+         {subaccount_number:0,exchange_index:2,balance:"0.0000"},
+         {subaccount_number:1,exchange_index:2,balance:"0.0000"},
+       ]};
+     return f.read(c,p,q);
+   },
+ });
+ assert.equal(result.ok,false);
+ assert.equal(result.reason,"shard_cash_inventory_mismatch");
+ assert.equal(f.posts(),0);
 });

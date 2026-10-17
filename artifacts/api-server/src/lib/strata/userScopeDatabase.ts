@@ -89,9 +89,23 @@ const ACCOUNT_SQL = `
 
 const CONNECTION_SQL = `
   SELECT fa.id::text AS financial_account_id, pc.id::text AS provider_connection_id,
-         pc.vault_secret_id::text AS vault_secret_id, pc.key_fingerprint, pc.verified_at
+         COALESCE(vc.vault_secret_id,pc.vault_secret_id)::text AS vault_secret_id,
+         COALESCE(vc.key_fingerprint,pc.key_fingerprint) AS key_fingerprint,
+         COALESCE(vc.verified_at,pc.verified_at) AS verified_at
   FROM public.financial_accounts fa
   LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
+  LEFT JOIN LATERAL (
+    SELECT c.vault_secret_id,c.key_fingerprint,c.verified_at
+    FROM private.kalshi_connection_credentials c
+    WHERE c.owner_user_id = fa.user_id
+      AND c.financial_account_id = fa.id
+      AND c.provider_connection_id = pc.id
+      AND c.role = 'account_setup_execution'
+      AND c.revoked_at IS NULL
+      AND c.verified_at IS NOT NULL
+      AND c.verification_reason = 'credential_verified'
+    ORDER BY c.verified_at DESC LIMIT 1
+  ) vc ON true
   WHERE fa.user_id = $1::uuid AND fa.provider = 'kalshi'
 `;
 
@@ -452,7 +466,7 @@ export function createDatabaseUserScopePort(
       };
       const botQuery = `?subaccount=${BOT_SUBACCOUNT}&exchange_index=${BOT_EXCHANGE_INDEX}`;
       const activityQuery = `?limit=200&subaccount=${BOT_SUBACCOUNT}`;
-      const primaryOutcome = await read("/trade-api/v2/portfolio/balance").then(
+      const primaryOutcome = await read("/trade-api/v2/portfolio/balance", "?subaccount=0&exchange_index=0").then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       );
@@ -500,6 +514,15 @@ export function createDatabaseUserScopePort(
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
       if (!account.commissioned) return refused(userId, "user_execution_account_not_commissioned", account);
+      // Human STOP/DISARM/KILL overrides any previously scheduled automatic
+      // restart. Never let the withdrawal worker undo a deliberate stop.
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" &&
+          (action === "STOP" || action === "DISARM" || action === "KILL")) {
+        await db.query(
+          "UPDATE private.strata_auto_withdrawal_maintenance SET operator_interrupted=true,last_reason='manual_stop_or_kill',changed_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state NOT IN ('completed','blocked')",
+          [userId,account.id],
+        ).catch(()=>null);
+      }
       if (action === "KILL") {
         try {
           const killed = await db.query(KILL_OWNED_ACCOUNT_SQL, [account.id, userId]);
@@ -544,6 +567,18 @@ export function createDatabaseUserScopePort(
       }
       if (action !== "START" && action !== "ARM") {
         return refused(userId, "control_action_rejected", account);
+      }
+      // A durable maintenance hold fences START/ARM independently of the
+      // withdrawal quote ledger. It remains active throughout STOP and
+      // protective-exit drain, not only after an exchange POST is attempted.
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+        try {
+          const holds=await db.query(
+            "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+            [userId,account.id],
+          );
+          if(holds.rows.length)return refused(userId,"automatic_withdrawal_maintenance_active",account);
+        }catch{return refused(userId,"automatic_maintenance_safety_unavailable",account);}
       }
       // Do not arm or start while a cash withdrawal is quoted or unreconciled.
       // The legacy trading flow is unchanged while the feature is disabled.

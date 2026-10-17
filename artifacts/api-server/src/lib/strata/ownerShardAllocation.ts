@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
+import { safeBalanceFailureReason } from "./kalshiBalanceQuota";
 import { getScopedKalshiJson, postScopedKalshiShardAllocation } from "../kalshiAccountClient";
 
 /**
@@ -162,16 +163,46 @@ function money(value:unknown, shard:0|2, sub:0|1):number|null {
   return cash!==null && Number.isSafeInteger(cash) && cash>=0?cash:null;
 }
 type Balances={source:number;destination:number;bot:number};
-async function balances(creds:Creds,get:Read):Promise<Balances|null>{
+/** Kalshi inventory fields are decimal-dollar strings, unlike scoped integer balance cents. */
+function inventoryMatches(payload:unknown,scoped:Balances):boolean{
+  if(!payload||typeof payload!=="object"||Array.isArray(payload))return false;
+  const records=(payload as Row).subaccount_balances;
+  if(!Array.isArray(records)||records.length>100)return false;
+  for(const [sub,shard,cents] of [[0,0,scoped.source],[0,2,scoped.destination],[1,2,scoped.bot]] as const){
+    const matches=records.filter(x=>x&&typeof x==="object"&&!Array.isArray(x)&&
+      Number((x as Row).subaccount_number)===sub&&Number((x as Row).exchange_index)===shard);
+    if(matches.length===0 && cents===0)continue; // A zero shard may be omitted.
+    if(matches.length!==1)return false;
+    const dollar=(matches[0] as Row).balance;
+    if(typeof dollar!=="string"||!/^([0-9]+)([.][0-9]{1,6})?$/.test(dollar))return false;
+    const [whole,fraction=""]=dollar.split(".");
+    const microdollars=BigInt(whole!)*1_000_000n+BigInt(fraction.padEnd(6,"0"));
+    // A six-place fractional holding cannot be rounded into spendable cents.
+    if(microdollars%10_000n!==0n||microdollars/10_000n!==BigInt(cents))return false;
+  }
+  return true;
+}
+async function balances(creds:Creds,get:Read,diagnostic?:{reason:string}):Promise<Balances|null>{
   try{
-    const [a,b,c]=await Promise.all([
-      get(creds,BALANCE,"?subaccount=0&exchange_index=0"),
-      get(creds,BALANCE,"?subaccount=0&exchange_index=2"),
-      get(creds,BALANCE,"?subaccount=1&exchange_index=2"),
-    ]);
+    // These share Kalshi's strict balance-read quota; never burst them.
+    const inventory=await get(creds,"/trade-api/v2/portfolio/subaccounts/balances","");
+    const a=await get(creds,BALANCE,"?subaccount=0&exchange_index=0");
+    const b=await get(creds,BALANCE,"?subaccount=0&exchange_index=2");
+    const c=await get(creds,BALANCE,"?subaccount=1&exchange_index=2");
     const source=money(a,0,0),destination=money(b,2,0),bot=money(c,2,1);
-    return source===null||destination===null||bot===null?null:{source,destination,bot};
-  }catch{return null;}
+    if(source===null||destination===null||bot===null) {
+      if(diagnostic)diagnostic.reason="shard_cash_scoped_response_invalid";
+      return null;
+    }
+    if(!inventoryMatches(inventory,{source,destination,bot})){
+      if(diagnostic)diagnostic.reason="shard_cash_inventory_mismatch";
+      return null;
+    }
+    return {source,destination,bot};
+  }catch(e){
+    if(diagnostic)diagnostic.reason=safeBalanceFailureReason(e,"shard_cash");
+    return null;
+  }
 }
 const defaultRead: Read=(c,p,q)=>getScopedKalshiJson(c,p,q);
 const defaultPost: Write=(c,id)=>postScopedKalshiShardAllocation(c,id);
@@ -182,8 +213,9 @@ export async function prepareOwnerShardAllocation(db:Pool,uid:string,
   opts:{read?:Read}={}):Promise<ShardAllocationView>{
   const bound=await owner(db,uid);
   if(!bound)return view("owner_shard_authority_or_safety_unproven");
-  const v=await balances(bound.creds,opts.read??defaultRead);
-  if(!v)return view("shard_cash_unproven");
+  const diagnostic={reason:"shard_cash_unproven"};
+  const v=await balances(bound.creds,opts.read??defaultRead,diagnostic);
+  if(!v)return view(diagnostic.reason);
   if(v.source<AMOUNT)return view("shard0_primary_cash_insufficient","unavailable",null,v.source,v.destination,v.bot);
   if(v.destination!==0||v.bot!==0)return view("destination_shard_not_empty","unavailable",null,v.source,v.destination,v.bot);
   if(!db.connect)return view("shard_transaction_unavailable");

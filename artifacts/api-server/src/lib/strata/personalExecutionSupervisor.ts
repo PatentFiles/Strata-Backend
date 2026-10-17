@@ -178,6 +178,15 @@ export function createProductionPersonalSession(
         return { ok: false, reason: "withdrawal_safety_unavailable" };
       }
     }
+    if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+      try {
+        const hold=await db.query(
+          "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+          [input.userId,input.accountId],
+        );
+        if(hold.rows.length)return {ok:false,reason:"automatic_withdrawal_maintenance_active"};
+      }catch{return {ok:false,reason:"automatic_maintenance_safety_unavailable"};}
+    }
     if (!flag(loaded.row.commissioned)) return { ok: false, reason: "user_execution_account_not_commissioned" };
     if (flag(loaded.row.kill_switch) || !flag(loaded.row.execution_enabled)) {
       return { ok: false, reason: "account_kill_switch" };
@@ -258,6 +267,18 @@ export function createProductionPersonalSession(
           throw new Error(beat.reason);
         }
         if (!beat.armRequested) state.entriesAuthorized = false;
+        // If a process died between persisting a cash maintenance hold and
+        // requesting STOP, the next heartbeat still disables new entries.
+        // Protective reduce-only exit management is left to the worker.
+        if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+          try {
+            const maintenance=await db.query(
+              "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+              [input.userId,input.accountId],
+            );
+            if(maintenance.rows.length)state.entriesAuthorized=false;
+          }catch{state.entriesAuthorized=false;}
+        }
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
         const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));

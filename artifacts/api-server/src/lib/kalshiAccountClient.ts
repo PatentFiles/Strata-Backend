@@ -5,12 +5,14 @@ import {
   createSign,
   sign,
 } from "node:crypto";
+import { reserveKalshiBalanceReadSlot } from "./strata/kalshiBalanceQuota";
 import {
   compatibleOptionalDirection, compatibleOptionalPrice, mergeDirectionAndPrices,
 } from "./microLiveFillNormalization";
 import {
   blockingSubaccountTransferDetail,
   cleanPairInventoryDiagnosis,
+  dedicatedSignerFingerprint,
   provePreBoundaryRoundTrip,
   type BlockingSubaccountTransfer,
 } from "./strata/commissioning";
@@ -424,10 +426,20 @@ export async function getScopedKalshiJson(
   query = "",
   fetchImpl: typeof fetch = fetch,
   host = baseUrl(),
+  rateLimitOwnerId?: string,
 ): Promise<unknown> {
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
   if (host !== "https://external-api.kalshi.com" && host !== "https://external-api.demo.kalshi.co") {
     throw new KalshiApiError("INVALID_CREDENTIALS");
+  }
+  // Timestamp and signature must be created AFTER the quota wait, otherwise
+  // queued requests carry stale signatures. Injected test transports never
+  // consume production quota.
+  if (path === `${API_PREFIX}/portfolio/balance` &&
+      host === "https://external-api.kalshi.com" &&
+      process.env.NODE_ENV === "production" && fetchImpl === fetch) {
+    await reserveKalshiBalanceReadSlot(creds.keyId, rateLimitOwnerId, undefined,
+      dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
   }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
