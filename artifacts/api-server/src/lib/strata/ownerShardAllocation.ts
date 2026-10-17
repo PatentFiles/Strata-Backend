@@ -184,6 +184,7 @@ function inventoryMatches(payload:unknown,scoped:Balances):boolean{
 async function balances(creds:Creds,get:Read,diagnostic?:{reason:string}):Promise<Balances|null>{
   try{
     // These share Kalshi's strict balance-read quota; never burst them.
+    const inventory=await get(creds,"/trade-api/v2/portfolio/subaccounts/balances","");
     const a=await get(creds,BALANCE,"?subaccount=0&exchange_index=0");
     const b=await get(creds,BALANCE,"?subaccount=0&exchange_index=2");
     const c=await get(creds,BALANCE,"?subaccount=1&exchange_index=2");
