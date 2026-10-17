@@ -25,7 +25,7 @@ export async function saveAutoRule(owner:string,input:unknown):Promise<AutoRule>
  const old=await db.query(read+" FOR UPDATE",[owner,id]);if(old.rows.length>1||Number(old.rows[0]?.revision??0)!==v.expectedRevision){await db.query("ROLLBACK");return make(old.rows[0]??null,"revision_changed",false);}
  if(v.enabled){const busy=await db.query(`SELECT 1 FROM ${W} WHERE execution_account_id=$1 AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1`,[id]);if(busy.rows.length){await db.query("ROLLBACK");return make(old.rows[0]??null,"withdrawal_unresolved",false);}}
  const sql=old.rows.length?
- `UPDATE ${R} SET trigger_cents=$3,withdraw_cents=$4,retain_cents=$5,enabled=$6,revision=revision+1,latched=CASE WHEN $6 THEN false ELSE latched END,updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text`:
+ `UPDATE ${R} SET trigger_cents=$3,withdraw_cents=$4,retain_cents=$5,enabled=$6,revision=revision+1,latched=latched,updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text`:
  `INSERT INTO ${R}(owner_user_id,execution_account_id,trigger_cents,withdraw_cents,retain_cents,enabled) VALUES($1::uuid,$2,$3,$4,$5,$6) RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text`;
  const next=await db.query(sql,[owner,id,t,w,k,v.enabled]);await db.query("COMMIT");return make(next.rows[0]!,"rule_saved");
  }catch{await db.query("ROLLBACK").catch(()=>undefined);return make(null,"save_failed",false);}finally{db.release();}
