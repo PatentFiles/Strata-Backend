@@ -1,0 +1,47 @@
+name: DEMO IOC real PostgreSQL isolation and concurrency
+on:
+  pull_request:
+    paths:
+      - 'sql/strata_demo_ioc_private.sql'
+      - 'scripts/test-demo-ioc-postgres.mjs'
+      - '.github/workflows/kalshi-demo-postgres.yml'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocLedger*'
+  push:
+    branches: [main]
+    paths:
+      - 'sql/strata_demo_ioc_private.sql'
+      - 'scripts/test-demo-ioc-postgres.mjs'
+      - '.github/workflows/kalshi-demo-postgres.yml'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocLedger*'
+permissions:
+  contents: read
+jobs:
+  real-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: strata_test
+          POSTGRES_PASSWORD: strata_test
+          POSTGRES_DB: strata_test
+        options: >-
+          --health-cmd "pg_isready -U strata_test -d strata_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://strata_test:strata_test@127.0.0.1:5432/strata_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Test actual PostgreSQL migration, concurrency, privilege and UNKNOWN durability
+        run: node scripts/test-demo-ioc-postgres.mjs
