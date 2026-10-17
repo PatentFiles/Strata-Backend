@@ -19,7 +19,7 @@ type Credential = { keyId: string; privateKey: string };
 type Snapshot = { botCents: number; cashierCents: number };
 type Get = typeof getScopedKalshiJson;
 type Post = typeof postScopedKalshiCashierSweep;
-export type ManualSweepState = "prepared" | "attempted" | "pending" | "uncertain" | "completed";
+export type ManualSweepState = "prepared" | "attempted" | "pending" | "uncertain" | "completed" | "expired";
 export type SweepResult = {
   ok: boolean; reason: string; enabled: boolean; id: string | null;
   state: ManualSweepState | null; amountCents: number | null;
@@ -65,7 +65,7 @@ function parseCredential(row: Row): Credential | null {
   } catch { return null; }
 }
 
-const OWNER_SQL = \`
+const OWNER_SQL = `
 SELECT a.id, a.owner_user_id, a.subaccount, a.exchange_index,
        a.kill_switch, a.execution_enabled, a.cash_precision_verified,
        a.reserved_micros::text AS reserved_micros,
@@ -88,7 +88,7 @@ JOIN private.kalshi_connection_credentials c
   AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
 JOIN vault.decrypted_secrets s ON s.id=c.vault_secret_id
 WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
-\`;
+`;
 /**
  * Require account kill switch ON, stopped/disarmed worker, no positions,
  * no intents, no reservations. This ensures order submission cannot race
@@ -132,12 +132,12 @@ async function signedBalances(creds: Credential, get: Get): Promise<Snapshot | n
   } catch { return null; }
 }
 const ACTIVE = "('prepared','attempted','pending','uncertain')";
-const SELECT_HISTORY = \`
+const SELECT_HISTORY = `
 SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
        cashier_before_cents,exchange_transfer_id,expires_at,created_at,
        attempted_at,completed_at,failure_reason
-FROM \${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
-\`;
+FROM ${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
+`;
 
 export async function sweepAvailability(userId: string, minimumRetainedCents = 0,
   get: Get = getScopedKalshiJson): Promise<SweepResult> {
@@ -146,8 +146,8 @@ export async function sweepAvailability(userId: string, minimumRetainedCents = 0
   try {
     const account = await owned(userId);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
-    const active = await pool.query(\`SELECT id FROM \${TABLE}
-      WHERE execution_account_id=$1 AND state IN \${ACTIVE} LIMIT 1\`, [account.row.id]);
+    const active = await pool.query(`SELECT id FROM ${TABLE}
+      WHERE execution_account_id=$1 AND state IN ${ACTIVE} LIMIT 1`, [account.row.id]);
     if (active.rows.length) return fail("existing_withdrawal_requires_reconciliation");
     const balance = await signedBalances(account.creds, get);
     if (!balance) return fail("kalshi_scoped_cash_unverified");
@@ -187,14 +187,14 @@ export async function quoteManualSweep(userId: string, input: unknown,
     await db.query("BEGIN");
     await db.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",
       [account.row.id,userId]);
-    await db.query(\`DELETE FROM \${TABLE} WHERE execution_account_id=$1 AND state='prepared' AND expires_at<now()\`,
+    await db.query(`UPDATE ${TABLE} SET state='expired',updated_at=now() WHERE execution_account_id=$1 AND state='prepared' AND expires_at<now()`,
       [account.row.id]);
-    const inserted = await db.query(\`INSERT INTO \${TABLE}
+    const inserted = await db.query(`INSERT INTO ${TABLE}
       (id,owner_user_id,execution_account_id,state,amount_cents,retain_cents,
        bot_before_cents,cashier_before_cents,authority_fingerprint)
       VALUES ($1::uuid,$2::uuid,$3,'prepared',$4,$5,$6,$7,$8)
       RETURNING id::text,state,amount_cents,retain_cents,bot_before_cents,
-        cashier_before_cents,expires_at,exchange_transfer_id\`,
+        cashier_before_cents,expires_at,exchange_transfer_id`,
       [id,userId,account.row.id,amount,availability.minimumRetainedCents,
         availability.botCashCents,availability.cashierCashCents,account.row.key_fingerprint]);
     await db.query("COMMIT");
@@ -216,9 +216,9 @@ export async function confirmManualSweep(userId: string, input: unknown,
   try {
     const account = await owned(userId);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
-    const plan = await pool.query(\`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
-      cashier_before_cents,authority_fingerprint,expires_at FROM \${TABLE}
-      WHERE id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3\`,
+    const plan = await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
+      cashier_before_cents,authority_fingerprint,expires_at FROM ${TABLE}
+      WHERE id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3`,
       [data.quoteId,userId,account.row.id]);
     if (plan.rows.length !== 1 || plan.rows[0]!.state !== "prepared") return fail("quote_missing_or_already_used");
     const row = plan.rows[0]!;
@@ -235,7 +235,7 @@ export async function confirmManualSweep(userId: string, input: unknown,
     const db = await pool.connect(); let claimed = false;
     try {
       await db.query("BEGIN");
-      const locked = await db.query(\`UPDATE \${TABLE}
+      const locked = await db.query(`UPDATE ${TABLE}
         SET state='attempted',attempted_at=now(),updated_at=now()
         WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared'
           AND expires_at>now() AND authority_fingerprint=$3
@@ -248,7 +248,7 @@ export async function confirmManualSweep(userId: string, input: unknown,
                 WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED'))
               AND NOT EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease l
                 WHERE l.execution_account_id=a.id AND (l.state='owned' OR l.arm_requested=true)))
-        RETURNING id\`,[data.quoteId,userId,account.row.key_fingerprint]);
+        RETURNING id`,[data.quoteId,userId,account.row.key_fingerprint]);
       await db.query("COMMIT");
       claimed = locked.rows.length === 1;
     } catch { await db.query("ROLLBACK").catch(()=>null); }
@@ -260,9 +260,9 @@ export async function confirmManualSweep(userId: string, input: unknown,
       if (response.status === 200 && !response.unreadable) transferId=response.transferId;
     } catch { /* Lost response = UNCERTAIN. Never make a second POST. */ }
     const status = transferId ? "pending" : "uncertain";
-    await pool.query(\`UPDATE \${TABLE} SET state=$3,exchange_transfer_id=$4,
+    await pool.query(`UPDATE ${TABLE} SET state=$3,exchange_transfer_id=$4,
       failure_reason=$5,updated_at=now()
-      WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='attempted'\`,
+      WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='attempted'`,
       [data.quoteId,userId,status,transferId,transferId?null:"kalshi_transfer_response_unconfirmed"]).catch(()=>null);
     return { ...exposed({...row,id:data.quoteId,state:status,exchange_transfer_id:transferId},
       transferId ? "transfer_submitted_reconcile_before_cashier_claim" : "transfer_outcome_uncertain", !!transferId),
@@ -275,9 +275,9 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
   get:Get=getScopedKalshiJson):Promise<SweepResult> {
   if(typeof withdrawalId!=="string" || !UUID.test(withdrawalId))return fail("invalid_withdrawal_id");
   try{
-    const result=await pool.query(\`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
+    const result=await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
       cashier_before_cents,exchange_transfer_id,expires_at,execution_account_id
-      FROM \${TABLE} WHERE owner_user_id=$1::uuid AND id=$2::uuid\`,[userId,withdrawalId]);
+      FROM ${TABLE} WHERE owner_user_id=$1::uuid AND id=$2::uuid`,[userId,withdrawalId]);
     if(result.rows.length!==1)return fail("withdrawal_not_found");
     const record=result.rows[0]!;
     if(record.state==="completed")return exposed(record,"withdrawal_completed");
@@ -286,7 +286,7 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     const account=await owned(userId);
     if(!account || account.row.id!==record.execution_account_id ||
         !ownerSafe(account.row))return exposed(record,"reconciliation_owner_or_safety_unproven",false);
-    const payload=await get(account.creds,\`\${TRANSFER_PATH}/\${record.exchange_transfer_id}\`,"");
+    const payload=await get(account.creds,`${TRANSFER_PATH}/${record.exchange_transfer_id}`,"");
     if(!payload || typeof payload!=="object" || Array.isArray(payload))return exposed(record,"exchange_receipt_unavailable",false);
     const transfer=(payload as Row).transfer;
     if(!transfer || typeof transfer!=="object" || Array.isArray(transfer))
@@ -309,11 +309,11 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     if(!balances || balances.botCents!==amountValue(record,"bot_before_cents")-amount ||
        balances.cashierCents!==amountValue(record,"cashier_before_cents")+amount)
       return exposed(record,"cashier_and_bot_balance_reconciliation_pending",false);
-    const update=await pool.query(\`UPDATE \${TABLE}
+    const update=await pool.query(`UPDATE ${TABLE}
       SET state='completed',completed_at=now(),updated_at=now(),failure_reason=NULL
       WHERE owner_user_id=$1::uuid AND id=$2::uuid AND state IN ('attempted','pending','uncertain')
       RETURNING id::text,state,amount_cents,retain_cents,bot_before_cents,cashier_before_cents,
-        exchange_transfer_id,expires_at\`,[userId,withdrawalId]);
+        exchange_transfer_id,expires_at`,[userId,withdrawalId]);
     return update.rows.length===1?exposed(update.rows[0]!,"withdrawal_completed"):
       exposed(record,"withdrawal_status_changed_refresh",false);
   }catch{return fail("withdrawal_reconciliation_unavailable");}
