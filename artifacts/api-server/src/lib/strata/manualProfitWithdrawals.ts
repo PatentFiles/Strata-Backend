@@ -312,7 +312,9 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     const t=transfer as Row;
     if(t.transfer_id!==record.exchange_transfer_id ||
        t.source!=="event_contract" || t.destination!=="event_contract" ||
-       t.source_exchange_shard!==2 || t.destination_exchange_shard!==0)
+       t.source_exchange_shard!==2 || t.destination_exchange_shard!==0 ||
+       (t.source_subaccount!==undefined && t.source_subaccount!==1) ||
+       (t.destination_subaccount!==undefined && t.destination_subaccount!==0))
       return exposed(record,"exchange_receipt_identity_mismatch",false);
     const amount=amountValue(record,"amount_cents");
     if(amount===null)return fail("withdrawal_amount_invalid");
@@ -322,7 +324,8 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     const [whole,frac=""]=raw.split(".");
     const micros=BigInt(whole!)*1_000_000n+BigInt(frac.padEnd(6,"0"));
     if(micros!==BigInt(amount)*10_000n)return exposed(record,"exchange_receipt_amount_mismatch",false);
-    if(t.status!=="complete")return exposed(record,"exchange_transfer_still_pending",false);
+    if(t.status!=="complete" && t.status!=="completed")
+      return exposed(record,"exchange_transfer_still_pending_or_incomplete",false);
     const balances=await signedBalances(account.creds,get);
     const beforeBot=amountValue(record,"bot_before_cents");
     const beforeCashier=amountValue(record,"cashier_before_cents");
