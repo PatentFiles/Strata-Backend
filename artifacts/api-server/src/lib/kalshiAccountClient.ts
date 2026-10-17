@@ -3545,3 +3545,58 @@ export async function readKalshiOrderbook(ticker: string): Promise<KalshiOrderbo
     observedAt: new Date().toISOString(),
   };
 }
+
+/**
+ * Cash-sweep transfer from the dedicated bot (subaccount 1, shard 2) to
+ * the primary cashier destination (subaccount 0, shard 0). An explicitly
+ * guarded once-only database claim MUST be committed before calling this.
+ * The API can complete cross-shard transfers non-atomically. Never retry a
+ * lost response: reconcile its transfer ID/history instead.
+ */
+export async function postScopedKalshiCashierSweep(
+  creds: { keyId: string; privateKey: string },
+  amountCents: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ status: number; transferId: string | null; unreadable: boolean }> {
+  if (process.env.KALSHI_API_ENVIRONMENT !== "production" ||
+      !Number.isSafeInteger(amountCents) || amountCents <= 0 ||
+      amountCents > 100_000_000_000 ||
+      !Number.isSafeInteger(amountCents * 100)) {
+    throw new KalshiApiError("INVALID_RESPONSE");
+  }
+  const path = "/trade-api/v2/portfolio/intra_exchange_instance_transfer";
+  const timestamp = Date.now().toString();
+  const response = await fetchImpl(\`https://external-api.kalshi.com\${path}\`, {
+    method: "POST", cache: "no-store", redirect: "manual",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      Accept: "application/json", "Content-Type": "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE": signRequest(creds, "POST", path, timestamp),
+      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    },
+    // amount is centicents (100 per cent), NOT amount_cents.
+    // No URL, account, or shard input from the browser is ever accepted.
+    body: JSON.stringify({
+      source: "event_contract", destination: "event_contract",
+      amount: amountCents * 100,
+      source_exchange_shard: 2, destination_exchange_shard: 0,
+      source_subaccount: 1, destination_subaccount: 0,
+    }),
+  });
+  if (response.status !== 200) {
+    return { status: response.status, transferId: null, unreadable: true };
+  }
+  let payload: unknown;
+  try { payload = await response.json(); }
+  catch { return { status: 200, transferId: null, unreadable: true }; }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { status: 200, transferId: null, unreadable: true };
+  }
+  const id = (payload as Record<string, unknown>).transfer_id;
+  return {
+    status: 200,
+    transferId: typeof id === "string" && /^[a-zA-Z0-9_-]{8,128}$/.test(id) ? id : null,
+    unreadable: !(typeof id === "string" && /^[a-zA-Z0-9_-]{8,128}$/.test(id)),
+  };
+}
