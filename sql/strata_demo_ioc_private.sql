@@ -33,6 +33,43 @@ CREATE TABLE IF NOT EXISTS private.strata_demo_ioc_attempt (
     CHECK(expires_at > created_at),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- Database-level protection: service credentials must not be able to
+-- reset an attempted POST to PREPARED or mutate immutable order identity.
+-- The application-level WHERE state='PREPARED' guard alone is insufficient.
+CREATE OR REPLACE FUNCTION private.strata_demo_ioc_transition_guard()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $ioc_guard$
+BEGIN
+  IF ROW(NEW.attempt_id,NEW.owner_user_id,NEW.demo_account_id,
+         NEW.signer_fingerprint,NEW.client_order_id,NEW.market_ticker,
+         NEW.reducing_side,NEW.requested_hundredths,NEW.price_dollars,
+         NEW.fee_fingerprint,NEW.operator_approval_id,NEW.worker_holder_id,
+         NEW.worker_fencing_token,NEW.created_at,NEW.expires_at)
+     IS DISTINCT FROM
+     ROW(OLD.attempt_id,OLD.owner_user_id,OLD.demo_account_id,
+         OLD.signer_fingerprint,OLD.client_order_id,OLD.market_ticker,
+         OLD.reducing_side,OLD.requested_hundredths,OLD.price_dollars,
+         OLD.fee_fingerprint,OLD.operator_approval_id,OLD.worker_holder_id,
+         OLD.worker_fencing_token,OLD.created_at,OLD.expires_at)
+  THEN RAISE EXCEPTION 'demo IOC immutable identity cannot change'
+    USING ERRCODE = '23514'; END IF;
+  IF NOT ((OLD.state = 'PREPARED' AND NEW.state = 'UNKNOWN')
+       OR (OLD.state = 'UNKNOWN' AND NEW.state = 'RECONCILED'))
+  THEN RAISE EXCEPTION 'invalid demo IOC state transition'
+    USING ERRCODE = '23514'; END IF;
+  IF NEW.updated_at < OLD.updated_at THEN
+    RAISE EXCEPTION 'demo IOC update timestamp cannot regress'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$ioc_guard$;
+DROP TRIGGER IF EXISTS strata_demo_ioc_transition_guard
+  ON private.strata_demo_ioc_attempt;
+CREATE TRIGGER strata_demo_ioc_transition_guard
+  BEFORE UPDATE ON private.strata_demo_ioc_attempt
+  FOR EACH ROW EXECUTE FUNCTION private.strata_demo_ioc_transition_guard();
+REVOKE ALL ON FUNCTION private.strata_demo_ioc_transition_guard()
+  FROM PUBLIC, anon, authenticated;
 -- Only one unresolved attempt per demo account/market. A process crash
 -- after UNKNOWN cannot open a new reservation until manual reconciliation.
 CREATE UNIQUE INDEX IF NOT EXISTS strata_demo_ioc_one_pending_per_market
