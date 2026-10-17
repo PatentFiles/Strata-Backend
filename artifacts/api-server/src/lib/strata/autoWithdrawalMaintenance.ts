@@ -81,6 +81,11 @@ async function initialize(owner:string,rule:AutoRule):Promise<string>{
  }
  if(cash.botCashCents<rule.thresholdCents)return "auto_below_threshold";
  if(!cash.cashPrecisionVerified)return "auto_cash_precision_unverified";
+ // Do not pause a running strategy when the requested sweep exceeds the
+ // owner's actual withdrawable cash after preserving verified starting capital.
+ const requiredFloor=Math.max(cash.initialCapitalCents,rule.minimumRetainedCents);
+ if(cash.botCashCents-rule.withdrawCents<requiredFloor)
+   return "auto_threshold_reached_but_safe_cash_insufficient";
  const running=personalTradingSession.isScheduled(owner,cash.accountId);
  const armed=cash.executionEnabled && !cash.killSwitch;
  const q=await pool.query(`INSERT INTO ${M}
