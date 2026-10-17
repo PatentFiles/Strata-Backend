@@ -2,6 +2,7 @@ import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
+import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
@@ -679,6 +680,19 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     }
     const result = await establishOfficialFeeDigest();
     if (!result.ok) {
+      // Kalshi's public PDF is frequently refused to cloud egress with 429.
+      // Restore a useful Step 6 read-only check from the live official API
+      // without pretending the operator's pinned PDF came from Kalshi today.
+      // NEVER persist this metadata as a fee-artifact digest. Owner approval,
+      // commissioning and order-time proof remain separately fail-closed.
+      if (result.reason === "official_fee_schedule_http_429" ||
+          result.reason === "official_fee_schedule_unavailable") {
+        const market = await probeCurrentKalshiFeeApi();
+        const observation = step6ApiFeeObservation(market);
+        if (observation) {
+          return void res.status(200).json(sanitizePublic(observation));
+        }
+      }
       return void res.status(409).json(sanitizePublic({
         ok: false,
         reason: result.reason,
@@ -691,11 +705,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.json(sanitizePublic({
       ok: true,
       reason: "official_fee_verified_read_only",
+      provenanceType: "kalshi_pdf_provider",
+      providerPdfVerified: true,
       feeArtifactDigest: result.digest,
       checkedAt: new Date().toISOString(),
       sourceUrl: "https://kalshi.com/docs/kalshi-fee-schedule.pdf",
       policyApproved: false,
       commissioningPerformed: false,
+      tradingAuthorized: false,
     }));
   });
   router.get("/policy/evidence", async (_req, res) => {
