@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS private.strata_manual_profit_withdrawals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_user_id uuid NOT NULL REFERENCES auth.users(id),
   execution_account_id text NOT NULL REFERENCES public.v13_production_account(id),
-  state text NOT NULL CHECK (state IN ('prepared','attempted','pending','uncertain','completed')),
+  state text NOT NULL CHECK (state IN ('prepared','attempted','pending','uncertain','completed','expired')),
   amount_cents bigint NOT NULL CHECK (amount_cents > 0 AND amount_cents <= 100000000000),
   retain_cents bigint NOT NULL CHECK (retain_cents >= 0),
   bot_before_cents bigint NOT NULL CHECK (bot_before_cents >= 0),
