@@ -86,6 +86,12 @@ export async function exerciseSandboxExitAfterUnknown(input:{
   }catch{
     return unknown("sandbox_exit_exchange_reconciliation_unavailable");
   }
+  // Do not accept a separately supplied history snapshot that disagrees with
+  // the actual single transport response for this attempt. A timeout does not
+  // constitute a trusted zero-fill receipt.
+  if(!receipt || !observation.response ||
+     JSON.stringify(observation.response)!==JSON.stringify(receipt))
+    return unknown("sandbox_exit_receipt_or_history_mismatch");
   if(observation.clientOrderId!==order.client_order_id ||
      observation.marketTicker!==order.ticker ||
      observation.positionMarketTicker!==order.ticker ||
