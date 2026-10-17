@@ -17,6 +17,7 @@ assert.ok(fingerprint);
 function fixture(){
   let state:string|null=null,attempt:string|null=null,exchangeId:string|null=null;
   let cash0=3450,cash2=0,bot=0,posts=0,preparedAt=Date.now(),allowOwner=true;
+  let sourceBeforeMicros=String(cash0*10000);
   let receiptStatus="complete",receiptAmount="25.0000",receiptDestinationShard=2;
   const owner={id:"acct-one",owner_user_id:USER,financial_account_id:"33333333-3333-4333-8333-333333333333",
     connection_id:"44444444-4444-4444-8444-444444444444",
@@ -29,14 +30,16 @@ function fixture(){
     if(["BEGIN","ROLLBACK","COMMIT"].includes(sql))return {rows:[]};
     if(sql.includes("shard-allocation:owner"))return {rows:params[0]===USER&&allowOwner?[owner]:[]};
     if(sql.includes("shard-allocation:prepare")){
-      if(state==="prepared"){preparedAt=Date.now();return {rows:[{id:attempt}]};}
+      if(state==="prepared"){preparedAt=Date.now();sourceBeforeMicros=String(params[8]);return {rows:[{id:attempt}]};}
       if(state)return {rows:[]};
       attempt=String(params[0]);state="prepared";preparedAt=Date.now();
+      sourceBeforeMicros=String(params[8]);
       return {rows:[{id:attempt}]};
     }
     if(sql.includes("shard-allocation:status"))
       return {rows:state&&params[0]===USER?[{
         id:attempt,state,source_before_cents:3450,destination_before_cents:0,bot_before_cents:0,
+        source_before_microdollars:sourceBeforeMicros,
         source_after_cents:state==="completed"?cash0:null,
         destination_after_cents:state==="completed"?cash2:null,
         bot_after_cents:state==="completed"?bot:null,exchange_transfer_id:exchangeId,
@@ -45,6 +48,7 @@ function fixture(){
       return {rows:state&&params[0]===USER&&params[1]===attempt?[{
         id:attempt,state,execution_account_id:"acct-one",authority_credential_id:owner.credential_id,
         authority_fingerprint:fingerprint,source_before_cents:3450,
+        source_before_microdollars:sourceBeforeMicros,
         destination_before_cents:0,bot_before_cents:0,prepared_ms:preparedAt,
       }]:[]};
     if(sql.includes("shard-allocation:claim-once")){
