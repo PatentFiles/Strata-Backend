@@ -42,7 +42,13 @@ export function startAutoSweepWorker():void{
  let running=false;
  const tick=async()=>{if(running||!live())return;running=true;const db=await pool.connect().catch(()=>null);if(!db){running=false;return;}
  let lock=false;try{const l=await db.query("SELECT pg_try_advisory_lock(619811017) AS locked");lock=l.rows[0]?.locked===true;if(!lock)return;
- const owners=await db.query(`SELECT owner_user_id::text AS owner FROM ${R} WHERE enabled=true ORDER BY updated_at LIMIT 40`);
+ const owners=await db.query(`SELECT owner FROM (
+  SELECT owner_user_id::text AS owner,updated_at AS changed FROM ${R} WHERE enabled=true
+  UNION
+  SELECT owner_user_id::text AS owner,changed_at AS changed
+  FROM private.strata_auto_withdrawal_maintenance
+  WHERE state IN ('pause_requested','waiting_flat','ready_to_transfer','reconciling','resume_requested')
+) pending ORDER BY changed LIMIT 40`);
  for(const row of owners.rows)if(typeof row.owner==="string"){try{await processAutoRule(row.owner);}catch{}}
  }catch{}finally{if(lock)await db.query("SELECT pg_advisory_unlock(619811017)").catch(()=>undefined);db.release();running=false;}};
  const handle=setInterval(()=>void tick(),60000);handle.unref();void tick();
