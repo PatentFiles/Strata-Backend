@@ -125,7 +125,8 @@ try{
    assert.equal(x.rows[0].state,"PREPARED");
  });
  await verify("concurrent worker reservation: exactly one wins",async()=>{
-   await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1 AND state='PREPARED'",[uid(5)]);
+   await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND state='PREPARED'",[uid(5)]);
+   await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1 AND state='UNKNOWN'",[uid(5)]);
    const c1=await pool.connect(),c2=await pool.connect();
    try{
      const [x,y]=await Promise.all([insert(c1,uid(6),cid(6)),insert(c2,uid(7),cid(7))]);
