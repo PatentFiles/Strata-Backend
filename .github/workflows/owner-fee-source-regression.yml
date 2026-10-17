@@ -49,6 +49,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitUnknownCommit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitUnknownCommit.test.cjs
       - name: Test UNKNOWN persisted before transport with no retry authorization
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitUnknownCommit.test.cjs
+      - name: Bundle one-shot sandbox IOC recovery lifecycle
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitSandboxCycle.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitSandboxCycle.test.cjs
+      - name: Test sandbox signed-transport mock, partial fills, timeouts and no retry
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitSandboxCycle.test.cjs
       - name: Bundle emergency IOC recovery state-machine regression
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRecoveryFence.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRecoveryFence.test.cjs
       - name: Test uncertain IOC never retries and zero/partial/full fills reconcile
