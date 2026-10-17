@@ -59,8 +59,10 @@ const ACCOUNT_SQL = `
 const STATUS_SQL = `
  -- shard-allocation:status
  SELECT t.id::text,t.state,t.source_before_cents,t.destination_before_cents,
-   t.bot_before_cents,t.source_after_cents,t.destination_after_cents,t.bot_after_cents,
-   t.exchange_transfer_id
+   t.bot_before_cents,t.source_before_microdollars::text,
+   t.source_after_cents,t.destination_after_cents,t.bot_after_cents,
+   t.source_after_microdollars::text,t.destination_after_microdollars::text,
+   t.bot_after_microdollars::text,t.exchange_transfer_id
  FROM private.kalshi_owner_shard_allocations t
  JOIN v13_production_account a ON a.id=t.execution_account_id AND a.owner_user_id=t.owner_user_id
  WHERE t.owner_user_id=$1::uuid ORDER BY t.prepared_at DESC LIMIT 1
@@ -70,10 +72,12 @@ const PREPARE_SQL = `
  INSERT INTO private.kalshi_owner_shard_allocations
   (id,owner_user_id,execution_account_id,financial_account_id,
    provider_connection_id,authority_credential_id,authority_fingerprint,
-   source_before_cents,destination_before_cents,bot_before_cents)
- VALUES ($1::uuid,$2::uuid,$3,$4::uuid,$5::uuid,$6::uuid,$7,$8,0,0)
+   source_before_cents,destination_before_cents,bot_before_cents,
+   source_before_microdollars)
+ VALUES ($1::uuid,$2::uuid,$3,$4::uuid,$5::uuid,$6::uuid,$7,$8,0,0,$9::bigint)
  ON CONFLICT (execution_account_id) DO UPDATE
    SET source_before_cents=EXCLUDED.source_before_cents,
+       source_before_microdollars=EXCLUDED.source_before_microdollars,
        prepared_at=now(),updated_at=now()
    WHERE private.kalshi_owner_shard_allocations.state='prepared'
      AND private.kalshi_owner_shard_allocations.owner_user_id=EXCLUDED.owner_user_id
@@ -85,7 +89,8 @@ const ATTEMPT_SQL = `
  -- shard-allocation:attempt
  SELECT t.id::text,t.state,t.execution_account_id,t.authority_credential_id::text,
    t.authority_fingerprint,t.source_before_cents,t.destination_before_cents,
-   t.bot_before_cents,(extract(epoch FROM t.prepared_at)*1000)::bigint AS prepared_ms,
+   t.bot_before_cents,t.source_before_microdollars::text,
+   (extract(epoch FROM t.prepared_at)*1000)::bigint AS prepared_ms,
    t.exchange_transfer_id
  FROM private.kalshi_owner_shard_allocations t
  WHERE t.owner_user_id=$1::uuid AND t.id=$2::uuid
@@ -121,6 +126,8 @@ const COMPLETE_SQL = `
  UPDATE private.kalshi_owner_shard_allocations
  SET state='completed',completed_at=now(),verified_at=now(),
    source_after_cents=$3,destination_after_cents=$4,bot_after_cents=$5,
+   source_after_microdollars=$6::bigint,destination_after_microdollars=$7::bigint,
+   bot_after_microdollars=$8::bigint,
    failure_reason=NULL,updated_at=now()
  WHERE owner_user_id=$1::uuid AND id=$2::uuid AND state IN ('uncertain','attempted')
  RETURNING id
@@ -256,7 +263,8 @@ export async function prepareOwnerShardAllocation(db:Pool,uid:string,
   const v=await balances(bound.creds,opts.read??defaultRead,diagnostic);
   if(!v)return view(diagnostic.reason);
   if(v.source<AMOUNT)return view("shard0_primary_cash_insufficient","unavailable",null,v.source,v.destination,v.bot);
-  if(v.destination!==0||v.bot!==0)return view("destination_shard_not_empty","unavailable",null,v.source,v.destination,v.bot);
+  if(v.destinationMicros!==0n||v.botMicros!==0n)
+    return view("destination_shard_not_empty","unavailable",null,v.source,v.destination,v.bot);
   if(!db.connect)return view("shard_transaction_unavailable");
   const client=await db.connect();
   try{
@@ -270,7 +278,8 @@ export async function prepareOwnerShardAllocation(db:Pool,uid:string,
     }
     const id=randomUUID();
     const result=await client.query(PREPARE_SQL,[id,uid,bound.row.id,bound.row.financial_account_id,
-      bound.row.connection_id,bound.row.credential_id,bound.row.key_fingerprint,v.source]);
+      bound.row.connection_id,bound.row.credential_id,bound.row.key_fingerprint,v.source,
+      String(v.sourceMicros)]);
     await client.query("COMMIT");
     if(result.rows.length===1)return prepared(v,String(result.rows[0]!.id));
     const status=await ownerShardAllocationStatus(db,uid);
@@ -323,10 +332,14 @@ export async function executeOwnerShardAllocation(db:Pool,uid:string,input:{
   if(x.rows.length!==1||plan?.state!=="prepared")return view("shard_already_attempted_or_missing","uncertain",input.attemptId);
   if(plan.execution_account_id!==bound.row.id||plan.authority_credential_id!==bound.row.credential_id||
     plan.authority_fingerprint!==bound.row.key_fingerprint||
+    typeof plan.source_before_microdollars!=="string"||
+    !/^[0-9]+$/.test(plan.source_before_microdollars)||
     Date.now()-Number(plan.prepared_ms)>300000)
     return view("shard_plan_expired_or_changed","prepared",input.attemptId);
   const before=await balances(bound.creds,opts.read??defaultRead);
-  if(!before||before.source!==Number(plan.source_before_cents)||before.destination!==0||before.bot!==0)
+  if(!before||before.source!==Number(plan.source_before_cents)||
+    before.sourceMicros!==BigInt(String(plan.source_before_microdollars))||
+    before.destinationMicros!==0n||before.botMicros!==0n)
     return view("shard_balance_changed","prepared",input.attemptId,
       before?.source??null,before?.destination??null,before?.bot??null);
   if(!db.connect)return view("shard_transaction_unavailable");
@@ -385,11 +398,16 @@ export async function reconcileOwnerShardAllocation(db:Pool,uid:string,
       t.amount!=="25.0000")return view("shard_exchange_receipt_not_complete","uncertain",String(plan.id),
       null,null,null,plan.exchange_transfer_id,true);
     const v=await balances(bound.creds,get);
-    if(!v||v.source!==Number(plan.source_before_cents)-AMOUNT ||
-      v.destination!==AMOUNT||v.bot!==0)
+    const sourceBefore=typeof plan.source_before_microdollars==="string" &&
+      /^[0-9]+$/.test(plan.source_before_microdollars)
+      ?BigInt(plan.source_before_microdollars):null;
+    if(!v||sourceBefore===null||
+      v.sourceMicros!==sourceBefore-SHARD_TRANSFER_MICROS||
+      v.destinationMicros!==SHARD_TRANSFER_MICROS||v.botMicros!==0n)
       return view("shard_balance_reconciliation_pending","uncertain",String(plan.id),
         v?.source??null,v?.destination??null,v?.bot??null,plan.exchange_transfer_id,true);
-    const wrote=await db.query(COMPLETE_SQL,[uid,plan.id,v.source,v.destination,v.bot]);
+    const wrote=await db.query(COMPLETE_SQL,[uid,plan.id,v.source,v.destination,v.bot,
+      String(v.sourceMicros),String(v.destinationMicros),String(v.botMicros)]);
     if(wrote.rows.length!==1)return view("shard_reconciliation_write_unproven","uncertain",String(plan.id),
       v.source,v.destination,v.bot,plan.exchange_transfer_id,true);
     return view("shard_completed","completed",String(plan.id),v.source,v.destination,v.bot,
