@@ -16,11 +16,27 @@ export async function reserveKalshiBalanceReadSlot(
   keyId: string,
   ownerUserId?: string,
   query: typeof pool.query = pool.query.bind(pool),
+  signerFingerprint?: string|null,
 ): Promise<void> {
   if (!keyId.trim()) throw new Error("kalshi_balance_credential_missing");
   if (ownerUserId && !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/.test(ownerUserId))
     throw new Error("kalshi_balance_owner_invalid");
-  const digest=createHash("sha256").update("strata:production:kalshi:balance:shared-bucket:v1").digest("hex");
+  // All verified credential roles belonging to a single member must
+  // consume the SAME bucket. Separate users must not block one another's
+  // live execution reads. Unknown credentials use one conservative fallback.
+  let effectiveOwner=ownerUserId;
+  if(!effectiveOwner && signerFingerprint && /^[0-9a-f]{64}$/.test(signerFingerprint)){
+    const identities=await query(
+      `SELECT DISTINCT owner_user_id::text AS owner
+         FROM private.kalshi_connection_credentials
+        WHERE key_fingerprint=$1 AND revoked_at IS NULL
+          AND verified_at IS NOT NULL AND verification_reason='credential_verified'
+        LIMIT 2`,[signerFingerprint]);
+    if(identities.rows.length===1 && typeof identities.rows[0]?.owner==="string")
+      effectiveOwner=identities.rows[0].owner;
+  }
+  const scope=effectiveOwner ? `member:${effectiveOwner}` : "member:unmapped-conservative";
+  const digest=createHash("sha256").update(`strata:kalshi:balance:${scope}:v1`).digest("hex");
   const response=await query(
     `INSERT INTO private.strata_kalshi_balance_read_slots (budget_key,next_slot_at)
      VALUES ($1,clock_timestamp()+interval '1200 milliseconds')
