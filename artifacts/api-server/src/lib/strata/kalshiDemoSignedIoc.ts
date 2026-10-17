@@ -204,7 +204,15 @@ export async function executeOneSignedDemoProtectiveIoc(input:{
     const raw:unknown=await response.json();
     if(!raw||typeof raw!=="object"||Array.isArray(raw))
       return unknown("demo_ioc_receipt_malformed",status);
-    receipt={httpStatus:201,...raw as Record<string,unknown>};
+    const obj=raw as Record<string,unknown>;
+    receipt={
+      httpStatus:201,
+      order_id:obj.order_id,
+      client_order_id:obj.client_order_id,
+      fill_count:obj.fill_count,
+      remaining_count:obj.remaining_count,
+      ts_ms:obj.ts_ms,
+    };
   }catch{
     return unknown("demo_ioc_post_outcome_ambiguous",status);
   }
