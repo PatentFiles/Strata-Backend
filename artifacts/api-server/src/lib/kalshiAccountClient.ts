@@ -12,6 +12,7 @@ import {
 import {
   blockingSubaccountTransferDetail,
   cleanPairInventoryDiagnosis,
+  dedicatedSignerFingerprint,
   provePreBoundaryRoundTrip,
   type BlockingSubaccountTransfer,
 } from "./strata/commissioning";
@@ -437,7 +438,8 @@ export async function getScopedKalshiJson(
   if (path === `${API_PREFIX}/portfolio/balance` &&
       host === "https://external-api.kalshi.com" &&
       process.env.NODE_ENV === "production" && fetchImpl === fetch) {
-    await reserveKalshiBalanceReadSlot(creds.keyId, rateLimitOwnerId);
+    await reserveKalshiBalanceReadSlot(creds.keyId, rateLimitOwnerId, undefined,
+      dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
   }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
