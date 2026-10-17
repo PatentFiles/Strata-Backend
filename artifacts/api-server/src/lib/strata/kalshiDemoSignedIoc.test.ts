@@ -66,7 +66,7 @@ function harness(opts:{
     commitUnknownBeforePost:async()=>{
       marks++;
       if(opts.throwMark)throw Error("commit outcome unknown");
-      return {persisted:!opts.denyMark,state:"UNKNOWN" as const,
+      return {persisted:(!opts.denyMark) as true,state:"UNKNOWN" as const,
         clientOrderId:id,fencingToken:7,mayRetry:false as const,
         oneShot:true as const};
     },
