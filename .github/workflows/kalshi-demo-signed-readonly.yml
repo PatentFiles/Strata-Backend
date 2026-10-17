@@ -6,6 +6,7 @@ on:
       - 'artifacts/api-server/src/lib/strata/kalshiDemoAuthenticatedProbe*'
       - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedIoc*'
       - 'artifacts/api-server/src/lib/strata/kalshiDemoIocLedger*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocQualification*'
       - 'sql/strata_demo_ioc_private.sql'
       - 'artifacts/api-server/src/scripts/runKalshiDemoAuthenticatedGet.ts'
       - '.github/workflows/kalshi-demo-signed-readonly.yml'
@@ -48,3 +49,8 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoIocLedger.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoIocLedger.test.cjs
       - name: Test DEMO IOC PREPARED to UNKNOWN and terminal records without retries
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/kalshiDemoIocLedger.test.cjs
+
+      - name: Bundle integrated DEMO lifecycle tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoIocQualification.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoIocQualification.test.cjs
+      - name: Test DEMO full prepare, UNKNOWN, POST, read and terminal durability
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/kalshiDemoIocQualification.test.cjs
