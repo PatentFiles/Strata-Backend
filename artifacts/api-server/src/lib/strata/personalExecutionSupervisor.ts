@@ -6,6 +6,7 @@ import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact"
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
+import { verifiedUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -297,9 +298,20 @@ export function createProductionPersonalSession(
        WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
       [input.accountId],
     );
-    const recovery = Number(uncertain.rows[0]?.n ?? "0") > 0;
+    const unresolved = verifiedUnresolvedIntentMode(uncertain.rows);
+    if (!unresolved.ok) {
+      state.entriesAuthorized = false;
+      state.presentedToken = -1;
+      try {
+        await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
+      } finally {
+        session.worker.stop();
+      }
+      return {ok:false,reason:unresolved.reason};
+    }
+    const recovery = unresolved.mode === "recovery";
     if (recovery) state.entriesAuthorized = false;
-    const scheduled = await scheduleOwnedAccountWorker(session, recovery ? "recovery" : "entries");
+    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
