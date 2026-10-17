@@ -146,7 +146,7 @@ async function signedBalances(creds: Credential, get: Get): Promise<Snapshot | n
 /** Read-only observation may run while trading; never authorizes a transfer. */
 export async function observeAutomaticSweepCash(userId:string):Promise<{
   accountId:string;botCashCents:number;cashierCashCents:number;
-  killSwitch:boolean;executionEnabled:boolean;cashPrecisionVerified:boolean;
+  initialCapitalCents:number;killSwitch:boolean;executionEnabled:boolean;cashPrecisionVerified:boolean;
 }|null>{
   try{
     const result=await pool.query(OWNER_SQL,[userId]);
@@ -156,8 +156,11 @@ export async function observeAutomaticSweepCash(userId:string):Promise<{
     if(!material)return null;
     const balances=await signedBalances(material,getScopedKalshiJson);
     if(!balances)return null;
+    const original=BigInt(String(row.initial_cash_micros??"-1"));
+    if(original<0n||original%10000n!==0n||original/10000n>BigInt(Number.MAX_SAFE_INTEGER))return null;
     return {
       accountId:String(row.id),botCashCents:balances.botCents,cashierCashCents:balances.cashierCents,
+      initialCapitalCents:Number(original/10000n),
       killSwitch:row.kill_switch===true,executionEnabled:row.execution_enabled===true,
       cashPrecisionVerified:row.cash_precision_verified===true,
     };
