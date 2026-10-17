@@ -349,3 +349,34 @@ test("contradictory subaccount identity and malformed money fail closed",async()
   assert.equal(p.reason,"shard0_primary_scoped_balance_invalid");
   assert.equal(f.posts(),0);
 });
+
+test("completed $25 receipt reconciles exact fractional source remainder without double POST",async()=>{
+  const f=fixture();
+  const precise=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await f.read(c,path,q);
+    if(path==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=0"){
+      const amount=(response as {balance_dollars:string}).balance_dollars;
+      return {balance_dollars:amount+"0031"};
+    }
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances"){
+      const row=(response as {subaccount_balances:Record<string,unknown>[]}).subaccount_balances
+        .find(x=>x.subaccount_number===0&&x.exchange_index===0)!;
+      // Source starts at $34.500031; after exactly $25 it is $9.500031.
+      const amount=String(row.balance);
+      row.balance=amount.slice(0,-2)+"31";
+    }
+    return response;
+  };
+  const plan=await prepareOwnerShardAllocation(f.db,USER,{read:precise});
+  assert.equal(plan.state,"prepared");
+  const sent=await executeOwnerShardAllocation(f.db,USER,{
+    attemptId:plan.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION,
+  },{read:precise,post:f.post,enableTestPost:true});
+  assert.equal(sent.state,"uncertain");
+  assert.equal(f.posts(),1);
+  const received=await reconcileOwnerShardAllocation(f.db,USER,{read:precise});
+  assert.equal(received.state,"completed");
+  assert.equal(received.sourceCents,950);
+  assert.equal(received.destinationCents,2500);
+  assert.equal(f.posts(),1);
+});
