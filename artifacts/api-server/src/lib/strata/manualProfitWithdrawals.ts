@@ -26,13 +26,15 @@ export type SweepResult = {
   minimumRetainedCents: number | null; botCashCents: number | null;
   cashierCashCents: number | null; maximumCents: number | null;
   expiresAt: string | null; transferId: string | null;
+  origin?: "manual" | "automatic" | null;
 };
 const UUID = /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const exact = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-const enabled = () => process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" &&
+export const withdrawalTransfersEnabled = () => process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" &&
   process.env.STRATA_WITHDRAWAL_ROUTING_VERIFIED === "true" &&
   process.env.KALSHI_API_ENVIRONMENT === "production";
+const enabled = withdrawalTransfersEnabled;
 const fail = (reason: string): SweepResult => ({
   ok: false, reason, enabled: enabled(), id: null, state: null,
   amountCents: null, minimumRetainedCents: null, botCashCents: null,
@@ -51,7 +53,8 @@ function exposed(row: Row, reason: string, ok = true): SweepResult {
     maximumCents: null,
     expiresAt: row.expires_at instanceof Date ? row.expires_at.toISOString()
       : typeof row.expires_at === "string" ? row.expires_at : null,
-    transferId: typeof row.exchange_transfer_id === "string" ? row.exchange_transfer_id : null };
+    transferId: typeof row.exchange_transfer_id === "string" ? row.exchange_transfer_id : null,
+    origin: row.origin === "automatic" ? "automatic" : "manual" };
 }
 function parseCredential(row: Row): Credential | null {
   if (typeof row.decrypted_secret !== "string" || typeof row.key_fingerprint !== "string") return null;
@@ -135,7 +138,7 @@ const ACTIVE = "('prepared','attempted','pending','uncertain')";
 const SELECT_HISTORY = `
 SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
        cashier_before_cents,exchange_transfer_id,expires_at,created_at,
-       attempted_at,completed_at,failure_reason
+       attempted_at,completed_at,failure_reason,origin
 FROM ${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
 `;
 
@@ -211,7 +214,8 @@ export async function quoteManualSweep(userId: string, input: unknown,
 
 /** Durable COMMIT before one financial POST; NEVER automatically retry a lost response. */
 export async function confirmManualSweep(userId: string, input: unknown,
-  get: Get = getScopedKalshiJson, post: Post = postScopedKalshiCashierSweep): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson, post: Post = postScopedKalshiCashierSweep,
+  automaticAuthorization = false): Promise<SweepResult> {
   if (!enabled()) return fail("withdrawal_feature_disabled");
   if (!input || typeof input !== "object" || Array.isArray(input)) return fail("invalid_request");
   const data = input as Row;
@@ -221,11 +225,14 @@ export async function confirmManualSweep(userId: string, input: unknown,
     const account = await owned(userId);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     const plan = await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
-      cashier_before_cents,authority_fingerprint,expires_at FROM ${TABLE}
+      cashier_before_cents,authority_fingerprint,expires_at,origin,auto_rule_id,auto_rule_revision FROM ${TABLE}
       WHERE id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3`,
       [data.quoteId,userId,account.row.id]);
     if (plan.rows.length !== 1 || plan.rows[0]!.state !== "prepared") return fail("quote_missing_or_already_used");
     const row = plan.rows[0]!;
+    // A manually supplied quote ID cannot execute an automated quote.
+    if ((row.origin === "automatic") !== automaticAuthorization)
+      return fail("withdrawal_origin_mismatch");
     const amount = amountValue(row,"amount_cents");
     const retain = amountValue(row,"retain_cents");
     if (amount === null || retain === null || amount <= 0 ||
@@ -243,6 +250,13 @@ export async function confirmManualSweep(userId: string, input: unknown,
         SET state='attempted',attempted_at=now(),updated_at=now()
         WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared'
           AND expires_at>now() AND authority_fingerprint=$3
+          AND (origin='manual' OR EXISTS (
+            SELECT 1 FROM private.strata_auto_profit_withdrawal_rules r
+            WHERE r.id=strata_manual_profit_withdrawals.auto_rule_id
+              AND r.owner_user_id=$2::uuid
+              AND r.execution_account_id=strata_manual_profit_withdrawals.execution_account_id
+              AND r.enabled=true AND r.revision=strata_manual_profit_withdrawals.auto_rule_revision
+              AND r.latched=true AND r.last_attempt_id=strata_manual_profit_withdrawals.id))
           AND EXISTS(SELECT 1 FROM public.v13_production_account a
             WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
               AND a.kill_switch=true AND a.reserved_micros=0
@@ -298,7 +312,9 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     const t=transfer as Row;
     if(t.transfer_id!==record.exchange_transfer_id ||
        t.source!=="event_contract" || t.destination!=="event_contract" ||
-       t.source_exchange_shard!==2 || t.destination_exchange_shard!==0)
+       t.source_exchange_shard!==2 || t.destination_exchange_shard!==0 ||
+       (t.source_subaccount!==undefined && t.source_subaccount!==1) ||
+       (t.destination_subaccount!==undefined && t.destination_subaccount!==0))
       return exposed(record,"exchange_receipt_identity_mismatch",false);
     const amount=amountValue(record,"amount_cents");
     if(amount===null)return fail("withdrawal_amount_invalid");
@@ -308,7 +324,8 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
     const [whole,frac=""]=raw.split(".");
     const micros=BigInt(whole!)*1_000_000n+BigInt(frac.padEnd(6,"0"));
     if(micros!==BigInt(amount)*10_000n)return exposed(record,"exchange_receipt_amount_mismatch",false);
-    if(t.status!=="complete")return exposed(record,"exchange_transfer_still_pending",false);
+    if(t.status!=="complete" && t.status!=="completed")
+      return exposed(record,"exchange_transfer_still_pending_or_incomplete",false);
     const balances=await signedBalances(account.creds,get);
     const beforeBot=amountValue(record,"bot_before_cents");
     const beforeCashier=amountValue(record,"cashier_before_cents");
@@ -325,6 +342,34 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
       exposed(record,"withdrawal_status_changed_refresh",false);
   }catch{return fail("withdrawal_reconciliation_unavailable");}
 }
+export interface CashierRouteDiagnostic {
+  ok:boolean;reason:string;documentedRoute:boolean;signedBalancesVerified:boolean;
+  transferHistoryReadVerified:boolean;liveTransfersEnabled:boolean;
+  source:string;destination:string;cashierCashCents:number|null;botCashCents:number|null;
+}
+/** Owner-scoped authenticated GETs only. Never attest that a POST has worked. */
+export async function inspectCashierRouteReadOnly(userId:string):Promise<CashierRouteDiagnostic>{
+  const result:CashierRouteDiagnostic={ok:false,reason:"signed_route_not_verified",
+    documentedRoute:true,signedBalancesVerified:false,transferHistoryReadVerified:false,
+    liveTransfersEnabled:enabled(),source:"subaccount_1_index_2",
+    destination:"primary_subaccount_0_index_0",botCashCents:null,cashierCashCents:null};
+  try{
+    const account=await owned(userId);
+    if(!account)return {...result,reason:"account_not_flat_stopped_or_execution_authority_unavailable"};
+    const balances=await signedBalances(account.creds,getScopedKalshiJson);
+    if(!balances)return {...result,reason:"scoped_bot_or_cashier_cash_unverified"};
+    const history=await getScopedKalshiJson(account.creds,TRANSFER_PATH,"?limit=1");
+    if(!history||typeof history!=="object"||Array.isArray(history)||
+       !Array.isArray((history as Row).transfers))
+      return {...result,reason:"authenticated_transfer_history_invalid",
+        signedBalancesVerified:true,botCashCents:balances.botCents,cashierCashCents:balances.cashierCents};
+    return {...result,ok:true,reason:enabled()?"read_only_routing_verified_money_movement_enabled":
+        "read_only_routing_verified_live_destination_receipt_unproven",
+      signedBalancesVerified:true,transferHistoryReadVerified:true,
+      botCashCents:balances.botCents,cashierCashCents:balances.cashierCents};
+  }catch{return {...result,reason:"signed_cashier_route_read_unavailable"};}
+}
+
 export async function listManualSweeps(userId:string):Promise<SweepResult[]>{
   try{
     const r=await pool.query(SELECT_HISTORY,[userId]);

@@ -8,6 +8,7 @@ import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
 import { verifyProductionShadowReads } from "./lib/productionShadowPreflight";
 import { auditMicroLiveReadOnly, reconcileMicroLiveAtStartup } from "./lib/microLive";
 import { establishOfficialFeeDigest } from "./lib/microLiveFeeArtifact";
+import { startAutoSweepWorker } from "./lib/strata/autoProfitWithdrawals";
 
 const rawPort = process.env["PORT"];
 
@@ -36,6 +37,9 @@ app.listen(port, "0.0.0.0", (err) => {
     return;
   }
   startFeeArtifactMonitor();
+  // Disabled unless the operator has explicitly enabled both cashier-route
+  // withdrawals and owner-approved automatic rules. Never on in demo.
+  startAutoSweepWorker();
   if (process.env.NODE_ENV === "production" &&
       process.env.STRATA_FEE_BRIDGE_CANARY_ON_BOOT === "true") {
     // Explicitly enabled, GET-only production proof for the alternate fee
