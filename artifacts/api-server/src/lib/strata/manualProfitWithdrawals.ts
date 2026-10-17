@@ -295,7 +295,9 @@ export async function confirmManualSweep(userId: string, input: unknown,
                 strata_manual_profit_withdrawals.origin='automatic'
                 AND EXISTS(SELECT 1 FROM private.strata_auto_withdrawal_maintenance m
                   WHERE m.execution_account_id=a.id AND m.owner_user_id=$2::uuid
-                    AND m.state='ready_to_transfer'
+                    AND m.state='reconciling'
+                    AND m.transfer_id=strata_manual_profit_withdrawals.id
+                    AND m.operator_interrupted=false
                     AND m.rule_id=strata_manual_profit_withdrawals.auto_rule_id
                     AND m.rule_revision=strata_manual_profit_withdrawals.auto_rule_revision)))
               AND a.reserved_micros=0
