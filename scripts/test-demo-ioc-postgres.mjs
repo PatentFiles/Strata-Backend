@@ -59,6 +59,11 @@ try{
   ]);
   assert.equal(x.rows[0].valid,true);
  });
+ await verify("inspect installed PostgreSQL constraint definition",async()=>{
+  const x=await pool.query("SELECT pg_get_constraintdef(oid) AS rule FROM pg_constraint WHERE conname='strata_demo_ioc_attempt_client_order_id_check'");
+  assert.equal(x.rows.length,1);
+  process.stdout.write("CID_RULE "+x.rows[0].rule+"\n");
+ });
  await verify("unique client ID survives terminal state",async()=>{
    const first=await insert(pool,uid(1),cid(1));
    assert.equal(first.rowCount,1);
