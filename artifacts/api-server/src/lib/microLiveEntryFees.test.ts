@@ -52,6 +52,8 @@ function response(body: unknown): Response {
 
 function fixture(options: {
   seriesMultiplier?: number;
+  seriesExchangeIndex?: number;
+  eventExchangeIndex?: number;
   eventMultiplier?: number | null;
   eventType?: string | null;
   seriesChanges?: unknown[];
@@ -65,6 +67,7 @@ function fixture(options: {
   listingPriceRanges?: unknown;
   marketPriceRanges?: unknown;
   marketFeeFields?: Record<string, unknown>;
+  marketExchangeIndex?: number;
 } = {}) {
   const closes = new Date(Date.now() + 600_000).toISOString();
   const expiration = new Date(Date.parse(closes) + 7 * 24 * 60 * 60_000).toISOString();
@@ -74,14 +77,18 @@ function fixture(options: {
   const marketPriceRanges = "marketPriceRanges" in options
     ? options.marketPriceRanges : taperedPriceRanges;
   const market = {
-    ticker, event_ticker: eventTicker, status: "active", close_time: closes,
+    ticker, event_ticker: eventTicker, status: "active",
+    exchange_index: options.marketExchangeIndex ?? 2, close_time: closes,
     expiration_time: expiration, latest_expiration_time: expiration,
     expected_expiration_time: closes, price_ranges: marketPriceRanges,
     ...options.marketFeeFields,
   };
   const seen: string[] = [];
-  const fetchImpl = (async (input: string | URL | Request) => {
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    assert.ok(url.startsWith("https://external-api.kalshi.com/trade-api/v2/"), "only canonical Kalshi API host");
+    assert.equal(init?.method, "GET");
+    assert.equal(init?.redirect, "error");
     seen.push(url);
     if (url.includes("fee-schedule")) throw new Error("fee-schedule URL must never be requested");
     if (url.includes("/markets?")) {
@@ -101,13 +108,15 @@ function fixture(options: {
     if (url.endsWith(`/markets/${ticker}`)) return response({ market });
     if (url.endsWith("/series/KXBTC15M")) return response({
       series: {
-        ticker: "KXBTC15M", fee_type: options.seriesType ?? "quadratic",
+        ticker: "KXBTC15M", exchange_index: options.seriesExchangeIndex ?? 2,
+        fee_type: options.seriesType ?? "quadratic",
         fee_multiplier: options.seriesMultiplier ?? 1,
         last_updated_ts: "2026-09-18T15:20:18.321673Z",
       },
     });
     if (url.endsWith(`/events/${eventTicker}`)) return response({
       event: { event_ticker: eventTicker, series_ticker: "KXBTC15M",
+        exchange_index: options.eventExchangeIndex ?? 2,
         // Kalshi currently emits year-one when the event has no override update.
         last_updated_ts: "0001-01-01T00:00:00Z",
         fee_type_override: options.eventType ?? null,
@@ -362,9 +371,9 @@ test("series metadata supplies the inherited model and the live event timestamp 
   const evidence = fixture();
   const terms = await readCurrentEntryFeeTerms(ticker, evidence.fetchImpl);
   assert.ok(terms);
-  assert.ok(evidence.seen.includes("https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M"));
+  assert.ok(evidence.seen.includes("https://external-api.kalshi.com/trade-api/v2/series/KXBTC15M"));
   assert.ok(evidence.seen.includes(
-    `https://api.elections.kalshi.com/trade-api/v2/events/${eventTicker}`,
+    `https://external-api.kalshi.com/trade-api/v2/events/${eventTicker}`,
   ));
   assert.equal(terms.feePerContractMicrosAtLimit("0.4000"), 16_800,
     "KXBTC15M quadratic series multiplier 1 is used when event overrides are null");
@@ -556,4 +565,14 @@ test("version mismatch and upward cap edits cannot reuse an approved policy", as
   }).where(eq(microLiveConfigTable.id, "singleton"));
   assert.equal(await approvedFeeSession(), null);
   assert.equal((await feeApprovalView()).status, "none");
+});
+test("rejects wrong exchange index for live market, series, or event fee terms", async () => {
+  for (const options of [
+    {marketExchangeIndex: 0},
+    {seriesExchangeIndex: 0},
+    {eventExchangeIndex: 0},
+  ]) {
+    const value = await readCurrentEntryFeeTerms(ticker, fixture(options).fetchImpl);
+    assert.equal(value, null, "cannot use another exchange's fee schedule");
+  }
 });
