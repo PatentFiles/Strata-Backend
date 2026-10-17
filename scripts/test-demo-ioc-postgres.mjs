@@ -125,6 +125,57 @@ try{
    const stale=await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND worker_fencing_token=6 AND state='PREPARED' RETURNING attempt_id",[all.rows[0].attempt_id]);
    assert.equal(stale.rowCount,0);
  });
+ await verify("actual backend prepare, UNKNOWN and finalize helpers use real transactions",async()=>{
+  const handlers=createRequire(resolve(root,"artifacts/api-server/dist/kalshiDemoIocLedger.integration.cjs"));
+  const identity={
+    ownerId:owner,demoAccountId:"DEMO-2",attemptId:uid(8),
+    operatorApprovalId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    workerHolderId:"worker-demo",workerFencingToken:12,
+  };
+  const order={
+    ticker:"KXBTC15M-26OCT161950-50",client_order_id:cid(8),
+    count:"1.00",side:"ask",price:"0.5500",post_only:false,
+    reduce_only:true,time_in_force:"immediate_or_cancel",
+    self_trade_prevention_type:"taker_at_cross",
+    subaccount:1,exchange_index:2,
+  };
+  const fingerprint="c".repeat(64),feeFingerprint="d".repeat(64);
+  const when=Date.now();
+  const prep=await handlers.prepareDemoIocOnce({
+    identity,order,signerFingerprint:fingerprint,feeFingerprint,
+    approvalExpiresAtMs:when+20000,nowMs:when,
+  },pool);
+  assert.equal(prep,true);
+  const repeat=await handlers.prepareDemoIocOnce({
+    identity,order,signerFingerprint:fingerprint,feeFingerprint,
+    approvalExpiresAtMs:when+20000,nowMs:when,
+  },pool);
+  assert.equal(repeat,false);
+  const bad=await handlers.consumeDemoIocUnknown({
+    identity:{...identity,workerFencingToken:11},order,
+    signerFingerprint:fingerprint,feeFingerprint,
+  },pool);
+  assert.equal(bad,null);
+  const committed=await handlers.consumeDemoIocUnknown({
+    identity,order,signerFingerprint:fingerprint,feeFingerprint,
+  },pool);
+  assert.equal(committed?.persisted,true);
+  assert.equal(committed?.state,"UNKNOWN");
+  const duplicate=await handlers.consumeDemoIocUnknown({
+    identity,order,signerFingerprint:fingerprint,feeFingerprint,
+  },pool);
+  assert.equal(duplicate,null);
+  const final=await handlers.finalizeVerifiedDemoIoc({
+    identity,clientOrderId:cid(8),independentlyVerified:true,
+    exactAccountMarketOrderFillPositionMatched:true,
+  },pool);
+  assert.equal(final,true);
+  const finalDuplicate=await handlers.finalizeVerifiedDemoIoc({
+    identity,clientOrderId:cid(8),independentlyVerified:true,
+    exactAccountMarketOrderFillPositionMatched:true,
+  },pool);
+  assert.equal(finalDuplicate,false);
+ });
  process.stdout.write(JSON.stringify({result:"PASS",realPostgres:true,
   cases:passes,noProductionDatabaseUsed:true})+"\n");
 }finally{await pool.end();}
