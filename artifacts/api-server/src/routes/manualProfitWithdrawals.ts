@@ -1,7 +1,8 @@
+import { readAutoRule, saveAutoRule } from "../lib/strata/autoProfitWithdrawals";
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   CASHIER_SWEEP_CONFIRMATION, confirmManualSweep, listManualSweeps,
-  quoteManualSweep, reconcileManualSweep, sweepAvailability,
+  quoteManualSweep, reconcileManualSweep, sweepAvailability, inspectCashierRouteReadOnly,
 } from "../lib/strata/manualProfitWithdrawals";
 
 /**
@@ -26,6 +27,21 @@ export function createManualProfitWithdrawalRouter(requireUser: RequestHandler):
     const id=owner(res);
     if(!id){res.status(401).json({error:"Unauthorized"});return;}
     res.json({withdrawals:await listManualSweeps(id)});
+  });
+  router.get("/cashier-route", async(_req,res)=>{
+    const id=owner(res);
+    if(!id){res.status(401).json({error:"Unauthorized"});return;}
+    res.json(await inspectCashierRouteReadOnly(id));
+  });
+  router.get("/automatic-rule", async(_req,res)=>{
+    const id=owner(res);
+    if(!id){res.status(401).json({error:"Unauthorized"});return;}
+    res.json(await readAutoRule(id));
+  });
+  router.post("/automatic-rule", async(req,res)=>{
+    const id=owner(res);
+    if(!id){res.status(401).json({error:"Unauthorized"});return;}
+    res.json(await saveAutoRule(id,req.body));
   });
   router.post("/quote", async(req,res)=>{
     const id=owner(res);
