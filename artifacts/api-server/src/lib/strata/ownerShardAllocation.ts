@@ -193,6 +193,10 @@ async function balances(creds:Creds,get:Read,diagnostic?:{reason:string}):Promis
       if(diagnostic)diagnostic.reason="shard_cash_scoped_response_invalid";
       return null;
     }
+    if(!inventoryMatches(inventory,{source,destination,bot})){
+      if(diagnostic)diagnostic.reason="shard_cash_inventory_mismatch";
+      return null;
+    }
     return {source,destination,bot};
   }catch(e){
     if(diagnostic)diagnostic.reason=safeBalanceFailureReason(e,"shard_cash");
