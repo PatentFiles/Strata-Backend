@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { pool } from "@workspace/db";
 
-const SLOT_MS = 1_200;
 const MAX_QUEUED_MS = 15_000;
 
 /**
  * Kalshi's /portfolio/balance has a separate one-request-per-second bucket
- * for Basic/Advanced, without burst. A single DB row per owner/key serializes
- * requests across Railway processes and multiple calls in one Promise.all.
+ * for Basic/Advanced, without burst. Until a reliable per-member identifier
+ * is available for every caller, one conservative shared bucket serializes
+ * balance requests across users, keys, and Railway processes.
  * The reservation is a database transaction, not a lock held across network I/O.
  *
  * Never log owner IDs or API key IDs. A missing database is fail-closed.
@@ -20,7 +20,7 @@ export async function reserveKalshiBalanceReadSlot(
   if (!keyId.trim()) throw new Error("kalshi_balance_credential_missing");
   if (ownerUserId && !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/.test(ownerUserId))
     throw new Error("kalshi_balance_owner_invalid");
-  const digest=createHash("sha256").update(ownerUserId ? `owner:${ownerUserId}` : `credential:${keyId}`).digest("hex");
+  const digest=createHash("sha256").update("strata:production:kalshi:balance:shared-bucket:v1").digest("hex");
   const response=await query(
     `INSERT INTO private.strata_kalshi_balance_read_slots (budget_key,next_slot_at)
      VALUES ($1,clock_timestamp()+interval '1200 milliseconds')
