@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS private.strata_auto_withdrawal_maintenance (
   was_running boolean NOT NULL DEFAULT false,
   was_armed boolean NOT NULL DEFAULT false,
   initial_kill_switch boolean NOT NULL DEFAULT true,
+  operator_interrupted boolean NOT NULL DEFAULT false,
   transfer_id uuid REFERENCES private.strata_manual_profit_withdrawals(id),
   last_reason text,
   started_at timestamptz NOT NULL DEFAULT now(),
