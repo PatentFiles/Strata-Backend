@@ -545,6 +545,19 @@ export function createDatabaseUserScopePort(
       if (action !== "START" && action !== "ARM") {
         return refused(userId, "control_action_rejected", account);
       }
+      // Do not arm or start while a cash withdrawal is quoted or unreconciled.
+      // The legacy trading flow is unchanged while the feature is disabled.
+      if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
+        try {
+          const withdrawals = await db.query(
+            "SELECT id FROM private.strata_manual_profit_withdrawals WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1",
+            [userId, account.id],
+          );
+          if (withdrawals.rows.length > 0) return refused(userId, "withdrawal_in_progress", account);
+        } catch {
+          return refused(userId, "withdrawal_safety_unavailable", account);
+        }
+      }
       if (account.killSwitch) return refused(userId, "account_kill_switch", account);
       let safety: { rows: Array<Record<string, unknown>> };
       try {
