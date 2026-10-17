@@ -5,6 +5,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedReadOnly*'
       - 'artifacts/api-server/src/lib/strata/kalshiDemoAuthenticatedProbe*'
       - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedIoc*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocLedger*'
+      - 'sql/strata_demo_ioc_private.sql'
       - 'artifacts/api-server/src/scripts/runKalshiDemoAuthenticatedGet.ts'
       - '.github/workflows/kalshi-demo-signed-readonly.yml'
   push:
@@ -41,3 +43,8 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoSignedIoc.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoSignedIoc.test.cjs
       - name: Test signed DEMO IOC fencing, no-retry, partial fills and fail closed
         run: node --test artifacts/api-server/dist/kalshiDemoSignedIoc.test.cjs
+
+      - name: Bundle private DEMO IOC ledger transition tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoIocLedger.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoIocLedger.test.cjs
+      - name: Test DEMO IOC PREPARED to UNKNOWN and terminal records without retries
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/kalshiDemoIocLedger.test.cjs
