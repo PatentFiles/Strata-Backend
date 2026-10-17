@@ -107,7 +107,7 @@ function ownerSafe(row: Row, origin: "manual" | "automatic" = "manual"): boolean
     (row.maintenance_state === "ready_to_transfer" ||
      row.maintenance_state === "reconciling") &&
     row.maintenance_owner === row.owner_user_id;
-  return (row.kill_switch === true || maintenance) &&
+  return (origin === "manual" ? row.kill_switch === true : maintenance) &&
     row.cash_precision_verified === true &&
     row.reserved_micros === "0" &&
     Number(row.open_positions) === 0 &&
@@ -294,7 +294,7 @@ export async function confirmManualSweep(userId: string, input: unknown,
               AND r.latched=true AND r.last_attempt_id=strata_manual_profit_withdrawals.id))
           AND EXISTS(SELECT 1 FROM public.v13_production_account a
             WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
-              AND (a.kill_switch=true OR (
+              AND ((strata_manual_profit_withdrawals.origin='manual' AND a.kill_switch=true) OR (
                 strata_manual_profit_withdrawals.origin='automatic'
                 AND EXISTS(SELECT 1 FROM private.strata_auto_withdrawal_maintenance m
                   WHERE m.execution_account_id=a.id AND m.owner_user_id=$2::uuid
