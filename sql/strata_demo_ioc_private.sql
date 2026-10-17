@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS private.strata_demo_ioc_attempt (
 -- reset an attempted POST to PREPARED or mutate immutable order identity.
 -- The application-level WHERE state='PREPARED' guard alone is insufficient.
 CREATE OR REPLACE FUNCTION private.strata_demo_ioc_transition_guard()
-RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $ioc_guard$
 BEGIN
   IF ROW(NEW.attempt_id,NEW.owner_user_id,NEW.demo_account_id,
          NEW.signer_fingerprint,NEW.client_order_id,NEW.market_ticker,
@@ -62,7 +62,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$;
+$ioc_guard$;
 DROP TRIGGER IF EXISTS strata_demo_ioc_transition_guard
   ON private.strata_demo_ioc_attempt;
 CREATE TRIGGER strata_demo_ioc_transition_guard
