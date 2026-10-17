@@ -3566,7 +3566,7 @@ export async function postScopedKalshiCashierSweep(
   }
   const path = "/trade-api/v2/portfolio/intra_exchange_instance_transfer";
   const timestamp = Date.now().toString();
-  const response = await fetchImpl(\`https://external-api.kalshi.com\${path}\`, {
+  const response = await fetchImpl(`https://external-api.kalshi.com${path}`, {
     method: "POST", cache: "no-store", redirect: "manual",
     signal: AbortSignal.timeout(15_000),
     headers: {
