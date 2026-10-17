@@ -174,7 +174,7 @@ function inventoryMatches(payload:unknown,scoped:Balances):boolean{
     if(matches.length===0 && cents===0)continue; // A zero shard may be omitted.
     if(matches.length!==1)return false;
     const dollar=(matches[0] as Row).balance;
-    if(typeof dollar!=="string"||!/^(?:0|[1-9]\\d*)(?:\\.\\d{1,4})?$/.test(dollar))return false;
+    if(typeof dollar!=="string"||!/^([0-9]+)([.][0-9]{1,4})?$/.test(dollar))return false;
     const [whole,fraction=""]=dollar.split(".");
     const micros=BigInt(whole!)*10000n+BigInt(fraction.padEnd(4,"0"));
     if(micros%100n!==0n||micros/100n!==BigInt(cents))return false;
