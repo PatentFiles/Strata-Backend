@@ -11,7 +11,7 @@ const response=(body:unknown,status=200,ctype="application/json")=>
   new Response(JSON.stringify(body),{status,headers:{"content-type":ctype}});
 function mock(body:unknown,status=200,ctype="application/json"){
   let calls=0;let exact=false;
-  const fetchImpl=(async(url:RequestInfo|URL,init?:RequestInit)=>{
+  const fetchImpl=(async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
     calls++;
     exact=String(url)===KALSHI_DEMO_ORIGIN+DEMO_BALANCE_PATH;
     assert.equal(exact,true);
