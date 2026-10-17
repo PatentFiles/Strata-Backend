@@ -53,6 +53,74 @@ try{
    assert.equal(x.rows[0].authenticated_insert,false);
    assert.equal(x.rows[0].authenticated_update,false);
  });
+ await verify("actual PostgreSQL regex accepts prescribed unique client ID",async()=>{
+   const r=await pool.query("SELECT $1::text ~ '^v13p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
+   const first=await insert(pool,uid(1),cid(1));
+   assert.equal(first.rowCount,1);
+   const collision=await insert(pool,uid(2),cid(1),"KXBTC15M-ANOTHER");
+   assert.equal(collision.rowCount,0);
+ });
+ await verify("partial unique pending market rejects unrelated client IDs",async()=>{
+   const duplicate=await insert(pool,uid(3),cid(3));
+   assert.equal(duplicate.rowCount,0);
+ });
+ await verify("transactional PREPARED->UNKNOWN with COMMIT before external POST",async()=>{
+   const c=await pool.connect();
+   try{
+     await c.query("BEGIN");
+     const x=await c.query(`UPDATE private.strata_demo_ioc_attempt
+      SET state='UNKNOWN',updated_at=now() WHERE attempt_id=$1
+      AND state='PREPARED' AND worker_fencing_token=7 RETURNING state`,[uid(1)]);
+     assert.equal(x.rowCount,1);assert.equal(x.rows[0].state,"UNKNOWN");
+     // A concurrent session must not see the uncommitted UNKNOWN transition.
+     const other=await pool.query("SELECT state FROM private.strata_demo_ioc_attempt WHERE attempt_id=$1",[uid(1)]);
+     assert.equal(other.rows[0].state,"PREPARED");
+     await c.query("COMMIT");
+   }finally{c.release();}
+   const check=await pool.query("SELECT state FROM private.strata_demo_ioc_attempt WHERE attempt_id=$1",[uid(1)]);
+   assert.equal(check.rows[0].state,"UNKNOWN");
+   const retry=await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND state='PREPARED' RETURNING attempt_id",[uid(1)]);
+   assert.equal(retry.rowCount,0);
+ });
+ await verify("crash/restart and failed COMMIT acknowledgment cannot replay",async()=>{
+   const afterRestart=await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND state='PREPARED' RETURNING attempt_id",[uid(1)]);
+   assert.equal(afterRestart.rowCount,0);
+   const duplicate=await insert(pool,uid(4),cid(4));
+   assert.equal(duplicate.rowCount,0);
+ });
+ await verify("rollback leaves PREPARED; no durable UNKNOWN grant",async()=>{
+   await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1 AND state='UNKNOWN'",[uid(1)]);
+   const inserted=await insert(pool,uid(5),cid(5));
+   assert.equal(inserted.rowCount,1);
+   const c=await pool.connect();
+   try{
+     await c.query("BEGIN");
+     await c.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND state='PREPARED'",[uid(5)]);
+     await c.query("ROLLBACK");
+   }finally{c.release();}
+   const x=await pool.query("SELECT state FROM private.strata_demo_ioc_attempt WHERE attempt_id=$1",[uid(5)]);
+   assert.equal(x.rows[0].state,"PREPARED");
+ });
+ await verify("concurrent worker reservation: exactly one wins",async()=>{
+   await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1 AND state='PREPARED'",[uid(5)]);
+   const c1=await pool.connect(),c2=await pool.connect();
+   try{
+     const [x,y]=await Promise.all([insert(c1,uid(6),cid(6)),insert(c2,uid(7),cid(7))]);
+     assert.equal(x.rowCount+y.rowCount,1);
+   }finally{c1.release();c2.release();}
+ });
+ await verify("stale worker token and nonterminal duplicates fail",async()=>{
+   const all=await pool.query("SELECT attempt_id FROM private.strata_demo_ioc_attempt WHERE state='PREPARED'");
+   assert.equal(all.rowCount,1);
+   const stale=await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1 AND worker_fencing_token=6 AND state='PREPARED' RETURNING attempt_id",[all.rows[0].attempt_id]);
+   assert.equal(stale.rowCount,0);
+ });
+ process.stdout.write(JSON.stringify({result:"PASS",realPostgres:true,
+  cases:passes,noProductionDatabaseUsed:true})+"\n");
+}finally{await pool.end();}
+ AS matches",[cid(1)]);
+   assert.equal(r.rows[0].matches,true,JSON.stringify({clientId:cid(1)}));
+ });
  await verify("unique client ID survives terminal state",async()=>{
    const first=await insert(pool,uid(1),cid(1));
    assert.equal(first.rowCount,1);
