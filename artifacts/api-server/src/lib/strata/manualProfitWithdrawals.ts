@@ -26,13 +26,15 @@ export type SweepResult = {
   minimumRetainedCents: number | null; botCashCents: number | null;
   cashierCashCents: number | null; maximumCents: number | null;
   expiresAt: string | null; transferId: string | null;
+  origin?: "manual" | "automatic" | null;
 };
 const UUID = /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const exact = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-const enabled = () => process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" &&
+export const withdrawalTransfersEnabled = () => process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" &&
   process.env.STRATA_WITHDRAWAL_ROUTING_VERIFIED === "true" &&
   process.env.KALSHI_API_ENVIRONMENT === "production";
+const enabled = withdrawalTransfersEnabled;
 const fail = (reason: string): SweepResult => ({
   ok: false, reason, enabled: enabled(), id: null, state: null,
   amountCents: null, minimumRetainedCents: null, botCashCents: null,
@@ -51,7 +53,8 @@ function exposed(row: Row, reason: string, ok = true): SweepResult {
     maximumCents: null,
     expiresAt: row.expires_at instanceof Date ? row.expires_at.toISOString()
       : typeof row.expires_at === "string" ? row.expires_at : null,
-    transferId: typeof row.exchange_transfer_id === "string" ? row.exchange_transfer_id : null };
+    transferId: typeof row.exchange_transfer_id === "string" ? row.exchange_transfer_id : null,
+    origin: row.origin === "automatic" ? "automatic" : "manual" };
 }
 function parseCredential(row: Row): Credential | null {
   if (typeof row.decrypted_secret !== "string" || typeof row.key_fingerprint !== "string") return null;
@@ -135,7 +138,7 @@ const ACTIVE = "('prepared','attempted','pending','uncertain')";
 const SELECT_HISTORY = `
 SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
        cashier_before_cents,exchange_transfer_id,expires_at,created_at,
-       attempted_at,completed_at,failure_reason
+       attempted_at,completed_at,failure_reason,origin
 FROM ${TABLE} WHERE owner_user_id=$1::uuid ORDER BY created_at DESC LIMIT 20
 `;
 
@@ -211,7 +214,8 @@ export async function quoteManualSweep(userId: string, input: unknown,
 
 /** Durable COMMIT before one financial POST; NEVER automatically retry a lost response. */
 export async function confirmManualSweep(userId: string, input: unknown,
-  get: Get = getScopedKalshiJson, post: Post = postScopedKalshiCashierSweep): Promise<SweepResult> {
+  get: Get = getScopedKalshiJson, post: Post = postScopedKalshiCashierSweep,
+  automaticAuthorization = false): Promise<SweepResult> {
   if (!enabled()) return fail("withdrawal_feature_disabled");
   if (!input || typeof input !== "object" || Array.isArray(input)) return fail("invalid_request");
   const data = input as Row;
@@ -221,11 +225,14 @@ export async function confirmManualSweep(userId: string, input: unknown,
     const account = await owned(userId);
     if (!account) return fail("withdrawal_account_not_safely_stopped_or_authorized");
     const plan = await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
-      cashier_before_cents,authority_fingerprint,expires_at FROM ${TABLE}
+      cashier_before_cents,authority_fingerprint,expires_at,origin,auto_rule_id,auto_rule_revision FROM ${TABLE}
       WHERE id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3`,
       [data.quoteId,userId,account.row.id]);
     if (plan.rows.length !== 1 || plan.rows[0]!.state !== "prepared") return fail("quote_missing_or_already_used");
     const row = plan.rows[0]!;
+    // A manually supplied quote ID cannot execute an automated quote.
+    if ((row.origin === "automatic") !== automaticAuthorization)
+      return fail("withdrawal_origin_mismatch");
     const amount = amountValue(row,"amount_cents");
     const retain = amountValue(row,"retain_cents");
     if (amount === null || retain === null || amount <= 0 ||
@@ -243,6 +250,12 @@ export async function confirmManualSweep(userId: string, input: unknown,
         SET state='attempted',attempted_at=now(),updated_at=now()
         WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared'
           AND expires_at>now() AND authority_fingerprint=$3
+          AND (origin='manual' OR EXISTS (
+            SELECT 1 FROM private.strata_auto_profit_withdrawal_rules r
+            WHERE r.id=auto_rule_id AND r.owner_user_id=$2::uuid
+              AND r.execution_account_id=execution_account_id
+              AND r.enabled=true AND r.revision=auto_rule_revision
+              AND r.latched=true AND r.last_attempt_id=id))
           AND EXISTS(SELECT 1 FROM public.v13_production_account a
             WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
               AND a.kill_switch=true AND a.reserved_micros=0
