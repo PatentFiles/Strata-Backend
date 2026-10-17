@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/step6ApiFeeObservation*'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/two-source-fee-regression.yml'
   push:
     branches: [main]
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/step6ApiFeeObservation*'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/two-source-fee-regression.yml'
   workflow_dispatch:
 
@@ -38,3 +42,10 @@ jobs:
             --outfile=dist/twoSourceFeeEvidence.test.cjs
       - name: Execute positive, changed-fee and API-failure regression tests
         run: node artifacts/api-server/dist/twoSourceFeeEvidence.test.cjs
+      - name: Bundle Step 6 API-only fallback fail-closed tests
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/step6ApiFeeObservation.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/step6ApiFeeObservation.test.cjs
+      - name: Reject stale, mismatched or authorizing API fee observations
+        run: node --test artifacts/api-server/dist/step6ApiFeeObservation.test.cjs
