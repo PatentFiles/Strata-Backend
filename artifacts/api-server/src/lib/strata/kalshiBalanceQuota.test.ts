@@ -28,3 +28,21 @@ test("full or broken quota denies further calls without sending exchange request
   await assert.rejects(reserveKalshiBalanceReadSlot("key",undefined,
     (async()=>{throw new Error("database unavailable");}) as never),/database unavailable/);
 });
+
+test("all verified keys for one account share a quota; other owners are independent",async()=>{
+  const captures:string[]=[];
+  const ownerA="11111111-1111-4111-8111-111111111111";
+  const ownerB="22222222-2222-4222-8222-222222222222";
+  const fake=async (sql:string,params:unknown[])=>{
+    if(sql.includes("SELECT DISTINCT owner_user_id"))
+      return {rows:[{owner:String(params[0]).startsWith("a")?ownerA:ownerB}]};
+    captures.push(String(params[0]));
+    return {rows:[{wait_ms:0}]};
+  };
+  await reserveKalshiBalanceReadSlot("key-a",undefined,fake as never,"a".repeat(64));
+  await reserveKalshiBalanceReadSlot("key-b",undefined,fake as never,("a".repeat(63)+"b"));
+  await reserveKalshiBalanceReadSlot("key-c",undefined,fake as never,"b".repeat(64));
+  assert.equal(captures.length,3);
+  assert.equal(captures[0],captures[1]);
+  assert.notEqual(captures[0],captures[2]);
+});
