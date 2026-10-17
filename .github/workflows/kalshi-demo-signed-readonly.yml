@@ -4,6 +4,7 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedReadOnly*'
       - 'artifacts/api-server/src/lib/strata/kalshiDemoAuthenticatedProbe*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedIoc*'
       - 'artifacts/api-server/src/scripts/runKalshiDemoAuthenticatedGet.ts'
       - '.github/workflows/kalshi-demo-signed-readonly.yml'
   push:
@@ -35,3 +36,8 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoAuthenticatedProbe.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoAuthenticatedProbe.test.cjs
       - name: Verify no-retry, redacted demo GET evidence
         run: node --test artifacts/api-server/dist/kalshiDemoAuthenticatedProbe.test.cjs
+
+      - name: Bundle signed DEMO IOC one-shot tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoSignedIoc.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoSignedIoc.test.cjs
+      - name: Test signed DEMO IOC fencing, no-retry, partial fills and fail closed
+        run: node --test artifacts/api-server/dist/kalshiDemoSignedIoc.test.cjs
