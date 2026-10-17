@@ -7,6 +7,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
       - 'artifacts/api-server/src/lib/strata/ownerFee*'
+      - 'artifacts/api-server/src/lib/strata/legacyOfficialFeeCaptureGate*'
+      - 'artifacts/api-server/src/lib/strata/commissioningStore.ts'
       - 'artifacts/api-server/src/lib/strata/guardedOwnerFeeWire*'
       - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
       - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
@@ -33,6 +35,10 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
+      - name: Bundle legacy official fee capture fail-closed tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/legacyOfficialFeeCaptureGate.test.ts --bundle --platform=node --format=cjs --outfile=dist/legacyOfficialFeeCaptureGate.test.cjs
+      - name: Reject legacy verified flags without matching provider fee capture
+        run: node --test artifacts/api-server/dist/legacyOfficialFeeCaptureGate.test.cjs
       - name: Bundle stage tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeSourceStage.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeSourceStage.test.cjs
       - name: Run stage negative cases

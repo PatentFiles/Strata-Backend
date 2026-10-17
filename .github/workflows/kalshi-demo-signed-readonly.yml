@@ -1,0 +1,31 @@
+name: Kalshi demo-only signed GET proof
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedReadOnly*'
+      - '.github/workflows/kalshi-demo-signed-readonly.yml'
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  demo-signer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Bundle demo-only signature and transport-denial tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoSignedReadOnly.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoSignedReadOnly.test.cjs
+      - name: Verify signatures and fail-closed GET scope
+        run: node --test artifacts/api-server/dist/kalshiDemoSignedReadOnly.test.cjs
