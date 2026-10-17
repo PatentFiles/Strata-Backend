@@ -40,6 +40,7 @@ const ACCOUNT=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const CLIENT_ID=/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
 const QUANTITY=/^\d{1,9}\.\d{2}$/;
+const PRICE=/^0\.\d{4}$|^1\.0000$/;
 const HOLDER=/^[A-Za-z0-9._:-]{1,128}$/;
 function hundredths(x:string):bigint {
   const [whole,fraction]=x.split(".");
@@ -67,6 +68,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
   if(!order||!MARKET.test(String(order.ticker??""))||
      typeof order.client_order_id!=="string"||!CLIENT_ID.test(order.client_order_id)||
      typeof order.count!=="string"||!QUANTITY.test(order.count)||
+     typeof order.price!=="string"||!PRICE.test(order.price)||
      !["ask","bid"].includes(String(order.side??""))||
      hundredths(order.count)<=0n||hundredths(order.count)>100000n||
      order.reduce_only!==true||order.time_in_force!=="immediate_or_cancel"||
@@ -115,6 +117,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND r.reducing_side=$7::text AND r.quantity_hundredths=$8::bigint " +
       "AND r.worker_holder_id=$9::text AND r.worker_fencing_token=$10::bigint " +
       "AND r.state='PREPARED' AND r.trading_authorized=false " +
+      "AND r.created_at > now()-interval '30 seconds' " +
       "AND a.subaccount=1 AND a.exchange_index=2 " +
       "AND a.key_fingerprint=$11::text AND a.commissioned=true " +
       "AND a.kill_switch=false AND a.execution_enabled=true " +
@@ -140,6 +143,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "WHERE reservation_id=$1::uuid AND owner_user_id=$2::uuid " +
       "AND execution_account_id=$3::text AND order_digest=$4::text " +
       "AND client_order_id=$5::text AND state='PREPARED' " +
+      "AND created_at > now()-interval '30 seconds' " +
       "AND trading_authorized=false " +
       "RETURNING reservation_id,client_order_id",
       [reservationId,ownerId,accountId,digest,order.client_order_id],
