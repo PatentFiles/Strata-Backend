@@ -1,4 +1,5 @@
 import { pool } from "@workspace/db";
+import { processAutoWithdrawalMaintenance } from "./autoWithdrawalMaintenance";
 import { quoteManualSweep, confirmManualSweep, reconcileManualSweep, sweepAvailability, withdrawalTransfersEnabled, CASHIER_SWEEP_CONFIRMATION } from "./manualProfitWithdrawals";
 export const AUTO_CONFIRMATION="ENABLE_AUTOMATIC_KALSHI_CASH_SWEEPS_FOR_MY_ACCOUNT";
 const R="private.strata_auto_profit_withdrawal_rules", W="private.strata_manual_profit_withdrawals";
@@ -32,27 +33,9 @@ export async function saveAutoRule(owner:string,input:unknown):Promise<AutoRule>
 }
 export async function processAutoRule(owner:string):Promise<string>{
  if(!live())return "money_movement_disabled";
- const r=await readAutoRule(owner);if(!r.ok||!r.enabled||!r.id)return "rule_disabled";
- if(r.lastAttemptId){const last=await pool.query(`SELECT state,origin FROM ${W} WHERE id=$1::uuid AND owner_user_id=$2::uuid`,[r.lastAttemptId,owner]);
- const row=last.rows[0];if(row?.origin==="automatic"&&["pending","attempted","uncertain"].includes(String(row.state))){await reconcileManualSweep(owner,r.lastAttemptId);return "previous_attempt_reconciling";}
- if(r.latched&&row?.state!=="completed")return "previous_attempt_unresolved";}
- const a=await sweepAvailability(owner,r.minimumRetainedCents);
- if(!a.ok||a.botCashCents===null||a.maximumCents===null)return "waiting_for_safe_stopped_bot";
- if(r.latched){if(a.botCashCents<r.thresholdCents){await pool.query(`UPDATE ${R} SET latched=false,updated_at=now(),last_observed_below_at=now() WHERE id=$1::uuid AND owner_user_id=$2::uuid AND revision=$3 AND enabled=true`,[r.id,owner,r.revision]);return "rearmed";}return "awaiting_next_crossing";}
- if(a.botCashCents<r.thresholdCents)return "below_threshold";
- if(a.maximumCents<r.withdrawCents)return "insufficient_excess_cash";
- const quote=await quoteManualSweep(owner,{amountCents:r.withdrawCents,minimumRetainedCents:r.minimumRetainedCents});if(!quote.ok||!quote.id)return "quote_unavailable";
- const db=await pool.connect();let authorized=false;
- try{await db.query("BEGIN");
- const rule=await db.query(`UPDATE ${R} SET latched=true,last_attempt_id=$4::uuid,last_triggered_at=now(),updated_at=now() WHERE id=$1::uuid AND owner_user_id=$2::uuid AND revision=$3 AND enabled=true AND latched=false AND trigger_cents<=$5 AND withdraw_cents=$6 AND retain_cents=$7 RETURNING id`,[r.id,owner,r.revision,quote.id,a.botCashCents,r.withdrawCents,r.minimumRetainedCents]);
- if(rule.rows.length!==1){await db.query("ROLLBACK");return "rule_changed";}
- const ledger=await db.query(`UPDATE ${W} SET origin='automatic',auto_rule_id=$3::uuid,auto_rule_revision=$4 WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared' RETURNING id`,[quote.id,owner,r.id,r.revision]);
- if(ledger.rows.length!==1){await db.query("ROLLBACK");return "quote_changed";}
- await db.query("COMMIT");authorized=true;
- }catch{await db.query("ROLLBACK").catch(()=>undefined);}finally{db.release();}
- if(!authorized)return "authorization_failed";
- const result=await confirmManualSweep(owner,{quoteId:quote.id,confirmation:CASHIER_SWEEP_CONFIRMATION},undefined,undefined,true);
- return result.reason;
+ const rule=await readAutoRule(owner);
+ if(!rule.ok || !rule.id)return "rule_unavailable";
+ return processAutoWithdrawalMaintenance(owner,rule);
 }
 export function startAutoSweepWorker():void{
  if(process.env.NODE_ENV!=="production"||process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED!=="true")return;
