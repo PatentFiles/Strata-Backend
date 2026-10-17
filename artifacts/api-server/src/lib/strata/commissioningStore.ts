@@ -19,6 +19,7 @@ import {
   verifyOfficialFeePdfBytes,
 } from "../microLiveFeeArtifact";
 import { REVIEWED_RELEASE } from "./reviewedRelease";
+import {legacyFeeHasCurrentOfficialCapture} from "./legacyOfficialFeeCaptureGate";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
@@ -302,8 +303,26 @@ export async function readCommissioningSnapshot(
       snapshot.signer.historyComplete = snapshot.signer.configured;
     }
     if (row?.fee_artifact_verified === true && typeof row.fee_artifact_digest === "string") {
+      // Preserve the legacy digest for audit, but never equate the historical
+      // boolean with a current first-party PDF capture. Uploaded PDFs and
+      // old singleton flags cannot satisfy Step 6 on their own.
       snapshot.fee.digest = row.fee_artifact_digest;
-      snapshot.fee.verified = true;
+      snapshot.fee.verified = false;
+      try {
+        const captures = await query(
+          "SELECT canonical_url, content_sha256, storage_path, byte_length, captured_at, expires_at " +
+          "FROM strata_official_fee_captures " +
+          "WHERE content_sha256 = $1 AND canonical_url = $2 " +
+          "AND expires_at > now() AND captured_at <= now() LIMIT 2",
+          [row.fee_artifact_digest, CANONICAL_FEE_SCHEDULE_URL],
+        );
+        snapshot.fee.verified = legacyFeeHasCurrentOfficialCapture(
+          row.fee_artifact_verified, row.fee_artifact_digest, captures.rows, Date.now(),
+        );
+      } catch {
+        // Database unavailability cannot manufacture official provenance.
+        snapshot.fee.verified = false;
+      }
     }
     if (row?.cash_precision_verified === true &&
         typeof row.cash_micros === "string" && /^[0-9]+$/.test(row.cash_micros) &&
