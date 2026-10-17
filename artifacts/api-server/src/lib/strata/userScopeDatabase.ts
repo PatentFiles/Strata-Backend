@@ -566,6 +566,18 @@ export function createDatabaseUserScopePort(
       if (action !== "START" && action !== "ARM") {
         return refused(userId, "control_action_rejected", account);
       }
+      // A durable maintenance hold fences START/ARM independently of the
+      // withdrawal quote ledger. It remains active throughout STOP and
+      // protective-exit drain, not only after an exchange POST is attempted.
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+        try {
+          const holds=await db.query(
+            "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+            [userId,account.id],
+          );
+          if(holds.rows.length)return refused(userId,"automatic_withdrawal_maintenance_active",account);
+        }catch{return refused(userId,"automatic_maintenance_safety_unavailable",account);}
+      }
       // Do not arm or start while a cash withdrawal is quoted or unreconciled.
       // The legacy trading flow is unchanged while the feature is disabled.
       if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
