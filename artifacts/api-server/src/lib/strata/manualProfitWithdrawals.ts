@@ -73,6 +73,7 @@ SELECT a.id, a.owner_user_id, a.subaccount, a.exchange_index,
        a.kill_switch, a.execution_enabled, a.cash_precision_verified,
        a.reserved_micros::text AS reserved_micros,
        a.initial_cash_micros::text AS initial_cash_micros,
+       m.state AS maintenance_state, m.owner_user_id AS maintenance_owner,
        c.id AS credential_id,c.key_fingerprint,s.decrypted_secret,
        (SELECT count(*)::int FROM v13_production_position p
          WHERE p.account_id=a.id AND p.quantity_hundredths>0) AS open_positions,
@@ -90,6 +91,8 @@ JOIN private.kalshi_connection_credentials c
   AND c.role='account_setup_execution' AND c.revoked_at IS NULL
   AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
 JOIN vault.decrypted_secrets s ON s.id=c.vault_secret_id
+LEFT JOIN private.strata_auto_withdrawal_maintenance m
+  ON m.execution_account_id=a.id AND m.owner_user_id=a.owner_user_id
 WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
 `;
 /**
