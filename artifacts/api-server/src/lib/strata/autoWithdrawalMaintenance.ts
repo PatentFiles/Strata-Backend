@@ -22,8 +22,9 @@ export function automaticResumeAuthorized(input:{
   wasRunning:boolean;wasArmed:boolean;initialKillSwitch:boolean;
   ownerInterrupted:boolean;ruleEnabled:boolean;ruleMatches:boolean;
 }):boolean{
-  return input.wasRunning && input.wasArmed && !input.initialKillSwitch &&
-    !input.ownerInterrupted && input.ruleEnabled && input.ruleMatches;
+  return input.wasRunning===true && input.wasArmed===true &&
+    input.initialKillSwitch===false && input.ownerInterrupted===false &&
+    input.ruleEnabled===true && input.ruleMatches===true;
 }
 
 async function read(owner:string):Promise<Row|null>{
