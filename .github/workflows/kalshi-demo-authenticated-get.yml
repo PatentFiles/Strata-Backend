@@ -1,0 +1,31 @@
+name: Kalshi DEMO authenticated GET (manual, read only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  authenticated-demo-get:
+    # Never run this operator-secret workflow on PR branches.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: kalshi-demo
+    env:
+      STRATA_DEMO_KALSHI_KEY_ID: ${{ secrets.STRATA_DEMO_KALSHI_KEY_ID }}
+      STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM: ${{ secrets.STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Build read-only DEMO GET runner
+        run: pnpm --filter @workspace/api-server exec esbuild src/scripts/runKalshiDemoAuthenticatedGet.ts --bundle --platform=node --format=cjs --outfile=dist/runKalshiDemoAuthenticatedGet.cjs
+      - name: Execute one demo balance GET and emit redacted status
+        run: node artifacts/api-server/dist/runKalshiDemoAuthenticatedGet.cjs
