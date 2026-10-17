@@ -165,6 +165,19 @@ export function createProductionPersonalSession(
     if (!fingerprint || fingerprint !== text(loaded.row.key_fingerprint) || fingerprint !== text(loaded.row.credential_fingerprint)) {
       return { ok: false, reason: "credential_fingerprint_mismatch" };
     }
+    // Independent worker-level guard: outstanding cashier transfers must settle
+    // before a live worker can acquire a lease, even if the controller races.
+    if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
+      try {
+        const withdrawals = await db.query(
+          "SELECT id FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1",
+          [input.accountId, input.userId],
+        );
+        if (withdrawals.rows.length > 0) return { ok: false, reason: "withdrawal_in_progress" };
+      } catch {
+        return { ok: false, reason: "withdrawal_safety_unavailable" };
+      }
+    }
     if (!flag(loaded.row.commissioned)) return { ok: false, reason: "user_execution_account_not_commissioned" };
     if (flag(loaded.row.kill_switch) || !flag(loaded.row.execution_enabled)) {
       return { ok: false, reason: "account_kill_switch" };
