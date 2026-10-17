@@ -312,16 +312,17 @@ export async function reconcileManualSweep(userId:string, withdrawalId:unknown,
   if(typeof withdrawalId!=="string" || !UUID.test(withdrawalId))return fail("invalid_withdrawal_id");
   try{
     const result=await pool.query(`SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
-      cashier_before_cents,exchange_transfer_id,expires_at,execution_account_id
+      cashier_before_cents,exchange_transfer_id,expires_at,execution_account_id,origin
       FROM ${TABLE} WHERE owner_user_id=$1::uuid AND id=$2::uuid`,[userId,withdrawalId]);
     if(result.rows.length!==1)return fail("withdrawal_not_found");
     const record=result.rows[0]!;
     if(record.state==="completed")return exposed(record,"withdrawal_completed");
     if(record.state==="prepared")return exposed(record,"withdrawal_not_submitted");
     if(typeof record.exchange_transfer_id!=="string")return exposed(record,"transfer_unconfirmed_manual_review_required",false);
-    const account=await owned(userId);
+    const origin=record.origin==="automatic"?"automatic":"manual";
+    const account=await owned(userId,origin);
     if(!account || account.row.id!==record.execution_account_id ||
-        !ownerSafe(account.row))return exposed(record,"reconciliation_owner_or_safety_unproven",false);
+        !ownerSafe(account.row,origin))return exposed(record,"reconciliation_owner_or_safety_unproven",false);
     const payload=await get(account.creds,`${TRANSFER_PATH}/${record.exchange_transfer_id}`,"");
     if(!payload || typeof payload!=="object" || Array.isArray(payload))return exposed(record,"exchange_receipt_unavailable",false);
     const transfer=(payload as Row).transfer;
