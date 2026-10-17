@@ -241,7 +241,7 @@ test("wallet reads the caller's Vault connection before execution ownership exis
   const port = createDatabaseUserScopePort(db, {
     kalshiGet: async (creds, path, query = "") => {
       assert.equal(creds.keyId, "key-a");
-      if (query.includes("subaccount=")) throw new Error("bot_unavailable");
+      if (query.includes("subaccount=1")) throw new Error("bot_unavailable");
       if (path.endsWith("/account/limits")) return { usage_tier: "basic" };
       if (path.endsWith("/portfolio/balance")) return { balance_dollars: "25.0000", portfolio_value: 1234 };
       return {};
