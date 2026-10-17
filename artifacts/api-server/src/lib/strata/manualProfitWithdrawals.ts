@@ -100,17 +100,23 @@ WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
  * no intents, no reservations. This ensures order submission cannot race
  * the cross-shard movement without modifying the trading engine.
  */
-function ownerSafe(row: Row): boolean {
-  return row.kill_switch === true &&
+function ownerSafe(row: Row, origin: "manual" | "automatic" = "manual"): boolean {
+  // Automated sweeps use a separate persisted entry-maintenance fence instead
+  // of turning off a user's live kill switch and restoring it later.
+  const maintenance = origin === "automatic" &&
+    (row.maintenance_state === "ready_to_transfer" ||
+     row.maintenance_state === "reconciling") &&
+    row.maintenance_owner === row.owner_user_id;
+  return (row.kill_switch === true || maintenance) &&
     row.cash_precision_verified === true &&
     row.reserved_micros === "0" &&
     Number(row.open_positions) === 0 &&
     Number(row.unresolved_intents) === 0 &&
     Number(row.active_workers) === 0;
 }
-async function owned(userId: string): Promise<{ row: Row; creds: Credential } | null> {
+async function owned(userId: string, origin: "manual" | "automatic" = "manual"): Promise<{ row: Row; creds: Credential } | null> {
   const r = await pool.query(OWNER_SQL, [userId]);
-  if (r.rows.length !== 1 || !ownerSafe(r.rows[0]!)) return null;
+  if (r.rows.length !== 1 || !ownerSafe(r.rows[0]!,origin)) return null;
   const creds = parseCredential(r.rows[0]!);
   return creds ? { row: r.rows[0]!, creds } : null;
 }
