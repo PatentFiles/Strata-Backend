@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 
 export const KALSHI_SERIES = "KXBTC15M";
-export const KALSHI_API_ORIGIN = "https://api.elections.kalshi.com/trade-api/v2";
+export const KALSHI_API_ORIGIN = "https://external-api.kalshi.com/trade-api/v2";
 export const REVIEWED_REFERENCE_PDF_SHA256 =
   "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601";
 const MAX_BYTES = 256_000;
@@ -111,6 +111,7 @@ export async function probeCurrentKalshiFeeApi(
       !!m && (m.status === "open" || m.status === "active") &&
       canonicalTime(m.close_time) !== null &&
       canonicalTime(m.close_time)! > now &&
+      (m.exchange_index === undefined || m.exchange_index === 2) &&
       tickerPattern.test(String(m.ticker ?? ""))).sort((a, b) =>
         canonicalTime(a.close_time)! - canonicalTime(b.close_time)!);
     const target = open[0];
@@ -133,7 +134,10 @@ export async function probeCurrentKalshiFeeApi(
     if (!market || !event || !series || market.ticker !== ticker ||
         market.event_ticker !== eventTicker || market.close_time !== target.close_time ||
         event.event_ticker !== eventTicker || event.series_ticker !== SERIES ||
-        series.ticker !== SERIES || !exactStandard(series.fee_type, series.fee_multiplier))
+        series.ticker !== SERIES || series.exchange_index !== 2 ||
+        (market.exchange_index !== undefined && market.exchange_index !== 2) ||
+        (event.exchange_index !== undefined && event.exchange_index !== 2) ||
+        !exactStandard(series.fee_type, series.fee_multiplier))
       return fail("series_event_fee_mismatch");
     if (!noOverrides(event) || Object.keys(market).some(k =>
       /fee|rebate/i.test(k) && market[k] !== null && market[k] !== false && market[k] !== undefined))
