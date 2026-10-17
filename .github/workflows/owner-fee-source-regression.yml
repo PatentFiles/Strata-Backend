@@ -33,6 +33,10 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
+      - name: Bundle Kalshi demo-only signed GET verification
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/kalshiDemoSignedReadOnly.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiDemoSignedReadOnly.test.cjs
+      - name: Test RSA-PSS and Ed25519 demo signing and strict read-only transport
+        run: node --test artifacts/api-server/dist/kalshiDemoSignedReadOnly.test.cjs
       - name: Bundle stage tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeSourceStage.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeSourceStage.test.cjs
       - name: Run stage negative cases
