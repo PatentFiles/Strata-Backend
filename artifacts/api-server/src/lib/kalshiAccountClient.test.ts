@@ -3455,3 +3455,39 @@ test("HTTP failures expose only error type and status, never response or credent
     restoreEnvironment();
   }
 });
+
+test("cashier sweep is fixed to owner bot shard 2 -> primary cashier shard 0 with centicent precision", async () => {
+  const previous = process.env.KALSHI_API_ENVIRONMENT;
+  process.env.KALSHI_API_ENVIRONMENT = "production";
+  let calls = 0;
+  const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls++;
+    assert.equal(new URL(String(input)).pathname,
+      "/trade-api/v2/portfolio/intra_exchange_instance_transfer");
+    assert.equal(init?.method, "POST");
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.deepEqual(body, {
+      source: "event_contract", destination: "event_contract",
+      amount: 7_500_000, // $750 in centicents
+      source_exchange_shard: 2, destination_exchange_shard: 0,
+      source_subaccount: 1, destination_subaccount: 0,
+    });
+    return { status: 200, json: async () => ({ transfer_id: "cashier-transfer-1234" }) } as Response;
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      kalshiClient.postScopedKalshiCashierSweep({ keyId: "k", privateKey: privateKeyPem }, -1, fetcher),
+      /INVALID_RESPONSE/,
+    );
+    assert.equal(calls, 0);
+    const result = await kalshiClient.postScopedKalshiCashierSweep(
+      { keyId: "k", privateKey: privateKeyPem }, 75_000, fetcher,
+    );
+    assert.equal(result.transferId, "cashier-transfer-1234");
+    assert.equal(result.unreadable, false);
+    assert.equal(calls, 1);
+  } finally {
+    if (previous === undefined) delete process.env.KALSHI_API_ENVIRONMENT;
+    else process.env.KALSHI_API_ENVIRONMENT = previous;
+  }
+});
