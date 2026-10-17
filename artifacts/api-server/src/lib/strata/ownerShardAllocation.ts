@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
+import { safeBalanceFailureReason } from "./kalshiBalanceQuota";
 import { getScopedKalshiJson, postScopedKalshiShardAllocation } from "../kalshiAccountClient";
 
 /**
