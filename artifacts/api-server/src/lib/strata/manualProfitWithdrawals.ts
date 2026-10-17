@@ -143,6 +143,27 @@ async function signedBalances(creds: Credential, get: Get): Promise<Snapshot | n
       ? { botCents: b, cashierCents: c } : null;
   } catch { return null; }
 }
+/** Read-only observation may run while trading; never authorizes a transfer. */
+export async function observeAutomaticSweepCash(userId:string):Promise<{
+  accountId:string;botCashCents:number;cashierCashCents:number;
+  killSwitch:boolean;executionEnabled:boolean;cashPrecisionVerified:boolean;
+}|null>{
+  try{
+    const result=await pool.query(OWNER_SQL,[userId]);
+    if(result.rows.length!==1)return null;
+    const row=result.rows[0]!;
+    const material=parseCredential(row);
+    if(!material)return null;
+    const balances=await signedBalances(material,getScopedKalshiJson);
+    if(!balances)return null;
+    return {
+      accountId:String(row.id),botCashCents:balances.botCents,cashierCashCents:balances.cashierCents,
+      killSwitch:row.kill_switch===true,executionEnabled:row.execution_enabled===true,
+      cashPrecisionVerified:row.cash_precision_verified===true,
+    };
+  }catch{return null;}
+}
+
 const ACTIVE = "('prepared','attempted','pending','uncertain')";
 const SELECT_HISTORY = `
 SELECT id::text,state,amount_cents,retain_cents,bot_before_cents,
