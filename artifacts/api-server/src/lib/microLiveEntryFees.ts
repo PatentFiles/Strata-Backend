@@ -10,7 +10,7 @@ import {
   beginFeeVerification, feeVerificationAttemptIsPending, finishFeeVerification,
   type FeeVerificationIdentity, type FeeVerificationStatus,
 } from "./microLiveFeeVerification";
-const API = "https://api.elections.kalshi.com/trade-api/v2";
+const API = "https://external-api.kalshi.com/trade-api/v2";
 const SERIES = "KXBTC15M";
 const MAX_READ_MS = 10_000;
 const MAX_FEE_EXPOSURE_MICROS = 5_000_000;
@@ -293,14 +293,16 @@ async function json(fetchImpl: typeof fetch, url: string): Promise<unknown> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      cache: "no-store",
+      method: "GET", redirect: "error", cache: "no-store",
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(MAX_READ_MS),
     });
   } catch {
     throw new FeeEvidenceUnavailableError("kalshi_fee_evidence_unavailable");
   }
-  if (!response.ok) throw new FeeEvidenceUnavailableError("kalshi_fee_evidence_unavailable");
+  // Never accept redirected data from another host or path for live fee sizing.
+  if (!response.ok || (response.url && response.url !== url))
+    throw new FeeEvidenceUnavailableError("kalshi_fee_evidence_unavailable");
   try {
     return await response.json();
   } catch {
@@ -728,6 +730,7 @@ async function readCurrentEntryFeeTermsCore(
     }
     const open = listing.markets.map(record).filter((m): m is Record<string, unknown> =>
       m !== null && (m.status === "open" || m.status === "active") &&
+      (m.exchange_index === undefined || m.exchange_index === 2) &&
       typeof m.close_time === "string" && Date.parse(m.close_time) > Date.now())
       .sort((a, b) => Date.parse(String(a.close_time)) - Date.parse(String(b.close_time)));
     if (open[0]?.ticker !== ticker || open.some((m, i) =>
@@ -744,6 +747,7 @@ async function readCurrentEntryFeeTermsCore(
     }
     const eventTicker = market?.event_ticker;
     if (market?.ticker !== ticker || market?.status !== open[0]?.status ||
+        (market.exchange_index !== undefined && market.exchange_index !== 2) ||
         market?.close_time !== open[0]?.close_time ||
         market?.event_ticker !== open[0]?.event_ticker ||
         typeof eventTicker !== "string" ||
@@ -785,7 +789,9 @@ async function readCurrentEntryFeeTermsCore(
       event?.series_ticker === SERIES
       ? pairFeeState(event.fee_type_override, event.fee_multiplier_override, true)
       : undefined;
-    if (seriesTimestamp !== null && !Number.isFinite(seriesTimestamp) ||
+    if (series?.exchange_index !== 2 ||
+        (event?.exchange_index !== undefined && event.exchange_index !== 2) ||
+        seriesTimestamp !== null && !Number.isFinite(seriesTimestamp) ||
         eventTimestamp !== null && !Number.isFinite(eventTimestamp) ||
         !currentSeriesState || currentEventState === undefined) {
       return rejectFeeEvidence("series_or_event_fee_metadata_invalid");

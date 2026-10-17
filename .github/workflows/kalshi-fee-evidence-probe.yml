@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - .github/workflows/kalshi-fee-evidence-probe.yml
+      - artifacts/api-server/src/lib/microLiveEntryFees.ts
+      - artifacts/api-server/src/lib/microLiveEntryFees.test.ts
+      - artifacts/api-server/src/lib/strata/twoSourceFeeEvidence.ts
 
 permissions:
   contents: read

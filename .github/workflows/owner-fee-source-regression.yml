@@ -10,6 +10,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
       - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
       - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/strata/workerUncertainOrderGate*'
+      - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - 'sql/strata_fee_source_policy_independent_reviews.sql'
       - 'sql/strata_emergency_exit_reservation_private.sql'
@@ -43,6 +45,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeSourceConsent.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeSourceConsent.test.cjs
       - name: Test owner consent UUIDs, isolation, duplicate prevention and revocation
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeSourceConsent.test.cjs
+      - name: Bundle unresolved-intent worker-start guard
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/workerUncertainOrderGate.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerUncertainOrderGate.test.cjs
+      - name: Test worker fail-closed behavior for unverified intent counts
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/workerUncertainOrderGate.test.cjs
       - name: Bundle emergency exit read-only verification tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExit.test.cjs
       - name: Test expired grant recovery evidence and zero-authority fail-closed cases
@@ -67,6 +73,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRead.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRead.test.cjs
       - name: Test emergency recovery scoped reads and isolation
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRead.test.cjs
+      - name: Bundle official API fee metadata diagnostic tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/twoSourceFeeEvidence.test.cjs
+      - name: Test official-series identity, fee changes and non-authorizing API evidence
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/twoSourceFeeEvidence.test.cjs
       - name: Bundle exact policy digest test
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/operatorFeePolicyDecision.test.ts --bundle --platform=node --format=cjs --outfile=dist/operatorFeePolicyDecision.test.cjs
       - name: Validate pinned human policy approval decision hash
