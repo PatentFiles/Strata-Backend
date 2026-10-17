@@ -540,12 +540,12 @@ test("cash and commissioning writes require explicit confirmation", async () => 
 
 test("owned market evidence uses the configured stake and rejects an unproven fee grid", () => {
   const book = { orderbook_fp: { yes_dollars: [["0.4500", "100"]], no_dollars: [["0.5000", "100"]] } };
-  const series = { series: { ticker: "KXBTC15M", fee_type: "quadratic", fee_multiplier: "1" } };
+  const series = { series: { ticker: "KXBTC15M", exchange_index: 2, fee_type: "quadratic", fee_multiplier: "1" } };
   const eventTicker = "KXBTC15M-TEST-EVENT";
   const close = new Date(NOW + 15*60_000).toISOString();
   const expires = new Date(NOW + 16*60_000).toISOString();
   const eventPayload = { event: { event_ticker: eventTicker, series_ticker: "KXBTC15M",
-    fee_type_override: null, fee_multiplier_override: null } };
+    exchange_index: 2, fee_type_override: null, fee_multiplier_override: null } };
   const seriesChangesPayload = { series_fee_change_arr: [], cursor: "" };
   const eventChangesPayload = { event_fee_changes: [], cursor: "" };
   const market = { market: { ticker: "KXBTC15M-TEST", event_ticker: eventTicker,
