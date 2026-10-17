@@ -40,7 +40,7 @@ const ACCOUNT=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const CLIENT_ID=/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
 const QUANTITY=/^\d{1,9}\.\d{2}$/;
-const PRICE=/^0\.\d{4}$|^1\.0000$/;
+const PRICE=/^0\.(?!0000)\d{4}$/;
 const HOLDER=/^[A-Za-z0-9._:-]{1,128}$/;
 function hundredths(x:string):bigint {
   const [whole,fraction]=x.split(".");
