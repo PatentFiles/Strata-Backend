@@ -98,6 +98,19 @@ try{
    const duplicate=await insert(pool,uid(4),cid(4));
    assert.equal(duplicate.rowCount,0);
  });
+ await verify("DB trigger prohibits UNKNOWN replay, identity mutation and skipped states",async()=>{
+   await assert.rejects(pool.query(
+     "UPDATE private.strata_demo_ioc_attempt SET state='PREPARED' WHERE attempt_id=$1",[uid(1)]),
+     /invalid demo IOC state transition/);
+   await assert.rejects(pool.query(
+     "UPDATE private.strata_demo_ioc_attempt SET client_order_id=$2 WHERE attempt_id=$1",
+     [uid(1),cid(81)]),/immutable identity/);
+   await assert.rejects(pool.query(
+     "UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1",
+     [uid(1)]).then(async()=>pool.query(
+       "UPDATE private.strata_demo_ioc_attempt SET state='UNKNOWN' WHERE attempt_id=$1",
+       [uid(1)])),/invalid demo IOC state transition/);
+ });
  await verify("rollback leaves PREPARED; no durable UNKNOWN grant",async()=>{
    await pool.query("UPDATE private.strata_demo_ioc_attempt SET state='RECONCILED' WHERE attempt_id=$1 AND state='UNKNOWN'",[uid(1)]);
    const inserted=await insert(pool,uid(5),cid(5));
