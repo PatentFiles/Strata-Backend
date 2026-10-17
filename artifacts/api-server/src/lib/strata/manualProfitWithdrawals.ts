@@ -252,10 +252,11 @@ export async function confirmManualSweep(userId: string, input: unknown,
           AND expires_at>now() AND authority_fingerprint=$3
           AND (origin='manual' OR EXISTS (
             SELECT 1 FROM private.strata_auto_profit_withdrawal_rules r
-            WHERE r.id=auto_rule_id AND r.owner_user_id=$2::uuid
-              AND r.execution_account_id=execution_account_id
-              AND r.enabled=true AND r.revision=auto_rule_revision
-              AND r.latched=true AND r.last_attempt_id=id))
+            WHERE r.id=strata_manual_profit_withdrawals.auto_rule_id
+              AND r.owner_user_id=$2::uuid
+              AND r.execution_account_id=strata_manual_profit_withdrawals.execution_account_id
+              AND r.enabled=true AND r.revision=strata_manual_profit_withdrawals.auto_rule_revision
+              AND r.latched=true AND r.last_attempt_id=strata_manual_profit_withdrawals.id))
           AND EXISTS(SELECT 1 FROM public.v13_production_account a
             WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
               AND a.kill_switch=true AND a.reserved_micros=0
