@@ -69,6 +69,12 @@ function fixture(){
         source_exchange_shard:0,destination_exchange_shard:receiptDestinationShard,
         amount:receiptAmount,status:receiptStatus}};
     }
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances")
+      return {subaccount_balances:[
+        {subaccount_number:0,exchange_index:0,balance:(cash0/100).toFixed(4),updated_ts:1700000000},
+        {subaccount_number:0,exchange_index:2,balance:(cash2/100).toFixed(4),updated_ts:1700000000},
+        {subaccount_number:1,exchange_index:2,balance:(bot/100).toFixed(4),updated_ts:1700000000},
+      ]};
     if(path!=="/trade-api/v2/portfolio/balance")throw new Error("unexpected path");
     const mapping:Record<string,[number,number,number]>={
       "?subaccount=0&exchange_index=0":[cash0,0,0],
