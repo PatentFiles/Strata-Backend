@@ -13,9 +13,9 @@ function fixture(): OwnedFeeMetadataInput {
       close_time:"2026-10-15T21:15:00Z",expiration_time:"2026-10-15T21:16:00Z",
       latest_expiration_time:"2026-10-15T21:16:00Z",expected_expiration_time:"2026-10-15T21:16:00Z",
     }},
-    seriesPayload:{series:{ticker:"KXBTC15M",fee_type:"quadratic",fee_multiplier:1}},
+    seriesPayload:{series:{ticker:"KXBTC15M",exchange_index:2,fee_type:"quadratic",fee_multiplier:1}},
     eventPayload:{event:{event_ticker:event,series_ticker:"KXBTC15M",
-      fee_type_override:null,fee_multiplier_override:null}},
+      exchange_index:2,fee_type_override:null,fee_multiplier_override:null}},
     seriesChangesPayload:{series_fee_change_arr:[],cursor:""},
     eventChangesPayload:{event_fee_changes:[],cursor:""},
   };
@@ -73,4 +73,14 @@ test("fingerprint binds current fee-change schedule; changed metadata is not equ
   assert.equal(initial.ok,true);
   assert.equal(changed.ok,true);
   if(initial.ok && changed.ok) assert.notEqual(initial.fingerprint,changed.fingerprint);
+});
+
+test("fail closed on wrong or missing exchange index from any exact-market identity", () => {
+  for (const bad of [
+    (p:OwnedFeeMetadataInput)=>{ (p.marketPayload as any).market.exchange_index=1; },
+    (p:OwnedFeeMetadataInput)=>{ delete (p.marketPayload as any).market.exchange_index; },
+    (p:OwnedFeeMetadataInput)=>{ (p.seriesPayload as any).series.exchange_index=1; },
+    (p:OwnedFeeMetadataInput)=>{ delete (p.seriesPayload as any).series.exchange_index; },
+    (p:OwnedFeeMetadataInput)=>{ (p.eventPayload as any).event.exchange_index=1; },
+  ]) assert.equal(verify(bad).ok,false);
 });
