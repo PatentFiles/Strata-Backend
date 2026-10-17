@@ -9,6 +9,7 @@ import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
 import { createStrataCommissioningRouter, type CommissioningPort } from "./strataCommissioning";
 import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
+import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -144,6 +145,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
   const userScope = deps.userScope ?? closedUserScopePort();
+  router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
     const result = await userScope.enableOwnedExecution(req.body ?? {});
