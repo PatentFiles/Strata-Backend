@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS private.strata_demo_ioc_attempt (
   signer_fingerprint text NOT NULL
     CHECK(signer_fingerprint ~ '^[0-9a-f]{64}$'),
   client_order_id text NOT NULL UNIQUE
-    CHECK(client_order_id ~ '^v13p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    CHECK(client_order_id ~ '^v13p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
   market_ticker text NOT NULL
     CHECK(market_ticker ~ '^KXBTC15M-[A-Za-z0-9-]+$'),
   reducing_side text NOT NULL CHECK(reducing_side IN ('bid','ask')),
