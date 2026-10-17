@@ -95,7 +95,7 @@ const CONNECTION_SQL = `
   FROM public.financial_accounts fa
   LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
   LEFT JOIN LATERAL (
-    SELECT c.vault_secret_id
+    SELECT c.vault_secret_id,c.key_fingerprint,c.verified_at
     FROM private.kalshi_connection_credentials c
     WHERE c.owner_user_id = fa.user_id
       AND c.financial_account_id = fa.id
