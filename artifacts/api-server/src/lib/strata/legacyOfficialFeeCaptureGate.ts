@@ -21,7 +21,7 @@ export function legacyFeeHasCurrentOfficialCapture(
   if(!row || typeof row!=="object" || Array.isArray(row) ||
      row.content_sha256!==digest ||
      row.canonical_url!==EXPECTED_OFFICIAL_KALSHI_FEE_URL ||
-     !Number.isSafeInteger(row.byte_length) || (row.byte_length as number)<1 ||
+     typeof row.byte_length!=="number" || !Number.isSafeInteger(row.byte_length) || row.byte_length<1 ||
      typeof row.storage_path!=="string" || !row.storage_path ||
      !row.captured_at || !row.expires_at)return false;
   const start=Date.parse(String(row.captured_at));
