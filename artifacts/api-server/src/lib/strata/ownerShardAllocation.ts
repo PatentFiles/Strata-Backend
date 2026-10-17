@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dedicatedSignerFingerprint } from "./commissioning";
-import { normalizeKalshiMoney } from "./kalshiUserRead";
+
 import { safeBalanceFailureReason } from "./kalshiBalanceQuota";
 import { getScopedKalshiJson, postScopedKalshiShardAllocation } from "../kalshiAccountClient";
 
@@ -150,55 +150,94 @@ async function owner(db: Query, uid: string):Promise<{row:Row;creds:Creds}|null>
     return creds?{row:x.rows[0]!,creds}:null;
   }catch{return null;}
 }
-/** Read only a fixed signed account/shard; unknown or mismatched identity fails closed. */
-function money(value:unknown, shard:0|2, sub:0|1):number|null {
+/**
+ * Monetary evidence uses exact millionths of a USD, Kalshi's documented
+ * fixed-point precision. A whole-cent ledger amount is a downward floor,
+ * never a round-up of unspendable fractional cents.
+ *
+ * Each Kalshi GET is signed with the precise subaccount and exchange-index
+ * query. The independently signed inventory must also agree exactly before
+ * a $25 allocation can be prepared or the receipt can be reconciled.
+ */
+const MICROS_PER_DOLLAR=1_000_000n;
+const MICROS_PER_CENT=10_000n;
+const SHARD_TRANSFER_MICROS=25n*MICROS_PER_DOLLAR;
+const MAX_BIGINT=9_223_372_036_854_775_807n;
+type CashExact={cents:number;micros:bigint};
+type Balances={
+  source:number;destination:number;bot:number;
+  sourceMicros:bigint;destinationMicros:bigint;botMicros:bigint;
+};
+function parseDollarMicro(value:unknown):bigint|null {
+  if(typeof value!=="string"||!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value))return null;
+  const [whole,fraction=""]=value.split(".");
+  const micros=BigInt(whole!)*MICROS_PER_DOLLAR+BigInt(fraction.padEnd(6,"0"));
+  return micros<=MAX_BIGINT?micros:null;
+}
+function centsFloor(micros:bigint):number|null{
+  const n=micros/MICROS_PER_CENT;
+  return n<=BigInt(Number.MAX_SAFE_INTEGER)?Number(n):null;
+}
+/** Reject contradictory echoes; the GET URL itself binds the account shard. */
+function money(value:unknown,shard:0|2,sub:0|1):CashExact|null{
   if(!value||typeof value!=="object"||Array.isArray(value))return null;
   const root=value as Row;
-  const x=root.balance && typeof root.balance==="object" && !Array.isArray(root.balance)
-    ? root.balance as Row:root;
+  const x=root.balance&&typeof root.balance==="object"&&!Array.isArray(root.balance)
+    ?root.balance as Row:root;
   if(x.subaccount!==undefined&&Number(x.subaccount)!==sub)return null;
   if(x.subaccount_number!==undefined&&Number(x.subaccount_number)!==sub)return null;
   if(x.exchange_index!==undefined&&Number(x.exchange_index)!==shard)return null;
-  const cash=normalizeKalshiMoney(x).cashCents;
-  return cash!==null && Number.isSafeInteger(cash) && cash>=0?cash:null;
+  let micros:bigint|null=null;
+  if(x.balance_dollars!==undefined)micros=parseDollarMicro(x.balance_dollars);
+  else if(typeof x.balance==="number"&&Number.isSafeInteger(x.balance)&&x.balance>=0)
+    micros=BigInt(x.balance)*MICROS_PER_CENT;
+  if(micros===null||micros>MAX_BIGINT)return null;
+  const cents=centsFloor(micros);
+  return cents===null?null:{micros,cents};
 }
-type Balances={source:number;destination:number;bot:number};
-/** Kalshi inventory fields are decimal-dollar strings, unlike scoped integer balance cents. */
+/** Inventory balance is a dollar string, not legacy integer cents. */
 function inventoryMatches(payload:unknown,scoped:Balances):boolean{
   if(!payload||typeof payload!=="object"||Array.isArray(payload))return false;
   const records=(payload as Row).subaccount_balances;
   if(!Array.isArray(records)||records.length>100)return false;
-  for(const [sub,shard,cents] of [[0,0,scoped.source],[0,2,scoped.destination],[1,2,scoped.bot]] as const){
+  const expected=[
+    [0,0,scoped.sourceMicros],
+    [0,2,scoped.destinationMicros],
+    [1,2,scoped.botMicros],
+  ] as const;
+  for(const [sub,shard,micros] of expected){
     const matches=records.filter(x=>x&&typeof x==="object"&&!Array.isArray(x)&&
       Number((x as Row).subaccount_number)===sub&&Number((x as Row).exchange_index)===shard);
-    if(matches.length===0 && cents===0)continue; // A zero shard may be omitted.
+    // Kalshi may omit zero-balance rows. Positive unlisted cash is not proved.
+    if(matches.length===0&&micros===0n)continue;
     if(matches.length!==1)return false;
-    const dollar=(matches[0] as Row).balance;
-    if(typeof dollar!=="string"||!/^([0-9]+)([.][0-9]{1,6})?$/.test(dollar))return false;
-    const [whole,fraction=""]=dollar.split(".");
-    const microdollars=BigInt(whole!)*1_000_000n+BigInt(fraction.padEnd(6,"0"));
-    // A six-place fractional holding cannot be rounded into spendable cents.
-    if(microdollars%10_000n!==0n||microdollars/10_000n!==BigInt(cents))return false;
+    if(parseDollarMicro((matches[0] as Row).balance)!==micros)return false;
   }
   return true;
 }
 async function balances(creds:Creds,get:Read,diagnostic?:{reason:string}):Promise<Balances|null>{
   try{
-    // These share Kalshi's strict balance-read quota; never burst them.
+    // Sequential reads; production transport also serializes across same-owner
+    // API keys to respect Kalshi's separate one-per-second balance bucket.
     const inventory=await get(creds,"/trade-api/v2/portfolio/subaccounts/balances","");
     const a=await get(creds,BALANCE,"?subaccount=0&exchange_index=0");
     const b=await get(creds,BALANCE,"?subaccount=0&exchange_index=2");
     const c=await get(creds,BALANCE,"?subaccount=1&exchange_index=2");
-    const source=money(a,0,0),destination=money(b,2,0),bot=money(c,2,1);
-    if(source===null||destination===null||bot===null) {
-      if(diagnostic)diagnostic.reason="shard_cash_scoped_response_invalid";
+    const source=money(a,0,0),dest=money(b,2,0),bot=money(c,2,1);
+    if(!source||!dest||!bot){
+      if(diagnostic)diagnostic.reason=!source?"shard0_primary_scoped_balance_invalid":
+        !dest?"shard2_primary_scoped_balance_invalid":"shard2_bot_scoped_balance_invalid";
       return null;
     }
-    if(!inventoryMatches(inventory,{source,destination,bot})){
+    const result:Balances={
+      source:source.cents,destination:dest.cents,bot:bot.cents,
+      sourceMicros:source.micros,destinationMicros:dest.micros,botMicros:bot.micros,
+    };
+    if(!inventoryMatches(inventory,result)){
       if(diagnostic)diagnostic.reason="shard_cash_inventory_mismatch";
       return null;
     }
-    return {source,destination,bot};
+    return result;
   }catch(e){
     if(diagnostic)diagnostic.reason=safeBalanceFailureReason(e,"shard_cash");
     return null;
