@@ -92,6 +92,18 @@ const CONNECTION_SQL = `
          COALESCE(vc.vault_secret_id,pc.vault_secret_id)::text AS vault_secret_id, pc.key_fingerprint, pc.verified_at
   FROM public.financial_accounts fa
   LEFT JOIN private.provider_connections pc ON pc.financial_account_id = fa.id
+  LEFT JOIN LATERAL (
+    SELECT c.vault_secret_id
+    FROM private.kalshi_connection_credentials c
+    WHERE c.owner_user_id = fa.user_id
+      AND c.financial_account_id = fa.id
+      AND c.provider_connection_id = pc.id
+      AND c.role = 'account_setup_execution'
+      AND c.revoked_at IS NULL
+      AND c.verified_at IS NOT NULL
+      AND c.verification_reason = 'credential_verified'
+    ORDER BY c.verified_at DESC LIMIT 1
+  ) vc ON true
   WHERE fa.user_id = $1::uuid AND fa.provider = 'kalshi'
 `;
 
