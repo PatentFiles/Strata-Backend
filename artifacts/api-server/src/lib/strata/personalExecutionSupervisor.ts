@@ -178,6 +178,15 @@ export function createProductionPersonalSession(
         return { ok: false, reason: "withdrawal_safety_unavailable" };
       }
     }
+    if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+      try {
+        const hold=await db.query(
+          "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+          [input.userId,input.accountId],
+        );
+        if(hold.rows.length)return {ok:false,reason:"automatic_withdrawal_maintenance_active"};
+      }catch{return {ok:false,reason:"automatic_maintenance_safety_unavailable"};}
+    }
     if (!flag(loaded.row.commissioned)) return { ok: false, reason: "user_execution_account_not_commissioned" };
     if (flag(loaded.row.kill_switch) || !flag(loaded.row.execution_enabled)) {
       return { ok: false, reason: "account_kill_switch" };
