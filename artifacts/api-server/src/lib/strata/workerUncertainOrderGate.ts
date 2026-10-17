@@ -17,3 +17,20 @@ export function verifiedUnresolvedIntentMode(rows: unknown):
   }
   return {ok:true,mode:n==="0"?"entries":"recovery"};
 }
+
+/** Treat database failures as missing evidence; never infer entry authority. */
+export async function readUnresolvedIntentMode(
+  query: (sql: string, params: unknown[]) => Promise<{rows:unknown}>,
+  accountId: string,
+): Promise<ReturnType<typeof verifiedUnresolvedIntentMode>> {
+  try {
+    const result = await query(
+      `SELECT count(*)::text AS n FROM v13_production_intent
+       WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
+      [accountId],
+    );
+    return verifiedUnresolvedIntentMode(result?.rows);
+  } catch {
+    return {ok:false,reason:"unresolved_intent_count_unverified"};
+  }
+}

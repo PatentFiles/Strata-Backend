@@ -6,7 +6,7 @@ import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact"
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
-import { verifiedUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -293,12 +293,9 @@ export function createProductionPersonalSession(
       },
       fetchImpl: alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
     });
-    const uncertain = await db.query(
-      `SELECT count(*)::text AS n FROM v13_production_intent
-       WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
-      [input.accountId],
+    const unresolved = await readUnresolvedIntentMode(
+      (sql, params) => db.query(sql, params), input.accountId,
     );
-    const unresolved = verifiedUnresolvedIntentMode(uncertain.rows);
     if (!unresolved.ok) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
