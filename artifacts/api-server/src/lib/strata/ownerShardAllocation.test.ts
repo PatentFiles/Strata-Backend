@@ -268,3 +268,84 @@ test("missing or conflicting cross-shard inventory refuses preflight without sub
  assert.equal(result.reason,"shard_cash_inventory_mismatch");
  assert.equal(f.posts(),0);
 });
+
+test("signed six-decimal source cash prepares without rounding upward",async()=>{
+  const f=fixture();
+  const precise=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await f.read(c,path,q);
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances"){
+      const rows=(response as {subaccount_balances:Record<string,unknown>[]}).subaccount_balances;
+      rows.find(x=>x.subaccount_number===0&&x.exchange_index===0)!.balance="34.500031";
+    }
+    if(path==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=0")
+      return {balance:3450,balance_dollars:"34.500031",updated_ts:1700000000};
+    return response;
+  };
+  const p=await prepareOwnerShardAllocation(f.db,USER,{read:precise});
+  assert.equal(p.ok,true);
+  assert.equal(p.sourceCents,3450);
+  assert.equal(f.posts(),0);
+  const movedDust=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await precise(c,path,q);
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances"){
+      (response as {subaccount_balances:Record<string,unknown>[]}).subaccount_balances
+        .find(x=>x.subaccount_number===0&&x.exchange_index===0)!.balance="34.500032";
+    }
+    if(path==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=0")
+      return {balance:3450,balance_dollars:"34.500032"};
+    return response;
+  };
+  const attempt=await executeOwnerShardAllocation(f.db,USER,
+    {attemptId:p.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION},
+    {read:movedDust,post:f.post,enableTestPost:true});
+  assert.equal(attempt.reason,"shard_balance_changed");
+  assert.equal(f.posts(),0);
+});
+
+test("subcent dust in destination never counts as empty",async()=>{
+  const f=fixture();
+  const precision=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await f.read(c,path,q);
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances"){
+      (response as {subaccount_balances:Record<string,unknown>[]}).subaccount_balances
+        .find(x=>x.subaccount_number===0&&x.exchange_index===2)!.balance="0.000001";
+    }
+    if(path==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=2")
+      return {balance:0,balance_dollars:"0.000001"};
+    return response;
+  };
+  const p=await prepareOwnerShardAllocation(f.db,USER,{read:precision});
+  assert.equal(p.ok,false);
+  assert.equal(p.reason,"destination_shard_not_empty");
+  assert.equal(f.posts(),0);
+});
+
+test("six-decimal inventory mismatch must block transfer without retries",async()=>{
+  const f=fixture();
+  const conflicting=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await f.read(c,path,q);
+    if(path==="/trade-api/v2/portfolio/subaccounts/balances"){
+      (response as {subaccount_balances:Record<string,unknown>[]}).subaccount_balances
+        .find(x=>x.subaccount_number===0&&x.exchange_index===0)!.balance="34.500001";
+    }
+    return response;
+  };
+  const p=await prepareOwnerShardAllocation(f.db,USER,{read:conflicting});
+  assert.equal(p.ok,false);
+  assert.equal(p.reason,"shard_cash_inventory_mismatch");
+  assert.equal(f.posts(),0);
+});
+
+test("contradictory subaccount identity and malformed money fail closed",async()=>{
+  const f=fixture();
+  const mismatched=async(c:typeof cred,path:string,q:string):Promise<unknown>=>{
+    const response=await f.read(c,path,q);
+    if(path==="/trade-api/v2/portfolio/balance"&&q==="?subaccount=0&exchange_index=0")
+      return {balance_dollars:"34.5000",subaccount:1,exchange_index:0};
+    return response;
+  };
+  const p=await prepareOwnerShardAllocation(f.db,USER,{read:mismatched});
+  assert.equal(p.ok,false);
+  assert.equal(p.reason,"shard0_primary_scoped_balance_invalid");
+  assert.equal(f.posts(),0);
+});
