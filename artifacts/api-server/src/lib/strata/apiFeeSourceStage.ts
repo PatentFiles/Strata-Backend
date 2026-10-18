@@ -73,6 +73,13 @@ export const READ_API_FEE_STAGE_SQL=`
    AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'
    AND r1.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
    AND r2.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
+   -- Independent reviewers cannot be the grant issuer or the owner.
+   -- Filter before LIMIT 2: otherwise unrelated reviewer pairs can hide
+   -- the genuine independent pair and make review eligibility ambiguous.
+   AND r1.reviewer_user_id<>g.owner_user_id
+   AND r2.reviewer_user_id<>g.owner_user_id
+   AND r1.reviewer_user_id<>g.issuer_admin_id
+   AND r2.reviewer_user_id<>g.issuer_admin_id
    AND r1.scope=g.scope AND r2.scope=g.scope
    AND r1.fee_model_version=g.fee_model_version
    AND r2.fee_model_version=g.fee_model_version
