@@ -11,11 +11,14 @@ CREATE TABLE IF NOT EXISTS private.strata_api_fee_rate_reviews (
    CHECK(fee_model_version='kalshi_quadratic_007_whole_cent_conservative_reference_v1'),
  scope text NOT NULL DEFAULT 'KXBTC15M:INDEX2' CHECK(scope='KXBTC15M:INDEX2'),
  confirmation text NOT NULL CHECK(confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'),
+ review_note text NOT NULL CHECK (char_length(btrim(review_note)) BETWEEN 100 AND 1600),
+ verified_rate_source text NOT NULL CHECK (verified_rate_source IN ('kalshi_official_fee_publication','kalshi_official_support_confirmation')),
  signed_at timestamptz NOT NULL DEFAULT now(),
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
  CHECK(reviewer_user_id<>owner_user_id),
- CHECK(expires_at>signed_at AND expires_at<=signed_at+interval '2 hours')
+ CHECK(expires_at>signed_at AND expires_at<=signed_at+interval '2 hours'),
+ UNIQUE(owner_user_id,reviewer_user_id,rate_decision_digest)
 );
 CREATE INDEX IF NOT EXISTS strata_api_fee_reviews_scope_idx
  ON private.strata_api_fee_rate_reviews(owner_user_id,rate_decision_digest,expires_at);
@@ -36,6 +39,7 @@ CREATE TABLE IF NOT EXISTS private.strata_api_fee_source_grants (
  issued_at timestamptz NOT NULL DEFAULT now(),
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
+ revocation_reason text,
  CHECK(issuer_admin_id<>owner_user_id),
  CHECK(expires_at>issued_at AND expires_at<=issued_at+interval '15 minutes')
 );
@@ -48,6 +52,7 @@ CREATE TABLE IF NOT EXISTS private.strata_api_fee_owner_consents (
  confirmation text NOT NULL CHECK(confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'),
  confirmed_at timestamptz NOT NULL DEFAULT now(),
  revoked_at timestamptz,
+ revocation_reason text,
  UNIQUE(grant_id,owner_user_id)
 );
 -- No anonymous or authenticated client writes, and no client selects.
