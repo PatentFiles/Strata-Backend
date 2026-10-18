@@ -182,18 +182,62 @@ export async function revokeReviewedFeeSourceGrant(
   }catch{return no("fee_source_grant_revocation_failed");}
 }
 
-/** Administrative discovery only; no balances, emails or credentials returned. */
+/** Admin-only identity labels, never keys, balances, or trading authority. */
+export type FeeSourceOwnerLabel={
+  ownerUserId:string;
+  displayName:string|null;
+  email:string|null;
+};
+export type FeeSourceOwnersResult={
+  ok:boolean;
+  reason:string;
+  ownerUserIds:string[]; // Legacy compatibility for older frontends.
+  owners:FeeSourceOwnerLabel[];
+};
+const safeLabel=(value:unknown,max:number):string|null=>
+  typeof value==="string"&&value.trim()?value.trim().slice(0,max):null;
+
+/**
+ * Show the verified user identifier together with the user's own profile
+ * display name and account email. An operator cannot safely distinguish the
+ * four execution accounts by UUID alone.
+ *
+ * Authorization is checked BEFORE the PII query. Only confirmed Strata ADMIN
+ * users may list these owner labels. No account state, secrets or provider data
+ * is returned and the selection still signs using the exact owner UUID.
+ */
 export async function listEligibleFeeSourceOwners(adminId:string):
-  Promise<{ok:boolean;reason:string;ownerUserIds:string[]}>{
-  if(!await adminVerified(adminId))return {ok:false,reason:"administrator_required",ownerUserIds:[]};
+  Promise<FeeSourceOwnersResult>{
+  const denied=(reason:string):FeeSourceOwnersResult=>
+    ({ok:false,reason,ownerUserIds:[],owners:[]});
+  if(!await adminVerified(adminId))return denied("administrator_required");
   try{
     const rows=await pool.query(`
-      SELECT DISTINCT owner_user_id FROM public.v13_production_account
-      WHERE owner_user_id IS NOT NULL AND subaccount=1 AND exchange_index=2
-      ORDER BY owner_user_id LIMIT 100`);
-    return {ok:true,reason:"owner_ids_read_only",ownerUserIds:
-      rows.rows.map(r=>String(r.owner_user_id)).filter(x=>UUID.test(x))};
-  }catch{return {ok:false,reason:"owners_unavailable",ownerUserIds:[]};}
+      SELECT a.owner_user_id::text AS owner_user_id,
+             nullif(btrim(p.display_name),'') AS display_name,
+             nullif(btrim(u.email),'') AS email
+      FROM public.v13_production_account a
+      LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+      LEFT JOIN auth.users u ON u.id=a.owner_user_id
+      WHERE a.owner_user_id IS NOT NULL
+        AND a.subaccount=1 AND a.exchange_index=2
+      GROUP BY a.owner_user_id,p.display_name,u.email
+      ORDER BY lower(coalesce(
+        nullif(btrim(p.display_name),''),
+        nullif(btrim(u.email),''),
+        a.owner_user_id::text
+      )),a.owner_user_id
+      LIMIT 100`);
+    const owners:FeeSourceOwnerLabel[]=rows.rows
+      .filter(row=>UUID.test(String(row.owner_user_id)))
+      .map(row=>({
+        ownerUserId:String(row.owner_user_id),
+        displayName:safeLabel(row.display_name,120),
+        email:safeLabel(row.email,254),
+      }));
+    return {ok:true,reason:"owner_labels_read_only",
+      ownerUserIds:owners.map(row=>row.ownerUserId),owners};
+  }catch{return denied("owners_unavailable");}
 }
 /** Only the separate policy reviewers and issuer can see review count. */
 export async function inspectFeePolicySigningStatus(adminId:string,ownerUserId:string):
