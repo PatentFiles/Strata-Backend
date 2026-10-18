@@ -18,7 +18,7 @@ const ALLOWED_ORIGIN = Deno.env.get("STRATA_WEB_ORIGIN")?.trim() ||
 const CORS = {
   "access-control-allow-origin": ALLOWED_ORIGIN,
   "access-control-allow-headers": "authorization, apikey, content-type, x-client-info, x-supabase-client-platform, x-supabase-client-version",
-  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
   "vary": "Origin",
 };
 const HEADERS = {
@@ -52,16 +52,18 @@ Deno.serve(async (request: Request) => {
     }
     return new Response(null, { status: 204, headers: CORS });
   }
-  if (request.method !== "POST") return error("method_not_allowed", 405);
+  if (request.method !== "POST" && request.method !== "GET") return error("method_not_allowed", 405);
   const url = new URL(request.url);
   if (url.search || url.pathname.split("/").pop() !== "strata-fee-operator-review") {
     return error("unsupported_path", 404);
   }
-  if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
-    return error("json_required", 415);
+  if (request.method === "POST") {
+    if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+      return error("json_required", 415);
+    }
+    const rawLength = Number(request.headers.get("content-length") ?? "0");
+    if (!Number.isFinite(rawLength) || rawLength > 4096) return error("request_too_large", 413);
   }
-  const rawLength = Number(request.headers.get("content-length") ?? "0");
-  if (!Number.isFinite(rawLength) || rawLength > 4096) return error("request_too_large", 413);
 
   const endpoint = Deno.env.get("SUPABASE_URL");
   const anon = Deno.env.get("SUPABASE_ANON_KEY");
@@ -74,11 +76,13 @@ Deno.serve(async (request: Request) => {
 
   try {
     const now = Date.now();
-    const raw = await request.text();
-    if (raw.length > 4096) return error("request_too_large", 413);
-    let payload: unknown;
-    try { payload = JSON.parse(raw); } catch { return error("invalid_json", 400); }
-    if (!validReview(payload, now)) return error("review_claim_invalid_or_stale", 422);
+    let payload: unknown = null;
+    if (request.method === "POST") {
+      const raw = await request.text();
+      if (raw.length > 4096) return error("request_too_large", 413);
+      try { payload = JSON.parse(raw); } catch { return error("invalid_json", 400); }
+      if (!validReview(payload, now)) return error("review_claim_invalid_or_stale", 422);
+    }
 
     const caller = createClient(endpoint, anon, {
       global: { headers: { Authorization: auth } },
@@ -95,6 +99,36 @@ Deno.serve(async (request: Request) => {
     const server = createClient(endpoint, service, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+    // Read an administrator's own persisted claim before any new write.
+    // A GET is always read-only; no PDF is downloaded and no approval is granted.
+    const existing = await server.from(TABLE).select("review_id,expires_at")
+      .eq("content_sha256", EXPECTED_SHA)
+      .eq("reviewer_user_id", reviewer.id)
+      .gt("expires_at", new Date().toISOString())
+      .order("reviewed_at", { ascending: false }).limit(1);
+    if (existing.error) return error("source_review_database_unavailable", 503);
+    const current = existing.data?.[0] ?? null;
+    if (request.method === "GET") {
+      const all = await server.from(TABLE).select("reviewer_user_id,expires_at")
+        .eq("content_sha256", EXPECTED_SHA)
+        .gt("expires_at", new Date().toISOString());
+      if (all.error) return error("source_review_database_unavailable", 503);
+      return new Response(JSON.stringify({
+        ok: true, reason: current ? "current_source_review_recorded" : "source_review_not_current",
+        currentReviewRecorded: Boolean(current),
+        currentReviewExpiresAt: current?.expires_at ?? null,
+        observedUnexpiredDistinctClaims: new Set((all.data ?? []).map(r => r.reviewer_user_id)).size,
+        checkedAt: new Date().toISOString(),
+        approvedOfficialFeeCapture: false, policyApproved: false, tradingAuthorized: false,
+      }), { status: 200, headers: HEADERS });
+    }
+    // Do not replace or duplicate a live attestation. The client should refresh GET.
+    if (current) return new Response(JSON.stringify({
+      ok: false, reason: "reviewer_already_attested_in_current_window",
+      currentReviewExpiresAt: current.expires_at,
+      approvedOfficialFeeCapture: false,
+    }), { status: 409, headers: HEADERS });
+
     const stored = await server.storage.from(BUCKET).download(OBJECT_PATH);
     if (stored.error || !stored.data) return error("pending_pdf_unavailable", 404);
     if (stored.data.size !== EXPECTED_BYTES) return error("uploaded_pdf_invalid", 422);
@@ -102,16 +136,6 @@ Deno.serve(async (request: Request) => {
     if (!validPdfEnvelope(bytes) || await digest(bytes) !== EXPECTED_SHA) {
       return error("uploaded_pdf_mismatch", 422);
     }
-
-    // Reject repeat claims from the same reviewer in an active review window.
-    // The database is append-only: expired historical reviews remain auditable.
-    const existing = await server.from(TABLE).select("review_id")
-      .eq("content_sha256", EXPECTED_SHA)
-      .eq("reviewer_user_id", reviewer.id)
-      .gt("expires_at", new Date().toISOString())
-      .limit(1);
-    if (existing.error) return error("source_review_database_unavailable", 503);
-    if ((existing.data ?? []).length > 0) return error("reviewer_already_attested_in_current_window", 409);
 
     // An owner-supplied PDF hash is not proof of Kalshi provenance.
     // Record ONLY this reviewer's signed human-source claim.
@@ -123,8 +147,8 @@ Deno.serve(async (request: Request) => {
       effective_date: "2026-07-07",
       reviewer_user_id: reviewer.id,
       reviewer_email: reviewer.email.toLowerCase(),
-      source_observed_at: new Date(Date.parse(payload.observedAt)).toISOString(),
-      source_review_note: payload.reviewNote.trim(),
+      source_observed_at: new Date(Date.parse((payload as { observedAt: string }).observedAt)).toISOString(),
+      source_review_note: (payload as { reviewNote: string }).reviewNote.trim(),
       review_kind: "human_canonical_source_claim",
     }).select("review_id,reviewed_at,expires_at").single();
     if (result.error || !result.data) {
