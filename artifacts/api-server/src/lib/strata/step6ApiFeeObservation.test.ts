@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { step6ApiFeeObservation } from "./step6ApiFeeObservation";
 import { REVIEWED_REFERENCE_PDF_SHA256, type KalshiMarketFeeReadOnly } from "./twoSourceFeeEvidence";
@@ -53,8 +53,9 @@ test("rejects wrong fees, digest, unapproved overrides and live authority", () =
 test("Step 6 read-only route has no PDF fetch dependency or authority mutation", () => {
   // Source contract test: a regression that reintroduces the PDF fetch
   // before API verification fails CI. Path is fixed source controlled by us.
-  const source = readFileSync(
-    join(process.cwd(), "src/routes/userExecutionRouter.ts"), "utf8");
+  const workspacePath = join(process.cwd(), "src/routes/userExecutionRouter.ts");
+  const rootPath = join(process.cwd(), "artifacts/api-server/src/routes/userExecutionRouter.ts");
+  const source = readFileSync(existsSync(workspacePath) ? workspacePath : rootPath, "utf8");
   const start = source.indexOf('router.get("/fees/preflight"');
   const end = source.indexOf('router.get("/policy/evidence"', start);
   assert.ok(start >= 0 && end > start);
