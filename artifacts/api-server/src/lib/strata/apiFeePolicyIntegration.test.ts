@@ -15,7 +15,17 @@ test("Step 9 owner approval and SQL bind the signed API grant, never a supplied 
  assert.match(policy,/parseReviewedApiSource\(input\.policy\.feeSourceUrl/);
  assert.match(policy,/AND \(\$25::uuid IS NULL OR EXISTS \(/);
  assert.match(policy,/g\.authorized_stages @> ARRAY\['STEP_9'\]/);
- assert.match(policy,/private\.strata_api_fee_rate_reviews r2/);
+ const sql=policy.split("const APPROVE_API_SQL = `")[1]?.split("`;")[0];
+ assert.ok(sql,"atomic API policy SQL must exist");
+ assert.match(sql,/g\.policy_version=\$16 AND \$16='strata_api_fee_source_signed_review_v2'/);
+ assert.match(sql,/r1\.reviewer_user_id=g\.issuer_admin_id/);
+ assert.match(sql,/r1\.reviewer_user_id<>g\.owner_user_id/);
+ assert.match(sql,/c\.revoked_at IS NULL/);
+ assert.match(sql,/g\.issuer_admin_id<>g\.owner_user_id/);
+ assert.match(sql,/g\.authorized_stages @> ARRAY\['STEP_9'\]/);
+ assert.match(sql,/rx\.reviewer_user_id=g\.issuer_admin_id/);
+ assert.match(sql,/r1\.signed_at<=g\.issued_at/);
+ assert.doesNotMatch(sql,/strata_api_fee_source_signed_review_v1|r2\.reviewer_user_id|r1\.reviewer_user_id<>g\.issuer_admin_id/);
 });
 test("Step 11 checks fresh API source and owner consent inside commissioning SQL",()=>{
  const owner=read("personalAccountActivation.ts");
@@ -24,6 +34,17 @@ test("Step 11 checks fresh API source and owner consent inside commissioning SQL
  assert.match(owner,/private\.strata_api_fee_owner_consents/);
  assert.match(owner,/g\.authorized_stages @> ARRAY\['STEP_11'\]/);
  assert.match(owner,/AND \(\$7::uuid IS NULL OR EXISTS \(/);
+ const sql=owner.split("const COMMISSION_API_SQL = `")[1]?.split("`;")[0];
+ assert.ok(sql);
+ assert.match(sql,/p\.fee_policy_version='strata_api_fee_source_signed_review_v2'/);
+ assert.match(sql,/r1\.reviewer_user_id=g\.issuer_admin_id/);
+ assert.match(sql,/g\.issuer_admin_id<>g\.owner_user_id/);
+ assert.match(sql,/g\.authorized_stages @> ARRAY\['STEP_11'\]/);
+ assert.match(sql,/g\.fee_model_version='kalshi_quadratic_007_whole_cent_conservative_reference_v1'/);
+ assert.match(sql,/c\.revoked_at IS NULL/);
+ assert.match(sql,/rx\.reviewer_user_id=g\.issuer_admin_id/);
+ assert.match(sql,/r1\.signed_at<=g\.issued_at/);
+ assert.doesNotMatch(sql,/strata_api_fee_source_signed_review_v1|r2\.reviewer_user_id|r1\.reviewer_user_id<>g\.issuer_admin_id/);
 });
 test("worker rechecks reviewed source for every exact-market read and every final order POST",()=>{
  const worker=read("personalExecutionSupervisor.ts");
