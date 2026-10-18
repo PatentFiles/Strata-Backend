@@ -30,7 +30,7 @@ test("worker rechecks reviewed source for every exact-market read and every fina
  const fence=read("guardedReviewedApiFeeWire.ts");
  assert.match(worker,/verifyReviewedApiFeeSourceStage\(input\.userId,"ORDER_ENTRY",/);
  assert.match(worker,/sourceUrl,market\)/);
- assert.match(worker,/createGuardedReviewedApiFeeFetch\(input\.userId,input\.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint\)/);
+ assert.match(worker,/createGuardedReviewedApiFeeFetch\(input\.userId,input\.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed\.fencingToken,holderId\)/);
  assert.match(fence,/FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL/);
  assert.match(fence,/live\.manual_kill_switch=false/);
  assert.match(fence,/c\.revoked_at IS NULL/);
