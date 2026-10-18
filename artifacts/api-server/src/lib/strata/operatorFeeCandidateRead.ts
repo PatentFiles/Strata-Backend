@@ -23,7 +23,8 @@ export async function inspectOperatorFeeCandidate(): Promise<{
       FROM public.strata_fee_operator_release_candidates
       WHERE content_sha256 = $1 AND revoked_at IS NULL AND expires_at > now()
       ORDER BY recorded_at DESC LIMIT 2`, [REVIEWED_FEE_DIGEST]);
-    if (release.rows.length !== 1) return blocked("candidate_missing_or_ambiguous");
+    if (release.rows.length === 0) return blocked("candidate_missing");
+    if (release.rows.length !== 1) return blocked("multiple_active_candidates_fail_closed");
     const item = release.rows[0]!;
     const reviews = await pool.query(`
       SELECT r.review_id, r.reviewer_user_id, r.content_sha256, r.expires_at,
