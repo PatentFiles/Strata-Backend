@@ -42,7 +42,7 @@ export async function inspectOperatorFeeCandidate(): Promise<{
       evidenceKind: String(item.evidence_kind), recordedAt: asTime(item.recorded_at),
       expiresAt: asTime(item.expires_at), revokedAt: item.revoked_at === null
         ? null : asTime(item.revoked_at),
-      reviewer1: String(item.reviewer_1), reviewer2: String(item.reviewer_2),
+      reviewer1: String(item.reviewer_1), reviewer2: item.reviewer_2 === null ? null : String(item.reviewer_2),
     };
     const claims: FeeReview[] = reviews.rows.map(r => ({
       reviewId: String(r.review_id), userId: String(r.reviewer_user_id),
