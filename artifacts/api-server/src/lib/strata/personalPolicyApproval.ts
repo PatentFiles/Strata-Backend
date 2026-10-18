@@ -96,6 +96,61 @@ const APPROVE_SQL = `
         AND g.authorized_stages @> ARRAY['STEP_9']::text[]
         AND $17='strata-operator-attested://kxbtc15m/' || g.grant_id::text || '/' || g.release_id::text
     ))
+  RETURNING id
+`;
+
+const APPROVE_API_SQL = `
+  -- owned-policy:approve
+  UPDATE v13_live_money_policy
+  SET state = 'APPROVED',
+      strategy_version = 'V1.3',
+      entry_policy_version = $22,
+      strategy_parameter_set_id = $3,
+      strategy_parameter_hash = $4,
+      champion_selection_review_id = $5,
+      champion_selection_evidence_hash = $6,
+      champion_selected_by = $7,
+      champion_selected_at = $8,
+      capital_limit_cents = $9,
+      max_entry_stake_cents = $10,
+      max_entry_all_in_cents = $11,
+      max_open_positions = 1,
+      max_daily_loss_cents = $12,
+      max_total_loss_cents = $13,
+      max_quote_age_ms = $14,
+      max_fee_evidence_age_ms = $15,
+      fee_policy_version = $16,
+      fee_source_url = $17,
+      fee_formula_version = $18,
+      require_full_depth = true,
+      entry_time_in_force = 'IOC',
+      entry_limit_source = 'SIGNAL_REFERENCE_OFFER',
+      approved_by = $7,
+      approved_at = $19,
+      policy_hash = $20
+  WHERE id = $1
+    AND execution_account_id = $2
+    AND execution_account_id IS NOT NULL
+    AND created_by = $21
+    AND state = 'DRAFT'
+    AND version = $23
+    AND ($24::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_fee_source_grants g
+      JOIN private.strata_fee_source_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN public.strata_fee_operator_release_candidates r
+        ON r.release_id=g.release_id
+      WHERE g.grant_id=$24::uuid AND g.owner_user_id=$21::uuid
+        AND g.revoked_at IS NULL AND g.expires_at>now()
+        AND c.revoked_at IS NULL
+        AND c.confirmation='CONFIRM_OPERATOR_FEE_SOURCE_ONLY'
+        AND r.revoked_at IS NULL AND r.expires_at>now()
+        AND g.release_id=c.release_id AND r.content_sha256=g.reviewed_pdf_sha256
+        AND g.policy_version=$16 AND g.policy_decision_sha256=
+          'f8f7e0920168ab4601c59a3a9343e940d78dd974512c7ec97f7d052bf5fd685e'
+        AND g.authorized_stages @> ARRAY['STEP_9']::text[]
+        AND $17='strata-operator-attested://kxbtc15m/' || g.grant_id::text || '/' || g.release_id::text
+    ))
     -- New source never reuses a PDF identity, even if client code is buggy.
     AND ($17 NOT LIKE 'strata-api-reviewed://%' OR $25::uuid IS NOT NULL)
     AND ($25::uuid IS NULL OR EXISTS (
@@ -349,7 +404,8 @@ async function approveAndLink(
     policy: V13ApprovedLiveMoneyPolicy;
   },
 ): Promise<{ ok: true; policyId: string }> {
-  const approved = await query(APPROVE_SQL, [
+  const apiGrant=parseReviewedApiSource(input.policy.feeSourceUrl??"");
+  const approved = await query(apiGrant?APPROVE_API_SQL:APPROVE_SQL, [
     input.policy.id,
     input.executionAccountId,
     input.policy.strategyParameterSetId,
@@ -374,9 +430,8 @@ async function approveAndLink(
     input.policy.entryPolicyVersion,
     input.policy.version,
     parseOwnerFeeSource(input.policy.feeSourceUrl??"")?.grantId ?? null,
-    parseReviewedApiSource(input.policy.feeSourceUrl??"")?.grantId ?? null,
-    PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
-    API_SOURCE_FORMULA_VERSION,
+    ...(apiGrant?[apiGrant.grantId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+      API_SOURCE_FORMULA_VERSION]:[]),
   ]);
   if ((approved.rowCount ?? approved.rows.length) !== 1) throw new Error("policy_not_approved");
   const linked = await query(LINK_SQL, [input.policy.id, input.executionAccountId, input.ownerUserId]);
