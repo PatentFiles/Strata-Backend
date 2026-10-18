@@ -106,4 +106,51 @@ BEGIN
   EXCEPTION WHEN unique_violation THEN NULL;
   END;
 END $$;
+-- Production reservation state changes remain one-way, including for the
+-- privileged database role. No reset to PREPARED or forged identity is allowed.
+UPDATE private.strata_emergency_exit_reservations
+  SET state='UNKNOWN',updated_at=now()
+  WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+DO $
+DECLARE trigger_count int;
+BEGIN
+  SELECT count(*) INTO trigger_count FROM pg_trigger
+    WHERE tgrelid='private.strata_emergency_exit_reservations'::regclass
+      AND tgname='strata_emergency_exit_transition_guard' AND NOT tgisinternal;
+  IF trigger_count<>1 THEN RAISE EXCEPTION 'production exit state trigger absent'; END IF;
+  BEGIN
+    UPDATE private.strata_emergency_exit_reservations
+      SET state='PREPARED',updated_at=now()
+      WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+    RAISE EXCEPTION 'accepted unsafe production UNKNOWN reset';
+  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
+  END;
+  BEGIN
+    UPDATE private.strata_emergency_exit_reservations
+      SET order_digest=repeat('f',64),updated_at=now()
+      WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+    RAISE EXCEPTION 'accepted production immutable order modification';
+  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM private.strata_emergency_exit_reservations
+      WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+    RAISE EXCEPTION 'accepted production reservation deletion';
+  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
+  END;
+END $;
+UPDATE private.strata_emergency_exit_reservations
+  SET state='RECONCILED',updated_at=now()
+  WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+DO $
+BEGIN
+  BEGIN
+    UPDATE private.strata_emergency_exit_reservations
+      SET state='UNKNOWN',updated_at=now()
+      WHERE reservation_id='55555555-5555-4555-8555-555555555555';
+    RAISE EXCEPTION 'accepted terminal production exit regression';
+  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
+  END;
+END $;
+
 SELECT 'DISPOSABLE_PRIVATE_EXIT_LEDGER_SQL_TESTS_PASSED' AS result;
