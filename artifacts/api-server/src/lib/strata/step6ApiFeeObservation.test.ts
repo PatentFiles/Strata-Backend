@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { step6ApiFeeObservation } from "./step6ApiFeeObservation";
 import { REVIEWED_REFERENCE_PDF_SHA256, type KalshiMarketFeeReadOnly } from "./twoSourceFeeEvidence";
 
@@ -46,4 +48,22 @@ test("rejects wrong fees, digest, unapproved overrides and live authority", () =
     const bad = { ...verified(), ...changes } as KalshiMarketFeeReadOnly;
     assert.equal(step6ApiFeeObservation(bad, now), null);
   }
+});
+
+test("Step 6 read-only route has no PDF fetch dependency or authority mutation", () => {
+  // Source contract test: a regression that reintroduces the PDF fetch
+  // before API verification fails CI. Path is fixed source controlled by us.
+  const source = readFileSync(
+    join(process.cwd(), "src/routes/userExecutionRouter.ts"), "utf8");
+  const start = source.indexOf('router.get("/fees/preflight"');
+  const end = source.indexOf('router.get("/policy/evidence"', start);
+  assert.ok(start >= 0 && end > start);
+  const route = source.slice(start, end);
+  assert.match(route, /await probeCurrentKalshiFeeApi\\(\\)/);
+  assert.match(route, /step6ApiFeeObservation\\(market\\)/);
+  assert.doesNotMatch(route, /establishOfficialFeeDigest|fetchOfficialFeeSchedule|feeSchedule\.pdf/);
+  assert.match(route, /policyApproved:\\s*false/);
+  assert.match(route, /commissioningPerformed:\\s*false/);
+  assert.match(route, /tradingAuthorized:\\s*false/);
+  assert.doesNotMatch(route, /res\\.status\\(20[01]\\).*approve|executeOrder|sendOrder/);
 });
