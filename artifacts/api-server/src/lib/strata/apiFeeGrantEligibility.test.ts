@@ -4,7 +4,7 @@ import {
  evaluatePdfFreeApiGrant, API_POLICY_SIGNED_REVIEW_V1,
  type ApiFeeGrantEvidence,
 } from "./apiFeeGrantEligibility";
-import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION } from "./apiFeeRateReference";
+import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION, PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { API_FEE_POLICY_SOURCE_V1 } from "./apiFeePolicyReviewCandidate";
 
 const now=Date.parse("2026-10-18T02:30:00.000Z");
@@ -16,6 +16,7 @@ const grantId="55555555-5555-4555-8555-555555555555";
 function fixture():ApiFeeGrantEvidence{
  const issued=now-60_000;
  const baseReview={currentlyAdmin:true,feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+  rateDecisionDigest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
   scope:"KXBTC15M:INDEX2" as const,signedAtMs:issued-5_000,
   expiresAtMs:now+60_000,revokedAtMs:null};
  return {
@@ -33,6 +34,7 @@ function fixture():ApiFeeGrantEvidence{
   },
   grant:{grantId,ownerUserId:owner,issuerAdminId:issuer,
    feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+   rateDecisionDigest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
    policyVersion:API_POLICY_SIGNED_REVIEW_V1,
    scope:"KXBTC15M:INDEX2",issuedAtMs:issued,expiresAtMs:now+60_000,
    revokedAtMs:null,authorizedStages:["STEP_9","STEP_11","ORDER_ENTRY"]},
@@ -64,6 +66,8 @@ test("denies missing or duplicate reviewers, revoked roles and altered owner",()
   x=>{x.consent!.ownerUserId=issuer},
   x=>{x.grant!.revokedAtMs=now},
   x=>{x.grant!.feeModelVersion="not-reviewed" as never},
+  x=>{x.grant!.rateDecisionDigest="a".repeat(64)},
+  x=>{x.reviews[0]!.rateDecisionDigest="a".repeat(64)},
   x=>{x.grant!.expiresAtMs=now},
   x=>{x.grant!.authorizedStages=[]},
   x=>{x.grant!.policyVersion="operator_attested_fee_source_v1" as never},
