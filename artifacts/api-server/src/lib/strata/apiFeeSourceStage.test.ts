@@ -7,7 +7,7 @@ import type {KalshiMarketFeeReadOnly} from "./twoSourceFeeEvidence";
 const now=Date.parse("2026-10-18T03:25:00Z");
 const owner="11111111-1111-4111-8111-111111111111";
 const issuer="22222222-2222-4222-8222-222222222222";
-const first="33333333-3333-4333-8333-333333333333";
+const first=issuer;
 const second="44444444-4444-4444-8444-444444444444";
 const gid="55555555-5555-4555-8555-555555555555";
 const ticker="KXBTC15M-26OCT18T0325";
@@ -46,7 +46,7 @@ test("source parser accepts exact owner-bound review grant URL only",()=>{
  assert.equal(parseReviewedApiSource("https://kalshi.com/docs/kalshi-fee-schedule.pdf"),null);
  assert.equal(parseReviewedApiSource(sourceUrl+"/other"),null);
 });
-test("current two-admin grant passes stage as eligibility, not authority",async()=>{
+test("two-person technical ADMIN and owner consent passes source-only eligibility",async()=>{
  const v=await verifyReviewedApiFeeSourceStage(owner,"STEP_9",sourceUrl,undefined,deps());
  assert.equal(v.ok,true);
  if(v.ok){
@@ -75,7 +75,8 @@ test("missing, ambiguous, revoked and owner-crossed source records fail closed",
   [row(),row()],
   [{...row(),consent_owner:issuer}],
   [{...row(),first_reviewer:second}],
-  [{...row(),second_revoked:new Date(now-1)}],
+  [{...row(),issuer_admin_id:owner}],
+  [{...row(),first_revoked:new Date(now-1)}],
   [{...row(),rate_decision_digest:"e".repeat(64)}],
   [{...row(),expires_at:new Date(now-100)}],
  ];
