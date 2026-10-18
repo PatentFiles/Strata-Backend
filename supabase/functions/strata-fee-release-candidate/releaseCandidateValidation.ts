@@ -6,10 +6,10 @@ export type SourceReviewRow = {
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function selectLiveDistinctReviews(
+export function selectLiveSingleReview(
   rows: SourceReviewRow[],
   nowMs: number,
-): { ok: true; ids: [string, string]; latestPossibleExpiryMs: number } |
+): { ok: true; ids: [string]; latestPossibleExpiryMs: number } |
    { ok: false; reason: string } {
   if (!Number.isSafeInteger(nowMs) || rows.length > 12)
     return { ok: false, reason: "invalid_review_window" };
@@ -20,9 +20,9 @@ export function selectLiveDistinctReviews(
         !Number.isFinite(expiration) || expiration <= nowMs) continue;
     if (!distinct.has(row.reviewer_user_id)) distinct.set(row.reviewer_user_id, row);
   }
-  const first = [...distinct.values()].slice(0, 2);
-  if (first.length !== 2) return { ok: false, reason: "two_current_independent_admin_claims_required" };
-  const ids = first.map(x => x.review_id).sort() as [string, string];
+  const first = [...distinct.values()].slice(0, 1);
+  if (first.length !== 1) return { ok: false, reason: "one_current_admin_claim_required" };
+  const ids = first.map(x => x.review_id).sort() as [string];
   const latestPossibleExpiryMs = Math.min(...first.map(x => Date.parse(x.expires_at)));
   if (ids[0] === ids[1] || latestPossibleExpiryMs <= nowMs)
     return { ok: false, reason: "review_claims_expired" };
