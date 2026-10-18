@@ -111,7 +111,7 @@ END $$;
 UPDATE private.strata_emergency_exit_reservations
   SET state='UNKNOWN',updated_at=now()
   WHERE reservation_id='55555555-5555-4555-8555-555555555555';
-DO $
+DO $$
 DECLARE trigger_count int;
 BEGIN
   SELECT count(*) INTO trigger_count FROM pg_trigger
@@ -138,11 +138,11 @@ BEGIN
     RAISE EXCEPTION 'accepted production reservation deletion';
   EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
   END;
-END $;
+END $$;
 UPDATE private.strata_emergency_exit_reservations
   SET state='RECONCILED',updated_at=now()
   WHERE reservation_id='55555555-5555-4555-8555-555555555555';
-DO $
+DO $$
 BEGIN
   BEGIN
     UPDATE private.strata_emergency_exit_reservations
@@ -151,6 +151,6 @@ BEGIN
     RAISE EXCEPTION 'accepted terminal production exit regression';
   EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
   END;
-END $;
+END $$;
 
 SELECT 'DISPOSABLE_PRIVATE_EXIT_LEDGER_SQL_TESTS_PASSED' AS result;
