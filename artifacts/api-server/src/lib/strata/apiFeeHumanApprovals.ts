@@ -105,8 +105,9 @@ export async function recordApiFeeRateReview(
  });
 }
 
-/** Issuer must be a THIRD administrator distinct from owner and BOTH reviewers.
- * Fresh Kalshi API observation and current rate attestations are prerequisites.
+/** Technical issuer must personally have made the single independently verified
+ * ADMIN fee model attestation. A different, authenticated owner must consent.
+ * Fresh Kalshi API observation and current rate attestation are prerequisites.
  * A grant never changes policy/commissioning/worker flags.
  */
 export async function issueApiFeeSourceGrant(
@@ -145,7 +146,7 @@ export async function issueApiFeeSourceGrant(
      ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
    WHERE r.owner_user_id=$1::uuid
      AND r.reviewer_user_id<>$1::uuid
-     AND r.reviewer_user_id<>$2::uuid
+     AND r.reviewer_user_id=$2::uuid
      AND r.rate_decision_digest=$3 AND r.fee_model_version=$4
      AND r.scope='KXBTC15M:INDEX2' AND r.confirmation=$5
      AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
@@ -155,8 +156,8 @@ export async function issueApiFeeSourceGrant(
    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM
   ]);
   const distinct=new Set(reviews.rows.map(r=>String(r.reviewer_user_id)));
-  if(distinct.size!==2 || reviews.rows.length!==2)
-    return denied("two_distinct_current_independent_admin_reviews_required");
+  if(distinct.size!==1 || reviews.rows.length!==1 || !distinct.has(adminId))
+    return denied("technical_admin_rate_review_missing_or_ambiguous");
   const now=Date.now();
   const expiry=Math.min(now+15*60_000,
     ...reviews.rows.map(r=>new Date(r.expires_at as string).getTime()));
@@ -290,7 +291,7 @@ export async function inspectApiFeeSourceReadiness(
     AND r.confirmation=$4 AND r.scope='KXBTC15M:INDEX2'
     AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
     AND u.email_confirmed_at IS NOT NULL
-    AND ($5::uuid IS NULL OR r.reviewer_user_id<>$5::uuid)`,[
+    AND ($5::uuid IS NULL OR r.reviewer_user_id=$5::uuid)`,[
     ownerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
     PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,
     viewerId!==ownerId?viewerId:null
