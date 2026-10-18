@@ -78,6 +78,14 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/step6ApiFeeObservation.test.cjs
           node --test dist/step6ApiFeeObservation.test.cjs
+      - name: Validate PDF-free API fee review candidate (NO approval authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeePolicyReviewCandidate.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeePolicyReviewCandidate.test.cjs \
+            --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/apiFeePolicyReviewCandidate.test.cjs
       - name: Test personal event/series fee changes and stale/override refusal
         working-directory: artifacts/api-server
         run: |
