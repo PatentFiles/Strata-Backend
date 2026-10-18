@@ -71,7 +71,11 @@ const READINESS_SQL = `
    AND c.role = 'restricted_execution'
    AND c.revoked_at IS NULL
    AND c.verified_at IS NOT NULL
-   AND c.verification_reason = 'credentialconst COMMISSION_SQL = `
+   AND c.verification_reason = 'credential_verified'
+  WHERE a.owner_user_id = $1::uuid AND a.owner_user_id IS NOT NULL
+`;
+
+const COMMISSION_SQL = `
   -- personal-activation:commission
   UPDATE v13_production_account
   SET commissioned = true,
