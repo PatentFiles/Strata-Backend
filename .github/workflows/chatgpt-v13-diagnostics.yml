@@ -85,6 +85,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/apiFeeRateReference.test.cjs
           node --test dist/apiFeeRateReference.test.cjs
+      - name: Guard Step 9/11/order API source integration and empty migration
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeePolicyIntegration.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeePolicyIntegration.test.cjs
+          node --test dist/apiFeePolicyIntegration.test.cjs
       - name: Verify final reviewed-API fee order POST fence (no live orders)
         working-directory: artifacts/api-server
         run: |
