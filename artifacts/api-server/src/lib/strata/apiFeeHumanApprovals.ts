@@ -256,3 +256,68 @@ export async function revokeApiFeeSourceGrant(
     :denied("api_fee_grant_not_owned_or_revoked");
  });
 }
+
+/** Read-only owner-scoped view for the PDF-free API fee-source review flow.
+ * Other owners may only be selected by currently confirmed administrators.
+ * Never returns the human review notes, credentials, or approval authority.
+ */
+export type ApiFeeSourceReadiness = {
+ ok:boolean;reason:string;ownerUserId?:string;
+ rateDecisionDigest?:string;feeModelVersion?:string;
+ currentReviewers?:number; grantId?:string|null;grantExpiresAt?:string|null;
+ ownerConsentRecorded?:boolean;
+ policyApproved:false;commissioningApproved:false;tradingAuthorized:false;
+};
+export async function inspectApiFeeSourceReadiness(
+ viewerId:string, selectedOwnerId?:string,
+ db:Pick<DbClient,"query">=pool,
+):Promise<ApiFeeSourceReadiness>{
+ const ownerId=selectedOwnerId??viewerId;
+ if(!validOwner(viewerId)||!validOwner(ownerId))
+  return denied("api_fee_readiness_owner_invalid");
+ try{
+  if(viewerId!==ownerId && !await confirmedAdmin(db as DbClient,viewerId))
+   return denied("administrator_required_for_other_owner");
+  if(!await singleOwnedPair(db as DbClient,ownerId))
+   return denied("owned_index2_account_missing_or_ambiguous");
+  const candidates=await db.query(`
+   SELECT r.reviewer_user_id FROM private.strata_api_fee_rate_reviews r
+   JOIN auth.users u ON u.id=r.reviewer_user_id
+   JOIN private.role_assignments role
+    ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
+   WHERE r.owner_user_id=$1::uuid AND r.reviewer_user_id<>$1::uuid
+    AND r.rate_decision_digest=$2 AND r.fee_model_version=$3
+    AND r.confirmation=$4 AND r.scope='KXBTC15M:INDEX2'
+    AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
+    AND u.email_confirmed_at IS NOT NULL`,[
+    ownerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM
+  ]);
+  const currentReviewers=new Set(candidates.rows.map(r=>String(r.reviewer_user_id))).size;
+  const g=await db.query(`
+   SELECT g.grant_id,g.expires_at,
+     EXISTS(SELECT 1 FROM private.strata_api_fee_owner_consents c
+       WHERE c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+       AND c.revoked_at IS NULL AND c.confirmation=$3) AS owner_consented
+   FROM private.strata_api_fee_source_grants g
+   WHERE g.owner_user_id=$1::uuid AND g.rate_decision_digest=$2
+    AND g.revoked_at IS NULL AND g.expires_at>now()
+    AND g.scope='KXBTC15M:INDEX2' AND g.policy_version=$4
+   LIMIT 2`,[
+   ownerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+   API_CONSENT_CONFIRM,API_POLICY_SIGNED_REVIEW_V1
+  ]);
+  if(g.rows.length>1)return denied("api_fee_multiple_active_grants_ambiguous");
+  const grant=g.rows[0];
+  return {
+   ...denied("api_fee_source_status_read_only"),
+   ok:true,ownerUserId:ownerId,rateDecisionDigest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+   feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+   currentReviewers,grantId:grant?String(grant.grant_id):null,
+   grantExpiresAt:grant?new Date(grant.expires_at as string).toISOString():null,
+   ownerConsentRecorded:grant?.owner_consented===true,
+  };
+ }catch{
+  return denied("api_fee_source_status_unavailable");
+ }
+}
