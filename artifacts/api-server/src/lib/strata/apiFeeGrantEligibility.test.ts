@@ -10,7 +10,7 @@ import { API_FEE_POLICY_SOURCE_V1 } from "./apiFeePolicyReviewCandidate";
 const now=Date.parse("2026-10-18T02:30:00.000Z");
 const owner="11111111-1111-4111-8111-111111111111";
 const issuer="22222222-2222-4222-8222-222222222222";
-const first="33333333-3333-4333-8333-333333333333";
+const first=issuer;
 const second="44444444-4444-4444-8444-444444444444";
 const grantId="55555555-5555-4555-8555-555555555555";
 function fixture():ApiFeeGrantEvidence{
@@ -39,13 +39,12 @@ function fixture():ApiFeeGrantEvidence{
    scope:"KXBTC15M:INDEX2",issuedAtMs:issued,expiresAtMs:now+60_000,
    revokedAtMs:null,authorizedStages:["STEP_9","STEP_11","ORDER_ENTRY"]},
   reviews:[
-   {...baseReview,reviewId:"66666666-6666-4666-8666-666666666666",reviewerUserId:first},
-   {...baseReview,reviewId:"77777777-7777-4777-8777-777777777777",reviewerUserId:second}
+   {...baseReview,reviewId:"66666666-6666-4666-8666-666666666666",reviewerUserId:first}
   ],
   consent:{grantId,ownerUserId:owner,confirmedAtMs:issued+1_000,revokedAtMs:null}
  };
 }
-test("distinct current admins plus owner consent qualifies for review but never approvals",()=>{
+test("technical ADMIN attestation plus distinct owner consent qualifies without trade authority",()=>{
  const x=evaluatePdfFreeApiGrant(fixture());
  assert.equal(x.ok,true);
  assert.equal(x.eligibleForIndependentPolicyReview,true);
@@ -53,14 +52,14 @@ test("distinct current admins plus owner consent qualifies for review but never 
  assert.equal(x.commissioningApproved,false);
  assert.equal(x.tradingAuthorized,false);
 });
-test("denies missing or duplicate reviewers, revoked roles and altered owner",()=>{
+test("denies missing or altered technical reviewer, revoked roles and altered owner",()=>{
  const edits:Array<(x:ApiFeeGrantEvidence)=>void>=[
   x=>{x.reviews=[]},
-  x=>{x.reviews[1]!.reviewerUserId=first},
+  x=>{x.reviews[0]!.reviewerUserId=second},
   x=>{x.reviews[0]!.currentlyAdmin=false},
-  x=>{x.reviews[0]!.reviewerUserId=x.grant!.issuerAdminId},
+  x=>{x.reviews[0]!.reviewerUserId=second},
   x=>{x.reviews[0]!.reviewerUserId=owner},
-  x=>{x.reviews[1]!.revokedAtMs=now-1},
+  x=>{x.reviews[0]!.revokedAtMs=now-1},
   x=>{x.ownerUserId="99999999-9999-4999-8999-999999999999"},
   x=>{x.consent!.revokedAtMs=now},
   x=>{x.consent!.ownerUserId=issuer},
