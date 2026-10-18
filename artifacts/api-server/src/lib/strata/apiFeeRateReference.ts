@@ -1,3 +1,19 @@
+import { createHash } from "node:crypto";
+
+/** Exact immutable human-review decision text. Changes invalidate signatures. */
+export const PDF_FREE_API_RATE_REVIEW_DECISION_TEXT = `STRATA_API_FEE_RATE_REVIEW_V1
+This is a proposed KXBTC15M Exchange Index 2 conservative reference calculation.
+Issuer evidence: https://external-api.kalshi.com/trade-api/v2 current series/event/market and fee_changes.
+Reference: conservative whole-cent ceiling of 0.07 * C * P * (1 - P), multiplier exactly 1.
+This reference is NOT official execution-receipt proof of Kalshi's live charged fees.
+A reviewer must separately confirm current effective fee/rounding rules and allowed exceptions.
+Entry and protective-exit orders require their own fresh fee-inclusive verification.
+Approved owner-specific source policy, account commissioning, live execution and orders
+require separate signed decisions; this model-review text confers NONE of them.
+` as const;
+export const PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 =
+  createHash("sha256").update(PDF_FREE_API_RATE_REVIEW_DECISION_TEXT).digest("hex");
+
 /**
  * Fee calculation reference vectors for INDEPENDENT review of a PDF-free
  * KXBTC15M rate-policy. This is a conservative whole-cent risk upper bound,
