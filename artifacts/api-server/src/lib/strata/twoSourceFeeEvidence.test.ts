@@ -109,3 +109,14 @@ test("ignores other-exchange listing candidates instead of misattributing fees",
   (pages["/markets?series_ticker=KXBTC15M&status=open&limit=100"]!.markets as Record<string,unknown>[])[0]!.exchange_index=0;
   assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now)).ok,false);
 });
+
+test("exact market fee probe never substitutes a different open BTC contract", async () => {
+  const wrong="KXBTC15M-26OCT15T2215";
+  const missing=await probeCurrentKalshiFeeApi(transport(responses()),()=>now,wrong);
+  assert.equal(missing.ok,false);
+  assert.equal(missing.reason,"exact_market_not_in_complete_open_listing");
+  const valid=await probeCurrentKalshiFeeApi(transport(responses()),()=>now,ticker);
+  assert.equal(valid.ok,true);
+  assert.equal(valid.marketTicker,ticker);
+  assert.equal((await probeCurrentKalshiFeeApi(transport(responses()),()=>now,"ABC")).ok,false);
+});
