@@ -14,8 +14,8 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
  const privateSchema="strata_fee_sql_test_private";
  const authSchema="strata_fee_sql_test_auth";
  const replaceSchemas=(value:string)=>value
-    .replace(/private\\./g,privateSchema+".")
-    .replace(/auth\\./g,authSchema+".");
+    .split("private.").join(privateSchema+".")
+    .split("auth.").join(authSchema+".");
  const owner="11111111-1111-4111-8111-111111111111";
  const admin="22222222-2222-4222-8222-222222222222";
  const gid="55555555-5555-4555-8555-555555555555";
@@ -28,7 +28,7 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   await db.query("CREATE TABLE "+privateSchema+".role_assignments (email text,role text)");
   await db.query("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN CREATE ROLE anon; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='service_role') THEN CREATE ROLE service_role; END IF; END $$");
   const migration=readFileSync("../../lib/db/drizzle/0030_strata_api_fee_rate_source_v1.sql","utf8")
-    .replace(/^BEGIN;\\s*$/m,"").replace(/^COMMIT;\\s*$/m,"");
+    .replace("BEGIN;","").replace("COMMIT;","");
   await db.query(replaceSchemas(migration));
   for(const name of ["strata_api_fee_rate_reviews","strata_api_fee_source_grants","strata_api_fee_owner_consents"]){
     const initial=await db.query("SELECT count(*)::int AS n FROM "+privateSchema+"."+name);
