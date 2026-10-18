@@ -18,6 +18,10 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
  JOIN v13_live_money_policy p ON p.id=a.policy_id
    AND p.execution_account_id=a.id
  JOIN live_execution_config live ON live.id='singleton'
+ JOIN private.kalshi_account_worker_lease lease
+   ON lease.execution_account_id=a.id AND lease.owner_user_id=a.owner_user_id
+   AND lease.financial_account_id=a.kalshi_connection_id
+   AND lease.credential_fingerprint=a.key_fingerprint
  JOIN private.kalshi_connection_credentials c
    ON c.owner_user_id=a.owner_user_id
    AND c.financial_account_id=a.kalshi_connection_id
@@ -35,18 +39,24 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    AND c.role='restricted_execution'
    AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
    AND c.verification_reason='credential_verified'
- FOR SHARE OF a,p,live,c
+   AND lease.state='owned' AND lease.account_kill=false
+   AND lease.fencing_token=$6::bigint AND lease.holder_id=$7
+   AND lease.heartbeat_at>now()-interval '30 seconds'
+ FOR SHARE OF a,p,live,c,lease
 `;
 export function createGuardedReviewedApiFeeFetch(
  ownerUserId:string,executionAccountId:string,sourceUrl:string,transport:typeof fetch,
  expectedPolicyHash:string,expectedSignerFingerprint:string,
+ expectedFencingToken:number,expectedLeaseHolderId:string,
  deps:{connect?:()=>ReturnType<typeof pool.connect>;
    verify?:typeof verifyReviewedApiFeeSourceStage}={},
 ):typeof fetch {
  if(!parseReviewedApiSource(sourceUrl))
   throw new Error("reviewed_api_source_url_invalid");
  if(!executionAccountId || !/^[a-f0-9]{64}$/i.test(expectedPolicyHash) ||
-    !/^[a-f0-9]{64}$/i.test(expectedSignerFingerprint))
+    !/^[a-f0-9]{64}$/i.test(expectedSignerFingerprint) ||
+    !Number.isSafeInteger(expectedFencingToken) || expectedFencingToken<=0 ||
+    !expectedLeaseHolderId || expectedLeaseHolderId.length>200)
   throw new Error("reviewed_api_account_identity_missing");
  return async (request,init)=>{
   if(init?.method!=="POST")return transport(request,init);
@@ -88,6 +98,7 @@ export function createGuardedReviewedApiFeeFetch(
    await client.query("SET LOCAL statement_timeout='15000ms'");
    const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
+    expectedFencingToken,expectedLeaseHolderId,
    ]);
    if(finalAccount.rows.length!==1)
     throw new Error("api_fee_final_account_signer_or_kill_closed");
