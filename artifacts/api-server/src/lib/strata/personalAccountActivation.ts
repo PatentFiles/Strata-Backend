@@ -175,11 +175,6 @@ const READINESS_SQL = `
   RETURNING id
 `;
 
-          g.grant_id::text || '/' || g.release_id::text
-    ))
-  RETURNING id
-`;
-
 export async function reportOwnedActivation(
   db: Queryable,
   ownerUserId: string,
