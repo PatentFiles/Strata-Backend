@@ -26,7 +26,7 @@ export type FeeReleaseCandidate = {
   expiresAt: string;
   revokedAt: string | null;
   reviewer1: string;
-  reviewer2: string;
+  reviewer2: string | null;
 };
 export type CandidateEligibility =
   | { ok: true; releaseId: string; expiresAt: string; provenance: "operator_attested" }
@@ -48,25 +48,27 @@ export function validateOperatorFeeRelease(
   const fail = (reason: string): CandidateEligibility => ({ ok: false, reason });
   if (!candidate || !Number.isSafeInteger(nowMs)) return fail("candidate_unavailable");
   if (!UUID.test(candidate.releaseId) || !UUID.test(candidate.reviewer1) ||
-      !UUID.test(candidate.reviewer2) || candidate.reviewer1 === candidate.reviewer2 ||
+      (candidate.reviewer2 !== null && (!UUID.test(candidate.reviewer2) || candidate.reviewer1 === candidate.reviewer2)) ||
       candidate.digest !== REVIEWED_FEE_DIGEST || candidate.evidenceKind !== RELEASE_KIND ||
       candidate.revokedAt !== null) return fail("candidate_identity_invalid");
   const start = timestamp(candidate.recordedAt), end = timestamp(candidate.expiresAt);
   if (start === null || end === null || start > nowMs || end <= nowMs ||
       end <= start || end - start > 15 * 60_000) return fail("candidate_expired");
-  const matched = [candidate.reviewer1, candidate.reviewer2].map(
-    id => reviews.filter(r => r.reviewId === id),
-  );
-  if (matched.some(rows => rows.length !== 1)) return fail("reviews_missing_or_ambiguous");
-  const first = matched[0]![0]!, second = matched[1]![0]!;
-  if (!UUID.test(first.userId) || !UUID.test(second.userId) ||
-      first.userId === second.userId || !first.isCurrentAdmin || !second.isCurrentAdmin ||
-      first.revokedAt !== null || second.revokedAt !== null ||
-      first.digest !== REVIEWED_FEE_DIGEST || second.digest !== REVIEWED_FEE_DIGEST)
+  // Legacy two-review candidates remain valid; version 2 accepts one
+  // currently authorized ADMIN source reviewer with a null second reviewer.
+  const reviewIds = candidate.reviewer2 === null ?
+    [candidate.reviewer1] : [candidate.reviewer1,candidate.reviewer2];
+  const matched = reviewIds.map(id=>reviews.filter(r=>r.reviewId===id));
+  if(matched.some(rows=>rows.length!==1))return fail("reviews_missing_or_ambiguous");
+  const checked=matched.map(rows=>rows[0]!);
+  if(checked.some(r=>!UUID.test(r.userId)||!r.isCurrentAdmin||
+      r.revokedAt!==null||r.digest!==REVIEWED_FEE_DIGEST))
     return fail("review_authority_invalid");
-  const expiry1 = timestamp(first.expiresAt), expiry2 = timestamp(second.expiresAt);
-  if (expiry1 === null || expiry2 === null || expiry1 <= nowMs || expiry2 <= nowMs ||
-      end > expiry1 || end > expiry2) return fail("review_expired");
+  if(checked.length===2&&checked[0]!.userId===checked[1]!.userId)
+    return fail("review_authority_invalid");
+  if(checked.some(r=>{const expiry=timestamp(r.expiresAt);
+    return expiry===null||expiry<=nowMs||end>expiry;}))
+    return fail("review_expired");
   return { ok: true, releaseId: candidate.releaseId,
     expiresAt: candidate.expiresAt, provenance: "operator_attested" };
 }
