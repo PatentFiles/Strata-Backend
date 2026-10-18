@@ -6,6 +6,8 @@ import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact"
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
+import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {
   openOwnedExecutionSession,
@@ -222,14 +224,26 @@ export function createProductionPersonalSession(
       snapshot.settlements.length === 0 && snapshot.positions.length === 0;
     if (flat && feeds.cashMicros !== text(loaded.row.cash_micros)) return { ok: false, reason: "cash_evidence_mismatch" };
     const alternate=parseOwnerFeeSource(sourceUrl);
+    const apiSource=parseReviewedApiSource(sourceUrl);
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
        formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
       return {ok:false,reason:"source_policy_identity_invalid"};
+    if(apiSource && (policyVersion!==API_SOURCE_POLICY_VERSION ||
+       formulaVersion!==API_SOURCE_FORMULA_VERSION))
+      return {ok:false,reason:"api_source_policy_identity_invalid"};
     const operatorAtStart=alternate?
       await verifyOwnerFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
     if(alternate && (!operatorAtStart?.ok || operatorAtStart.identity.digest!==digest))
       return {ok:false,reason:"operator_source_release_unavailable"};
-    const artifact=alternate && operatorAtStart?.ok?
+    const apiAtStart=apiSource?
+      await verifyReviewedApiFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
+    if(apiSource && (!apiAtStart?.ok || apiAtStart.identity.grantId!==apiSource.grantId))
+      return {ok:false,reason:"reviewed_api_source_release_unavailable"};
+    // The commissioning digest is a historical observation. Refresh the API
+    // source for the exact target market at every readMarket and final POST.
+    const artifact=apiSource && apiAtStart?.ok?
+      {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
+      alternate && operatorAtStart?.ok?
       {valid:true,digest:operatorAtStart.identity.digest,
        verifiedAt:operatorAtStart.identity.verifiedAtMs}:
       await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
@@ -287,7 +301,14 @@ export function createProductionPersonalSession(
       },
       readMarket: async (market, side) => {
         const clock = now();
-        if(alternate){
+        if(apiSource){
+          const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
+            sourceUrl,market);
+          if(!checked.ok||checked.identity.marketTicker!==market)
+            throw new Error("api_fee_exact_market_source_unavailable");
+          feeVerifiedAt=checked.identity.verifiedAtMs;
+          feeCheckedAt=clock;
+        }else if(alternate){
           const checked=await verifyOwnerFeeSourceStage(input.userId,"ORDER_ENTRY",
             sourceUrl,market);
           if(!checked.ok || checked.identity.digest!==digest)
@@ -325,7 +346,8 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
+      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,sourceUrl,personalProductionFetch) :
+        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
     });
     const unresolved = await readUnresolvedIntentMode(
       (sql, params) => db.query(sql, params), input.accountId,
