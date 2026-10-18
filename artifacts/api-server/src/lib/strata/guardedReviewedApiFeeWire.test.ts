@@ -6,6 +6,8 @@ const grant="55555555-5555-4555-8555-555555555555";
 const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const policyHash="b".repeat(64);
 const signer="c".repeat(64);
+const token=7;
+const leaseHolder="personal-11111111-1111-4111-8111-111111111111";
 const source="strata-api-reviewed://kxbtc15m/"+grant;
 const ticker="KXBTC15M-26OCT18T0325";
 const url="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders";
@@ -18,7 +20,7 @@ const order={
 test("never sends an unreviewed new entry even if all other permissions are claimed",async()=>{
  let sent=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer);
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder);
  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})}),
   /new_entry_blocked/);
  assert.equal(sent,0);
@@ -26,8 +28,8 @@ test("never sends an unreviewed new entry even if all other permissions are clai
 test("refuses any invalid order shape, scope, URL or unsourced grant",async()=>{
  let sent=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- assert.throws(()=>createGuardedReviewedApiFeeFetch(owner,account,"http://malicious",transport,policyHash,signer),/source_url_invalid/);
- const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer);
+ assert.throws(()=>createGuardedReviewedApiFeeFetch(owner,account,"http://malicious",transport,policyHash,signer,token,leaseHolder),/source_url_invalid/);
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder);
  for(const payload of [
   {...order,ticker:"OTHER"},
   {...order,exchange_index:0},
@@ -61,7 +63,7 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
    marketTicker:ticker,verifiedAtMs:Date.now(),
   }};
  };
- const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder,{
   connect:(async()=>db) as never, verify:grantProof as never,
  });
  await wrapped(url,{method:"POST",body:JSON.stringify(order)});
@@ -77,7 +79,7 @@ test("a missing grant must ROLLBACK and never call Kalshi POST",async()=>{
   sql.startsWith("ROLLBACK")?"ROLLBACK":"OTHER");return {rows:[]}},
   release:()=>{calls.push("RELEASE")}};
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder,{
   connect:(async()=>db) as never,
   verify:(async()=>({ok:false,reason:"fee_review_missing"})) as never,
  });
@@ -94,14 +96,17 @@ test("final transaction refuses revoked signer, closed account or global kill be
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/live\.live_execution_enabled=true/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/c\.revoked_at IS NULL/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/p\.policy_hash=\$4/);
- assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,live,c/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.fencing_token=\$6::bigint/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.holder_id=\$7/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.state=\x27owned\x27/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,live,c,lease/);
  let sent=0,verified=0,rolledBack=0,released=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
  const db={query:async(sql:string)=>{
   if(sql.startsWith("ROLLBACK"))rolledBack++;
   return {rows:[]}; // no matched account: closed/stale state
  },release:()=>{released++}};
- const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder,{
   connect:(async()=>db) as never,
   verify:(async()=>{verified++;return {ok:true}}) as never,
  });
