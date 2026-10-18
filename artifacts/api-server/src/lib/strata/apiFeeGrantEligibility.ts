@@ -5,13 +5,14 @@
  * has NO APPROVAL SIDE EFFECT and cannot authorize an exchange POST.
  */
 import { API_FEE_POLICY_SOURCE_V1, type ApiFeePolicyReviewResult } from "./apiFeePolicyReviewCandidate";
-import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION } from "./apiFeeRateReference";
+import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION, PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 
 export const API_POLICY_SIGNED_REVIEW_V1="strata_api_fee_source_signed_review_v1" as const;
 export type ApiFeeStage="STEP_9"|"STEP_11"|"ORDER_ENTRY";
 type Review={
  reviewId:string; reviewerUserId:string; currentlyAdmin:boolean;
  feeModelVersion:typeof PDF_FREE_RATE_REVIEW_VECTOR_VERSION;
+ rateDecisionDigest:string;
  scope:"KXBTC15M:INDEX2";signedAtMs:number;expiresAtMs:number;
  revokedAtMs:number|null; // Independent signed, service-verified human decision
 };
@@ -66,6 +67,7 @@ export function evaluatePdfFreeApiGrant(e:ApiFeeGrantEvidence):ApiFeeGrantDecisi
     grant.policyVersion!==API_POLICY_SIGNED_REVIEW_V1 ||
     grant.scope!=="KXBTC15M:INDEX2" ||
     grant.feeModelVersion!==PDF_FREE_RATE_REVIEW_VECTOR_VERSION ||
+    grant.rateDecisionDigest!==PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 ||
     !grant.authorizedStages.includes(e.stage) ||
     grant.revokedAtMs!==null ||
     !Number.isSafeInteger(grant.issuedAtMs) ||
@@ -82,6 +84,7 @@ export function evaluatePdfFreeApiGrant(e:ApiFeeGrantEvidence):ApiFeeGrantDecisi
    UUID.test(r.reviewId) && UUID.test(r.reviewerUserId) &&
    r.currentlyAdmin && r.scope==="KXBTC15M:INDEX2" &&
    r.feeModelVersion===PDF_FREE_RATE_REVIEW_VECTOR_VERSION &&
+   r.rateDecisionDigest===PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 &&
    r.revokedAtMs===null && Number.isSafeInteger(r.signedAtMs) &&
    Number.isSafeInteger(r.expiresAtMs) &&
    r.signedAtMs<=grant.issuedAtMs && r.expiresAtMs>nowMs &&
