@@ -23,6 +23,7 @@ type OwnerConsent={
 type Grant={
  grantId:string;ownerUserId:string;issuerAdminId:string;
  feeModelVersion:typeof PDF_FREE_RATE_REVIEW_VECTOR_VERSION;
+ rateDecisionDigest:string;
  policyVersion:typeof API_POLICY_SIGNED_REVIEW_V1;
  scope:"KXBTC15M:INDEX2";issuedAtMs:number;expiresAtMs:number;
  revokedAtMs:number|null;authorizedStages:readonly ApiFeeStage[];
