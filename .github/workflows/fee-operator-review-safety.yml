@@ -1,6 +1,12 @@
 name: Fee operator source review safety
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - "supabase/functions/strata-fee-operator-review/**"
+      - "lib/db/drizzle/0023_strata_fee_operator_source_reviews.sql"
+      - ".github/workflows/fee-operator-review-safety.yml"
   pull_request:
     paths:
       - "supabase/functions/strata-fee-operator-review/**"
@@ -37,6 +43,9 @@ jobs:
           assert 'tradingAuthorityChanged: false' in source
           assert 'currentCanonicalByteIdentityVerified: false' in source
           assert 'strata_can_inspect_pending_fee_artifact' in source
+          assert 'request.method === "GET"' in source
+          assert 'currentReviewRecorded' in source
+          assert 'reviewer_already_attested_in_current_window' in source
           assert 'operator-pending/kalshi-fee-schedule.pdf' in source
           assert '.upload(' not in source and '.update(' not in source and '.upsert(' not in source
           assert 'ENABLE ROW LEVEL SECURITY' in migration
