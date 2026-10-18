@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
-import pg from "pg";
+import {pool} from "@workspace/db";
 test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and revocation fails closed",async()=>{
  const urlText=process.env.DATABASE_URL;
  assert.equal(process.env.CI,"true");
@@ -10,8 +10,7 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
  const url=new URL(urlText);
  assert.ok(["localhost","127.0.0.1"].includes(url.hostname));
  assert.equal(url.pathname,"/v13_ci");
- const db=new pg.Client({connectionString:urlText});
- await db.connect();
+ const db=await pool.connect();
  const privateSchema="strata_fee_sql_test_private";
  const authSchema="strata_fee_sql_test_auth";
  const replaceSchemas=(value:string)=>value
@@ -54,6 +53,6 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   assert.equal((await db.query(sql,args)).rows.length,0);
  }finally{
   await db.query("ROLLBACK").catch(()=>{});
-  await db.end();
+  db.release();
  }
 });
