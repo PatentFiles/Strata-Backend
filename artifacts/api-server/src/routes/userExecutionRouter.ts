@@ -1,6 +1,5 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
-import { establishOfficialFeeDigest } from "../lib/microLiveFeeArtifact";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
@@ -662,8 +661,11 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     res.setHeader("Cache-Control", "private, no-store");
-    // Prefer a separately signed, owner-consented alternative when present.
-    // Operator source evidence is never falsely labeled provider PDF capture.
+
+    // Step 6 is a READ-ONLY live fee diagnostic, not provider PDF provenance.
+    // Never start by fetching a rate-limited PDF: this endpoint works from
+    // the official Kalshi Trade API or from an already separately authorized
+    // operator grant. Neither path creates policy/commissioning/order authority.
     const reviewed = await verifyOwnerFeeSourceStage(userId, "STEP_6");
     if (reviewed.ok) {
       return void res.status(200).json(sanitizePublic({
@@ -678,38 +680,21 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
         tradingAuthorized: false,
       }));
     }
-    const result = await establishOfficialFeeDigest();
-    if (!result.ok) {
-      // Kalshi's public PDF is frequently refused to cloud egress with 429.
-      // Restore a useful Step 6 read-only check from the live official API
-      // without pretending the operator's pinned PDF came from Kalshi today.
-      // NEVER persist this metadata as a fee-artifact digest. Owner approval,
-      // commissioning and order-time proof remain separately fail-closed.
-      if (result.reason === "official_fee_schedule_http_429" ||
-          result.reason === "official_fee_schedule_unavailable") {
-        const market = await probeCurrentKalshiFeeApi();
-        const observation = step6ApiFeeObservation(market);
-        if (observation) {
-          return void res.status(200).json(sanitizePublic(observation));
-        }
-      }
-      return void res.status(409).json(sanitizePublic({
-        ok: false,
-        reason: result.reason,
-        alternateAuthorizationReason: reviewed.reason,
-        retryAfterSeconds: result.reason === "official_fee_schedule_http_429"
-          ? result.diagnostic.retryAfterSeconds ?? 60
-          : undefined,
-      }));
+
+    // Probe the exact KXBTC15M market, Index 2, fee parameters, event
+    // overrides, scheduled changes and freshness. A good API observation
+    // is NOT a PDF digest and must not auto-advance Step 9/10/11.
+    const market = await probeCurrentKalshiFeeApi();
+    const observation = step6ApiFeeObservation(market);
+    if (observation) {
+      return void res.status(200).json(sanitizePublic(observation));
     }
-    res.json(sanitizePublic({
-      ok: true,
-      reason: "official_fee_verified_read_only",
-      provenanceType: "kalshi_pdf_provider",
-      providerPdfVerified: true,
-      feeArtifactDigest: result.digest,
-      checkedAt: new Date().toISOString(),
-      sourceUrl: "https://kalshi.com/docs/kalshi-fee-schedule.pdf",
+    return void res.status(409).json(sanitizePublic({
+      ok: false,
+      reason: market.reason || "live_kalshi_fee_metadata_unavailable",
+      alternateAuthorizationReason: reviewed.reason,
+      provenanceType: "kalshi_api_fee_metadata_not_pdf",
+      providerPdfVerified: false,
       policyApproved: false,
       commissioningPerformed: false,
       tradingAuthorized: false,
