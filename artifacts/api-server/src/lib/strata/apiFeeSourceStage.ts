@@ -45,70 +45,43 @@ const txt=(v:unknown):string=>typeof v==="string"?v:"";
 
 /** Must be read from the actual Railway runtime database, never public client. */
 export const READ_API_FEE_STAGE_SQL=`
- -- api-fee:source-stage (owner + stage + exact source)
+ -- api-fee:two-person-source-stage. Technical ADMIN review + distinct owner consent.
  SELECT g.grant_id, g.owner_user_id, g.issuer_admin_id, g.rate_decision_digest,
-   g.fee_model_version, g.policy_version, g.scope, g.issued_at,
-   g.expires_at, g.revoked_at,g.authorized_stages,
-   c.confirmed_at, c.revoked_at AS consent_revoked_at, c.owner_user_id AS consent_owner,
-   r1.review_id AS first_review_id, r1.reviewer_user_id AS first_reviewer,
-   r1.rate_decision_digest AS first_digest, r1.fee_model_version AS first_model,
-   r1.scope AS first_scope, r1.signed_at AS first_signed,
-   r1.expires_at AS first_expires, r1.revoked_at AS first_revoked,
-   r2.review_id AS second_review_id, r2.reviewer_user_id AS second_reviewer,
-   r2.rate_decision_digest AS second_digest, r2.fee_model_version AS second_model,
-   r2.scope AS second_scope, r2.signed_at AS second_signed,
-   r2.expires_at AS second_expires, r2.revoked_at AS second_revoked
+   g.fee_model_version,g.policy_version,g.scope,g.issued_at,
+   g.expires_at,g.revoked_at,g.authorized_stages,
+   c.confirmed_at,c.revoked_at AS consent_revoked_at,c.owner_user_id AS consent_owner,
+   r1.review_id AS first_review_id,r1.reviewer_user_id AS first_reviewer,
+   r1.rate_decision_digest AS first_digest,r1.fee_model_version AS first_model,
+   r1.scope AS first_scope,r1.signed_at AS first_signed,
+   r1.expires_at AS first_expires,r1.revoked_at AS first_revoked
  FROM private.strata_api_fee_source_grants g
  JOIN private.strata_api_fee_owner_consents c
    ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
  JOIN private.strata_api_fee_rate_reviews r1
    ON r1.owner_user_id=g.owner_user_id AND r1.rate_decision_digest=g.rate_decision_digest
- JOIN private.strata_api_fee_rate_reviews r2
-   ON r2.owner_user_id=g.owner_user_id AND r2.rate_decision_digest=g.rate_decision_digest
-   AND r1.reviewer_user_id<r2.reviewer_user_id
+   AND r1.reviewer_user_id=g.issuer_admin_id
  WHERE g.owner_user_id=$1::uuid AND ($2::uuid IS NULL OR g.grant_id=$2::uuid)
    AND g.rate_decision_digest=$4 AND g.fee_model_version=$5
-   AND g.policy_version='strata_api_fee_source_signed_review_v1'
-   AND g.scope='KXBTC15M:INDEX2' AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
+   AND g.policy_version='strata_api_fee_source_signed_review_v2'
+   AND g.issuer_admin_id<>g.owner_user_id
+   AND g.scope='KXBTC15M:INDEX2'
+   AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
    AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'
    AND r1.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
-   AND r2.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
-   -- Independent reviewers cannot be the grant issuer or the owner.
-   -- Filter before LIMIT 2: otherwise unrelated reviewer pairs can hide
-   -- the genuine independent pair and make review eligibility ambiguous.
    AND r1.reviewer_user_id<>g.owner_user_id
-   AND r2.reviewer_user_id<>g.owner_user_id
-   AND r1.reviewer_user_id<>g.issuer_admin_id
-   AND r2.reviewer_user_id<>g.issuer_admin_id
-   AND r1.scope=g.scope AND r2.scope=g.scope
-   AND r1.fee_model_version=g.fee_model_version
-   AND r2.fee_model_version=g.fee_model_version
-   AND r1.signed_at<=g.issued_at AND r2.signed_at<=g.issued_at
-   AND g.revoked_at IS NULL AND c.revoked_at IS NULL
-   AND r1.revoked_at IS NULL AND r2.revoked_at IS NULL
+   AND r1.scope=g.scope AND r1.fee_model_version=g.fee_model_version
+   AND r1.signed_at<=g.issued_at
+   AND g.revoked_at IS NULL AND c.revoked_at IS NULL AND r1.revoked_at IS NULL
    AND g.expires_at>now()+interval '12 seconds'
    AND r1.expires_at>now()+interval '12 seconds'
-   AND r2.expires_at>now()+interval '12 seconds'
    AND g.authorized_stages @> ARRAY[$3::text]
-   AND EXISTS (
+   AND EXISTS(
      SELECT 1 FROM auth.users u JOIN private.role_assignments role
        ON lower(btrim(u.email))=lower(btrim(role.email))
      WHERE u.id=g.issuer_admin_id AND role.role='ADMIN'
        AND u.email_confirmed_at IS NOT NULL
    )
-   AND EXISTS (
-     SELECT 1 FROM auth.users u JOIN private.role_assignments role
-       ON lower(btrim(u.email))=lower(btrim(role.email))
-     WHERE u.id=r1.reviewer_user_id AND role.role='ADMIN'
-       AND u.email_confirmed_at IS NOT NULL
-   )
-   AND EXISTS (
-     SELECT 1 FROM auth.users u JOIN private.role_assignments role
-       ON lower(btrim(u.email))=lower(btrim(role.email))
-     WHERE u.id=r2.reviewer_user_id AND role.role='ADMIN'
-       AND u.email_confirmed_at IS NOT NULL
-   )
- FOR SHARE OF g,c,r1,r2
+ FOR SHARE OF g,c,r1
  LIMIT 2
 `;
 export async function verifyReviewedApiFeeSourceStage(
@@ -161,11 +134,6 @@ export async function verifyReviewedApiFeeSourceStage(
     feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,scope:"KXBTC15M:INDEX2",
     signedAtMs:ms(r.first_signed),expiresAtMs:ms(r.first_expires),
     revokedAtMs:r.first_revoked==null?null:ms(r.first_revoked)},
-   {reviewId:txt(r.second_review_id),reviewerUserId:txt(r.second_reviewer),
-    currentlyAdmin:true,rateDecisionDigest:txt(r.second_digest),
-    feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,scope:"KXBTC15M:INDEX2",
-    signedAtMs:ms(r.second_signed),expiresAtMs:ms(r.second_expires),
-    revokedAtMs:r.second_revoked==null?null:ms(r.second_revoked)},
   ],
  };
  const decision=evaluatePdfFreeApiGrant(evidence);
