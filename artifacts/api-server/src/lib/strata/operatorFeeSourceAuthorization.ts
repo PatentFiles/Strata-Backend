@@ -16,7 +16,7 @@
  */
 import { REVIEWED_FEE_DIGEST, type CandidateEligibility } from "./operatorAttestedFeeEligibility";
 
-export const OPERATOR_FEE_SOURCE_POLICY = "operator_attested_fee_source_v1" as const;
+export const OPERATOR_FEE_SOURCE_POLICY = "operator_attested_fee_source_v2" as const;
 export type FeeAuthorizationStage = "STEP_6" | "STEP_9" | "STEP_11" | "ORDER_ENTRY";
 
 export type ApprovedOperatorFeeSourceGrant = {
