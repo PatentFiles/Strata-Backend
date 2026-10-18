@@ -289,9 +289,11 @@ export async function inspectApiFeeSourceReadiness(
     AND r.rate_decision_digest=$2 AND r.fee_model_version=$3
     AND r.confirmation=$4 AND r.scope='KXBTC15M:INDEX2'
     AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
-    AND u.email_confirmed_at IS NOT NULL`,[
+    AND u.email_confirmed_at IS NOT NULL
+    AND ($5::uuid IS NULL OR r.reviewer_user_id<>$5::uuid)`,[
     ownerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
-    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM
+    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,
+    viewerId!==ownerId?viewerId:null
   ]);
   const currentReviewers=new Set(candidates.rows.map(r=>String(r.reviewer_user_id))).size;
   const g=await db.query(`
