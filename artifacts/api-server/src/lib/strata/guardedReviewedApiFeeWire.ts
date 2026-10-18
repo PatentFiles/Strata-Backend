@@ -1,0 +1,134 @@
+import { pool } from "@workspace/db";
+import {
+ parseReviewedApiSource, verifyReviewedApiFeeSourceStage
+} from "./apiFeeSourceStage";
+/**
+ * Last exact-market API-source fee fence for the alternative PDF-free source.
+ * Runs WITH a DB transaction and row-share locks until the signed exchange
+ * POST returns. New exposure is explicitly paused: reduce-only IOC exits
+ * require current independent source reviews, owner consent, fee model and
+ * fresh exact-market API metadata. This is not a trading activation toggle.
+ */
+/** Recheck durable account/exchange signer and global controls while row locks
+ * remain held through the single signed POST. Never trust worker startup state
+ * as the last authorization when an operator can STOP or revoke credentials. */
+export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
+ SELECT a.id
+ FROM v13_production_account a
+ JOIN v13_live_money_policy p ON p.id=a.policy_id
+   AND p.execution_account_id=a.id
+ JOIN live_execution_config live ON live.id='singleton'
+ JOIN private.kalshi_account_worker_lease lease
+   ON lease.execution_account_id=a.id AND lease.owner_user_id=a.owner_user_id
+   AND lease.financial_account_id=a.kalshi_connection_id
+   AND lease.credential_fingerprint=a.key_fingerprint
+ JOIN private.kalshi_connection_credentials c
+   ON c.owner_user_id=a.owner_user_id
+   AND c.financial_account_id=a.kalshi_connection_id
+   AND c.key_fingerprint=a.key_fingerprint
+ WHERE a.owner_user_id=$1::uuid AND a.id=$2
+   AND a.subaccount=1 AND a.exchange_index=2
+   AND a.commissioned=true AND a.execution_enabled=true
+   AND a.kill_switch=false AND a.cash_precision_verified=true
+   AND a.key_fingerprint=$3
+   AND p.policy_hash=$4 AND p.state='APPROVED'
+   AND p.fee_source_url=$5
+   AND p.fee_policy_version='strata_api_fee_source_signed_review_v1'
+   AND p.fee_formula_version='standard_quadratic_0.07_round_cent_v1'
+   AND live.live_execution_enabled=true AND live.manual_kill_switch=false
+   AND c.role='restricted_execution'
+   AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
+   AND c.verification_reason='credential_verified'
+   AND lease.state='owned' AND lease.account_kill=false
+   AND lease.fencing_token=$6::bigint AND lease.holder_id=$7
+   AND lease.heartbeat_at>now()-interval '30 seconds'
+ FOR SHARE OF a,p,live,c,lease
+`;
+export function createGuardedReviewedApiFeeFetch(
+ ownerUserId:string,executionAccountId:string,sourceUrl:string,transport:typeof fetch,
+ expectedPolicyHash:string,expectedSignerFingerprint:string,
+ expectedFencingToken:number,expectedLeaseHolderId:string,
+ deps:{connect?:()=>ReturnType<typeof pool.connect>;
+   verify?:typeof verifyReviewedApiFeeSourceStage}={},
+):typeof fetch {
+ if(!parseReviewedApiSource(sourceUrl))
+  throw new Error("reviewed_api_source_url_invalid");
+ if(!executionAccountId || !/^[a-f0-9]{64}$/i.test(expectedPolicyHash) ||
+    !/^[a-f0-9]{64}$/i.test(expectedSignerFingerprint) ||
+    !Number.isSafeInteger(expectedFencingToken) || expectedFencingToken<=0 ||
+    !expectedLeaseHolderId || expectedLeaseHolderId.length>200)
+  throw new Error("reviewed_api_account_identity_missing");
+ return async (request,init)=>{
+  // Fetch accepts Request objects and normalizes method case. A POST must
+  // never bypass the fee/order fence through a non-string input or 'post'.
+  const rawMethod=init?.method ??
+    (request instanceof Request ? request.method : "GET");
+  const method=rawMethod.toUpperCase();
+  if(method!=="POST"){
+    if(!["GET","HEAD","DELETE"].includes(method))
+      throw new Error("api_fee_unsupported_exchange_method");
+    if(method==="DELETE"){
+      // Permit safety cancellations only at documented order-ID endpoints.
+      const target=typeof request==="string"?request:request.toString();
+      const parsed=new URL(target);
+      if(parsed.protocol!=="https:" || parsed.host!=="external-api.kalshi.com" ||
+        !/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
+        throw new Error("api_fee_unexpected_cancel_endpoint");
+    }
+    return transport(request,init);
+  }
+  if(init?.method!=="POST" || typeof request!=="string" ||
+     request!=="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders"||
+     typeof init.body!=="string")
+    throw new Error("api_fee_unexpected_order_endpoint");
+  let order:Record<string,unknown>;
+  try{
+   const raw=JSON.parse(init.body);
+   if(!raw||typeof raw!=="object"||Array.isArray(raw))
+    throw Error("invalid");
+   order=raw as Record<string,unknown>;
+  }catch{throw new Error("api_fee_order_body_invalid");}
+  const ticker=order.ticker;
+  if(typeof ticker!=="string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(ticker) ||
+     order.subaccount!==1 || order.exchange_index!==2)
+    throw new Error("api_fee_order_scope_invalid");
+  // Entry/increase remains closed until independently validated exit procedure
+  // and real exchange reconciliation evidence is approved. No browser override.
+  if(order.reduce_only!==true)
+    throw new Error("api_fee_source_new_entry_blocked_pending_exit_validation");
+  if(order.time_in_force!=="immediate_or_cancel"||
+     order.self_trade_prevention_type!=="taker_at_cross"||
+     order.post_only!==false || order.expiration_time!==undefined ||
+     typeof order.client_order_id!=="string" ||
+     !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id) ||
+     (order.side!=="bid"&&order.side!=="ask") ||
+     typeof order.count!=="string"||!/^[0-9]{1,9}\.[0-9]{2}$/.test(order.count) ||
+     Number(order.count)<=0 ||
+     typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price) ||
+     Number(order.price)<=0)
+    throw new Error("api_fee_exit_order_shape_unverified");
+  const client=await(deps.connect?.()??pool.connect());
+  let committed=false;
+  try{
+   await client.query("BEGIN");
+   await client.query("SET LOCAL lock_timeout='1000ms'");
+   await client.query("SET LOCAL statement_timeout='15000ms'");
+   const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
+    ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
+    expectedFencingToken,expectedLeaseHolderId,
+   ]);
+   if(finalAccount.rows.length!==1)
+    throw new Error("api_fee_final_account_signer_or_kill_closed");
+   const checked=await (deps.verify??verifyReviewedApiFeeSourceStage)(
+    ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client});
+   if(!checked.ok || checked.identity.marketTicker!==ticker)
+    throw new Error("api_fee_final_order_grant_or_market_closed");
+   const response=await transport(request,init);
+   await client.query("COMMIT");committed=true;
+   return response;
+  }finally{
+   if(!committed){try{await client.query("ROLLBACK");}catch{}}
+   client.release();
+  }
+ };
+}

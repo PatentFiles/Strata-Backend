@@ -78,6 +78,65 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/step6ApiFeeObservation.test.cjs
           node --test dist/step6ApiFeeObservation.test.cjs
+      - name: Verify integer quadratic reference vectors (review-only)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeRateReference.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeRateReference.test.cjs
+          node --test dist/apiFeeRateReference.test.cjs
+      - name: Validate API-source schema on isolated disposable PGlite
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeSourceMigration.postgres.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeSourceMigration.postgres.test.cjs
+          node --test dist/apiFeeSourceMigration.postgres.test.cjs
+      - name: Guard Step 9/11/order API source integration and empty migration
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeePolicyIntegration.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeePolicyIntegration.test.cjs
+          node --test dist/apiFeePolicyIntegration.test.cjs
+      - name: Verify final reviewed-API fee order POST fence (no live orders)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/guardedReviewedApiFeeWire.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/guardedReviewedApiFeeWire.test.cjs
+          node --test dist/guardedReviewedApiFeeWire.test.cjs
+      - name: Test DB-backed reviewed API fee stage and exact-market refusal
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeSourceStage.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeSourceStage.test.cjs
+          node --test dist/apiFeeSourceStage.test.cjs
+      - name: Test authenticated API fee model review, grants, owner consent and revocation
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeHumanApprovals.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeHumanApprovals.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
+            --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/apiFeeHumanApprovals.test.cjs
+      - name: Test two-independent-reviewer API grant eligibility (no authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeGrantEligibility.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeGrantEligibility.test.cjs
+          node --test dist/apiFeeGrantEligibility.test.cjs
+      - name: Validate PDF-free API fee review candidate (NO approval authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeePolicyReviewCandidate.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeePolicyReviewCandidate.test.cjs \
+            --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/apiFeePolicyReviewCandidate.test.cjs
       - name: Test personal event/series fee changes and stale/override refusal
         working-directory: artifacts/api-server
         run: |
