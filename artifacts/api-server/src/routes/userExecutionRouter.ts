@@ -3,7 +3,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
-import { recordApiFeeRateReview, issueApiFeeSourceGrant, recordApiFeeOwnerConsent, revokeApiFeeOwnerConsent, revokeApiFeeSourceGrant } from "../lib/strata/apiFeeHumanApprovals";
+import { recordApiFeeRateReview, issueApiFeeSourceGrant, recordApiFeeOwnerConsent, revokeApiFeeOwnerConsent, revokeApiFeeSourceGrant, inspectApiFeeSourceReadiness } from "../lib/strata/apiFeeHumanApprovals";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
@@ -574,6 +574,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   // Separate versioned API-source human actions, authenticated by the user
   // session. These only write audit records; NEVER approve Step 9/11 or orders.
+  router.get("/fees/api-source-readiness", async (req,res)=>{
+    const viewer=subject(res);
+    if(!viewer)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const selected=typeof req.query.ownerUserId==="string"?req.query.ownerUserId:undefined;
+    const result=await inspectApiFeeSourceReadiness(viewer,selected);
+    res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
   router.post("/fees/api-rate-review", async (req,res)=>{
     const userId=subject(res);
     if(!userId)return void res.status(401).json({error:"Unauthorized"});
