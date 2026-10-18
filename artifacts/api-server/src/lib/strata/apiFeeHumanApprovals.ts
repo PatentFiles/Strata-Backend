@@ -97,7 +97,7 @@ export async function recordApiFeeRateReview(
   ON CONFLICT(owner_user_id,reviewer_user_id,rate_decision_digest)
   DO NOTHING RETURNING review_id,expires_at`,[
    id,b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
-   PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,b.note.trim(),b.verifiedRateSource
+   PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,(b.note as string).trim(),b.verifiedRateSource
   ]);
   if(rows.rows.length!==1)return denied("rate_review_already_recorded_no_retry");
   return recorded("independent_rate_source_review_recorded_only",
@@ -217,7 +217,7 @@ export async function revokeApiFeeOwnerConsent(
    UPDATE private.strata_api_fee_owner_consents
    SET revoked_at=now(),revocation_reason=$3
    WHERE grant_id=$1::uuid AND owner_user_id=$2::uuid AND revoked_at IS NULL
-   RETURNING consent_id`,[b.grantId,ownerId,b.reason.trim()]);
+   RETURNING consent_id`,[b.grantId,ownerId,(b.reason as string).trim()]);
   return rows.rows.length===1
     ?recorded("owner_api_fee_consent_revoked_only",String(rows.rows[0]!.consent_id))
     :denied("owner_api_fee_consent_not_active");
@@ -238,7 +238,7 @@ export async function revokeApiFeeSourceGrant(
    UPDATE private.strata_api_fee_source_grants
    SET revoked_at=now(),revocation_reason=$3
    WHERE grant_id=$1::uuid AND issuer_admin_id=$2::uuid AND revoked_at IS NULL
-   RETURNING grant_id`,[b.grantId,adminId,b.reason.trim()]);
+   RETURNING grant_id`,[b.grantId,adminId,(b.reason as string).trim()]);
   return rows.rows.length===1
     ?recorded("api_fee_source_grant_revoked_only",String(rows.rows[0]!.grant_id))
     :denied("api_fee_grant_not_owned_or_revoked");
