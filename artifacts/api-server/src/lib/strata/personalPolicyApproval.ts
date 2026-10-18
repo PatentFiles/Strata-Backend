@@ -159,13 +159,10 @@ const APPROVE_API_SQL = `
         ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
       JOIN private.strata_api_fee_rate_reviews r1
         ON r1.owner_user_id=g.owner_user_id AND r1.rate_decision_digest=g.rate_decision_digest
-      JOIN private.strata_api_fee_rate_reviews r2
-        ON r2.owner_user_id=g.owner_user_id AND r2.rate_decision_digest=g.rate_decision_digest
-        AND r1.reviewer_user_id<r2.reviewer_user_id
       WHERE g.grant_id=$25::uuid AND g.owner_user_id=$21::uuid
         AND g.revoked_at IS NULL AND g.expires_at>now()+interval '12 seconds'
         AND g.issuer_admin_id<>g.owner_user_id
-        AND g.policy_version=$16 AND $16='strata_api_fee_source_signed_review_v1'
+        AND g.policy_version=$16 AND $16='strata_api_fee_source_signed_review_v2'
         AND g.fee_model_version='kalshi_quadratic_007_whole_cent_conservative_reference_v1'
         AND g.rate_decision_digest=$26
         AND $17='strata-api-reviewed://kxbtc15m/' || g.grant_id::text
@@ -173,23 +170,29 @@ const APPROVE_API_SQL = `
         AND g.authorized_stages @> ARRAY['STEP_9']::text[]
         AND c.revoked_at IS NULL AND c.confirmed_at>=g.issued_at
         AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
-        AND r1.revoked_at IS NULL AND r2.revoked_at IS NULL
+        AND g.scope='KXBTC15M:INDEX2'
+        AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'
+        AND r1.revoked_at IS NULL
         AND r1.expires_at>now()+interval '12 seconds'
-        AND r2.expires_at>now()+interval '12 seconds'
-        AND r1.signed_at<=g.issued_at AND r2.signed_at<=g.issued_at
-        AND r1.reviewer_user_id<>g.issuer_admin_id
-        AND r2.reviewer_user_id<>g.issuer_admin_id
+        AND r1.signed_at<=g.issued_at
+        AND r1.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
+        AND r1.scope=g.scope AND r1.fee_model_version=g.fee_model_version
+        AND r1.reviewer_user_id=g.issuer_admin_id
         AND r1.reviewer_user_id<>g.owner_user_id
-        AND r2.reviewer_user_id<>g.owner_user_id
+        AND (SELECT count(*) FROM private.strata_api_fee_rate_reviews rx
+             WHERE rx.owner_user_id=g.owner_user_id
+               AND rx.rate_decision_digest=g.rate_decision_digest
+               AND rx.reviewer_user_id=g.issuer_admin_id
+               AND rx.scope=g.scope AND rx.fee_model_version=g.fee_model_version
+               AND rx.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
+               AND rx.revoked_at IS NULL AND rx.signed_at<=g.issued_at
+               AND rx.expires_at>now()+interval '12 seconds')=1
         AND EXISTS (SELECT 1 FROM auth.users u JOIN private.role_assignments role
           ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
           WHERE u.id=g.issuer_admin_id AND u.email_confirmed_at IS NOT NULL)
         AND EXISTS (SELECT 1 FROM auth.users u JOIN private.role_assignments role
           ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
           WHERE u.id=r1.reviewer_user_id AND u.email_confirmed_at IS NOT NULL)
-        AND EXISTS (SELECT 1 FROM auth.users u JOIN private.role_assignments role
-          ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
-          WHERE u.id=r2.reviewer_user_id AND u.email_confirmed_at IS NOT NULL)
     ))
   RETURNING id
 `;

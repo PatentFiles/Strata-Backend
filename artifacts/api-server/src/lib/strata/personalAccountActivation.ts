@@ -199,13 +199,9 @@ const COMMISSION_API_SQL = `
       JOIN private.strata_api_fee_rate_reviews r1
         ON r1.owner_user_id=g.owner_user_id
         AND r1.rate_decision_digest=g.rate_decision_digest
-      JOIN private.strata_api_fee_rate_reviews r2
-        ON r2.owner_user_id=g.owner_user_id
-        AND r2.rate_decision_digest=g.rate_decision_digest
-        AND r1.reviewer_user_id<r2.reviewer_user_id
       WHERE g.grant_id=$7::uuid AND g.owner_user_id=$2::uuid
         AND p.state='APPROVED'
-        AND p.fee_policy_version='strata_api_fee_source_signed_review_v1'
+        AND p.fee_policy_version='strata_api_fee_source_signed_review_v2'
         AND p.fee_source_url='strata-api-reviewed://kxbtc15m/' || g.grant_id::text
         AND g.rate_decision_digest=
           $8
@@ -213,12 +209,25 @@ const COMMISSION_API_SQL = `
         AND g.revoked_at IS NULL AND g.expires_at>now()+interval '12 seconds'
         AND c.revoked_at IS NULL AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
         AND c.confirmed_at>=g.issued_at
-        AND r1.revoked_at IS NULL AND r2.revoked_at IS NULL
+        AND g.issuer_admin_id<>g.owner_user_id
+        AND g.scope='KXBTC15M:INDEX2'
+        AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'
+        AND g.fee_model_version='kalshi_quadratic_007_whole_cent_conservative_reference_v1'
+        AND r1.revoked_at IS NULL
         AND r1.expires_at>now()+interval '12 seconds'
-        AND r2.expires_at>now()+interval '12 seconds'
-        AND r1.signed_at<=g.issued_at AND r2.signed_at<=g.issued_at
-        AND r1.reviewer_user_id<>g.issuer_admin_id
-        AND r2.reviewer_user_id<>g.issuer_admin_id
+        AND r1.signed_at<=g.issued_at
+        AND r1.reviewer_user_id=g.issuer_admin_id
+        AND r1.reviewer_user_id<>g.owner_user_id
+        AND r1.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
+        AND r1.scope=g.scope AND r1.fee_model_version=g.fee_model_version
+        AND (SELECT count(*) FROM private.strata_api_fee_rate_reviews rx
+             WHERE rx.owner_user_id=g.owner_user_id
+               AND rx.rate_decision_digest=g.rate_decision_digest
+               AND rx.reviewer_user_id=g.issuer_admin_id
+               AND rx.scope=g.scope AND rx.fee_model_version=g.fee_model_version
+               AND rx.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
+               AND rx.revoked_at IS NULL AND rx.signed_at<=g.issued_at
+               AND rx.expires_at>now()+interval '12 seconds')=1
         AND g.authorized_stages @> ARRAY['STEP_11']::text[]
         AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
           ON lower(btrim(u.email))=lower(btrim(ra.email))
@@ -227,10 +236,6 @@ const COMMISSION_API_SQL = `
         AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
           ON lower(btrim(u.email))=lower(btrim(ra.email))
           WHERE u.id=r1.reviewer_user_id AND ra.role='ADMIN'
-            AND u.email_confirmed_at IS NOT NULL)
-        AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
-          ON lower(btrim(u.email))=lower(btrim(ra.email))
-          WHERE u.id=r2.reviewer_user_id AND ra.role='ADMIN'
             AND u.email_confirmed_at IS NOT NULL)
     ))
   RETURNING id
