@@ -12,7 +12,7 @@ import {
   KALSHI_API_ORIGIN, KALSHI_SERIES, type KalshiMarketFeeReadOnly,
 } from "./twoSourceFeeEvidence";
 import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
-import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION, validateConservativeFeeVectors } from "./apiFeeRateReference";
+import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION, PDF_FREE_API_RATE_REVIEW_DECISION_SHA256, validateConservativeFeeVectors } from "./apiFeeRateReference";
 
 export const API_FEE_POLICY_SOURCE_V1 = "kalshi_trade_api_fee_policy_candidate_v1" as const;
 const HASH=/^[a-f0-9]{64}$/;
@@ -74,6 +74,7 @@ export function preparePdfFreeApiFeePolicyReview(
     verifiedAt:market.liveVerifiedAt,
     feeFormulaVersion:STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
     conservativeReferenceVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+    conservativeRatePolicySha256:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
   });
   return {
     ok:true,reason:"api_fee_observation_eligible_for_independent_review_only",
