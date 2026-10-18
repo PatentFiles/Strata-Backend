@@ -98,7 +98,12 @@ function safeChanges(data: JsonObject, key: string, windowEnd: number): boolean 
 export async function probeCurrentKalshiFeeApi(
   fetchImpl: typeof fetch = globalThis.fetch,
   clock: () => number = Date.now,
+  expectedMarketTicker?: string,
 ): Promise<KalshiMarketFeeReadOnly> {
+  // Order-time calls MUST bind evidence to the exact order market.
+  // An ambiguous/absent ticker cannot fall back to another open market.
+  if(expectedMarketTicker!==undefined && !tickerPattern.test(expectedMarketTicker))
+    return fail("exact_market_identity_invalid");
   const started = clock();
   try {
     const listing = await getJson(
@@ -114,9 +119,14 @@ export async function probeCurrentKalshiFeeApi(
       (m.exchange_index === undefined || m.exchange_index === 2) &&
       tickerPattern.test(String(m.ticker ?? ""))).sort((a, b) =>
         canonicalTime(a.close_time)! - canonicalTime(b.close_time)!);
-    const target = open[0];
-    if (!target || open[1] && target.close_time === open[1].close_time)
-      return fail("market_target_ambiguous");
+    const matches=expectedMarketTicker===undefined ? [] :
+      open.filter(m=>m.ticker===expectedMarketTicker);
+    const target=expectedMarketTicker===undefined ? open[0] : matches[0];
+    if (!target || expectedMarketTicker!==undefined && matches.length!==1 ||
+        expectedMarketTicker===undefined && open[1] &&
+          target.close_time===open[1].close_time)
+      return fail(expectedMarketTicker!==undefined ?
+        "exact_market_not_in_complete_open_listing" : "market_target_ambiguous");
     const ticker = String(target.ticker);
     const eventTicker = target.event_ticker;
     if (typeof eventTicker !== "string" || !tickerPattern.test(eventTicker))
