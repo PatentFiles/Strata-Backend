@@ -59,8 +59,25 @@ export function createGuardedReviewedApiFeeFetch(
     !expectedLeaseHolderId || expectedLeaseHolderId.length>200)
   throw new Error("reviewed_api_account_identity_missing");
  return async (request,init)=>{
-  if(init?.method!=="POST")return transport(request,init);
-  if(typeof request!=="string" ||
+  // Fetch accepts Request objects and normalizes method case. A POST must
+  // never bypass the fee/order fence through a non-string input or 'post'.
+  const rawMethod=init?.method ??
+    (request instanceof Request ? request.method : "GET");
+  const method=rawMethod.toUpperCase();
+  if(method!=="POST"){
+    if(!["GET","HEAD","DELETE"].includes(method))
+      throw new Error("api_fee_unsupported_exchange_method");
+    if(method==="DELETE"){
+      // Permit safety cancellations only at documented order-ID endpoints.
+      const target=typeof request==="string"?request:request.toString();
+      const parsed=new URL(target);
+      if(parsed.protocol!=="https:" || parsed.host!=="external-api.kalshi.com" ||
+        !/^\\/trade-api\\/v2\\/portfolio\\/(?:orders|events\\/orders)\\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
+        throw new Error("api_fee_unexpected_cancel_endpoint");
+    }
+    return transport(request,init);
+  }
+  if(init?.method!=="POST" || typeof request!=="string" ||
      request!=="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders"||
      typeof init.body!=="string")
     throw new Error("api_fee_unexpected_order_endpoint");
