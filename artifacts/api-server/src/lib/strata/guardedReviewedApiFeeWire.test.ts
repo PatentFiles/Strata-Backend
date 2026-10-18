@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
+import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
+const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const policyHash="b".repeat(64);
+const signer="c".repeat(64);
 const source="strata-api-reviewed://kxbtc15m/"+grant;
 const ticker="KXBTC15M-26OCT18T0325";
 const url="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders";
@@ -15,7 +18,7 @@ const order={
 test("never sends an unreviewed new entry even if all other permissions are claimed",async()=>{
  let sent=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- const wrapped=createGuardedReviewedApiFeeFetch(owner,source,transport);
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer);
  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})}),
   /new_entry_blocked/);
  assert.equal(sent,0);
@@ -23,8 +26,8 @@ test("never sends an unreviewed new entry even if all other permissions are clai
 test("refuses any invalid order shape, scope, URL or unsourced grant",async()=>{
  let sent=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- assert.throws(()=>createGuardedReviewedApiFeeFetch(owner,"http://malicious",transport),/source_url_invalid/);
- const wrapped=createGuardedReviewedApiFeeFetch(owner,source,transport);
+ assert.throws(()=>createGuardedReviewedApiFeeFetch(owner,account,"http://malicious",transport,policyHash,signer),/source_url_invalid/);
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer);
  for(const payload of [
   {...order,ticker:"OTHER"},
   {...order,exchange_index:0},
@@ -45,7 +48,7 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
  const transport=(async()=>{sent++;calls.push("POST");return new Response("{}");}) as typeof fetch;
  const db={
   query:async(sql:string)=>{calls.push(sql==="BEGIN"?"BEGIN":sql.startsWith("COMMIT")?"COMMIT":
-   sql.startsWith("ROLLBACK")?"ROLLBACK":"QUERY");return {rows:[]}},
+   sql.startsWith("ROLLBACK")?"ROLLBACK":"QUERY");return {rows:sql.includes("SELECT a.id")?[{id:account}]:[]}},
   release:()=>{released++},
  };
  const grantProof=async(_owner:string,_stage:string,_source:string|undefined,market:string|undefined)=>{
@@ -58,7 +61,7 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
    marketTicker:ticker,verifiedAtMs:Date.now(),
   }};
  };
- const wrapped=createGuardedReviewedApiFeeFetch(owner,source,transport,{
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
   connect:(async()=>db) as never, verify:grantProof as never,
  });
  await wrapped(url,{method:"POST",body:JSON.stringify(order)});
@@ -74,7 +77,7 @@ test("a missing grant must ROLLBACK and never call Kalshi POST",async()=>{
   sql.startsWith("ROLLBACK")?"ROLLBACK":"OTHER");return {rows:[]}},
   release:()=>{calls.push("RELEASE")}};
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
- const wrapped=createGuardedReviewedApiFeeFetch(owner,source,transport,{
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
   connect:(async()=>db) as never,
   verify:(async()=>({ok:false,reason:"fee_review_missing"})) as never,
  });
@@ -82,4 +85,28 @@ test("a missing grant must ROLLBACK and never call Kalshi POST",async()=>{
  assert.equal(sent,0);
  assert.ok(calls.includes("ROLLBACK"));
  assert.equal(calls.at(-1),"RELEASE");
+});
+
+test("final transaction refuses revoked signer, closed account or global kill before any POST",async()=>{
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/a\.commissioned=true/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/a\.kill_switch=false/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/live\.manual_kill_switch=false/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/live\.live_execution_enabled=true/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/c\.revoked_at IS NULL/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/p\.policy_hash=\$4/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,live,c/);
+ let sent=0,verified=0,rolledBack=0,released=0;
+ const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
+ const db={query:async(sql:string)=>{
+  if(sql.startsWith("ROLLBACK"))rolledBack++;
+  return {rows:[]}; // no matched account: closed/stale state
+ },release:()=>{released++}};
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,{
+  connect:(async()=>db) as never,
+  verify:(async()=>{verified++;return {ok:true}}) as never,
+ });
+ await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify(order)}),
+  /api_fee_final_account_signer_or_kill_closed/);
+ assert.equal(sent,0);assert.equal(verified,0);
+ assert.equal(rolledBack,1);assert.equal(released,1);
 });
