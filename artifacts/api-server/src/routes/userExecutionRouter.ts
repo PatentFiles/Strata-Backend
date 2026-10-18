@@ -3,6 +3,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
+import { recordApiFeeRateReview, issueApiFeeSourceGrant, recordApiFeeOwnerConsent, revokeApiFeeOwnerConsent, revokeApiFeeSourceGrant } from "../lib/strata/apiFeeHumanApprovals";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
@@ -564,6 +565,43 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   // Diagnostic only: human-attested candidate is not authenticated official PDF
   // evidence. The result never authorizes Step 9, Step 11 or live orders.
+  // Separate versioned API-source human actions, authenticated by the user
+  // session. These only write audit records; NEVER approve Step 9/11 or orders.
+  router.post("/fees/api-rate-review", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await recordApiFeeRateReview(userId,req.body??{});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/api-source-grants", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await issueApiFeeSourceGrant(userId,req.body??{});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/api-owner-consent", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await recordApiFeeOwnerConsent(userId,req.body??{});
+    res.status(result.ok?201:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/api-owner-consent/revoke", async(req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeApiFeeOwnerConsent(userId,req.body??{});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/api-source-grants/revoke", async(req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await revokeApiFeeSourceGrant(userId,req.body??{});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
   router.get("/fees/operator-candidate", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
