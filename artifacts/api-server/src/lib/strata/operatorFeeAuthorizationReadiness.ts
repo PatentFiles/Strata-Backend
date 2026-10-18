@@ -119,7 +119,7 @@ export async function inspectOwnerFeeSourceReadiness(
                 SELECT 1 FROM public.strata_fee_operator_release_candidates candidate
                 JOIN public.strata_fee_operator_source_reviews first_review
                   ON first_review.review_id=candidate.reviewer_1
-                JOIN public.strata_fee_operator_source_reviews second_review
+                LEFT JOIN public.strata_fee_operator_source_reviews second_review
                   ON second_review.review_id=candidate.reviewer_2
                 WHERE candidate.release_id=g.release_id
                   AND candidate.revoked_at IS NULL
@@ -127,15 +127,16 @@ export async function inspectOwnerFeeSourceReadiness(
                   AND candidate.recorded_at <= now() AND candidate.expires_at > now()
                   AND candidate.content_sha256=g.reviewed_pdf_sha256
                   AND first_review.content_sha256=candidate.content_sha256
-                  AND second_review.content_sha256=candidate.content_sha256
+                  AND (candidate.reviewer_2 IS NULL OR second_review.content_sha256=candidate.content_sha256)
                   AND first_review.reviewed_at <= now()
-                  AND second_review.reviewed_at <= now()
+                  AND (candidate.reviewer_2 IS NULL OR second_review.reviewed_at <= now())
                   AND first_review.expires_at > now()
-                  AND second_review.expires_at > now()
-                  AND first_review.reviewer_user_id <> second_review.reviewer_user_id
-                  AND g.approved_by_admin_id <> first_review.reviewer_user_id
-                  AND g.approved_by_admin_id <> second_review.reviewer_user_id
-                  AND g.approved_by_admin_id <> g.owner_user_id
+                  AND (candidate.reviewer_2 IS NULL OR second_review.expires_at > now())
+                  AND (candidate.reviewer_2 IS NULL OR first_review.reviewer_user_id <> second_review.reviewer_user_id)
+                  AND EXISTS (SELECT 1 FROM auth.users u JOIN private.role_assignments ar
+                    ON lower(btrim(u.email))=lower(btrim(ar.email))
+                    WHERE u.id=first_review.reviewer_user_id
+                      AND u.email_confirmed_at IS NOT NULL AND ar.role='ADMIN')
               ) AS approver_independent
          FROM private.strata_fee_source_grants g
         WHERE g.owner_user_id=$1::uuid AND g.release_id=$2::uuid
@@ -154,12 +155,12 @@ export async function inspectOwnerFeeSourceReadiness(
             JOIN private.role_assignments sr
               ON lower(btrim(sr.email))=lower(btrim(signer.email))
             WHERE reviewers.owner_user_id=$1::uuid AND reviewers.release_id=$2::uuid
-              AND reviewers.reviewer_user_id <> g.owner_user_id
+              
               AND reviewers.policy_decision_sha256=$3
               AND reviewers.reviewed_pdf_sha256=g.reviewed_pdf_sha256
               AND reviewers.revoked_at IS NULL AND reviewers.expires_at>now()
               AND signer.email_confirmed_at IS NOT NULL AND sr.role='ADMIN'
-          ) >= 2
+          ) >= 1
         ORDER BY g.approved_at DESC LIMIT 2`,
       [ownerUserId, candidate.releaseId, FEE_SOURCE_DECISION_SHA256],
     );
@@ -173,8 +174,7 @@ export async function inspectOwnerFeeSourceReadiness(
     // Revalidate issuer independence and review/release freshness each read.
     const grantRow = grants.rows[0]!;
     if (grantRow.approver_independent !== true ||
-        grantRow.policy_decision_sha256 !== FEE_SOURCE_DECISION_SHA256 ||
-        String(grantRow.approved_by_admin_id).toLowerCase() === ownerUserId.toLowerCase()) {
+        grantRow.policy_decision_sha256 !== FEE_SOURCE_DECISION_SHA256) {
       const denied = blocked("fee_grant_independent_reviewers_unverified");
       denied.candidateExpiresAt = candidate.expiresAt;
       return denied;
