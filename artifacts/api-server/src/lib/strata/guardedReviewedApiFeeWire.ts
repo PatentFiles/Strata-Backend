@@ -72,7 +72,7 @@ export function createGuardedReviewedApiFeeFetch(
       const target=typeof request==="string"?request:request.toString();
       const parsed=new URL(target);
       if(parsed.protocol!=="https:" || parsed.host!=="external-api.kalshi.com" ||
-        !/^\\/trade-api\\/v2\\/portfolio\\/(?:orders|events\\/orders)\\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
+        !/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
         throw new Error("api_fee_unexpected_cancel_endpoint");
     }
     return transport(request,init);
