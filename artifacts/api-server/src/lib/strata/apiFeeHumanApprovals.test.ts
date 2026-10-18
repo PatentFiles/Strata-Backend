@@ -33,7 +33,7 @@ function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;active
    if(sql.includes("SELECT grant_id FROM private.strata_api_fee_source_grants") && sql.includes("LIMIT 1"))
     return {rows:options.activeGrant?[{grant_id:grant}]:[]};
    if(sql.includes("SELECT r.reviewer_user_id,r.expires_at")){
-    return {rows:Array.from({length:options.reviewers??2},(_,i)=>({
+    return {rows:Array.from({length:options.reviewers??1},(_,i)=>({
      reviewer_user_id:i===0?"33333333-3333-4333-8333-333333333333":"44444444-4444-4444-8444-444444444444",
      expires_at:new Date(Date.now()+90*60_000)
     }))};
@@ -90,8 +90,8 @@ test("rate review requires distinct confirmed ADMIN and exact signed decision di
  const r=await recordApiFeeRateReview(admin,review,allowed.db);
  assert.equal(r.ok,true);assert.equal(allowed.commits,1);assertNoAuthority(r);
 });
-test("grant requires independent pair, fresh canonical Kalshi fee observation and third issuer",async()=>{
- for(const reviewers of [0,1,3]){
+test("grant requires same technical attesting admin, fresh canonical Kalshi fee observation and distinct owner",async()=>{
+ for(const reviewers of [0,2,3]){
   const state=fixture({reviewers});
   const r=await issueApiFeeSourceGrant(admin,
    {ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM},
