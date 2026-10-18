@@ -85,6 +85,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/apiFeeRateReference.test.cjs
           node --test dist/apiFeeRateReference.test.cjs
+      - name: Verify final reviewed-API fee order POST fence (no live orders)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/guardedReviewedApiFeeWire.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/guardedReviewedApiFeeWire.test.cjs
+          node --test dist/guardedReviewedApiFeeWire.test.cjs
       - name: Test DB-backed reviewed API fee stage and exact-market refusal
         working-directory: artifacts/api-server
         run: |
