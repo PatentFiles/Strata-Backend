@@ -129,6 +129,63 @@ const COMMISSION_SQL = `
         AND p.fee_source_url='strata-operator-attested://kxbtc15m/' ||
           g.grant_id::text || '/' || g.release_id::text
     ))
+  RETURNING id
+`;
+
+const COMMISSION_API_SQL = `
+  -- personal-activation:commission
+  UPDATE v13_production_account
+  SET commissioned = true,
+      commissioning_digest = $3,
+      fee_artifact_digest = $4,
+      minimum_exit_micros = $5
+  WHERE id = $1
+    AND owner_user_id = $2::uuid
+    AND owner_user_id IS NOT NULL
+    AND subaccount = 1
+    AND exchange_index = 2
+    AND execution_enabled = false
+    AND kill_switch = true
+    AND cash_precision_verified = true
+    AND cash_micros >= 25000000
+    AND reconciled_at IS NOT NULL
+    AND (
+      EXISTS (
+        SELECT 1 FROM private.kalshi_owner_pilot_transfers t
+        WHERE t.execution_account_id = v13_production_account.id
+          AND t.owner_user_id = v13_production_account.owner_user_id
+          AND t.state='completed' AND t.bot_after_cents >= 2500
+          AND v13_production_account.reconciled_at >= t.completed_at
+      )
+      OR EXISTS (
+        SELECT 1 FROM private.kalshi_owner_historical_funding h
+        WHERE h.execution_account_id = v13_production_account.id
+          AND h.owner_user_id = v13_production_account.owner_user_id
+          AND h.primary_after_cents=0 AND h.bot_after_cents=2500
+          AND v13_production_account.reconciled_at >= h.verified_at
+      )
+    )
+    AND policy_id IS NOT NULL
+    AND (fee_artifact_digest IS NULL OR fee_artifact_digest = $4)
+    AND (commissioned = false OR commissioning_digest = $3)
+    AND $5::integer BETWEEN 1 AND 999999
+    AND ($6::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_fee_source_grants g
+      JOIN private.strata_fee_source_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN public.strata_fee_operator_release_candidates r
+        ON r.release_id=g.release_id
+      JOIN v13_live_money_policy p ON p.id=v13_production_account.policy_id
+      WHERE g.grant_id=$6::uuid AND g.owner_user_id=$2::uuid
+        AND g.revoked_at IS NULL AND g.expires_at>now()
+        AND c.revoked_at IS NULL AND c.confirmation='CONFIRM_OPERATOR_FEE_SOURCE_ONLY'
+        AND r.revoked_at IS NULL AND r.expires_at>now()
+        AND r.content_sha256=g.reviewed_pdf_sha256 AND c.release_id=g.release_id
+        AND g.authorized_stages @> ARRAY['STEP_11']::text[]
+        AND p.state='APPROVED' AND p.fee_policy_version=g.policy_version
+        AND p.fee_source_url='strata-operator-attested://kxbtc15m/' ||
+          g.grant_id::text || '/' || g.release_id::text
+    ))
     AND (NOT EXISTS (
       SELECT 1 FROM v13_live_money_policy p
       WHERE p.id=v13_production_account.policy_id
@@ -533,11 +590,10 @@ export async function commissionOwnedAccount(
     fee: digest,
     policyId: text(row?.policy_id),
   })).digest("hex");
-  const written = await db.query(COMMISSION_SQL, [
+  const written = await db.query(apiGrantId?COMMISSION_API_SQL:COMMISSION_SQL, [
     report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
     alternateGrantId,
-    apiGrantId,
-    PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+    ...(apiGrantId?[apiGrantId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]:[]),
   ]);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
