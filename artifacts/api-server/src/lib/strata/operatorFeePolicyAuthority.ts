@@ -135,8 +135,8 @@ export async function issueReviewedOwnerFeeSourceGrant(
       ORDER BY p.reviewer_user_id FOR SHARE OF p`,
       [r.releaseId,r.ownerUserId,FEE_SOURCE_DECISION_SHA256,REVIEWED_OPERATOR_FEE_SHA256]);
     const distinct=new Set(reviewers.rows.map(x=>String(x.reviewer_user_id)));
-    if(distinct.size<2||reviewers.rows.length!==2)
-      return no("two_independent_current_fee_policy_signers_required");
+    if(distinct.size<1||reviewers.rows.length<1)
+      return no("one_current_fee_policy_admin_required");
     const now=Date.now();
     const expiry=Math.min(Date.parse(candidate.expiresAt ?? ''),
       new Date(release.rows[0]!.expires_at).getTime(),
@@ -149,7 +149,7 @@ export async function issueReviewedOwnerFeeSourceGrant(
       INSERT INTO private.strata_fee_source_grants
       (grant_id,owner_user_id,release_id,reviewed_pdf_sha256,policy_version,
        approved_by_admin_id,policy_decision_sha256,approved_at,expires_at,authorized_stages)
-      VALUES ($1::uuid,$2::uuid,$3::uuid,$4,'operator_attested_fee_source_v1',
+      VALUES ($1::uuid,$2::uuid,$3::uuid,$4,'operator_attested_fee_source_v2',
         $5::uuid,$6,now(),$7::timestamptz,$8::text[])
       ON CONFLICT (owner_user_id,release_id) DO NOTHING RETURNING grant_id`,
       [grantId,r.ownerUserId,r.releaseId,REVIEWED_OPERATOR_FEE_SHA256,
