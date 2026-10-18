@@ -60,11 +60,11 @@ test("Step 6 read-only route has no PDF fetch dependency or authority mutation",
   const end = source.indexOf('router.get("/policy/evidence"', start);
   assert.ok(start >= 0 && end > start);
   const route = source.slice(start, end);
-  assert.match(route, /await probeCurrentKalshiFeeApi\\(\\)/);
-  assert.match(route, /step6ApiFeeObservation\\(market\\)/);
+  assert.match(route, /await probeCurrentKalshiFeeApi\(\)/);
+  assert.match(route, /step6ApiFeeObservation\(market\)/);
   assert.doesNotMatch(route, /establishOfficialFeeDigest|fetchOfficialFeeSchedule|feeSchedule\.pdf/);
-  assert.match(route, /policyApproved:\\s*false/);
-  assert.match(route, /commissioningPerformed:\\s*false/);
-  assert.match(route, /tradingAuthorized:\\s*false/);
-  assert.doesNotMatch(route, /res\\.status\\(20[01]\\).*approve|executeOrder|sendOrder/);
+  assert.match(route, /policyApproved:\s*false/);
+  assert.match(route, /commissioningPerformed:\s*false/);
+  assert.match(route, /tradingAuthorized:\s*false/);
+  assert.doesNotMatch(route, /res\.status\(20[01]\).*approve|executeOrder|sendOrder/);
 });
