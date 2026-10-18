@@ -71,6 +71,13 @@ jobs:
           node --test dist/kalshiAccountClient.test.cjs
           pnpm exec esbuild src/lib/kalshiTradingClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiTradingClient.test.cjs             --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/kalshiTradingClient.test.cjs
+      - name: Test API-first Step 6 without PDF and no approval authority
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/step6ApiFeeObservation.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/step6ApiFeeObservation.test.cjs
+          node --test dist/step6ApiFeeObservation.test.cjs
       - name: Test personal event/series fee changes and stale/override refusal
         working-directory: artifacts/api-server
         run: |
