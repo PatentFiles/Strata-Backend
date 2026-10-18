@@ -23,6 +23,7 @@ import { digest } from "../v13-production/types";
 import { verifyOwnerFeeSourceStage, parseOwnerFeeSource } from "./ownerFeeSourceStage";
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
+import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -70,11 +71,7 @@ const READINESS_SQL = `
    AND c.role = 'restricted_execution'
    AND c.revoked_at IS NULL
    AND c.verified_at IS NOT NULL
-   AND c.verification_reason = 'credential_verified'
-  WHERE a.owner_user_id = $1::uuid AND a.owner_user_id IS NOT NULL
-`;
-
-const COMMISSION_SQL = `
+   AND c.verification_reason = 'credentialconst COMMISSION_SQL = `
   -- personal-activation:commission
   UPDATE v13_production_account
   SET commissioned = true,
@@ -126,6 +123,58 @@ const COMMISSION_SQL = `
         AND g.authorized_stages @> ARRAY['STEP_11']::text[]
         AND p.state='APPROVED' AND p.fee_policy_version=g.policy_version
         AND p.fee_source_url='strata-operator-attested://kxbtc15m/' ||
+          g.grant_id::text || '/' || g.release_id::text
+    ))
+    AND (NOT EXISTS (
+      SELECT 1 FROM v13_live_money_policy p
+      WHERE p.id=v13_production_account.policy_id
+        AND p.fee_source_url LIKE 'strata-api-reviewed://%'
+    ) OR $7::uuid IS NOT NULL)
+    AND ($7::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM private.strata_api_fee_source_grants g
+      JOIN private.strata_api_fee_owner_consents c
+        ON c.grant_id=g.grant_id AND c.owner_user_id=g.owner_user_id
+      JOIN v13_live_money_policy p ON p.id=v13_production_account.policy_id
+      JOIN private.strata_api_fee_rate_reviews r1
+        ON r1.owner_user_id=g.owner_user_id
+        AND r1.rate_decision_digest=g.rate_decision_digest
+      JOIN private.strata_api_fee_rate_reviews r2
+        ON r2.owner_user_id=g.owner_user_id
+        AND r2.rate_decision_digest=g.rate_decision_digest
+        AND r1.reviewer_user_id<r2.reviewer_user_id
+      WHERE g.grant_id=$7::uuid AND g.owner_user_id=$2::uuid
+        AND p.state='APPROVED'
+        AND p.fee_policy_version='strata_api_fee_source_signed_review_v1'
+        AND p.fee_source_url='strata-api-reviewed://kxbtc15m/' || g.grant_id::text
+        AND g.rate_decision_digest=
+          $8
+        AND g.policy_version=p.fee_policy_version
+        AND g.revoked_at IS NULL AND g.expires_at>now()+interval '12 seconds'
+        AND c.revoked_at IS NULL AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
+        AND c.confirmed_at>=g.issued_at
+        AND r1.revoked_at IS NULL AND r2.revoked_at IS NULL
+        AND r1.expires_at>now()+interval '12 seconds'
+        AND r2.expires_at>now()+interval '12 seconds'
+        AND r1.signed_at<=g.issued_at AND r2.signed_at<=g.issued_at
+        AND r1.reviewer_user_id<>g.issuer_admin_id
+        AND r2.reviewer_user_id<>g.issuer_admin_id
+        AND g.authorized_stages @> ARRAY['STEP_11']::text[]
+        AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
+          ON lower(btrim(u.email))=lower(btrim(ra.email))
+          WHERE u.id=g.issuer_admin_id AND ra.role='ADMIN'
+            AND u.email_confirmed_at IS NOT NULL)
+        AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
+          ON lower(btrim(u.email))=lower(btrim(ra.email))
+          WHERE u.id=r1.reviewer_user_id AND ra.role='ADMIN'
+            AND u.email_confirmed_at IS NOT NULL)
+        AND EXISTS(SELECT 1 FROM auth.users u JOIN private.role_assignments ra
+          ON lower(btrim(u.email))=lower(btrim(ra.email))
+          WHERE u.id=r2.reviewer_user_id AND ra.role='ADMIN'
+            AND u.email_confirmed_at IS NOT NULL)
+    ))
+  RETURNING id
+`;
+
           g.grant_id::text || '/' || g.release_id::text
     ))
   RETURNING id
@@ -435,8 +484,20 @@ export async function commissionOwnedAccount(
   const row = policy.rows[0];
   const policySource=text(row?.fee_source_url)??"";
   const operatorIdentity=parseOwnerFeeSource(policySource);
+  const apiIdentity=parseReviewedApiSource(policySource);
   let alternateGrantId:string|null=null;
-  if(operatorIdentity){
+  let apiGrantId:string|null=null;
+  if(apiIdentity){
+    if(text(row?.fee_policy_version)!==API_SOURCE_POLICY_VERSION ||
+       text(row?.fee_formula_version)!==API_SOURCE_FORMULA_VERSION)
+      return {ok:false,reason:"api_fee_source_identity_invalid",
+        blockers:["api_fee_source_identity_invalid"]};
+    const checked=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
+    if(!checked.ok||checked.identity.digest!==digest)
+      return {ok:false,reason:checked.ok?"api_fee_digest_mismatch":checked.reason,
+        blockers:[checked.ok?"api_fee_digest_mismatch":checked.reason]};
+    apiGrantId=checked.identity.grantId;
+  }else if(operatorIdentity){
     if(text(row?.fee_policy_version)!==OPERATOR_FEE_SOURCE_POLICY ||
        text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)
       return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
@@ -450,7 +511,7 @@ export async function commissionOwnedAccount(
              text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
   }
-  if (!operatorIdentity && input.verifyFee) {
+  if (!operatorIdentity && !apiIdentity && input.verifyFee) {
     const artifact = await input.verifyFee({
       digest,
       policyVersion: text(row?.fee_policy_version) ?? "",
@@ -460,7 +521,7 @@ export async function commissionOwnedAccount(
     if (!artifact.valid || artifact.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
-  } else if (!operatorIdentity) {
+  } else if (!operatorIdentity && !apiIdentity) {
     const established = await establishOfficialFeeDigest();
     if (!established.ok) return { ok: false, reason: established.reason, blockers: [established.reason] };
     if (established.digest !== digest) {
@@ -476,6 +537,8 @@ export async function commissionOwnedAccount(
   const written = await db.query(COMMISSION_SQL, [
     report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
     alternateGrantId,
+    apiGrantId,
+    PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
   ]);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
