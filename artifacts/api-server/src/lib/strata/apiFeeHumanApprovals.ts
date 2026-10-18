@@ -126,6 +126,18 @@ export async function issueApiFeeSourceGrant(
  return transaction(db,async c=>{
   if(!await confirmedAdmin(c,adminId))return denied("administrator_required");
   if(!await singleOwnedPair(c,b.ownerUserId as string))return denied("owned_index2_account_missing_or_ambiguous");
+  // Serialize issuance on the owned execution-account row. Duplicate
+  // simultaneously valid grants would make source lookup ambiguous.
+  const ownerLock=await c.query(`
+   SELECT id FROM public.v13_production_account
+   WHERE owner_user_id=$1::uuid AND subaccount=1 AND exchange_index=2
+   FOR UPDATE`,[b.ownerUserId]);
+  if(ownerLock.rows.length!==1)return denied("owned_account_issuance_lock_unavailable");
+  const existing=await c.query(`
+   SELECT grant_id FROM private.strata_api_fee_source_grants
+   WHERE owner_user_id=$1::uuid AND revoked_at IS NULL AND expires_at>now()
+   LIMIT 1`,[b.ownerUserId]);
+  if(existing.rows.length)return denied("active_api_fee_source_grant_already_exists");
   const reviews=await c.query(`
    SELECT r.reviewer_user_id,r.expires_at FROM private.strata_api_fee_rate_reviews r
    JOIN auth.users u ON u.id=r.reviewer_user_id
