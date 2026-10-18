@@ -9,13 +9,45 @@ import {
  * require current independent source reviews, owner consent, fee model and
  * fresh exact-market API metadata. This is not a trading activation toggle.
  */
+/** Recheck durable account/exchange signer and global controls while row locks
+ * remain held through the single signed POST. Never trust worker startup state
+ * as the last authorization when an operator can STOP or revoke credentials. */
+export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
+ SELECT a.id
+ FROM v13_production_account a
+ JOIN v13_live_money_policy p ON p.id=a.policy_id
+   AND p.execution_account_id=a.id
+ JOIN live_execution_config live ON live.id='singleton'
+ JOIN private.kalshi_connection_credentials c
+   ON c.owner_user_id=a.owner_user_id
+   AND c.financial_account_id=a.kalshi_connection_id
+   AND c.key_fingerprint=a.key_fingerprint
+ WHERE a.owner_user_id=$1::uuid AND a.id=$2
+   AND a.subaccount=1 AND a.exchange_index=2
+   AND a.commissioned=true AND a.execution_enabled=true
+   AND a.kill_switch=false AND a.cash_precision_verified=true
+   AND a.key_fingerprint=$3
+   AND p.policy_hash=$4 AND p.state='APPROVED'
+   AND p.fee_source_url=$5
+   AND p.fee_policy_version='strata_api_fee_source_signed_review_v1'
+   AND p.fee_formula_version='standard_quadratic_0.07_round_cent_v1'
+   AND live.live_execution_enabled=true AND live.manual_kill_switch=false
+   AND c.role='restricted_execution'
+   AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
+   AND c.verification_reason='credential_verified'
+ FOR SHARE OF a,p,live,c
+`;
 export function createGuardedReviewedApiFeeFetch(
- ownerUserId:string,sourceUrl:string,transport:typeof fetch,
+ ownerUserId:string,executionAccountId:string,sourceUrl:string,transport:typeof fetch,
+ expectedPolicyHash:string,expectedSignerFingerprint:string,
  deps:{connect?:()=>ReturnType<typeof pool.connect>;
    verify?:typeof verifyReviewedApiFeeSourceStage}={},
 ):typeof fetch {
  if(!parseReviewedApiSource(sourceUrl))
   throw new Error("reviewed_api_source_url_invalid");
+ if(!executionAccountId || !/^[a-f0-9]{64}$/i.test(expectedPolicyHash) ||
+    !/^[a-f0-9]{64}$/i.test(expectedSignerFingerprint))
+  throw new Error("reviewed_api_account_identity_missing");
  return async (request,init)=>{
   if(init?.method!=="POST")return transport(request,init);
   if(typeof request!=="string" ||
@@ -54,6 +86,11 @@ export function createGuardedReviewedApiFeeFetch(
    await client.query("BEGIN");
    await client.query("SET LOCAL lock_timeout='1000ms'");
    await client.query("SET LOCAL statement_timeout='15000ms'");
+   const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
+    ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
+   ]);
+   if(finalAccount.rows.length!==1)
+    throw new Error("api_fee_final_account_signer_or_kill_closed");
    const checked=await (deps.verify??verifyReviewedApiFeeSourceStage)(
     ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client});
    if(!checked.ok || checked.identity.marketTicker!==ticker)
