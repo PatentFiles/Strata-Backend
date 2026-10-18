@@ -26,11 +26,12 @@ CREATE TABLE IF NOT EXISTS private.strata_api_fee_source_grants (
  grant_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  owner_user_id uuid NOT NULL REFERENCES auth.users(id),
  issuer_admin_id uuid NOT NULL REFERENCES auth.users(id),
+ -- The issuer is the same independently attesting technical admin; the owner is different.
  rate_decision_digest text NOT NULL CHECK(rate_decision_digest ~ '^[0-9a-f]{64}$'),
  fee_model_version text NOT NULL
    CHECK(fee_model_version='kalshi_quadratic_007_whole_cent_conservative_reference_v1'),
- policy_version text NOT NULL DEFAULT 'strata_api_fee_source_signed_review_v1'
-   CHECK(policy_version='strata_api_fee_source_signed_review_v1'),
+ policy_version text NOT NULL DEFAULT 'strata_api_fee_source_signed_review_v2'
+   CHECK(policy_version='strata_api_fee_source_signed_review_v2'),
  scope text NOT NULL DEFAULT 'KXBTC15M:INDEX2' CHECK(scope='KXBTC15M:INDEX2'),
  authorized_stages text[] NOT NULL
    CHECK(authorized_stages @> ARRAY['STEP_9','STEP_11','ORDER_ENTRY']::text[]
@@ -65,5 +66,5 @@ REVOKE ALL ON TABLE private.strata_api_fee_rate_reviews,
 GRANT SELECT,INSERT,UPDATE ON TABLE private.strata_api_fee_rate_reviews,
  private.strata_api_fee_source_grants,private.strata_api_fee_owner_consents TO service_role;
 COMMENT ON TABLE private.strata_api_fee_source_grants IS
- 'No grant created by this migration. Source grants are not live execution approval; runtime rechecks owner, admin roles, explicit consent, price/fee model and exchange order';
+ 'Two-person owner and technical ADMIN model; no grant created by this migration. Source grants are not live execution approval; runtime rechecks owner, admin roles, explicit consent, price/fee model and exchange order';
 COMMIT;
