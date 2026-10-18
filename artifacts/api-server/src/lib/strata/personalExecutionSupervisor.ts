@@ -346,7 +346,7 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,sourceUrl,personalProductionFetch) :
+      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint) :
         alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
     });
     const unresolved = await readUnresolvedIntentMode(
