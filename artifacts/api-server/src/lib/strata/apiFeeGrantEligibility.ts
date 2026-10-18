@@ -7,7 +7,8 @@
 import { API_FEE_POLICY_SOURCE_V1, type ApiFeePolicyReviewResult } from "./apiFeePolicyReviewCandidate";
 import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION, PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 
-export const API_POLICY_SIGNED_REVIEW_V1="strata_api_fee_source_signed_review_v1" as const;
+/** V2 enforces one independent technical ADMIN review plus distinct owner consent. */
+export const API_POLICY_SIGNED_REVIEW_V1="strata_api_fee_source_signed_review_v2" as const;
 export type ApiFeeStage="STEP_9"|"STEP_11"|"ORDER_ENTRY";
 type Review={
  reviewId:string; reviewerUserId:string; currentlyAdmin:boolean;
@@ -90,9 +91,9 @@ export function evaluatePdfFreeApiGrant(e:ApiFeeGrantEvidence):ApiFeeGrantDecisi
    Number.isSafeInteger(r.expiresAtMs) &&
    r.signedAtMs<=grant.issuedAtMs && r.expiresAtMs>nowMs &&
    r.reviewerUserId!==ownerUserId &&
-   r.reviewerUserId!==grant.issuerAdminId);
- if(matches.length<2 || new Set(matches.map(r=>r.reviewerUserId)).size<2)
-  return deny("api_fee_independent_admin_signatures_missing");
+   r.reviewerUserId===grant.issuerAdminId);
+ if(matches.length!==1 || new Set(matches.map(r=>r.reviewerUserId)).size!==1)
+  return deny("api_fee_technical_admin_review_missing_or_ambiguous");
  return {
   ok:true, reason:"api_fee_source_independent_review_eligible_only",
   sourceKind:API_FEE_POLICY_SOURCE_V1,
