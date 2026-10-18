@@ -85,6 +85,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/apiFeeRateReference.test.cjs
           node --test dist/apiFeeRateReference.test.cjs
+      - name: Test two-independent-reviewer API grant eligibility (no authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeGrantEligibility.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeGrantEligibility.test.cjs
+          node --test dist/apiFeeGrantEligibility.test.cjs
       - name: Validate PDF-free API fee review candidate (NO approval authority)
         working-directory: artifacts/api-server
         run: |
