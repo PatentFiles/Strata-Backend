@@ -56,6 +56,11 @@ export function evaluatePdfFreeApiGrant(e:ApiFeeGrantEvidence):ApiFeeGrantDecisi
     candidate.requiresIndependentFeeModelReview!==true ||
     candidate.policyApproved!==false || candidate.tradingAuthorized!==false)
   return deny("api_fee_observation_not_verified");
+ const observed=Date.parse(candidate.verifiedAt);
+ if(!Number.isFinite(observed) || observed>nowMs || nowMs-observed>10_000 ||
+    candidate.marketTicker.indexOf("KXBTC15M-")!==0 ||
+    candidate.eventTicker.indexOf("KXBTC15M-")!==0)
+  return deny("api_fee_observation_stale_or_wrong_market");
  if(!grant || !UUID.test(grant.grantId) || !UUID.test(grant.issuerAdminId) ||
     grant.ownerUserId!==ownerUserId || grant.issuerAdminId===ownerUserId ||
     grant.policyVersion!==API_POLICY_SIGNED_REVIEW_V1 ||
