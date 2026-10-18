@@ -113,6 +113,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/apiFeeSourceStage.test.cjs
           node --test dist/apiFeeSourceStage.test.cjs
+      - name: Verify admin-only runtime database attestation (read-only, no credentials)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/apiFeeRuntimeDbIdentity.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/apiFeeRuntimeDbIdentity.test.cjs
+          node --test dist/apiFeeRuntimeDbIdentity.test.cjs
       - name: Test authenticated API fee model review, grants, owner consent and revocation
         working-directory: artifacts/api-server
         run: |

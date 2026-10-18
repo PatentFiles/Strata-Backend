@@ -1,5 +1,6 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
+import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
@@ -574,6 +575,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   // Separate versioned API-source human actions, authenticated by the user
   // session. These only write audit records; NEVER approve Step 9/11 or orders.
+  // Admin-only, read-only runtime database identity. No credentials or live powers.
+  router.get("/fees/runtime-db-attestation", async (_req,res)=>{
+    const actor=subject(res);
+    if(!actor)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await inspectRuntimeDbIdentity(actor);
+    res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
   router.get("/fees/api-source-readiness", async (req,res)=>{
     const viewer=subject(res);
     if(!viewer)return void res.status(401).json({error:"Unauthorized"});
