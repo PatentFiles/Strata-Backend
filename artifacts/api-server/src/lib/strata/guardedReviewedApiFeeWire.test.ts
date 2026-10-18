@@ -115,3 +115,39 @@ test("final transaction refuses revoked signer, closed account or global kill be
  assert.equal(sent,0);assert.equal(verified,0);
  assert.equal(rolledBack,1);assert.equal(released,1);
 });
+
+test("Request-object and mixed-case POST cannot bypass signed order fence",async()=>{
+ let sent=0;
+ const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,
+   policyHash,signer,token,leaseHolder);
+ await assert.rejects(wrapped(new Request(url,{method:"POST",body:JSON.stringify(order)})),
+   /api_fee_unexpected_order_endpoint/);
+ for(const method of ["post","PoSt","pOsT"]){
+   await assert.rejects(wrapped(url,{method,body:JSON.stringify(order)}),
+    /api_fee_unexpected_order_endpoint/);
+ }
+ await assert.rejects(wrapped(url,{method:"PATCH",body:"{}"}),
+   /api_fee_unsupported_exchange_method/);
+ assert.equal(sent,0);
+});
+
+test("only canonical Kalshi order cancellations may bypass fee-POST fence",async()=>{
+ const calls:string[]=[];
+ const transport=(async(_req,_init)=>{calls.push("DELETE");return new Response("{}");}) as typeof fetch;
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,
+   policyHash,signer,token,leaseHolder);
+ const path="https://external-api.kalshi.com/trade-api/v2/portfolio/orders/a0123456-abcdef";
+ await wrapped(path,{method:"DELETE"});
+ await wrapped("https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders/a0123456?market_ticker="+ticker,
+   {method:"DELETE"});
+ for(const target of [
+   "https://untrusted.example/trade-api/v2/portfolio/orders/a0123456",
+   "https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",
+   "https://external-api.kalshi.com/trade-api/v2/portfolio/withdrawals/abc",
+ ]){
+   await assert.rejects(wrapped(target,{method:"DELETE"}),
+    /api_fee_unexpected_cancel_endpoint/);
+ }
+ assert.equal(calls.length,2);
+});
