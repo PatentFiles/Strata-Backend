@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { preparePdfFreeApiFeePolicyReview, API_FEE_POLICY_SOURCE_V1 } from
   "./apiFeePolicyReviewCandidate";
 import type { KalshiMarketFeeReadOnly } from "./twoSourceFeeEvidence";
@@ -56,4 +58,19 @@ test("PDF-free candidate refuses unauthenticated, false-authority and stale meta
  }
  assert.equal(preparePdfFreeApiFeePolicyReview(fixture(),now+11_000).ok,false);
  assert.equal(preparePdfFreeApiFeePolicyReview(fixture(),now-1_000).ok,false);
+});
+
+test("Step 9 API-source review GET never approves fees or updates an owner account",()=>{
+ const inWorkspace=join(process.cwd(),"src/routes/userExecutionRouter.ts");
+ const inRoot=join(process.cwd(),"artifacts/api-server/src/routes/userExecutionRouter.ts");
+ const source=readFileSync(existsSync(inWorkspace)?inWorkspace:inRoot,"utf8");
+ const start=source.indexOf('router.get("/fees/api-policy-review-candidate"');
+ const end=source.indexOf('router.get("/fees/operator-candidate"',start);
+ assert.ok(start>=0 && end>start,"read-only diagnostic route exists");
+ const route=source.slice(start,end);
+ assert.match(route,/subject\(res\)/);
+ assert.match(route,/await probeCurrentKalshiFeeApi\(\)/);
+ assert.match(route,/preparePdfFreeApiFeePolicyReview\(market\)/);
+ assert.doesNotMatch(route,/establishOfficialFeeDigest|fetchOfficialFeeSchedule|\.pdf|approvePolicy|commissionAccount|executeOrder|port\.control|POST/);
+ assert.match(route,/res\.status\(candidate\.ok \? 200 : 409\)/);
 });
