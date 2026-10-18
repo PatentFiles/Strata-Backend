@@ -22,6 +22,7 @@ import { REVIEWED_RELEASE } from "./reviewedRelease";
 import { digest } from "../v13-production/types";
 import { verifyOwnerFeeSourceStage, parseOwnerFeeSource } from "./ownerFeeSourceStage";
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
+import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -196,6 +197,19 @@ export async function readOwnedApprovedFeeEvidence(
     return { ok: false, reason: "production_entry_policy_revision_not_approved" };
   }
   const sourceUrl=text(row.fee_source_url) ?? "";
+  const reviewedApi=parseReviewedApiSource(sourceUrl);
+  if(reviewedApi){
+    if(text(row.fee_policy_version)!==API_SOURCE_POLICY_VERSION ||
+       text(row.fee_formula_version)!==API_SOURCE_FORMULA_VERSION)
+      return {ok:false,reason:"api_fee_source_identity_invalid"};
+    const verified=await verifyReviewedApiFeeSourceStage(ownerUserId,"STEP_9",sourceUrl);
+    if(!verified.ok)return {ok:false,reason:verified.reason};
+    const version=Number(row.version);
+    if(!Number.isSafeInteger(version)||version<1)
+      return {ok:false,reason:"policy_limits_missing"};
+    return {ok:true,reason:"owned_policy_reviewed_api_fee_source_current",
+      feeArtifactDigest:verified.identity.digest,policyId:String(row.id),version};
+  }
   const altIdentity=parseOwnerFeeSource(sourceUrl);
   const altMode=text(row.fee_policy_version)===OPERATOR_FEE_SOURCE_POLICY &&
     text(row.fee_formula_version)===STANDARD_QUADRATIC_FEE_FORMULA_VERSION &&
@@ -238,10 +252,22 @@ export async function approveOwnedPolicyForUser(
   if (!parsed.ok) return parsed;
   const request = input.body as Record<string,unknown>;
   const altRequested=request.feeSourceKind==="operator_attested_not_provider";
-  if(request.feeSourceKind!==undefined&&!altRequested)
+  const apiRequested=request.feeSourceKind==="kalshi_trade_api_fee_policy_v1";
+  if(request.feeSourceKind!==undefined&&!altRequested&&!apiRequested)
     return {ok:false,reason:"fee_source_mode_not_supported"};
   let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
-  if(altRequested){
+  if(apiRequested){
+    const verified=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_9");
+    if(!verified.ok)return {ok:false,reason:verified.reason};
+    // Canonical reviewed source identity comes ONLY from signed service DB.
+    parsed.fee={
+      policyVersion:verified.identity.feePolicyVersion,
+      sourceUrl:verified.identity.sourceUrl,
+      formulaVersion:verified.identity.formulaVersion,
+    };
+    parsed.digest=verified.identity.digest;
+    feeDigest={ok:true,digest:verified.identity.digest};
+  }else if(altRequested){
     const verified=await verifyOwnerFeeSourceStage(input.ownerUserId,"STEP_9");
     if(!verified.ok)return {ok:false,reason:verified.reason};
     // Never trust source URL or provenance from an HTTP client.
