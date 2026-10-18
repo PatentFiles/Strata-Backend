@@ -67,8 +67,8 @@ test("denies missing or duplicate reviewers, revoked roles and altered owner",()
   x=>{x.grant!.expiresAtMs=now},
   x=>{x.grant!.authorizedStages=[]},
   x=>{x.grant!.policyVersion="operator_attested_fee_source_v1" as never},
-  x=>{x.candidate.verifiedAt=new Date(now-20_000).toISOString()},
-  x=>{x.candidate.marketTicker="OTHER" },
+  x=>{if(x.candidate.ok)x.candidate.verifiedAt=new Date(now-20_000).toISOString()},
+  x=>{if(x.candidate.ok)x.candidate.marketTicker="OTHER" },
  ];
  for(const edit of edits) {
   const v=fixture();edit(v);
