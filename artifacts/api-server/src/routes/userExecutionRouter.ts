@@ -565,6 +565,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   // Diagnostic only: human-attested candidate is not authenticated official PDF
   // evidence. The result never authorizes Step 9, Step 11 or live orders.
+  router.get("/fees/operator-candidate", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const result = await inspectOperatorFeeCandidate();
+    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
   // Separate versioned API-source human actions, authenticated by the user
   // session. These only write audit records; NEVER approve Step 9/11 or orders.
   router.post("/fees/api-rate-review", async (req,res)=>{
@@ -601,13 +608,6 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await revokeApiFeeSourceGrant(userId,req.body??{});
     res.status(result.ok?200:409).json(sanitizePublic(result));
-  });
-  router.get("/fees/operator-candidate", async (_req, res) => {
-    const userId = subject(res);
-    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-    res.setHeader("Cache-Control", "private, no-store");
-    const result = await inspectOperatorFeeCandidate();
-    res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.get("/fees/reviewed-evidence", async (_req, res) => {
     const userId = subject(res);
