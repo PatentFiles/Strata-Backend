@@ -2,6 +2,7 @@ import { Router, type IRouter, type RequestHandler } from "express";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
+import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
 import { inspectOwnerFeeSourceReadiness } from "../lib/strata/operatorFeeAuthorizationReadiness";
@@ -549,6 +550,17 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const evidence = await probeCurrentKalshiFeeApi();
     res.status(evidence.ok ? 200 : 409).json(sanitizePublic(evidence));
+  });
+  // Read-only Step 9 preparation: canonical official API observation with a
+  // versioned, NON-AUTHORIZING review-candidate digest. No PDF fetch, account
+  // policy update, admin signature, owner consent, transfer or order occurs.
+  router.get("/fees/api-policy-review-candidate", async (_req, res) => {
+    const userId = subject(res);
+    if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+    res.setHeader("Cache-Control", "private, no-store");
+    const market = await probeCurrentKalshiFeeApi();
+    const candidate = preparePdfFreeApiFeePolicyReview(market);
+    res.status(candidate.ok ? 200 : 409).json(sanitizePublic(candidate));
   });
   // Diagnostic only: human-attested candidate is not authenticated official PDF
   // evidence. The result never authorizes Step 9, Step 11 or live orders.
