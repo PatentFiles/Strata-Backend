@@ -21,7 +21,7 @@ const assertNoAuthority=(v:{policyApproved:boolean;commissioningApproved:boolean
  assert.equal(v.commissioningApproved,false);
  assert.equal(v.tradingAuthorized,false);
 };
-function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean}={}){
+function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;activeGrant?:boolean}={}){
  const calls:string[]=[];
  let commits=0;
  const client={
@@ -30,6 +30,8 @@ function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean}={}){
    if(sql==="COMMIT")commits++;
    if(sql.includes("FROM auth.users u JOIN private.role_assignments"))return {rows:options.admin===false?[]:[{one:1}]};
    if(sql.includes("FROM public.v13_production_account"))return {rows:[{id:"acc"}]};
+   if(sql.includes("SELECT grant_id FROM private.strata_api_fee_source_grants") && sql.includes("LIMIT 1"))
+    return {rows:options.activeGrant?[{grant_id:grant}]:[]};
    if(sql.includes("SELECT r.reviewer_user_id,r.expires_at")){
     return {rows:Array.from({length:options.reviewers??2},(_,i)=>({
      reviewer_user_id:i===0?"33333333-3333-4333-8333-333333333333":"44444444-4444-4444-8444-444444444444",
@@ -101,6 +103,11 @@ test("grant requires independent pair, fresh canonical Kalshi fee observation an
   {ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM},
   stale.db,(async()=>({...observed(),feeMultiplier:"2"})) as never);
  assert.equal(r.ok,false);assert.equal(stale.calls.length,0);
+ const duplicate=fixture({activeGrant:true});
+ const refused=await issueApiFeeSourceGrant(admin,
+  {ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM},
+  duplicate.db,(async()=>observed()) as never);
+ assert.equal(refused.ok,false);assert.equal(duplicate.commits,0);assertNoAuthority(refused);
  const accepted=fixture();
  const good=await issueApiFeeSourceGrant(admin,
    {ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM},
