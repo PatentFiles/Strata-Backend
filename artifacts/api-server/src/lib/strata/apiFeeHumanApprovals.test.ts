@@ -34,7 +34,7 @@ function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;active
     return {rows:options.activeGrant?[{grant_id:grant}]:[]};
    if(sql.includes("SELECT r.reviewer_user_id,r.expires_at")){
     return {rows:Array.from({length:options.reviewers??1},(_,i)=>({
-     reviewer_user_id:i===0?"33333333-3333-4333-8333-333333333333":"44444444-4444-4444-8444-444444444444",
+     reviewer_user_id:i===0?admin:"44444444-4444-4444-8444-444444444444",
      expires_at:new Date(Date.now()+90*60_000)
     }))};
    }
