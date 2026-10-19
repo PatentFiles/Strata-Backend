@@ -84,9 +84,9 @@ export function createGuardedReviewedApiFeeFetch(
       if(!/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
         throw new Error("api_fee_unexpected_cancel_endpoint");
     }
-    // The underlying Kalshi transport must still reject redirects. Do not
-    // override a caller-supplied manual redirect or add broader permissions.
-    return transport(request,init);
+    // Signed request headers must never follow a provider redirect onto a
+    // different origin, even when the caller used Request.redirect="follow".
+    return transport(request,{...init,redirect:"error"});
   }
   if(init?.method!=="POST" || typeof request!=="string" ||
      request!=="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders"||
