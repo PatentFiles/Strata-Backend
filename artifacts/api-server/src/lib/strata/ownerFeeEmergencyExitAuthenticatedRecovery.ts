@@ -86,23 +86,17 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
  if(orders.length!==1)return fail("exit_recovery_order_not_unique");
  const order=orders[0]!;
- // Restart recovery derives an observation from authenticated exchange records,
- // never from an inferred POST success. No network POST is performed here.
+ // Restart derives GET order evidence, not a fabricated 201 receipt.
  const orderId=text(order.order_id);
- const observedReceipt:NonNullable<Receipt>=receipt??{
-  httpStatus:201, // internal reconciler convention; not a witnessed HTTP response
-  client_order_id:text(input.order.client_order_id),order_id:orderId,
-  fill_count:text(order.fill_count_fp),
-  remaining_count:position(count(input.order.count)-count(order.fill_count_fp)),
-  ts_ms:baselineTime
- };
+ if(receipt===null&&count(order.fill_count_fp)+count(order.remaining_count_fp)!==requested)
+  return fail("exit_recovery_provider_count_mismatch");
  // GET /portfolio/orders uses book_side and subaccount_number, unlike
  // the V2 POST body. The exchange history may omit reduce_only; its proof
  // is the immutable signed request digest and server-side fenced reservation.
- if(order.order_id!==observedReceipt.order_id||order.ticker!==input.order.ticker||
+ if((receipt!==null&&orderId!==receipt.order_id)||order.ticker!==input.order.ticker||
     order.book_side!==input.order.side||
     (order.yes_price_dollars!==undefined&&order.yes_price_dollars!==input.order.price)||
-    (order.fill_count_fp!==undefined&&count(order.fill_count_fp)!==count(observedReceipt.fill_count))||
+    (order.fill_count_fp!==undefined&&count(order.fill_count_fp)!==count((receipt?.fill_count??order.fill_count_fp)))||
     (order.reduce_only!==undefined&&order.reduce_only!==true)||
     !["executed","canceled","cancelled"].includes(String(order.status))||
     (order.subaccount_number!==undefined&&Number(order.subaccount_number)!==1)||
@@ -115,13 +109,13 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const seen=new Set<string>();
  for(const raw of feed.fills){
   const fill=object(raw);
-  if(fill.order_id===observedReceipt.order_id&&fill.ticker!==input.order.ticker)
+  if(fill.order_id===orderId&&fill.ticker!==input.order.ticker)
    return fail("exit_recovery_matched_fill_market_mismatch");
   if(fill.ticker!==input.order.ticker)continue;
   const id=text(fill.trade_id??fill.fill_id);
   if(seen.has(id))return fail("exit_recovery_duplicate_fill_id");
   seen.add(id);
-  if(fill.order_id===observedReceipt.order_id){
+  if(fill.order_id===orderId){
    const units=count(fill.count_fp??fill.count);
    if(units===0n)return fail("exit_recovery_zero_quantity_fill");
    total+=units;
@@ -133,7 +127,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
     return fail("exit_recovery_concurrent_fill_unattributable");
   }
  }
- if(total!==count(observedReceipt.fill_count)||total+count(observedReceipt.remaining_count)!==requested)
+ if(total!==count((receipt?.fill_count??order.fill_count_fp))||total+count((receipt?.remaining_count??order.remaining_count_fp))!==requested)
   return fail("exit_recovery_fill_receipt_disagreement");
  const expected=initialUnits>0n?initialUnits-total:initialUnits+total;
  if(expected!==observed)return fail("exit_recovery_position_not_attributable");
@@ -147,6 +141,13 @@ export async function readAuthenticatedProtectiveExitOutcome(
   reducingBookSide:input.order.side==="ask"?"ask":"bid",
   completeExchangeHistory:true,exactMarketAndAccountMatched:true,
   orderAndFillHistoryMatched:true,isolatedPositionDelta:true,
-  response:observedReceipt,
+  response:receipt,
+  authenticatedOrder:receipt===null?{
+    order_id:orderId,client_order_id:input.order.client_order_id,
+    status:text(order.status),
+    initial_count_fp:text(order.initial_count_fp??order.initial_count??order.count_fp??order.count),
+    fill_count_fp:text(order.fill_count_fp),
+    remaining_count_fp:text(order.remaining_count_fp)
+  }:undefined,
  };
 }
