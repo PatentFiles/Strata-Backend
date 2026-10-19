@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
+import {API_SOURCE_POLICY_VERSION} from "./apiFeeSourceStage";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
 const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -58,7 +59,7 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
   calls.push("VERIFIED");
   return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
    grantId:grant,sourceUrl:source,digest:"a".repeat(64),
-   feePolicyVersion:"strata_api_fee_source_signed_review_v1",
+   feePolicyVersion:API_SOURCE_POLICY_VERSION,
    formulaVersion:"standard_quadratic_0.07_round_cent_v1",
    marketTicker:ticker,verifiedAtMs:Date.now(),
   }};
@@ -87,6 +88,16 @@ test("a missing grant must ROLLBACK and never call Kalshi POST",async()=>{
  assert.equal(sent,0);
  assert.ok(calls.includes("ROLLBACK"));
  assert.equal(calls.at(-1),"RELEASE");
+});
+
+test("final SQL account fence requires exactly the canonical V2 fee source version",()=>{
+ assert.equal(API_SOURCE_POLICY_VERSION,"strata_api_fee_source_signed_review_v2");
+ assert.ok(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL.includes(
+   "p.fee_policy_version='"+API_SOURCE_POLICY_VERSION+"'"
+ ));
+ assert.ok(!FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL.includes(
+   "strata_api_fee_source_signed_review_v1"
+ ));
 });
 
 test("final transaction refuses revoked signer, closed account or global kill before any POST",async()=>{
