@@ -284,6 +284,17 @@ export function createProductionPersonalSession(
       state,
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
       readSnapshot: async () => {
+        // A protective reservation may become PREPARED/UNKNOWN while this
+        // worker is already scheduled. Gate EVERY subsequent snapshot, not
+        // just START, so another entry cannot race an unresolved exit.
+        const unresolvedNow=await readUnresolvedIntentMode(
+          (sql,params)=>db.query(sql,params),input.accountId,
+        );
+        if(!unresolvedNow.ok){
+          state.entriesAuthorized=false;
+          throw new Error("unresolved_intent_count_unverified");
+        }
+        if(unresolvedNow.mode==="recovery")state.entriesAuthorized=false;
         const beat = await heartbeatLease(db, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
