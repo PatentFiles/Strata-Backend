@@ -86,7 +86,6 @@ test("One fully fenced DEMO pipeline follows PREPARE->UNKNOWN->POST->GET->FINAL"
    identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
    nowMs:()=>now,
   verifyAuthenticatedOwnerTestApproval:async()=>true,
-   verifyAuthenticatedOwnerTestApproval:async()=>true,
    verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
      ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
    ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
