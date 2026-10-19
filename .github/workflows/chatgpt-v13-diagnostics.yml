@@ -274,3 +274,8 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/personalOwnerMonetaryCommission.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryCommission.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
           node --test dist/personalOwnerMonetaryCommission.test.cjs
+      - name: Verify independently observed official PDF snapshot and immutable 24h lease
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/microLiveFeeOfficialSnapshot.test.ts --bundle --platform=node --format=cjs --outfile=dist/microLiveFeeOfficialSnapshot.test.cjs --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/microLiveFeeOfficialSnapshot.test.cjs
