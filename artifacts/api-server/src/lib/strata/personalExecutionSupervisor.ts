@@ -257,7 +257,7 @@ export function createProductionPersonalSession(
       {valid:true,digest:operatorAtStart.identity.digest,
        verifiedAt:operatorAtStart.identity.verifiedAtMs}:
       monetaryAtStart?.ok?
-      {valid:true,digest:monetaryAtStart.sourceDigest,
+      {valid:true,digest,
        verifiedAt:Date.parse(monetaryAtStart.verifiedAt??"")}:
       await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
