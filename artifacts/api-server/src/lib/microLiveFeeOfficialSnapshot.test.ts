@@ -56,3 +56,16 @@ test("after expiry real digest entry refuses an unavailable canonical provider",
   if(!proof.ok)assert.equal(proof.reason,"official_fee_schedule_http_429");
  }finally{globalThis.fetch=savedFetch;Date.now=savedNow;}
 });
+
+test("mocked fetch never inherits first-party snapshot authorization",async()=>{
+ const original=globalThis.fetch,savedNow=Date.now;
+ let calls=0;
+ try{
+  Date.now=()=>Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt)+120000;
+  globalThis.fetch=(async()=>{calls++;return new Response(null,{status:429});}) as typeof fetch;
+  const proof=await establishOfficialFeeDigest();
+  assert.equal(proof.ok,false);
+  if(!proof.ok)assert.equal(proof.reason,"official_fee_schedule_http_429");
+  assert.equal(calls,1);
+ }finally{globalThis.fetch=original;Date.now=savedNow;}
+});
