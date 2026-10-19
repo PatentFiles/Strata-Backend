@@ -21,7 +21,8 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean;
  badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
  missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
- wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;}={}){
+ wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;
+ receiptWaitMs?:number;}={}){
  const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
  const initial=options.side==="bid"?"-3.00":"3.00";
  const ending=options.side==="bid"?"-"+position:position;
@@ -38,7 +39,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  }};
  const readFeeds=(async()=>{
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
-  return {ok:true as const,observedAtMs:NOW,cashMicros:"0",
+  return {ok:true as const,observedAtMs:NOW+(options.receiptWaitMs??0),cashMicros:"0",
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
      book_side:selected.order.side,
      subaccount_number:options.missingOrderScope?undefined:options.wrongOrderScope?0:1,
@@ -61,7 +62,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    settlements:[]};
  }) as typeof readOwnedKalshiFeeds;
  return {run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
-  {db,readFeeds,now:()=>NOW})};
+  {db,readFeeds,now:()=>NOW+(options.receiptWaitMs??0)})};
 }
 test("zero, partial and full signed account history reconcile against immutable baseline",async()=>{
  for(const fill of ["0.00","1.00","2.00"]){
@@ -131,4 +132,14 @@ test("full/partial/zero IOC scoped provider history remains recoverable",async()
   assert.equal(recovered.response,null);
   assert.equal(recovered.authenticatedOrder?.fill_count_fp,fill);
  }
+});
+
+// A witnessed POST receipt does not expire merely because a scoped provider
+// history read is delayed. The immutable request, timestamps, fills and
+// inventory must still match; this test submits no exchange order.
+test("late witnessed HTTP 201 can reconcile from complete signed history",async()=>{
+ const result=await harness({receiptWaitMs:120_000,fill:"1.00"}).run();
+ assert.equal(result.response?.httpStatus,201);
+ assert.equal(result.authenticatedOrder?.status,"canceled");
+ assert.equal(result.observedPositionFp,"2.00");
 });
