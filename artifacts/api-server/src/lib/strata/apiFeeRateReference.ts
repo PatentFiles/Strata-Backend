@@ -64,3 +64,63 @@ export function validateConservativeFeeVectors(): boolean {
     conservativeWholeCentTakerReference(v.priceMicros,v.contracts)===
       v.maximumCents);
 }
+
+
+/**
+ * Pure fixed-point pre-trade UPPER BOUNDS for the documented general quadratic
+ * taker model; one dollar is 1,000,000 integer micros. Kalshi separately
+ * documents (a) 6-decimal trade fee rounding, (b) alignment of account balance
+ * changes to 100 micros for direct members or 10,000 micros otherwise,
+ * and (c) per-order rebates across partial fills.
+ *
+ * We IGNORE future rebates, allow up to one model-rounding micro per fill
+ * and a full balance-grid loss per fill. This intentionally overestimates
+ * execution debits, even if an order splits into many partial fills.
+ *
+ * This is NOT provider proof that 0.07/multiplier=1 applies to the market.
+ * Consumers MUST independently validate the official current effective
+ * coefficient, overrides and changes before invoking this as an execution
+ * authorization. It is NOT wired to order-entry or commissioning.
+ */
+export type KalshiAccountBalanceGridMicros = 100n | 10_000n;
+
+function conservativeFixedPointBound(
+  modelFeeNumerator: bigint, contracts: bigint,
+  balanceGridMicros: KalshiAccountBalanceGridMicros, maxFills: bigint,
+): bigint | null {
+  if (contracts < 1n || contracts > 1_000_000n ||
+      maxFills < 1n || maxFills > contracts ||
+      (balanceGridMicros !== 100n && balanceGridMicros !== 10_000n)) return null;
+  // Multiplier=1: model fee in micros
+  // = (7/100) * contracts * priceMicros * (1e6-priceMicros) / 1e6.
+  const modelMicrosCeil=(modelFeeNumerator+100_000_000n-1n)/100_000_000n;
+  // Ceil per fill can exceed ceil of aggregate by at most fills-1 micros.
+  const perFillTradeRounding=maxFills-1n;
+  // Ignore all rebates; each fill's alignment costs strictly below one grid.
+  const perFillBalanceRounding=maxFills*(balanceGridMicros-1n);
+  return modelMicrosCeil+perFillTradeRounding+perFillBalanceRounding;
+}
+
+/** Bound at a FIXED, known exact executed price, not a limit-order price. */
+export function conservativeExactFillFeeAndRoundingBoundMicros(
+  priceMicros: bigint, contracts: bigint,
+  balanceGridMicros: KalshiAccountBalanceGridMicros,maxFills: bigint,
+): bigint | null {
+ if (priceMicros<=0n || priceMicros>=PRICE_PRECISION) return null;
+ const numerator=7n*contracts*priceMicros*(PRICE_PRECISION-priceMicros);
+ return conservativeFixedPointBound(numerator,contracts,balanceGridMicros,maxFills);
+}
+
+/**
+ * Bound for UNKNOWN fill prices in a standard KXBTC15M quadratic taker order:
+ * p*(1-p) <= 1/4, so maximum model fee is 17,500 micros/contract.
+ * It remains an OFFLINE reference until source applicability and order
+ * execution gates have been independently validated.
+ */
+export function conservativeUnknownPriceFeeAndRoundingBoundMicros(
+  contracts: bigint,balanceGridMicros: KalshiAccountBalanceGridMicros,
+  maxFills: bigint,
+): bigint | null {
+ const numerator=7n*contracts*500_000n*500_000n;
+ return conservativeFixedPointBound(numerator,contracts,balanceGridMicros,maxFills);
+}

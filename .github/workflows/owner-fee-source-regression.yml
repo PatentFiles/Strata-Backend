@@ -6,6 +6,7 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/apiFeeRateReference*'
       - 'artifacts/api-server/src/lib/strata/ownerFee*'
       - 'artifacts/api-server/src/lib/strata/legacyOfficialFeeCaptureGate*'
       - 'artifacts/api-server/src/lib/strata/commissioningStore.ts'
@@ -79,6 +80,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRead.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRead.test.cjs
       - name: Test emergency recovery scoped reads and isolation
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRead.test.cjs
+      - name: Bundle six-decimal fee and partial-fill conservative bound tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/apiFeeRateReference.test.ts --bundle --platform=node --format=cjs --outfile=dist/apiFeeRateReference.test.cjs
+      - name: Test fee price, precision, and split-fill upper bounds
+        run: node --test artifacts/api-server/dist/apiFeeRateReference.test.cjs
       - name: Bundle official API fee metadata diagnostic tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/twoSourceFeeEvidence.test.cjs
       - name: Test official-series identity, fee changes and non-authorizing API evidence

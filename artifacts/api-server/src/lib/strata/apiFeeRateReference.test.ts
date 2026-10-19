@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
  conservativeWholeCentTakerReference,validateConservativeFeeVectors,
+ conservativeExactFillFeeAndRoundingBoundMicros,conservativeUnknownPriceFeeAndRoundingBoundMicros,
  TAKER_FEE_REVIEW_VECTORS,PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
 } from "./apiFeeRateReference";
 
@@ -35,4 +36,53 @@ test("whole-cent ceiling is conservative and preserves integer symmetry",()=>{
   assert.ok(fee!*1_000_000_000_000n>=exactCentsNumerator);
   assert.ok((fee!-1n)*1_000_000_000_000n<exactCentsNumerator);
  }
+});
+
+
+test("official six-decimal fee example and balance-grid worst case are conservatively bounded",()=>{
+ // Kalshi public docs use a 5.5c fill with a model fee of $0.00363825:
+ // ceiling to six decimals is exactly 3,639 micros.
+ const direct=conservativeExactFillFeeAndRoundingBoundMicros(55_000n,1n,100n,1n);
+ const nondirect=conservativeExactFillFeeAndRoundingBoundMicros(55_000n,1n,10_000n,1n);
+ assert.equal(direct,3_639n+99n);
+ assert.equal(nondirect,3_639n+9_999n);
+ // Published non-direct worked example yields 5,000 micros in net debit fee.
+ assert.ok(nondirect! >= 5_000n);
+});
+
+test("maximum model rate at 50c dominates any exact fill price",()=>{
+ for (const grid of [100n,10_000n] as const) {
+  for (const qty of [1n,2n,7n,100n]) {
+   for (const fills of [1n,qty]) {
+    const universal=conservativeUnknownPriceFeeAndRoundingBoundMicros(qty,grid,fills)!;
+    for(const price of [1n,55_000n,100_000n,250_000n,500_000n,750_000n,999_999n]) {
+      const exact=conservativeExactFillFeeAndRoundingBoundMicros(price,qty,grid,fills)!;
+      assert.ok(universal>=exact);
+    }
+   }
+  }
+ }
+});
+
+test("splitting an order can only increase conservative rounding overhead",()=>{
+ const cases=[100n,10_000n] as const;
+ for(const grid of cases){
+  const one=conservativeUnknownPriceFeeAndRoundingBoundMicros(8n,grid,1n)!;
+  const eight=conservativeUnknownPriceFeeAndRoundingBoundMicros(8n,grid,8n)!;
+  assert.equal(eight-one,7n*grid);
+  // At 50 cents, one-contract model fee is 17,500 micros.
+  assert.equal(conservativeUnknownPriceFeeAndRoundingBoundMicros(1n,grid,1n),
+   17_500n+grid-1n);
+ }
+});
+
+test("partial-fill bounds fail closed on invalid ranges or account precision",()=>{
+ for(const [qty,grid,fills] of [
+  [0n,100n,1n],[1_000_001n,100n,1n],[1n,100n,0n],
+  [1n,100n,2n],[1n,10n,1n],[1n,1000n,1n],
+ ] as const){
+   assert.equal(conservativeUnknownPriceFeeAndRoundingBoundMicros(qty,grid as 100n, fills),null);
+ }
+ assert.equal(conservativeExactFillFeeAndRoundingBoundMicros(0n,1n,100n,1n),null);
+ assert.equal(conservativeExactFillFeeAndRoundingBoundMicros(1_000_000n,1n,100n,1n),null);
 });
