@@ -18,7 +18,7 @@ const receipt={httpStatus:201,client_order_id:ID,order_id:"order-1",
  fill_count:"1.00",remaining_count:"1.00",ts_ms:NOW};
 function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;
- failPages?:boolean;badOrderStatus?:boolean}={}){
+ failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean}={}){
  const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
  const initial=options.side==="bid"?"-3.00":"3.00";
  const ending=options.side==="bid"?"-"+position:position;
@@ -36,9 +36,10 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
   return {ok:true as const,observedAtMs:NOW,cashMicros:"0",
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
      book_side:selected.order.side,subaccount_number:1,exchange_index:2,
+     yes_price_dollars:options.badPrice?"0.9000":"0.5500",fill_count_fp:filled,
      initial_count_fp:"2.00",status:options.badOrderStatus?"pending":"executed"}],
    fills:[...(Number(filled)>0?[{trade_id:"t-1",order_id:options.badOrder?"other":"order-1",
-      ticker:MARKET,count_fp:filled,created_time:new Date(NOW).toISOString()}]:[]),
+      ticker:options.badFillMarket?"OTHER":MARKET,count_fp:filled,created_time:new Date(NOW).toISOString()}]:[]),
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
    positions:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
@@ -65,7 +66,8 @@ test("NO holdings reduce by bid and preserve signed position orientation",async(
 });
 test("absent baseline, incomplete history, bad status, unrelated fills, or position mismatch fail closed",async()=>{
  for(const options of [{noBaseline:true},{failPages:true},{badOrderStatus:true},
-  {foreignFill:true},{differentPosition:true},{badOrder:true}]){
+  {foreignFill:true},{differentPosition:true},{badOrder:true},
+  {badPrice:true},{badFillMarket:true}]){
   await assert.rejects(()=>harness(options).run());
  }
 });
