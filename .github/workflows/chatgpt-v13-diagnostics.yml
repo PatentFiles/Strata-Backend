@@ -254,3 +254,8 @@ jobs:
             --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
             --external:@clerk/express --external:express
           node --test dist/pairKeyProvisioning.test.cjs
+      - name: Test common fee contract fail-closed behavior
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/monetaryFeeContract.test.ts --bundle --platform=node --format=cjs --outfile=dist/monetaryFeeContract.test.cjs
+          node --test dist/monetaryFeeContract.test.cjs
