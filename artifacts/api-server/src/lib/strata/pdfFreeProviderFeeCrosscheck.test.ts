@@ -8,13 +8,13 @@ import type {KalshiMarketFeeReadOnly} from "./twoSourceFeeEvidence";
 const NOW=Date.parse("2026-10-19T03:50:00.000Z");
 const MARKET="KXBTC15M-26OCT190400-00";
 const EVENT="KXBTC15M-26OCT190400";
-const page=():FeePageCandidate=>({
+const page=()=>({
  ok:true,reason:"official_prediction_fee_page_bytes_captured_for_review",
  canonicalUrl:OFFICIAL_PREDICTION_FEE_PAGE,capturedAt:new Date(NOW).toISOString(),
  sha256:"a".repeat(64),byteLength:8127,providerContentReceived:true,
  currentFeeFormulaVerified:false,sourcePolicyApproved:false,
  exchangeExecutionAuthorized:false,
-});
+}) as const;
 const api=():KalshiMarketFeeReadOnly=>({
  ok:true,reason:"live_series_event_fee_metadata_verified_read_only",
  series:"KXBTC15M",exchangeIndex:2,referenceDigest:"b".repeat(64),
