@@ -15,7 +15,7 @@ export type OwnerFeePreflight = {
   evidenceDigest?: string;
   observedAt?: string;
   independentHumanReviewerRequired: false;
-  monetaryScheduleVerified: false;
+  monetaryScheduleVerified: boolean;
   policyApproved: false;
   commissioningApproved: false;
   tradingAuthorized: false;
@@ -42,6 +42,7 @@ export async function inspectOwnerFeeEvidence(
   if(!checked.ok) return {...base,ok:false,reason:checked.reason};
   return {
     ...base,ok:true,reason:checked.reason,
+    monetaryScheduleVerified:checked.monetaryFeeAuthorized,
     marketTicker:checked.marketTicker,evidenceDigest:checked.sourceDigest,
     observedAt:checked.verifiedAt,
   };
