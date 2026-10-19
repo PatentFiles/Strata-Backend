@@ -158,7 +158,44 @@ test("only canonical Kalshi order cancellations may bypass fee-POST fence",async
    "https://external-api.kalshi.com/trade-api/v2/portfolio/withdrawals/abc",
  ]){
    await assert.rejects(wrapped(target,{method:"DELETE"}),
-    /api_fee_unexpected_cancel_endpoint/);
+    /api_fee_unexpected_(?:cancel|read)_endpoint/);
  }
  assert.equal(calls.length,2);
+});
+
+
+test("signed GET and HEAD requests are limited to canonical Kalshi API paths",async()=>{
+ let sent=0;
+ const transport=(async(req:unknown,init?:RequestInit)=>{
+   sent++;
+   assert.equal(init?.redirect,"error");
+   return new Response("{}",{status:200});
+ }) as typeof fetch;
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,
+   policyHash,signer,token,leaseHolder);
+ const official=[
+   "https://external-api.kalshi.com/trade-api/v2/portfolio/positions?subaccount=1&exchange_index=2",
+   "https://external-api.kalshi.com/trade-api/v2/series/KXBTC15M",
+   "https://external-api.kalshi.com/trade-api/v2/events/KXBTC15M-26OCT18T0325",
+ ];
+ await wrapped(official[0]!,{method:"GET"});
+ await wrapped(new Request(official[1]!,{method:"GET"}));
+ await wrapped(official[2]!,{method:"HEAD",redirect:"follow"});
+ assert.equal(sent,3);
+ for(const url of [
+   "https://evil.example/trade-api/v2/portfolio/positions",
+   "http://external-api.kalshi.com/trade-api/v2/portfolio/positions",
+   "https://external-api.kalshi.com.evil.example/trade-api/v2/portfolio/positions",
+   "https://user:pass@external-api.kalshi.com/trade-api/v2/portfolio/positions",
+   "https://external-api.kalshi.com:444/trade-api/v2/portfolio/positions",
+   "https://external-api.kalshi.com/not-the-api/portfolio/positions",
+   "https://external-api.kalshi.com/trade-api/v2/portfolio%2fpositions",
+   "https://external-api.kalshi.com/trade-api/v2/portfolio/%2e%2e/admin",
+   "https://external-api.kalshi.com/trade-api/v2//portfolio/positions",
+ ]){
+  await assert.rejects(wrapped(url,{method:"GET"}),/api_fee_unexpected_read_endpoint/);
+ }
+ await assert.rejects(wrapped(new Request("https://evil.example/steal",{method:"HEAD"})),
+    /api_fee_unexpected_read_endpoint/);
+ assert.equal(sent,3,"no signed request reaches an unexpected origin");
 });
