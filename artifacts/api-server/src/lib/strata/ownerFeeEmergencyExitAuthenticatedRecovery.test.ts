@@ -19,7 +19,9 @@ const receipt={httpStatus:201,client_order_id:ID,order_id:"order-1",
 function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;restart?:boolean;
  failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean;
- badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;}={}){
+ badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
+ missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
+ wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;}={}){
  const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
  const initial=options.side==="bid"?"-3.00":"3.00";
  const ending=options.side==="bid"?"-"+position:position;
@@ -38,7 +40,10 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
   return {ok:true as const,observedAtMs:NOW,cashMicros:"0",
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
-     book_side:selected.order.side,subaccount_number:1,exchange_index:2,
+     book_side:selected.order.side,
+     subaccount_number:options.missingOrderScope?undefined:options.wrongOrderScope?0:1,
+     exchange_index:options.missingOrderScope?undefined:2,
+     created_time:new Date(NOW-(options.oldOrder?180_000:100)).toISOString(),
      yes_price_dollars:options.badPrice?"0.9000":"0.5500",fill_count_fp:filled,
      remaining_count_fp:options.badProviderTotals?"0.50":"0.00",
      initial_count_fp:"2.00",status:options.badOrderStatus?"pending":filled==="2.00"?"executed":"canceled"},
@@ -46,7 +51,10 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
      ...(options.concurrentOrder?[{client_order_id:"foreign",order_id:"order-concurrent",
       ticker:MARKET,created_time:new Date(NOW).toISOString(),status:"executed"}]:[])],
    fills:[...(Number(filled)>0?[{trade_id:"t-1",order_id:options.badOrder?"other":"order-1",
-      ticker:options.badFillMarket?"OTHER":MARKET,count_fp:filled,created_time:new Date(NOW).toISOString()}]:[]),
+      ticker:options.badFillMarket?"OTHER":MARKET,count_fp:filled,
+      subaccount_number:options.missingFillScope?undefined:options.wrongFillScope?0:1,
+      exchange_index:options.missingFillScope?undefined:2,
+      created_time:new Date(NOW-(options.oldFill?180_000:0)).toISOString()}]:[]),
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
    positions:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
@@ -105,4 +113,22 @@ test("canceled IOC has zero resting quantity even after partial or zero fill",as
 });
 test("nonzero resting quantity cannot establish terminal IOC recovery",async()=>{
  await assert.rejects(()=>harness({restart:true,badProviderTotals:true}).run());
+});
+
+test("authenticated recovery rejects missing/foreign order and fill account provenance",async()=>{
+ for(const testCase of [
+  {restart:true,missingOrderScope:true},{restart:true,wrongOrderScope:true},
+  {restart:true,missingFillScope:true},{restart:true,wrongFillScope:true},
+  {restart:true,oldOrder:true},{restart:true,oldFill:true}
+ ]){
+  await assert.rejects(()=>harness(testCase).run());
+ }
+});
+test("full/partial/zero IOC scoped provider history remains recoverable",async()=>{
+ for(const fill of ["0.00","1.00","2.00"]){
+  const recovered=await harness({restart:true,fill}).run();
+  assert.equal(recovered.orderAndFillHistoryMatched,true);
+  assert.equal(recovered.response,null);
+  assert.equal(recovered.authenticatedOrder?.fill_count_fp,fill);
+ }
 });
