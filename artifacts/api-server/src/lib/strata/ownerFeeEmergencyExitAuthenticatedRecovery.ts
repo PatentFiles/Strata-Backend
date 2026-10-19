@@ -71,8 +71,13 @@ export async function readAuthenticatedProtectiveExitOutcome(
  // The order submitted for recovery must be identical to the immutable reservation.
  const digest=createHash("sha256").update(JSON.stringify(input.order)).digest("hex");
  if(baseline.order_digest!==digest)return fail("exit_recovery_order_digest_mismatch");
+ // Fresh position evidence is mandatory BEFORE an IOC POST. At recovery,
+ // immutable baselines may legitimately be older than 30 seconds, including
+ // when a witnessed HTTP 201 is followed by delayed authenticated reads.
+ // Account-scoped order/fill timestamps and the complete position delta below
+ // must independently prove attribution; age alone must not strand UNKNOWN.
  if(!Number.isSafeInteger(now)||!Number.isSafeInteger(baselineTime)||
-    baselineTime>now||(receipt!==null&&now-baselineTime>30_000))
+    baselineTime>now)
   return fail("exit_recovery_baseline_stale");
  const initialUnits=signed(initial),requested=count(input.order.count);
  if(initialUnits===0n||requested===0n||
