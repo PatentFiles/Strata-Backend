@@ -89,7 +89,9 @@ export async function readAuthenticatedProtectiveExitOutcome(
  // the V2 POST body. The exchange history may omit reduce_only; its proof
  // is the immutable signed request digest and server-side fenced reservation.
  if(order.order_id!==receipt.order_id||order.ticker!==input.order.ticker||
-    (order.book_side??order.side)!==input.order.side||
+    order.book_side!==input.order.side||
+    (order.yes_price_dollars!==undefined&&order.yes_price_dollars!==input.order.price)||
+    (order.fill_count_fp!==undefined&&count(order.fill_count_fp)!==count(receipt.fill_count))||
     (order.reduce_only!==undefined&&order.reduce_only!==true)||
     !["executed","canceled","cancelled"].includes(String(order.status))||
     (order.subaccount_number!==undefined&&Number(order.subaccount_number)!==1)||
@@ -102,6 +104,8 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const seen=new Set<string>();
  for(const raw of feed.fills){
   const fill=object(raw);
+  if(fill.order_id===receipt.order_id&&fill.ticker!==input.order.ticker)
+   return fail("exit_recovery_matched_fill_market_mismatch");
   if(fill.ticker!==input.order.ticker)continue;
   const id=text(fill.trade_id??fill.fill_id);
   if(seen.has(id))return fail("exit_recovery_duplicate_fill_id");
