@@ -96,6 +96,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRecoveryFence.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRecoveryFence.test.cjs
       - name: Validate no-trade UNKNOWN and no-retry recovery transitions
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRecoveryFence.test.cjs
+      - name: Bundle worker-fenced durable UNKNOWN commit review tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitUnknownCommit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitUnknownCommit.test.cjs
+      - name: Verify committed UNKNOWN before any transport and no retry authorization
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitUnknownCommit.test.cjs
       - name: Bundle isolated sandbox IOC lifecycle proof tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitSandboxCycle.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitSandboxCycle.test.cjs
       - name: Validate sandbox-only zero/partial/full-fill and uncertain responses
