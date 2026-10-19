@@ -72,7 +72,8 @@ export function createGuardedReviewedApiFeeFetch(
     // URL parsing normalizes ports, credentials and encoded path components.
     let parsed:URL;
     try{
-      parsed=new URL(typeof request==="string"?request:request.toString());
+      parsed=new URL(request instanceof Request ? request.url :
+        typeof request==="string" ? request : request.toString());
     }catch{throw new Error("api_fee_unexpected_read_endpoint");}
     if(parsed.origin!=="https://external-api.kalshi.com" ||
        parsed.username!=="" || parsed.password!=="" ||
