@@ -100,7 +100,7 @@ END $$;
 
 -- The runtime's canonical count must include durable protective exits,
 -- not just normal v13 orders, to prevent another entry after an UNKNOWN IOC.
-DO $
+DO $worker_protection_test$
 DECLARE n bigint;
 BEGIN
  SELECT (
@@ -136,5 +136,5 @@ BEGIN
       AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
  ) INTO n;
  IF n<>1 THEN RAISE EXCEPTION 'normal UNKNOWN intent gate regressed'; END IF;
-END $;
+END $worker_protection_test$;
 SELECT 'CANDIDATE_PROTECTIVE_EXIT_SQL_ISOLATED_PASS' AS result;
