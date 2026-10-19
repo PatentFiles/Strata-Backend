@@ -75,6 +75,13 @@ export function createGuardedMonetaryFeeFetch(
   if(order.reduce_only!==true)
     throw Error("monetary_fee_new_risk_requires_exit_validation");
   if(order.time_in_force!=="immediate_or_cancel"||
+     order.self_trade_prevention_type!=="taker_at_cross"||
+     order.post_only!==false||order.expiration_time!==undefined||
+     (order.side!=="bid"&&order.side!=="ask")||
+     typeof order.count!=="string"||!/^[0-9]{1,9}\\.[0-9]{2}$/.test(order.count)||
+     Number(order.count)<=0||
+     typeof order.price!=="string"||!/^0\\.[0-9]{4}$/.test(order.price)||
+     Number(order.price)<=0||
      typeof order.client_order_id!=="string"||
      !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id))
     throw Error("monetary_fee_exit_order_shape_invalid");
