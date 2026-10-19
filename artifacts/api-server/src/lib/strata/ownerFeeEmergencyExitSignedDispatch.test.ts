@@ -1,0 +1,135 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
+import type {IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
+
+const OWNER="11111111-1111-4111-8111-111111111111";
+const RES="22222222-2222-4222-8222-222222222222";
+const CID="v13p-33333333-3333-4333-8333-333333333333";
+const MARKET="KXBTC15M-26OCT161945-45";
+const o={
+ ticker:MARKET,client_order_id:CID,side:"ask",count:"2.00",price:"0.5500",
+ time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
+ post_only:false,reduce_only:true,subaccount:1,exchange_index:2,
+};
+const identity={ownerId:OWNER,accountId:"owner-execution-2",
+ reservationId:RES,material:{keyId:"not-a-real-key",privateKey:"unused"},
+ order:o,lease:{holderId:"worker-1",fencingToken:8}};
+function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
+ marker?:boolean;reject?:boolean;badHistory?:boolean}={}){
+ const calls:{fee:number;mark:number;post:number;read:number;sql:string[]}={
+   fee:0,mark:0,post:0,read:0,sql:[],
+ };
+ let consumed=false;
+ const receipt={httpStatus:201,order_id:"order-1",client_order_id:CID,
+  fill_count:input.fill??"1.00",remaining_count:
+    input.fill==="0.00"?"2.00":input.fill==="2.00"?"0.00":"1.00",
+  ts_ms:1792200000000};
+ const db={connect:async()=>({query:async (sql:string)=>{
+  calls.sql.push(sql);
+  if(sql.startsWith("SELECT r.reservation_id")){
+   assert.match(sql,/v\.independent_reviewer_id <> a\.owner_user_id/);
+   assert.match(sql,/r\.state='UNKNOWN'/);
+   assert.match(sql,/a\.minimum_exit_micros <= \$11::bigint/);
+   assert.match(sql,/FOR SHARE OF r,a,g,w,pos,v/);
+   return {rows:input.denyLock?[]:[{reservation_id:RES}]};
+  }
+  return {rows:[]};
+ },release:()=>{}})};
+ const run=()=>dispatchReviewedProtectiveExitOnce(identity,{
+   db,verifyFee:(async()=>{
+     calls.fee++;
+     return {ok:input.fee!==false,monetaryFeeAuthorized:input.fee!==false,
+      marketTicker:MARKET,reason:"verified"};
+   }) as never,
+   mark:(async()=>{calls.mark++;
+     if(input.marker===false||consumed)return {unknownRecorded:false};
+     consumed=true;
+     return {unknownRecorded:true,clientOrderId:CID,
+       mayRetry:false,transportAuthorized:false};
+   }) as never,
+   post:async()=>{calls.post++;if(input.reject)throw Error("timed out");
+     return input.receipt===false?null:receipt;
+   },
+   readAuthenticatedOutcome:async(_input,observed)=>{
+    calls.read++;
+    const filled=input.fill??"1.00";
+    const position=filled==="0.00"?"3.00":filled==="2.00"?"1.00":"2.00";
+    return {clientOrderId:CID,marketTicker:MARKET,requestedCountFp:"2.00",
+     initialPositionFp:"3.00",observedPositionFp:position,
+     positionMarketTicker:MARKET,reducingBookSide:"ask",
+     completeExchangeHistory:true,exactMarketAndAccountMatched:true,
+     orderAndFillHistoryMatched:input.badHistory!==true,isolatedPositionDelta:true,
+     response:observed} satisfies IocRecoveryObservation;
+   }
+ });
+ return {run,calls};
+}
+test("one committed UNKNOWN marker produces at most one signed IOC, even across repeated calls",async()=>{
+ const h=harness();
+ const first=await h.run();
+ assert.equal(first.state,"RECONCILED");assert.equal(first.postAttempted,true);
+ assert.equal(first.filledHundredths,"100");
+ const again=await h.run();
+ assert.equal(again.state,"BLOCKED");
+ assert.equal(again.postAttempted,false);
+ assert.equal(h.calls.post,1);assert.equal(h.calls.mark,2);
+ assert.equal(h.calls.read,1);
+ assert.equal(first.mayRetry,false);
+ assert.equal(first.tradingAuthorized,false);
+});
+test("exact 0/partial/full IOC observations reconcile only after independent read",async()=>{
+ for(const [fill,expected] of [["0.00","0"],["1.00","100"],["2.00","200"]] as const){
+  const h=harness({fill}),r=await h.run();
+  assert.equal(r.state,"RECONCILED");
+  assert.equal(r.filledHundredths,expected);
+  assert.equal(h.calls.post,1);
+  assert.equal(h.calls.read,1);
+  assert.equal(r.mayRetry,false);
+ }
+});
+test("fail-closed before POST for missing fee evidence, durable marker, or final account/lease lock",async()=>{
+ for(const options of [{fee:false},{marker:false},{denyLock:true}]){
+   const h=harness(options),r=await h.run();
+   assert.equal(r.postAttempted,false);
+   assert.equal(h.calls.post,0);
+   assert.equal(r.tradingAuthorized,false);
+ }
+});
+test("uncertain network responses and unproven history remain UNKNOWN, never retryable",async()=>{
+ for(const options of [{reject:true},{receipt:false},{badHistory:true}]){
+   const h=harness(options),r=await h.run();
+   assert.equal(r.state,"UNKNOWN");
+   assert.equal(r.mayRetry,false);
+   assert.equal(h.calls.post,1);
+   await h.run(); assert.equal(h.calls.post,1);
+ }
+});
+test("recovery adapter must exist before any durable reservation is consumed",async()=>{
+ let n=0;
+ const r=await dispatchReviewedProtectiveExitOnce(identity,{
+  mark:(async()=>{n++;throw Error("unexpected");}) as never,
+  verifyFee:(async()=>{n++;throw Error("unexpected");}) as never
+ });
+ assert.equal(r.state,"BLOCKED");
+ assert.equal(r.reason,"protective_exit_authenticated_recovery_adapter_not_installed");
+ assert.equal(n,0);
+});
+test("owner, scope and order identity are checked before all external side effects",async()=>{
+ for(const order of [
+  {...o,reduce_only:false},
+  {...o,time_in_force:"good_till_canceled"},
+  {...o,subaccount:0},
+  {...o,side:"buy"},
+  {...o,price:"bad"},
+  {...o,ticker:"OTHER"},
+ ]){
+   let called=0;
+   const result=await dispatchReviewedProtectiveExitOnce({...identity,order},{
+     verifyFee:(async()=>{called++;throw Error("unexpected");}) as never,
+     readAuthenticatedOutcome:async()=>{called++;throw Error("unexpected")}
+   });
+   assert.equal(result.state,"BLOCKED");
+   assert.equal(called,0);
+ }
+});
