@@ -83,7 +83,7 @@ export function createGuardedMonetaryFeeFetch(
      typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price)||
      Number(order.price)<=0||
      typeof order.client_order_id!=="string"||
-     !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id))
+     !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id))
     throw Error("monetary_fee_exit_order_shape_invalid");
   const connector:DbConnector=deps.connect??(()=>pool.connect() as unknown as Promise<DbClient>);
   const client=await connector();
