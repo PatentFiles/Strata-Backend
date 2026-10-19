@@ -3,8 +3,8 @@
  * this is NOT a trading authorization: an authenticated owner must separately
  * approve policy, and exact monetary model provenance remains required.
  */
-import { probeCurrentKalshiFeeApi, type KalshiMarketFeeReadOnly } from "./twoSourceFeeEvidence";
-import { preparePdfFreeApiFeePolicyReview } from "./apiFeePolicyReviewCandidate";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+
 import { validateConservativeFeeVectors } from "./apiFeeRateReference";
 
 export type OwnerFeePreflight = {
@@ -35,20 +35,14 @@ export async function inspectOwnerFeeEvidence(
     tradingAuthorized: false as const,
   };
   if (!validateConservativeFeeVectors()) return { ...base, ok: false, reason: "offline_fee_vector_mismatch" };
-  let read: KalshiMarketFeeReadOnly;
-  try {
-    read = await probeCurrentKalshiFeeApi(fetchImpl, now, expectedMarketTicker);
-  } catch {
-    return { ...base, ok: false, reason: "official_api_read_unavailable" };
-  }
-  // Provider probe verifies a specific market, event, series, override status and\n  // both scheduled-change feeds. It does not prove the actual monetary rounding policy.\n  const candidate = preparePdfFreeApiFeePolicyReview(read, now());
-  if (!candidate.ok) return { ...base, ok: false, reason: candidate.reason };
-  if (expectedMarketTicker && candidate.marketTicker !== expectedMarketTicker)
-    return { ...base, ok: false, reason: "fee_market_scope_mismatch" };
+  const checked = await verifyMonetaryFeeContract(
+    expectedMarketTicker ? "ORDER_ENTRY" : "STEP_9", expectedMarketTicker,
+    fetchImpl, now,
+  );
+  if(!checked.ok) return {...base,ok:false,reason:checked.reason};
   return {
-    ...base, ok: true, reason: "live_market_metadata_verified_monetary_schedule_pending",
-    marketTicker: candidate.marketTicker,
-    evidenceDigest: candidate.reviewCandidateDigest,
-    observedAt: candidate.verifiedAt,
+    ...base,ok:true,reason:checked.reason,
+    marketTicker:checked.marketTicker,evidenceDigest:checked.sourceDigest,
+    observedAt:checked.verifiedAt,
   };
 }
