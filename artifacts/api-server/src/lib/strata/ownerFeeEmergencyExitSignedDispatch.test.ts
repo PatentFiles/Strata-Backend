@@ -1,4 +1,5 @@
 import test from "node:test";
+import {generateKeyPairSync} from "node:crypto";
 import assert from "node:assert/strict";
 import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
 import type {IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
@@ -12,8 +13,9 @@ const o={
  time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
  post_only:false,reduce_only:true,subaccount:1,exchange_index:2,
 };
+const signingKey=generateKeyPairSync("rsa",{modulusLength:2048}).privateKey.export({format:"pem",type:"pkcs8"}).toString();
 const identity={ownerId:OWNER,accountId:"owner-execution-2",
- reservationId:RES,material:{keyId:"not-a-real-key",privateKey:"unused"},
+ reservationId:RES,material:{keyId:"ephemeral-regression-only",privateKey:signingKey},
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
  marker?:boolean;reject?:boolean;badHistory?:boolean}={}){
@@ -32,6 +34,8 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    assert.match(sql,/r\.state='UNKNOWN'/);
    assert.match(sql,/a\.minimum_exit_micros <= \$11::bigint/);
    assert.match(sql,/FOR SHARE OF r,a,g,w,pos,v/);
+   assert.match(sql,/r\\.order_digest=\\$12::text/);
+   assert.match(sql,/w\\.credential_fingerprint=\\$13::text/);
    return {rows:input.denyLock?[]:[{reservation_id:RES}]};
   }
   return {rows:[]};
