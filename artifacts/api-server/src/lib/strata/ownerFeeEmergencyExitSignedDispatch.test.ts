@@ -109,14 +109,14 @@ test("uncertain network responses and unproven history remain UNKNOWN, never ret
    await h.run(); assert.equal(h.calls.post,1);
  }
 });
-test("recovery adapter must exist before any durable reservation is consumed",async()=>{
+test("unverified monetary fees deny before consuming an emergency reservation",async()=>{
  let n=0;
  const r=await dispatchReviewedProtectiveExitOnce(identity,{
   mark:(async()=>{n++;throw Error("unexpected");}) as never,
-  verifyFee:(async()=>{n++;throw Error("unexpected");}) as never
+  verifyFee:(async()=>({ok:false,monetaryFeeAuthorized:false,reason:"fee_unavailable"})) as never
  });
  assert.equal(r.state,"BLOCKED");
- assert.equal(r.reason,"protective_exit_authenticated_recovery_adapter_not_installed");
+ assert.equal(r.reason,"protective_exit_monetary_fees_unverified");
  assert.equal(n,0);
 });
 test("owner, scope and order identity are checked before all external side effects",async()=>{
