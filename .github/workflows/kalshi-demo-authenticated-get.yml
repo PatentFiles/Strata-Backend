@@ -10,9 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: kalshi-demo
-    env:
-      STRATA_DEMO_KALSHI_KEY_ID: ${{ secrets.STRATA_DEMO_KALSHI_KEY_ID }}
-      STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM: ${{ secrets.STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM }}
+    # Do NOT set demo secrets at job scope: checkout, dependency installation,
+    # and the build must never receive the signing key in their environments.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,4 +27,15 @@ jobs:
       - name: Build read-only DEMO GET runner
         run: pnpm --filter @workspace/api-server exec esbuild src/scripts/runKalshiDemoAuthenticatedGet.ts --bundle --platform=node --format=cjs --outfile=dist/runKalshiDemoAuthenticatedGet.cjs
       - name: Execute one demo balance GET and emit redacted status
-        run: node artifacts/api-server/dist/runKalshiDemoAuthenticatedGet.cjs
+        # Secrets are available ONLY to this final, demo-only read operation.
+        # They must never be printed, included in an artifact, or given to build steps.
+        env:
+          STRATA_DEMO_KALSHI_KEY_ID: ${{ secrets.STRATA_DEMO_KALSHI_KEY_ID }}
+          STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM: ${{ secrets.STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM }}
+        shell: bash
+        run: |
+          if [[ -z "${STRATA_DEMO_KALSHI_KEY_ID}" || -z "${STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM}" ]]; then
+            echo "::error::One or both required DEMO-only environment secrets are missing. Configure the kalshi-demo environment; do not paste their values into logs."
+            exit 2
+          fi
+          node artifacts/api-server/dist/runKalshiDemoAuthenticatedGet.cjs
