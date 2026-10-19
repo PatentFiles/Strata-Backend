@@ -5,6 +5,7 @@ import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
+import {persistAuthenticatedExitReconciliation} from "./ownerFeeEmergencyExitReconciliationCommit";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
 
@@ -47,6 +48,7 @@ type Ports={
  verifyFee?:typeof verifyMonetaryFeeContract;
  post?:(material:Material,order:Readonly<EmergencyExitOrder>)=>Promise<Receipt>;
  readAuthenticatedOutcome?:(input:Input,receipt:Receipt)=>Promise<IocRecoveryObservation>;
+ persistReconciled?:typeof persistAuthenticatedExitReconciliation;
 };
 function validOrder(o:EmergencyExitOrder):boolean{
  return !!o&&typeof o.ticker==="string"&&MARKET.test(o.ticker)&&
@@ -163,7 +165,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  if(!testMode&&(process.env.NODE_ENV!=="production"||
     process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
   return fail("protective_exit_release_disabled");
- if(!testMode&&(ports.db||ports.mark||ports.verifyFee||ports.post||ports.readAuthenticatedOutcome))
+ if(!testMode&&(ports.db||ports.mark||ports.verifyFee||ports.post||ports.readAuthenticatedOutcome||ports.persistReconciled))
   return fail("protective_exit_injection_forbidden");
  const sha=process.env.RAILWAY_GIT_COMMIT_SHA;
  if(!testMode&&(!sha||!SHA.test(sha)))return fail("protective_exit_release_version_unknown");
@@ -207,8 +209,13 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  const result=reconcileIocEmergencyExit(observed);
  if(result.state!=="RECONCILED")
   return fail(result.reason,"UNKNOWN",true);
- // RECONCILED is a read-only finding: only a separately audited DB transition
- // may record terminal state. This never grants a second POST or trading access.
+ // The original reservation is UNKNOWN until an audited transaction commits
+ // a one-shot immutable reconciliation row and terminal state. A failed or
+ // ambiguous commit never permits any retry or treats a fill as cleared.
+ const persisted=await (ports.persistReconciled??persistAuthenticatedExitReconciliation)(input,observed);
+ if(persisted.committed!==true||persisted.mayRetry!==false)
+  return fail("protective_exit_terminal_audit_unverified","UNKNOWN",true);
+ // This response reports durable recovery, not permission for another POST.
  return {state:"RECONCILED",reason:"protective_exit_reconciled_read_only",
   clientOrderId:order.client_order_id,filledHundredths:result.filledHundredths,
   mayRetry:false,tradingAuthorized:false,postAttempted:true};
