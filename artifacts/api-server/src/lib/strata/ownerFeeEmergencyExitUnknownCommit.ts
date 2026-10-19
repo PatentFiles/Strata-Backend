@@ -59,6 +59,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
     inspect?:typeof inspectOwnedEmergencyExitRead;
     signerFingerprint?:typeof dedicatedSignerFingerprint;
     db?:DB;
+    now?:()=>number;
   }={},
 ):Promise<ExitUnknownCommitResult> {
   if(!UUID.test(ownerId)||!ACCOUNT.test(accountId)||!UUID.test(reservationId)||
@@ -88,7 +89,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
     return deny("emergency_exit_unknown_advisory_unverified");
   const baseline=advisory.verifiedPositionFp;
   const observed=advisory.verifiedPositionObservedAtMs;
-  const at=Date.now();
+  const at=(deps.now??Date.now)();
   if(typeof baseline!=="string"||!/(^-?[0-9]{1,9}\.[0-9]{2}$)/.test(baseline)||
      !Number.isSafeInteger(observed)||observed!>at||at-observed!>3000)
     return deny("emergency_exit_unknown_authenticated_baseline_unverified");
