@@ -121,9 +121,10 @@ export async function verifyReviewedApiFeeSourceStage(
   grant:{
    grantId,ownerUserId:txt(r.owner_user_id),issuerAdminId:txt(r.issuer_admin_id),
    rateDecisionDigest:txt(r.rate_decision_digest),
-   feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
-   policyVersion:API_POLICY_SIGNED_REVIEW_V1,
-   scope:"KXBTC15M:INDEX2",issuedAtMs:ms(r.issued_at),expiresAtMs:ms(r.expires_at),
+   feeModelVersion:txt(r.fee_model_version) as typeof PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+   policyVersion:txt(r.policy_version) as typeof API_POLICY_SIGNED_REVIEW_V1,
+   scope:txt(r.scope) as "KXBTC15M:INDEX2",
+   issuedAtMs:ms(r.issued_at),expiresAtMs:ms(r.expires_at),
    revokedAtMs:r.revoked_at==null?null:ms(r.revoked_at),authorizedStages:stages,
   },
   consent:{grantId,ownerUserId:txt(r.consent_owner),confirmedAtMs:ms(r.confirmed_at),
@@ -131,7 +132,8 @@ export async function verifyReviewedApiFeeSourceStage(
   reviews:[
    {reviewId:txt(r.first_review_id),reviewerUserId:txt(r.first_reviewer),
     currentlyAdmin:true,rateDecisionDigest:txt(r.first_digest),
-    feeModelVersion:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,scope:"KXBTC15M:INDEX2",
+    feeModelVersion:txt(r.first_model) as typeof PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+    scope:txt(r.first_scope) as "KXBTC15M:INDEX2",
     signedAtMs:ms(r.first_signed),expiresAtMs:ms(r.first_expires),
     revokedAtMs:r.first_revoked==null?null:ms(r.first_revoked)},
   ],
