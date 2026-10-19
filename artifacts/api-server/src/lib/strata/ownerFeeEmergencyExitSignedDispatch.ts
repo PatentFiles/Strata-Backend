@@ -4,6 +4,7 @@ import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
+import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
 
@@ -175,8 +176,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     !validOrder(order)||!lease||!/^[A-Za-z0-9._:-]{1,128}$/.test(lease.holderId)||
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
   return fail("protective_exit_identity_invalid");
- if(!ports.readAuthenticatedOutcome)
-  return fail("protective_exit_authenticated_recovery_adapter_not_installed");
+ // Production recovery is a trusted server-only implementation; tests may inject a reader.
  const fee=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",String(order.ticker));
  if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_unverified");
@@ -195,10 +195,9 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
   ()=> (ports.post??signedPost)(material,order),ports.db??(pool as unknown as DB));
  if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);
- if(!ports.readAuthenticatedOutcome)
-  return fail("protective_exit_exchange_reconciliation_unavailable","UNKNOWN",true);
+
  let observed:IocRecoveryObservation;
- try{observed=await ports.readAuthenticatedOutcome(input,outcome.receipt);}
+ try{observed=await (ports.readAuthenticatedOutcome??readAuthenticatedProtectiveExitOutcome)(input,outcome.receipt);}
  catch{return fail("protective_exit_exchange_reconciliation_unavailable","UNKNOWN",true);}
  if(observed.clientOrderId!==order.client_order_id||observed.marketTicker!==order.ticker||
     observed.requestedCountFp!==order.count||
