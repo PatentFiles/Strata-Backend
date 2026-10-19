@@ -85,9 +85,14 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
  if(orders.length!==1)return fail("exit_recovery_order_not_unique");
  const order=orders[0]!;
+ // GET /portfolio/orders uses book_side and subaccount_number, unlike
+ // the V2 POST body. The exchange history may omit reduce_only; its proof
+ // is the immutable signed request digest and server-side fenced reservation.
  if(order.order_id!==receipt.order_id||order.ticker!==input.order.ticker||
-    order.side!==input.order.side||order.reduce_only!==true||
+    (order.book_side??order.side)!==input.order.side||
+    (order.reduce_only!==undefined&&order.reduce_only!==true)||
     !["executed","canceled","cancelled"].includes(String(order.status))||
+    (order.subaccount_number!==undefined&&Number(order.subaccount_number)!==1)||
     (order.subaccount!==undefined&&Number(order.subaccount)!==1)||
     (order.exchange_index!==undefined&&Number(order.exchange_index)!==2))
   return fail("exit_recovery_order_mismatch");
