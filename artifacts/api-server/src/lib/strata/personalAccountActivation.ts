@@ -348,18 +348,23 @@ export async function readOwnedApprovedFeeEvidence(
       text(row.fee_formula_version) !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return { ok: false, reason: "fee_artifact_unverified" };
   }
-  const proof = await establish();
-  if (!proof.ok || !/^[0-9a-f]{64}$/.test(proof.digest)) {
-    return { ok: false, reason: proof.ok ? "fee_artifact_unverified" : proof.reason };
-  }
+  // The production path verifies the PDF and live market once. Dependency-
+  // injected isolated tests still exercise the original PDF-only interface.
+  let verifiedDigest:string;
   if(establish===establishOfficialFeeDigest){
     const monetary=await verifyMonetaryFeeContract("STEP_11");
-    if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==proof.digest)
-      return {ok:false,reason:monetary.reason==="provider_monetary_fee_schedule_and_market_verified"?"fee_artifact_unverified":monetary.reason};
+    if(!monetary.ok||!monetary.monetaryFeeAuthorized||!monetary.sourceDigest)
+      return {ok:false,reason:monetary.reason};
+    verifiedDigest=monetary.sourceDigest;
+  }else{
+    const proof=await establish();
+    if(!proof.ok||!/^[a-f0-9]{64}$/.test(proof.digest))
+      return {ok:false,reason:proof.ok?"fee_artifact_unverified":proof.reason};
+    verifiedDigest=proof.digest;
   }
   const version = Number(row.version);
   if (!Number.isSafeInteger(version) || version < 1) return { ok: false, reason: "policy_limits_missing" };
-  return { ok: true, reason: "owned_policy_fee_verified", feeArtifactDigest: proof.digest,
+  return { ok: true, reason: "owned_policy_fee_verified", feeArtifactDigest: verifiedDigest,
     policyId: String(row.id), version };
 }
 
@@ -609,19 +614,13 @@ export async function commissionOwnedAccount(
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
   } else if (!operatorIdentity && !apiIdentity) {
-    const established = await establishOfficialFeeDigest();
-    if (!established.ok) return { ok: false, reason: established.reason, blockers: [established.reason] };
-    if (established.digest !== digest) {
-      return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
-    }
-  }
-  // Check the same authoritative schedule and currently effective market
-  // before commissioning. Test-injected artifact validators stay isolated.
-  if(!operatorIdentity && !apiIdentity && !input.verifyFee){
+    // One source read establishes the PDF's monetary formula and live market
+    // metadata. It does not grant commissioning consent.
     const monetary=await verifyMonetaryFeeContract("STEP_11");
-    if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==digest)
-      return {ok:false,reason:monetary.ok?"fee_artifact_unverified":monetary.reason,
-        blockers:[monetary.ok?"fee_artifact_unverified":monetary.reason]};
+    if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==digest){
+      const reason=monetary.ok?"fee_artifact_unverified":monetary.reason;
+      return {ok:false,reason,blockers:[reason]};
+    }
   }
   const commissioningDigest = createHash("sha256").update(JSON.stringify({
     accountId: report.accountId,
