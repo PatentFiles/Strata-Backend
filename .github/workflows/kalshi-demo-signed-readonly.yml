@@ -22,6 +22,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify GitHub DEMO private key scope
+        # Regression guard: no untrusted dependency install/build step sees secrets.
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          workflow = Path(".github/workflows/kalshi-demo-authenticated-get.yml").read_text()
+          marker = "      - name: Execute one demo balance GET and emit redacted status"
+          before, found, final_step = workflow.partition(marker)
+          assert found, "Read-only DEMO execution step is missing"
+          assert "environment: kalshi-demo" in before
+          for secret in ("STRATA_DEMO_KALSHI_KEY_ID", "STRATA_DEMO_KALSHI_PRIVATE_KEY_PEM"):
+              assert "secrets." + secret not in before, "DEMO secret exposed outside GET step"
+              assert "secrets." + secret in final_step, "DEMO execution secret missing"
+          assert "node artifacts/api-server/dist/runKalshiDemoAuthenticatedGet.cjs" in final_step
+          print("DEMO credentials are scoped to the final signed GET only.")
+          PY
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.9
