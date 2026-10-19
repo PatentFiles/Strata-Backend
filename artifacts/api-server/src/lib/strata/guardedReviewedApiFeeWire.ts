@@ -1,4 +1,5 @@
 import { pool } from "@workspace/db";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import {
  parseReviewedApiSource, verifyReviewedApiFeeSourceStage, API_SOURCE_POLICY_VERSION
 } from "./apiFeeSourceStage";
@@ -49,7 +50,8 @@ export function createGuardedReviewedApiFeeFetch(
  expectedPolicyHash:string,expectedSignerFingerprint:string,
  expectedFencingToken:number,expectedLeaseHolderId:string,
  deps:{connect?:()=>ReturnType<typeof pool.connect>;
-   verify?:typeof verifyReviewedApiFeeSourceStage}={},
+   verify?:typeof verifyReviewedApiFeeSourceStage;
+   verifyMonetary?:typeof verifyMonetaryFeeContract}={},
 ):typeof fetch {
  if(!parseReviewedApiSource(sourceUrl))
   throw new Error("reviewed_api_source_url_invalid");
@@ -131,6 +133,9 @@ export function createGuardedReviewedApiFeeFetch(
    ]);
    if(finalAccount.rows.length!==1)
     throw new Error("api_fee_final_account_signer_or_kill_closed");
+   const monetary=await (deps.verifyMonetary??verifyMonetaryFeeContract)("ORDER_ENTRY",ticker);
+   if(!monetary.ok || monetary.marketTicker!==ticker)
+    throw new Error("api_fee_final_order_monetary_source_closed");
    const checked=await (deps.verify??verifyReviewedApiFeeSourceStage)(
     ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client});
    if(!checked.ok || checked.identity.marketTicker!==ticker)

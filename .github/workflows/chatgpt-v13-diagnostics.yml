@@ -254,3 +254,23 @@ jobs:
             --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
             --external:@clerk/express --external:express
           node --test dist/pairKeyProvisioning.test.cjs
+      - name: Test common fee contract fail-closed behavior
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/monetaryFeeContract.test.ts --bundle --platform=node --format=cjs --outfile=dist/monetaryFeeContract.test.cjs
+          node --test dist/monetaryFeeContract.test.cjs
+      - name: Test monetary fee final signed-order lock and rollback
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/guardedMonetaryFeeWire.test.ts --bundle --platform=node --format=cjs --outfile=dist/guardedMonetaryFeeWire.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/guardedMonetaryFeeWire.test.cjs
+      - name: Test authenticated owner monetary policy approval
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalOwnerMonetaryApproval.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryApproval.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
+          node --test dist/personalOwnerMonetaryApproval.test.cjs
+      - name: Test Step 11 owner monetary commissioning consent
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalOwnerMonetaryCommission.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryCommission.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
+          node --test dist/personalOwnerMonetaryCommission.test.cjs

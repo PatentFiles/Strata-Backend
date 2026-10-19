@@ -66,10 +66,16 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
  };
  const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder,{
   connect:(async()=>db) as never, verify:grantProof as never,
+  verifyMonetary:(async(_stage:string,market:string)=>{
+    assert.equal(market,ticker);
+    calls.push("MONETARY");
+    return {ok:true,reason:"provider_monetary_fee_schedule_and_market_verified",marketTicker:ticker};
+  }) as never,
  });
  await wrapped(url,{method:"POST",body:JSON.stringify(order)});
  assert.equal(sent,1);assert.equal(released,1);
- assert.ok(calls.indexOf("VERIFIED")>calls.indexOf("BEGIN"));
+ assert.ok(calls.indexOf("MONETARY")>calls.indexOf("BEGIN"));
+ assert.ok(calls.indexOf("VERIFIED")>calls.indexOf("MONETARY"));
  assert.ok(calls.indexOf("POST")>calls.indexOf("VERIFIED"));
  assert.ok(calls.indexOf("COMMIT")>calls.indexOf("POST"));
 });

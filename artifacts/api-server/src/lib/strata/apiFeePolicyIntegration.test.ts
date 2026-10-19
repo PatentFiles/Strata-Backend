@@ -72,3 +72,14 @@ test("migration creates empty service-only records; no client grants, approvals 
  assert.match(sql,/REVOKE ALL ON TABLE/);
  assert.doesNotMatch(sql,/INSERT INTO|UPDATE v13_production_account|live_execution_enabled\s*=\s*true/);
 });
+
+test("monetary evidence is revalidated at Step 9, Step 11 and the final order fence",()=>{
+ const owner=read("personalAccountActivation.ts");
+ const fence=read("guardedReviewedApiFeeWire.ts");
+ assert.match(owner,/verifyMonetaryFeeContract\("STEP_9"\)/);
+ assert.match(owner,/verifyMonetaryFeeContract\("STEP_11"\)/);
+ assert.match(fence,/deps\.verifyMonetary\?\?verifyMonetaryFeeContract\)\("ORDER_ENTRY",ticker\)/);
+ assert.match(fence,/api_fee_final_order_monetary_source_closed/);
+ assert.match(fence,/if\(order\.reduce_only!==true\)/);
+ assert.match(fence,/live\.manual_kill_switch=false/);
+});
