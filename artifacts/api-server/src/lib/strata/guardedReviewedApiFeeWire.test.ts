@@ -166,7 +166,7 @@ test("only canonical Kalshi order cancellations may bypass fee-POST fence",async
 
 test("signed GET and HEAD requests are limited to canonical Kalshi API paths",async()=>{
  let sent=0;
- const transport=(async(req:RequestInfo|URL,init?:RequestInit)=>{
+ const transport=(async(req:unknown,init?:RequestInit)=>{
    sent++;
    assert.equal(init?.redirect,"error");
    return new Response("{}",{status:200});
