@@ -25,7 +25,6 @@ import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
-import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
