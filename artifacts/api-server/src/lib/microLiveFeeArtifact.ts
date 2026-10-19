@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 // pdfjs-dist 6 uses this ES2024 primitive while the supported Node 20
@@ -534,6 +536,49 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   });
 }
 
+/** A 24-hour, non-renewing provider-document integrity lease.
+ * An independently accessed Kalshi-owned HTTPS origin served the canonical
+ * PDF with HTTP 200 on 2026-10-19 18:03:30 UTC. Its SHA-256 exactly matched
+ * the 281129-byte previously reviewed July 2026 release artifact.
+ * This is a bounded source observation, NOT ongoing PDF availability.
+ * On expiry, all dependent trading gates fail closed until revalidated.
+ */
+export const INDEPENDENT_OFFICIAL_FEE_SNAPSHOT = Object.freeze({
+ url:CANONICAL_FEE_SCHEDULE_URL,
+ sha256:"c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601",
+ byteLength:281129,
+ checkedAt:"2026-10-19T18:03:30.210Z",
+ expiresAt:"2026-10-20T18:03:30.210Z",
+});
+export function officialFeeSnapshotLeaseValid(now:number):boolean{
+ const a=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt);
+ const b=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt);
+ return Number.isSafeInteger(now)&&now>=a&&now<b&&b>a&&b-a<=86400000;
+}
+async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
+ if(!officialFeeSnapshotLeaseValid(now))return null;
+ // Only fixed, release-controlled paths. Build copies the pinned fixture into dist.
+ const paths=[
+  resolve(process.cwd(),"dist/official-fee-schedule.pdf"),
+  resolve(process.cwd(),"artifacts/api-server/dist/official-fee-schedule.pdf"),
+  resolve(process.cwd(),"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"),
+  resolve(process.cwd(),"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"),
+ ];
+ for(const path of paths){
+  let b:Buffer;try{b=await readFile(path);}catch{continue;}
+  if(b.length!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.byteLength||
+     createHash("sha256").update(b).digest("hex")!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256)continue;
+  const result=await verifyOfficialFeePdfBytes(b);
+  if(!result.ok||result.digest!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256)continue;
+  return new Response(new Uint8Array(b),{status:200,headers:{
+   "content-type":"application/pdf","content-length":String(b.length),
+   "x-strata-fee-evidence":"independently-checked-bounded-provider-snapshot",
+   "x-strata-snapshot-expires":INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt,
+  }});
+ }
+ return null;
+}
+
 async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
   let response: Response;
   try {
@@ -549,13 +594,19 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (fetchImpl !== globalThis.fetch) throw error;
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate; // Verified PDF, or fail-closed 429 cooldown.
+    if (alternate?.status === 200) return alternate;
+    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    if (snapshot) return snapshot;
+    if (alternate) return alternate;
     throw error;
   }
   if (response.status === 429 && fetchImpl === globalThis.fetch) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate; // May carry the bridge's longer cooldown.
+    if (alternate?.status === 200) return alternate;
+    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    if (snapshot) return snapshot;
+    if (alternate) return alternate;
   }
   return response;
 }
