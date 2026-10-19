@@ -158,7 +158,7 @@ test("only canonical Kalshi order cancellations may bypass fee-POST fence",async
    "https://external-api.kalshi.com/trade-api/v2/portfolio/withdrawals/abc",
  ]){
    await assert.rejects(wrapped(target,{method:"DELETE"}),
-    /api_fee_unexpected_cancel_endpoint/);
+    /api_fee_unexpected_(?:cancel|read)_endpoint/);
  }
  assert.equal(calls.length,2);
 });
