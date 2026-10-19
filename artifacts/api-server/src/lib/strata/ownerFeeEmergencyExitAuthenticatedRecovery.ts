@@ -90,6 +90,15 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
  if(orders.length!==1)return fail("exit_recovery_order_not_unique");
  const order=orders[0]!;
+ // Order history must explicitly echo the requested account scope. Filter
+ // parameters alone are not sufficient evidence for a financial state change.
+ if(Number(order.subaccount_number??order.subaccount)!==1||
+    Number(order.exchange_index)!==2)
+  return fail("exit_recovery_order_scope_unproven");
+ const orderCreatedAt=Date.parse(String(order.created_time??""));
+ if(!Number.isSafeInteger(orderCreatedAt)||orderCreatedAt<baselineTime||
+    orderCreatedAt>feed.observedAtMs+3_000)
+  return fail("exit_recovery_order_time_unproven");
  // A second order after the inventory baseline could account for the delta.
  for(const candidateRaw of feed.orders){
   const candidate=object(candidateRaw);
@@ -135,6 +144,14 @@ export async function readAuthenticatedProtectiveExitOutcome(
   if(seen.has(id))return fail("exit_recovery_duplicate_fill_id");
   seen.add(id);
   if(fill.order_id===orderId){
+   // A matching order_id from an unscoped/foreign fill is not conclusive.
+   if(Number(fill.subaccount_number??fill.subaccount)!==1||
+      Number(fill.exchange_index)!==2)
+    return fail("exit_recovery_fill_scope_unproven");
+   const occurredAt=Date.parse(String(fill.created_time??""));
+   if(!Number.isSafeInteger(occurredAt)||occurredAt<baselineTime||
+      occurredAt>feed.observedAtMs+3_000)
+    return fail("exit_recovery_fill_time_unproven");
    const units=count(fill.count_fp??fill.count);
    if(units===0n)return fail("exit_recovery_zero_quantity_fill");
    total+=units;
