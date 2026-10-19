@@ -1,4 +1,5 @@
-import {constants,createPrivateKey,createSign} from "node:crypto";
+import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
+import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
@@ -106,6 +107,9 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
   const units=(BigInt(String(input.order.count).split(".")[0]!)*100n+
     BigInt(String(input.order.count).split(".")[1]!)).toString();
   const side=input.order.side==="ask"?"YES":"NO";
+  const fingerprint=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
+  const digest=createHash("sha256").update(JSON.stringify(input.order)).digest("hex");
+  if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))return {attempted:false,receipt:null};
   const sql=`SELECT r.reservation_id FROM private.strata_emergency_exit_reservations r
  JOIN public.v13_production_account a ON a.id=r.execution_account_id AND a.owner_user_id=r.owner_user_id
  JOIN public.live_execution_config g ON g.id='singleton'
@@ -117,12 +121,15 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  AND r.reducing_side=$7 AND r.quantity_hundredths=$8::bigint
  AND r.worker_holder_id=$9 AND r.worker_fencing_token=$10::bigint
  AND r.state='UNKNOWN' AND r.trading_authorized=false
+ AND r.order_digest=$12::text
  AND r.updated_at > now()-interval '8 seconds'
  AND a.commissioned=true AND a.execution_enabled=true AND a.kill_switch=false
+ AND a.key_fingerprint=$13::text
  AND a.subaccount=1 AND a.exchange_index=2
  AND a.minimum_exit_micros IS NOT NULL AND a.minimum_exit_micros <= $11::bigint
  AND g.live_execution_enabled=true AND g.manual_kill_switch=false
  AND w.holder_id=$9 AND w.fencing_token=$10::bigint AND w.state='owned'
+ AND w.credential_fingerprint=$13::text
  AND w.account_kill=false AND w.heartbeat_at > now()-interval '5 seconds'
  AND pos.quantity_hundredths >= $8::bigint
  AND v.expires_at > now() AND v.revoked_at IS NULL
@@ -134,7 +141,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  FOR SHARE OF r,a,g,w,pos,v`;
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
-    input.lease.holderId,input.lease.fencingToken,proceeds]);
+    input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint]);
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return {attempted:false,receipt:null};
   // One-shot in DB already: PREPARED cannot be re-entered from UNKNOWN.
@@ -160,7 +167,10 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  const sha=process.env.RAILWAY_GIT_COMMIT_SHA;
  if(!testMode&&(!sha||!SHA.test(sha)))return fail("protective_exit_release_version_unknown");
  const releaseSha=testMode?"a".repeat(40):sha!;
- const {ownerId,accountId,reservationId,order,lease,material}=input;
+ const {ownerId,accountId,reservationId,lease,material}=input;
+ // Immutable scalar snapshot, never use a mutable caller object after awaits.
+ const order=Object.freeze({...input.order});
+ input={...input,order};
  if(!UUID.test(ownerId)||!UUID.test(reservationId)||!/^[A-Za-z0-9._:-]{1,128}$/.test(accountId)||
     !validOrder(order)||!lease||!/^[A-Za-z0-9._:-]{1,128}$/.test(lease.holderId)||
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
