@@ -555,7 +555,7 @@ export function officialFeeSnapshotLeaseValid(now:number):boolean{
  const b=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt);
  return Number.isSafeInteger(now)&&now>=a&&now<b&&b>a&&b-a<=86400000;
 }
-async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
+export async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
  if(!officialFeeSnapshotLeaseValid(now))return null;
  // Only fixed, release-controlled paths. Build copies the pinned fixture into dist.
  const paths=[
