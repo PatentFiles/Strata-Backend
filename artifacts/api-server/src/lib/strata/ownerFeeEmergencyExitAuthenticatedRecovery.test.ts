@@ -35,8 +35,8 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
   return {ok:true as const,observedAtMs:NOW,cashMicros:"0",
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
-     side:selected.order.side,reduce_only:true,initial_count_fp:"2.00",
-     status:options.badOrderStatus?"pending":"executed"}],
+     book_side:selected.order.side,subaccount_number:1,exchange_index:2,
+     initial_count_fp:"2.00",status:options.badOrderStatus?"pending":"executed"}],
    fills:[...(Number(filled)>0?[{trade_id:"t-1",order_id:options.badOrder?"other":"order-1",
       ticker:MARKET,count_fp:filled,created_time:new Date(NOW).toISOString()}]:[]),
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
