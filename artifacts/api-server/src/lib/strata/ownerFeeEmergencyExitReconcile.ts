@@ -22,7 +22,18 @@ export type IocRecoveryObservation = {
   orderAndFillHistoryMatched: boolean;
   /** No simultaneous orders, fills or transfer activity in this market. */
   isolatedPositionDelta: boolean;
-  /** Independently authenticated GET order when the original POST receipt was lost.\n   * This is NOT an HTTP 201 response or permission to retry an IOC. */\n  authenticatedOrder?: {\n    order_id: unknown;client_order_id: unknown;status: unknown;\n    initial_count_fp: unknown;fill_count_fp: unknown;remaining_count_fp: unknown;\n  };\n  /** Null when no conclusive exchange response; never treat as no fill. */
+  /** Authenticated GET order when the original POST response was lost.
+   * This is NOT a witnessed HTTP response or permission to retry.
+   */
+  authenticatedOrder?: {
+    order_id: unknown;
+    client_order_id: unknown;
+    status: unknown;
+    initial_count_fp: unknown;
+    fill_count_fp: unknown;
+    remaining_count_fp: unknown;
+  };
+  /** Null when no conclusive exchange response; never treat as no fill. */
   response: null | {
     httpStatus: number;
     order_id: unknown;
