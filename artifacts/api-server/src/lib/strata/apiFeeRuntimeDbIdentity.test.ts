@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {inspectRuntimeDbIdentity,RUNTIME_DB_IDENTITY_SQL} from "./apiFeeRuntimeDbIdentity";
+import {sanitizePublic} from "../v13-production/sanitize";
 const admin="22222222-2222-4222-8222-222222222222";
 test("runtime identity denies missing and unconfirmed administrators, never reads connection metadata",async()=>{
  const calls:string[]=[];
@@ -49,4 +50,39 @@ test("database query failure fails closed without leaking error details",async()
  assert.equal(result.ok,false);
  assert.equal(result.reason,"runtime_db_identity_unavailable");
  assert.equal(JSON.stringify(result).includes("sensitive"),false);
+});
+
+test("runtime attestation survives generic response sanitizer without exposing private values", async()=>{
+ const db={query:async(sql:string)=>{
+  if(sql.includes("FROM auth.users u"))return {rows:[{is_admin:true}]};
+  return {rows:[{
+   runtime_role:"postgres",database_name:"postgres",private_schema_usable:true,
+   reviews_ready:true,grants_ready:true,consents_ready:true,
+   account_fingerprint:"a".repeat(32),
+  }]};
+ }};
+ const result=await inspectRuntimeDbIdentity(admin,db);
+ assert.equal(result.ok,true);
+ const published=sanitizePublic({
+  ...result,
+  privateKey:"DO_NOT_LEAK",
+  privateSchemaDetails:"DO_NOT_LEAK",
+  password:"DO_NOT_LEAK",
+ });
+ assert.equal(published.ok,true);
+ assert.equal(published.privateSchemaUsable,true);
+ assert.equal(published.reviewsReady,true);
+ assert.equal(published.grantsReady,true);
+ assert.equal(published.consentsReady,true);
+ assert.equal(published.accountFingerprint,"a".repeat(32));
+ assert.equal(JSON.stringify(published).includes("DO_NOT_LEAK"),false);
+ assert.equal(Object.prototype.hasOwnProperty.call(published,"privateKey"),false);
+ assert.equal(Object.prototype.hasOwnProperty.call(published,"privateSchemaDetails"),false);
+ assert.equal(Object.prototype.hasOwnProperty.call(published,"password"),false);
+ // Only exact nonsecret booleans may pass through the exception.
+ const invalid=sanitizePublic({privateSchemaUsable:"sensitive",privateSchemaDetails:true});
+ assert.equal(Object.prototype.hasOwnProperty.call(invalid,"privateSchemaUsable"),false);
+ assert.equal(Object.prototype.hasOwnProperty.call(invalid,"privateSchemaDetails"),false);
+ const falseValue=sanitizePublic({privateSchemaUsable:false});
+ assert.equal(falseValue.privateSchemaUsable,false);
 });
