@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid,
  recentPinnedOfficialFeeSnapshot, verifyOfficialFeePdfBytes,
- CANONICAL_FEE_SCHEDULE_URL } from "./microLiveFeeArtifact";
+ CANONICAL_FEE_SCHEDULE_URL, establishOfficialFeeDigest } from "./microLiveFeeArtifact";
 import { REVIEWED_REFERENCE_PDF_SHA256 } from "./strata/twoSourceFeeEvidence";
 
 test("first-party browser observation is tied to the pre-reviewed exact PDF",async()=>{
@@ -36,4 +36,27 @@ test("expired source observation does not create fee-authorizing PDF bytes",asyn
  const expiry=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt);
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry),null);
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry+86400000),null);
+});
+test("real fee digest entry uses the verified snapshot without a network call inside the lease",async()=>{
+ const savedFetch=globalThis.fetch, savedNow=Date.now;
+ let requests=0;
+ try{
+  const instant=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt)+120000;
+  Date.now=()=>instant;
+  globalThis.fetch=(async()=>{requests++;return new Response(null,{status:429});}) as typeof fetch;
+  const proof=await establishOfficialFeeDigest();
+  assert.equal(proof.ok,true);
+  if(proof.ok) assert.equal(proof.digest,INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256);
+  assert.equal(requests,0,"short-term provider lease should not hammer Kalshi 429");
+ }finally{globalThis.fetch=savedFetch;Date.now=savedNow;}
+});
+test("after expiry real digest entry refuses an unavailable canonical provider",async()=>{
+ const savedFetch=globalThis.fetch,savedNow=Date.now;
+ try{
+  Date.now=()=>Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt)+1;
+  globalThis.fetch=(async()=>new Response(null,{status:429})) as typeof fetch;
+  const proof=await establishOfficialFeeDigest();
+  assert.equal(proof.ok,false);
+  if(!proof.ok)assert.equal(proof.reason,"official_fee_schedule_http_429");
+ }finally{globalThis.fetch=savedFetch;Date.now=savedNow;}
 });
