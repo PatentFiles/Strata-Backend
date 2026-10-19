@@ -17,7 +17,7 @@ const input={ownerId:OWNER,accountId:"owner-execution-2",reservationId:RES,
 const receipt={httpStatus:201,client_order_id:ID,order_id:"order-1",
  fill_count:"1.00",remaining_count:"1.00",ts_ms:NOW};
 function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
- badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;
+ badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;restart?:boolean;
  failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean}={}){
  const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
  const initial=options.side==="bid"?"-3.00":"3.00";
@@ -29,7 +29,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    assert.match(sql,/r.state='UNKNOWN'/);
    assert.equal(args?.[0],RES);assert.equal(args?.[1],OWNER);
    return {rows:options.noBaseline?[]:[{initial_position_fp:initial,
-     position_observed_at_ms:NOW-200}]};
+     position_observed_at_ms:NOW-(options.restart?120_000:200)}]};
  }};
  const readFeeds=(async()=>{
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
@@ -45,7 +45,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    positions:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
    settlements:[]};
  }) as typeof readOwnedKalshiFeeds;
- return {run:()=>readAuthenticatedProtectiveExitOutcome(selected,signedReceipt,
+ return {run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
   {db,readFeeds,now:()=>NOW})};
 }
 test("zero, partial and full signed account history reconcile against immutable baseline",async()=>{
@@ -70,4 +70,15 @@ test("absent baseline, incomplete history, bad status, unrelated fills, or posit
   {badPrice:true},{badFillMarket:true}]){
   await assert.rejects(()=>harness(options).run());
  }
+});
+
+test("restart after 120 seconds recovers UNKNOWN from authenticated order and fills with no POST",async()=>{
+ const result=await harness({restart:true,fill:"1.00"}).run();
+ assert.equal(result.observedPositionFp,"2.00");
+ assert.equal(result.response?.order_id,"order-1");
+});
+test("restart fails closed on missing provider history, concurrent fills, or conflicting balance",async()=>{
+ for(const options of [{restart:true,failPages:true},{restart:true,foreignFill:true},
+  {restart:true,differentPosition:true},{restart:true,badOrderStatus:true}])
+  await assert.rejects(()=>harness(options).run());
 });
