@@ -3,6 +3,8 @@ import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+// Capture the real transport before any tests can monkeypatch global fetch.
+const PRODUCTION_FEE_FETCH: typeof fetch = globalThis.fetch;
 
 // pdfjs-dist 6 uses this ES2024 primitive while the supported Node 20
 // production runtime does not provide it yet.
@@ -584,7 +586,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
   // static PDF endpoint. Test-injected transports never use this fallback.
   // When the lease ends this automatically resumes the normal live retrieval
   // path and refuses all unverified bytes or metadata-only authorizations.
-  if (fetchImpl === globalThis.fetch) {
+  if (fetchImpl === PRODUCTION_FEE_FETCH) {
     const snapshot = await recentPinnedOfficialFeeSnapshot();
     if (snapshot) return snapshot;
   }
@@ -599,7 +601,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
   } catch (error) {
     // The trusted Edge function is a fallback solely for production transport
     // failures. Injected test fetches never trigger network access.
-    if (fetchImpl !== globalThis.fetch) throw error;
+    if (fetchImpl !== PRODUCTION_FEE_FETCH) throw error;
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
@@ -608,7 +610,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (alternate) return alternate;
     throw error;
   }
-  if (response.status === 429 && fetchImpl === globalThis.fetch) {
+  if (response.status === 429 && fetchImpl === PRODUCTION_FEE_FETCH) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
