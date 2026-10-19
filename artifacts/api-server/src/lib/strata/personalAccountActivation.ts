@@ -551,6 +551,7 @@ export async function commissionOwnedAccount(
     feeArtifactDigest: unknown;
     minimumExitMicros: unknown;
     verifyFee?: typeof verifyCurrentFeeArtifact;
+    verifyMonetary?: typeof verifyMonetaryFeeContract;
   },
 ): Promise<{ ok: boolean; reason: string; blockers: string[] }> {
   if (input.confirmation !== COMMISSION_OWNED_ACCOUNT_CONFIRMATION) {
@@ -614,10 +615,11 @@ export async function commissionOwnedAccount(
     if (!artifact.valid || artifact.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
-  } else if (!operatorIdentity && !apiIdentity) {
+  } else if (!operatorIdentity && !apiIdentity && (!input.verifyFee || input.verifyMonetary)) {
     // One source read establishes the PDF's monetary formula and live market
-    // metadata. It does not grant commissioning consent.
-    const monetary=await verifyMonetaryFeeContract("STEP_11");
+    // metadata. It does not grant commissioning consent. Explicit test
+    // injection cannot originate in the user request or HTTP body.
+    const monetary=await (input.verifyMonetary??verifyMonetaryFeeContract)("STEP_11");
     if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==digest){
       const reason=monetary.ok?"fee_artifact_unverified":monetary.reason;
       return {ok:false,reason,blockers:[reason]};
