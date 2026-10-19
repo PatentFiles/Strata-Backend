@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
+export { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 // Capture the real transport before any tests can monkeypatch global fetch.
 const PRODUCTION_FEE_FETCH: typeof fetch = globalThis.fetch;
@@ -538,26 +540,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   });
 }
 
-/** A 24-hour, non-renewing provider-document integrity lease.
- * An independently accessed Kalshi-owned HTTPS origin served the canonical
- * PDF with HTTP 200 on 2026-10-19 18:03:30 UTC. Its SHA-256 exactly matched
- * the 281129-byte previously reviewed July 2026 release artifact.
- * This is a bounded source observation, NOT ongoing PDF availability.
- * On expiry, all dependent trading gates fail closed until revalidated.
- */
-export const INDEPENDENT_OFFICIAL_FEE_SNAPSHOT = Object.freeze({
- url:CANONICAL_FEE_SCHEDULE_URL,
- sha256:"c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601",
- byteLength:281129,
- checkedAt:"2026-10-19T18:03:30.210Z",
- expiresAt:"2026-10-20T18:03:30.210Z",
-});
-export function officialFeeSnapshotLeaseValid(now:number):boolean{
- const a=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt);
- const b=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt);
- return Number.isSafeInteger(now)&&now>=a&&now<b&&b>a&&b-a<=86400000;
-}
-export async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
+async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
  if(!officialFeeSnapshotLeaseValid(now))return null;
  // Only fixed, release-controlled paths. Build copies the pinned fixture into dist.
  const paths=[
@@ -586,7 +569,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
   // static PDF endpoint. Test-injected transports never use this fallback.
   // When the lease ends this automatically resumes the normal live retrieval
   // path and refuses all unverified bytes or metadata-only authorizations.
-  if (fetchImpl === PRODUCTION_FEE_FETCH) {
+  if (fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH) {
     const snapshot = await recentPinnedOfficialFeeSnapshot();
     if (snapshot) return snapshot;
   }
@@ -601,7 +584,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
   } catch (error) {
     // The trusted Edge function is a fallback solely for production transport
     // failures. Injected test fetches never trigger network access.
-    if (fetchImpl !== PRODUCTION_FEE_FETCH) throw error;
+    if (fetchImpl !== globalThis.fetch) throw error;
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
@@ -610,7 +593,7 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (alternate) return alternate;
     throw error;
   }
-  if (response.status === 429 && fetchImpl === PRODUCTION_FEE_FETCH) {
+  if (response.status === 429 && fetchImpl === globalThis.fetch) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
