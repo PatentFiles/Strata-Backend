@@ -41,7 +41,7 @@ export async function inspectOwnerFeeEvidence(
   } catch {
     return { ...base, ok: false, reason: "official_api_read_unavailable" };
   }
-  const candidate = preparePdfFreeApiFeePolicyReview(read, now());
+  // Provider probe verifies a specific market, event, series, override status and\n  // both scheduled-change feeds. It does not prove the actual monetary rounding policy.\n  const candidate = preparePdfFreeApiFeePolicyReview(read, now());
   if (!candidate.ok) return { ...base, ok: false, reason: candidate.reason };
   if (expectedMarketTicker && candidate.marketTicker !== expectedMarketTicker)
     return { ...base, ok: false, reason: "fee_market_scope_mismatch" };
