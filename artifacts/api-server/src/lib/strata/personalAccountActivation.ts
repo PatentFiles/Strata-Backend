@@ -92,6 +92,10 @@ const COMMISSION_SQL = `
     AND cash_precision_verified = true
     AND cash_micros >= 25000000
     AND reconciled_at IS NOT NULL
+    -- Authenticated Kalshi cash proof must be newly observed at commissioning,
+    -- not a years-old reconciliation that merely postdates a funding receipt.
+    AND reconciled_at BETWEEN now() - interval '15 minutes'
+                          AND now() + interval '10 seconds'
     AND (
       EXISTS (
         SELECT 1 FROM private.kalshi_owner_pilot_transfers t
@@ -149,6 +153,10 @@ const COMMISSION_API_SQL = `
     AND cash_precision_verified = true
     AND cash_micros >= 25000000
     AND reconciled_at IS NOT NULL
+    -- Authenticated Kalshi cash proof must be newly observed at commissioning,
+    -- not a years-old reconciliation that merely postdates a funding receipt.
+    AND reconciled_at BETWEEN now() - interval '15 minutes'
+                          AND now() + interval '10 seconds'
     AND (
       EXISTS (
         SELECT 1 FROM private.kalshi_owner_pilot_transfers t
@@ -244,6 +252,7 @@ const COMMISSION_API_SQL = `
 export async function reportOwnedActivation(
   db: Queryable,
   ownerUserId: string,
+  nowMs = Date.now(),
 ): Promise<{
   ok: true;
   accountId: string | null;
@@ -268,7 +277,7 @@ export async function reportOwnedActivation(
     return { ok: true, accountId: null, blockers: ["execution_account_missing"], readyForCommissioning: false, readyForLive: false, activationRequested: false };
   }
   const row = rows[0] ?? {};
-  const blockers = activationBlockers(row, live[0]);
+  const blockers = activationBlockers(row, live[0], nowMs);
   const liveOnly = new Set(["account_not_commissioned", "execution_not_enabled", "account_kill_switch", "global_kill_switch", "live_execution_not_enabled"]);
   return {
     ok: true,
@@ -606,7 +615,10 @@ export async function commissionOwnedAccount(
   return { ok: true, reason: "account_commissioned", blockers: [] };
 }
 
-function activationBlockers(row: Record<string, unknown>, gate: Record<string, unknown> | undefined): string[] {
+function activationBlockers(
+  row: Record<string, unknown>, gate: Record<string, unknown> | undefined,
+  nowMs: number,
+): string[] {
   const blockers: string[] = [];
   if (text(row.key_fingerprint) === null || text(row.credential_fingerprint) !== text(row.key_fingerprint)) {
     blockers.push("restricted_signer_unverified");
@@ -626,7 +638,15 @@ function activationBlockers(row: Record<string, unknown>, gate: Record<string, u
   if (!flag(row.cash_precision_verified) ||
       !Number.isSafeInteger(cashMicros) || cashMicros < 25_000_000 ||
       !Number.isFinite(reconciledAt) || !Number.isFinite(fundedAt) ||
-      reconciledAt < fundedAt) blockers.push("cash_not_reconciled");
+      reconciledAt < fundedAt ||
+      // Freshness is required before the first irreversible commissioning
+      // action. Existing commissioned accounts retain their independent
+      // per-order exchange reconciliation and pre-POST safety checks.
+      (!flag(row.commissioned) && (
+        !Number.isFinite(nowMs) ||
+        reconciledAt > nowMs + 10_000 ||
+        nowMs - reconciledAt > 15 * 60_000
+      ))) blockers.push("cash_not_reconciled");
   const exitMicros = Number(row.minimum_exit_micros);
   if (!Number.isSafeInteger(exitMicros) || exitMicros < 1 || exitMicros > 999_999) blockers.push("minimum_exit_missing");
   if (!/^[0-9a-f]{64}$/.test(text(row.fee_artifact_digest) ?? "")) blockers.push("fee_evidence_missing");
