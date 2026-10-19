@@ -39,6 +39,7 @@ export async function reserveOwnedEmergencyExitProof(
     inspect?:typeof inspectOwnedEmergencyExitRead;
     signerFingerprint?:typeof dedicatedSignerFingerprint;
     db?:DB;
+    now?:()=>number;
   }={},
 ):Promise<ExitReservationResult>{
   if(!UUID.test(ownerId)||!ACCOUNT.test(accountId)||
@@ -56,9 +57,23 @@ export async function reserveOwnedEmergencyExitProof(
      !/^\d{1,9}\.\d{2}$/.test(order.count)||
      (order.side!=="bid"&&order.side!=="ask"))
     return deny("emergency_exit_request_unverified");
+  const baseline=inspected.verifiedPositionFp;
+  const observed=inspected.verifiedPositionObservedAtMs;
+  const now=(deps.now??Date.now)();
+  if(typeof baseline!=="string"||!/(^-?[0-9]{1,9}\.[0-9]{2}$)/.test(baseline)||
+     !Number.isSafeInteger(observed)||observed!>now||now-observed!>3000||
+     !Number.isSafeInteger(now)||now<=0)
+    return deny("emergency_exit_verified_baseline_unavailable");
+  if((order.side==="ask"&&baseline.startsWith("-"))||
+     (order.side==="bid"&&!baseline.startsWith("-")))
+    return deny("emergency_exit_verified_baseline_wrong_side");
   const [whole,fraction]=order.count.split(".");
   const quantity=BigInt(whole!)*100n+BigInt(fraction!);
   if(quantity<=0n)return deny("emergency_exit_request_unverified");
+  const value=baseline.startsWith("-")?baseline.slice(1):baseline;
+  const [posWhole,posFraction]=value.split(".");
+  const position=BigInt(posWhole!)*100n+BigInt(posFraction!);
+  if(position<quantity)return deny("emergency_exit_verified_baseline_exceeds_inventory");
   const side=order.side==="ask"?"YES":"NO";
   const fingerprint=(deps.signerFingerprint??dedicatedSignerFingerprint)(material.keyId,material.privateKey);
   if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))
@@ -104,12 +119,12 @@ export async function reserveOwnedEmergencyExitProof(
       "INSERT INTO private.strata_emergency_exit_reservations (" +
       "reservation_id,owner_user_id,execution_account_id,market_ticker," +
       "client_order_id,reducing_side,quantity_hundredths,order_digest," +
-      "worker_fencing_token,worker_holder_id,trading_authorized,state) " +
+      "worker_fencing_token,worker_holder_id,initial_position_fp,position_observed_at_ms,trading_authorized,state) " +
       "VALUES ($1::uuid,$2::uuid,$3::text,$4::text,$5::text,$6::text," +
-      "$7::bigint,$8::text,$9::bigint,$10::text,false,'PREPARED') " +
+      "$7::bigint,$8::text,$9::bigint,$10::text,$11::text,$12::bigint,false,'PREPARED') " +
       "ON CONFLICT DO NOTHING RETURNING reservation_id",
       [randomUUID(),ownerId,accountId,order.ticker,order.client_order_id,
-       side,quantity.toString(),bodyHash,lease.fencingToken,lease.holderId],
+       side,quantity.toString(),bodyHash,lease.fencingToken,lease.holderId,baseline,observed],
     );
     if(inserted.rows.length!==1)return deny("emergency_exit_duplicate_or_unresolved_reservation");
     await client.query("COMMIT");committed=true;
