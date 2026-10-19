@@ -34,8 +34,8 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    assert.match(sql,/r\.state='UNKNOWN'/);
    assert.match(sql,/a\.minimum_exit_micros <= \$11::bigint/);
    assert.match(sql,/FOR SHARE OF r,a,g,w,pos,v/);
-   assert.match(sql,/r\\.order_digest=\\$12::text/);
-   assert.match(sql,/w\\.credential_fingerprint=\\$13::text/);
+   assert.match(sql,/r\.order_digest=\$12::text/);
+   assert.match(sql,/w\.credential_fingerprint=\$13::text/);
    return {rows:input.denyLock?[]:[{reservation_id:RES}]};
   }
   return {rows:[]};
