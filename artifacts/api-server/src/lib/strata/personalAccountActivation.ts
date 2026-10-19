@@ -25,6 +25,7 @@ import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -389,6 +390,8 @@ export async function approveOwnedPolicyForUser(
     return {ok:false,reason:"fee_source_mode_not_supported"};
   let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
   if(apiRequested){
+    const monetary=await verifyMonetaryFeeContract("STEP_9");
+    if(!monetary.ok)return {ok:false,reason:monetary.reason};
     const verified=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_9");
     if(!verified.ok)return {ok:false,reason:verified.reason};
     // Canonical reviewed source identity comes ONLY from signed service DB.
@@ -586,6 +589,8 @@ export async function commissionOwnedAccount(
        text(row?.fee_formula_version)!==API_SOURCE_FORMULA_VERSION)
       return {ok:false,reason:"api_fee_source_identity_invalid",
         blockers:["api_fee_source_identity_invalid"]};
+    const monetary=await verifyMonetaryFeeContract("STEP_11");
+    if(!monetary.ok)return {ok:false,reason:monetary.reason,blockers:[monetary.reason]};
     const checked=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
     if(!checked.ok||checked.identity.digest!==digest)
       return {ok:false,reason:checked.ok?"api_fee_digest_mismatch":checked.reason,
