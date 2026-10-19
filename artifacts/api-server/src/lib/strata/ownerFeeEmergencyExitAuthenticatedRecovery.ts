@@ -48,7 +48,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
  if(!UUID.test(input.ownerId)||!UUID.test(input.reservationId)||
     (receipt!==null&&(receipt.httpStatus!==201||
      receipt.client_order_id!==input.order.client_order_id||
-     typeof observedReceipt.order_id!=="string"||!receipt.order_id))||
+     typeof receipt.order_id!=="string"||!receipt.order_id))||
     input.order.ticker===undefined)
   return fail("exit_recovery_receipt_or_owner_invalid");
  const now=(deps.now??Date.now)();
@@ -115,13 +115,13 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const seen=new Set<string>();
  for(const raw of feed.fills){
   const fill=object(raw);
-  if(fill.order_id===receipt.order_id&&fill.ticker!==input.order.ticker)
+  if(fill.order_id===observedReceipt.order_id&&fill.ticker!==input.order.ticker)
    return fail("exit_recovery_matched_fill_market_mismatch");
   if(fill.ticker!==input.order.ticker)continue;
   const id=text(fill.trade_id??fill.fill_id);
   if(seen.has(id))return fail("exit_recovery_duplicate_fill_id");
   seen.add(id);
-  if(fill.order_id===receipt.order_id){
+  if(fill.order_id===observedReceipt.order_id){
    const units=count(fill.count_fp??fill.count);
    if(units===0n)return fail("exit_recovery_zero_quantity_fill");
    total+=units;
