@@ -97,4 +97,44 @@ BEGIN
  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
  END;
 END $$;
+
+-- The runtime's canonical count must include durable protective exits,
+-- not just normal v13 orders, to prevent another entry after an UNKNOWN IOC.
+DO $
+DECLARE n bigint;
+BEGIN
+ SELECT (
+   (SELECT count(*) FROM public.v13_production_intent
+    WHERE account_id='isolated-1' AND state IN ('DISPATCHED','UNKNOWN'))
+   +
+   (SELECT count(*) FROM private.strata_emergency_exit_reservations
+    WHERE execution_account_id='isolated-1'
+      AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+ ) INTO n;
+ IF n<>1 THEN RAISE EXCEPTION 'UNKNOWN protective exit did not block new entries'; END IF;
+
+ UPDATE private.strata_emergency_exit_reservations
+ SET state='RECONCILED',updated_at=now()
+ WHERE reservation_id='33333333-3333-4333-8333-333333333333';
+ SELECT (
+   (SELECT count(*) FROM public.v13_production_intent
+    WHERE account_id='isolated-1' AND state IN ('DISPATCHED','UNKNOWN'))
+   +
+   (SELECT count(*) FROM private.strata_emergency_exit_reservations
+    WHERE execution_account_id='isolated-1'
+      AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+ ) INTO n;
+ IF n<>0 THEN RAISE EXCEPTION 'terminal protective exit must not remain unresolved'; END IF;
+
+ INSERT INTO public.v13_production_intent(account_id,state) VALUES('isolated-1','UNKNOWN');
+ SELECT (
+   (SELECT count(*) FROM public.v13_production_intent
+    WHERE account_id='isolated-1' AND state IN ('DISPATCHED','UNKNOWN'))
+   +
+   (SELECT count(*) FROM private.strata_emergency_exit_reservations
+    WHERE execution_account_id='isolated-1'
+      AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+ ) INTO n;
+ IF n<>1 THEN RAISE EXCEPTION 'normal UNKNOWN intent gate regressed'; END IF;
+END $;
 SELECT 'CANDIDATE_PROTECTIVE_EXIT_SQL_ISOLATED_PASS' AS result;
