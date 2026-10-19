@@ -133,7 +133,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
     return fail("exit_recovery_concurrent_fill_unattributable");
   }
  }
- if(total!==count(receipt.fill_count)||total+count(observedReceipt.remaining_count)!==requested)
+ if(total!==count(observedReceipt.fill_count)||total+count(observedReceipt.remaining_count)!==requested)
   return fail("exit_recovery_fill_receipt_disagreement");
  const expected=initialUnits>0n?initialUnits-total:initialUnits+total;
  if(expected!==observed)return fail("exit_recovery_position_not_attributable");
