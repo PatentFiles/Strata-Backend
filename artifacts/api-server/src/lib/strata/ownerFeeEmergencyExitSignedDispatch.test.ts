@@ -18,7 +18,7 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  reservationId:RES,material:{keyId:"ephemeral-regression-only",privateKey:signingKey},
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
- marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean}={}){
+ marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;failPersist?:boolean}={}){
  const calls:{fee:number;mark:number;post:number;read:number;sql:string[]}={
    fee:0,mark:0,post:0,read:0,sql:[],
  };
@@ -55,6 +55,7 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    post:input.rawSigned?undefined:async()=>{calls.post++;if(input.reject)throw Error("timed out");
      return input.receipt===false?null:receipt;
    },
+   persistReconciled:async()=>({committed:input.failPersist!==true,mayRetry:false,tradingAuthorized:false,reason:"test"}),
    readAuthenticatedOutcome:async(_input,observed)=>{
     calls.read++;
     const filled=input.fill??"1.00";
@@ -168,4 +169,16 @@ test("signed V2 POST uses exact canonical path, RSA-PSS and strict reduce-only I
    assert.equal(result.state,"RECONCILED");
    assert.equal(captured,1);
  }finally{globalThis.fetch=oldFetch;}
+});
+
+test("a valid exchange fill without durable audited terminal commit remains UNKNOWN",async()=>{
+ const h=harness({failPersist:true});
+ const result=await h.run();
+ assert.equal(result.state,"UNKNOWN");
+ assert.equal(result.mayRetry,false);
+ assert.equal(result.tradingAuthorized,false);
+ assert.equal(result.postAttempted,true);
+ assert.equal(h.calls.post,1);
+ await h.run();
+ assert.equal(h.calls.post,1);
 });
