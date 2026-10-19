@@ -21,7 +21,7 @@ const assertNoAuthority=(v:{policyApproved:boolean;commissioningApproved:boolean
  assert.equal(v.commissioningApproved,false);
  assert.equal(v.tradingAuthorized,false);
 };
-function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;activeGrant?:boolean}={}){
+function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;activeGrant?:boolean;activeReview?:boolean}={}){
  const calls:string[]=[];
  let commits=0;
  const client={
@@ -30,6 +30,8 @@ function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;active
    if(sql==="COMMIT")commits++;
    if(sql.includes("FROM auth.users u JOIN private.role_assignments"))return {rows:options.admin===false?[]:[{one:1}]};
    if(sql.includes("FROM public.v13_production_account"))return {rows:[{id:"acc"}]};
+   if(sql.includes("FROM private.strata_api_fee_rate_reviews") && sql.includes("SELECT review_id"))
+    return {rows:options.activeReview?[{review_id:"already-active"}]:[]};
    if(sql.includes("SELECT grant_id FROM private.strata_api_fee_source_grants") && sql.includes("LIMIT 1"))
     return {rows:options.activeGrant?[{grant_id:grant}]:[]};
    if(sql.includes("SELECT r.reviewer_user_id,r.expires_at")){
@@ -89,6 +91,21 @@ test("rate review requires distinct confirmed ADMIN and exact signed decision di
  const allowed=fixture();
  const r=await recordApiFeeRateReview(admin,review,allowed.db);
  assert.equal(r.ok,true);assert.equal(allowed.commits,1);assertNoAuthority(r);
+});
+test("fee review refuses concurrent active duplicate and permits reattestation after expiry",async()=>{
+ const active=fixture({activeReview:true});
+ const denied=await recordApiFeeRateReview(admin,review,active.db);
+ assert.equal(denied.ok,false);
+ assert.equal(denied.reason,"active_fee_rate_review_already_exists");
+ assert.equal(active.commits,0);
+ assert.ok(active.calls.some(x=>x.includes("FOR UPDATE")));
+ const expired=fixture({activeReview:false});
+ const renewed=await recordApiFeeRateReview(admin,review,expired.db);
+ assert.equal(renewed.ok,true);
+ assert.equal(expired.commits,1);
+ assert.ok(expired.calls.some(x=>x.includes("SELECT review_id")));
+ assert.ok(expired.calls.some(x=>x.includes("ON CONFLICT DO NOTHING")));
+ assertNoAuthority(renewed);
 });
 test("grant requires same technical attesting admin, fresh canonical Kalshi fee observation and distinct owner",async()=>{
  for(const reviewers of [0,2,3]){

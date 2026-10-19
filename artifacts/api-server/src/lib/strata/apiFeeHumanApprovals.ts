@@ -86,6 +86,21 @@ export async function recordApiFeeRateReview(
  return transaction(db,async c=>{
   if(!await confirmedAdmin(c,adminId))return denied("administrator_required");
   if(!await singleOwnedPair(c,b.ownerUserId as string))return denied("owned_index2_account_missing_or_ambiguous");
+  // Serialize authentic review renewals per owner. The permanent triple
+  // uniqueness constraint was removed by migration 0031; without this lock,
+  // concurrent requests could create ambiguous simultaneously active reviews.
+  const locked=await c.query(`
+    SELECT id FROM public.v13_production_account
+    WHERE owner_user_id=$1::uuid AND subaccount=1 AND exchange_index=2
+    FOR UPDATE`,[b.ownerUserId]);
+  if(locked.rows.length!==1)return denied("owned_fee_review_lock_unavailable");
+  const active=await c.query(`
+    SELECT review_id FROM private.strata_api_fee_rate_reviews
+    WHERE owner_user_id=$1::uuid AND reviewer_user_id=$2::uuid
+      AND rate_decision_digest=$3 AND revoked_at IS NULL
+      AND expires_at>now()
+    LIMIT 1`,[b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
+  if(active.rows.length!==0)return denied("active_fee_rate_review_already_exists");
   const id=randomUUID();
   const rows=await c.query(`
   INSERT INTO private.strata_api_fee_rate_reviews
@@ -94,8 +109,7 @@ export async function recordApiFeeRateReview(
     signed_at,expires_at)
   VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,'KXBTC15M:INDEX2',
     $6,$7,$8,now(),now()+interval '2 hours')
-  ON CONFLICT(owner_user_id,reviewer_user_id,rate_decision_digest)
-  DO NOTHING RETURNING review_id,expires_at`,[
+  ON CONFLICT DO NOTHING RETURNING review_id,expires_at`,[
    id,b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,(b.note as string).trim(),b.verifiedRateSource
   ]);
