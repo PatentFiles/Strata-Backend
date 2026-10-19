@@ -60,11 +60,18 @@ function harness(opts:{
   filled?:string;remaining?:string;
   status?:number;networkFailure?:boolean;badHistory?:boolean;
   throwHistory?:boolean;denyMark?:boolean;throwMark?:boolean;denyFinalize?:boolean;
+  denyOwnerAuth?:boolean;throwOwnerAuth?:boolean;
 }={}){
   let marks=0,posts=0,reads=0;
   const fill=opts.filled??"2.00",remaining=opts.remaining??"0.00";
   const deps={
     nowMs:()=>now,
+    verifyAuthenticatedOwnerTestApproval:async(ownerId:string,approvalId:string)=>{
+      assert.equal(ownerId,approval.authenticatedOwnerId);
+      assert.equal(approvalId,approval.ownerApprovalId);
+      if(opts.throwOwnerAuth)throw Error("auth unavailable");
+      return !opts.denyOwnerAuth;
+    },
     commitUnknownBeforePost:async()=>{
       marks++;
       if(opts.throwMark)throw Error("commit outcome unknown");
@@ -171,6 +178,17 @@ test("Invalid authorization, wrong market/side/subaccount, stale fees or positio
    });
    assert.equal(r.state,"BLOCKED");
    assert.deepEqual(h.stats(),{marks:0,posts:0,reads:0});
+ }
+});
+test("No authenticated owner test approval causes zero markers and zero signed POSTs",async()=>{
+ for(const x of [{denyOwnerAuth:true},{throwOwnerAuth:true}]){
+  const h=harness(x);
+  const v=await executeOneSignedDemoProtectiveIoc({
+    keyId,privateKeyPem:pem,order,approval,deps:h.deps,
+  });
+  assert.equal(v.state,"BLOCKED");
+  assert.equal(v.reason,"demo_owner_approval_not_authenticated");
+  assert.deepEqual(h.stats(),{marks:0,posts:0,reads:0});
  }
 });
 test("Failed or ambiguous durable commit never sends to demo exchange",async()=>{
