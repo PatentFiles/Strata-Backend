@@ -269,3 +269,8 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/personalOwnerMonetaryApproval.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryApproval.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
           node --test dist/personalOwnerMonetaryApproval.test.cjs
+      - name: Test Step 11 owner monetary commissioning consent
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalOwnerMonetaryCommission.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryCommission.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
+          node --test dist/personalOwnerMonetaryCommission.test.cjs
