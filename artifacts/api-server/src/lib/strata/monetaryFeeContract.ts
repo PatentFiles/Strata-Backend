@@ -41,7 +41,7 @@ export async function verifyMonetaryFeeContract(
   // No current official monetary-rate provenance has been authenticated for
   // the owner. A favorable metadata read is NOT sufficient for Step 9/11/order.
   return {
-    ok:true,reason:"market_fee_metadata_verified_monetary_authorization_pending",
+    ok:false,reason:"market_fee_metadata_verified_monetary_authorization_pending",
     stage,marketTicker:candidate.marketTicker,eventTicker:candidate.eventTicker,
     sourceDigest:candidate.reviewCandidateDigest,verifiedAt:candidate.verifiedAt,
     monetaryFeeAuthorized:false,policyApproved:false,tradingAuthorized:false,
