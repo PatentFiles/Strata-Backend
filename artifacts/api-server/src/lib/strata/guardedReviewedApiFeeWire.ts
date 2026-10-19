@@ -67,14 +67,25 @@ export function createGuardedReviewedApiFeeFetch(
   if(method!=="POST"){
     if(!["GET","HEAD","DELETE"].includes(method))
       throw new Error("api_fee_unsupported_exchange_method");
+    // Even read-only Kalshi calls can carry a live API signature. Never pass
+    // those headers to user-provided, redirecting, or non-Kalshi URLs.
+    // URL parsing normalizes ports, credentials and encoded path components.
+    let parsed:URL;
+    try{
+      parsed=new URL(typeof request==="string"?request:request.toString());
+    }catch{throw new Error("api_fee_unexpected_read_endpoint");}
+    if(parsed.origin!=="https://external-api.kalshi.com" ||
+       parsed.username!=="" || parsed.password!=="" ||
+       !/^\/trade-api\/v2\/(?:portfolio|historical|markets|events|series|exchange)(?:\/|$)/.test(parsed.pathname) ||
+       /%2f|%5c|%2e|\\\\|\/\//i.test(parsed.pathname))
+      throw new Error("api_fee_unexpected_read_endpoint");
     if(method==="DELETE"){
       // Permit safety cancellations only at documented order-ID endpoints.
-      const target=typeof request==="string"?request:request.toString();
-      const parsed=new URL(target);
-      if(parsed.protocol!=="https:" || parsed.host!=="external-api.kalshi.com" ||
-        !/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
+      if(!/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(parsed.pathname))
         throw new Error("api_fee_unexpected_cancel_endpoint");
     }
+    // The underlying Kalshi transport must still reject redirects. Do not
+    // override a caller-supplied manual redirect or add broader permissions.
     return transport(request,init);
   }
   if(init?.method!=="POST" || typeof request!=="string" ||
