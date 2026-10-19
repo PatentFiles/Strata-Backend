@@ -22,7 +22,7 @@ export type IocRecoveryObservation = {
   orderAndFillHistoryMatched: boolean;
   /** No simultaneous orders, fills or transfer activity in this market. */
   isolatedPositionDelta: boolean;
-  /** Null when no conclusive exchange response; never treat as no fill. */
+  /** Independently authenticated GET order when the original POST receipt was lost.\n   * This is NOT an HTTP 201 response or permission to retry an IOC. */\n  authenticatedOrder?: {\n    order_id: unknown;client_order_id: unknown;status: unknown;\n    initial_count_fp: unknown;fill_count_fp: unknown;remaining_count_fp: unknown;\n  };\n  /** Null when no conclusive exchange response; never treat as no fill. */
   response: null | {
     httpStatus: number;
     order_id: unknown;
@@ -79,16 +79,34 @@ export function reconcileIocEmergencyExit(x:IocRecoveryObservation):IocRecoveryR
   if(!x.completeExchangeHistory||!x.exactMarketAndAccountMatched||
      !x.orderAndFillHistoryMatched||!x.isolatedPositionDelta)
     return deny("UNKNOWN","emergency_reconcile_exchange_history_unproven");
-  if(!x.response)
-    return deny("UNKNOWN","emergency_reconcile_response_uncertain");
-  const r=x.response;
-  if(r.httpStatus!==201||r.client_order_id!==x.clientOrderId||
-     typeof r.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(r.order_id)||
-     typeof r.ts_ms!=="number"||!Number.isSafeInteger(r.ts_ms)||r.ts_ms<=0)
-    return deny("UNKNOWN","emergency_reconcile_exchange_receipt_invalid");
-  const filled=decimal(r.fill_count),remaining=decimal(r.remaining_count);
+  // Two distinct provenance paths: the original witnessed 201 response or a
+  // separately authenticated, complete terminal GET order after a restart.
+  // Never synthesize a successful HTTP response when the POST was ambiguous.
+  let filled:bigint|null=null,remaining:bigint|null=null;
+  if(x.response){
+    const r=x.response;
+    if(r.httpStatus!==201||r.client_order_id!==x.clientOrderId||
+       typeof r.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(r.order_id)||
+       typeof r.ts_ms!=="number"||!Number.isSafeInteger(r.ts_ms)||r.ts_ms<=0)
+      return deny("UNKNOWN","emergency_reconcile_exchange_receipt_invalid");
+    filled=decimal(r.fill_count);remaining=decimal(r.remaining_count);
+  }else if(x.authenticatedOrder){
+    const a=x.authenticatedOrder;
+    if(a.client_order_id!==x.clientOrderId||
+       typeof a.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(a.order_id)||
+       !["executed","canceled","cancelled"].includes(String(a.status))||
+       decimal(a.initial_count_fp)!==qty)
+      return deny("UNKNOWN","emergency_reconcile_authenticated_order_invalid");
+    filled=decimal(a.fill_count_fp);remaining=decimal(a.remaining_count_fp);
+  }else return deny("UNKNOWN","emergency_reconcile_response_uncertain");
   if(filled===null||remaining===null||filled+remaining!==qty)
     return deny("UNKNOWN","emergency_reconcile_fill_count_invalid");
+  if(x.response&&x.authenticatedOrder&&(
+    x.authenticatedOrder.order_id!==x.response.order_id||
+    x.authenticatedOrder.client_order_id!==x.clientOrderId||
+    decimal(x.authenticatedOrder.fill_count_fp)!==filled||
+    decimal(x.authenticatedOrder.remaining_count_fp)!==remaining))
+    return deny("UNKNOWN","emergency_reconcile_receipt_history_conflict");
   const expected=start>0n?start-filled:start+filled;
   if(expected!==finish||
      (start>0n&&(finish<0n||finish>start))||
