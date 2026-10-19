@@ -40,8 +40,8 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
      book_side:selected.order.side,subaccount_number:1,exchange_index:2,
      yes_price_dollars:options.badPrice?"0.9000":"0.5500",fill_count_fp:filled,
-     remaining_count_fp:options.badProviderTotals?"0.00":signedReceipt.remaining_count,
-     initial_count_fp:"2.00",status:options.badOrderStatus?"pending":"executed"},
+     remaining_count_fp:options.badProviderTotals?"0.50":"0.00",
+     initial_count_fp:"2.00",status:options.badOrderStatus?"pending":filled==="2.00"?"executed":"canceled"},
      ...(options.duplicateOrder?[{client_order_id:ID,order_id:"order-dup",ticker:MARKET}]:[]),
      ...(options.concurrentOrder?[{client_order_id:"foreign",order_id:"order-concurrent",
       ticker:MARKET,created_time:new Date(NOW).toISOString(),status:"executed"}]:[])],
@@ -92,4 +92,17 @@ test("restart fails closed on missing provider history, concurrent fills, or con
   {restart:true,badProviderTotals:true},{restart:true,duplicateOrder:true},
   {restart:true,concurrentOrder:true},{restart:true,badDigest:true}])
   await assert.rejects(()=>harness(options).run());
+});
+
+test("canceled IOC has zero resting quantity even after partial or zero fill",async()=>{
+ for(const fill of ["0.00","1.00"]){
+  const result=await harness({restart:true,fill}).run();
+  assert.equal(result.response,null);
+  assert.equal(result.authenticatedOrder?.status,"canceled");
+  assert.equal(result.authenticatedOrder?.remaining_count_fp,"0.00");
+  assert.equal(result.authenticatedOrder?.fill_count_fp,fill);
+ }
+});
+test("nonzero resting quantity cannot establish terminal IOC recovery",async()=>{
+ await assert.rejects(()=>harness({restart:true,badProviderTotals:true}).run());
 });
