@@ -167,7 +167,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
   return fail("protective_exit_identity_invalid");
  if(!ports.readAuthenticatedOutcome)
   return fail("protective_exit_authenticated_recovery_adapter_not_installed");
- const fee=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",order.ticker);
+ const fee=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",String(order.ticker));
  if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_unverified");
  let marker:Awaited<ReturnType<typeof markOwnedEmergencyExitUnknownForReview>>;
@@ -178,7 +178,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     marker.mayRetry!==false||marker.transportAuthorized!==false)
   return fail("protective_exit_unknown_marker_unverified");
  // Before final fence refresh provider fees again; never transmit with stale terms.
- const current=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",order.ticker);
+ const current=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",String(order.ticker));
  if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_changed","UNKNOWN");
  const outcome=await withFinalReleaseFence(input,releaseSha,
