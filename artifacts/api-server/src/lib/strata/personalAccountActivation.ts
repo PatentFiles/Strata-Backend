@@ -24,6 +24,7 @@ import { verifyOwnerFeeSourceStage, parseOwnerFeeSource } from "./ownerFeeSource
 import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -351,6 +352,11 @@ export async function readOwnedApprovedFeeEvidence(
   if (!proof.ok || !/^[0-9a-f]{64}$/.test(proof.digest)) {
     return { ok: false, reason: proof.ok ? "fee_artifact_unverified" : proof.reason };
   }
+  if(establish===establishOfficialFeeDigest){
+    const monetary=await verifyMonetaryFeeContract("STEP_11");
+    if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==proof.digest)
+      return {ok:false,reason:monetary.reason==="provider_monetary_fee_schedule_and_market_verified"?"fee_artifact_unverified":monetary.reason};
+  }
   const version = Number(row.version);
   if (!Number.isSafeInteger(version) || version < 1) return { ok: false, reason: "policy_limits_missing" };
   return { ok: true, reason: "owned_policy_fee_verified", feeArtifactDigest: proof.digest,
@@ -372,7 +378,8 @@ export async function approveOwnedPolicyForUser(
   const request = input.body as Record<string,unknown>;
   const altRequested=request.feeSourceKind==="operator_attested_not_provider";
   const apiRequested=request.feeSourceKind==="kalshi_trade_api_fee_policy_v1";
-  if(request.feeSourceKind!==undefined&&!altRequested&&!apiRequested)
+  const ownerVerifiedRequested=request.feeSourceKind==="kalshi_owner_verified_monetary_v1";
+  if(request.feeSourceKind!==undefined&&!altRequested&&!apiRequested&&!ownerVerifiedRequested)
     return {ok:false,reason:"fee_source_mode_not_supported"};
   let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
   if(apiRequested){
@@ -397,6 +404,16 @@ export async function approveOwnedPolicyForUser(
     };
     parsed.digest=verified.identity.digest;
     feeDigest={ok:true,digest:verified.identity.digest};
+  }else if(ownerVerifiedRequested){
+    // Existing authenticated owner's explicit policy consent is enforced by
+    // policyBody. This branch verifies BOTH official monetary PDF evidence and
+    // live exact-market API evidence; no synthetic technical review is minted.
+    const current=await verifyMonetaryFeeContract("STEP_9");
+    if(!current.ok || !current.monetaryFeeAuthorized || !current.sourceDigest)
+      return {ok:false,reason:current.reason};
+    if(parsed.digest && parsed.digest!==current.sourceDigest)
+      return {ok:false,reason:"fee_artifact_unverified"};
+    feeDigest={ok:true,digest:current.sourceDigest};
   }else{
     feeDigest=await resolveOwnedFeeDigest(parsed.digest,parsed.fee,input.verifyFee);
   }
@@ -597,6 +614,14 @@ export async function commissionOwnedAccount(
     if (established.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
+  }
+  // Check the same authoritative schedule and currently effective market
+  // before commissioning. Test-injected artifact validators stay isolated.
+  if(!operatorIdentity && !apiIdentity && !input.verifyFee){
+    const monetary=await verifyMonetaryFeeContract("STEP_11");
+    if(!monetary.ok||!monetary.monetaryFeeAuthorized||monetary.sourceDigest!==digest)
+      return {ok:false,reason:monetary.ok?"fee_artifact_unverified":monetary.reason,
+        blockers:[monetary.ok?"fee_artifact_unverified":monetary.reason]};
   }
   const commissioningDigest = createHash("sha256").update(JSON.stringify({
     accountId: report.accountId,
