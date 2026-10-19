@@ -161,7 +161,11 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  }
 }
 export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports={}):Promise<Result>{
- const testMode=process.env.NODE_ENV==="test";
+ // Test seams must NEVER be reachable from a Railway process, even if
+ // NODE_ENV is accidentally or maliciously set to "test" in deployment.
+ const hosted=Boolean(process.env.RAILWAY_ENVIRONMENT_ID||
+   process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID);
+ const testMode=process.env.NODE_ENV==="test"&&!hosted;
  if(!testMode&&(process.env.NODE_ENV!=="production"||
     process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
   return fail("protective_exit_release_disabled");
