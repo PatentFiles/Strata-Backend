@@ -64,7 +64,12 @@ export function auditExitOutcomeMatrix(cases:readonly ExitEvidenceScenario[]):Ex
   if(recon?.state!=="RECONCILED"||recon?.mayRetry!==false){
     problems.push(c.kind+":not_exchange_reconciled");continue;
   }
-  const filled=parseFixed(recon.filledHundredths),remaining=parseFixed(recon.remainingHundredths);
+  // reconcileIocEmergencyExit emits integer hundredths, NOT "1.00" strings.
+  // Keep the exchange wire quantity format distinct from recovery output units.
+  const recovered=(x:unknown):bigint|null=>
+    typeof x==="string"&&/^\\d+$/.test(x)?BigInt(x):null;
+  const filled=recovered(recon.filledHundredths);
+  const remaining=recovered(recon.remainingHundredths);
   const requested=parseFixed(obs.requestedCountFp);
   if(filled===null||remaining===null||requested===null||requested<=0n||
     filled+remaining!==requested){
