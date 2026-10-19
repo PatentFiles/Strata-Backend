@@ -112,3 +112,7 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitAuthenticatedRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitAuthenticatedRecovery.test.cjs
       - name: Validate immutable baseline, full scoped fills and fail-closed recovery
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitAuthenticatedRecovery.test.cjs
+      - name: Bundle transactionally audited protective exit reconciliation tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitReconciliationCommit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitReconciliationCommit.test.cjs
+      - name: Test committed terminal state, duplicate prevention and ambiguity handling
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitReconciliationCommit.test.cjs
