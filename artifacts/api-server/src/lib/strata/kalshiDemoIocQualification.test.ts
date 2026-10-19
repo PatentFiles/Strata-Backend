@@ -85,7 +85,6 @@ test("One fully fenced DEMO pipeline follows PREPARE->UNKNOWN->POST->GET->FINAL"
  const x=await runPreparedDemoIocQualification({
    identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
    nowMs:()=>now,
-  verifyAuthenticatedOwnerTestApproval:async()=>true,
    verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
      ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
    ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
@@ -103,7 +102,6 @@ test("DEMO qualification denies missing server-backed owner approval before PREP
   identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
   verifyAuthenticatedOwnerTestApproval:async()=>false,
   nowMs:()=>now,
-  verifyAuthenticatedOwnerTestApproval:async()=>true,
   ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
   fetchImpl:h.fetchImpl,readVerifiedExchangeHistory:h.readVerifiedExchangeHistory,
  });
@@ -116,7 +114,6 @@ test("Owner mismatch or duplicate durable reservation denies ANY signed POST",as
   identity:{...identity,ownerId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"},
   order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
   nowMs:()=>now,
-  verifyAuthenticatedOwnerTestApproval:async()=>true,
   verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
     ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
   ledger:x.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
@@ -128,7 +125,6 @@ test("Owner mismatch or duplicate durable reservation denies ANY signed POST",as
  const duplicate=await runPreparedDemoIocQualification({
   identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
   nowMs:()=>now,
-  verifyAuthenticatedOwnerTestApproval:async()=>true,
   verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
     ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
   ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
