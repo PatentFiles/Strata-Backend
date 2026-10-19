@@ -1,5 +1,5 @@
 import test from "node:test";
-import {generateKeyPairSync} from "node:crypto";
+import {generateKeyPairSync,createPublicKey,verify,constants} from "node:crypto";
 import assert from "node:assert/strict";
 import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
 import type {IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
@@ -18,7 +18,7 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  reservationId:RES,material:{keyId:"ephemeral-regression-only",privateKey:signingKey},
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
- marker?:boolean;reject?:boolean;badHistory?:boolean}={}){
+ marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean}={}){
  const calls:{fee:number;mark:number;post:number;read:number;sql:string[]}={
    fee:0,mark:0,post:0,read:0,sql:[],
  };
@@ -52,7 +52,7 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
      return {unknownRecorded:true,clientOrderId:CID,
        mayRetry:false,transportAuthorized:false};
    }) as never,
-   post:async()=>{calls.post++;if(input.reject)throw Error("timed out");
+   post:input.rawSigned?undefined:async()=>{calls.post++;if(input.reject)throw Error("timed out");
      return input.receipt===false?null:receipt;
    },
    readAuthenticatedOutcome:async(_input,observed)=>{
@@ -136,4 +136,36 @@ test("owner, scope and order identity are checked before all external side effec
    assert.equal(result.state,"BLOCKED");
    assert.equal(called,0);
  }
+});
+
+test("signed V2 POST uses exact canonical path, RSA-PSS and strict reduce-only IOC body",async()=>{
+ const oldFetch=globalThis.fetch;
+ let captured=0;
+ globalThis.fetch=(async(url:unknown,init?:RequestInit)=>{
+   captured++;
+   assert.equal(url,"https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders");
+   assert.equal(init?.method,"POST");assert.equal(init?.redirect,"error");
+   const headers=init!.headers as Record<string,string>;
+   const ts=headers["KALSHI-ACCESS-TIMESTAMP"];
+   const sig=headers["KALSHI-ACCESS-SIGNATURE"];
+   assert.ok(verify("sha256",Buffer.from(ts+"POST"+"/trade-api/v2/portfolio/events/orders"),
+      {key:createPublicKey(signingKey),padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},
+      Buffer.from(sig,"base64")));
+   const body=JSON.parse(String(init!.body)) as Record<string,unknown>;
+   assert.deepEqual(Object.keys(body).sort(),[
+    "ticker","client_order_id","side","count","price","time_in_force",
+    "self_trade_prevention_type","post_only","cancel_order_on_pause",
+    "reduce_only","subaccount","exchange_index"].sort());
+   assert.equal(body.reduce_only,true);
+   assert.equal(body.time_in_force,"immediate_or_cancel");
+   assert.equal(body.cancel_order_on_pause,true);
+   assert.equal(body.subaccount,1);assert.equal(body.exchange_index,2);
+   return new Response(JSON.stringify({order_id:"order-1",client_order_id:CID,
+    fill_count:"1.00",remaining_count:"1.00",ts_ms:1792200000000}),{status:201});
+ }) as typeof fetch;
+ try{
+   const h=harness({rawSigned:true}),result=await h.run();
+   assert.equal(result.state,"RECONCILED");
+   assert.equal(captured,1);
+ }finally{globalThis.fetch=oldFetch;}
 });
