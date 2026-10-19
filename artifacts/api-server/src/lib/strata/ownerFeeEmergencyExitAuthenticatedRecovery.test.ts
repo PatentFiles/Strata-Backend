@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {generateKeyPairSync} from "node:crypto";
+import {generateKeyPairSync,createHash} from "node:crypto";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
 import type {readOwnedKalshiFeeds} from "./personalExchangeRead";
 const NOW=Date.parse("2026-10-19T20:00:00Z");
@@ -18,7 +18,8 @@ const receipt={httpStatus:201,client_order_id:ID,order_id:"order-1",
  fill_count:"1.00",remaining_count:"1.00",ts_ms:NOW};
 function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;restart?:boolean;
- failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean}={}){
+ failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean;
+ badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;}={}){
  const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
  const initial=options.side==="bid"?"-3.00":"3.00";
  const ending=options.side==="bid"?"-"+position:position;
@@ -29,7 +30,9 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    assert.match(sql,/r.state='UNKNOWN'/);
    assert.equal(args?.[0],RES);assert.equal(args?.[1],OWNER);
    return {rows:options.noBaseline?[]:[{initial_position_fp:initial,
-     position_observed_at_ms:NOW-(options.restart?120_000:200)}]};
+     position_observed_at_ms:NOW-(options.restart?120_000:200),
+     order_digest:options.badDigest?"f".repeat(64):
+      createHash("sha256").update(JSON.stringify(selected.order)).digest("hex")}]};
  }};
  const readFeeds=(async()=>{
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
@@ -37,7 +40,11 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
    orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
      book_side:selected.order.side,subaccount_number:1,exchange_index:2,
      yes_price_dollars:options.badPrice?"0.9000":"0.5500",fill_count_fp:filled,
-     initial_count_fp:"2.00",status:options.badOrderStatus?"pending":"executed"}],
+     remaining_count_fp:options.badProviderTotals?"0.00":signedReceipt.remaining_count,
+     initial_count_fp:"2.00",status:options.badOrderStatus?"pending":"executed"},
+     ...(options.duplicateOrder?[{client_order_id:ID,order_id:"order-dup",ticker:MARKET}]:[]),
+     ...(options.concurrentOrder?[{client_order_id:"foreign",order_id:"order-concurrent",
+      ticker:MARKET,created_time:new Date(NOW).toISOString(),status:"executed"}]:[])],
    fills:[...(Number(filled)>0?[{trade_id:"t-1",order_id:options.badOrder?"other":"order-1",
       ticker:options.badFillMarket?"OTHER":MARKET,count_fp:filled,created_time:new Date(NOW).toISOString()}]:[]),
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
@@ -75,10 +82,14 @@ test("absent baseline, incomplete history, bad status, unrelated fills, or posit
 test("restart after 120 seconds recovers UNKNOWN from authenticated order and fills with no POST",async()=>{
  const result=await harness({restart:true,fill:"1.00"}).run();
  assert.equal(result.observedPositionFp,"2.00");
- assert.equal(result.response?.order_id,"order-1");
+ assert.equal(result.response,null);
+ assert.equal(result.authenticatedOrder?.order_id,"order-1");
+ assert.equal(result.authenticatedOrder?.fill_count_fp,"1.00");
 });
 test("restart fails closed on missing provider history, concurrent fills, or conflicting balance",async()=>{
  for(const options of [{restart:true,failPages:true},{restart:true,foreignFill:true},
-  {restart:true,differentPosition:true},{restart:true,badOrderStatus:true}])
+  {restart:true,differentPosition:true},{restart:true,badOrderStatus:true},
+  {restart:true,badProviderTotals:true},{restart:true,duplicateOrder:true},
+  {restart:true,concurrentOrder:true},{restart:true,badDigest:true}])
   await assert.rejects(()=>harness(options).run());
 });
