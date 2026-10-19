@@ -101,8 +101,14 @@ export async function readAuthenticatedProtectiveExitOutcome(
  }
  // Restart derives GET order evidence, not a fabricated 201 receipt.
  const orderId=text(order.order_id);
- if(receipt===null&&count(order.fill_count_fp)+count(order.remaining_count_fp)!==requested)
-  return fail("exit_recovery_provider_count_mismatch");
+ const exchangeFilled=count(order.fill_count_fp);
+ const exchangeResting=count(order.remaining_count_fp);
+ // Canceled IOC unfilled size is NOT the remaining open size in a
+ // subsequent GET order. Require a terminal non-resting order and prove
+ // the original amount through immutable request + authenticated fills.
+ if(exchangeFilled>requested||exchangeResting!==0n||
+    (order.status==="executed"&&exchangeFilled!==requested))
+  return fail("exit_recovery_terminal_quantity_mismatch");
  // GET /portfolio/orders uses book_side and subaccount_number, unlike
  // the V2 POST body. The exchange history may omit reduce_only; its proof
  // is the immutable signed request digest and server-side fenced reservation.
@@ -140,7 +146,8 @@ export async function readAuthenticatedProtectiveExitOutcome(
     return fail("exit_recovery_concurrent_fill_unattributable");
   }
  }
- if(total!==count((receipt?.fill_count??order.fill_count_fp))||total+count((receipt?.remaining_count??order.remaining_count_fp))!==requested)
+ if(total!==exchangeFilled||
+    (receipt!==null&&total!==count(receipt.fill_count)))
   return fail("exit_recovery_fill_receipt_disagreement");
  const expected=initialUnits>0n?initialUnits-total:initialUnits+total;
  if(expected!==observed)return fail("exit_recovery_position_not_attributable");
@@ -155,12 +162,14 @@ export async function readAuthenticatedProtectiveExitOutcome(
   completeExchangeHistory:true,exactMarketAndAccountMatched:true,
   orderAndFillHistoryMatched:true,isolatedPositionDelta:true,
   response:receipt,
-  authenticatedOrder:receipt===null?{
+  // Persist the independently re-read terminal order on both paths.
+  // It is never represented as an HTTP response to the original POST.
+  authenticatedOrder:{
     order_id:orderId,client_order_id:input.order.client_order_id,
     status:text(order.status),
     initial_count_fp:text(order.initial_count_fp??order.initial_count??order.count_fp??order.count),
     fill_count_fp:text(order.fill_count_fp),
     remaining_count_fp:text(order.remaining_count_fp)
-  }:undefined,
+  },
  };
 }
