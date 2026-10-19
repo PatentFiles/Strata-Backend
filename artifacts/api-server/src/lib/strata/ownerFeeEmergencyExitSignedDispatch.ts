@@ -68,7 +68,10 @@ async function signedPost(material:Material,order:Readonly<EmergencyExitOrder>):
   headers:{"Content-Type":"application/json","Accept":"application/json",
    "KALSHI-ACCESS-KEY":material.keyId,
    "KALSHI-ACCESS-TIMESTAMP":timestamp,"KALSHI-ACCESS-SIGNATURE":signature},
-  body:JSON.stringify({...order,cancel_order_on_pause:true}),
+  body:JSON.stringify({ticker:order.ticker,client_order_id:order.client_order_id,
+    side:order.side,count:order.count,price:order.price,
+    time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
+    post_only:false,cancel_order_on_pause:true,reduce_only:true,subaccount:1,exchange_index:2}),
   signal:AbortSignal.timeout(8000),
  });
  if(response.status!==201)return null; // All HTTP failures are ambiguous after POST.
@@ -162,7 +165,8 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     !validOrder(order)||!lease||!/^[A-Za-z0-9._:-]{1,128}$/.test(lease.holderId)||
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
   return fail("protective_exit_identity_invalid");
- const clock=ports.now??Date.now;
+ if(!ports.readAuthenticatedOutcome)
+  return fail("protective_exit_authenticated_recovery_adapter_not_installed");
  const fee=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",order.ticker);
  if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_unverified");
