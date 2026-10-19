@@ -34,7 +34,7 @@ export async function inspectOwnedEmergencyExitRead(
   if(!Number.isSafeInteger(started)||started<=0)return deny("emergency_exit_clock_invalid");
   try{
     const account=await db.query(
-      "SELECT owner_user_id,subaccount,exchange_index,execution_enabled,kill_switch,key_fingerprint FROM public.v13_production_account WHERE id=$1::text AND owner_user_id=$2::uuid LIMIT 2",
+      "SELECT owner_user_id,subaccount,exchange_index,execution_enabled,kill_switch,key_fingerprint,minimum_exit_micros FROM public.v13_production_account WHERE id=$1::text AND owner_user_id=$2::uuid LIMIT 2",
       [accountId,ownerId]);
     const global=await db.query(
       "SELECT live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
@@ -79,6 +79,7 @@ export async function inspectOwnedEmergencyExitRead(
     const evidence:EmergencyExitEvidence={
       authenticatedOwnerId:ownerId,accountOwnerId:ownerId,
       accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,
+      minimumExitMicros:Number(a.minimum_exit_micros),
       globalKillActive:false,accountKillActive:false,executionEnabled:true,
       positionsComplete:true,positionMarket:String(matching[0]!.ticker),
       positionFp,positionsObservedAtMs:feeds.observedAtMs,

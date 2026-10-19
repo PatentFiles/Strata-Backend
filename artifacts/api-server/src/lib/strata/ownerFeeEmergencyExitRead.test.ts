@@ -18,7 +18,7 @@ const order:EmergencyExitOrder={
 };
 function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
   positions?:unknown[];orders?:unknown[];pending?:number|null;badFee?:boolean;
-  incomplete?:boolean}={}){
+  incomplete?:boolean;floor?:number|null}={}){
   let dbReads=0,feedReads=0,feeReads=0;
   const db={query:async(sql:string)=>{
     dbReads++;
@@ -28,6 +28,7 @@ function harness(opt:{owner?:string;kill?:boolean;globalKill?:boolean;
       owner_user_id:opt.owner??OWNER,subaccount:1,exchange_index:2,
       key_fingerprint:"validated_fingerprint",execution_enabled:true,
       kill_switch:opt.kill??false,
+      minimum_exit_micros:opt.floor===undefined?10000:opt.floor,
     }]};
     }
     if(sql.includes("live_execution_config"))return {rows:[{
@@ -90,4 +91,14 @@ test("resting or unknown orders, unresolved intent, failed fee probe all fail",a
     assert.equal(r.diagnosticEligible,false);
     assert.equal(r.tradingAuthorized,false);
   }
+});
+
+test("stored account exit floor is mandatory; absent, invalid and excessive floor deny",async()=>{
+ for(const floor of [null,0,-1,1000000,1500000,1.5]){
+  const h=harness({floor});
+  const outcome=await h.run();
+  assert.equal(outcome.diagnosticEligible,false);
+  assert.equal(outcome.reason,"emergency_exit_approved_floor_unverified");
+  assert.equal(outcome.tradingAuthorized,false);
+ }
 });

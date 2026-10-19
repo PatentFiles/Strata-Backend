@@ -13,7 +13,7 @@ function fixture(fill:"0.00"|"1.00"|"2.00"="1.00"):ExitDryRunScenario {
     self_trade_prevention_type:"taker_at_cross",
     post_only:false,subaccount:1,exchange_index:2};
   const evidence:EmergencyExitEvidence={authenticatedOwnerId:OWNER,accountOwnerId:OWNER,
-    accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,
+    accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,minimumExitMicros:10000,
     globalKillActive:false,accountKillActive:false,executionEnabled:true,
     positionsComplete:true,positionMarket:MARKET,positionFp:"3.00",
     positionsObservedAtMs:NOW-100,restingOrderCount:0,uncertainOrderCount:0,

@@ -38,6 +38,11 @@ export interface EmergencyExitEvidence {
   accountSubaccount: number;
   accountExchangeIndex: number;
   signerVerified: boolean;
+  /** Owner-approved exit proceeds floor, from persisted account state.
+   * Never accept this field from the caller's request body.
+   * A bid which closes a NO position receives (1 - YES bid price).
+   */
+  minimumExitMicros: number;
   /** Current *independent* execution boundaries are never ignored. */
   globalKillActive: boolean;
   accountKillActive: boolean;
@@ -144,10 +149,22 @@ export function inspectEmergencyExitCandidate(
   const position=signedPositionHundredths(evidence.positionFp);
   if(position===null||quantity>(position<0n?-position:position))
     return DENY("emergency_exit_exceeds_position");
+  // Check side and inventory first, then validate the approved exit floor.
   // In V2, ask reduces a YES long; bid reduces a NO long.
   if((position>0n&&order.side!=="ask")||
      (position<0n&&order.side!=="bid"))
     return DENY("emergency_exit_side_not_reducing");
+  if(!Number.isSafeInteger(evidence.minimumExitMicros)||
+     evidence.minimumExitMicros<1||evidence.minimumExitMicros>=1_000_000)
+    return DENY("emergency_exit_approved_floor_unverified");
+  // Kalshi's V2 book uses YES prices. Liquidating NO via bid receives
+  // 1 - YES price; liquidating YES via ask receives the YES price.
+  // Parse exact four-decimal integer price, never binary floating point.
+  const yesPriceMicros=Number((order.price as string).slice(2))*100;
+  const proceedsMicros=position>0n?yesPriceMicros:1_000_000-yesPriceMicros;
+  if(proceedsMicros<evidence.minimumExitMicros)
+    return DENY("emergency_exit_below_approved_floor");
+
   if(!Number.isSafeInteger(evidence.restingOrderCount)||
      evidence.restingOrderCount!==0||
      !Number.isSafeInteger(evidence.uncertainOrderCount)||
