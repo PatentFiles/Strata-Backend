@@ -78,7 +78,7 @@ test("monetary evidence is revalidated at Step 9, Step 11 and the final order fe
  const fence=read("guardedReviewedApiFeeWire.ts");
  assert.match(owner,/verifyMonetaryFeeContract\("STEP_9"\)/);
  assert.match(owner,/verifyMonetaryFeeContract\("STEP_11"\)/);
- assert.match(fence,/verifyMonetaryFeeContract\("ORDER_ENTRY",ticker\)/);
+ assert.match(fence,/deps\.verifyMonetary\?\?verifyMonetaryFeeContract\)\("ORDER_ENTRY",ticker\)/);
  assert.match(fence,/api_fee_final_order_monetary_source_closed/);
  assert.match(fence,/if\(order\.reduce_only!==true\)/);
  assert.match(fence,/live\.manual_kill_switch=false/);
