@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
-import { rm } from "node:fs/promises";
+import { rm, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { buildReleaseIdentity } from "../../lib/v13-strategy/build-release.mjs";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
@@ -121,6 +122,14 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
     `,
     },
   });
+  // Freeze the independently corroborated PDF as an immutable distribution
+  // asset. Never ship a changed fee schedule under an old authorization.
+  const source=path.resolve(artifactDir,"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
+  const bytes=await readFile(source);
+  if(bytes.length!==281129 || createHash("sha256").update(bytes).digest("hex")!==
+     "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601")
+    throw Error("official_fee_distribution_artifact_mismatch");
+  await writeFile(path.resolve(distDir,"official-fee-schedule.pdf"),bytes);
 }
 
 buildAll().catch((err) => {
