@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {readOwnedKalshiFeeds} from "./personalExchangeRead";
@@ -55,7 +56,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const fp=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
  if(!fp||!/^[a-f0-9]{64}$/.test(fp))return fail("exit_recovery_signer_invalid");
  const query=await (deps.db??pool).query(
-  "SELECT r.initial_position_fp,r.position_observed_at_ms FROM private.strata_emergency_exit_reservations r "+
+  "SELECT r.initial_position_fp,r.position_observed_at_ms,r.order_digest FROM private.strata_emergency_exit_reservations r "+
   "JOIN public.v13_production_account a ON a.id=r.execution_account_id "+
   "AND a.owner_user_id=r.owner_user_id "+
   "WHERE r.reservation_id=$1::uuid AND r.owner_user_id=$2::uuid "+
@@ -67,6 +68,9 @@ export async function readAuthenticatedProtectiveExitOutcome(
  if(query.rows.length!==1)return fail("exit_recovery_baseline_not_unique");
  const baseline=query.rows[0]!;
  const initial=text(baseline.initial_position_fp),baselineTime=Number(baseline.position_observed_at_ms);
+ // The order submitted for recovery must be identical to the immutable reservation.
+ const digest=createHash("sha256").update(JSON.stringify(input.order)).digest("hex");
+ if(baseline.order_digest!==digest)return fail("exit_recovery_order_digest_mismatch");
  if(!Number.isSafeInteger(now)||!Number.isSafeInteger(baselineTime)||
     baselineTime>now||(receipt!==null&&now-baselineTime>30_000))
   return fail("exit_recovery_baseline_stale");
@@ -86,6 +90,15 @@ export async function readAuthenticatedProtectiveExitOutcome(
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
  if(orders.length!==1)return fail("exit_recovery_order_not_unique");
  const order=orders[0]!;
+ // A second order after the inventory baseline could account for the delta.
+ for(const candidateRaw of feed.orders){
+  const candidate=object(candidateRaw);
+  if(candidate.ticker!==input.order.ticker||
+     candidate.client_order_id===input.order.client_order_id)continue;
+  const at=Date.parse(String(candidate.created_time??""));
+  if(!Number.isFinite(at)||at>=baselineTime)
+    return fail("exit_recovery_concurrent_order_unattributable");
+ }
  // Restart derives GET order evidence, not a fabricated 201 receipt.
  const orderId=text(order.order_id);
  if(receipt===null&&count(order.fill_count_fp)+count(order.remaining_count_fp)!==requested)
