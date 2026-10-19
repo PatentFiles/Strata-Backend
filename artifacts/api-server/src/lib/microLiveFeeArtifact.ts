@@ -588,7 +588,8 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
-    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
+      ? await recentPinnedOfficialFeeSnapshot() : null;
     if (snapshot) return snapshot;
     if (alternate) return alternate;
     throw error;
@@ -597,7 +598,8 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
-    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
+      ? await recentPinnedOfficialFeeSnapshot() : null;
     if (snapshot) return snapshot;
     if (alternate) return alternate;
   }
