@@ -6,6 +6,11 @@
  * BEFORE this module can submit a single signed POST. An ambiguous response
  * never enables a retry or changes any production financial state.
  *
+ * Owner-only DEMO approval is intentional; no co-signer is required for a
+ * no-real-money test. The owner approval must be supplied by verified JWT
+ * middleware, NOT untrusted HTTP input. This module does not itself issue
+ * authenticated approvals or expose a route.
+ *
  * Kalshi V2: POST /trade-api/v2/portfolio/events/orders; bid/ask is YES book
  * side, price/count are fixed-point strings, reduce_only requires IOC.
  */
@@ -43,8 +48,12 @@ export type DemoExitApproval = {
   demoAccountVerified:true;
   subaccount:1;
   exchangeIndex:2;
-  authorizedByIndependentOperator:true;
-  operatorApprovalId:string;
+  // Owner alone may authorize a DEMO-only exit. The caller must build
+  // this from a verified current owner JWT/session, never request JSON.
+  ownerDemoApprovalConfirmed:true;
+  ownerDemoApprovalConfirmation:"AUTHORIZE_ONE_SHOT_KALSHI_DEMO_PROTECTIVE_IOC_ONLY";
+  ownerApprovalId:string;
+  ownerApprovalSignedAtMs:number;
   approvalExpiresAtMs:number;
   marketTicker:string;
   marketOpen:true;
@@ -83,6 +92,11 @@ const result=(state:DemoIocResult["state"],reason:string,httpStatus:number|null=
 type Receipt = IocRecoveryObservation["response"];
 type VerifiedRead = (clientOrderId:string,receipt:Receipt)=>Promise<IocRecoveryObservation>;
 export interface DemoIocDependencies {
+  /** Server-side authenticated session + immutable test approval lookup.
+   * Never satisfy this using client-provided booleans or unsigned HTTP data.
+   * The approval must be owned by ownerId and bound to its unique UUID.
+   */
+  verifyAuthenticatedOwnerTestApproval:(ownerId:string,approvalId:string)=>Promise<boolean>;
   /** Durable serializable DB transition; must reject duplicate client order IDs. */
   commitUnknownBeforePost:(order:Readonly<EmergencyExitOrder>,fingerprint:string)=>Promise<DurableDemoUnknown>;
   /** Independently authenticated exchange GET history, not an HTTP 201 echo. */
@@ -109,11 +123,15 @@ export async function executeOneSignedDemoProtectiveIoc(input:{
      approval.authenticatedOwnerId!==approval.accountOwnerId||
      approval.demoAccountVerified!==true||
      approval.subaccount!==1||approval.exchangeIndex!==2||
-     approval.authorizedByIndependentOperator!==true||
-     !UUID.test(approval.operatorApprovalId)||
+     approval.ownerDemoApprovalConfirmed!==true||
+     approval.ownerDemoApprovalConfirmation!=="AUTHORIZE_ONE_SHOT_KALSHI_DEMO_PROTECTIVE_IOC_ONLY"||
+     !UUID.test(approval.ownerApprovalId)||
+     !Number.isSafeInteger(approval.ownerApprovalSignedAtMs)||
+     approval.ownerApprovalSignedAtMs>now||
+     now-approval.ownerApprovalSignedAtMs>60_000||
      !Number.isSafeInteger(approval.approvalExpiresAtMs)||
      approval.approvalExpiresAtMs<=now||
-     approval.approvalExpiresAtMs>now+60_000||
+     approval.approvalExpiresAtMs>approval.ownerApprovalSignedAtMs+60_000||
      approval.signerFingerprint!==fingerprint||
      !MARKET.test(approval.marketTicker)||
      approval.marketTicker!==order.ticker||
@@ -152,6 +170,16 @@ export async function executeOneSignedDemoProtectiveIoc(input:{
   if(actual<=0n||requested>actual||
      (neg&&order.side!=="bid")||(!neg&&order.side!=="ask"))
     return result("BLOCKED","demo_ioc_not_verified_reducing");
+  // Owner-supplied request claims are insufficient: this trusted callback
+  // must verify a current authenticated session and server-owned approval.
+  // A missing, failed or ambiguous verification sends NO signed DEMO order.
+  try{
+    if(await deps.verifyAuthenticatedOwnerTestApproval(
+      approval.authenticatedOwnerId,approval.ownerApprovalId)!==true)
+      return result("BLOCKED","demo_owner_approval_not_authenticated");
+  }catch{
+    return result("BLOCKED","demo_owner_approval_not_authenticated");
+  }
   // This is a strict allowlist of wire fields; never spread untrusted caller
   // JSON into an order or accept expiration/post-only/other order flags.
   const body={

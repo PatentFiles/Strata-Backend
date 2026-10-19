@@ -1,5 +1,5 @@
 /**
- * Operator-only DEMO qualification orchestration.
+ * Owner-authorized DEMO qualification orchestration.
  * No Express routes, no production signer, no live trading configuration.
  * Creates a private durable PREPARED row then consumes UNKNOWN atomically
  * before one signed DEMO IOC and independently verified final reconciliation.
@@ -27,6 +27,8 @@ export async function runPreparedDemoIocQualification(input:{
   approval:Readonly<DemoExitApproval>;
   demoKeyId:string;
   demoPrivateKeyPem:string;
+  /** Trusted authenticated owner/session + server-held approval verification. */
+  verifyAuthenticatedOwnerTestApproval:(ownerId:string,approvalId:string)=>Promise<boolean>;
   readVerifiedExchangeHistory:(
     clientOrderId:string,
     receipt:IocRecoveryObservation["response"],
@@ -48,10 +50,11 @@ export async function runPreparedDemoIocQualification(input:{
     approval.signerFingerprint!==signerFp ||
     approval.authenticatedOwnerId!==identity.ownerId ||
     approval.accountOwnerId!==identity.ownerId ||
-    approval.operatorApprovalId!==identity.operatorApprovalId ||
+    approval.ownerApprovalId!==identity.operatorApprovalId ||
     approval.workerFencingToken!==identity.workerFencingToken ||
     approval.demoAccountVerified!==true ||
-    approval.authorizedByIndependentOperator!==true ||
+    approval.ownerDemoApprovalConfirmed!==true ||
+    approval.ownerDemoApprovalConfirmation!=="AUTHORIZE_ONE_SHOT_KALSHI_DEMO_PROTECTIVE_IOC_ONLY" ||
     approval.feesCurrentAndApplicable!==true ||
     approval.marketTicker!==order.ticker ||
     approval.positionMarketTicker!==order.ticker ||
@@ -61,6 +64,15 @@ export async function runPreparedDemoIocQualification(input:{
     approval.approvalExpiresAtMs<=now ||
     approval.approvalExpiresAtMs>now+60_000)
     return blocked("demo_qualification_owner_or_approval_invalid");
+ // Fail before even reserving an IOC unless the real authenticated owner
+ // has an unexpired server-held DEMO test approval for this account.
+ try{
+  if(await input.verifyAuthenticatedOwnerTestApproval(
+    approval.authenticatedOwnerId,approval.ownerApprovalId)!==true)
+    return blocked("demo_qualification_owner_approval_not_authenticated");
+ }catch{
+  return blocked("demo_qualification_owner_approval_not_authenticated");
+ }
  const ledger=input.ledger??{
    prepare:prepareDemoIocOnce,
    consume:consumeDemoIocUnknown,
@@ -78,6 +90,7 @@ export async function runPreparedDemoIocQualification(input:{
    privateKeyPem:input.demoPrivateKeyPem,
    order,approval,
    deps:{
+     verifyAuthenticatedOwnerTestApproval:input.verifyAuthenticatedOwnerTestApproval,
      nowMs:input.nowMs,
      fetchImpl:input.fetchImpl,
      readVerifiedExchangeHistory:input.readVerifiedExchangeHistory,

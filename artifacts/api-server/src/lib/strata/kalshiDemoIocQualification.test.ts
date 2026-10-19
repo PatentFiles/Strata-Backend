@@ -32,8 +32,10 @@ const approval:DemoExitApproval={
  accountOwnerId:identity.ownerId,
  signerFingerprint:demoSignerFingerprint(keyId,privateKeyPem)!,
  demoAccountVerified:true,subaccount:1,exchangeIndex:2,
- authorizedByIndependentOperator:true,
- operatorApprovalId:identity.operatorApprovalId,
+ ownerDemoApprovalConfirmed:true,
+ ownerDemoApprovalConfirmation:"AUTHORIZE_ONE_SHOT_KALSHI_DEMO_PROTECTIVE_IOC_ONLY",
+ ownerApprovalId:identity.operatorApprovalId,
+ ownerApprovalSignedAtMs:now-1_000,
  approvalExpiresAtMs:now+5_000,marketTicker:ticker,marketOpen:true,
  priceGridVerified:true,permittedLimitPrice:"0.5500",
  positionMarketTicker:ticker,positionsComplete:true,
@@ -83,6 +85,8 @@ test("One fully fenced DEMO pipeline follows PREPARE->UNKNOWN->POST->GET->FINAL"
  const x=await runPreparedDemoIocQualification({
    identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
    nowMs:()=>now,
+   verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
+     ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
    ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
    fetchImpl:h.fetchImpl,
    readVerifiedExchangeHistory:h.readVerifiedExchangeHistory,
@@ -92,12 +96,26 @@ test("One fully fenced DEMO pipeline follows PREPARE->UNKNOWN->POST->GET->FINAL"
  assert.equal(x.filledHundredths,"100");
  assert.deepEqual(h.calls,["prepare","unknown","POST","GET history","finalize"]);
 });
+test("DEMO qualification denies missing server-backed owner approval before PREPARED",async()=>{
+ const h=harness();
+ const x=await runPreparedDemoIocQualification({
+  identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
+  verifyAuthenticatedOwnerTestApproval:async()=>false,
+  nowMs:()=>now,
+  ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
+  fetchImpl:h.fetchImpl,readVerifiedExchangeHistory:h.readVerifiedExchangeHistory,
+ });
+ assert.equal(x.state,"BLOCKED");
+ assert.deepEqual(h.calls,[]);
+});
 test("Owner mismatch or duplicate durable reservation denies ANY signed POST",async()=>{
  const x=harness();
  const result=await runPreparedDemoIocQualification({
   identity:{...identity,ownerId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"},
   order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
   nowMs:()=>now,
+  verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
+    ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
   ledger:x.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
   fetchImpl:x.fetchImpl,readVerifiedExchangeHistory:x.readVerifiedExchangeHistory,
  });
@@ -107,6 +125,8 @@ test("Owner mismatch or duplicate durable reservation denies ANY signed POST",as
  const duplicate=await runPreparedDemoIocQualification({
   identity,order,approval,demoKeyId:keyId,demoPrivateKeyPem:privateKeyPem,
   nowMs:()=>now,
+  verifyAuthenticatedOwnerTestApproval:async(ownerId,approvalId)=>
+    ownerId===identity.ownerId && approvalId===identity.operatorApprovalId,
   ledger:h.ledger as unknown as Parameters<typeof runPreparedDemoIocQualification>[0]["ledger"],
   fetchImpl:h.fetchImpl,readVerifiedExchangeHistory:h.readVerifiedExchangeHistory,
  });

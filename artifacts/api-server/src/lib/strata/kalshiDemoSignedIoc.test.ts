@@ -27,8 +27,10 @@ const approval:DemoExitApproval={
   signerFingerprint:fp,
   demoAccountVerified:true,
   subaccount:1,exchangeIndex:2,
-  authorizedByIndependentOperator:true,
-  operatorApprovalId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  ownerDemoApprovalConfirmed:true,
+  ownerDemoApprovalConfirmation:"AUTHORIZE_ONE_SHOT_KALSHI_DEMO_PROTECTIVE_IOC_ONLY",
+  ownerApprovalId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  ownerApprovalSignedAtMs:now-1000,
   approvalExpiresAtMs:now+15_000,
   marketTicker:ticker,marketOpen:true,
   priceGridVerified:true,permittedLimitPrice:"0.5500",
@@ -58,11 +60,18 @@ function harness(opts:{
   filled?:string;remaining?:string;
   status?:number;networkFailure?:boolean;badHistory?:boolean;
   throwHistory?:boolean;denyMark?:boolean;throwMark?:boolean;denyFinalize?:boolean;
+  denyOwnerAuth?:boolean;throwOwnerAuth?:boolean;
 }={}){
   let marks=0,posts=0,reads=0;
   const fill=opts.filled??"2.00",remaining=opts.remaining??"0.00";
   const deps={
     nowMs:()=>now,
+    verifyAuthenticatedOwnerTestApproval:async(ownerId:string,approvalId:string)=>{
+      assert.equal(ownerId,approval.authenticatedOwnerId);
+      assert.equal(approvalId,approval.ownerApprovalId);
+      if(opts.throwOwnerAuth)throw Error("auth unavailable");
+      return !opts.denyOwnerAuth;
+    },
     commitUnknownBeforePost:async()=>{
       marks++;
       if(opts.throwMark)throw Error("commit outcome unknown");
@@ -112,6 +121,15 @@ function harness(opts:{
   };
   return {deps,stats:()=>({marks,posts,reads})};
 }
+test("DEMO owner-only approval never creates live order authority",async()=>{
+ const h=harness();
+ const outcome=await executeOneSignedDemoProtectiveIoc({keyId,privateKeyPem:pem,order,approval,deps:h.deps});
+ assert.equal(outcome.state,"RECONCILED");
+ assert.equal(outcome.productionOrderSubmitted,false);
+ assert.equal(outcome.tradingAuthorized,false);
+ assert.equal(outcome.mayRetry,false);
+ assert.deepEqual(h.stats(),{marks:1,posts:1,reads:1});
+});
 test("DEMO only: zero/partial/full independently reconciled without production authority",async()=>{
  for(const [filled,remaining] of [["0.00","2.00"],["1.00","1.00"],["2.00","0.00"]]){
    const h=harness({filled,remaining});
@@ -128,7 +146,12 @@ test("DEMO only: zero/partial/full independently reconciled without production a
 });
 test("Invalid authorization, wrong market/side/subaccount, stale fees or position: zero writes",async()=>{
  const bad=[
-   {approval:{...approval,authorizedByIndependentOperator:false}},
+   {approval:{...approval,ownerDemoApprovalConfirmed:false}},
+   {approval:{...approval,ownerDemoApprovalConfirmation:"WRONG"}},
+   {approval:{...approval,ownerApprovalId:"INVALID"}},
+   {approval:{...approval,ownerApprovalSignedAtMs:now-61_000}},
+   {approval:{...approval,ownerApprovalSignedAtMs:now+1}},
+   {approval:{...approval,approvalExpiresAtMs:now+61_000}},
    {approval:{...approval,signerFingerprint:"b".repeat(64)}},
    {approval:{...approval,accountOwnerId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}},
    {approval:{...approval,positionObservedAtMs:now-4000}},
@@ -155,6 +178,17 @@ test("Invalid authorization, wrong market/side/subaccount, stale fees or positio
    });
    assert.equal(r.state,"BLOCKED");
    assert.deepEqual(h.stats(),{marks:0,posts:0,reads:0});
+ }
+});
+test("No authenticated owner test approval causes zero markers and zero signed POSTs",async()=>{
+ for(const x of [{denyOwnerAuth:true},{throwOwnerAuth:true}]){
+  const h=harness(x);
+  const v=await executeOneSignedDemoProtectiveIoc({
+    keyId,privateKeyPem:pem,order,approval,deps:h.deps,
+  });
+  assert.equal(v.state,"BLOCKED");
+  assert.equal(v.reason,"demo_owner_approval_not_authenticated");
+  assert.deepEqual(h.stats(),{marks:0,posts:0,reads:0});
  }
 });
 test("Failed or ambiguous durable commit never sends to demo exchange",async()=>{
