@@ -8,6 +8,8 @@ import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSource
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
 import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {
   openOwnedExecutionSession,
@@ -241,6 +243,15 @@ export function createProductionPersonalSession(
       return {ok:false,reason:"reviewed_api_source_release_unavailable"};
     // The commissioning digest is a historical observation. Refresh the API
     // source for the exact target market at every readMarket and final POST.
+    // The direct owner's standing policy has no human reviewer requirement,
+    // but must prove authoritative monetary schedule + current Kalshi market.
+    // Isolated test-injected fee verifiers never invoke the production source.
+    if(!apiSource && !alternate && !options.verifyFee){
+      const monetary=await verifyMonetaryFeeContract("STEP_11");
+      if(!monetary.ok||!monetary.monetaryFeeAuthorized||
+         monetary.sourceDigest!==digest)
+        return {ok:false,reason:monetary.ok?"fee_artifact_unverified":monetary.reason};
+    }
     const artifact=apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
       alternate && operatorAtStart?.ok?
@@ -315,6 +326,13 @@ export function createProductionPersonalSession(
             throw new Error("owner_operator_fee_source_unavailable");
           feeVerifiedAt=checked.identity.verifiedAtMs;
           feeCheckedAt=clock;
+        }else if(!options.verifyFee){
+          const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
+          if(!monetary.ok||!monetary.monetaryFeeAuthorized||
+             monetary.marketTicker!==market||monetary.sourceDigest!==digest)
+            throw Error("monetary_fee_exact_market_unverified");
+          feeVerifiedAt=Date.parse(monetary.verifiedAt??"");
+          feeCheckedAt=clock;
         }else if (clock - feeCheckedAt > 10_000) {
           const refreshed = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
           if (!refreshed.valid || refreshed.digest !== digest || !refreshed.verifiedAt) {
@@ -347,7 +365,11 @@ export function createProductionPersonalSession(
         });
       },
       fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed.fencingToken,holderId) :
-        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) : personalProductionFetch,
+        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) :
+        !options.verifyFee ? createGuardedMonetaryFeeFetch(
+          input.userId,input.accountId,personalProductionFetch,policyHash,
+          fingerprint,claimed.fencingToken,holderId,digest,
+        ) : personalProductionFetch,
     });
     const unresolved = await readUnresolvedIntentMode(
       (sql, params) => db.query(sql, params), input.accountId,
