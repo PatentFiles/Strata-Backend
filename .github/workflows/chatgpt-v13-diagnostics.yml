@@ -83,6 +83,11 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/providerFeePageCapture.test.ts --bundle --platform=node --format=cjs --outfile=dist/providerFeePageCapture.test.cjs
           node --test dist/providerFeePageCapture.test.cjs
+      - name: Verify fixed-origin Kalshi fee webpage and live exact-market API crosscheck (NO trade authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/pdfFreeProviderFeeCrosscheck.test.ts --bundle --platform=node --format=cjs --outfile=dist/pdfFreeProviderFeeCrosscheck.test.cjs
+          node --test dist/pdfFreeProviderFeeCrosscheck.test.cjs
       - name: Audit four protective-exit outcomes, timeout and no duplicate POST (NO live exchange)
         working-directory: artifacts/api-server
         run: |
