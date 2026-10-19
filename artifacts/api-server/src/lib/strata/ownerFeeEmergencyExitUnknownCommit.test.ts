@@ -10,6 +10,7 @@ const ACCOUNT="owner-execution-2";
 const RESERVATION="22222222-2222-4222-8222-222222222222";
 const CLIENT_ID="v13p-33333333-3333-4333-8333-333333333333";
 const MARKET="KXBTC15M-26OCT161945-45";
+const NOW=Date.parse("2026-10-19T19:00:00Z");
 const ORDER:EmergencyExitOrder={
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5500",
   client_order_id:CLIENT_ID,time_in_force:"immediate_or_cancel",
@@ -26,6 +27,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
        tradingAuthorized:false as const,needsIndependentApproval:true as const}
     : {ok:false as const,reason:"emergency_exit_candidate_verified_requires_fenced_dispatch",
        diagnosticEligible:true,tradingAuthorized:false as const,
+       verifiedPositionFp:"3.00",verifiedPositionObservedAtMs:NOW-100,
        needsIndependentApproval:true as const}) as typeof inspectOwnedEmergencyExitRead;
   const db={connect:async()=>({query:async(sql:string,args?:unknown[])=>{
     if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||
@@ -74,7 +76,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
     params.owner??OWNER,params.account??ACCOUNT,params.reservation??RESERVATION,
     {keyId:"test",privateKey:"test"},
     params.order??ORDER,params.lease??LEASE,
-    {inspect,db,signerFingerprint:(()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint},
+    {inspect,db,now:()=>NOW,signerFingerprint:(()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint},
   );
   return {run,events,phase:()=>phase};
 }
