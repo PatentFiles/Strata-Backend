@@ -78,6 +78,16 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/step6ApiFeeObservation.test.cjs
           node --test dist/step6ApiFeeObservation.test.cjs
+      - name: Validate fixed-origin PDF-free official fee HTML capture (NO authorization)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/providerFeePageCapture.test.ts --bundle --platform=node --format=cjs --outfile=dist/providerFeePageCapture.test.cjs
+          node --test dist/providerFeePageCapture.test.cjs
+      - name: Audit four protective-exit outcomes, timeout and no duplicate POST (NO live exchange)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFeeEmergencyExitEvidenceAudit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitEvidenceAudit.test.cjs
+          node --test dist/ownerFeeEmergencyExitEvidenceAudit.test.cjs
       - name: Verify integer quadratic reference vectors (review-only)
         working-directory: artifacts/api-server
         run: |
