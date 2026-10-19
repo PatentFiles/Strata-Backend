@@ -78,14 +78,14 @@ export function createGuardedMonetaryFeeFetch(
      order.self_trade_prevention_type!=="taker_at_cross"||
      order.post_only!==false||order.expiration_time!==undefined||
      (order.side!=="bid"&&order.side!=="ask")||
-     typeof order.count!=="string"||!/^[0-9]{1,9}\\.[0-9]{2}$/.test(order.count)||
+     typeof order.count!=="string"||!/^[0-9]{1,9}\.[0-9]{2}$/.test(order.count)||
      Number(order.count)<=0||
-     typeof order.price!=="string"||!/^0\\.[0-9]{4}$/.test(order.price)||
+     typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price)||
      Number(order.price)<=0||
      typeof order.client_order_id!=="string"||
      !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id))
     throw Error("monetary_fee_exit_order_shape_invalid");
-  const connector:DbConnector=deps.connect??(()=>pool.connect() as Promise<DbClient>);
+  const connector:DbConnector=deps.connect??(()=>pool.connect() as unknown as Promise<DbClient>);
   const client=await connector();
   let committed=false;
   try{
