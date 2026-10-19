@@ -264,3 +264,8 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/guardedMonetaryFeeWire.test.ts --bundle --platform=node --format=cjs --outfile=dist/guardedMonetaryFeeWire.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/guardedMonetaryFeeWire.test.cjs
+      - name: Test authenticated owner monetary policy approval
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalOwnerMonetaryApproval.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryApproval.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
+          node --test dist/personalOwnerMonetaryApproval.test.cjs
