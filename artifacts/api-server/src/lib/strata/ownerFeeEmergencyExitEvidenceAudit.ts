@@ -67,7 +67,7 @@ export function auditExitOutcomeMatrix(cases:readonly ExitEvidenceScenario[]):Ex
   // reconcileIocEmergencyExit emits integer hundredths, NOT "1.00" strings.
   // Keep the exchange wire quantity format distinct from recovery output units.
   const recovered=(x:unknown):bigint|null=>
-    typeof x==="string"&&/^\\d+$/.test(x)?BigInt(x):null;
+    typeof x==="string"&&/^\d+$/.test(x)?BigInt(x):null;
   const filled=recovered(recon.filledHundredths);
   const remaining=recovered(recon.remainingHundredths);
   const requested=parseFixed(obs.requestedCountFp);
