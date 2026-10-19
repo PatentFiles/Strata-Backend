@@ -25,6 +25,8 @@ const row=()=>({
  grant_id:gid,owner_user_id:owner,issuer_admin_id:issuer,
  rate_decision_digest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
  fee_model_version:PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
+ policy_version:"strata_api_fee_source_signed_review_v2",
+ scope:"KXBTC15M:INDEX2",
  issued_at:new Date(now-20_000),expires_at:new Date(now+60_000),revoked_at:null,
  authorized_stages:["STEP_9","STEP_11","ORDER_ENTRY"],
  consent_owner:owner,confirmed_at:new Date(now-15_000),consent_revoked_at:null,
@@ -86,6 +88,21 @@ test("missing, ambiguous, revoked and owner-crossed source records fail closed",
   assert.equal(decision.ok,false);
  }
 });
+test("stored grant and reviewer source claims are evaluated, not synthesized",async()=>{
+ const defects=[
+  {fee_model_version:"unexpected_model"},
+  {policy_version:"strata_api_fee_source_signed_review_v1"},
+  {scope:"KXOTHER:INDEX2"},
+  {first_model:"unexpected_review_model"},
+  {first_scope:"KXOTHER:INDEX2"},
+ ];
+ for(const defect of defects){
+  const x=await verifyReviewedApiFeeSourceStage(owner,"STEP_9",sourceUrl,
+    undefined,deps([{...row(),...defect}]));
+  assert.equal(x.ok,false,JSON.stringify(defect));
+ }
+});
+
 test("no database and no reviewed grant cannot create fee approval",async()=>{
  const d=deps();
  const v=await verifyReviewedApiFeeSourceStage(owner,"STEP_11",sourceUrl,
