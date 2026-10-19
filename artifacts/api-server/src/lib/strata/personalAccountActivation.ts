@@ -609,7 +609,7 @@ export async function commissionOwnedAccount(
              text(row?.fee_formula_version)!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION) {
     return {ok:false,reason:"fee_source_identity_invalid",blockers:["fee_source_identity_invalid"]};
   }
-  if (!operatorIdentity && !apiIdentity && input.verifyFee) {
+  if (!operatorIdentity && !apiIdentity && input.verifyFee && !input.verifyMonetary) {
     const artifact = await input.verifyFee({
       digest,
       policyVersion: text(row?.fee_policy_version) ?? "",
@@ -619,7 +619,7 @@ export async function commissionOwnedAccount(
     if (!artifact.valid || artifact.digest !== digest) {
       return { ok: false, reason: "fee_artifact_unverified", blockers: ["fee_artifact_unverified"] };
     }
-  } else if (!operatorIdentity && !apiIdentity && (!input.verifyFee || input.verifyMonetary)) {
+  } else if (!operatorIdentity && !apiIdentity) {
     // One source read establishes the PDF's monetary formula and live market
     // metadata. It does not grant commissioning consent. Explicit test
     // injection cannot originate in the user request or HTTP body.
