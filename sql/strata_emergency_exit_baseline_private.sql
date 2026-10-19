@@ -14,8 +14,8 @@ ALTER TABLE private.strata_emergency_exit_reservations
  ADD CONSTRAINT strata_exit_snapshot_format
  CHECK (
    position_observed_at_ms > 0
-   AND ((reducing_side='YES' AND initial_position_fp ~ '^[0-9]{1,9}\\.[0-9]{2}$')
-    OR (reducing_side='NO' AND initial_position_fp ~ '^-[0-9]{1,9}\\.[0-9]{2}$'))
+   AND ((reducing_side='YES' AND initial_position_fp ~ '^[0-9]{1,9}\.[0-9]{2}$')
+    OR (reducing_side='NO' AND initial_position_fp ~ '^-[0-9]{1,9}\.[0-9]{2}$'))
  );
 CREATE OR REPLACE FUNCTION private.strata_protective_exit_baseline_guard()
 RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $fn$
