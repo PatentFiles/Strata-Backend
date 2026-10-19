@@ -93,8 +93,13 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
   const stillStale = await reportOwnedActivation(db, USER);
   assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
   owner.reconciled_at = "2026-10-15T17:53:00.000Z";
-  const fresh = await reportOwnedActivation(db, USER);
+  const fresh = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
   assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
+  const tooOld = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T18:10:00.000Z"));
+  assert.equal(tooOld.blockers.includes("cash_not_reconciled"), true);
+  assert.equal(tooOld.readyForCommissioning, false);
+  const tooEarly = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:52:00.000Z"));
+  assert.equal(tooEarly.blockers.includes("cash_not_reconciled"), true);
   assert.equal(fresh.readyForCommissioning, true); // commissioning still requires separate owner consent
 });
 
