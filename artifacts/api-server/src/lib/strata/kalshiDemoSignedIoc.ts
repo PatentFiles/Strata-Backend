@@ -92,6 +92,11 @@ const result=(state:DemoIocResult["state"],reason:string,httpStatus:number|null=
 type Receipt = IocRecoveryObservation["response"];
 type VerifiedRead = (clientOrderId:string,receipt:Receipt)=>Promise<IocRecoveryObservation>;
 export interface DemoIocDependencies {
+  /** Server-side authenticated session + immutable test approval lookup.
+   * Never satisfy this using client-provided booleans or unsigned HTTP data.
+   * The approval must be owned by ownerId and bound to its unique UUID.
+   */
+  verifyAuthenticatedOwnerTestApproval:(ownerId:string,approvalId:string)=>Promise<boolean>;
   /** Durable serializable DB transition; must reject duplicate client order IDs. */
   commitUnknownBeforePost:(order:Readonly<EmergencyExitOrder>,fingerprint:string)=>Promise<DurableDemoUnknown>;
   /** Independently authenticated exchange GET history, not an HTTP 201 echo. */
@@ -165,6 +170,16 @@ export async function executeOneSignedDemoProtectiveIoc(input:{
   if(actual<=0n||requested>actual||
      (neg&&order.side!=="bid")||(!neg&&order.side!=="ask"))
     return result("BLOCKED","demo_ioc_not_verified_reducing");
+  // Owner-supplied request claims are insufficient: this trusted callback
+  // must verify a current authenticated session and server-owned approval.
+  // A missing, failed or ambiguous verification sends NO signed DEMO order.
+  try{
+    if(await deps.verifyAuthenticatedOwnerTestApproval(
+      approval.authenticatedOwnerId,approval.ownerApprovalId)!==true)
+      return result("BLOCKED","demo_owner_approval_not_authenticated");
+  }catch{
+    return result("BLOCKED","demo_owner_approval_not_authenticated");
+  }
   // This is a strict allowlist of wire fields; never spread untrusted caller
   // JSON into an order or accept expiration/post-only/other order flags.
   const body={
