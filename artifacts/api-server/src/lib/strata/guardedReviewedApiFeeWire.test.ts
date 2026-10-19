@@ -168,6 +168,7 @@ test("signed GET and HEAD requests are limited to canonical Kalshi API paths",as
  let sent=0;
  const transport=(async(req:RequestInfo|URL,init?:RequestInit)=>{
    sent++;
+   assert.equal(init?.redirect,"error");
    return new Response("{}",{status:200});
  }) as typeof fetch;
  const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,
@@ -179,7 +180,7 @@ test("signed GET and HEAD requests are limited to canonical Kalshi API paths",as
  ];
  await wrapped(official[0]!,{method:"GET"});
  await wrapped(new Request(official[1]!,{method:"GET"}));
- await wrapped(official[2]!,{method:"HEAD"});
+ await wrapped(official[2]!,{method:"HEAD",redirect:"follow"});
  assert.equal(sent,3);
  for(const url of [
    "https://evil.example/trade-api/v2/portfolio/positions",
