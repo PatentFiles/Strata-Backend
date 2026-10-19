@@ -86,6 +86,12 @@ export async function markOwnedEmergencyExitUnknownForReview(
   if(!advisory||advisory.diagnosticEligible!==true||
      advisory.tradingAuthorized!==false)
     return deny("emergency_exit_unknown_advisory_unverified");
+  const baseline=advisory.verifiedPositionFp;
+  const observed=advisory.verifiedPositionObservedAtMs;
+  const at=Date.now();
+  if(typeof baseline!=="string"||!/(^-?[0-9]{1,9}\.[0-9]{2}$)/.test(baseline)||
+     !Number.isSafeInteger(observed)||observed!>at||at-observed!>3000)
+    return deny("emergency_exit_unknown_authenticated_baseline_unverified");
   const fingerprint=(deps.signerFingerprint??dedicatedSignerFingerprint)(
     material.keyId,material.privateKey,
   );
@@ -115,7 +121,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND r.execution_account_id=$3::text AND r.order_digest=$4::text " +
       "AND r.client_order_id=$5::text AND r.market_ticker=$6::text " +
       "AND r.reducing_side=$7::text AND r.quantity_hundredths=$8::bigint " +
-      "AND r.worker_holder_id=$9::text AND r.worker_fencing_token=$10::bigint " +
+      "AND r.worker_holder_id=$9::text AND r.worker_fencing_token=$10::bigint AND r.initial_position_fp=$12::text " +
       "AND r.state='PREPARED' AND r.trading_authorized=false " +
       "AND r.created_at > now()-interval '30 seconds' " +
       "AND a.subaccount=1 AND a.exchange_index=2 " +
@@ -132,7 +138,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
       "FOR UPDATE OF r,a,w,pos",
       [reservationId,ownerId,accountId,digest,order.client_order_id,
-       order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint],
+       order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint,baseline],
     );
     if(eligible.rows.length!==1)
       return deny("emergency_exit_unknown_position_or_fence_unavailable");
@@ -142,11 +148,11 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "state='UNKNOWN',updated_at=now() " +
       "WHERE reservation_id=$1::uuid AND owner_user_id=$2::uuid " +
       "AND execution_account_id=$3::text AND order_digest=$4::text " +
-      "AND client_order_id=$5::text AND state='PREPARED' " +
+      "AND client_order_id=$5::text AND initial_position_fp=$6::text AND state='PREPARED' " +
       "AND created_at > now()-interval '30 seconds' " +
       "AND trading_authorized=false " +
       "RETURNING reservation_id,client_order_id",
-      [reservationId,ownerId,accountId,digest,order.client_order_id],
+      [reservationId,ownerId,accountId,digest,order.client_order_id,baseline],
     );
     if(changed.rows.length!==1||
        changed.rows[0]!.reservation_id!==reservationId||
