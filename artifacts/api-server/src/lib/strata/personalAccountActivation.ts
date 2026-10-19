@@ -376,6 +376,7 @@ export async function approveOwnedPolicyForUser(
     body: unknown;
     now?: Date;
     verifyFee?: typeof verifyCurrentFeeArtifact;
+    verifyMonetary?: typeof verifyMonetaryFeeContract;
   },
 ): Promise<{ ok: boolean; reason: string; feeArtifactDigest?: string; retryAfterSeconds?: number }> {
   const parsed = policyBody(input.body, input.ownerUserId, input.now ?? new Date());
@@ -413,7 +414,7 @@ export async function approveOwnedPolicyForUser(
     // Existing authenticated owner's explicit policy consent is enforced by
     // policyBody. This branch verifies BOTH official monetary PDF evidence and
     // live exact-market API evidence; no synthetic technical review is minted.
-    const current=await verifyMonetaryFeeContract("STEP_9");
+    const current=await (input.verifyMonetary??verifyMonetaryFeeContract)("STEP_9");
     if(!current.ok || !current.monetaryFeeAuthorized || !current.sourceDigest)
       return {ok:false,reason:current.reason};
     if(parsed.digest && parsed.digest!==current.sourceDigest)
