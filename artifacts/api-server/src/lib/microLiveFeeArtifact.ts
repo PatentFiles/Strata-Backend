@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
+export { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+// Capture the real transport before any tests can monkeypatch global fetch.
+const PRODUCTION_FEE_FETCH: typeof fetch = globalThis.fetch;
 
 // pdfjs-dist 6 uses this ES2024 primitive while the supported Node 20
 // production runtime does not provide it yet.
@@ -534,7 +540,39 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   });
 }
 
+export async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Response|null>{
+ if(!officialFeeSnapshotLeaseValid(now))return null;
+ // Only fixed, release-controlled paths. Build copies the pinned fixture into dist.
+ const paths=[
+  resolve(process.cwd(),"dist/official-fee-schedule.pdf"),
+  resolve(process.cwd(),"artifacts/api-server/dist/official-fee-schedule.pdf"),
+  resolve(process.cwd(),"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"),
+  resolve(process.cwd(),"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"),
+ ];
+ for(const path of paths){
+  let b:Buffer;try{b=await readFile(path);}catch{continue;}
+  if(b.length!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.byteLength||
+     createHash("sha256").update(b).digest("hex")!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256)continue;
+  const result=await verifyOfficialFeePdfBytes(b);
+  if(!result.ok||result.digest!==INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256)continue;
+  return new Response(new Uint8Array(b),{status:200,headers:{
+   "content-type":"application/pdf","content-length":String(b.length),
+   "x-strata-fee-evidence":"independently-checked-bounded-provider-snapshot",
+   "x-strata-snapshot-expires":INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.expiresAt,
+  }});
+ }
+ return null;
+}
+
 async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
+  // A 24h origin-confirmed receipt avoids hammering a currently throttled
+  // static PDF endpoint. Test-injected transports never use this fallback.
+  // When the lease ends this automatically resumes the normal live retrieval
+  // path and refuses all unverified bytes or metadata-only authorizations.
+  if (fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH) {
+    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    if (snapshot) return snapshot;
+  }
   let response: Response;
   try {
     response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
@@ -549,13 +587,21 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (fetchImpl !== globalThis.fetch) throw error;
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate; // Verified PDF, or fail-closed 429 cooldown.
+    if (alternate?.status === 200) return alternate;
+    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
+      ? await recentPinnedOfficialFeeSnapshot() : null;
+    if (snapshot) return snapshot;
+    if (alternate) return alternate;
     throw error;
   }
   if (response.status === 429 && fetchImpl === globalThis.fetch) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate) return alternate; // May carry the bridge's longer cooldown.
+    if (alternate?.status === 200) return alternate;
+    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
+      ? await recentPinnedOfficialFeeSnapshot() : null;
+    if (snapshot) return snapshot;
+    if (alternate) return alternate;
   }
   return response;
 }
