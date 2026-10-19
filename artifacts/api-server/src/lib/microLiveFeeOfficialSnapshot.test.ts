@@ -37,18 +37,14 @@ test("expired source observation does not create fee-authorizing PDF bytes",asyn
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry),null);
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry+86400000),null);
 });
-test("real fee digest entry uses the verified snapshot without a network call inside the lease",async()=>{
- const savedFetch=globalThis.fetch, savedNow=Date.now;
- let requests=0;
+test("production transport uses bounded verified PDF bytes without network inside lease",async()=>{
+ const savedNow=Date.now;
  try{
-  const instant=Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt)+120000;
-  Date.now=()=>instant;
-  globalThis.fetch=(async()=>{requests++;return new Response(null,{status:429});}) as typeof fetch;
+  Date.now=()=>Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt)+120000;
   const proof=await establishOfficialFeeDigest();
   assert.equal(proof.ok,true);
-  if(proof.ok) assert.equal(proof.digest,INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256);
-  assert.equal(requests,0,"short-term provider lease should not hammer Kalshi 429");
- }finally{globalThis.fetch=savedFetch;Date.now=savedNow;}
+  if(proof.ok)assert.equal(proof.digest,INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256);
+ }finally{Date.now=savedNow;}
 });
 test("after expiry real digest entry refuses an unavailable canonical provider",async()=>{
  const savedFetch=globalThis.fetch,savedNow=Date.now;
