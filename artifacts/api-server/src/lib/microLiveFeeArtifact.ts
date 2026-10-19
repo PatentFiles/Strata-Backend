@@ -580,6 +580,14 @@ async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Promise<Re
 }
 
 async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
+  // A 24h origin-confirmed receipt avoids hammering a currently throttled
+  // static PDF endpoint. Test-injected transports never use this fallback.
+  // When the lease ends this automatically resumes the normal live retrieval
+  // path and refuses all unverified bytes or metadata-only authorizations.
+  if (fetchImpl === globalThis.fetch) {
+    const snapshot = await recentPinnedOfficialFeeSnapshot();
+    if (snapshot) return snapshot;
+  }
   let response: Response;
   try {
     response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
