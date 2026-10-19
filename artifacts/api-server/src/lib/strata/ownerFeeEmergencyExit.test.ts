@@ -16,7 +16,7 @@ const order=():EmergencyExitOrder=>({
 const evidence=():EmergencyExitEvidence=>({
   authenticatedOwnerId:OWNER,accountOwnerId:OWNER,
   accountSubaccount:1,accountExchangeIndex:2,
-  signerVerified:true,globalKillActive:false,accountKillActive:false,
+  signerVerified:true,minimumExitMicros:10000,globalKillActive:false,accountKillActive:false,
   executionEnabled:true,positionsComplete:true,
   positionMarket:MARKET,positionFp:"2.00",positionsObservedAtMs:NOW-100,
   restingOrderCount:0,uncertainOrderCount:0,
@@ -123,4 +123,22 @@ test("exact Kalshi fee evidence must be current, specific and consistent",()=>{
   }
   assert.equal(check(order(),{...evidence(),kalshiFee:null}).reason,
     "emergency_exit_exact_fee_evidence_unverified");
+});
+
+test("owner's persisted 0.01 floor applies to both YES and NO proceeds, exactly",()=>{
+ const base=evidence();
+ assert.equal(check({...order(),price:"0.0099"},base).reason,
+   "emergency_exit_below_approved_floor");
+ assert.equal(check({...order(),price:"0.0100"},base).diagnosticEligible,true);
+ const no={...base,positionFp:"-2.00"};
+ assert.equal(check({...order(),side:"bid",price:"0.9901"},no).reason,
+   "emergency_exit_below_approved_floor");
+ assert.equal(check({...order(),side:"bid",price:"0.9900"},no).diagnosticEligible,true);
+});
+test("missing, nonsensical or browser-origin exit floors never create exit authority",()=>{
+ for(const floor of [undefined,null,0,-1,1.1,1000000,NaN,"10000"]){
+   const outcome=check(order(),{...evidence(),minimumExitMicros:floor as number});
+   assert.equal(outcome.reason,"emergency_exit_approved_floor_unverified");
+   assert.equal(outcome.tradingAuthorized,false);
+ }
 });
