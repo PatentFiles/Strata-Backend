@@ -246,17 +246,19 @@ export function createProductionPersonalSession(
     // The direct owner's standing policy has no human reviewer requirement,
     // but must prove authoritative monetary schedule + current Kalshi market.
     // Isolated test-injected fee verifiers never invoke the production source.
-    if(!apiSource && !alternate && !options.verifyFee){
-      const monetary=await verifyMonetaryFeeContract("STEP_11");
-      if(!monetary.ok||!monetary.monetaryFeeAuthorized||
-         monetary.sourceDigest!==digest)
-        return {ok:false,reason:monetary.ok?"fee_artifact_unverified":monetary.reason};
-    }
+    const monetaryAtStart=!apiSource&&!alternate&&!options.verifyFee?
+      await verifyMonetaryFeeContract("STEP_11"):null;
+    if(monetaryAtStart && (!monetaryAtStart.ok||
+       !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
+      return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
     const artifact=apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
       alternate && operatorAtStart?.ok?
       {valid:true,digest:operatorAtStart.identity.digest,
        verifiedAt:operatorAtStart.identity.verifiedAtMs}:
+      monetaryAtStart?.ok?
+      {valid:true,digest:monetaryAtStart.sourceDigest,
+       verifiedAt:Date.parse(monetaryAtStart.verifiedAt??"")}:
       await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
