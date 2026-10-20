@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
-import {API_SOURCE_POLICY_VERSION} from "./apiFeeSourceStage";
+import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
 const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -60,7 +60,7 @@ test("a reduce-only IOC needs independently current exact-market stage and held 
   return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
    grantId:grant,sourceUrl:source,digest:"a".repeat(64),
    feePolicyVersion:API_SOURCE_POLICY_VERSION,
-   formulaVersion:"standard_quadratic_0.07_round_cent_v1",
+   formulaVersion:API_SOURCE_FORMULA_VERSION,
    marketTicker:ticker,verifiedAtMs:Date.now(),
   }};
  };
@@ -98,6 +98,12 @@ test("a missing grant must ROLLBACK and never call Kalshi POST",async()=>{
 
 test("final SQL account fence requires exactly the canonical V2 fee source version",()=>{
  assert.equal(API_SOURCE_POLICY_VERSION,"strata_api_fee_source_signed_review_v2");
+ assert.equal(API_SOURCE_FORMULA_VERSION,"standard-quadratic-0.07-v1");
+ assert.ok(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL.includes(
+   "p.fee_formula_version='"+API_SOURCE_FORMULA_VERSION+"'"
+ ));
+ assert.ok(!FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL.includes("standard_quadratic_0.07_round_cent_v1"));
+
  assert.ok(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL.includes(
    "p.fee_policy_version='"+API_SOURCE_POLICY_VERSION+"'"
  ));
@@ -220,7 +226,7 @@ test("reviewed API-source order does not depend on Kalshi PDF fetch once indepen
   return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
    grantId:grant,sourceUrl:source,digest:"a".repeat(64),
    feePolicyVersion:API_SOURCE_POLICY_VERSION,
-   formulaVersion:"standard_quadratic_0.07_round_cent_v1",
+   formulaVersion:API_SOURCE_FORMULA_VERSION,
    marketTicker:ticker,verifiedAtMs:Date.now(),
   }};
  };
@@ -241,7 +247,7 @@ test("reviewed API-source order does not depend on Kalshi PDF fetch once indepen
 test("reviewed API grant with incorrect formula or digest cannot submit an order",async()=>{
  for(const bad of [
   {formulaVersion:"unapproved",digest:"a".repeat(64)},
-  {formulaVersion:"standard_quadratic_0.07_round_cent_v1",digest:"tampered"},
+  {formulaVersion:API_SOURCE_FORMULA_VERSION,digest:"tampered"},
  ]){
   let sent=0;
   const db={query:async(sql:string)=>({rows:sql.includes("SELECT a.id")?[{id:account}]:[]}),release(){}};
