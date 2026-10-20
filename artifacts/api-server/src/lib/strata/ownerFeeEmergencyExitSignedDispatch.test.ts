@@ -212,3 +212,15 @@ test("kill/lease/review database row locks are released before network transport
  assert.ok(h.calls.sql.indexOf("COMMIT")>=0);
  assert.ok(h.calls.sql.indexOf("COMMIT")>h.calls.sql.findIndex(q=>q.startsWith("SELECT r.reservation_id")));
 });
+
+test("final outbound fence demands a matching DISPATCHED V13 financial EXIT intent",async()=>{
+ const h=harness({receipt:false});
+ await h.run();
+ const fence=h.calls.sql.find(q=>q.includes("FROM private.strata_emergency_exit_reservations r"));
+ assert.ok(fence,"expected account-scoped signed release fence");
+ assert.match(fence!,/i\.client_order_id=r\.client_order_id/);
+ assert.match(fence!,/i\.kind='EXIT'/);
+ assert.match(fence!,/i\.state='DISPATCHED'/);
+ assert.match(fence!,/i\.terminal=false/);
+ assert.match(fence!,/i\.client_order_id<>r\.client_order_id/);
+});
