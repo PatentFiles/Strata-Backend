@@ -14,6 +14,17 @@
 - The personal protective-exit release is SHA-bound and time-limited. It must be valid for the deployed commit with >20 minutes remaining before it can authorize new entries.
 - GitHub PR #110 (legacy global-account isolation) and #111 (startup reason logging) are review changes, not evidence of a deployed binary.
 
+## P0 discovery after runbook creation — provisional commissioning freeze
+
+**Do not enable owner-scoped new entries after the signal producer deploy until this has been resolved.**
+
+The provisioning code persists `blocked_reason='awaiting_account_commissioning'`. The currently deployed commissioning/activation transitions do not clear it, even when `commissioned=true` and `execution_enabled=true`. The live `ProductionExecutor.gate` then rejects entry with `production_account_frozen`. A read-only inspection on 2026-10-20 found the stale sentinel on all **three commissioned personal accounts** (plus two correctly still-uncommissioned accounts).
+
+- [Backend draft PR #112](https://github.com/PatentFiles/Strata-Backend/pull/112) corrects future valid commissioning transitions and surfaces the freeze in owner readiness. It does not silently repair already-enabled accounts.
+- Existing commissioned accounts need independently reviewed, account-specific authenticated recovery, with owner/operator approval, immutable audit, exact identity/policy/fee verification, fresh complete Kalshi reconciliation and zero unresolved orders or exposure. Never clear genuine financial exception reasons.
+- The old protective-exit release has expired. Renew only after choosing the final deployed backend SHA. Any cached `ARM` or healthy lease does not recreate entry authority after a release expires.
+- Do **not** assume that the `FORWARD_TEST_PRODUCTION_WORKER_ENABLED` fix alone completes real-money readiness.
+
 ## Before choosing a deployment target
 
 1. Check the existing Railway service and commit SHA, not just the repository's main branch. Confirm whether new deployments are genuinely available, whether pending staged changes exist, and whether the intended flags are deployed.
