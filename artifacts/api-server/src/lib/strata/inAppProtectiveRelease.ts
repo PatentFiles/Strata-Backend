@@ -305,6 +305,7 @@ export async function authorizeProtectiveRelease(
  WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL
  AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1`,[reviewer]);
   if(role.rows.length!==1)return deny("reviewer_authority_expired");
+  let repairEvidence:{observedAtMs:number;exchangeDigest:string}|null=null;
   if(repairing){
     const rec=await client.query(`
  SELECT (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1) intents,
@@ -319,10 +320,39 @@ export async function authorizeProtectiveRelease(
        !truth(current.commissioned)||!truth(current.cash_precision_verified)||
        String(current.reserved_micros)!=="0"||
        !current.reconciled_at||
-       !Number.isFinite(Date.parse(String(current.reconciled_at)))||
-       Date.now()-Date.parse(String(current.reconciled_at))>15_000||
-       Date.now()<Date.parse(String(current.reconciled_at))-10_000)
+       !Number.isFinite(Date.parse(String(current.reconciled_at))))
       return deny("commissioning_repair_fresh_zero_exposure_unverified");
+
+    // The reconciliation previously required a worker-maintained DB timestamp
+    // younger than 15s. That timestamp cannot stay fresh during a genuinely
+    // independent human review, especially when the trading worker is STOPPED.
+    // Instead obtain the *authoritative* signed, complete, account-scoped
+    // Kalshi balance/order/fill/position/settlement history NOW, while the
+    // financial row is locked and before making the owner-approved transition.
+    const material=await loadedMaterial(client,a);
+    if(!material)return deny("commissioning_repair_restricted_signer_unavailable");
+    const observedAtMs=(deps.now??Date.now)();
+    const feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,observedAtMs);
+    if(!feeds.ok)return deny("commissioning_repair_live_exchange_read_unavailable");
+    if(!Number.isSafeInteger(feeds.observedAtMs)||
+       feeds.observedAtMs!==observedAtMs||
+       Date.now()-observedAtMs>15_000||
+       observedAtMs-Date.now()>2000||
+       String(feeds.cashMicros)!==String(current.cash_micros))
+      return deny("commissioning_repair_live_cash_or_freshness_unverified");
+    const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
+    const snapshot=personalAccountSnapshot(identity,feeds,[]);
+    if(!("identity" in snapshot)||
+       snapshot.orders.length!==0||snapshot.fills.length!==0||
+       snapshot.positions.length!==0||snapshot.settlements.length!==0||
+       feeds.orders.length!==0||feeds.fills.length!==0||
+       feeds.settlements.length!==0)
+      return deny("commissioning_repair_live_exposure_unverified");
+    repairEvidence={observedAtMs,exchangeDigest:hash({
+      accountId,sha,observedAtMs,cashMicros:feeds.cashMicros,
+      orders:feeds.orders,fills:feeds.fills,
+      positions:feeds.positions,settlements:feeds.settlements,
+    })};
   }
   const prior=await client.query(`
  SELECT release_id::text FROM private.strata_protective_exit_release
@@ -353,16 +383,23 @@ export async function authorizeProtectiveRelease(
    AND blocked_reason='awaiting_account_commissioning'
    AND commissioned=true AND cash_precision_verified=true
    AND reserved_micros=0
-   AND reconciled_at>now()-interval '15 seconds'
+   -- DB-server freshness check on the independent signed provider read.
+   -- Do not rely on a stale cached worker reconciliation timestamp.
+   AND $3::timestamptz > statement_timestamp()-interval '15 seconds'
+   AND $3::timestamptz <= statement_timestamp()+interval '2 seconds'
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1)
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_event WHERE account_id=$1)
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0)
    AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1)
- RETURNING id`,[accountId,ownerId]);
+ RETURNING id`,[accountId,ownerId,
+     repairEvidence?new Date(repairEvidence.observedAtMs).toISOString():null]);
     if(clear.rows.length!==1)return deny("commissioning_repair_transactional_guard_failed");
+    if(!repairEvidence)return deny("commissioning_repair_fresh_exchange_evidence_missing");
     const audit={accountId,ownerId,releaseSha:sha,reviewId:String(b.reviewId),
       reviewerId:reviewer,priorReason:"awaiting_account_commissioning",
-      newReason:null,confirmation:PROVISIONAL_REPAIR_CONFIRM};
+      newReason:null,confirmation:PROVISIONAL_REPAIR_CONFIRM,
+      liveExchangeObservedAtMs:repairEvidence.observedAtMs,
+      liveExchangeEvidenceDigest:repairEvidence.exchangeDigest};
     await client.query(`
  INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
  VALUES($1,$2,'OWNER_COMMISSIONING_FREEZE_REPAIR',$3::jsonb,$4)`,
