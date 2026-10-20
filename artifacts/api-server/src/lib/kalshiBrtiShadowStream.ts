@@ -8,7 +8,7 @@
  */
 import {createPrivateKey,createSign,constants} from "node:crypto";
 import {parseKalshiBrtiInstantFrame,parseKalshiBrtiQuarterHourFrame,type BrtiWindowFrame,type BrtiInstantFrame} from "./cfBenchmarksSettlement";
-import {logger} from "./logger";
+// Deliberately no Pino transport import: the authenticated read route must not start log workers.
 
 const WSS_PATH="/trade-api/ws/v2";
 const WSS_HOST="wss://external-api-ws.kalshi.com";
@@ -33,7 +33,7 @@ let lastError:string|null=null;
 let socket:WebSocket|null=null;
 let reconnectTimer:ReturnType<typeof setTimeout>|null=null;
 
-const genericError=(name:string)=>{lastError=name;logger.warn({source:"kalshi_cf_brti_shadow",reason:name},"Kalshi BRTI shadow source unavailable; live authority unchanged");};
+const genericError=(name:string)=>{lastError=name;console.warn(`[brti-shadow] ${name}; no live authority affected`);};
 const obj=(x:unknown):x is Record<string,unknown>=>Boolean(x)&&typeof x==="object"&&!Array.isArray(x);
 const enabled=(env:NodeJS.ProcessEnv)=>
   env.NODE_ENV==="production"&&
