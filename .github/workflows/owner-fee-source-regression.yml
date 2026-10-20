@@ -132,3 +132,7 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerProtectiveRecovery.test.cjs
       - name: Verify protected recovery happens before V13 execution
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/workerProtectiveRecovery.test.cjs
+      - name: Bundle trusted owned protective IOC cutover tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitWorkerDispatch.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitWorkerDispatch.test.cjs
+      - name: Test owned signed protective exit cutover
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitWorkerDispatch.test.cjs
