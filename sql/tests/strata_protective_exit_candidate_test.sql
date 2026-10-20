@@ -20,10 +20,10 @@ INSERT INTO public.v13_production_account(id) VALUES ('isolated-1');
 INSERT INTO private.strata_emergency_exit_reservations(
  reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,
  reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,
- initial_position_fp,position_observed_at_ms)
+ initial_position_fp,position_observed_at_ms,order_request_json)
 VALUES('33333333-3333-4333-8333-333333333333','11111111-1111-4111-8111-111111111111',
  'isolated-1','KXBTC15M-TEST','v13p-44444444-4444-4444-8444-444444444444',
- 'YES',100,repeat('a',64),1,'w-1','2.00',100000);
+ 'YES',100,repeat('a',64),1,'w-1','2.00',100000,'{"ticker":"KXBTC15M-TEST","side":"ask"}');
 DO $$
 BEGIN
  BEGIN
@@ -33,6 +33,15 @@ BEGIN
  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
  END;
 END $$;
+DO $
+BEGIN
+ BEGIN
+ UPDATE private.strata_emergency_exit_reservations
+ SET order_request_json='{"ticker":"KXBTC15M-ALTERED","side":"bid"}';
+ RAISE EXCEPTION 'immutable request changed';
+ EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
+ END;
+END $;
 UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN', updated_at=now()
 WHERE reservation_id='33333333-3333-4333-8333-333333333333';
 INSERT INTO private.strata_protective_exit_reconciliations(
