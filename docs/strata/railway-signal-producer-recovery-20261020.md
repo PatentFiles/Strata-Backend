@@ -84,3 +84,19 @@ order by created_at desc limit 3;
 ```
 
 **Completion criterion:** Railway deployment health + exact reviewed SHA + fresh signal-producing cycles + authenticated full exchange reconciliation + valid release for the deployed SHA + explicit owner ARM and START + correct handling of any genuine qualifying event. Paper-only signal activity and a personal worker heartbeat **alone** are insufficient to declare live trading operational.
+
+
+## Release validity: precise semantics and recommended follow-up
+
+- The **release lives for two hours**: the reviewed owner approval transaction inserts `expires_at=now()+interval '2 hours'`.
+- The **20-minute threshold is a remaining-validity margin**, not a demand for new source code or independent review every 20 minutes: personal START and every worker snapshot need `expires_at > now()+interval '20 minutes'`.
+- The final protective-exit signed POST verifies **the same exact SHA-bound release** with `expires_at>now()`, preserving a late-expiry safety check. Do not extend expiration in the database or remove its final-order fence.
+- After remaining validity dips under 20 minutes, new entries are latched off in the running session. A new release alone cannot reactivate that session: explicit authenticated restart with full reconciliation is necessary.
+- The expiring approval is an **operational policy friction**, but not proof the 20-minute margin is a code defect. A future reviewed policy design should separate persistent code-review authorization (SHA, review evidence, revocation) from shorter-lived, automatically verified operational readiness (fees, account, policy, recon, lease, position, protective-exit capacity). Reauthorizing actual live-money trading remains an explicit owner decision, not an automated review forgery.
+- **P0 review question:** a final protective-exit attempt is itself gated by the expiration. Before changing the two-hour policy, validate positions that remain open across expiry and prove there is a safe, independently authorized reduce-only exit path that does not inadvertently strand exposure. Preserve all one-use transport, unknown-order recovery and independent review controls.
+- A release is approved **only for the actual deployed SHA**, not for a draft PR's current tip or a candidate assembled while the previous binary runs.
+- The existing commissioned-account freeze is separate from release expiry: PR #112 prevents future stale sentinel states, but an already-enabled account cannot be silently repaired. Recovery requires a controlled, authenticated, owner-confirmed, auditable action after independent review and zero-exposure checks. No generic SQL clear is approved.
+
+## Deployment gate decision
+
+**NO-GO** until all checks pass: consolidated CI; genuine independent review; a safe, audited precommissioning-sentinel remediation for already-commissioned accounts; healthy Railway deployment and exact SHA; approved protective-exit release; live market-evaluation writes; authenticated Kalshi cash/position reconciliation; separate owner ARM and START; proper real order/partial-fill/unknown-response settlement handling. A fresh worker heartbeat alone is insufficient.
