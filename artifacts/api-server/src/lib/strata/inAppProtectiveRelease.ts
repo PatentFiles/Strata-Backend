@@ -37,13 +37,8 @@ export async function readReleaseOwner(db:Query,ownerId:string):Promise<{ok:true
  if(a.rows.length!==1)return {ok:false,reason:"owned_account_missing_or_ambiguous"};
  const account=a.rows[0]!;
  if(!truth(account.commissioned)||account.policy_state!=="APPROVED"||
-    !truth(account.cash_precision_verified)||!Number.isInteger(Number(account.minimum_exit_micros))||
-    Number(account.minimum_exit_micros)!==10000||!SHA.test(String(account.fee_artifact_digest??""))){
-   // SHA pattern is reused only for full digest below; a fee digest is 64 chars.
-   if(!truth(account.commissioned)||account.policy_state!=="APPROVED"||
-      !truth(account.cash_precision_verified)||Number(account.minimum_exit_micros)!==10000)
-     return {ok:false,reason:"account_commissioning_policy_or_floor_unverified"};
- }
+    !truth(account.cash_precision_verified)||Number(account.minimum_exit_micros)!==10000)
+   return {ok:false,reason:"account_commissioning_policy_or_floor_unverified"};
  if(!/^[a-f0-9]{64}$/.test(String(account.fee_artifact_digest??"")))
    return {ok:false,reason:"account_fee_digest_unverified"};
  const request=await db.query(`
@@ -105,6 +100,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    qualificationId:qualification.rows[0]?.qualification_id??null,
    qualificationExpiresAt:qualification.rows[0]?.expires_at??null,
    reviewerId:review.rows.length===1?review.rows[0]?.reviewer_user_id:null,
+   reviewId:review.rows.length===1?review.rows[0]?.review_id:null,
    reviewed:review.rows.length===1,
    releaseActive:active.rows.length===1,
    releaseExpiresAt:active.rows[0]?.expires_at??null,
