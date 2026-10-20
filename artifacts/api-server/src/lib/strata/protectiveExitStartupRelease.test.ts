@@ -13,9 +13,11 @@ const env=(value:"true"|"false"|undefined="true")=>({
 
 test("START refuses missing signed dispatcher without any DB read",async()=>{
  let called=false;
+ const missingFlag=env();
+ delete missingFlag.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
  const result=await verifyProtectiveExitStartupRelease({query:async()=>{
    called=true;return {rows:[{release_id:releaseId}]};
- }},owner,env(undefined));
+ }},owner,missingFlag);
  assert.equal(result.ok,false);
  assert.equal(result.reason,"protective_exit_release_disabled");
  assert.equal(called,false);
