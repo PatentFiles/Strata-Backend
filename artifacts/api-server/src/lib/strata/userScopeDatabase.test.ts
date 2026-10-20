@@ -553,6 +553,7 @@ test("START reports running only after the session schedules a worker, and produ
   const row: Record<string, unknown> = {
     ...account(USER_A, "acct-a", true, "25000000"),
     kill_switch: false,
+    execution_enabled: true,
     reconciled_at: "2026-10-13T00:00:00.000Z",
     configured_stake_cents: 100,
     stake_revision: 4,
@@ -603,6 +604,13 @@ test("START reports running only after the session schedules a worker, and produ
     },
     session,
   });
+  // ARM never schedules a worker or calls the exchange. Only START does.
+  const armed = await port.control(USER_A, "ARM");
+  assert.equal(armed.ok, true);
+  assert.equal(armed.reason, "account_armed_ready_for_start");
+  assert.equal(armed.view.armed, true);
+  assert.equal(armed.view.workerRunning, false);
+  assert.equal(session.running, false);
   const started = await port.control(USER_A, "START");
   assert.equal(started.ok, true);
   assert.equal(started.reason, "worker_scheduled");
