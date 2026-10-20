@@ -4,7 +4,7 @@ import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitS
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
-import type { Identity, Request } from "../v13-production/types";
+import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
@@ -42,9 +42,18 @@ export async function readReleaseOwner(db:Query,ownerId:string):Promise<{ok:true
  if(!/^[a-f0-9]{64}$/.test(String(account.fee_artifact_digest??"")))
    return {ok:false,reason:"account_fee_digest_unverified"};
  const request=await db.query(`
- SELECT 1 FROM public.v13_production_observation o
- WHERE o.account_id=$1 AND o.kind='OWNER_ACTIVATION_REQUEST' LIMIT 1`,[account.id]);
- if(request.rows.length!==1)return {ok:false,reason:"owner_activation_request_missing"};
+ SELECT o.digest FROM public.v13_production_observation o
+ WHERE o.account_id=$1 AND o.kind='OWNER_ACTIVATION_REQUEST'
+ ORDER BY o.observed_at DESC LIMIT 1`,[account.id]);
+ const expected=v13Digest({
+  accountId:String(account.id),policyId:String(account.policy_id??""),
+  feeDigest:String(account.fee_artifact_digest??""),
+  stakeCents:Number(account.configured_stake_cents),
+  commissioningDigest:String(account.commissioning_digest??""),
+  minimumExitMicros:Number(account.minimum_exit_micros),
+ });
+ if(request.rows.length!==1||request.rows[0]?.digest!==expected)
+   return {ok:false,reason:"owner_activation_request_stale_or_missing"};
  return {ok:true,account};
 }
 async function loadedMaterial(db:Query,account:DbRow):Promise<{keyId:string;privateKey:string}|null>{
