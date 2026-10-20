@@ -3,7 +3,7 @@ import { pool } from "@workspace/db";
 import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitSha";
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
-import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -14,7 +14,7 @@ export const OWNER_CONFIRM="I_AUTHORIZE_MY_OWN_ACCOUNT_AND_SHARED_LIVE_EXECUTION
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
 type Db=Query & {connect():Promise<Query&{release():void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyMonetaryFeeContract;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -152,8 +152,8 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   if(!("identity" in mapped))return deny(mapped.reason);
   // Standing fee policy is already approved; verify the actual official
   // fee source and current series/event schedule again before attestation.
-  const fee=await(deps.verifyFee??verifyMonetaryFeeContract)("STEP_11");
-  if(!fee.ok||!fee.monetaryFeeAuthorized||
+  const fee=await(deps.verifyFee??verifyProtectiveReleaseFeePreflight)();
+  if(!fee.ok||
     account.fee_source_url!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf"||
     fee.sourceDigest!==account.fee_artifact_digest)
     return deny("approved_standing_fee_source_not_current");

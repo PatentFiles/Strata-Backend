@@ -15,6 +15,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
       - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
       - 'artifacts/api-server/src/lib/strata/inAppProtectiveRelease*'
+      - 'artifacts/api-server/src/lib/strata/protectiveReleaseFeePreflight*'
+      - 'artifacts/api-server/src/lib/strata/verifiedOfficialFeeSnapshotLease.ts'
       - 'artifacts/api-server/src/routes/protectiveReleaseRouter.ts'
       - 'artifacts/api-server/src/lib/strata/protectiveExitStartupRelease*'
       - 'artifacts/api-server/src/lib/strata/workerUncertainOrderGate*'
@@ -151,6 +153,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/protectiveExitStartupRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/protectiveExitStartupRelease.test.cjs
       - name: Ensure no START without approved deployed SHA and signed EXIT release
         run: NODE_ENV=test node --test artifacts/api-server/dist/protectiveExitStartupRelease.test.cjs
+      - name: Bundle reviewed official source lease fee preflight regression
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/protectiveReleaseFeePreflight.test.ts --bundle --platform=node --format=cjs --outfile=dist/protectiveReleaseFeePreflight.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+      - name: Test official PDF transport fallback, expiry and current Kalshi overrides
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/protectiveReleaseFeePreflight.test.cjs
       - name: Bundle genuine in-app two-human protective release and owner consent tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/inAppProtectiveRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/inAppProtectiveRelease.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
       - name: Test production GET-only qualification, identity isolation, audit and atomic launch
