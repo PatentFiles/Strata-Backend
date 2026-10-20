@@ -25,6 +25,16 @@ export type BrtiWindowFrame = {
 export type BrtiParseResult =
   | { ok: true; frame: BrtiWindowFrame }
   | { ok: false; reason: string };
+export type BrtiInstantFrame={
+  indexId:typeof BRTI_INDEX_ID;
+  sourceTimestampMs:number;
+  receivedAtMs:number;
+  currentIndexUsd:string;
+  settlementAuthority:false;
+};
+export type BrtiInstantParseResult=
+  |{ok:true;tick:BrtiInstantFrame}
+  |{ok:false;reason:string};
 
 const record=(x:unknown):x is Record<string,unknown>=>Boolean(x)&&typeof x==="object"&&!Array.isArray(x);
 function timestamp(n:unknown):number|null {
@@ -36,16 +46,15 @@ function decimal(n:unknown):string|null {
   return n;
 }
 /**
- * Parses Kalshi's *authenticated upstream* WebSocket envelope.
- * Untrusted input never substitutes for signed provider provenance.
- * A count of 60 alone does not prove official settlement or price finality.
+ * Current vendor BRTI spot index — available throughout the quarter-hour.
+ * Never treat an instantaneous index as a 60-second settlement average.
  */
-export function parseKalshiBrtiQuarterHourFrame(
+export function parseKalshiBrtiInstantFrame(
   input:unknown,
   receivedAtMs:number,
   maxFeedAgeMs=5000,
-):BrtiParseResult {
-  const refuse=(reason:string):BrtiParseResult=>({ok:false,reason});
+):BrtiInstantParseResult{
+  const refuse=(reason:string):BrtiInstantParseResult=>({ok:false,reason});
   if(!record(input)||input.type!=="cfbenchmarks_value"||!record(input.msg))
     return refuse("not_cfbenchmarks_value");
   const msg=input.msg;
@@ -65,6 +74,27 @@ export function parseKalshiBrtiQuarterHourFrame(
   if(ts===null||current===null)return refuse("invalid_cf_index_sample");
   if(ts>received+2000||received-ts>ageLimit)
     return refuse("cf_index_stale_or_future_dated");
+  return {ok:true,tick:{indexId:BRTI_INDEX_ID,sourceTimestampMs:ts,
+    receivedAtMs:received,currentIndexUsd:current,settlementAuthority:false}};
+}
+/**
+ * Parses Kalshi's *authenticated upstream* WebSocket envelope.
+ * Untrusted input never substitutes for signed provider provenance.
+ * A count of 60 alone does not prove official settlement or price finality.
+ */
+export function parseKalshiBrtiQuarterHourFrame(
+  input:unknown,
+  receivedAtMs:number,
+  maxFeedAgeMs=5000,
+):BrtiParseResult {
+  const refuse=(reason:string):BrtiParseResult=>({ok:false,reason});
+  const instant=parseKalshiBrtiInstantFrame(input,receivedAtMs,maxFeedAgeMs);
+  if(!instant.ok)return refuse(instant.reason);
+  if(!record(input)||!record(input.msg))return refuse("not_cfbenchmarks_value");
+  const msg=input.msg;
+  const ts=instant.tick.sourceTimestampMs;
+  const current=instant.tick.currentIndexUsd;
+  const received=instant.tick.receivedAtMs;
   if(!record(msg.last_60s_windowed_average_15min))
     return refuse("outside_kalshi_quarter_final_minute");
   const win=msg.last_60s_windowed_average_15min;
