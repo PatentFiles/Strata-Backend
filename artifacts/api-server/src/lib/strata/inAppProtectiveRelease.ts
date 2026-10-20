@@ -237,14 +237,18 @@ export async function authorizeProtectiveRelease(
  WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[accountId,ownerId]);
   const current=locked.rows[0];
   if(locked.rows.length!==1||!current||
-     truth(current.execution_enabled)||!truth(current.kill_switch))
-    return deny("account_no_longer_disarmed_for_release");
+     truth(current.execution_enabled)===truth(current.kill_switch))
+    return deny("account_inconsistent_execution_kill_state");
+  const accountNeedsEnable=!truth(current.execution_enabled);
   const global=await client.query(`
  SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config
  WHERE id='singleton' FOR UPDATE`);
   if(global.rows.length!==1||global.rows[0]?.mode!=="V13_PRODUCTION"||
-     truth(global.rows[0]?.live_execution_enabled)||!truth(global.rows[0]?.manual_kill_switch))
-   return deny("global_release_not_fail_closed");
+     truth(global.rows[0]?.live_execution_enabled)===truth(global.rows[0]?.manual_kill_switch))
+   return deny("global_execution_kill_state_inconsistent");
+  const globalNeedsEnable=!truth(global.rows[0]?.live_execution_enabled);
+  if(accountNeedsEnable!==globalNeedsEnable)
+    return deny("account_global_release_state_mismatch");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>client!.query(sql,p),accountId);
   if(!unresolved.ok||unresolved.mode!=="entries")return deny("release_unresolved_order");
   if(!Number.isSafeInteger(Number(a.configured_stake_cents))||
@@ -271,9 +275,19 @@ export async function authorizeProtectiveRelease(
  AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1`,[reviewer]);
   if(role.rows.length!==1)return deny("reviewer_authority_expired");
   const prior=await client.query(`
- SELECT 1 FROM private.strata_protective_exit_release WHERE release_commit_sha=$1 LIMIT 1
- `,[sha]);
-  if(prior.rows.length)return deny("release_for_exact_commit_already_exists");
+ SELECT release_id::text FROM private.strata_protective_exit_release
+ WHERE release_commit_sha=$1 AND revoked_at IS NULL AND expires_at>now()
+ FOR UPDATE`,[sha]);
+  if(prior.rows.length>1)return deny("active_release_duplicate_or_unverified");
+  if(prior.rows.length===1){
+    // Renewal is atomic: revoke the old release only inside the transaction
+    // that commits a fresh independent review and replacement release.
+    const revoked=await client.query(`
+      UPDATE private.strata_protective_exit_release SET revoked_at=now()
+      WHERE release_id=$1::uuid AND revoked_at IS NULL RETURNING release_id`,
+      [prior.rows[0]?.release_id]);
+    if(revoked.rows.length!==1)return deny("prior_release_revocation_failed");
+  }
   const inserted=await client.query(`
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
@@ -282,16 +296,20 @@ export async function authorizeProtectiveRelease(
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
-  const updated=await client.query(`
+  if(accountNeedsEnable){
+    const updated=await client.query(`
  UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false
  WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
  AND execution_enabled=false AND kill_switch=true RETURNING id`,[accountId,ownerId]);
-  if(updated.rows.length!==1)return deny("account_enable_failed");
-  const master=await client.query(`
+    if(updated.rows.length!==1)return deny("account_enable_failed");
+  }
+  if(globalNeedsEnable){
+    const master=await client.query(`
  UPDATE public.live_execution_config SET live_execution_enabled=true,manual_kill_switch=false,updated_at=now()
  WHERE id='singleton' AND mode='V13_PRODUCTION'
  AND live_execution_enabled=false AND manual_kill_switch=true RETURNING id`);
-  if(master.rows.length!==1)return deny("shared_live_enable_failed");
+    if(master.rows.length!==1)return deny("shared_live_enable_failed");
+  }
   await client.query("COMMIT");committed=true;
   return {ok:true,reason:"owner_approved_release_account_and_shared_live_enabled",
    releaseId:inserted.rows[0]?.id,expiresAt:inserted.rows[0]?.expires_at,
