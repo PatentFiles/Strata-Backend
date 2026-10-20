@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { digest as v13Digest } from "../v13-production/types";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
-  authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,
+  authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
@@ -18,12 +18,12 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
   if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||sql.startsWith("SET LOCAL"))return {rows:[]};
-  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[account]};
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,blocked_reason:input.freeze??null}]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
       feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
@@ -34,6 +34,12 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
     decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
   }]};
+  if(sql.includes("AS intents,")||sql.includes(") intents,"))
+   return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
+  // The guarded UPDATE embeds NOT EXISTS history subqueries; match writes
+  // before generic SELECT history mocks or this test would falsely refuse.
+  if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
+  if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_release_qualification"))
    return {rows:[{id:QID,expires_at:"2026-10-20T06:00:00Z"}]};
@@ -44,7 +50,9 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("INSERT INTO private.strata_protective_release_reviews"))
    return {rows:[{id:RID,expires_at:"2026-10-20T06:00:00Z"}]};
   if(sql.includes("FROM public.v13_production_account")&&sql.includes("FOR UPDATE"))
-   return {rows:[{id:account.id,execution_enabled:false,kill_switch:true,cash_micros:"25000000"}]};
+   return {rows:[{id:account.id,execution_enabled:false,kill_switch:true,cash_micros:"25000000",
+    blocked_reason:input.freeze??null,commissioned:true,cash_precision_verified:true,reserved_micros:"0",
+    reconciled_at:new Date(Date.now()-(input.fresh===false?60_000:1000)).toISOString()}]};
   if(sql.includes("FROM public.live_execution_config"))return {rows:[{
     mode:"V13_PRODUCTION",live_execution_enabled:false,manual_kill_switch:true,
   }]};
@@ -57,7 +65,6 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.strata_protective_exit_release"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_exit_release"))
    return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:"2026-10-20T06:00:00Z"}]};
-  if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
   if(sql.includes("UPDATE public.live_execution_config"))return {rows:[{id:"singleton"}]};
   throw Error("unexpected_query");
  };
@@ -117,4 +124,46 @@ test("owner consent inserts exact signed release then atomically enables account
  const globalUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.live_execution_config"));
  assert.ok(insert>0&&accountUpdate>insert&&globalUpdate>accountUpdate);
  assert.ok(h.executed.indexOf("COMMIT")>globalUpdate);
+});
+
+test("provisional freeze cannot be cleared without distinct explicit owner consent",async()=>{
+ const h=fakeDb({freeze:"awaiting_account_commissioning"});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,false);
+ assert.equal(r.reason,"explicit_commissioning_repair_confirmation_required");
+ assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
+ assert.equal(h.executed.includes("COMMIT"),false);
+});
+test("any genuine freeze is immutable through commissioning recovery",async()=>{
+ const h=fakeDb({freeze:"unknown_exchange_order"});
+ const r=await authorizeProtectiveRelease(OWNER,{
+  reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
+ },{db:h.db,sha:()=>SHA});
+ assert.equal(r.reason,"account_risk_freeze_requires_independent_remediation");
+ assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
+});
+test("owner-authorized recovery fails closed on stale reconciliation or unaccounted exposure",async()=>{
+ for(const options of [{freeze:"awaiting_account_commissioning",fresh:false},
+  {freeze:"awaiting_account_commissioning",unresolved:true}]){
+  const h=fakeDb(options),r=await authorizeProtectiveRelease(OWNER,{
+   reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
+  },{db:h.db,sha:()=>SHA});
+  assert.equal(r.ok,false,r.reason);
+  assert.equal(r.reason,"commissioning_repair_fresh_zero_exposure_unverified");
+  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
+ }
+});
+test("explicit reviewed zero-exposure recovery is atomic, auditable and creates no order",async()=>{
+ const h=fakeDb({freeze:"awaiting_account_commissioning"});
+ const r=await authorizeProtectiveRelease(OWNER,{
+  reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
+ },{db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal("provisionalFreezeRepaired" in r && r.provisionalFreezeRepaired,true);
+ const release=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
+ const repair=h.executed.findIndex(s=>s.includes("SET blocked_reason=NULL"));
+ const audit=h.executed.findIndex(s=>s.includes("OWNER_COMMISSIONING_FREEZE_REPAIR"));
+ assert.ok(release>=0&&repair>release&&audit>repair);
+ assert.ok(h.executed.indexOf("COMMIT")>audit);
+ assert.equal(h.executed.some(s=>s.includes("INSERT INTO public.v13_production_intent")),false);
 });
