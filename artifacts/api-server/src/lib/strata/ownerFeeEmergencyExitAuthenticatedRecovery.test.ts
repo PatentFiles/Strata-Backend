@@ -22,9 +22,11 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
  missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
  wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;
- receiptWaitMs?:number;}={}){
- const filled=options.fill??"1.00",position=(3-Number(filled)).toFixed(2);
- const initial=options.side==="bid"?"-3.00":"3.00";
+ receiptWaitMs?:number;fullyClosed?:boolean;omitPosition?:boolean;}={}){
+ const filled=options.fill??"1.00";
+ const baselineUnits=options.fullyClosed?2:3;
+ const position=(baselineUnits-Number(filled)).toFixed(2);
+ const initial=options.side==="bid"?"-"+baselineUnits.toFixed(2):baselineUnits.toFixed(2);
  const ending=options.side==="bid"?"-"+position:position;
  const selected={...input,order:{...input.order,side:options.side??"ask"}};
  const signedReceipt={...receipt,fill_count:filled,
@@ -58,7 +60,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
       created_time:new Date(NOW-(options.oldFill?180_000:0)).toISOString()}]:[]),
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
-   positions:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
+   positions:options.omitPosition?[]:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
    settlements:[]};
  }) as typeof readOwnedKalshiFeeds;
  return {run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
@@ -142,4 +144,24 @@ test("late witnessed HTTP 201 can reconcile from complete signed history",async(
  assert.equal(result.response?.httpStatus,201);
  assert.equal(result.authenticatedOrder?.status,"canceled");
  assert.equal(result.observedPositionFp,"2.00");
+});
+
+test("fully closed market missing from unsettled positions remains UNKNOWN",async()=>{
+ // Kalshi Get Positions documents unsettled positions by default. An empty
+ // page does not itself cryptographically attest that inventory is zero.
+ // A fully filled terminal order and authenticated fills are insufficient
+ // to infer the account inventory without a matching complete position proof.
+ for(const restart of [false,true]){
+  await assert.rejects(
+   ()=>harness({restart,fill:"2.00",fullyClosed:true,omitPosition:true}).run(),
+   /exit_recovery_position_not_unique/,
+  );
+ }
+});
+test("fully closed market with explicit scoped zero-position evidence reconciles",async()=>{
+ const result=await harness({restart:true,fill:"2.00",fullyClosed:true}).run();
+ assert.equal(result.initialPositionFp,"2.00");
+ assert.equal(result.observedPositionFp,"0.00");
+ assert.equal(result.authenticatedOrder?.status,"executed");
+ assert.equal(result.response,null);
 });
