@@ -79,3 +79,17 @@ export const LEGACY_EXIT_JOIN=`
 export const LEGACY_EXIT_PREDICATE=`
  AND v.expires_at > now() AND v.revoked_at IS NULL
  AND v.independent_reviewer_id <> a.owner_user_id`;
+
+/** Called at the final ENTRY wire, after the financial risk fence and before
+ * the one-use signed POST. Revocation, absent DB access or missing callback
+ * must never be interpreted as approval. Reduce-only exits have their own
+ * separate signed protective fence. */
+export async function assertInstitutionalFinalEntryApproval(
+ mode:InstitutionalMode,verify:(()=>Promise<boolean>)|null
+):Promise<void>{
+ if(mode==="LEGACY_TWO_HOUR")return;
+ if(!verify)throw new Error("institutional_code_approval_revoked_or_unavailable");
+ let ok=false;
+ try{ok=await verify()}catch{ok=false}
+ if(!ok)throw new Error("institutional_code_approval_revoked_or_unavailable");
+}
