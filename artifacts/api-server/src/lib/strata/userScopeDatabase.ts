@@ -19,6 +19,7 @@ import {
 import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 import {
   changeConfiguredStake,
+  stakeEditBlockers,
   emptyUserExecutionView,
   policyAuthorityChange,
   type ControlAction,
