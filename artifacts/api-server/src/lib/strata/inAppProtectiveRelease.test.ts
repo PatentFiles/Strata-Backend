@@ -36,6 +36,10 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   }]};
   if(sql.includes("AS intents,")||sql.includes(") intents,"))
    return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
+  // The guarded UPDATE embeds NOT EXISTS history subqueries; match writes
+  // before generic SELECT history mocks or this test would falsely refuse.
+  if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
+  if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_release_qualification"))
    return {rows:[{id:QID,expires_at:"2026-10-20T06:00:00Z"}]};
@@ -61,8 +65,6 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.strata_protective_exit_release"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_exit_release"))
    return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:"2026-10-20T06:00:00Z"}]};
-  if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
-  if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   if(sql.includes("UPDATE public.live_execution_config"))return {rows:[{id:"singleton"}]};
   throw Error("unexpected_query");
  };
