@@ -1,5 +1,5 @@
 import { ProductionExecutor } from "./executor";
-import { consumeOwnedPosition } from "./consumer";
+import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 
 /** Explicit lifecycle only. API startup neither constructs nor starts this worker. */
 export class ProductionWorker {
@@ -10,7 +10,9 @@ export class ProductionWorker {
     readonly report: (error: unknown) => void = () => {},
     readonly entriesOpen: () => boolean = () => true,
     /** Trusted, never-submitting UNKNOWN protective-exit recovery pass. */
-    readonly recoverProtectiveExits: () => Promise<void> = async () => {}) {}
+    readonly recoverProtectiveExits: () => Promise<void> = async () => {},
+    /** Trusted owner-scoped IOC exit, never obtained from user requests. */
+    readonly dispatchProtectiveExit?: ProtectiveExitDispatch) {}
   async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -20,7 +22,7 @@ export class ProductionWorker {
       await this.recoverProtectiveExits();
       await this.executor.reconcile(); // restart first; never replay dispatched POSTs
       if (this.recoveryOnly) return;
-      await consumeOwnedPosition(this.executor);
+      await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
       if (!this.entriesOpen()) return;
       const ids = (await this.executor.ledger.pool.query(`SELECT id FROM forward_test_evaluations
         WHERE evaluation_source='paper' AND qualifying_trigger=true AND fresh_cross=true
