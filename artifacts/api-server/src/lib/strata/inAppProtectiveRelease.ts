@@ -98,15 +98,15 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  SELECT qualification_id::text,evidence_digest,expires_at FROM private.strata_protective_release_qualification
  WHERE owner_user_id=$1::uuid AND release_commit_sha=$2 AND expires_at>now()
  ORDER BY observed_at DESC LIMIT 1`,[ownerId,sha]);
+  const durable=institutionalReleaseMode()==="DURABLE_CODE_V1";
   const review=await db.query(`
  SELECT v.review_id::text,v.reviewer_user_id::text,v.review_url,v.evidence_digest,v.expires_at
  FROM private.strata_protective_release_reviews v
  JOIN private.strata_protective_release_qualification q ON q.qualification_id=v.qualification_id
- WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.review_scope=$3
+ WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2
+ ${durable?"AND v.review_scope='DURABLE_CODE_V1'":""}
  AND v.expires_at>now() AND q.expires_at>now()
- ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha,
- institutionalReleaseMode()==="DURABLE_CODE_V1"?"DURABLE_CODE_V1":"TWO_HOUR"]);
-  const durable= institutionalReleaseMode()==="DURABLE_CODE_V1";
+ ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
   const active=durable
     ? await db.query(`
  SELECT approval_id::text AS release_id,NULL::timestamptz AS expires_at
@@ -234,12 +234,17 @@ export async function attestProtectiveReleaseReview(
   if(already.rows.length)return deny("review_already_recorded");
   const digest=hash({sha,ownerId,reviewerId:actorId,
    qualificationId:qid,qualificationDigest:q.rows[0]?.evidence_digest,reviewUrl:url,note,reviewScope});
-  const inserted=await client.query(`
+  const inserted=await client.query(durable?`
  INSERT INTO private.strata_protective_release_reviews
  (qualification_id,release_commit_sha,reviewer_user_id,owner_user_id,review_url,review_note,evidence_digest,review_scope)
  VALUES($1::uuid,$2,$3::uuid,$4::uuid,$5,$6,$7,$8)
+ RETURNING review_id::text AS id,expires_at`:`
+ INSERT INTO private.strata_protective_release_reviews
+ (qualification_id,release_commit_sha,reviewer_user_id,owner_user_id,review_url,review_note,evidence_digest)
+ VALUES($1::uuid,$2,$3::uuid,$4::uuid,$5,$6,$7)
  RETURNING review_id::text AS id,expires_at`,
- [qid,sha,actorId,ownerId,url,note,digest,reviewScope]);
+ durable?[qid,sha,actorId,ownerId,url,note,digest,reviewScope]:
+ [qid,sha,actorId,ownerId,url,note,digest]);
   if(inserted.rows.length!==1)return deny("independent_review_not_recorded");
   await client.query("COMMIT");committed=true;
   return {ok:true,reason:"independent_release_review_recorded",
@@ -312,7 +317,8 @@ export async function authorizeProtectiveRelease(
      Number(a.configured_stake_cents)*10000>Number(a.cash_micros))
     return deny("approved_stake_or_cash_not_ready");
   const review=await client.query(`
- SELECT r.review_id::text,r.reviewer_user_id::text,r.review_url,r.evidence_digest,r.review_scope,
+ SELECT r.review_id::text,r.reviewer_user_id::text,r.review_url,r.evidence_digest,
+        ${durable?"r.review_scope":"\'TWO_HOUR\'::text AS review_scope"},
         q.evidence_digest AS qualification_digest
  FROM private.strata_protective_release_reviews r
  JOIN private.strata_protective_release_qualification q ON q.qualification_id=r.qualification_id
