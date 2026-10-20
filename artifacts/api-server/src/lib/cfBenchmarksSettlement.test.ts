@@ -63,6 +63,15 @@ test("rejects incomplete data outside final minute or wrong index",()=>{
     assert.equal(parseKalshiBrtiQuarterHourFrame(example,tick+100).ok,false);
   }
 });
+test("accepts vendor exact open start boundary of the last minute",()=>{
+  const r=parseKalshiBrtiQuarterHourFrame(websocket({
+    start:quarterClose-60_000,
+    ts:quarterClose-59_000,
+    count:1,
+    end:quarterClose-59_000,
+  }),quarterClose-58_900);
+  assert.equal(r.ok,true);
+});
 test("rejects stale or future-dated source ticks",()=>{
   assert.equal(parseKalshiBrtiQuarterHourFrame(websocket(),tick+6_000).ok,false);
   assert.equal(parseKalshiBrtiQuarterHourFrame(websocket(),tick-4_000).ok,false);
