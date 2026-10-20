@@ -614,6 +614,7 @@ export function createDatabaseUserScopePort(
       if (!account.executionEnabled) {
         return refused(userId, "execution_not_enabled", account);
       }
+      if (!options.session) return refused(userId, "worker_not_scheduled", account);
       if (action === "ARM") {
         // ARM is an authorization/readiness state, never a worker lifecycle
         // action. The previously shared START path could place orders on ARM.
@@ -627,7 +628,6 @@ export function createDatabaseUserScopePort(
           }),
         };
       }
-      if (!options.session) return refused(userId, "worker_not_scheduled", account);
       const scheduled = await options.session.start({ userId, accountId: account.id, action });
       if (!scheduled.workerStarted || options.session.isScheduled(userId, account.id) !== true) {
         return refused(userId, scheduled.reason || "worker_not_scheduled", account);
