@@ -312,12 +312,14 @@ export function createProductionPersonalSession(
           minimumExitMicros:approvedFloorMicros,
           readMarket:(m,side)=>session.exchange.market(m,side),
         });
-        if(result.state!=="RECONCILED"){
-          // An UNKNOWN IOC (including a committed marker with no POST) must
-          // not be followed by another outbound exit or fresh entry.
-          state.entriesAuthorized=false;
+        // The protective audit is distinct from the legacy V13 financial
+        // ledger. Even a successful authenticated IOC reconciliation must
+        // stop further live processing until the financial-intent ledger is
+        // reconciled to the same order/fills/cash/position evidence.
+        state.entriesAuthorized=false;
+        if(result.state!=="RECONCILED")
           throw new Error("protective_exit_requires_recovery");
-        }
+        throw new Error("protective_exit_financial_ledger_reconciliation_required");
       },
       // Only the backend-held, authenticated vault signer can read UNKNOWN
       // protective-exit history. Browser routes never receive this callback
