@@ -57,7 +57,7 @@ test("NO position uses complementary YES book bid while honoring approved NO flo
     reason:"no_provider_inventory"};
   },
  });
- assert.equal(result.state,"BLOCKED");assert.equal(checked,true);
+ assert.equal(result.state,"BLOCKED");assert.equal(checked,true,result.reason);
  assert.equal(result.postAttempted,false);
 });
 test("missing depth and below-floor quotes produce no reservation or network attempt",async()=>{
