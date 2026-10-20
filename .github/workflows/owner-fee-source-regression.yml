@@ -25,6 +25,10 @@ jobs:
   safety:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Offline unit suites that bundle server modules require a configured URL
+    # at import time; this unreachable placeholder never touches live Supabase.
+    env:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/unreachable
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
