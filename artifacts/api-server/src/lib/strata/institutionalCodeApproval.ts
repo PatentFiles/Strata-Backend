@@ -15,7 +15,11 @@ export function institutionalReleaseMode(env: NodeJS.ProcessEnv=process.env):Ins
   return env[INSTITUTIONAL_APPROVAL_FLAG]==="true"?"DURABLE_CODE_V1":"LEGACY_TWO_HOUR";
 }
 
-/** START and continuous new-entry gate: exact code + fresh account evidence. */
+/** Code/admission gate. Do not demand a *recent* reconciliation before
+ * START, because a stopped process cannot refresh its own ledger heartbeat.
+ * The owner session reads authenticated Kalshi evidence on START, and the
+ * V13 executor separately requires a fresh <=15s reconciliation at every
+ * prepared and final order fence. This SQL does NOT authorize an entry. */
 export const INSTITUTIONAL_ENTRY_SQL=`
  SELECT c.approval_id::text AS release_id
  FROM private.strata_durable_code_approvals c
@@ -28,7 +32,6 @@ export const INSTITUTIONAL_ENTRY_SQL=`
  AND c.owner_approver_id=$2::uuid
  AND a.commissioned=true AND a.execution_enabled=true AND a.kill_switch=false
  AND a.blocked_reason IS NULL AND a.cash_precision_verified=true
- AND a.reconciled_at>now()-interval '15 seconds' AND a.reconciled_at<=now()
  AND a.subaccount=1 AND a.exchange_index=2 AND a.reserved_micros>=0
  AND a.fee_artifact_digest ~ '^[a-f0-9]{64}$'
  AND p.state='APPROVED'
@@ -43,6 +46,25 @@ export const INSTITUTIONAL_ENTRY_SQL=`
  * The existing signed-exit transaction independently enforces exact owner,
  * lease, position, fee, one-use marker and current global/account kill.
  */
+/** Operational health/diagnostic query only; must not become a standalone
+ * authority to POST. Final signed order paths already enforce live current
+ * market fees, lease, account state and exchange reconciliation. */
+export const INSTITUTIONAL_OPERATIONAL_SQL=`
+ SELECT a.id,a.reconciled_at,a.blocked_reason,a.cash_micros,a.reserved_micros,
+        g.live_execution_enabled,g.manual_kill_switch,
+        p.state AS policy_state
+ FROM public.v13_production_account a
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+ JOIN public.live_execution_config g ON g.id='singleton'
+ WHERE a.owner_user_id=$1::uuid AND a.commissioned=true
+ AND a.execution_enabled=true AND a.kill_switch=false
+ AND a.blocked_reason IS NULL AND a.cash_precision_verified=true
+ AND a.reconciled_at>now()-interval '15 seconds'
+ AND a.reconciled_at<=now()
+ AND p.state='APPROVED'
+ AND g.live_execution_enabled=true AND g.manual_kill_switch=false
+ LIMIT 2`;
+
 export const INSTITUTIONAL_EXIT_JOIN=`
  JOIN private.strata_durable_code_approvals v
    ON v.release_commit_sha=$1 AND v.owner_user_id=a.owner_user_id`;
