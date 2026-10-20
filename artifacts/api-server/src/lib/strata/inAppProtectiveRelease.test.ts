@@ -157,7 +157,7 @@ test("explicit reviewed zero-exposure recovery is atomic, auditable and creates 
   reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
  },{db:h.db,sha:()=>SHA});
  assert.equal(r.ok,true,JSON.stringify(r));
- assert.equal(r.provisionalFreezeRepaired,true);
+ assert.equal("provisionalFreezeRepaired" in r && r.provisionalFreezeRepaired,true);
  const release=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
  const repair=h.executed.findIndex(s=>s.includes("SET blocked_reason=NULL"));
  const audit=h.executed.findIndex(s=>s.includes("OWNER_COMMISSIONING_FREEZE_REPAIR"));
