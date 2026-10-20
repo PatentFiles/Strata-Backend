@@ -14,6 +14,7 @@ on:
       - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
       - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
       - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/strata/protectiveExitStartupRelease*'
       - 'artifacts/api-server/src/lib/strata/workerUncertainOrderGate*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - 'sql/strata_fee_source_policy_independent_reviews.sql'
@@ -144,6 +145,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/userScopeDatabase.test.ts --bundle --platform=node --format=cjs --outfile=dist/userScopeDatabase.test.cjs --external:express --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
       - name: Ensure ARM never schedules a worker and START still requires ownership
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test pnpm --filter @workspace/api-server exec node --test dist/userScopeDatabase.test.cjs
+      - name: Bundle exact deployed protective-release START preflight
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/protectiveExitStartupRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/protectiveExitStartupRelease.test.cjs
+      - name: Ensure no START without approved deployed SHA and signed EXIT release
+        run: NODE_ENV=test node --test artifacts/api-server/dist/protectiveExitStartupRelease.test.cjs
       - name: Bundle owned protective exit book and floor tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownedProtectiveExitOrder.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedProtectiveExitOrder.test.cjs
       - name: Test live reduce-only YES/NO exits, liquidity caps and bad evidence
