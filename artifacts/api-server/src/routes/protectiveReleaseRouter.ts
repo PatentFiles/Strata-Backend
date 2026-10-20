@@ -1,7 +1,7 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   authorizeProtectiveRelease,attestProtectiveReleaseReview,
-  pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,
+  pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,revokeDurableCodeApproval,
 } from "../lib/strata/inAppProtectiveRelease";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
 
@@ -50,5 +50,11 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const result=await authorizeProtectiveRelease(actor.subject,req.body);
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
- return router;
+ router.post("/code-approval/revoke",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const result=await revokeDurableCodeApproval(actor.subject,req.body);
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+  return router;
 }
