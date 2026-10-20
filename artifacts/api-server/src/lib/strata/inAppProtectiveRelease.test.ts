@@ -39,6 +39,8 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   // before generic SELECT history mocks or this test would falsely refuse.
   if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
+  if(sql.includes("AS intents,")||sql.includes(") intents,"))
+   return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_release_qualification"))
    return {rows:[{id:QID,expires_at:"2026-10-20T06:00:00Z"}]};
@@ -61,8 +63,6 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
      review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",review_scope:process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED==="true"?"DURABLE_CODE_V1":"TWO_HOUR",
      evidence_digest:DIGEST,qualification_digest:DIGEST}]};
   if(sql.includes("FROM auth.users u JOIN public.profiles p"))return {rows:input.permit===false?[]:[{"?column?":1}]};
-  if(sql.includes("AS intents,")||sql.includes(") intents,"))
-   return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   if(sql.includes("INSERT INTO private.strata_durable_code_approvals"))
     return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:null}]};
   if(sql.includes("FROM private.strata_protective_exit_release"))return {rows:[]};
