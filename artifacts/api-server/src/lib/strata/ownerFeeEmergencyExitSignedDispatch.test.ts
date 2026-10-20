@@ -18,9 +18,10 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  reservationId:RES,material:{keyId:"ephemeral-regression-only",privateKey:signingKey},
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
- marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;failPersist?:boolean}={}){
- const calls:{fee:number;mark:number;post:number;read:number;sql:string[]}={
-   fee:0,mark:0,post:0,read:0,sql:[],
+ marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;
+ failPersist?:boolean;failCommit?:boolean}={}){
+ const calls:{fee:number;mark:number;post:number;read:number;releases:number;sql:string[]}={
+   fee:0,mark:0,post:0,read:0,releases:0,sql:[],
  };
  let consumed=false;
  const receipt={httpStatus:201,order_id:"order-1",client_order_id:CID,
@@ -29,6 +30,7 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
   ts_ms:1792200000000};
  const db={connect:async()=>({query:async (sql:string)=>{
   calls.sql.push(sql);
+  if(sql==="COMMIT"&&input.failCommit)throw Error("commit_acknowledgement_lost");
   if(sql.startsWith("SELECT r.reservation_id")){
    assert.match(sql,/v\.independent_reviewer_id <> a\.owner_user_id/);
    assert.match(sql,/r\.state='UNKNOWN'/);
@@ -39,7 +41,7 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    return {rows:input.denyLock?[]:[{reservation_id:RES}]};
   }
   return {rows:[]};
- },release:()=>{}})};
+ },release:()=>{calls.releases++}})};
  const run=()=>dispatchReviewedProtectiveExitOnce(identity,{
    db,verifyFee:(async()=>{
      calls.fee++;
@@ -52,7 +54,11 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
      return {unknownRecorded:true,clientOrderId:CID,
        mayRetry:false,transportAuthorized:false};
    }) as never,
-   post:input.rawSigned?undefined:async()=>{calls.post++;if(input.reject)throw Error("timed out");
+   post:input.rawSigned?undefined:async()=>{
+     // Kills/revocations must never wait on row locks across network I/O.
+     assert.ok(calls.sql.includes("COMMIT"),"SQL commit must precede POST");
+     assert.equal(calls.releases,1,"release account/kill/lease locks before POST");
+     calls.post++;if(input.reject)throw Error("timed out");
      return input.receipt===false?null:receipt;
    },
    persistReconciled:async()=>({committed:input.failPersist!==true,mayRetry:false,tradingAuthorized:false,reason:"test"}),
@@ -181,4 +187,28 @@ test("a valid exchange fill without durable audited terminal commit remains UNKN
  assert.equal(h.calls.post,1);
  await h.run();
  assert.equal(h.calls.post,1);
+});
+
+test("failed or ambiguous final fence COMMIT never posts and is never retryable",async()=>{
+ const h=harness({failCommit:true});
+ const result=await h.run();
+ assert.equal(result.state,"UNKNOWN");
+ assert.equal(result.postAttempted,false);
+ assert.equal(h.calls.post,0);
+ assert.equal(h.calls.releases,1);
+ assert.ok(h.calls.sql.includes("ROLLBACK"));
+ const repeat=await h.run();
+ assert.equal(repeat.postAttempted,false);
+ assert.equal(h.calls.post,0);
+});
+
+test("kill/lease/review database row locks are released before network transport",async()=>{
+ const h=harness({receipt:false});
+ const r=await h.run();
+ assert.equal(r.state,"UNKNOWN");
+ assert.equal(r.postAttempted,true);
+ assert.equal(h.calls.post,1);
+ assert.equal(h.calls.releases,1);
+ assert.ok(h.calls.sql.indexOf("COMMIT")>=0);
+ assert.ok(h.calls.sql.indexOf("COMMIT")>h.calls.sql.findIndex(q=>q.startsWith("SELECT r.reservation_id")));
 });
