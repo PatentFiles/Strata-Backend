@@ -307,6 +307,10 @@ export function createProductionPersonalSession(
         // prepareExit is financial-intent preparation ONLY: it does not send
         // an order. The same sealed V13 client ID must be used by the separate
         // one-use signed dispatcher so fills/cash/positions are attributable.
+        // Once an EXIT financial intent starts preparation, no further fresh
+        // entries may be scheduled until reconciled, even if provider reads or
+        // subsequent reservation/dispatch validation throws.
+        state.entriesAuthorized=false;
         const financialIntentId=await session.executor.prepareExit(
           position.id,approvedFloorMicros/1_000_000,
         );
