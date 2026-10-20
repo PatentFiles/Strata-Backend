@@ -102,8 +102,10 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  SELECT v.review_id::text,v.reviewer_user_id::text,v.review_url,v.evidence_digest,v.expires_at
  FROM private.strata_protective_release_reviews v
  JOIN private.strata_protective_release_qualification q ON q.qualification_id=v.qualification_id
- WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.expires_at>now()
- AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
+ WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.review_scope=$3
+ AND v.expires_at>now() AND q.expires_at>now()
+ ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha,
+ institutionalReleaseMode()==="DURABLE_CODE_V1"?"DURABLE_CODE_V1":"TWO_HOUR"]);
   const durable= institutionalReleaseMode()==="DURABLE_CODE_V1";
   const active=durable
     ? await db.query(`
