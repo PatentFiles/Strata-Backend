@@ -26,7 +26,7 @@ test("owner SHA release requires an owner-specific, independent, revocable revie
  assert.match(INSTITUTIONAL_ENTRY_SQL,/c.owner_approver_id=\$2::uuid/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/a.blocked_reason IS NULL/);
  assert.doesNotMatch(INSTITUTIONAL_ENTRY_SQL,/reconciled_at>now/,"START must not deadlock on stale heartbeat");
- assert.match(INSTITUTIONAL_OPERATIONAL_SQL,/a.reconciled_at>now\\(\\)-interval '15 seconds'/);
+ assert.match(INSTITUTIONAL_OPERATIONAL_SQL,/a.reconciled_at>now\(\)-interval '15 seconds'/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/p.state='APPROVED'/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/g.manual_kill_switch=false/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/state IN \('DISPATCHED','UNKNOWN'\)/);
