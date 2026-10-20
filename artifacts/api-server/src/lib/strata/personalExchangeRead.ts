@@ -18,6 +18,16 @@ const HISTORICAL_FILL_PATH = "/trade-api/v2/historical/fills";
 const PAIR_QUERY = "limit=200&subaccount=1&exchange_index=2";
 const PAGE_CAP = 20;
 
+/** Read unsettled and settled (non-archived) market inventory. Kalshi's
+ * default positions read is unsettled-only; a fully reduced IOC can disappear
+ * from that default view while order/fill history remains. Keep the
+ * exchange's nonzero-position OR traded-count filter, and require complete
+ * cursor pagination; a missing ticker STILL cannot be imputed as zero.
+ */
+export function ownedPositionHistoryQuery(cursor: string | null = null): string {
+ return `?${PAIR_QUERY}&settlement_status=all&count_filter=position%2Ctotal_traded${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`;
+}
+
 export interface OwnedKalshiRead {
   ok: true;
   observedAtMs: number;
@@ -212,7 +222,7 @@ async function pages(
   let cursor: string | null = null;
   const seen = new Set<string>();
   for (let page = 0; page < PAGE_CAP; page += 1) {
-    const query = `?${PAIR_QUERY}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const query = path === POSITION_PATH ? ownedPositionHistoryQuery(cursor) : `?${PAIR_QUERY}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     let payload: unknown;
     try {
       payload = await get(creds, path, query);
