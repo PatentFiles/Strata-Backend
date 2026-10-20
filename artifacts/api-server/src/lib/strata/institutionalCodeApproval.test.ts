@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { INSTITUTIONAL_ENTRY_SQL, INSTITUTIONAL_EXIT_JOIN,
   INSTITUTIONAL_EXIT_PREDICATE, LEGACY_EXIT_JOIN, LEGACY_EXIT_PREDICATE,
-  institutionalReleaseMode, INSTITUTIONAL_OPERATIONAL_SQL } from "./institutionalCodeApproval";
+  institutionalReleaseMode, INSTITUTIONAL_OPERATIONAL_SQL, assertInstitutionalFinalEntryApproval } from "./institutionalCodeApproval";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 
 const owner="11111111-1111-4111-8111-111111111111";
@@ -60,4 +60,14 @@ test("reduce-only signed exit remains fenced by durable SHA + owner and one-use 
  assert.match(INSTITUTIONAL_EXIT_PREDICATE,/v.owner_approver_id=a.owner_user_id/);
  assert.match(LEGACY_EXIT_JOIN,/strata_protective_exit_release v/);
  assert.match(LEGACY_EXIT_PREDICATE,/v.expires_at > now\(\)/);
+});
+
+test("final entry wire requires current checked approval; revoked, missing and failed checks never POST",async()=>{
+ let calls=0;
+ await assertInstitutionalFinalEntryApproval("LEGACY_TWO_HOUR",null);
+ await assert.rejects(()=>assertInstitutionalFinalEntryApproval("DURABLE_CODE_V1",null),/revoked_or_unavailable/);
+ await assert.rejects(()=>assertInstitutionalFinalEntryApproval("DURABLE_CODE_V1",async()=>{calls++;return false}),/revoked_or_unavailable/);
+ await assert.rejects(()=>assertInstitutionalFinalEntryApproval("DURABLE_CODE_V1",async()=>{calls++;throw Error("DB unavailable")}),/revoked_or_unavailable/);
+ await assertInstitutionalFinalEntryApproval("DURABLE_CODE_V1",async()=>{calls++;return true});
+ assert.equal(calls,3);
 });
