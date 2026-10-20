@@ -12,7 +12,7 @@ export const PROTECTIVE_STARTUP_RELEASE_SQL = `
  WHERE v.release_commit_sha=$1::text
    AND v.state='approved'
    AND v.revoked_at IS NULL
-   AND v.created_at<=now() AND v.expires_at>now()
+   AND v.created_at<=now() AND v.expires_at>now()+interval '20 minutes'
    AND v.independent_reviewer_id <> $2::uuid
    AND v.operator_approver_id <> v.independent_reviewer_id
  LIMIT 2`;
