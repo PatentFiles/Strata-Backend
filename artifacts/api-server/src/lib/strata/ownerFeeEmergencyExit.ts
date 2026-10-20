@@ -79,6 +79,8 @@ export interface EmergencyExitDecision {
   needsIndependentApproval: true;
   /** Indicates only whether the presented read-only evidence was internally consistent. */
   diagnosticEligible: boolean;
+  verifiedPositionFp?: string;
+  verifiedPositionObservedAtMs?: number;
 }
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -179,5 +181,6 @@ export function inspectEmergencyExitCandidate(
     return DENY("emergency_exit_exact_fee_evidence_unverified");
   // No signed live or risk-bearing authority is issued here.
   return {...DENY("emergency_exit_candidate_verified_requires_fenced_dispatch"),
-    diagnosticEligible:true};
+    diagnosticEligible:true,verifiedPositionFp:evidence.positionFp,
+    verifiedPositionObservedAtMs:evidence.positionsObservedAtMs};
 }

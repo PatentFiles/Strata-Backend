@@ -6,6 +6,7 @@ import { decodePolicy, ProductionLedger, type Account } from "../v13-production/
 import { encodeProductionOrder } from "../v13-production/transport";
 import { canonical, requireProof, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import { ProductionWorker } from "../v13-production/worker";
+import type { ProtectiveExitDispatch } from "../v13-production/consumer";
 import { dedicatedSignerFingerprint, PRODUCTION_EXCHANGE_INDEX, PRODUCTION_SUBACCOUNT } from "./commissioning";
 import { executionBoundaryAllowsDispatch } from "./accountScopedExecution";
 import { validateMarketEvidence } from "./personalMarketAdapter";
@@ -257,6 +258,8 @@ export function openOwnedExecutionSession(input: {
   intervalMs?: number;
   fault?: (stage: string) => void;
   entriesOpen?: () => boolean;
+  recoverProtectiveExits?: () => Promise<void>;
+  dispatchProtectiveExit?: ProtectiveExitDispatch;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -275,7 +278,8 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
-  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {}, input.entriesOpen);
+  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {},
+    input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }
 

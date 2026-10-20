@@ -11,6 +11,10 @@ import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
+import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
+import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
+import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -283,7 +287,90 @@ export function createProductionPersonalSession(
       now,
       state,
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
+      // This is the only LIVE exit producer. The source selection comes from
+      // the unchanged strategy and owned PostgreSQL position, NOT a browser.
+      // The signer and lease are captured from this authenticated vault session.
+      dispatchProtectiveExit: async selection => {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_release_disabled");
+        }
+        if (state.accountKill || state.globalKill || state.presentedToken !== claimed.fencingToken) {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_worker_lease_or_kill_changed");
+        }
+        try {
+          // Fresh entries are halted as soon as an outbound EXIT intent is
+          // prepared. Never initiate a second entry when exit evidence is
+          // uncertain or the exchange account is being reduced.
+          state.entriesAuthorized = false;
+          // Financial preparation commits an accountable V13 SELL intent but
+          // DOES NOT send an order. It independently rechecks position,
+          // strategy, approved policy/fees, book, stake and exit floor.
+          const financialId = await session.executor.prepareExit(
+            selection.positionId,selection.minimumExitMicros/1_000_000,
+          );
+          const financialRows = await db.query(
+            "SELECT request FROM public.v13_production_intent "+
+            "WHERE id=$1 AND account_id=$2 AND parent_id=$3 "+
+            "AND kind='EXIT' AND state='PREPARED' AND terminal=false",
+            [financialId,input.accountId,selection.positionId],
+          );
+          const value=financialRows.rows[0]?.request;
+          const request=(typeof value==="string"?JSON.parse(value):value) as Request;
+          if(financialRows.rows.length!==1||!request||
+             typeof request!=="object"||Array.isArray(request))
+            throw Error("protective_exit_v13_intent_unverified");
+          const market = await session.executor.exchange.market(selection.market, selection.side);
+          const order = sealedFinancialProtectiveExitOrder(selection,request,market);
+          const lease = { holderId, fencingToken: claimed.fencingToken };
+          const reservation = await reserveOwnedEmergencyExitProof(
+            input.userId, input.accountId, material, order, lease,
+          );
+          if (!reservation.reservationPrepared || !reservation.reservationId) {
+            throw new Error(reservation.reason);
+          }
+          // Marker PREPARED -> UNKNOWN must COMMIT before a one-use signed POST;
+          // all transport failures require exchange GET recovery, never retry.
+          const outcome = await dispatchReviewedProtectiveExitOnce({
+            ownerId: input.userId, accountId: input.accountId,
+            reservationId: reservation.reservationId, material, order, lease,
+          });
+          if (outcome.state !== "RECONCILED") throw new Error(outcome.reason);
+          // The one-use private reservation is not the V13 cash/fill ledger.
+          // Verify the latter against signed provider history before treating
+          // position/cash balances as authoritative or permitting new entries.
+          await session.executor.reconcile();
+        } catch (error) {
+          // Exposure after an ambiguous IOC is never replaced by a new entry.
+          state.entriesAuthorized = false;
+          throw error;
+        }
+      },
+      // Only the backend-held, authenticated vault signer can read UNKNOWN
+      // protective-exit history. Browser routes never receive this callback
+      // or the signer. No order submission is possible from this function.
+      recoverProtectiveExits: async () => {
+        const recovery=await reconcileOwnedProtectiveExits({
+          ownerId:input.userId,accountId:input.accountId,material,
+        },db);
+        if(!recovery.ok){
+          state.entriesAuthorized=false;
+          throw new Error(recovery.reason);
+        }
+      },
       readSnapshot: async () => {
+        // A protective reservation may become PREPARED/UNKNOWN while this
+        // worker is already scheduled. Gate EVERY subsequent snapshot, not
+        // just START, so another entry cannot race an unresolved exit.
+        const unresolvedNow=await readUnresolvedIntentMode(
+          (sql,params)=>db.query(sql,params),input.accountId,
+        );
+        if(!unresolvedNow.ok){
+          state.entriesAuthorized=false;
+          throw new Error("unresolved_intent_count_unverified");
+        }
+        if(unresolvedNow.mode==="recovery")state.entriesAuthorized=false;
         const beat = await heartbeatLease(db, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),

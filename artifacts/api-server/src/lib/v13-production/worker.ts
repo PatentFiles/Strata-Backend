@@ -1,5 +1,5 @@
 import { ProductionExecutor } from "./executor";
-import { consumeOwnedPosition } from "./consumer";
+import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 
 /** Explicit lifecycle only. API startup neither constructs nor starts this worker. */
 export class ProductionWorker {
@@ -8,14 +8,21 @@ export class ProductionWorker {
   private recoveryOnly = false;
   constructor(readonly executor: ProductionExecutor, readonly intervalMs = 2_500,
     readonly report: (error: unknown) => void = () => {},
-    readonly entriesOpen: () => boolean = () => true) {}
+    readonly entriesOpen: () => boolean = () => true,
+    /** Trusted, never-submitting UNKNOWN protective-exit recovery pass. */
+    readonly recoverProtectiveExits: () => Promise<void> = async () => {},
+    /** Trusted owner-scoped IOC exit, never obtained from user requests. */
+    readonly dispatchProtectiveExit?: ProtectiveExitDispatch) {}
   async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
+      // Resolve or retain UNKNOWN protective exits BEFORE ordinary reconciliation
+      // and before any chance of a new entry. Failures stop this tick; never POST.
+      await this.recoverProtectiveExits();
       await this.executor.reconcile(); // restart first; never replay dispatched POSTs
       if (this.recoveryOnly) return;
-      await consumeOwnedPosition(this.executor);
+      await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
       if (!this.entriesOpen()) return;
       const ids = (await this.executor.ledger.pool.query(`SELECT id FROM forward_test_evaluations
         WHERE evaluation_source='paper' AND qualifying_trigger=true AND fresh_cross=true
@@ -30,6 +37,7 @@ export class ProductionWorker {
   }
   async start(): Promise<void> {
     if (this.timer) return;
+    await this.recoverProtectiveExits();
     await this.executor.reconcile();
     await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
     this.recoveryOnly = false;
@@ -39,7 +47,8 @@ export class ProductionWorker {
     if (this.timer) return;
     await this.executor.ledger.readAccount();
     this.recoveryOnly = true;
-    try { await this.executor.reconcile(); } catch (error) { this.report(error); }
+    try { await this.recoverProtectiveExits(); await this.executor.reconcile(); }
+    catch (error) { this.report(error); }
     this.schedule();
   }
   private schedule(): void {

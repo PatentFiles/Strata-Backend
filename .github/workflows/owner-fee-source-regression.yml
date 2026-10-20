@@ -25,6 +25,10 @@ jobs:
   safety:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Offline unit suites that bundle server modules require a configured URL
+    # at import time; this unreachable placeholder never touches live Supabase.
+    env:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/unreachable
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -104,3 +108,51 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitSandboxCycle.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitSandboxCycle.test.cjs
       - name: Validate sandbox-only zero/partial/full-fill and uncertain responses
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitSandboxCycle.test.cjs
+      - name: Bundle version-bound one-shot protective IOC dispatch tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitSignedDispatch.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitSignedDispatch.test.cjs
+      - name: Test durable UNKNOWN before signed one-shot, isolated fills and no blind retry
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitSignedDispatch.test.cjs
+      - name: Bundle independently scoped protective-exit recovery history tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitAuthenticatedRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitAuthenticatedRecovery.test.cjs
+      - name: Validate immutable baseline, full scoped fills and fail-closed recovery
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitAuthenticatedRecovery.test.cjs
+      - name: Bundle transactionally audited protective exit reconciliation tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitReconciliationCommit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitReconciliationCommit.test.cjs
+      - name: Test committed terminal state, duplicate prevention and ambiguity handling
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitReconciliationCommit.test.cjs
+      - name: Bundle restart reconciliation no-submit orchestration tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRestartRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRestartRecovery.test.cjs
+      - name: Test restart signed history and irreversible one-use audited recovery
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRestartRecovery.test.cjs
+      - name: Bundle authenticated full-state position history query tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangePositionQuery.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangePositionQuery.test.cjs
+      - name: Test Kalshi complete market position query
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/personalExchangePositionQuery.test.cjs
+      - name: Bundle immutable protective worker recovery tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitWorkerRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Test immutable worker protective recovery snapshots
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Bundle approved historical API fee source protective exit tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/reviewedProtectiveExitFee.test.ts --bundle --platform=node --format=cjs --outfile=dist/reviewedProtectiveExitFee.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+      - name: Test independent approved model and fresh official metadata fail closed
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/reviewedProtectiveExitFee.test.cjs
+      - name: Bundle protective V2 YES and NO provider-history compatibility tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangeProtectiveSnapshot.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangeProtectiveSnapshot.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+      - name: Test omitted reduce-only echo, partial fills and explicit contradictions
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/personalExchangeProtectiveSnapshot.test.cjs
+      - name: Bundle authenticated ARM versus START lifecycle regression
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/userScopeDatabase.test.ts --bundle --platform=node --format=cjs --outfile=dist/userScopeDatabase.test.cjs --external:express --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+      - name: Ensure ARM never schedules a worker and START still requires ownership
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test pnpm --filter @workspace/api-server exec node --test dist/userScopeDatabase.test.cjs
+      - name: Bundle owned protective exit book and floor tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownedProtectiveExitOrder.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedProtectiveExitOrder.test.cjs
+      - name: Test live reduce-only YES/NO exits, liquidity caps and bad evidence
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/ownedProtectiveExitOrder.test.cjs
+      - name: Bundle worker recovery ordering tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerProtectiveRecovery.test.cjs
+      - name: Verify protected recovery happens before V13 execution
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/workerProtectiveRecovery.test.cjs
+      - name: Bundle V13 financial-intent protective exit tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownedProtectiveFinancialIntent.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedProtectiveFinancialIntent.test.cjs
+      - name: Test sealed financial-intent protective exit pricing
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownedProtectiveFinancialIntent.test.cjs

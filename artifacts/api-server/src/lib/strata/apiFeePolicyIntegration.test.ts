@@ -73,13 +73,22 @@ test("migration creates empty service-only records; no client grants, approvals 
  assert.doesNotMatch(sql,/INSERT INTO|UPDATE v13_production_account|live_execution_enabled\s*=\s*true/);
 });
 
-test("monetary evidence is revalidated at Step 9, Step 11 and the final order fence",()=>{
+test("signed API fee model is rechecked at Step 9, Step 11 and the final order fence without PDF dependency",()=>{
  const owner=read("personalAccountActivation.ts");
  const fence=read("guardedReviewedApiFeeWire.ts");
- assert.match(owner,/verifyMonetaryFeeContract\("STEP_9"\)/);
- assert.match(owner,/verifyMonetaryFeeContract\("STEP_11"\)/);
- assert.match(fence,/deps\.verifyMonetary\?\?verifyMonetaryFeeContract\)\("ORDER_ENTRY",ticker\)/);
- assert.match(fence,/api_fee_final_order_monetary_source_closed/);
+ const api9=owner.split("if(apiRequested){")[1]?.split("}else if(altRequested)")[0] ?? "";
+ const api11=owner.split("if(apiIdentity){")[1]?.split("}else if(operatorIdentity)")[0] ?? "";
+ assert.match(api9,/verifyReviewedApiFeeSourceStage/);
+ assert.match(api11,/verifyReviewedApiFeeSourceStage/);
+ assert.doesNotMatch(api9,/verifyMonetaryFeeContract/);
+ assert.doesNotMatch(api11,/verifyMonetaryFeeContract/);
+ // The legacy owner-verified/standing official PDF policies still require
+ // the original independent official monetary fee verifier.
+ assert.match(owner,/input\.verifyMonetary\?\?verifyMonetaryFeeContract/);
+ assert.match(fence,/verifyReviewedApiFeeSourceStage/);
+ assert.match(fence,/checked\.identity\.feePolicyVersion/);
+ assert.match(fence,/checked\.identity\.formulaVersion/);
+ assert.match(fence,/checked\.identity\.digest/);
  assert.match(fence,/if\(order\.reduce_only!==true\)/);
  assert.match(fence,/live\.manual_kill_switch=false/);
 });

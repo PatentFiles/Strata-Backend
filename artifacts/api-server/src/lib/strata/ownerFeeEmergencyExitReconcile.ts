@@ -22,6 +22,17 @@ export type IocRecoveryObservation = {
   orderAndFillHistoryMatched: boolean;
   /** No simultaneous orders, fills or transfer activity in this market. */
   isolatedPositionDelta: boolean;
+  /** Authenticated GET order when the original POST response was lost.
+   * This is NOT a witnessed HTTP response or permission to retry.
+   */
+  authenticatedOrder?: {
+    order_id: unknown;
+    client_order_id: unknown;
+    status: unknown;
+    initial_count_fp: unknown;
+    fill_count_fp: unknown;
+    remaining_count_fp: unknown;
+  };
   /** Null when no conclusive exchange response; never treat as no fill. */
   response: null | {
     httpStatus: number;
@@ -79,16 +90,52 @@ export function reconcileIocEmergencyExit(x:IocRecoveryObservation):IocRecoveryR
   if(!x.completeExchangeHistory||!x.exactMarketAndAccountMatched||
      !x.orderAndFillHistoryMatched||!x.isolatedPositionDelta)
     return deny("UNKNOWN","emergency_reconcile_exchange_history_unproven");
-  if(!x.response)
+  // A terminal Kalshi GET order reports the quantity STILL RESTING on the
+  // book. For IOC cancellation that value may be 0 despite an unfilled amount.
+  // Keep it distinct from the requested-minus-filled unexecuted quantity.
+  // Never reconstruct a witnessed HTTP 201 from a GET response.
+  let filled:bigint|null=null;
+  let unfilled:bigint|null=null;
+  if(x.response){
+    const r=x.response;
+    if(r.httpStatus!==201||r.client_order_id!==x.clientOrderId||
+       typeof r.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(r.order_id)||
+       typeof r.ts_ms!=="number"||!Number.isSafeInteger(r.ts_ms)||r.ts_ms<=0)
+      return deny("UNKNOWN","emergency_reconcile_exchange_receipt_invalid");
+    filled=decimal(r.fill_count);
+    const responseRemaining=decimal(r.remaining_count);
+    if(filled===null||responseRemaining===null||filled>qty||
+       responseRemaining>qty-filled)
+      return deny("UNKNOWN","emergency_reconcile_fill_count_invalid");
+    // With no independently verified terminal order, preserve stricter
+    // response-only arithmetic rather than infer a completed cancellation.
+    if(!x.authenticatedOrder&&filled+responseRemaining!==qty)
+      return deny("UNKNOWN","emergency_reconcile_fill_count_invalid");
+    unfilled=qty-filled;
+  }
+  if(x.authenticatedOrder){
+    const a=x.authenticatedOrder;
+    if(a.client_order_id!==x.clientOrderId||
+       typeof a.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(a.order_id)||
+       !["executed","canceled","cancelled"].includes(String(a.status))||
+       decimal(a.initial_count_fp)!==qty)
+      return deny("UNKNOWN","emergency_reconcile_authenticated_order_invalid");
+    const exchangeFilled=decimal(a.fill_count_fp);
+    const resting=decimal(a.remaining_count_fp);
+    // Terminal must have no resting order. Executed means fully filled;
+    // canceled IOC may be partially filled, or zero-filled.
+    if(exchangeFilled===null||resting!==0n||exchangeFilled>qty||
+       (a.status==="executed"&&exchangeFilled!==qty))
+      return deny("UNKNOWN","emergency_reconcile_terminal_quantity_invalid");
+    if(x.response&&(
+       a.order_id!==x.response.order_id||
+       exchangeFilled!==filled))
+      return deny("UNKNOWN","emergency_reconcile_receipt_history_conflict");
+    filled=exchangeFilled;
+    unfilled=qty-exchangeFilled;
+  }
+  if(filled===null||unfilled===null)
     return deny("UNKNOWN","emergency_reconcile_response_uncertain");
-  const r=x.response;
-  if(r.httpStatus!==201||r.client_order_id!==x.clientOrderId||
-     typeof r.order_id!=="string"||!/^[a-zA-Z0-9._:-]{1,128}$/.test(r.order_id)||
-     typeof r.ts_ms!=="number"||!Number.isSafeInteger(r.ts_ms)||r.ts_ms<=0)
-    return deny("UNKNOWN","emergency_reconcile_exchange_receipt_invalid");
-  const filled=decimal(r.fill_count),remaining=decimal(r.remaining_count);
-  if(filled===null||remaining===null||filled+remaining!==qty)
-    return deny("UNKNOWN","emergency_reconcile_fill_count_invalid");
   const expected=start>0n?start-filled:start+filled;
   if(expected!==finish||
      (start>0n&&(finish<0n||finish>start))||
@@ -96,5 +143,5 @@ export function reconcileIocEmergencyExit(x:IocRecoveryObservation):IocRecoveryR
     return deny("UNKNOWN","emergency_reconcile_position_change_unproven");
   // Even conclusively reconciled fills confer no authority for a second POST.
   return {...deny("RECONCILED","emergency_exit_reconciled_read_only"),
-    filledHundredths:String(filled),remainingHundredths:String(remaining)};
+    filledHundredths:String(filled),remainingHundredths:String(unfilled)};
 }

@@ -10,6 +10,7 @@ const ACCOUNT="owner-execution-2";
 const RESERVATION="22222222-2222-4222-8222-222222222222";
 const CLIENT_ID="v13p-33333333-3333-4333-8333-333333333333";
 const MARKET="KXBTC15M-26OCT161945-45";
+const NOW=Date.parse("2026-10-19T19:00:00Z");
 const ORDER:EmergencyExitOrder={
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5500",
   client_order_id:CLIENT_ID,time_in_force:"immediate_or_cancel",
@@ -18,7 +19,7 @@ const ORDER:EmergencyExitOrder={
 };
 const LEASE={holderId:"personal-22222222-2222-4222-8222-222222222222",fencingToken:7};
 
-function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"lock"|"update"|"commit";badReturn?:boolean}={}){
+function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"lock"|"update"|"financial"|"commit";badReturn?:boolean}={}){
   const events:string[]=[];
   let phase:"PREPARED"|"UNKNOWN"="PREPARED";
   const inspect=(async()=>opts.advisory===false
@@ -26,6 +27,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
        tradingAuthorized:false as const,needsIndependentApproval:true as const}
     : {ok:false as const,reason:"emergency_exit_candidate_verified_requires_fenced_dispatch",
        diagnosticEligible:true,tradingAuthorized:false as const,
+       verifiedPositionFp:"3.00",verifiedPositionObservedAtMs:NOW-100,
        needsIndependentApproval:true as const}) as typeof inspectOwnedEmergencyExitRead;
   const db={connect:async()=>({query:async(sql:string,args?:unknown[])=>{
     if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||
@@ -65,6 +67,15 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
       phase="UNKNOWN";
       return {rows:[{reservation_id:opts.badReturn?"wrong-id":RESERVATION,client_order_id:CLIENT_ID}]};
     }
+    if(sql.startsWith("UPDATE public.v13_production_intent SET state='DISPATCHED'")){
+      events.push("V13_UPDATE");
+      assert.match(sql,/client_order_id=\$2::text/);
+      assert.match(sql,/kind='EXIT'/);
+      assert.match(sql,/state='PREPARED'/);
+      assert.deepEqual(args?.slice(0,2),[ACCOUNT,CLIENT_ID]);
+      if(opts.failAt==="financial")throw Error("financial_ledger_unavailable");
+      return {rows:opts.update===false?[]:[{client_order_id:CLIENT_ID}]};
+    }
     throw new Error("unexpected_sql:"+sql.slice(0,65));
   },release:()=>events.push("RELEASE")})};
   const run=(params:{
@@ -74,7 +85,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
     params.owner??OWNER,params.account??ACCOUNT,params.reservation??RESERVATION,
     {keyId:"test",privateKey:"test"},
     params.order??ORDER,params.lease??LEASE,
-    {inspect,db,signerFingerprint:(()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint},
+    {inspect,db,now:()=>NOW,signerFingerprint:(()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint},
   );
   return {run,events,phase:()=>phase};
 }
@@ -87,7 +98,8 @@ test("durable UNKNOWN marker is committed before returning; no transport or retr
   assert.equal(result.tradingAuthorized,false);
   assert.equal(result.transportAuthorized,false);
   assert.equal(result.mayRetry,false);
-  assert.deepEqual(x.events.filter(z=>["LOCK","UPDATE","COMMIT"].includes(z)),["LOCK","UPDATE","COMMIT"]);
+  assert.deepEqual(x.events.filter(z=>["LOCK","UPDATE","V13_UPDATE","COMMIT"].includes(z)),
+   ["LOCK","UPDATE","V13_UPDATE","COMMIT"]);
   assert.equal(x.phase(),"UNKNOWN");
   assert.equal(x.events.at(-1),"RELEASE");
   const again=await x.run();
@@ -125,7 +137,7 @@ test("wrong owner, lease, order identity or unchecked advisory cannot mark UNKNO
 test("concurrent, failed and ambiguous database transitions fail closed and never grant retry",async()=>{
   for(const scenario of [
     {lock:false},{update:false},{failAt:"lock" as const},
-    {failAt:"update" as const},{failAt:"commit" as const},{badReturn:true},
+    {failAt:"update" as const},{failAt:"financial" as const},{failAt:"commit" as const},{badReturn:true},
   ]){
     const x=mock(scenario);
     const result=await x.run();

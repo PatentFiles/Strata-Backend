@@ -75,3 +75,61 @@ test("phantom position decreases, side reversal or unrelated market cannot recon
   assert.equal(reconcileIocEmergencyExit({...x,clientOrderId:"client-foreign"}).state,"REJECTED");
   assert.equal(reconcileIocEmergencyExit({...x,reducingBookSide:"bid"}).state,"REJECTED");
 });
+
+test("lost POST response can reconcile from a terminal authenticated GET order, not forged HTTP 201",()=>{
+ for(const [fill,remaining] of [["0.00","2.00"],["1.00","1.00"],["2.00","0.00"]]){
+  const x=sample(fill,remaining);
+  x.response=null;
+  x.authenticatedOrder={order_id:"order-123",client_order_id:id,
+   status:fill==="2.00"?"executed":"canceled",initial_count_fp:"2.00",fill_count_fp:fill,
+   remaining_count_fp:"0.00"};
+  const r=reconcileIocEmergencyExit(x);
+  assert.equal(r.state,"RECONCILED");
+  assert.equal(r.mayRetry,false);
+  assert.equal(r.tradingAuthorized,false);
+ }
+});
+test("incomplete authenticated GET or nonterminal orders never clear UNKNOWN",()=>{
+ const baseline=sample();
+ baseline.response=null;
+ const proof={order_id:"order-123",client_order_id:id,
+  status:"canceled",initial_count_fp:"2.00",
+  fill_count_fp:"1.00",remaining_count_fp:"0.00"};
+ for(const extra of [
+  {status:"resting"},{client_order_id:"foreign"},
+  {initial_count_fp:"3.00"},{remaining_count_fp:"1.00"},{status:"executed"},
+  {fill_count_fp:"NaN"},{order_id:""},
+ ]){
+  const result=reconcileIocEmergencyExit({...baseline,
+   authenticatedOrder:{...proof,...extra}});
+  assert.equal(result.state,"UNKNOWN");
+  assert.equal(result.mayRetry,false);
+ }
+});
+test("receipt/provider-history conflicts remain UNKNOWN even with exact inventory",()=>{
+ const x=sample();
+ x.authenticatedOrder={order_id:"foreign",client_order_id:id,
+  status:"canceled",initial_count_fp:"2.00",fill_count_fp:"1.00",
+  remaining_count_fp:"0.00"};
+ assert.equal(reconcileIocEmergencyExit(x).state,"UNKNOWN");
+});
+
+test("witnessed 201 residual and canceled GET remaining zero can independently agree",()=>{
+ const x=sample("1.00","1.00");
+ x.authenticatedOrder={order_id:"order-123",client_order_id:id,
+  status:"canceled",initial_count_fp:"2.00",fill_count_fp:"1.00",
+  remaining_count_fp:"0.00"};
+ const result=reconcileIocEmergencyExit(x);
+ assert.equal(result.state,"RECONCILED");
+ assert.equal(result.filledHundredths,"100");
+ assert.equal(result.remainingHundredths,"100");
+ assert.equal(result.mayRetry,false);
+});
+test("canceled partial fill with resting residual is not terminal proof",()=>{
+ const x=sample("1.00","1.00");
+ x.response=null;
+ x.authenticatedOrder={order_id:"order-123",client_order_id:id,
+  status:"canceled",initial_count_fp:"2.00",fill_count_fp:"1.00",
+  remaining_count_fp:"1.00"};
+ assert.equal(reconcileIocEmergencyExit(x).state,"UNKNOWN");
+});

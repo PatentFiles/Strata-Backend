@@ -1,12 +1,21 @@
 import { evaluateV13Strategy, V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 import { ProductionExecutor } from "./executor";
+
+/** Backend-owned one-shot exit transport. No HTTP/client-supplied authority. */
+export type ProtectiveExitDispatch = (selection: Readonly<{
+  positionId: string;
+  market: string;
+  side: "YES" | "NO";
+  quantityHundredths: string;
+  minimumExitMicros: number;
+}>) => Promise<void>;
 import { digest, money, requireProof } from "./types";
 
 /**
  * Feed observations are provenance, not commands. Re-evaluate the unchanged
  * champion against the separately reconciled owned production position.
  */
-export async function consumeOwnedPosition(executor: ProductionExecutor): Promise<void> {
+export async function consumeOwnedPosition(executor: ProductionExecutor, dispatchProtectiveExit?: ProtectiveExitDispatch): Promise<void> {
   const l = executor.ledger;
   const owned = (await l.pool.query(`SELECT * FROM v13_production_position
     WHERE account_id=$1 AND quantity_hundredths>0`, [l.accountId])).rows;
@@ -40,9 +49,22 @@ export async function consumeOwnedPosition(executor: ProductionExecutor): Promis
     });
     if (evaluation.decision.signal !== "EXIT" || !evaluation.decision.positionExitReason) continue;
     requireProof(evaluation.floor, "production_exit_floor_missing");
+    if (executor.exchange.mode === "LIVE") {
+      // Never send a live EXIT through the generic legacy V13 dispatcher.
+      // The owner-scoped worker supplies the only authenticated signed path;
+      // if it is unavailable, leave the existing position unchanged.
+      requireProof(dispatchProtectiveExit, "reviewed_protective_exit_worker_not_bound");
+      requireProof(pos.side === "YES" || pos.side === "NO", "protective_exit_side_unverified");
+      await dispatchProtectiveExit({
+        positionId:String(pos.id),
+        market: String(pos.market), side: pos.side,
+        quantityHundredths: String(pos.quantity_hundredths),
+        minimumExitMicros: evaluation.floor,
+      });
+      continue;
+    }
+    // The original simulation-only path preserves the champion research tests.
     const id = await executor.prepareExit(pos.id, evaluation.floor / 1_000_000);
-    // prepareExit independently rechecks and binds current owned evidence
-    // under its reservation lock. No later mutation of the sealed capability.
     await executor.dispatch(id);
   }
 }

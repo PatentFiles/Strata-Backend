@@ -25,6 +25,7 @@ import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -389,8 +390,10 @@ export async function approveOwnedPolicyForUser(
     return {ok:false,reason:"fee_source_mode_not_supported"};
   let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
   if(apiRequested){
-    const monetary=await verifyMonetaryFeeContract("STEP_9");
-    if(!monetary.ok)return {ok:false,reason:monetary.reason};
+    // The API source was independently signed against a versioned rate model.
+    // Do not hard-require the unrelated PDF transport that returns HTTP 429.
+    // The real official series/event fee probe and grant/consent validation
+    // remain mandatory inside verifyReviewedApiFeeSourceStage.
     const verified=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_9");
     if(!verified.ok)return {ok:false,reason:verified.reason};
     // Canonical reviewed source identity comes ONLY from signed service DB.
@@ -588,8 +591,8 @@ export async function commissionOwnedAccount(
        text(row?.fee_formula_version)!==API_SOURCE_FORMULA_VERSION)
       return {ok:false,reason:"api_fee_source_identity_invalid",
         blockers:["api_fee_source_identity_invalid"]};
-    const monetary=await verifyMonetaryFeeContract("STEP_11");
-    if(!monetary.ok)return {ok:false,reason:monetary.reason,blockers:[monetary.reason]};
+    // For a signed PDF-free source, re-check signed reviewer authority,
+    // owner consent and fresh exact-market API metadata, not unavailable PDF.
     const checked=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
     if(!checked.ok||checked.identity.digest!==digest)
       return {ok:false,reason:checked.ok?"api_fee_digest_mismatch":checked.reason,
@@ -705,12 +708,14 @@ export async function requestOwnedAccountActivation(
   if (!report.accountId || blockers.length > 0) {
     return { ok: false, reason: blockers[0] ?? "execution_account_missing", ...closed };
   }
-  const unresolved = await db.query(
-    `SELECT count(*)::text AS n FROM v13_production_intent
-     WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
-    [report.accountId],
+  // Existing v13 intents are not the whole picture: independently reserved
+  // protective exits can have already consumed one irrevocable IOC identity.
+  // A missing private-ledger count is never interpreted as zero.
+  const unresolved = await readUnresolvedIntentMode(
+    (sql, params) => db.query(sql, params), report.accountId,
   );
-  if (Number(unresolved.rows[0]?.n ?? "0") > 0) {
+  if (!unresolved.ok) return { ok: false, reason: unresolved.reason, ...closed };
+  if (unresolved.mode === "recovery") {
     return { ok: false, reason: "production_uncertain_order_blocks_mutation", ...closed };
   }
   const row = (await db.query(READINESS_SQL, [input.ownerUserId])).rows[0] ?? {};

@@ -8,6 +8,7 @@ import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 const OWNER="11111111-1111-4111-8111-111111111111";
 const ACCOUNT="owner-execution-2";
 const MARKET="KXBTC15M-26OCT161945-45";
+const NOW=Date.parse("2026-10-19T19:00:00Z");
 const order:EmergencyExitOrder={
   ticker:MARKET,side:"ask",count:"2.00",price:"0.5500",
   client_order_id:"v13p-33333333-3333-4333-8333-333333333333",
@@ -24,6 +25,7 @@ function h(options:{ready?:boolean;lock?:boolean;insert?:boolean}={}){
        diagnosticEligible:false,needsIndependentApproval:true as const}:
       {ok:false as const,reason:"emergency_exit_candidate_verified_requires_fenced_dispatch",
        tradingAuthorized:false as const,diagnosticEligible:true,
+       verifiedPositionFp:"3.00",verifiedPositionObservedAtMs:NOW-100,
        needsIndependentApproval:true as const};
   }) as typeof inspectOwnedEmergencyExitRead;
   const db={connect:async()=>{connections++;return {
@@ -52,7 +54,7 @@ function h(options:{ready?:boolean;lock?:boolean;insert?:boolean}={}){
   };}};
   const run=(override?:Partial<typeof lease>)=>
     reserveOwnedEmergencyExitProof(OWNER,ACCOUNT,{keyId:"key",privateKey:"test"},order,
-      {...lease,...override},{inspect,db,signerFingerprint:((()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint)});
+      {...lease,...override},{inspect,db,signerFingerprint:((()=> "a".repeat(64)) as typeof dedicatedSignerFingerprint),now:()=>NOW});
   return {run,stats:()=>({connections,inserts,commit,rollback,release,checked})};
 }
 test("records an advisory-only prepared proof under position and worker locks",async()=>{

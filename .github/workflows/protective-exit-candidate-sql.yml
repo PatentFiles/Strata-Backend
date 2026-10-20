@@ -1,0 +1,58 @@
+name: PR99 disposable protective-exit release schema
+on:
+  pull_request:
+    paths:
+      - 'sql/strata_emergency_exit_baseline_private.sql'
+      - 'sql/strata_protective_exit_reconciliation_private.sql'
+      - 'sql/strata_protective_exit_release_private.sql'
+      - 'sql/strata_protective_exit_request_snapshot_private.sql'
+      - 'sql/tests/strata_protective_exit_candidate_test.sql'
+      - '.github/workflows/protective-exit-candidate-sql.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-sql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 8
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create disposable reference schemas
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE SCHEMA auth;
+          CREATE TABLE auth.users(id uuid PRIMARY KEY);
+          CREATE SCHEMA private;
+          CREATE TABLE public.v13_production_account(id text PRIMARY KEY);
+          CREATE TABLE public.v13_production_intent(account_id text NOT NULL,state text NOT NULL);
+          SQL
+      - name: Apply existing reviewed reservation and proposed candidate schema
+        run: |
+          psql -v ON_ERROR_STOP=1 -f sql/strata_emergency_exit_reservation_private.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_emergency_exit_baseline_private.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_reconciliation_private.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_release_private.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_request_snapshot_private.sql
+      - name: Validate immutable baselines, RLS, uniqueness and revocation
+        run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_exit_candidate_test.sql

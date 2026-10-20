@@ -665,6 +665,7 @@ test("commissioning requires an explicit minimum exit and activation does not ch
     query: async (sql) => {
       writes.push(sql);
       if (sql.includes("UPDATE")) throw new Error("activation_request_wrote_state");
+      if (sql.includes("WITH unresolved_intents")) return { rows: [{ n: "0" }] };
       if (sql.includes("INSERT INTO v13_production_observation")) return { rows: [], rowCount: 1 };
       return { rows: [ready] };
     },
