@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import {
   db,
   microLivePairBoundaryTable,
@@ -40,9 +40,17 @@ function countOf(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * The legacy V13 global worker is not the personal owner-scoped executor.
+ * Several real owner accounts use subaccount=1/exchangeIndex=2.
+ * Never let an unordered lookup bind this shared worker/read API to one of
+ * those accounts: fail closed unless the exact ownerless legacy row exists.
+ */
 async function accountRow() {
   const [row] = await db.select().from(v13ProductionAccountTable)
     .where(and(
+      eq(v13ProductionAccountTable.id, "v13-production-1-2"),
+      isNull(v13ProductionAccountTable.ownerUserId),
       eq(v13ProductionAccountTable.subaccount, 1),
       eq(v13ProductionAccountTable.exchangeIndex, 2),
     ))
