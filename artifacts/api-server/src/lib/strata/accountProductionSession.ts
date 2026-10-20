@@ -10,6 +10,7 @@ import type { ProtectiveExitDispatch } from "../v13-production/consumer";
 import { dedicatedSignerFingerprint, PRODUCTION_EXCHANGE_INDEX, PRODUCTION_SUBACCOUNT } from "./commissioning";
 import { executionBoundaryAllowsDispatch } from "./accountScopedExecution";
 import { validateMarketEvidence } from "./personalMarketAdapter";
+import { institutionalReleaseMode, assertInstitutionalFinalEntryApproval } from "./institutionalCodeApproval";
 
 export const PHASE5_EXECUTABLE = false;
 const ORDER_PATH = "/trade-api/v2/portfolio/events/orders";
@@ -104,6 +105,7 @@ export class AccountScopedExchange implements Exchange {
     readonly fetchImpl: typeof fetch | null = null,
     readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
     readonly readMarket: ((market: string, side: "YES" | "NO") => Promise<MarketEvidence>) | null = null,
+    readonly finalEntryCodeApproval: (() => Promise<boolean>) | null = null,
   ) {}
   readonly #spent = new WeakSet<() => Promise<void>>();
   async market(market: string, side: "YES" | "NO"): Promise<MarketEvidence> {
@@ -130,7 +132,7 @@ export class AccountScopedExchange implements Exchange {
       throw new Error("entries_stopped");
     }
     this.refuseBeforeWire();
-    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck);
+    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck, !request.reduceOnly);
     return {};
   }
   async cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void> {
@@ -148,11 +150,12 @@ export class AccountScopedExchange implements Exchange {
     const decision = accountDispatchDecision(this.state);
     if (!decision.allowed) throw new Error(decision.reason);
   }
-  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>): Promise<void> {
+  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>, entry = false): Promise<void> {
     if (!ProductionExecutor.isFinalFence(finalCheck) || this.#spent.has(finalCheck)) {
       throw new Error("production_opaque_fence_required");
     }
     await finalCheck();
+    if (entry) await assertInstitutionalFinalEntryApproval(institutionalReleaseMode(),this.finalEntryCodeApproval);
     this.#spent.add(finalCheck);
     if (!this.fetchImpl || this.fetchImpl === fetch) throw new Error("personal_submission_not_authorized");
     if (!this.material) throw new Error("credential_unavailable");
@@ -260,6 +263,7 @@ export function openOwnedExecutionSession(input: {
   entriesOpen?: () => boolean;
   recoverProtectiveExits?: () => Promise<void>;
   dispatchProtectiveExit?: ProtectiveExitDispatch;
+  finalEntryCodeApproval?: () => Promise<boolean>;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -274,6 +278,7 @@ export function openOwnedExecutionSession(input: {
     input.fetchImpl ?? null,
     null,
     input.readMarket ?? null,
+    input.finalEntryCodeApproval ?? null,
   );
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
