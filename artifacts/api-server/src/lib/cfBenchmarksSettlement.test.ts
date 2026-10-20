@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   QUARTER_HOUR_MS,
+  parseKalshiBrtiInstantFrame,
   parseKalshiBrtiQuarterHourFrame,
   compareBrtiToKalshiStrike,
   independentlyAverageSixtyBrtiSeconds,
@@ -93,4 +94,18 @@ test("invalid sources cannot cause order submission, authorization or settlement
     assert.equal("tradeAuthorization" in result.frame,false);
     assert.equal("officialSettlementResult" in result.frame,false);
   }
+});
+
+test("instant BRTI spot is available throughout all 15 minutes, never equivalent to settlement",()=>{
+  const earlier=quarterClose-10*60_000;
+  const raw=websocket({ts:earlier,has15m:false});
+  const spot=parseKalshiBrtiInstantFrame(raw,earlier+95);
+  assert.equal(spot.ok,true);
+  if(spot.ok){
+    assert.equal(spot.tick.currentIndexUsd,"68312.34");
+    assert.equal(spot.tick.settlementAuthority,false);
+  }
+  assert.equal(parseKalshiBrtiQuarterHourFrame(raw,earlier+95).ok,false);
+  assert.equal(parseKalshiBrtiInstantFrame(raw,earlier+10_000).ok,false);
+  assert.equal(parseKalshiBrtiInstantFrame(websocket({index:"ETHUSD_RTI",ts:earlier}),earlier+95).ok,false);
 });
