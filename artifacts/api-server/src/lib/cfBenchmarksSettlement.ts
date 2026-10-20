@@ -157,14 +157,14 @@ export function independentlyAverageSixtyBrtiSeconds(
     const second=Math.ceil(ts/1000);
     if(seconds.has(second))return {ok:false,reason:"duplicate_second"};
     const [integer,fraction=""]=price.split(".");
-    const micros=BigInt(integer)*1_000_000n+
-      BigInt((fraction+"000000").slice(0,6));
-    seconds.set(second,micros);
+    const scaled=BigInt(integer)*1_000_000_000_000n+
+      BigInt((fraction+"000000000000").slice(0,12));
+    seconds.set(second,scaled);
   }
   const finalSecond=quarterCloseMs/1000;
   for(let s=finalSecond-59;s<=finalSecond;s++)
     if(!seconds.has(s))return {ok:false,reason:"missing_second"};
   const total=[...seconds.values()].reduce((a,b)=>a+b,0n);
-  const mean=(total+30n)/60n; // 6-decimal USD, half-up
-  return {ok:true,meanUsd:`${mean/1_000_000n}.${(mean%1_000_000n).toString().padStart(6,"0")}`,count:60};
+  const mean=(total+30n)/60n; // 12-decimal USD, half-up
+  return {ok:true,meanUsd:`${mean/1_000_000_000_000n}.${(mean%1_000_000_000_000n).toString().padStart(12,"0")}`,count:60};
 }
