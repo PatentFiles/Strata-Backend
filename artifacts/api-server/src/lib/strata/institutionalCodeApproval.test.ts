@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { INSTITUTIONAL_ENTRY_SQL, INSTITUTIONAL_EXIT_JOIN,
   INSTITUTIONAL_EXIT_PREDICATE, LEGACY_EXIT_JOIN, LEGACY_EXIT_PREDICATE,
-  institutionalReleaseMode } from "./institutionalCodeApproval";
+  institutionalReleaseMode, INSTITUTIONAL_OPERATIONAL_SQL } from "./institutionalCodeApproval";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 
 const owner="11111111-1111-4111-8111-111111111111";
@@ -25,7 +25,8 @@ test("owner SHA release requires an owner-specific, independent, revocable revie
  assert.match(INSTITUTIONAL_ENTRY_SQL,/c.independent_reviewer_id<>\$2::uuid/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/c.owner_approver_id=\$2::uuid/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/a.blocked_reason IS NULL/);
- assert.match(INSTITUTIONAL_ENTRY_SQL,/a.reconciled_at>now\(\)-interval '15 seconds'/);
+ assert.doesNotMatch(INSTITUTIONAL_ENTRY_SQL,/reconciled_at>now/,"START must not deadlock on stale heartbeat");
+ assert.match(INSTITUTIONAL_OPERATIONAL_SQL,/a.reconciled_at>now\\(\\)-interval '15 seconds'/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/p.state='APPROVED'/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/g.manual_kill_switch=false/);
  assert.match(INSTITUTIONAL_ENTRY_SQL,/state IN \('DISPATCHED','UNKNOWN'\)/);
