@@ -132,6 +132,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitWorkerRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
       - name: Test immutable worker protective recovery snapshots
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Bundle protective V2 YES and NO provider-history compatibility tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangeProtectiveSnapshot.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangeProtectiveSnapshot.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+      - name: Test omitted reduce-only echo, partial fills and explicit contradictions
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/personalExchangeProtectiveSnapshot.test.cjs
       - name: Bundle authenticated ARM versus START lifecycle regression
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/userScopeDatabase.test.ts --bundle --platform=node --format=cjs --outfile=dist/userScopeDatabase.test.cjs --external:express --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
       - name: Ensure ARM never schedules a worker and START still requires ownership
