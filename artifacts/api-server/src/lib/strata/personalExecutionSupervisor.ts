@@ -12,6 +12,9 @@ import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
+import { makeOwnedProtectiveExitOrder } from "./ownedProtectiveExitOrder";
+import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
+import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -284,6 +287,41 @@ export function createProductionPersonalSession(
       now,
       state,
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
+      // This is the only LIVE exit producer. The source selection comes from
+      // the unchanged strategy and owned PostgreSQL position, NOT a browser.
+      // The signer and lease are captured from this authenticated vault session.
+      dispatchProtectiveExit: async selection => {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_release_disabled");
+        }
+        if (state.accountKill || state.globalKill || state.presentedToken !== claimed.fencingToken) {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_worker_lease_or_kill_changed");
+        }
+        try {
+          const market = await session.executor.exchange.market(selection.market, selection.side);
+          const order = makeOwnedProtectiveExitOrder(selection, market, now());
+          const lease = { holderId, fencingToken: claimed.fencingToken };
+          const reservation = await reserveOwnedEmergencyExitProof(
+            input.userId, input.accountId, material, order, lease,
+          );
+          if (!reservation.reservationPrepared || !reservation.reservationId) {
+            throw new Error(reservation.reason);
+          }
+          // Marker PREPARED -> UNKNOWN must COMMIT before a one-use signed POST;
+          // all transport failures require exchange GET recovery, never retry.
+          const outcome = await dispatchReviewedProtectiveExitOnce({
+            ownerId: input.userId, accountId: input.accountId,
+            reservationId: reservation.reservationId, material, order, lease,
+          });
+          if (outcome.state !== "RECONCILED") throw new Error(outcome.reason);
+        } catch (error) {
+          // Exposure after an ambiguous IOC is never replaced by a new entry.
+          state.entriesAuthorized = false;
+          throw error;
+        }
+      },
       // Only the backend-held, authenticated vault signer can read UNKNOWN
       // protective-exit history. Browser routes never receive this callback
       // or the signer. No order submission is possible from this function.
