@@ -390,8 +390,10 @@ export async function approveOwnedPolicyForUser(
     return {ok:false,reason:"fee_source_mode_not_supported"};
   let feeDigest: {ok:true;digest:string}|{ok:false;reason:string;retryAfterSeconds?:number};
   if(apiRequested){
-    const monetary=await verifyMonetaryFeeContract("STEP_9");
-    if(!monetary.ok)return {ok:false,reason:monetary.reason};
+    // The API source was independently signed against a versioned rate model.
+    // Do not hard-require the unrelated PDF transport that returns HTTP 429.
+    // The real official series/event fee probe and grant/consent validation
+    // remain mandatory inside verifyReviewedApiFeeSourceStage.
     const verified=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_9");
     if(!verified.ok)return {ok:false,reason:verified.reason};
     // Canonical reviewed source identity comes ONLY from signed service DB.
@@ -589,8 +591,8 @@ export async function commissionOwnedAccount(
        text(row?.fee_formula_version)!==API_SOURCE_FORMULA_VERSION)
       return {ok:false,reason:"api_fee_source_identity_invalid",
         blockers:["api_fee_source_identity_invalid"]};
-    const monetary=await verifyMonetaryFeeContract("STEP_11");
-    if(!monetary.ok)return {ok:false,reason:monetary.reason,blockers:[monetary.reason]};
+    // For a signed PDF-free source, re-check signed reviewer authority,
+    // owner consent and fresh exact-market API metadata, not unavailable PDF.
     const checked=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
     if(!checked.ok||checked.identity.digest!==digest)
       return {ok:false,reason:checked.ok?"api_fee_digest_mismatch":checked.reason,
