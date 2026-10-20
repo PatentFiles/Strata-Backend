@@ -32,7 +32,7 @@ test("owned NO reduces with complement YES bid, never sells or increases NO", ()
 test("floor is enforced on owner position proceeds for both legs", () => {
   assert.throws(() => makeOwnedProtectiveExitOrder(owned("YES", 10_000), book("0.0099", "1"), NOW, ID),
     /protective_exit_below_owner_floor_or_invalid_price/);
-  assert.throws(() => makeOwnedProtectiveExitOrder(owned("NO", 10_000), book("0.9950", "1"), NOW, ID),
+  assert.throws(() => makeOwnedProtectiveExitOrder(owned("NO", 10_000), book("0.0050", "1"), NOW, ID),
     /protective_exit_below_owner_floor_or_invalid_price/);
 });
 test("never exceed actual owned quantity, book liquidity or hard per-order cap", () => {
