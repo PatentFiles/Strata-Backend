@@ -19,6 +19,10 @@ const input={
  lease:{holderId:"personal-owner-lease",fencingToken:17},
  market,positionSide:"YES" as "YES"|"NO",
  ownedQuantityHundredths:"200",minimumExitMicros:10000,
+ preparedRequest:{market,side:"YES" as "YES"|"NO",
+  action:"SELL" as const,contracts:2,limitMicros:550000,
+  timeInForce:"IOC" as const,reduceOnly:true as const,
+  clientOrderId:"v13p-33333333-3333-4333-8333-333333333333"},
  readMarket:async()=>evidence,
 };
 test("owned YES position forms one signed reduce-only IOC after durable preparation",async()=>{
@@ -49,7 +53,7 @@ test("owned YES position forms one signed reduce-only IOC after durable preparat
 });
 test("NO position uses complementary YES book bid while honoring approved NO floor",async()=>{
  let checked=false;
- const result=await dispatchOwnedWorkerProtectiveExit({...input,positionSide:"NO"},{
+ const result=await dispatchOwnedWorkerProtectiveExit({...input,positionSide:"NO",preparedRequest:{...input.preparedRequest,side:"NO"}},{
   reserve:async(_owner,_account,_material,order)=>{
    checked=true;
    assert.equal(order.side,"bid");assert.equal(order.price,"0.4500");
@@ -97,4 +101,23 @@ test("hosted production rejects injected provider proofs and release skips",asyn
   if(prior===undefined)delete process.env.RAILWAY_SERVICE_ID;
   else process.env.RAILWAY_SERVICE_ID=prior;
  }
+});
+
+test("sealed V13 intent mismatch fails before protective reservation and POST",async()=>{
+ let writes=0;
+ for(const bad of [
+  {...input.preparedRequest,clientOrderId:"not-v13"},
+  {...input.preparedRequest,contracts:3},
+  {...input.preparedRequest,limitMicros:560000},
+  {...input.preparedRequest,action:"BUY" as "SELL"},
+ ]){
+  const result=await dispatchOwnedWorkerProtectiveExit({
+    ...input,preparedRequest:bad,
+  },{
+    reserve:async()=>{writes++;throw Error("unexpected reservation");},
+    dispatch:async()=>{writes++;throw Error("unexpected post");},
+  });
+  assert.equal(result.state,"BLOCKED");
+ }
+ assert.equal(writes,0);
 });
