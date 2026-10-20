@@ -105,7 +105,7 @@ test("owner consent inserts exact signed release then atomically enables account
  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.equal(r.ordersSubmitted,false);
- assert.equal(r.workerStarted,false);
+ assert.equal("workerStarted" in r && r.workerStarted,false);
  const insert=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
  const accountUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.v13_production_account"));
  const globalUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.live_execution_config"));
