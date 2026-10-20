@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { digest as v13Digest } from "../v13-production/types";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,
@@ -23,7 +24,12 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   executed.push(sql);
   if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||sql.startsWith("SET LOCAL"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[account]};
-  if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{"?column?":1}]};
+  if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
+    digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
+      feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
+      commissioningDigest:String(account.commissioning_digest??""),
+      minimumExitMicros:Number(account.minimum_exit_micros)})
+  }]};
   if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
     decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
