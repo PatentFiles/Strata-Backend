@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitSha";
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
@@ -11,6 +11,7 @@ const SHA=/^[a-f0-9]{40}$/;
 const REVIEW_URL=/^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/;
 export const REVIEW_CONFIRM="I_INDEPENDENTLY_REVIEWED_THE_EXACT_PRODUCTION_PROTECTIVE_EXIT_RELEASE";
 export const OWNER_CONFIRM="I_AUTHORIZE_MY_OWN_ACCOUNT_AND_SHARED_LIVE_EXECUTION_AFTER_INDEPENDENT_REVIEW";
+export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STALE_COMMISSIONING_BLOCKER";
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
 type Db=Query & {connect():Promise<Query&{release():void}>};
@@ -23,6 +24,7 @@ const time=(n:number)=>new Date(n).toISOString();
 const accountSQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.commissioned,a.execution_enabled,
  a.kill_switch,a.cash_precision_verified,a.minimum_exit_micros,a.cash_micros::text AS cash_micros,
+ a.blocked_reason,
  a.key_fingerprint,a.policy_id,a.commissioning_digest,a.fee_artifact_digest,
  a.kalshi_connection_id, p.state AS policy_state,p.fee_source_url,p.fee_policy_version,
  p.fee_formula_version,p.approved_at,p.max_entry_stake_cents,p.max_entry_all_in_cents,
@@ -114,6 +116,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    releaseActive:active.rows.length===1,
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
+   provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
    accountExecutionEnabled:account?truth(account.execution_enabled):false,
    globalExecutionEnabled:truth(global.rows[0]?.live_execution_enabled),
    accountKillOn:account?!truth(account.execution_enabled)||truth(account.kill_switch):true,
@@ -131,6 +134,9 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const v=await readReleaseOwner(db,ownerId);
   if(!v.ok)return deny(v.reason);
   const account=v.account;
+  if(account.blocked_reason!==null&&account.blocked_reason!==undefined&&
+     account.blocked_reason!=="awaiting_account_commissioning")
+    return deny("account_risk_freeze_requires_independent_remediation");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>db.query(sql,p),String(account.id));
   if(!unresolved.ok||unresolved.mode!=="entries")
     return deny("unresolved_order_prevents_release");
@@ -150,6 +156,10 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(account.key_fingerprint)};
   const mapped=personalAccountSnapshot(identity,feeds,requests);
   if(!("identity" in mapped))return deny(mapped.reason);
+  if(account.blocked_reason==="awaiting_account_commissioning" &&
+     (mapped.orders.length>0||mapped.fills.length>0||mapped.positions.length>0||
+      mapped.settlements.length>0||requests.length>0))
+    return deny("commissioning_repair_requires_empty_exchange_and_ledger_history");
   // Standing fee policy is already approved; verify the actual official
   // fee source and current series/event schedule again before attestation.
   const fee=await(deps.verifyFee??verifyProtectiveReleaseFeePreflight)();
@@ -231,6 +241,9 @@ export async function authorizeProtectiveRelease(
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as DbRow:{};
  if(!valid(ownerId)||!valid(b.reviewId)||b.confirmation!==OWNER_CONFIRM||!SHA.test(sha))
    return deny("explicit_authenticated_owner_release_confirmation_required");
+ const repairing=b.provisionalRepairConfirmation===PROVISIONAL_REPAIR_CONFIRM;
+ if(b.provisionalRepairConfirmation!==undefined&&!repairing)
+   return deny("explicit_commissioning_repair_confirmation_invalid");
  let client:Awaited<ReturnType<Db["connect"]>>|null=null,committed=false;
  try{
   client=await db.connect();
@@ -242,12 +255,21 @@ export async function authorizeProtectiveRelease(
   if(!v.ok)return deny(v.reason);
   const a=v.account,accountId=String(a.id);
   const locked=await client.query(`
- SELECT id,execution_enabled,kill_switch,cash_micros::text FROM public.v13_production_account
+ SELECT id,execution_enabled,kill_switch,cash_micros::text,
+   blocked_reason,reserved_micros::text,reconciled_at,
+   commissioned,cash_precision_verified FROM public.v13_production_account
  WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[accountId,ownerId]);
   const current=locked.rows[0];
   if(locked.rows.length!==1||!current||
      truth(current.execution_enabled)===truth(current.kill_switch))
     return deny("account_inconsistent_execution_kill_state");
+  const frozen=current.blocked_reason;
+  if(frozen!==null&&frozen!==undefined&&frozen!=="awaiting_account_commissioning")
+    return deny("account_risk_freeze_requires_independent_remediation");
+  if(frozen==="awaiting_account_commissioning"&&!repairing)
+    return deny("explicit_commissioning_repair_confirmation_required");
+  if(frozen!=="awaiting_account_commissioning"&&repairing)
+    return deny("commissioning_repair_not_applicable");
   const accountNeedsEnable=!truth(current.execution_enabled);
   const global=await client.query(`
  SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config
@@ -283,6 +305,25 @@ export async function authorizeProtectiveRelease(
  WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL
  AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1`,[reviewer]);
   if(role.rows.length!==1)return deny("reviewer_authority_expired");
+  if(repairing){
+    const rec=await client.query(`
+ SELECT (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1) intents,
+        (SELECT count(*)::text FROM public.v13_production_event WHERE account_id=$1) events,
+        (SELECT count(*)::text FROM public.v13_production_position
+           WHERE account_id=$1 AND quantity_hundredths>0) positions,
+        (SELECT count(*)::text FROM private.strata_emergency_exit_reservations
+           WHERE execution_account_id=$1) exit_reservations`,[accountId]);
+    const counts=rec.rows[0];
+    if(rec.rows.length!==1||!counts||
+       ["intents","events","positions","exit_reservations"].some(k=>String(counts[k])!=="0")||
+       !truth(current.commissioned)||!truth(current.cash_precision_verified)||
+       String(current.reserved_micros)!=="0"||
+       !current.reconciled_at||
+       !Number.isFinite(Date.parse(String(current.reconciled_at)))||
+       Date.now()-Date.parse(String(current.reconciled_at))>15_000||
+       Date.now()<Date.parse(String(current.reconciled_at))-10_000)
+      return deny("commissioning_repair_fresh_zero_exposure_unverified");
+  }
   const prior=await client.query(`
  SELECT release_id::text FROM private.strata_protective_exit_release
  WHERE release_commit_sha=$1 AND revoked_at IS NULL AND expires_at>now()
@@ -305,6 +346,28 @@ export async function authorizeProtectiveRelease(
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
+  if(repairing){
+    const clear=await client.query(`
+ UPDATE public.v13_production_account SET blocked_reason=NULL,revision=revision+1
+ WHERE id=$1 AND owner_user_id=$2::uuid
+   AND blocked_reason='awaiting_account_commissioning'
+   AND commissioned=true AND cash_precision_verified=true
+   AND reserved_micros=0
+   AND reconciled_at>now()-interval '15 seconds'
+   AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1)
+   AND NOT EXISTS(SELECT 1 FROM public.v13_production_event WHERE account_id=$1)
+   AND NOT EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0)
+   AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1)
+ RETURNING id`,[accountId,ownerId]);
+    if(clear.rows.length!==1)return deny("commissioning_repair_transactional_guard_failed");
+    const audit={accountId,ownerId,releaseSha:sha,reviewId:String(b.reviewId),
+      reviewerId:reviewer,priorReason:"awaiting_account_commissioning",
+      newReason:null,confirmation:PROVISIONAL_REPAIR_CONFIRM};
+    await client.query(`
+ INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+ VALUES($1,$2,'OWNER_COMMISSIONING_FREEZE_REPAIR',$3::jsonb,$4)`,
+    [randomUUID(),accountId,JSON.stringify(audit),v13Digest(audit)]);
+  }
   if(accountNeedsEnable){
     const updated=await client.query(`
  UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false
@@ -322,6 +385,7 @@ export async function authorizeProtectiveRelease(
   await client.query("COMMIT");committed=true;
   return {ok:true,reason:"owner_approved_release_account_and_shared_live_enabled",
    releaseId:inserted.rows[0]?.id,expiresAt:inserted.rows[0]?.expires_at,
+   provisionalFreezeRepaired:repairing,
    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return deny("owner_release_transaction_refused")}
  finally{if(client){if(!committed)try{await client.query("ROLLBACK")}catch{};client.release()}}
