@@ -89,7 +89,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  FROM private.strata_protective_release_reviews v
  JOIN private.strata_protective_release_qualification q ON q.qualification_id=v.qualification_id
  WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.expires_at>now()
- AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 2`,[ownerId,sha]);
+ AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
   const active=await db.query(`
  SELECT release_id::text,expires_at FROM private.strata_protective_exit_release
  WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL AND expires_at>now()
