@@ -123,7 +123,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   if(!v.ok)return deny(v.reason);
   const account=v.account;
   const unresolved=await readUnresolvedIntentMode((sql,p)=>db.query(sql,p),String(account.id));
-  if(!unresolved.ok||unresolved.mode!=="normal")
+  if(!unresolved.ok||unresolved.mode!=="entries")
     return deny("unresolved_order_prevents_release");
   const material=await loadedMaterial(db,account);
   if(!material)return deny("restricted_production_signer_unavailable");
@@ -246,7 +246,7 @@ export async function authorizeProtectiveRelease(
      truth(global.rows[0]?.live_execution_enabled)||!truth(global.rows[0]?.manual_kill_switch))
    return deny("global_release_not_fail_closed");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>client!.query(sql,p),accountId);
-  if(!unresolved.ok||unresolved.mode!=="normal")return deny("release_unresolved_order");
+  if(!unresolved.ok||unresolved.mode!=="entries")return deny("release_unresolved_order");
   if(!Number.isSafeInteger(Number(a.configured_stake_cents))||
      Number(a.configured_stake_cents)<=0||
      Number(a.configured_stake_cents)>Number(a.max_entry_stake_cents)||
