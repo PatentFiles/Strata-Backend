@@ -39,6 +39,7 @@ import {
   requestOwnedAccountActivation,
 } from "./personalAccountActivation";
 import { createOwnedPolicyDraft, type OwnedPolicyLimits } from "./personalPolicyApproval";
+import { amendOwnedStakePolicy, MIN_OWNER_STAKE_CENTS } from "./ownerStakePolicyAmendment";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -142,6 +143,9 @@ export const UPSERT_STAKE_SQL = `
   WHERE a.id = $2
     AND a.owner_user_id = $4::uuid
     AND a.owner_user_id IS NOT NULL
+    AND $1::int BETWEEN 150 AND 2500000
+    AND a.cash_micros >= a.reserved_micros + ($1::bigint * 10000)
+    AND a.reconciled_at IS NOT NULL
     AND ($3::int IS NULL OR EXISTS (
       SELECT 1 FROM strata_configured_stake existing
       WHERE existing.execution_account_id = a.id
@@ -675,6 +679,37 @@ export function createDatabaseUserScopePort(
         unknownIntentCount,
         unresolvedOrderCount,
       };
+      // A stake is the owner's maximum entry cash exposure, never authority
+      // to spend more than the bot subaccount can cover. The SQL write repeats
+      // the balance check so stale browser state cannot authorize an over-stake.
+      if (!Number.isSafeInteger(cents) || cents < MIN_OWNER_STAKE_CENTS) {
+        return refused(userId, "stake_below_minimum_150_cents", scoped);
+      }
+      if (cents > 2_500_000) return refused(userId, "above_hard_stake_ceiling", scoped);
+      if (scoped.capitalRemainingCents === null) return refused(userId, "available_cash_unverified", scoped);
+      if (cents > scoped.capitalRemainingCents) return refused(userId, "stake_exceeds_available_cash", scoped);
+      const editBlockers = stakeEditBlockers(scoped);
+      if (editBlockers.length) return refused(userId, editBlockers[0]!, scoped);
+
+      // If the owner explicitly increases the stake beyond the existing risk
+      // policy, transactionally version that policy, approve the owner change,
+      // save stake and refresh existing activation evidence. Never mutate a
+      // historical approved policy or permit a partial update.
+      if (scoped.approvedMaxEntryStakeCents !== null && cents > scoped.approvedMaxEntryStakeCents) {
+        const transactionDb = db as UserScopeQuery & {
+          connect?: () => Promise<{query:UserScopeQuery["query"];release():void}>;
+        };
+        if (!transactionDb.connect) return refused(userId, "stake_policy_transaction_unavailable", scoped);
+        const amended = await amendOwnedStakePolicy(
+          {connect:transactionDb.connect.bind(transactionDb)},userId,account.id,cents,revision,
+        );
+        if (!amended.ok) return refused(userId, amended.reason, scoped);
+        const refreshed = await ownedAccount(userId);
+        return refreshed
+          ? {ok:true as const,view:viewFrom(userId,refreshed)}
+          : refused(userId,"policy_revision_refresh_unavailable",scoped);
+      }
+
       const change = changeConfiguredStake(userId, scoped, cents);
       if (!change.ok) return refused(userId, change.reason, scoped);
       if (account.stakeRevision === null ? revision !== null : revision !== account.stakeRevision) {
