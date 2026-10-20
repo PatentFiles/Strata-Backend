@@ -14,7 +14,7 @@ type Client={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unkno
 type DB={connect():Promise<Client>};
 export type ExitReservationResult={
   ok:false;reason:string;tradingAuthorized:false;reservationPrepared:boolean;
-  clientOrderId?:string;
+  clientOrderId?:string;reservationId?:string;
 };
 const deny=(reason:string):ExitReservationResult=>({
   ok:false,reason,tradingAuthorized:false,reservationPrepared:false,
@@ -78,7 +78,10 @@ export async function reserveOwnedEmergencyExitProof(
   const fingerprint=(deps.signerFingerprint??dedicatedSignerFingerprint)(material.keyId,material.privateKey);
   if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))
     return deny("emergency_exit_signer_unverified");
-  const bodyHash=createHash("sha256").update(JSON.stringify(order)).digest("hex");
+  const orderRequestJson=JSON.stringify(order);
+  // The exact serialized bytes are immutable and are required after a crash.
+  const bodyHash=createHash("sha256").update(orderRequestJson).digest("hex");
+  const reservationId=randomUUID();
   let client:Client|null=null,committed=false;
   try{
     client=await (deps.db??(pool as unknown as DB)).connect();
@@ -119,18 +122,18 @@ export async function reserveOwnedEmergencyExitProof(
       "INSERT INTO private.strata_emergency_exit_reservations (" +
       "reservation_id,owner_user_id,execution_account_id,market_ticker," +
       "client_order_id,reducing_side,quantity_hundredths,order_digest," +
-      "worker_fencing_token,worker_holder_id,initial_position_fp,position_observed_at_ms,trading_authorized,state) " +
+      "worker_fencing_token,worker_holder_id,initial_position_fp,position_observed_at_ms,order_request_json,trading_authorized,state) " +
       "VALUES ($1::uuid,$2::uuid,$3::text,$4::text,$5::text,$6::text," +
-      "$7::bigint,$8::text,$9::bigint,$10::text,$11::text,$12::bigint,false,'PREPARED') " +
+      "$7::bigint,$8::text,$9::bigint,$10::text,$11::text,$12::bigint,$13::text,false,'PREPARED') " +
       "ON CONFLICT DO NOTHING RETURNING reservation_id",
-      [randomUUID(),ownerId,accountId,order.ticker,order.client_order_id,
-       side,quantity.toString(),bodyHash,lease.fencingToken,lease.holderId,baseline,observed],
+      [reservationId,ownerId,accountId,order.ticker,order.client_order_id,
+       side,quantity.toString(),bodyHash,lease.fencingToken,lease.holderId,baseline,observed,orderRequestJson],
     );
     if(inserted.rows.length!==1)return deny("emergency_exit_duplicate_or_unresolved_reservation");
     await client.query("COMMIT");committed=true;
     // A committed reservation is NOT an order, nor permission to transmit one.
     return {ok:false,reason:"emergency_exit_reserved_dispatch_still_disabled",
-      tradingAuthorized:false,reservationPrepared:true,clientOrderId:order.client_order_id};
+      tradingAuthorized:false,reservationPrepared:true,clientOrderId:order.client_order_id,reservationId};
   }catch{
     return deny("emergency_exit_reservation_unavailable");
   }finally{
