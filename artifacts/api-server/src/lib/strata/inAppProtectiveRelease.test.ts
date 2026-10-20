@@ -34,6 +34,8 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
     decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
   }]};
+  if(sql.includes("AS intents,")||sql.includes(") intents,"))
+   return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_release_qualification"))
    return {rows:[{id:QID,expires_at:"2026-10-20T06:00:00Z"}]};
@@ -56,8 +58,6 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
      review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",
      evidence_digest:DIGEST,qualification_digest:DIGEST}]};
   if(sql.includes("FROM auth.users u JOIN public.profiles p"))return {rows:input.permit===false?[]:[{"?column?":1}]};
-  if(sql.includes("AS intents,")||sql.includes(") intents,"))
-   return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   if(sql.includes("FROM private.strata_protective_exit_release"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_exit_release"))
    return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:"2026-10-20T06:00:00Z"}]};
