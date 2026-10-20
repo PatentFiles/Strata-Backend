@@ -2,6 +2,7 @@ import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
+import {verifyReviewedProtectiveExitFee} from "./reviewedProtectiveExitFee";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
@@ -196,7 +197,13 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
   return fail("protective_exit_identity_invalid");
  // Production recovery is a trusted server-only implementation; tests may inject a reader.
- const fee=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",String(order.ticker));
+ // The reviewed owner-pinned API fee model remains usable for narrowly
+ // scoped protective exits when an entry/fee-source grant expires. It still
+ // requires a fresh official exact-market fee/override read, and the exact
+ // independently approved code SHA at the signed POST fence.
+ const checkFee=ports.verifyFee??((_stage:"ORDER_ENTRY",market:string)=>
+   verifyReviewedProtectiveExitFee(ownerId,accountId,market));
+ const fee=await checkFee("ORDER_ENTRY",String(order.ticker));
  if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_unverified");
  let marker:Awaited<ReturnType<typeof markOwnedEmergencyExitUnknownForReview>>;
@@ -207,7 +214,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     marker.mayRetry!==false||marker.transportAuthorized!==false)
   return fail("protective_exit_unknown_marker_unverified");
  // Before final fence refresh provider fees again; never transmit with stale terms.
- const current=await (ports.verifyFee??verifyMonetaryFeeContract)("ORDER_ENTRY",String(order.ticker));
+ const current=await checkFee("ORDER_ENTRY",String(order.ticker));
  if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker)
   return fail("protective_exit_monetary_fees_changed","UNKNOWN");
  const outcome=await withFinalReleaseFence(input,releaseSha,
