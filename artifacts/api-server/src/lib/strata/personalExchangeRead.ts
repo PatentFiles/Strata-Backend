@@ -117,7 +117,8 @@ export function personalAccountSnapshot(
       if (text(record.ticker) !== request.market || bookSide(request) !== bookSideOf(record) ||
           yesPriceMicros(record) !== yesLimit(request) ||
           countHundredths(record.initial_count_fp ?? record.initial_count) !== BigInt(request.contracts) * 100n ||
-          (request.reduceOnly ? record.reduce_only !== true && record.reduce_only !== "true" : false)) {
+          (request.reduceOnly && record.reduce_only !== undefined &&
+            record.reduce_only !== true && record.reduce_only !== "true")) {
         return { ok: false, reason: "personal_exchange_history_unreconciled" };
       }
       const orderId = text(record.order_id);
