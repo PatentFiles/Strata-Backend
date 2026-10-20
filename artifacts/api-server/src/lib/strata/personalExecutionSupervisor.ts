@@ -298,7 +298,7 @@ export function createProductionPersonalSession(
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
       // The signer and lease are captured from this authenticated vault session.
       dispatchProtectiveExit: async selection => {
-        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE === "false") {
           state.entriesAuthorized = false;
           throw new Error("protective_exit_release_disabled");
         }
