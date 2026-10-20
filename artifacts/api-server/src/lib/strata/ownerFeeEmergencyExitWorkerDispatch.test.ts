@@ -56,6 +56,7 @@ test("NO position uses complementary YES book bid while honoring approved NO flo
    return {ok:false,tradingAuthorized:false,reservationPrepared:false,
     reason:"no_provider_inventory"};
   },
+  dispatch:async()=>{throw Error("must_not_dispatch_without_reservation");},
  });
  assert.equal(result.state,"BLOCKED");assert.equal(checked,true,result.reason);
  assert.equal(result.postAttempted,false);
