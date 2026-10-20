@@ -400,6 +400,12 @@ export function createProductionPersonalSession(
             if(maintenance.rows.length)state.entriesAuthorized=false;
           }catch{state.entriesAuthorized=false;}
         }
+        // Approvals are short-lived. Check on EVERY worker snapshot; no new
+        // inventory when the last approved exit window nears expiry.
+        // Keep reconciling existing inventory instead of treating revocation
+        // as proof that a position has disappeared.
+        const activeRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
+        if(!activeRelease.ok)state.entriesAuthorized=false;
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
         const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));
