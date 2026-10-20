@@ -72,6 +72,13 @@ jobs:
             --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
             --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/commissioningFreezeTransition.test.cjs
+      - name: Verify KXBTC15M CF Benchmarks settlement-index shadow (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/cfBenchmarksSettlement.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/cfBenchmarksSettlement.test.cjs
+          node --test dist/cfBenchmarksSettlement.test.cjs
       - name: Test paper strategy execution semantics
         run: |
           pnpm --filter @workspace/api-server exec esbuild ../btc-paper-dashboard/src/lib/strategy.self-test.ts \
