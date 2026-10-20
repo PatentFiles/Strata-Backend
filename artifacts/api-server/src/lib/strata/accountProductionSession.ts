@@ -10,7 +10,7 @@ import type { ProtectiveExitDispatch } from "../v13-production/consumer";
 import { dedicatedSignerFingerprint, PRODUCTION_EXCHANGE_INDEX, PRODUCTION_SUBACCOUNT } from "./commissioning";
 import { executionBoundaryAllowsDispatch } from "./accountScopedExecution";
 import { validateMarketEvidence } from "./personalMarketAdapter";
-import { institutionalReleaseMode } from "./institutionalCodeApproval";
+import { institutionalReleaseMode, assertInstitutionalFinalEntryApproval } from "./institutionalCodeApproval";
 
 export const PHASE5_EXECUTABLE = false;
 const ORDER_PATH = "/trade-api/v2/portfolio/events/orders";
@@ -155,10 +155,7 @@ export class AccountScopedExchange implements Exchange {
       throw new Error("production_opaque_fence_required");
     }
     await finalCheck();
-    if (entry && institutionalReleaseMode()==="DURABLE_CODE_V1") {
-      if (!this.finalEntryCodeApproval || !await this.finalEntryCodeApproval())
-        throw new Error("institutional_code_approval_revoked_or_unavailable");
-    }
+    if (entry) await assertInstitutionalFinalEntryApproval(institutionalReleaseMode(),this.finalEntryCodeApproval);
     this.#spent.add(finalCheck);
     if (!this.fetchImpl || this.fetchImpl === fetch) throw new Error("personal_submission_not_authorized");
     if (!this.material) throw new Error("credential_unavailable");
