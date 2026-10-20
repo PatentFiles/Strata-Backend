@@ -7,7 +7,7 @@
  * Kalshi docs: /websockets/cfbenchmarks-value (BRTI, indexlist, last_60s...)
  */
 import {createPrivateKey,createSign,constants} from "node:crypto";
-import {parseKalshiBrtiQuarterHourFrame,type BrtiWindowFrame} from "./cfBenchmarksSettlement";
+import {parseKalshiBrtiInstantFrame,parseKalshiBrtiQuarterHourFrame,type BrtiWindowFrame,type BrtiInstantFrame} from "./cfBenchmarksSettlement";
 import {logger} from "./logger";
 
 const WSS_PATH="/trade-api/ws/v2";
@@ -17,6 +17,7 @@ const FRESH_MS=5_000;
 type State="DISABLED"|"CONFIG_MISSING"|"CONNECTING"|"CONNECTED"|"BRTI_CONFIRMED"|"NO_ENTITLEMENT"|"DISCONNECTED";
 type ReferenceState={
   state:State;indexId:"BRTI";lastFrame:BrtiWindowFrame|null;
+  lastIndex:BrtiInstantFrame|null;instantSourceFresh:boolean;
   lastReceivedAtMs:number|null;lastError:string|null;
   connectionEstablishedAtMs:number|null;sourceFresh:boolean;
   tradingAuthority:false;
@@ -25,6 +26,7 @@ let started=false;
 let stopped=false;
 let state:State="DISABLED";
 let lastFrame:BrtiWindowFrame|null=null;
+let lastIndex:BrtiInstantFrame|null=null;
 let lastReceivedAtMs:number|null=null;
 let connectionEstablishedAtMs:number|null=null;
 let lastError:string|null=null;
@@ -45,7 +47,11 @@ export function kalshiBrtiShadowConfigured(env:NodeJS.ProcessEnv=process.env):bo
 export function readKalshiBrtiShadowStatus(now=Date.now()):ReferenceState {
   const sourceFresh=lastFrame!==null&&state==="BRTI_CONFIRMED"&&
     now-lastFrame.receivedAtMs>=0&&now-lastFrame.receivedAtMs<=FRESH_MS;
-  return {state,indexId:"BRTI",lastFrame:sourceFresh?lastFrame:null,
+  const instantSourceFresh=lastIndex!==null&&state==="BRTI_CONFIRMED"&&
+    now-lastIndex.receivedAtMs>=0&&now-lastIndex.receivedAtMs<=FRESH_MS;
+  return {state,indexId:"BRTI",
+    lastFrame:sourceFresh?lastFrame:null,
+    lastIndex:instantSourceFresh?lastIndex:null,instantSourceFresh,
     lastReceivedAtMs,connectionEstablishedAtMs,lastError,sourceFresh,
     tradingAuthority:false};
 }
@@ -63,7 +69,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
   // The Node >=22 native Undici WebSocket accepts a headers-only init object.
   const connect=()=>{
     if(stopped)return;
-    state="CONNECTING";lastFrame=null;
+    state="CONNECTING";lastFrame=null;lastIndex=null;
     lastError=null;connectionEstablishedAtMs=null;
     try{
       const key=createPrivateKey(pem);
@@ -119,6 +125,10 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         }
         if(frame.type!=="cfbenchmarks_value"||state!=="BRTI_CONFIRMED")return;
         const received=Date.now();
+        const tick=parseKalshiBrtiInstantFrame(frame,received);
+        if(tick.ok&&(!lastIndex||tick.tick.sourceTimestampMs>lastIndex.sourceTimestampMs)){
+          lastIndex=tick.tick;lastReceivedAtMs=received;
+        }
         const parsed=parseKalshiBrtiQuarterHourFrame(frame,received);
         // Outside final minute is an ordinary state, not a feed outage.
         if(parsed.ok){
@@ -134,7 +144,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
       ws.addEventListener("error",()=>{if(socket===ws)genericError("websocket_transport_error");});
       ws.addEventListener("close",()=>{
         if(socket!==ws)return;
-        socket=null;lastFrame=null;connectionEstablishedAtMs=null;
+        socket=null;lastFrame=null;lastIndex=null;connectionEstablishedAtMs=null;
         if(stopped)return;
         if(state!=="NO_ENTITLEMENT")state="DISCONNECTED";
         reconnectTimer=setTimeout(connect,RECONNECT_MS);
@@ -148,7 +158,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
   };
   connect();
   return {stop:()=>{
-    stopped=true;state="DISABLED";lastFrame=null;
+    stopped=true;state="DISABLED";lastFrame=null;lastIndex=null;
     if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}
     try{socket?.close()}catch{/* release best effort */}
     socket=null;
