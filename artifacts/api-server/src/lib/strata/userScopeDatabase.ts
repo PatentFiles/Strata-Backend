@@ -611,6 +611,22 @@ export function createDatabaseUserScopePort(
       if (!flag(gate?.live_execution_enabled)) {
         return refused(userId, "live_execution_not_enabled", account);
       }
+      if (!account.executionEnabled) {
+        return refused(userId, "execution_not_enabled", account);
+      }
+      if (action === "ARM") {
+        // ARM is an authorization/readiness state, never a worker lifecycle
+        // action. The previously shared START path could place orders on ARM.
+        // Do not persist a forged approval or clear a kill switch here.
+        return {
+          ok: true as const,
+          reason: "account_armed_ready_for_start",
+          view: viewFrom(userId, {
+            ...account,
+            workerRunning: options.session?.isScheduled(userId, account.id) === true,
+          }),
+        };
+      }
       if (!options.session) return refused(userId, "worker_not_scheduled", account);
       const scheduled = await options.session.start({ userId, accountId: account.id, action });
       if (!scheduled.workerStarted || options.session.isScheduled(userId, account.id) !== true) {
