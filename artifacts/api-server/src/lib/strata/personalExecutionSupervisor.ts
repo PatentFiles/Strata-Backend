@@ -11,6 +11,7 @@ import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -283,6 +284,18 @@ export function createProductionPersonalSession(
       now,
       state,
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
+      // Only the backend-held, authenticated vault signer can read UNKNOWN
+      // protective-exit history. Browser routes never receive this callback
+      // or the signer. No order submission is possible from this function.
+      recoverProtectiveExits: async () => {
+        const recovery=await reconcileOwnedProtectiveExits({
+          ownerId:input.userId,accountId:input.accountId,material,
+        },db);
+        if(!recovery.ok){
+          state.entriesAuthorized=false;
+          throw new Error(recovery.reason);
+        }
+      },
       readSnapshot: async () => {
         // A protective reservation may become PREPARED/UNKNOWN while this
         // worker is already scheduled. Gate EVERY subsequent snapshot, not
