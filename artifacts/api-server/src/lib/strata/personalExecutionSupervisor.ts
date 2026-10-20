@@ -12,6 +12,7 @@ import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
+import {dispatchOwnedWorkerProtectiveExit} from "./ownerFeeEmergencyExitWorkerDispatch";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -284,6 +285,40 @@ export function createProductionPersonalSession(
       now,
       state,
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
+      protectiveExit: async (position,approvedFloorMicros) => {
+        // Recheck the trusted V13 owned inventory row and owner-configured
+        // floor immediately before constructing an IOC. No request-body data.
+        const own=await db.query(
+          "SELECT p.id,p.market,p.side,p.quantity_hundredths::text AS quantity_hundredths,"+
+          "a.minimum_exit_micros,a.kill_switch,a.execution_enabled "+
+          "FROM public.v13_production_position p "+
+          "JOIN public.v13_production_account a ON a.id=p.account_id "+
+          "WHERE p.id=$1 AND p.account_id=$2 AND a.owner_user_id=$3::uuid",
+          [position.id,input.accountId,input.userId],
+        );
+        const row=own.rows[0];
+        if(own.rows.length!==1||!row||row.market!==position.market||
+           row.side!==position.side||
+           row.quantity_hundredths!==position.quantity_hundredths||
+           Number(row.minimum_exit_micros)!==approvedFloorMicros||
+           row.kill_switch!==false||row.execution_enabled!==true||
+           !state.workerActuallyScheduled||state.accountKill)
+          throw new Error("protective_exit_owned_position_or_floor_changed");
+        const result=await dispatchOwnedWorkerProtectiveExit({
+          ownerId:input.userId,accountId:input.accountId,material,
+          lease:{holderId,fencingToken:state.fencingToken},
+          market:position.market,positionSide:position.side,
+          ownedQuantityHundredths:position.quantity_hundredths,
+          minimumExitMicros:approvedFloorMicros,
+          readMarket:(m,side)=>session.exchange.market(m,side),
+        });
+        if(result.state!=="RECONCILED"){
+          // An UNKNOWN IOC (including a committed marker with no POST) must
+          // not be followed by another outbound exit or fresh entry.
+          state.entriesAuthorized=false;
+          throw new Error("protective_exit_requires_recovery");
+        }
+      },
       // Only the backend-held, authenticated vault signer can read UNKNOWN
       // protective-exit history. Browser routes never receive this callback
       // or the signer. No order submission is possible from this function.
