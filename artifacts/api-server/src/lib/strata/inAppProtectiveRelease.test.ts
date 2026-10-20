@@ -15,7 +15,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
  cash_micros:"25000000",key_fingerprint:"c".repeat(64),
- policy_id:"policy-v13",kalshi_connection_id:QID,configured_stake_cents:100,
+ policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
 function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean}={}){
