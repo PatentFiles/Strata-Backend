@@ -19,6 +19,14 @@ export class ProductionExecutor {
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
   /** Set only for an owned user account. The legacy singleton leaves this null. */
   accountOwnerUserId: string | null = null;
+  /**
+   * Bound only by the trusted owner's execution session, never an HTTP client.
+   * A configured protective release MUST NOT silently fall back to legacy
+   * V13 SELL transport when this path is missing or yields UNKNOWN.
+   */
+  protectiveExit?: (position:{
+    id:string;market:string;side:"YES"|"NO";quantity_hundredths:string;
+  },minimumExitMicros:number)=>Promise<void>;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
     market_ticker: string; target: number; crossing_key: string;
