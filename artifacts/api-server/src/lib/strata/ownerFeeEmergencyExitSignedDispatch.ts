@@ -10,7 +10,7 @@ import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
 
 /**
- * P0 protective-exit signed transport candidate. NOT wired to a public route or
+ * P0 protective-exit signed transport candidate. Never wired to a public route;
  * worker. All production calls fail closed unless an independently approved,
  * commit-bound release exists AND a server-side feature flag is explicitly set.
  * Neither CI nor this module creates that release. Never retry UNKNOWN.
@@ -139,8 +139,13 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  AND v.independent_reviewer_id <> a.owner_user_id
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
    WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
+ AND EXISTS (SELECT 1 FROM public.v13_production_intent i
+   WHERE i.account_id=a.id AND i.client_order_id=r.client_order_id
+   AND i.market=r.market_ticker AND i.kind='EXIT'
+   AND i.state='DISPATCHED' AND i.terminal=false)
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
-   WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN'))
+   WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
+   AND i.client_order_id<>r.client_order_id)
  FOR SHARE OF r,a,g,w,pos,v`;
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
