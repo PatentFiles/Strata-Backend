@@ -4,6 +4,7 @@ import { digest as v13Digest } from "../v13-production/types";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
+ DURABLE_REVIEW_CONFIRM,DURABLE_OWNER_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
@@ -57,11 +58,13 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.strata_protective_release_reviews r")&&
      sql.includes("JOIN private.strata_protective_release_qualification"))
    return {rows:input.review===false?[]:[{review_id:RID,reviewer_user_id:REVIEWER,
-     review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",review_scope:"TWO_HOUR",
+     review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",review_scope:process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED==="true"?"DURABLE_CODE_V1":"TWO_HOUR",
      evidence_digest:DIGEST,qualification_digest:DIGEST}]};
   if(sql.includes("FROM auth.users u JOIN public.profiles p"))return {rows:input.permit===false?[]:[{"?column?":1}]};
   if(sql.includes("AS intents,")||sql.includes(") intents,"))
    return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
+  if(sql.includes("INSERT INTO private.strata_durable_code_approvals"))
+    return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:null}]};
   if(sql.includes("FROM private.strata_protective_exit_release"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_exit_release"))
    return {rows:[{id:"55555555-5555-4555-8555-555555555555",expires_at:"2026-10-20T06:00:00Z"}]};
@@ -166,4 +169,46 @@ test("explicit reviewed zero-exposure recovery is atomic, auditable and creates 
  assert.ok(release>=0&&repair>release&&audit>repair);
  assert.ok(h.executed.indexOf("COMMIT")>audit);
  assert.equal(h.executed.some(s=>s.includes("INSERT INTO public.v13_production_intent")),false);
+});
+
+test("durable SHA mode requires distinct owner authorization and never auto-starts",async()=>{
+ const old=process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED;
+ process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED="true";
+ try{
+  const h=fakeDb(),base={reviewId:RID,confirmation:OWNER_CONFIRM};
+  const blocked=await authorizeProtectiveRelease(OWNER,base,{db:h.db,sha:()=>SHA});
+  assert.equal(blocked.ok,false);
+  assert.equal(blocked.reason,"explicit_durable_code_owner_authorization_required");
+  const approved=await authorizeProtectiveRelease(OWNER,{
+   ...base,durableCodeAuthorizationConfirmation:DURABLE_OWNER_CONFIRM,
+  },{db:h.db,sha:()=>SHA});
+  assert.equal(approved.ok,true,JSON.stringify(approved));
+  assert.equal("codeApprovalActive" in approved && approved.codeApprovalActive,true);
+  assert.equal(approved.workerStarted,false);
+  assert.equal(h.executed.filter(s=>s.includes("INSERT INTO private.strata_durable_code_approvals")).length,1);
+  assert.equal(h.executed.filter(s=>s.includes("INSERT INTO private.strata_protective_exit_release")).length,0);
+ }finally{
+  if(old===undefined)delete process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED;
+  else process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED=old;
+ }
+});
+test("durable review attestation requires its own express independent scope confirmation",async()=>{
+ const old=process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED;
+ process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED="true";
+ try{
+  const data={ownerUserId:OWNER,qualificationId:QID,
+   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/113",
+   note:"I independently reviewed the long-lived exact SHA release, revocation, final signed exit fence, fee and book evidence, cash accounting, crashes, failover and risk gates.",
+   confirmation:REVIEW_CONFIRM};
+  const h=fakeDb();
+  assert.equal((await attestProtectiveReleaseReview(REVIEWER,"ADMIN",data,{db:h.db,sha:()=>SHA})).ok,false);
+  const signed=await attestProtectiveReleaseReview(REVIEWER,"ADMIN",{
+   ...data,confirmation:DURABLE_REVIEW_CONFIRM,
+  },{db:h.db,sha:()=>SHA});
+  assert.equal(signed.ok,true,JSON.stringify(signed));
+  assert.ok(h.executed.some(s=>s.includes("review_scope")));
+ }finally{
+  if(old===undefined)delete process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED;
+  else process.env.STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED=old;
+ }
 });
