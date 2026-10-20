@@ -6,9 +6,9 @@ const OWNER="11111111-1111-4111-8111-111111111111";
 const market="KXBTC15M-26OCT191945-45";
 const evidence={
  observedAtMs:Date.now(),bestBidDollars:"0.5500",
- bids:[{priceDollars:"0.5500",availableContracts:5}],
+ bids:[{priceDollars:"0.5500",availableContracts:"5.00"}],
  bestAskDollars:"0.5600",
- asks:[{priceDollars:"0.5600",availableContracts:5}],
+ asks:[{priceDollars:"0.5600",availableContracts:"5.00"}],
  fee:{policyVersion:"test",sourceUrl:"test",formulaVersion:"test",
   fingerprint:"a".repeat(64),verifiedAtMs:Date.now(),
   contracts:2,limitPrice:0.55,reservedEntryFeeCents:1,reservedExitFeeCents:1},
