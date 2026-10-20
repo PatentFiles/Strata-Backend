@@ -21,6 +21,10 @@ export function sanitizePublic<T>(value: T): T {
 }
 
 function sanitizeValue(value: unknown): unknown {
+  // pg timestamptz columns are JavaScript Date objects. Preserve their
+  // expiry timestamp as ISO8601, rather than reducing Date to {}.
+  // Invalid dates are non-authorizing and serialize to null.
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null;
   if (Array.isArray(value)) return value.map(sanitizeValue);
   if (typeof value === "string") return SECRET_VALUE.test(value) ? "[redacted]" : value;
   if (!value || typeof value !== "object") return value;
