@@ -258,6 +258,7 @@ export function openOwnedExecutionSession(input: {
   fault?: (stage: string) => void;
   entriesOpen?: () => boolean;
   recoverProtectiveExits?: () => Promise<void>;
+  protectiveExit?: NonNullable<ProductionExecutor["protectiveExit"]>;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -276,6 +277,9 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
+  // Bound to this trusted server session, not a user-supplied order callback.
+  // Without this handler, the consumer refuses signed-release execution.
+  executor.protectiveExit = input.protectiveExit;
   const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {},
     input.entriesOpen, input.recoverProtectiveExits);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
