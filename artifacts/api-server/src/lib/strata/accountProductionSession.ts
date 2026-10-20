@@ -257,6 +257,7 @@ export function openOwnedExecutionSession(input: {
   intervalMs?: number;
   fault?: (stage: string) => void;
   entriesOpen?: () => boolean;
+  recoverProtectiveExits?: () => Promise<void>;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -275,7 +276,8 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
-  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {}, input.entriesOpen);
+  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {},
+    input.entriesOpen, input.recoverProtectiveExits);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }
 
