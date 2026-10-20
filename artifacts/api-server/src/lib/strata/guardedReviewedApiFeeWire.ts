@@ -35,7 +35,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    AND p.policy_hash=$4 AND p.state='APPROVED'
    AND p.fee_source_url=$5
    AND p.fee_policy_version='${API_SOURCE_POLICY_VERSION}'
-   AND p.fee_formula_version='standard_quadratic_0.07_round_cent_v1'
+   AND p.fee_formula_version='${API_SOURCE_FORMULA_VERSION}'
    AND live.live_execution_enabled=true AND live.manual_kill_switch=false
    AND c.role='restricted_execution'
    AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
