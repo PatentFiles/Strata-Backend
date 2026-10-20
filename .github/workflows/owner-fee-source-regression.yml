@@ -132,6 +132,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitWorkerRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
       - name: Test immutable worker protective recovery snapshots
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Bundle approved historical API fee source protective exit tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/reviewedProtectiveExitFee.test.ts --bundle --platform=node --format=cjs --outfile=dist/reviewedProtectiveExitFee.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+      - name: Test independent approved model and fresh official metadata fail closed
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/reviewedProtectiveExitFee.test.cjs
       - name: Bundle protective V2 YES and NO provider-history compatibility tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangeProtectiveSnapshot.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangeProtectiveSnapshot.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
       - name: Test omitted reduce-only echo, partial fills and explicit contradictions
