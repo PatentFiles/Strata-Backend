@@ -80,7 +80,7 @@ test("strict 60 second independent BRTI cross-check refuses gaps and duplicates"
     indexUsd:"68311.250000",
   }));
   const complete=independentlyAverageSixtyBrtiSeconds(ticks,quarterClose);
-  assert.deepEqual(complete,{ok:true,meanUsd:"68311.250000",count:60});
+  assert.deepEqual(complete,{ok:true,meanUsd:"68311.250000000000",count:60});
   assert.equal(independentlyAverageSixtyBrtiSeconds(ticks.slice(1),quarterClose).ok,false);
   assert.equal(independentlyAverageSixtyBrtiSeconds([...ticks.slice(0,59),ticks[58]!],quarterClose).ok,false);
   assert.equal(independentlyAverageSixtyBrtiSeconds(ticks,quarterClose-60000).ok,false);
