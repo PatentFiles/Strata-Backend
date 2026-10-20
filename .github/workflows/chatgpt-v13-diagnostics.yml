@@ -94,6 +94,9 @@ jobs:
         run: pnpm run build
       - name: Initialize disposable database schema
         run: pnpm --filter @workspace/db run push
+      - name: Validate private institutional code approval SQL in disposable PostgreSQL
+        working-directory: lib/db
+        run: node scripts/verifyInstitutionalCodeMigration.mjs
       - name: Test API and forward-test integration
         working-directory: artifacts/api-server
         run: pnpm test
