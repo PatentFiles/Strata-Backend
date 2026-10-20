@@ -11,6 +11,12 @@ const SHA="a".repeat(40);
 const DIGEST="b".repeat(64);
 const QID="33333333-3333-4333-8333-333333333333";
 const RID="44444444-4444-4444-8444-444444444444";
+const emptySignedFeed=(override:Record<string,unknown>={})=>({
+ ok:true as const,observedAtMs:Date.now(),cashMicros:"25000000",
+ orders:[],fills:[],positions:[],settlements:[],...override,
+});
+const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
+ provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
 const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
@@ -142,28 +148,56 @@ test("any genuine freeze is immutable through commissioning recovery",async()=>{
  assert.equal(r.reason,"account_risk_freeze_requires_independent_remediation");
  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
 });
-test("owner-authorized recovery fails closed on stale reconciliation or unaccounted exposure",async()=>{
- for(const options of [{freeze:"awaiting_account_commissioning",fresh:false},
-  {freeze:"awaiting_account_commissioning",unresolved:true}]){
-  const h=fakeDb(options),r=await authorizeProtectiveRelease(OWNER,{
-   reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
-  },{db:h.db,sha:()=>SHA});
-  assert.equal(r.ok,false,r.reason);
-  assert.equal(r.reason,"commissioning_repair_fresh_zero_exposure_unverified");
-  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
+test("owner-authorized recovery denies stale signed source, mismatched cash and any exchange exposure",async()=>{
+ const cases=[
+  {name:"stale exchange feed",feed:emptySignedFeed({observedAtMs:Date.now()-60_000}),
+   reason:"commissioning_repair_live_cash_or_freshness_unverified"},
+  {name:"cash mismatch",feed:emptySignedFeed({cashMicros:"24000000"}),
+   reason:"commissioning_repair_live_cash_or_freshness_unverified"},
+  {name:"exchange orders",feed:emptySignedFeed({orders:[{order_id:"unknown"}]}),
+   reason:"commissioning_repair_live_exposure_unverified"},
+  {name:"exchange open positions",feed:emptySignedFeed({positions:[{ticker:"KXBTC15M-TEST",position_fp:"1.00"}]}),
+   reason:"commissioning_repair_live_exposure_unverified"},
+  {name:"provider failure",feed:{ok:false as const,reason:"kalshi_read_failed"},
+   reason:"commissioning_repair_live_exchange_read_unavailable"},
+ ];
+ for(const row of cases){
+  const h=fakeDb({freeze:"awaiting_account_commissioning"});
+  const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
+   db:h.db,sha:()=>SHA,readFeeds:(async()=>row.feed) as never,
+  });
+  assert.equal(r.ok,false,row.name);
+  assert.equal(r.reason,row.reason,row.name);
+  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false,row.name);
+  assert.ok(h.executed.includes("ROLLBACK"),row.name);
  }
+ const h=fakeDb({freeze:"awaiting_account_commissioning",unresolved:true});
+ const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
+  db:h.db,sha:()=>SHA,readFeeds:(async()=>emptySignedFeed()) as never,
+ });
+ assert.equal(r.reason,"commissioning_repair_fresh_zero_exposure_unverified");
+ assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
 });
-test("explicit reviewed zero-exposure recovery is atomic, auditable and creates no order",async()=>{
- const h=fakeDb({freeze:"awaiting_account_commissioning"});
- const r=await authorizeProtectiveRelease(OWNER,{
-  reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
- },{db:h.db,sha:()=>SHA});
+test("explicit owner reviewed repair refreshes real Kalshi evidence inside transaction even with old worker reconciliation",async()=>{
+ const h=fakeDb({freeze:"awaiting_account_commissioning",fresh:false});
+ let signedReads=0;
+ const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
+  db:h.db,sha:()=>SHA,
+  readFeeds:(async()=>{
+   signedReads++;
+   return emptySignedFeed();
+  }) as never,
+ });
  assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(signedReads,1);
  assert.equal("provisionalFreezeRepaired" in r && r.provisionalFreezeRepaired,true);
+ const providerMaterial=h.executed.findIndex(s=>s.includes("FROM private.kalshi_connection_credentials c"));
  const release=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
  const repair=h.executed.findIndex(s=>s.includes("SET blocked_reason=NULL"));
  const audit=h.executed.findIndex(s=>s.includes("OWNER_COMMISSIONING_FREEZE_REPAIR"));
- assert.ok(release>=0&&repair>release&&audit>repair);
+ assert.ok(providerMaterial>=0&&release>providerMaterial&&repair>release&&audit>repair);
  assert.ok(h.executed.indexOf("COMMIT")>audit);
  assert.equal(h.executed.some(s=>s.includes("INSERT INTO public.v13_production_intent")),false);
+ assert.ok(h.executed.some(s=>s.includes("statement_timestamp()-interval '15 seconds'")));
+ assert.equal(h.executed.some(s=>s.includes("AND reconciled_at>now()-interval '15 seconds'")),false);
 });
