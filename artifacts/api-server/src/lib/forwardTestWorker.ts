@@ -21,6 +21,8 @@ import {
   type BtcObservation, type ForwardTestFeeds, type MarketObservation,
 } from "./forwardTestFeeds";
 import { logger } from "./logger";
+import { forwardTestStartupDecision } from "./forwardTestStartupGate";
+export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
 import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
 import { ensureV13BuiltInResearchChallengers, recordV13ShadowOpportunities } from "./v13StrategyResearch";
 
@@ -407,28 +409,18 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   }
 }
 
-export function isForwardTestWorkerEnabled(
-  environment: string | undefined,
-  developmentFlag: string | undefined,
-  productionFlag: string | undefined,
-) {
-  return environment === "development"
-    ? developmentFlag === "true"
-    : environment === "production" && productionFlag === "true";
-}
-
 export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicForwardTestFeeds) {
   const production = process.env.NODE_ENV === "production";
-  // Staged source must remain inert across an incidental process restart.
-  // A separate reviewed schema/runtime rollout must explicitly opt in.
-  if (process.env.V13_ENTRY_POLICY_RUNTIME_APPROVED !== V13_ENTRY_POLICY_VERSION ||
-      !isForwardTestWorkerEnabled(
-    process.env.NODE_ENV,
-    process.env.FORWARD_TEST_WORKER_ENABLED,
-    process.env.FORWARD_TEST_PRODUCTION_WORKER_ENABLED,
-  )) {
+  // Review gating is unchanged: an incidental Railway process restart never
+  // authorizes this PAPER_ONLY producer unless BOTH exact flags are present.
+  const startup = forwardTestStartupDecision(process.env, V13_ENTRY_POLICY_VERSION);
+  if (!startup.ready) {
+    logger.info({ reason: startup.reason, mode: startup.mode },
+      "Strategy evaluation producer not scheduled; no new forward-test entries");
     return { running: false, stop: async () => {} };
   }
+  logger.info({ mode: startup.mode, reason: startup.reason },
+    "Strategy evaluation producer scheduler enabled; awaiting market evaluations");
   const owner = randomUUID();
   const controller = new AbortController();
   let stopped = false;
