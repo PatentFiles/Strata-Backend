@@ -4,6 +4,8 @@ import {
   GetForwardTestStatusResponse,
 } from "@workspace/api-zod";
 import { db, forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable } from "@workspace/db";
+import { readKalshiBrtiShadowStatus } from "../lib/kalshiBrtiShadowStream";
+import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
@@ -108,6 +110,34 @@ export async function readForwardTestStatus() {
     ...triggers,
   });
 }
+
+/**
+ * Authenticated read-only CF Benchmarks market-reference diagnostics.
+ * Does not return credentials, provide a provider settlement verdict, or
+ * change the Coinbase champion's execution threshold.
+ */
+router.get("/forward-test/settlement-reference", async (_req, res): Promise<void> => {
+  const status=readKalshiBrtiShadowStatus();
+  let comparison=null;
+  if(status.sourceFresh&&status.lastFrame){
+    try {
+      const engine=await getEngineStatus();
+      const [window]=engine?.marketTicker
+        ? await db.select().from(forwardTestWindowTable)
+          .where(eq(forwardTestWindowTable.ticker,engine.marketTicker)).limit(1)
+        : [];
+      if(window?.target!=null&&window.endsAt){
+        comparison=compareBrtiToKalshiStrike(status.lastFrame,{
+          ticker:window.ticker,target:window.target,
+          closeAtMs:window.endsAt.getTime(),coinbaseSpot:engine?.btcPrice,
+        });
+      }
+    }catch{/* No signal/target => no calculated comparison. */}
+  }
+  res.json({...status,comparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
+    sourceIndex:"BRTI",readOnly:true,paperOnly:true,tradingAuthority:false,
+    warning:"Reference only. Not a Kalshi official settlement or entry authorization."});
+});
 
 router.get("/forward-test/status", async (_req, res): Promise<void> => {
   res.json(await readForwardTestStatus());
