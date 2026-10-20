@@ -100,3 +100,29 @@ order by created_at desc limit 3;
 ## Deployment gate decision
 
 **NO-GO** until all checks pass: consolidated CI; genuine independent review; a safe, audited precommissioning-sentinel remediation for already-commissioned accounts; healthy Railway deployment and exact SHA; approved protective-exit release; live market-evaluation writes; authenticated Kalshi cash/position reconciliation; separate owner ARM and START; proper real order/partial-fill/unknown-response settlement handling. A fresh worker heartbeat alone is insufficient.
+
+
+## Institutional authorization V1 — opt-in release sequence
+
+This is a SECURITY-SENSITIVE policy change. The default two-hour code-release model remains authoritative unless the exact opt-in variable `STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED=true` is set. Do not set it on Railway until the migration, review, and tested target SHA are all available.
+
+1. Finish independent code/security review of the final combined backend PR and frontend controls. Reviewer must genuinely attest the **durable, revocable exact-SHA review scope**, separate from owner consent; do not reuse a prior `TWO_HOUR` review.
+2. Apply `sql/strata_institutional_code_approval_v1.sql` with privileged migration access, **before** deploying backend code that references `review_scope`. Verify its private RLS, no anon/authenticated grants, immutable/revocation-only trigger and unique active per-owner SHA. It is additive and creates no approval or trading authority.
+3. Keep `STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED` absent/false until all CI tests and deployment checks pass. All existing `/status`, legacy reviewer, authorization, and signed exit code must continue to work on this mode.
+4. Deploy the exact reviewed backend SHA to the single existing Railway service. Confirm no second replicas and no worker restart while positions or ambiguous orders exist. Validate the signal producer and Kalshi account reconciliation first.
+5. Set the new flag only after deliberate security rollout approval. A **new, separate** reviewer confirmation and **new, explicit** owner confirmation create an account-specific durable code approval. Nothing is silently grandfathered; no prior two-hour record becomes durable.
+6. The reviewed code SHA persists until revoked, but does NOT authorize orders. Each live entry still requires owner ARM/START, connected restricted signing key, approved policy/stake, current official fees/market evidence, full authenticated Kalshi reconciliation, no unresolved orders, current worker lease and kill switches off.
+7. Startup code approval does **not** require a pre-existing 15-second reconciliation: a stopped worker refreshes provider evidence on START, then the V13 executor enforces fresh reconciliation at prepare/final order boundaries. The final one-use signed EXIT checks the same reviewed SHA and current revocation without a rolling two-hour expiry, separately enforcing position, lease, fees, kill, and known-order fence.
+8. To revoke: account owner uses explicit revocation with no exposure; for urgent shutdown or open exposure, use established STOP/KILL controls and exchange reconciliation. Revocation is irreversible; reapproval requires new independent review and owner consent. A subsequent Git SHA never inherits prior approval.
+9. Verify the actual DB status, code SHA, operator logs and exchange results after rollout. Never call a successful code approval proof of a filled order.
+
+### Rollback
+
+- If the institutional path fails, STOP new entries through authenticated owner safety controls and reconcile exposure; do not roll back a server while uncertain orders exist.
+- Set `STRATA_INSTITUTIONAL_CODE_APPROVAL_ENABLED=false` only as part of a controlled deployment; this restores the legacy *approval verification model*, not an expired two-hour release and not trading authority.
+- The new private approval table is additive; **do not DROP it during rollback**. Preserve independent review and revocation history. Do not delete money, ledger, or signed-order evidence.
+- Any emergency code rollback changes the deployed SHA and requires its own genuine reviewed approval. Existing exited/fill/settlement evidence is preserved.
+
+### Unresolved operational evidence
+
+CI uses isolated/stubbed exchange outcomes. It cannot prove live fills. The production final signed POST must be independently tested under an authorized, strictly controlled environment, including timeout, partial fills, duplicate prevention, settlement and reduce-only management. A healthy worker heartbeat is not proof of real-money execution.
