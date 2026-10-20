@@ -304,12 +304,37 @@ export function createProductionPersonalSession(
            row.kill_switch!==false||row.execution_enabled!==true||
            !state.workerActuallyScheduled||state.accountKill)
           throw new Error("protective_exit_owned_position_or_floor_changed");
+        // prepareExit is financial-intent preparation ONLY: it does not send
+        // an order. The same sealed V13 client ID must be used by the separate
+        // one-use signed dispatcher so fills/cash/positions are attributable.
+        const financialIntentId=await session.executor.prepareExit(
+          position.id,approvedFloorMicros/1_000_000,
+        );
+        const intentRows=await db.query(
+          "SELECT request FROM public.v13_production_intent "+
+          "WHERE id=$1 AND account_id=$2 AND parent_id=$3 "+
+          "AND kind='EXIT' AND state='PREPARED' AND terminal=false",
+          [financialIntentId,input.accountId,position.id],
+        );
+        const raw=intentRows.rows[0]?.request;
+        const request=typeof raw==="string"?JSON.parse(raw):raw;
+        if(intentRows.rows.length!==1||!request||
+           typeof request!=="object"||Array.isArray(request)||
+           request.market!==position.market||request.side!==position.side||
+           request.action!=="SELL"||request.reduceOnly!==true||
+           request.timeInForce!=="IOC")
+          throw new Error("protective_exit_financial_intent_unverified");
         const result=await dispatchOwnedWorkerProtectiveExit({
           ownerId:input.userId,accountId:input.accountId,material,
           lease:{holderId,fencingToken:state.fencingToken},
           market:position.market,positionSide:position.side,
           ownedQuantityHundredths:position.quantity_hundredths,
           minimumExitMicros:approvedFloorMicros,
+          preparedRequest:request as {
+            market:string;side:"YES"|"NO";action:"SELL";
+            contracts:number;limitMicros:number;timeInForce:"IOC";
+            reduceOnly:true;clientOrderId:string;
+          },
           readMarket:(m,side)=>session.exchange.market(m,side),
         });
         // The protective audit is distinct from the legacy V13 financial
