@@ -109,7 +109,7 @@ export function parseKalshiBrtiQuarterHourFrame(
   // Kalshi's 15m accumulator uses (quarterClose - 60s, quarterClose].
   if(ts<=quarterClose-SETTLEMENT_WINDOW_MS||ts>quarterClose)
     return refuse("source_tick_outside_final_minute");
-  if(start<=quarterClose-SETTLEMENT_WINDOW_MS||start>quarterClose||
+  if(start<quarterClose-SETTLEMENT_WINDOW_MS||start>quarterClose||
      end>quarterClose+2000)
     return refuse("quarter_window_bounds_invalid");
   if(count===60&&ts<quarterClose)
