@@ -12,7 +12,7 @@ import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
-import { makeOwnedProtectiveExitOrder } from "./ownedProtectiveExitOrder";
+import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import {
@@ -300,8 +300,29 @@ export function createProductionPersonalSession(
           throw new Error("protective_exit_worker_lease_or_kill_changed");
         }
         try {
+          // Fresh entries are halted as soon as an outbound EXIT intent is
+          // prepared. Never initiate a second entry when exit evidence is
+          // uncertain or the exchange account is being reduced.
+          state.entriesAuthorized = false;
+          // Financial preparation commits an accountable V13 SELL intent but
+          // DOES NOT send an order. It independently rechecks position,
+          // strategy, approved policy/fees, book, stake and exit floor.
+          const financialId = await session.executor.prepareExit(
+            selection.positionId,selection.minimumExitMicros/1_000_000,
+          );
+          const financialRows = await db.query(
+            "SELECT request FROM public.v13_production_intent "+
+            "WHERE id=$1 AND account_id=$2 AND parent_id=$3 "+
+            "AND kind='EXIT' AND state='PREPARED' AND terminal=false",
+            [financialId,input.accountId,selection.positionId],
+          );
+          const value=financialRows.rows[0]?.request;
+          const request=(typeof value==="string"?JSON.parse(value):value) as Request;
+          if(financialRows.rows.length!==1||!request||
+             typeof request!=="object"||Array.isArray(request))
+            throw Error("protective_exit_v13_intent_unverified");
           const market = await session.executor.exchange.market(selection.market, selection.side);
-          const order = makeOwnedProtectiveExitOrder(selection, market, now());
+          const order = sealedFinancialProtectiveExitOrder(selection,request,market);
           const lease = { holderId, fencingToken: claimed.fencingToken };
           const reservation = await reserveOwnedEmergencyExitProof(
             input.userId, input.accountId, material, order, lease,
@@ -316,6 +337,10 @@ export function createProductionPersonalSession(
             reservationId: reservation.reservationId, material, order, lease,
           });
           if (outcome.state !== "RECONCILED") throw new Error(outcome.reason);
+          // The one-use private reservation is not the V13 cash/fill ledger.
+          // Verify the latter against signed provider history before treating
+          // position/cash balances as authoritative or permitting new entries.
+          await session.executor.reconcile();
         } catch (error) {
           // Exposure after an ambiguous IOC is never replaced by a new entry.
           state.entriesAuthorized = false;

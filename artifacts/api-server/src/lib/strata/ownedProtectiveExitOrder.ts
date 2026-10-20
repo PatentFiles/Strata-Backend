@@ -9,7 +9,8 @@ import type { EmergencyExitOrder } from "./ownerFeeEmergencyExit";
  * integer ticks/hundredths: NO liquidation is a YES bid at (1 - NO bid).
  * Never sweep beyond top-of-book liquidity or the owned position.
  */
-type Selection = Parameters<ProtectiveExitDispatch>[0];
+type Selection = Pick<Parameters<ProtectiveExitDispatch>[0],
+ "market" | "side" | "quantityHundredths" | "minimumExitMicros">;
 const MARKET = /^KXBTC15M-[A-Za-z0-9-]+$/;
 const PRICE = /^0\.[0-9]{4}$/;
 const COUNT = /^(0|[1-9][0-9]{0,8})(?:\.([0-9]{1,2}))?$/;

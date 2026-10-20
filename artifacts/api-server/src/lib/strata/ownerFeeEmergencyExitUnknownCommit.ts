@@ -117,6 +117,10 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id " +
       "JOIN public.v13_production_position pos " +
       "ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side " +
+      "JOIN public.v13_production_intent fi " +
+      "ON fi.account_id=a.id AND fi.parent_id=pos.id " +
+      "AND fi.client_order_id=r.client_order_id AND fi.kind='EXIT' " +
+      "AND fi.state='PREPARED' AND fi.terminal=false " +
       "JOIN public.live_execution_config g ON g.id='singleton' " +
       "WHERE r.reservation_id=$1::uuid AND r.owner_user_id=$2::uuid " +
       "AND r.execution_account_id=$3::text AND r.order_digest=$4::text " +
@@ -130,6 +134,12 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND a.kill_switch=false AND a.execution_enabled=true " +
       "AND g.live_execution_enabled=true AND g.manual_kill_switch=false " +
       "AND pos.quantity_hundredths >= r.quantity_hundredths " +
+      "AND fi.request->>'action'='SELL' AND fi.request->>'reduceOnly'='true' " +
+      "AND fi.request->>'timeInForce'='IOC' AND fi.request->>'market'=r.market_ticker " +
+      "AND fi.request->>'side'=r.reducing_side " +
+      "AND fi.request->>'clientOrderId'=r.client_order_id " +
+      "AND (fi.request->>'contracts')::integer*100=r.quantity_hundredths " +
+      "AND (fi.request->>'limitMicros')::integer=$13::integer " +
       "AND w.state='owned' AND w.account_kill=false " +
       "AND w.credential_fingerprint=$11::text " +
       "AND w.holder_id=$9::text AND w.fencing_token=$10::bigint " +
@@ -137,9 +147,11 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i " +
       "WHERE i.account_id=a.id AND (i.state IN ('DISPATCHED','UNKNOWN') " +
       "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
-      "FOR UPDATE OF r,a,w,pos",
+      "FOR UPDATE OF r,a,w,pos,fi",
       [reservationId,ownerId,accountId,digest,order.client_order_id,
-       order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint,baseline],
+       order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint,baseline,
+       order.side==="ask"?Number((order.price as string).slice(2))*100:
+        1_000_000-Number((order.price as string).slice(2))*100],
     );
     if(eligible.rows.length!==1)
       return deny("emergency_exit_unknown_position_or_fence_unavailable");
@@ -159,6 +171,20 @@ export async function markOwnedEmergencyExitUnknownForReview(
        changed.rows[0]!.reservation_id!==reservationId||
        changed.rows[0]!.client_order_id!==order.client_order_id)
       return deny("emergency_exit_unknown_transition_not_unique");
+    // Both ledgers consume the SAME order identity atomically before any
+    // signed POST; a crash never permits either pathway to resubmit.
+    const financial=await client.query(
+      "UPDATE public.v13_production_intent SET state='DISPATCHED',dispatch_at=now() " +
+      "WHERE account_id=$1::text AND client_order_id=$2::text " +
+      "AND parent_id IN (SELECT id FROM public.v13_production_position " +
+      "WHERE account_id=$1::text AND market=$3::text AND side=$4::text) " +
+      "AND kind='EXIT' AND state='PREPARED' AND terminal=false " +
+      "RETURNING client_order_id",
+      [accountId,order.client_order_id,order.ticker,direction],
+    );
+    if(financial.rows.length!==1||
+       financial.rows[0]!.client_order_id!==order.client_order_id)
+      return deny("emergency_exit_financial_intent_transition_not_unique");
     await client.query("COMMIT");committed=true;
     return {
       ...deny("emergency_exit_unknown_committed_no_transport_authority"),

@@ -3,6 +3,7 @@ import { ProductionExecutor } from "./executor";
 
 /** Backend-owned one-shot exit transport. No HTTP/client-supplied authority. */
 export type ProtectiveExitDispatch = (selection: Readonly<{
+  positionId: string;
   market: string;
   side: "YES" | "NO";
   quantityHundredths: string;
@@ -55,6 +56,7 @@ export async function consumeOwnedPosition(executor: ProductionExecutor, dispatc
       requireProof(dispatchProtectiveExit, "reviewed_protective_exit_worker_not_bound");
       requireProof(pos.side === "YES" || pos.side === "NO", "protective_exit_side_unverified");
       await dispatchProtectiveExit({
+        positionId:String(pos.id),
         market: String(pos.market), side: pos.side,
         quantityHundredths: String(pos.quantity_hundredths),
         minimumExitMicros: evaluation.floor,

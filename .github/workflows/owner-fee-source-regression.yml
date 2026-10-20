@@ -25,6 +25,10 @@ jobs:
   safety:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Offline unit suites that bundle server modules require a configured URL
+    # at import time; this unreachable placeholder never touches live Supabase.
+    env:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/unreachable
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -140,3 +144,7 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerProtectiveRecovery.test.cjs
       - name: Verify protected recovery happens before V13 execution
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/workerProtectiveRecovery.test.cjs
+      - name: Bundle V13 financial-intent protective exit tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownedProtectiveFinancialIntent.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedProtectiveFinancialIntent.test.cjs
+      - name: Test sealed financial-intent protective exit pricing
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownedProtectiveFinancialIntent.test.cjs
