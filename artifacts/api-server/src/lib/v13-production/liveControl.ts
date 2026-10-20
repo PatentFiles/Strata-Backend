@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import {
   db,
   microLivePairBoundaryTable,
@@ -16,6 +16,7 @@ import { ProductionExecutor } from "./executor";
 import { ProductionLedger } from "./ledger";
 import { createProductionExchange } from "./readers";
 import { ProductionWorker } from "./worker";
+import { legacyGlobalAccountPredicate } from "./legacyGlobalAccountSelector";
 import {
   assertDirectSessionDatabase,
   releaseProductionWorkerLock,
@@ -48,12 +49,7 @@ function countOf(value: unknown): number {
  */
 async function accountRow() {
   const [row] = await db.select().from(v13ProductionAccountTable)
-    .where(and(
-      eq(v13ProductionAccountTable.id, "v13-production-1-2"),
-      isNull(v13ProductionAccountTable.ownerUserId),
-      eq(v13ProductionAccountTable.subaccount, 1),
-      eq(v13ProductionAccountTable.exchangeIndex, 2),
-    ))
+    .where(legacyGlobalAccountPredicate())
     .limit(1);
   return row ?? null;
 }
