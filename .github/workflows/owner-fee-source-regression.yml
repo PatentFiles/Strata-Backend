@@ -120,3 +120,7 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitRestartRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitRestartRecovery.test.cjs
       - name: Test restart signed history and irreversible one-use audited recovery
         run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerFeeEmergencyExitRestartRecovery.test.cjs
+      - name: Bundle authenticated full-state position history query tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangePositionQuery.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangePositionQuery.test.cjs
+      - name: Test Kalshi complete market position query
+        run: node --test artifacts/api-server/dist/personalExchangePositionQuery.test.cjs
