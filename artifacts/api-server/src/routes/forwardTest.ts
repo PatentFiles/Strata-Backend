@@ -119,22 +119,43 @@ export async function readForwardTestStatus() {
 router.get("/forward-test/settlement-reference", async (_req, res): Promise<void> => {
   const status=readKalshiBrtiShadowStatus();
   let comparison=null;
-  if(status.sourceFresh&&status.lastFrame){
+  let spotComparison=null;
+  if((status.sourceFresh&&status.lastFrame)||(status.instantSourceFresh&&status.lastIndex)){
     try {
       const engine=await getEngineStatus();
       const [window]=engine?.marketTicker
         ? await db.select().from(forwardTestWindowTable)
           .where(eq(forwardTestWindowTable.ticker,engine.marketTicker)).limit(1)
         : [];
-      if(window?.target!=null&&window.endsAt){
-        comparison=compareBrtiToKalshiStrike(status.lastFrame,{
-          ticker:window.ticker,target:window.target,
-          closeAtMs:window.endsAt.getTime(),coinbaseSpot:engine?.btcPrice,
-        });
+      if(window?.target!=null&&window.endsAt&&window.startsAt){
+        if(status.sourceFresh&&status.lastFrame){
+          comparison=compareBrtiToKalshiStrike(status.lastFrame,{
+            ticker:window.ticker,target:window.target,
+            closeAtMs:window.endsAt.getTime(),coinbaseSpot:engine?.btcPrice,
+          });
+        }
+        const tick=status.lastIndex;
+        if(status.instantSourceFresh&&tick&&
+           tick.sourceTimestampMs>=window.startsAt.getTime()&&
+           tick.sourceTimestampMs<=window.endsAt.getTime()){
+          const p=Number(tick.currentIndexUsd);
+          const coinbase=engine?.btcPrice;
+          spotComparison={
+            ticker:window.ticker,
+            source:"CF_BENCHMARKS_BRTI_CURRENT_INDEX",
+            spotUsd:tick.currentIndexUsd,
+            strikeUsd:window.target.toFixed(2),
+            spreadToStrikeUsd:Math.round((p-window.target)*100)/100,
+            coinbaseBasisUsd:typeof coinbase==="number"&&Number.isFinite(coinbase)&&coinbase>0
+              ?Math.round((coinbase-p)*100)/100:null,
+            observedAtMs:tick.sourceTimestampMs,
+            settlementAuthority:false,readOnly:true,tradingAuthority:false,
+          };
+        }
       }
-    }catch{/* No signal/target => no calculated comparison. */}
+    }catch{/* No same-market signal/target => no calculated comparison. */}
   }
-  res.json({...status,comparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
+  res.json({...status,comparison,spotComparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
     sourceIndex:"BRTI",readOnly:true,paperOnly:true,tradingAuthority:false,
     warning:"Reference only. Not a Kalshi official settlement or entry authorization."});
 });
