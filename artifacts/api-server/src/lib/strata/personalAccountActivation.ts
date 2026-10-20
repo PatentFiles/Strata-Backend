@@ -25,6 +25,7 @@ import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -705,12 +706,14 @@ export async function requestOwnedAccountActivation(
   if (!report.accountId || blockers.length > 0) {
     return { ok: false, reason: blockers[0] ?? "execution_account_missing", ...closed };
   }
-  const unresolved = await db.query(
-    `SELECT count(*)::text AS n FROM v13_production_intent
-     WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')`,
-    [report.accountId],
+  // Existing v13 intents are not the whole picture: independently reserved
+  // protective exits can have already consumed one irrevocable IOC identity.
+  // A missing private-ledger count is never interpreted as zero.
+  const unresolved = await readUnresolvedIntentMode(
+    (sql, params) => db.query(sql, params), report.accountId,
   );
-  if (Number(unresolved.rows[0]?.n ?? "0") > 0) {
+  if (!unresolved.ok) return { ok: false, reason: unresolved.reason, ...closed };
+  if (unresolved.mode === "recovery") {
     return { ok: false, reason: "production_uncertain_order_blocks_mutation", ...closed };
   }
   const row = (await db.query(READINESS_SQL, [input.ownerUserId])).rows[0] ?? {};
