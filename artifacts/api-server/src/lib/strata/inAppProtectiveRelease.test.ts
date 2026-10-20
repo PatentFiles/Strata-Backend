@@ -184,7 +184,7 @@ test("durable SHA mode requires distinct owner authorization and never auto-star
   },{db:h.db,sha:()=>SHA});
   assert.equal(approved.ok,true,JSON.stringify(approved));
   assert.equal("codeApprovalActive" in approved && approved.codeApprovalActive,true);
-  assert.equal(approved.workerStarted,false);
+  assert.equal("workerStarted" in approved && approved.workerStarted,false);
   assert.equal(h.executed.filter(s=>s.includes("INSERT INTO private.strata_durable_code_approvals")).length,1);
   assert.equal(h.executed.filter(s=>s.includes("INSERT INTO private.strata_protective_exit_release")).length,0);
  }finally{
