@@ -33,7 +33,7 @@ BEGIN
  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
  END;
 END $$;
-DO $
+DO $snapshot_guard$
 BEGIN
  BEGIN
  UPDATE private.strata_emergency_exit_reservations
@@ -41,7 +41,7 @@ BEGIN
  RAISE EXCEPTION 'immutable request changed';
  EXCEPTION WHEN SQLSTATE '23514' THEN NULL;
  END;
-END $;
+END $snapshot_guard$;
 UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN', updated_at=now()
 WHERE reservation_id='33333333-3333-4333-8333-333333333333';
 INSERT INTO private.strata_protective_exit_reconciliations(
