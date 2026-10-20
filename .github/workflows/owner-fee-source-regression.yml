@@ -124,3 +124,11 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/personalExchangePositionQuery.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExchangePositionQuery.test.cjs
       - name: Test Kalshi complete market position query
         run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/personalExchangePositionQuery.test.cjs
+      - name: Bundle immutable protective worker recovery tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFeeEmergencyExitWorkerRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Test immutable worker protective recovery snapshots
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/ownerFeeEmergencyExitWorkerRecovery.test.cjs
+      - name: Bundle worker recovery ordering tests
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerProtectiveRecovery.test.cjs
+      - name: Verify protected recovery happens before V13 execution
+        run: DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test node --test artifacts/api-server/dist/workerProtectiveRecovery.test.cjs
