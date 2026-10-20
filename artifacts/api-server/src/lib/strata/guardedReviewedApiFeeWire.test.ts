@@ -205,3 +205,57 @@ test("signed GET and HEAD requests are limited to canonical Kalshi API paths",as
     /api_fee_unexpected_read_endpoint/);
  assert.equal(sent,3,"no signed request reaches an unexpected origin");
 });
+
+test("reviewed API-source order does not depend on Kalshi PDF fetch once independently signed grant is verified",async()=>{
+ let sent=0,reviewChecks=0;
+ const sequence:string[]=[];
+ const db={
+  async query(sql:string){
+   sequence.push(sql==="COMMIT"?"COMMIT":sql==="BEGIN"?"BEGIN":"SQL");
+   return {rows:sql.includes("SELECT a.id")?[{id:account}]:[]};
+  },
+  release(){sequence.push("RELEASE");},
+ };
+ const verified=async()=>{reviewChecks++;sequence.push("REVIEWED_API");
+  return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
+   grantId:grant,sourceUrl:source,digest:"a".repeat(64),
+   feePolicyVersion:API_SOURCE_POLICY_VERSION,
+   formulaVersion:"standard_quadratic_0.07_round_cent_v1",
+   marketTicker:ticker,verifiedAtMs:Date.now(),
+  }};
+ };
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,
+  (async()=>{sent++;sequence.push("POST");return new Response("{}");}) as typeof fetch,
+  policyHash,signer,token,leaseHolder,{
+   connect:(async()=>db) as never,
+   verify:verified as never,
+   // No PDF verifier is injected. The strictly authenticated, signed
+   // reviewed API stage must be the sole monetary-model proof.
+  });
+ await wrapped(url,{method:"POST",body:JSON.stringify(order)});
+ assert.equal(reviewChecks,1);assert.equal(sent,1);
+ assert.ok(sequence.indexOf("POST")>sequence.indexOf("REVIEWED_API"));
+ assert.ok(sequence.indexOf("COMMIT")>sequence.indexOf("POST"));
+});
+
+test("reviewed API grant with incorrect formula or digest cannot submit an order",async()=>{
+ for(const bad of [
+  {formulaVersion:"unapproved",digest:"a".repeat(64)},
+  {formulaVersion:"standard_quadratic_0.07_round_cent_v1",digest:"tampered"},
+ ]){
+  let sent=0;
+  const db={query:async(sql:string)=>({rows:sql.includes("SELECT a.id")?[{id:account}]:[]}),release(){}};
+  const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,
+    (async()=>{sent++;return new Response("{}");}) as typeof fetch,
+    policyHash,signer,token,leaseHolder,{
+    connect:(async()=>db) as never,
+    verify:(async()=>({ok:true,identity:{
+     grantId:grant,sourceUrl:source,marketTicker:ticker,
+     feePolicyVersion:API_SOURCE_POLICY_VERSION,
+     formulaVersion:bad.formulaVersion,digest:bad.digest,
+    }})) as never,
+  });
+  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify(order)}),/grant_or_market_closed/);
+  assert.equal(sent,0);
+ }
+});
