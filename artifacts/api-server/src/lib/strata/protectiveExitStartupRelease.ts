@@ -1,3 +1,4 @@
+import { INSTITUTIONAL_ENTRY_SQL, institutionalReleaseMode } from "./institutionalCodeApproval";
 /**
  * Safe, read-only first fence for personal production START. A worker must
  * never open NEW inventory unless its ONE-USE signed protective EXIT path
@@ -41,7 +42,9 @@ export async function verifyProtectiveExitStartupRelease(
  if(!sha||!SHA.test(sha))return {ok:false,reason:"protective_exit_release_version_unknown"};
  if(!UUID.test(ownerId))return {ok:false,reason:"protective_exit_owner_unverified"};
  try{
-  const evidence=await db.query(PROTECTIVE_STARTUP_RELEASE_SQL,[sha,ownerId]);
+  const sql=institutionalReleaseMode(env)==="DURABLE_CODE_V1"
+    ? INSTITUTIONAL_ENTRY_SQL : PROTECTIVE_STARTUP_RELEASE_SQL;
+  const evidence=await db.query(sql,[sha,ownerId]);
   if(evidence.rows.length!==1||
      typeof evidence.rows[0]?.release_id!=="string"||
      !UUID.test(evidence.rows[0].release_id)){

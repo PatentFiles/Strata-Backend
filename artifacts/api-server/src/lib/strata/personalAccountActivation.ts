@@ -43,7 +43,7 @@ const READINESS_SQL = `
   -- personal-activation:readiness
   SELECT a.id, a.commissioned, a.execution_enabled, a.kill_switch,
          a.cash_precision_verified, a.cash_micros::text AS cash_micros,
-         a.reconciled_at,
+         a.reconciled_at, a.blocked_reason,
          (SELECT MAX(proof_at) FROM (
            SELECT t.completed_at AS proof_at FROM private.kalshi_owner_pilot_transfers t
              WHERE t.execution_account_id=a.id AND t.owner_user_id=a.owner_user_id
@@ -83,7 +83,14 @@ const COMMISSION_SQL = `
   SET commissioned = true,
       commissioning_digest = $3,
       fee_artifact_digest = $4,
-      minimum_exit_micros = $5
+      minimum_exit_micros = $5,
+      -- Clear ONLY the pre-commissioning sentinel during an explicitly
+      -- authenticated, freshly reconciled owner's commissioning transition.
+      -- Never erase a different risk freeze or unknown-order reason.
+      blocked_reason = CASE
+        WHEN blocked_reason = 'awaiting_account_commissioning' THEN NULL
+        ELSE blocked_reason
+      END
   WHERE id = $1
     AND owner_user_id = $2::uuid
     AND owner_user_id IS NOT NULL
@@ -144,7 +151,14 @@ const COMMISSION_API_SQL = `
   SET commissioned = true,
       commissioning_digest = $3,
       fee_artifact_digest = $4,
-      minimum_exit_micros = $5
+      minimum_exit_micros = $5,
+      -- Clear ONLY the pre-commissioning sentinel during an explicitly
+      -- authenticated, freshly reconciled owner's commissioning transition.
+      -- Never erase a different risk freeze or unknown-order reason.
+      blocked_reason = CASE
+        WHEN blocked_reason = 'awaiting_account_commissioning' THEN NULL
+        ELSE blocked_reason
+      END
   WHERE id = $1
     AND owner_user_id = $2::uuid
     AND owner_user_id IS NOT NULL
@@ -684,6 +698,13 @@ function activationBlockers(
   const exitMicros = Number(row.minimum_exit_micros);
   if (!Number.isSafeInteger(exitMicros) || exitMicros < 1 || exitMicros > 999_999) blockers.push("minimum_exit_missing");
   if (!/^[0-9a-f]{64}$/.test(text(row.fee_artifact_digest) ?? "")) blockers.push("fee_evidence_missing");
+  // Commissioning must finish the initial provisioning state transition.
+  // A commissioned account still carrying this sentinel will fail the live
+  // executor's production_account_frozen gate; surface it before ARM/START.
+  // All other freeze reasons must remain visible and never be auto-cleared.
+  if (flag(row.commissioned) && text(row.blocked_reason)) {
+    blockers.push("production_account_frozen");
+  }
   if (!flag(row.commissioned)) blockers.push("account_not_commissioned");
   if (!flag(row.execution_enabled)) blockers.push("execution_not_enabled");
   if (flag(row.kill_switch)) blockers.push("account_kill_switch");

@@ -1,3 +1,4 @@
+import { institutionalReleaseMode, INSTITUTIONAL_EXIT_JOIN, INSTITUTIONAL_EXIT_PREDICATE, LEGACY_EXIT_JOIN, LEGACY_EXIT_PREDICATE } from "./institutionalCodeApproval";
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
@@ -119,7 +120,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
  JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
- JOIN private.strata_protective_exit_release v ON v.release_commit_sha=$1 AND v.state='approved'
+${institutionalReleaseMode()==="DURABLE_CODE_V1"?INSTITUTIONAL_EXIT_JOIN:LEGACY_EXIT_JOIN}
  WHERE r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
  AND r.execution_account_id=$4 AND r.client_order_id=$5 AND r.market_ticker=$6
  AND r.reducing_side=$7 AND r.quantity_hundredths=$8::bigint
@@ -136,8 +137,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  AND w.credential_fingerprint=$13::text
  AND w.account_kill=false AND w.heartbeat_at > now()-interval '5 seconds'
  AND pos.quantity_hundredths >= $8::bigint
- AND v.expires_at > now() AND v.revoked_at IS NULL
- AND v.independent_reviewer_id <> a.owner_user_id
+${institutionalReleaseMode()==="DURABLE_CODE_V1"?INSTITUTIONAL_EXIT_PREDICATE:LEGACY_EXIT_PREDICATE}
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
    WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
  AND EXISTS (SELECT 1 FROM public.v13_production_intent i
