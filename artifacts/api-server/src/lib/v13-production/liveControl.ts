@@ -16,6 +16,7 @@ import { ProductionExecutor } from "./executor";
 import { ProductionLedger } from "./ledger";
 import { createProductionExchange } from "./readers";
 import { ProductionWorker } from "./worker";
+import { legacyGlobalAccountPredicate } from "./legacyGlobalAccountSelector";
 import {
   assertDirectSessionDatabase,
   releaseProductionWorkerLock,
@@ -40,12 +41,15 @@ function countOf(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * The legacy V13 global worker is not the personal owner-scoped executor.
+ * Several real owner accounts use subaccount=1/exchangeIndex=2.
+ * Never let an unordered lookup bind this shared worker/read API to one of
+ * those accounts: fail closed unless the exact ownerless legacy row exists.
+ */
 async function accountRow() {
   const [row] = await db.select().from(v13ProductionAccountTable)
-    .where(and(
-      eq(v13ProductionAccountTable.subaccount, 1),
-      eq(v13ProductionAccountTable.exchangeIndex, 2),
-    ))
+    .where(legacyGlobalAccountPredicate())
     .limit(1);
   return row ?? null;
 }
