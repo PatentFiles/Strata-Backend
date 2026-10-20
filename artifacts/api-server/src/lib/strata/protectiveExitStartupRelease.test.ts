@@ -53,7 +53,7 @@ test("exact deployed SHA and unrelated reviewer with unexpired release is requir
  assert.equal(calls,1);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/release_commit_sha=\$1::text/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/independent_reviewer_id <> \$2::uuid/);
- assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)\+interval '20 minutes'/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/revoked_at IS NULL/);
 });
 test("no release, ambiguous release or DB failures refuse START",async()=>{
