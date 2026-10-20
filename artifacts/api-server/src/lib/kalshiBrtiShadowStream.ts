@@ -121,13 +121,16 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
             ws.close();return;
           }
           state="BRTI_CONFIRMED";lastError=null;
+          console.info("[brti-shadow] BRTI index entitlement confirmed; read-only observer");
           return;
         }
         if(frame.type!=="cfbenchmarks_value"||state!=="BRTI_CONFIRMED")return;
         const received=Date.now();
         const tick=parseKalshiBrtiInstantFrame(frame,received);
         if(tick.ok&&(!lastIndex||tick.tick.sourceTimestampMs>lastIndex.sourceTimestampMs)){
+          const firstTick=lastIndex===null;
           lastIndex=tick.tick;lastReceivedAtMs=received;
+          if(firstTick)console.info("[brti-shadow] fresh BRTI index tick verified; no trading authority");
         }
         const parsed=parseKalshiBrtiQuarterHourFrame(frame,received);
         // Outside final minute is an ordinary state, not a feed outage.
@@ -146,7 +149,10 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         if(socket!==ws)return;
         socket=null;lastFrame=null;lastIndex=null;connectionEstablishedAtMs=null;
         if(stopped)return;
-        if(state!=="NO_ENTITLEMENT")state="DISCONNECTED";
+        // Explicit provider denial is terminal until the next operator-approved
+        // deployment. Do not hammer the credential or bypass entitlement.
+        if(state==="NO_ENTITLEMENT")return;
+        state="DISCONNECTED";
         reconnectTimer=setTimeout(connect,RECONNECT_MS);
         reconnectTimer.unref?.();
       });
