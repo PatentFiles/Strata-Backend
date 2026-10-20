@@ -15,6 +15,7 @@ import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecove
 import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
+import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -209,6 +210,12 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "live_execution_not_enabled" };
     }
     if (!flag(loaded.row.cash_precision_verified)) return { ok: false, reason: "cash_not_reconciled" };
+    // New exposure is forbidden until the exact Railway build has a genuine,
+    // unexpired independently reviewed protective EXIT release. The earlier
+    // implementation only checked this when the EXIT itself was attempted,
+    // which was too late for an already-opened position.
+    const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
+    if(!exitRelease.ok)return {ok:false,reason:exitRelease.reason};
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);
