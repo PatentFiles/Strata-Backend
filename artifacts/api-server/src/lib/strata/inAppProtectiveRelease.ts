@@ -125,6 +125,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    reviewed:review.rows.length===1,
    releaseActive:active.rows.length===1,
    codeApprovalActive:durable&&active.rows.length===1,
+   codeApprovalId:durable&&active.rows.length===1?active.rows[0]?.release_id:null,
    releaseMode:durable?"DURABLE_CODE_V1":"LEGACY_TWO_HOUR",
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
@@ -421,5 +422,52 @@ export async function authorizeProtectiveRelease(
    codeApprovalActive:durable,
    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return deny("owner_release_transaction_refused")}
+ finally{if(client){if(!committed)try{await client.query("ROLLBACK")}catch{};client.release()}}
+}
+
+/** Revocation is an owner-only AAL2 control; it never arms/stops/starts or
+ * submits orders. Exposure must be flat so existing exits cannot be stranded.
+ * The audited code approval is immutable except for irreversible revoked_at.
+ */
+export const DURABLE_REVOKE_CONFIRM="I_REVOKE_MY_DURABLE_CODE_APPROVAL_AND_BLOCK_NEW_ENTRIES";
+export async function revokeDurableCodeApproval(
+ ownerId:string,raw:unknown,deps:Deps={}
+){
+ const db=deps.db??pool;
+ const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as DbRow:{};
+ if(institutionalReleaseMode()!=="DURABLE_CODE_V1"||!valid(ownerId)||
+    !valid(b.approvalId)||b.confirmation!==DURABLE_REVOKE_CONFIRM)
+   return deny("explicit_durable_code_revocation_required");
+ let client:Awaited<ReturnType<Db["connect"]>>|null=null,committed=false;
+ try{
+  client=await db.connect();
+  await client.query("BEGIN");
+  await client.query("SET LOCAL lock_timeout='1500ms'");
+  const target=await client.query(`
+ SELECT c.approval_id::text,a.id AS account_id
+ FROM private.strata_durable_code_approvals c
+ JOIN public.v13_production_account a ON a.owner_user_id=c.owner_user_id
+ WHERE c.approval_id=$1::uuid AND c.owner_user_id=$2::uuid AND c.revoked_at IS NULL
+ FOR UPDATE OF c,a`,[b.approvalId,ownerId]);
+  if(target.rows.length!==1)return deny("code_approval_owner_or_state_unverified");
+  const accountId=String(target.rows[0]?.account_id);
+  const exposure=await client.query(`
+ SELECT (SELECT count(*)::text FROM public.v13_production_intent
+          WHERE account_id=$1 AND terminal=false) pending,
+        (SELECT count(*)::text FROM public.v13_production_position
+          WHERE account_id=$1 AND quantity_hundredths>0) positions,
+        (SELECT count(*)::text FROM private.strata_emergency_exit_reservations
+          WHERE execution_account_id=$1 AND state<>'RECONCILED') uncertain_exits`,[accountId]);
+  const row=exposure.rows[0];
+  if(!row||["pending","positions","uncertain_exits"].some(k=>String(row[k])!=="0"))
+    return deny("code_revocation_exposure_requires_protective_management");
+  const updated=await client.query(`
+ UPDATE private.strata_durable_code_approvals SET revoked_at=now()
+ WHERE approval_id=$1::uuid AND owner_user_id=$2::uuid AND revoked_at IS NULL
+ RETURNING approval_id`,[b.approvalId,ownerId]);
+  if(updated.rows.length!==1)return deny("code_revocation_conflict");
+  await client.query("COMMIT");committed=true;
+  return {ok:true,reason:"durable_sha_code_approval_revoked",ordersSubmitted:false as const};
+ }catch{return deny("durable_code_approval_revocation_failed")}
  finally{if(client){if(!committed)try{await client.query("ROLLBACK")}catch{};client.release()}}
 }
