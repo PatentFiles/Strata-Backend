@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
 import { isV13DevelopmentStaged } from "./lib/v13DevelopmentStaging";
 import { startServerForwardTestWorker } from "./lib/forwardTestWorker";
+import { startKalshiBrtiShadowFeed } from "./lib/kalshiBrtiShadowStream";
 import { startShadowObserver } from "./lib/shadowLive";
 import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
 import { verifyProductionShadowReads } from "./lib/productionShadowPreflight";
@@ -70,6 +71,8 @@ app.listen(port, "0.0.0.0", (err) => {
   startShadowObserver();
   // Paper processing does not depend on the separately gated live recovery.
   startServerForwardTestWorker();
+  // GET-only reference monitor, default OFF; no order capability or live gate.
+  startKalshiBrtiShadowFeed();
   void reconcileMicroLiveAtStartup().then((result) => {
     logger.info({ ready: result.ready, reason: result.reason },
       "Micro-live startup reconciliation barrier completed");
