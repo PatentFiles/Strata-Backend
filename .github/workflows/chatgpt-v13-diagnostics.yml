@@ -47,6 +47,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck workspace
         run: pnpm run typecheck
+      - name: Regression - commissioned account cannot retain provisional freeze
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/commissioningFreezeTransition.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/commissioningFreezeTransition.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
+            --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/commissioningFreezeTransition.test.cjs
       - name: Test paper strategy execution semantics
         run: |
           pnpm --filter @workspace/api-server exec esbuild ../btc-paper-dashboard/src/lib/strategy.self-test.ts \
