@@ -53,7 +53,7 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.strata_protective_release_reviews r")&&
      sql.includes("JOIN private.strata_protective_release_qualification"))
    return {rows:input.review===false?[]:[{review_id:RID,reviewer_user_id:REVIEWER,
-     review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",
+     review_url:"https://github.com/PatentFiles/Strata-Backend/pull/107",review_scope:"TWO_HOUR",
      evidence_digest:DIGEST,qualification_digest:DIGEST}]};
   if(sql.includes("FROM auth.users u JOIN public.profiles p"))return {rows:input.permit===false?[]:[{"?column?":1}]};
   if(sql.includes("AS intents,")||sql.includes(") intents,"))
