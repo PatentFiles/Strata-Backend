@@ -99,7 +99,7 @@ async function signedPost(material:Material,order:Readonly<EmergencyExitOrder>):
  */
 async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Receipt>,db:DB):
  Promise<{attempted:boolean;receipt:Receipt}>{
- let c:DBClient|null=null,committed=false,attempted=false,receipt:Receipt=null;
+ let c:DBClient|null=null,committed=false,eligible=false;
  try{
   c=await db.connect();
   await c.query("BEGIN");
@@ -147,17 +147,25 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
     input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint]);
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return {attempted:false,receipt:null};
-  // One-shot in DB already: PREPARED cannot be re-entered from UNKNOWN.
-  attempted=true;
-  try{receipt=await send();}catch{receipt=null;}
-  await c.query("COMMIT");committed=true;
-  return {attempted,receipt};
+  // The PREPARED -> UNKNOWN marker is already committed. This final
+  // authorization fence must COMMIT before any network request is attempted.
+  // No row lock may be held across the external transport.
+  await c.query("COMMIT");committed=true;eligible=true;
  }catch{
-  // COMMIT may be ambiguous after network transmission. Never retry.
-  return {attempted,receipt:null};
+  // Ambiguous COMMIT: keep durable UNKNOWN, never transmit and never retry.
+  return {attempted:false,receipt:null};
  }finally{
   if(c){if(!committed){try{await c.query("ROLLBACK");}catch{}}
    c.release();}
+ }
+ if(!eligible)return {attempted:false,receipt:null};
+ // At this point a kill can update immediately. An in-flight POST cannot be
+ // unsent; the one-use marker ensures recovery-only behavior after a crash.
+ try{
+  const receipt=await send();
+  return {attempted:true,receipt};
+ }catch{
+  return {attempted:true,receipt:null};
  }
 }
 export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports={}):Promise<Result>{
