@@ -11,16 +11,24 @@ const env=(value:"true"|"false"|undefined="true")=>({
  ...(value===undefined?{}:{STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:value}),
 }) as NodeJS.ProcessEnv;
 
-test("START refuses missing signed dispatcher without any DB read",async()=>{
+test("explicit Railway false switch prevents START without reading DB",async()=>{
  let called=false;
- const missingFlag=env();
- delete missingFlag.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
  const result=await verifyProtectiveExitStartupRelease({query:async()=>{
    called=true;return {rows:[{release_id:releaseId}]};
- }},owner,missingFlag);
+ }},owner,env("false"));
  assert.equal(result.ok,false);
  assert.equal(result.reason,"protective_exit_release_disabled");
  assert.equal(called,false);
+});
+test("absent switch never permits START without a genuine matching DB approval",async()=>{
+ const noFlag=env();
+ delete noFlag.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ const rejected=await verifyProtectiveExitStartupRelease({query:async()=>({rows:[]})},owner,noFlag);
+ assert.equal(rejected.reason,"protective_exit_exact_deployed_version_approval_missing");
+ const approved=await verifyProtectiveExitStartupRelease({query:async()=>({
+  rows:[{release_id:releaseId}]
+ })},owner,noFlag);
+ assert.equal(approved.ok,true);
 });
 test("START refuses invalid runtime SHA and bad owner before any DB read",async()=>{
  let called=false;
@@ -45,7 +53,7 @@ test("exact deployed SHA and unrelated reviewer with unexpired release is requir
  assert.equal(calls,1);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/release_commit_sha=\$1::text/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/independent_reviewer_id <> \$2::uuid/);
- assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)\+interval '20 minutes'/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/revoked_at IS NULL/);
 });
 test("no release, ambiguous release or DB failures refuse START",async()=>{

@@ -12,7 +12,7 @@ export const PROTECTIVE_STARTUP_RELEASE_SQL = `
  WHERE v.release_commit_sha=$1::text
    AND v.state='approved'
    AND v.revoked_at IS NULL
-   AND v.created_at<=now() AND v.expires_at>now()
+   AND v.created_at<=now() AND v.expires_at>now()+interval '20 minutes'
    AND v.independent_reviewer_id <> $2::uuid
    AND v.operator_approver_id <> v.independent_reviewer_id
  LIMIT 2`;
@@ -34,7 +34,7 @@ export async function verifyProtectiveExitStartupRelease(
  if(env.NODE_ENV==="test"&&!hosted){
    return {ok:true,reason:"protective_exit_release_verified"};
  }
- if(env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"){
+ if(env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="false"){
    return {ok:false,reason:"protective_exit_release_disabled"};
  }
  const sha=env.RAILWAY_GIT_COMMIT_SHA;

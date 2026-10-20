@@ -10,6 +10,7 @@ import { createProductionRouter, type ProductionHttpDeps } from "./productionRou
 import { createStrataCommissioningRouter, type CommissioningPort } from "./strataCommissioning";
 import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
 import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
+import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -147,6 +148,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const userScope = deps.userScope ?? closedUserScopePort();
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
+  router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
     const result = await userScope.enableOwnedExecution(req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));

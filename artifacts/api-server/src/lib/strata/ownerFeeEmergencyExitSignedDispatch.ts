@@ -181,7 +181,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
    process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID);
  const testMode=process.env.NODE_ENV==="test"&&!hosted;
  if(!testMode&&(process.env.NODE_ENV!=="production"||
-    process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
+    process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="false"))
   return fail("protective_exit_release_disabled");
  if(!testMode&&(ports.db||ports.mark||ports.verifyFee||ports.post||ports.readAuthenticatedOutcome||ports.persistReconciled))
   return fail("protective_exit_injection_forbidden");

@@ -6,6 +6,10 @@ on:
       - 'sql/strata_protective_exit_reconciliation_private.sql'
       - 'sql/strata_protective_exit_release_private.sql'
       - 'sql/strata_protective_exit_request_snapshot_private.sql'
+      - 'sql/strata_in_app_protective_release_approval.sql'
+      - 'sql/strata_protective_exit_release_renewable.sql'
+      - 'sql/tests/strata_protective_release_renewal_test.sql'
+      - 'sql/tests/strata_in_app_protective_release_test.sql'
       - 'sql/tests/strata_protective_exit_candidate_test.sql'
       - '.github/workflows/protective-exit-candidate-sql.yml'
   workflow_dispatch:
@@ -54,5 +58,11 @@ jobs:
           psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_reconciliation_private.sql
           psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_release_private.sql
           psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_request_snapshot_private.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_in_app_protective_release_approval.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_release_renewable.sql
       - name: Validate immutable baselines, RLS, uniqueness and revocation
         run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_exit_candidate_test.sql
+      - name: Validate two-person review separation and immutable evidence
+        run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_in_app_protective_release_test.sql
+      - name: Validate renewable reviewer sign-off and strict one-active-version constraint
+        run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_release_renewal_test.sql
