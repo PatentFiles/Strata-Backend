@@ -293,6 +293,13 @@ export function createProductionPersonalSession(
       material,
       now,
       state,
+      // Final exchange entry transport independently re-reads exact SHA code
+      // approval AFTER the financial/order risk fence and BEFORE signed POST.
+      finalEntryCodeApproval: async () => {
+        const approval=await verifyProtectiveExitStartupRelease(db,input.userId);
+        if(!approval.ok)state.entriesAuthorized=false;
+        return approval.ok;
+      },
       entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
       // This is the only LIVE exit producer. The source selection comes from
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
