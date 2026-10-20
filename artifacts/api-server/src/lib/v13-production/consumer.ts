@@ -40,9 +40,20 @@ export async function consumeOwnedPosition(executor: ProductionExecutor): Promis
     });
     if (evaluation.decision.signal !== "EXIT" || !evaluation.decision.positionExitReason) continue;
     requireProof(evaluation.floor, "production_exit_floor_missing");
+    // Never use the legacy V13 SELL transport as a fallback after protective
+    // release is selected: that would bypass the one-use reservation/release
+    // and could send a second exit after a signed IOC with unknown response.
+    if(process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="true"){
+      requireProof(executor.protectiveExit,"protective_exit_worker_not_integrated");
+      await executor.protectiveExit({
+        id:String(pos.id),market:String(pos.market),
+        side:pos.side as "YES"|"NO",
+        quantity_hundredths:String(pos.quantity_hundredths),
+      },Number(evaluation.floor));
+      continue;
+    }
     const id = await executor.prepareExit(pos.id, evaluation.floor / 1_000_000);
-    // prepareExit independently rechecks and binds current owned evidence
-    // under its reservation lock. No later mutation of the sealed capability.
+    // Legacy V13 path retained only while the protective-release gate is OFF.
     await executor.dispatch(id);
   }
 }
