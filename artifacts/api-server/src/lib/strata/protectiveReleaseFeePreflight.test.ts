@@ -12,7 +12,7 @@ const observation=(ts=now)=>({
  eventTicker:"KXBTC15M-26OCT200545",feeType:"quadratic",feeMultiplier:"1",
  metadataDigest:"a".repeat(64),pdfProvenanceApproved:false,ownerPolicyApproved:false,
  commissioningApproved:false,tradingEnabled:false,
-}) as never;
+});
 
 test("Primary fresh provider PDF and market approval remains preferred",async()=>{
  let probed=false;
