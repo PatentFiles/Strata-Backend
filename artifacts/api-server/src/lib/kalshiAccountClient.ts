@@ -599,12 +599,17 @@ export async function postScopedOwnerVariableTopup(
   if(process.env.KALSHI_API_ENVIRONMENT!=="production" ||
      process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true")
     throw new KalshiApiError("INVALID_CREDENTIALS");
-  const path=kind==="bot"
-    ? `${API_PREFIX}/portfolio/subaccounts/transfer`
-    : `${API_PREFIX}/portfolio/intra_exchange_instance_transfer`;
+  // The /subaccounts/transfer POST returns an EMPTY body, and the
+  // /subaccounts/transfers history does NOT expose client_transfer_id.
+  // Using that route made our receipt match impossible. Kalshi's intra-account
+  // endpoint returns a server-issued transfer_id even for same-shard
+  // subaccount transfers. Keep the one-shot DB claim: Kalshi explicitly
+  // disallows client_transfer_id on numbered-subaccount intra transfers.
+  const path=`${API_PREFIX}/portfolio/intra_exchange_instance_transfer`;
   const body=kind==="bot" ? {
-    client_transfer_id:id,from_subaccount:0,to_subaccount:1,
-    exchange_index:2,amount_cents:amountCents,
+    source:"event_contract",destination:"event_contract",
+    amount:amountCents*100,source_exchange_shard:2,destination_exchange_shard:2,
+    source_subaccount:0,destination_subaccount:1,
   } : {
     client_transfer_id:id,source:"event_contract",destination:"event_contract",
     amount:amountCents*100,source_exchange_shard:0,destination_exchange_shard:2,
