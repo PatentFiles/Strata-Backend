@@ -16,6 +16,9 @@ export interface ScopedAccount {
   capitalRemainingCents: number | null;
   configuredStakeCents: number | null;
   stakeRevision: number | null;
+  riskPresetId?: string | null;
+  riskPresetRevision?: number | null;
+  riskCapitalCents?: number | null;
   approvedMaxEntryStakeCents: number | null;
   policyApproved: boolean;
   policyVersion: number | null;
@@ -49,6 +52,9 @@ export interface UserExecutionView {
   capitalRemainingCents: number | null;
   configuredStakeCents: number | null;
   stakeRevision: number | null;
+  riskPresetId?: string | null;
+  riskPresetRevision?: number | null;
+  riskCapitalCents?: number | null;
   approvedMaxEntryStakeCents: number | null;
   policyApproved: boolean;
   policyVersion: number | null;
@@ -119,6 +125,9 @@ export function emptyUserExecutionView(ownerUserId: string): UserExecutionView {
     capitalRemainingCents: null,
     configuredStakeCents: null,
     stakeRevision: null,
+    riskPresetId: null,
+    riskPresetRevision: null,
+    riskCapitalCents: null,
     approvedMaxEntryStakeCents: null,
     policyApproved: false,
     policyVersion: null,
@@ -160,6 +169,9 @@ export function viewForCaller(callerUserId: string, account: ScopedAccount | nul
     capitalRemainingCents: account.capitalRemainingCents,
     configuredStakeCents: account.configuredStakeCents,
     stakeRevision: account.stakeRevision,
+    riskPresetId: account.riskPresetId ?? null,
+    riskPresetRevision: account.riskPresetRevision ?? null,
+    riskCapitalCents: account.riskCapitalCents ?? null,
     approvedMaxEntryStakeCents: account.approvedMaxEntryStakeCents,
     policyApproved: account.policyApproved,
     policyVersion: account.policyVersion,
