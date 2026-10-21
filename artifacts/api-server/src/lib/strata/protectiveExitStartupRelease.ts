@@ -55,14 +55,18 @@ export async function verifyProtectiveExitStartupRelease(
  if(!sha||!SHA.test(sha))return {ok:false,reason:"protective_exit_release_version_unknown"};
  if(!UUID.test(ownerId))return {ok:false,reason:"protective_exit_owner_unverified"};
  try{
-  // Backward compatibility: an existing independent legacy release can still
-  // start a worker. The owner path grants no authority when its table is absent.
+  // Durable owner release may be absent for a legacy account; that never
+  // weakens the independent exact-SHA protective safety review required below.
   try {
     const own=await db.query(OWNER_SHA_STARTUP_RELEASE_SQL,[sha,ownerId]);
-    if(own.rows.length===1 && typeof own.rows[0]?.release_id==="string" &&
-       UUID.test(own.rows[0].release_id))
-      return {ok:true,reason:"protective_exit_release_verified"};
+    // Owner AAL2 account consent never substitutes for independent approval
+    // of the executable protective-exit implementation. Both are distinct
+    // authorities. The shared technical release is checked below for ALL modes.
     if(own.rows.length>1)return {ok:false,reason:"duplicate_owner_code_approval"};
+    if(own.rows.length===1 &&
+       (typeof own.rows[0]?.release_id!=="string"||
+        !UUID.test(own.rows[0].release_id)))
+      return {ok:false,reason:"owner_code_approval_unverified"};
   }catch{/* staged migration unavailable; do not grant owner authority */}
   const evidence=await db.query(PROTECTIVE_STARTUP_RELEASE_SQL,[sha,ownerId]);
   if(evidence.rows.length!==1||
