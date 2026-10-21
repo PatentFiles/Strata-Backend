@@ -155,8 +155,10 @@ const output=(p:Row,reason:string,ok=false):TopupStatus=>({
 });
 export async function ownerTopupStatus(db:Pool,uid:string):Promise<TopupStatus>{
  const p=await readPlan(db,uid);
- return p?output(p,p.plan_state==="completed"?"topup_completed":"topup_requires_next_action",
-  p.plan_state==="completed"):block("topup_not_prepared");
+ if(!p)return block("topup_not_prepared");
+ if(p.plan_state==="cancelled")return block("topup_cancelled");
+ return output(p,p.plan_state==="completed"?"topup_completed":"topup_requires_next_action",
+  p.plan_state==="completed");
 }
 async function exchangeClear(creds:Creds,expectedBot:bigint,now:number,get:Get):Promise<boolean>{
  try{
