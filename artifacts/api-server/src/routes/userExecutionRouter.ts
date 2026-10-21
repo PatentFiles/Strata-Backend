@@ -19,6 +19,7 @@ import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
 import type { OwnerFundingMaintenanceReadiness } from "../lib/strata/ownerFundingMaintenanceReadiness";
+import type { TopupStatus } from "../lib/strata/ownerVariableTopup";
 import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 import { readQualificationDiagnostics, type QualificationDiagnostic } from "../lib/strata/qualificationDiagnostics";
 import type { AccountSetupNextRequirement } from "../lib/strata/accountCredentialProbe";
@@ -102,6 +103,10 @@ export interface UserScopePort {
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
   botTopupReadiness(userId: string): Promise<OwnerFundingMaintenanceReadiness>;
+  ownerTopupStatus(userId:string):Promise<TopupStatus>;
+  prepareOwnerTopup(userId:string,amountCents:number):Promise<TopupStatus>;
+  executeOwnerTopup(userId:string,body:unknown):Promise<TopupStatus>;
+  reconcileOwnerTopup(userId:string):Promise<TopupStatus>;
   control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL"): Promise<{
     ok: boolean;
@@ -188,6 +193,10 @@ export function closedUserScopePort(): UserScopePort {
       requiresSignedKalshiCashRead:true as const,
       requiresAuthenticatedExchangeReconciliation:true as const,
       requiresOwnerTransferConsent:true as const,recordedBotCashCents:null,reconciledAt:null}),
+    ownerTopupStatus: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
+    prepareOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
+    executeOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
+    reconcileOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
     control: async (userId) => refused(userId),
     safetyControl: async (userId) => ({ ...await refused(userId), executable: false, workerStarted: false, executionActive: false }),
     credentialStatus: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, roles: [] }),
@@ -407,6 +416,33 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     // Signed Kalshi GET and receipt evidence persistence ONLY; no fund transfer.
     const report=await port.verifyHistoricalFunding(userId);
     res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.get("/bot-topup/status",async(_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    res.status(200).json(sanitizePublic(await port.ownerTopupStatus(userId)));
+  });
+  router.post("/bot-topup/prepare",async(req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const amount=req.body?.amountCents;
+    if(!Number.isSafeInteger(amount))return void res.status(400).json({error:"topup_amount_invalid"});
+    const result=await port.prepareOwnerTopup(userId,amount);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/bot-topup/execute",async(req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const result=await port.executeOwnerTopup(userId,req.body??{});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/bot-topup/reconcile",async(_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    const result=await port.reconcileOwnerTopup(userId);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.get("/bot-topup/readiness", async (_req, res) => {
     const userId=subject(res);
