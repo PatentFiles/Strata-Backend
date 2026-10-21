@@ -531,6 +531,41 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(halted.isScheduled(USER, "acct-a"), true);
 });
 
+test("risk-frozen commissioned account cannot START even with account/global flags permissive",async()=>{
+ const material=keyMaterial();
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey);
+ let exchangeCalls=0;
+ const session=createProductionPersonalSession({
+  async query(sql:string){
+   if(sql.includes("personal-session:signer")){
+    assert.match(sql,/a\\.blocked_reason/);
+    return {rows:[{
+     key_fingerprint:fingerprint,credential_fingerprint:fingerprint,
+     decrypted_secret:JSON.stringify({api_key_id:material.keyId,private_key:material.privateKey}),
+     commissioned:true,execution_enabled:true,kill_switch:false,
+     blocked_reason:"awaiting_account_commissioning",
+     cash_precision_verified:true,cash_micros:"25000000",
+     subaccount:1,exchange_index:2,
+     fee_artifact_digest:"ab".repeat(32),policy_hash:"cd".repeat(32),
+     fee_policy_version:"standing",fee_source_url:"https://kalshi.com/fees",
+     fee_formula_version:"quadratic",policy_state:"APPROVED",configured_stake_cents:"500"
+    }]};
+   }
+   throw Error("risk freeze must prevent subsequent database and lease operations");
+  },
+ },{
+  now:()=>NOW,
+  verifyFee:async()=>{exchangeCalls++;throw Error("fee check must not run");},
+  kalshiGet:async()=>{exchangeCalls++;throw Error("exchange request must not run");},
+ });
+ const result=await session.start({userId:USER,accountId:"frozen-owner",action:"START"});
+ assert.equal(result.ok,false);
+ assert.equal(result.reason,"execution_account_risk_freeze_requires_reconciliation");
+ assert.equal(result.workerStarted,false);
+ assert.equal(session.isScheduled(USER,"frozen-owner"),false);
+ assert.equal(exchangeCalls,0);
+});
+
 test("cash and commissioning writes require explicit confirmation", async () => {
   const db = { query: async () => { throw new Error("no_write"); } };
   const cash = await reconcileOwnedSubaccountCash(db, { ownerUserId: USER, confirmation: "no", nowMs: NOW });
