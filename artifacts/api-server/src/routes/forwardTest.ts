@@ -116,7 +116,7 @@ export async function readForwardTestStatus() {
  * Does not return credentials, provide a provider settlement verdict, or
  * change the Coinbase champion's execution threshold.
  */
-router.get("/forward-test/settlement-reference", async (_req, res): Promise<void> => {
+export async function readForwardTestBrtiReference() {
   const status=readKalshiBrtiShadowStatus();
   let comparison=null;
   let spotComparison=null;
@@ -155,9 +155,16 @@ router.get("/forward-test/settlement-reference", async (_req, res): Promise<void
       }
     }catch{/* No same-market signal/target => no calculated comparison. */}
   }
-  res.json({...status,comparison,spotComparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
+  return {...status,comparison,spotComparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
     sourceIndex:"BRTI",readOnly:true,paperOnly:true,tradingAuthority:false,
-    warning:"Reference only. Not a Kalshi official settlement or entry authorization."});
+    warning:"Reference only. Not a Kalshi official settlement or entry authorization."};
+}
+
+// Legacy Clerk-authenticated endpoint keeps the same payload. The modern
+// Supabase-authenticated Strata router calls this same read-only implementation.
+router.get("/forward-test/settlement-reference", async (_req, res): Promise<void> => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(await readForwardTestBrtiReference());
 });
 
 router.get("/forward-test/status", async (_req, res): Promise<void> => {
