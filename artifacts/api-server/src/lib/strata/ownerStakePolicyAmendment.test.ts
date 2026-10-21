@@ -69,14 +69,16 @@ test("a risk-policy increase cannot be authorized by stake amount alone",async()
  const h=mock();
  const no=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1);
  assert.equal(no.ok,false);
- assert.equal(no.reason,"explicit_owner_risk_policy_consent_required");
+ assert.equal(no.reason,"named_risk_preset_required_for_increase");
  assert.equal(h.sqls.includes("ROLLBACK"),true);
  assert.equal(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy")),false);
  assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
 });
-test("explicit owner consent atomically versions, audits and saves without START",async()=>{
- const h=mock();
- const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM);
+test("explicit named risk preset and owner consent atomically version and save without START",async()=>{
+ const h=mock("25000000");
+ const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:TEST_TWENTY_PERCENT_PRESET.id,
+   presetRevision:TEST_TWENTY_PERCENT_PRESET.revision,capitalBudgetCents:2500});
  assert.equal(ok.ok,true,JSON.stringify(ok));
  assert.equal(h.sqls.some(s=>s.includes("OWNER_STAKE_POLICY_AMENDMENT")),true);
  assert.equal(h.sqls.includes("COMMIT"),true);
@@ -136,4 +138,12 @@ test("20% preset cannot be used to exceed the verified capital or silently repla
   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:25_000});
  assert.equal(excessive.ok,false);
  assert.equal(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")),false);
+});
+
+test("preset-less attempts to raise $1.50 approval to $5 fail even with owner confirmation",async()=>{
+ const h=mock("25000000");
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM);
+ assert.deepEqual(result,{ok:false,reason:"named_risk_preset_required_for_increase"});
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")));
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE private.strata_owner_sha_approvals")));
 });
