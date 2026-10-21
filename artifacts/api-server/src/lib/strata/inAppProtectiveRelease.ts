@@ -58,7 +58,7 @@ export async function readReleaseOwner(db:Query,ownerId:string):Promise<{ok:true
    return {ok:false,reason:"owner_activation_request_stale_or_missing"};
  return {ok:true,account};
 }
-async function loadedMaterial(db:Query,account:DbRow):Promise<{keyId:string;privateKey:string}|null>{
+export async function loadedMaterial(db:Query,account:DbRow):Promise<{keyId:string;privateKey:string}|null>{
  const r=await db.query(`
  SELECT s.decrypted_secret FROM private.kalshi_connection_credentials c
  JOIN vault.decrypted_secrets s ON s.id=c.vault_secret_id
@@ -105,6 +105,15 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  SELECT release_id::text,expires_at FROM private.strata_protective_exit_release
  WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL AND expires_at>now()
  LIMIT 2`,[sha]);
+  // New owner SHA releases are account-specific and durable until revoked.
+  // Missing staged schema retains the legacy status without granting authority.
+  let ownerMode=false,ownerApproved=false,ownerApprovalId:null|string=null;
+  try{
+    const own=await db.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals
+      WHERE owner_user_id=$1::uuid AND release_commit_sha=$2 AND revoked_at IS NULL LIMIT 2`,[ownerId,sha]);
+    ownerMode=true;ownerApproved=own.rows.length===1;
+    ownerApprovalId=ownerApproved?String(own.rows[0]?.approval_id):null;
+  }catch{ownerMode=false;}
   const global=await db.query("SELECT live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
   const account=owner.ok?owner.account:null;
   return {ok:true,reason:owner.ok?"status_verified":owner.reason,sha,ownerId,
@@ -113,7 +122,9 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    reviewerId:review.rows.length===1?review.rows[0]?.reviewer_user_id:null,
    reviewId:review.rows.length===1?review.rows[0]?.review_id:null,
    reviewed:review.rows.length===1,
-   releaseActive:active.rows.length===1,
+   releaseMode:ownerMode?'OWNER_SHA_V1':'LEGACY_TWO_HOUR',
+   codeApprovalActive:ownerApproved,codeApprovalId:ownerApprovalId,
+   releaseActive:ownerApproved||active.rows.length===1,
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
    provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
