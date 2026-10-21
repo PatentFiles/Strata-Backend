@@ -28,7 +28,7 @@ import {
 } from "./userExecutionScope";
 import type { UserScopePort } from "../../routes/userExecutionRouter";
 import { readOwnerFundingMaintenanceReadiness } from "./ownerFundingMaintenanceReadiness";
-import {ownerTopupStatus,prepareOwnerTopup,executeOwnerTopup,reconcileOwnerTopup} from "./ownerVariableTopup";
+import {ownerTopupStatus,prepareOwnerTopup,executeOwnerTopup,reconcileOwnerTopup,cancelPreparedOwnerTopup} from "./ownerVariableTopup";
 import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
@@ -452,6 +452,7 @@ export function createDatabaseUserScopePort(
     async prepareOwnerTopup(userId,amountCents){return prepareOwnerTopup(db as never,userId,amountCents);},
     async executeOwnerTopup(userId,body){return executeOwnerTopup(db as never,userId,body);},
     async reconcileOwnerTopup(userId){return reconcileOwnerTopup(db as never,userId);},
+    async cancelOwnerTopup(userId,confirmation){return cancelPreparedOwnerTopup(db as never,userId,confirmation);},
     async botTopupReadiness(userId) {
       // Read-only maintenance status for THIS owner. Never submits transfers.
       return readOwnerFundingMaintenanceReadiness(db,userId);
