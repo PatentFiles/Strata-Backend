@@ -92,6 +92,35 @@ test("PRODUCTION qualifier performs only owned GET and stores a digest, not a tr
  assert.equal(h.executed.filter(s=>s.includes("INSERT INTO")).length,1);
  assert.equal(h.executed.some(s=>/INSERT INTO (?:public\.v13_production_intent|private\.strata_protective_exit_release)/.test(s)),false);
 });
+test("Step 12 reports sanitized provider source reasons and still refuses missing or changed PDF digest",async()=>{
+ const cases=[
+  {fee:{ok:false,reason:"independent_official_fee_snapshot_expired"},
+   expected:"release_fee_independent_official_fee_snapshot_expired"},
+  {fee:{ok:false,reason:"official_fee_schedule_http_429"},
+   expected:"release_fee_official_fee_schedule_http_429"},
+  {fee:{ok:false,reason:"market_or_event_fee_override_unreviewed"},
+   expected:"release_fee_market_or_event_fee_override_unreviewed"},
+  {fee:{ok:true,sourceDigest:"c".repeat(64)},
+   expected:"approved_fee_artifact_digest_changed"},
+  {fee:{ok:true,sourceDigest:undefined},
+   expected:"current_official_fee_digest_missing"},
+  {fee:{ok:false,reason:"unsafe stack with=credentials&secret=must-not-echo"},
+   expected:"release_fee_fee_preflight_unavailable"},
+ ];
+ for(const row of cases){
+  const h=fakeDb();
+  const result=await qualifyProtectiveRelease(OWNER,{
+   db:h.db,sha:()=>SHA,now:()=>Date.parse("2026-10-20T05:30:00Z"),
+   readFeeds:(async()=>({ok:true,observedAtMs:Date.parse("2026-10-20T05:30:00Z"),
+    cashMicros:"25000000",orders:[],fills:[],positions:[],settlements:[]})) as never,
+   verifyFee:(async()=>row.fee) as never,
+  });
+  assert.equal(result.ok,false,row.expected);
+  assert.equal(result.reason,row.expected);
+  assert.equal(result.ordersSubmitted,false);
+  assert.equal(h.executed.some(s=>s.includes("INSERT INTO private.strata_protective_release_qualification")),false);
+ }
+});
 test("reviewer cannot impersonate account owner or use ordinary user role",async()=>{
  const h=fakeDb(),data={ownerUserId:OWNER,qualificationId:QID,
   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/107",
