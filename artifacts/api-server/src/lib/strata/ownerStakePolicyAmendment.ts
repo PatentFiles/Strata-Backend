@@ -104,9 +104,15 @@ export async function amendOwnedStakePolicy(
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
     if (stakeCents <= old.maxEntryStakeCents) return reject("policy_amendment_not_required");
+    // Existing drafts can occupy the next version: never overwrite or reuse
+    // their revision numbers when increasing a commissioned policy.
+    const versions=await tx.query(`SELECT COALESCE(MAX(version),0)::int AS last_version
+      FROM public.v13_live_money_policy WHERE execution_account_id=$1`,[accountId]);
+    const lastVersion=int(versions.rows[0]?.last_version);
+    if(lastVersion===null || lastVersion<old.version)return reject("policy_version_unverified");
     const when=new Date();
     const next: V13ApprovedLiveMoneyPolicy = {
-      ...old, id: randomUUID(), supersedesPolicyId: old.id, version: old.version+1,
+      ...old, id: randomUUID(), supersedesPolicyId: old.id, version: lastVersion+1,
       maxEntryStakeCents: stakeCents,
       maxEntryAllInCents: Math.max(old.maxEntryAllInCents,stakeCents),
       capitalLimitCents: Math.max(old.capitalLimitCents,stakeCents),
