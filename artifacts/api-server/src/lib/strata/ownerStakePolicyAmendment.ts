@@ -84,6 +84,10 @@ export async function amendOwnedStakePolicy(
     if (a.commissioned !== true || a.cash_precision_verified !== true || asText(a.policy_id).length===0) {
       return reject("account_not_commissioned");
     }
+    // Risk-preset revision requires the worker stopped AND account disarmed.
+    // Owner cannot change a live armed risk envelope between START checks.
+    if(presetSelection && a.execution_enabled === true && a.kill_switch === false)
+      return reject("disarm_account_before_risk_preset_change");
     const cash = int(a.cash_micros), reserved = int(a.reserved_micros);
     if (cash===null || reserved===null || reserved>cash ||
         !a.reconciled_at || Date.now() - new Date(String(a.reconciled_at)).getTime() > 15*60_000) {
