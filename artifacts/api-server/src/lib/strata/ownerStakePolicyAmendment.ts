@@ -151,6 +151,11 @@ export async function amendOwnedStakePolicy(
     if (policies.rows.length!==1) return reject("approved_policy_missing");
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
+    // Existing clients may lower a stake inside an already approved policy.
+    // Raising the policy limit must NEVER use the legacy preset-less path.
+    // Otherwise a bare amount + confirmation could silently bypass a 6% cap.
+    if(!presetSelection && stakeCents > old.maxEntryStakeCents)
+      return reject("named_risk_preset_required_for_increase");
     let next: V13ApprovedLiveMoneyPolicy=old;
     const target=proportional?.ok?proportional.limits:null;
     const revisesPolicy=target
