@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
+import {STANDARD_PROPORTIONAL_PRESET} from "./sharedPresets";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
 const ACCOUNT="owned-funded-account";
@@ -36,14 +37,14 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock() {
+function mock(availableMicros="5000000") {
  const sqls:string[]=[];
  const query=async(sql:string)=> {
   sqls.push(sql);
   if(sql.startsWith("BEGIN")||sql.startsWith("SET LOCAL")||sql==="ROLLBACK"||sql==="COMMIT")return {rows:[]};
   if(sql.includes("SELECT * FROM public.v13_production_account"))
    return {rows:[{id:ACCOUNT,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
-    policy_id:old.id,cash_micros:"5000000",reserved_micros:"0",
+    policy_id:old.id,cash_micros:availableMicros,reserved_micros:"0",
     reconciled_at:new Date().toISOString(),fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
     minimum_exit_micros:10000}]};
   if(sql.includes("SELECT\n      (SELECT count(*)::int FROM public.v13_production_position"))
@@ -85,4 +86,29 @@ test("stake beyond $25,000 is rejected before any DB side effect",async()=>{
  const bad=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,2_500_001,1,OWNER_STAKE_POLICY_CONFIRM);
  assert.equal(bad.ok,false);
  assert.equal(h.sqls.length,0);
+});
+
+test("explicitly chosen standard preset atomically derives matching $25 capital, 6% stake and policy ceilings",async()=>{
+ const h=mock("25000000");
+ const preset=STANDARD_PROPORTIONAL_PRESET;
+ const chosen={presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500};
+ const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,150,1,
+   OWNER_STAKE_POLICY_CONFIRM,chosen);
+ assert.equal(ok.ok,true,JSON.stringify(ok));
+ assert.ok(h.sqls.some(s=>s.includes("risk_preset_id,risk_preset_revision,risk_capital_cents")));
+ assert.ok(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
+ assert.ok(h.sqls.some(s=>s.includes("INSERT INTO public.v13_production_observation")));
+ assert.ok(h.sqls.includes("COMMIT"));
+});
+
+test("a spoofed stale preset amount is rejected before risk-policy mutation",async()=>{
+ const h=mock("25000000");
+ const preset=STANDARD_PROPORTIONAL_PRESET;
+ const chosen={presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500};
+ const bad=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,2000,1,
+   OWNER_STAKE_POLICY_CONFIRM,chosen);
+ assert.deepEqual(bad,{ok:false,reason:"stake_must_match_selected_proportional_preset"});
+ assert.ok(h.sqls.includes("ROLLBACK"));
+ assert.equal(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy")),false);
+ assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
 });
