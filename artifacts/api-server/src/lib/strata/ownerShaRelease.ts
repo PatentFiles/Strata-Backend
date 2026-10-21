@@ -1,7 +1,7 @@
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
-import {readReleaseOwner, loadedMaterial} from "./inAppProtectiveRelease";
+import {readReleaseOwner, loadedMaterial, PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
 import {readUnresolvedIntentMode} from "./workerUncertainOrderGate";
 import {digest as v13Digest,type Identity} from "../v13-production/types";
@@ -69,6 +69,14 @@ export async function authorizeOwnerShaRelease(
   if(!isTrue(current.commissioned)||!isTrue(current.cash_precision_verified)||
      (isTrue(current.execution_enabled)===isTrue(current.kill_switch)))
     return reject("commissioning_or_account_kill_state_invalid");
+  // A previously commissioned account's stale provisioner marker can be
+  // repaired by its AAL2 owner after an authenticated zero-exposure proof.
+  // Require a *separate* owner confirmation; never silently clear a freeze.
+  const repairing=current.blocked_reason==="awaiting_account_commissioning";
+  if(repairing && args.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
+    return reject("explicit_owner_commissioning_repair_confirmation_required");
+  if(!repairing && args.provisionalRepairConfirmation!==undefined)
+    return reject("commissioning_repair_confirmation_not_applicable");
   const global=await tx.query(`SELECT live_execution_enabled,manual_kill_switch,mode
     FROM public.live_execution_config WHERE id='singleton'`);
   if(global.rows.length!==1||global.rows[0]?.mode!=="V13_PRODUCTION"||

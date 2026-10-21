@@ -121,6 +121,34 @@ test("Step 12 reports sanitized provider source reasons and still refuses missin
   assert.equal(h.executed.some(s=>s.includes("INSERT INTO private.strata_protective_release_qualification")),false);
  }
 });
+test("owner-only qualification rejects stale exchange readings and expired provider journeys",async()=>{
+ const observed=Date.parse("2026-10-20T05:30:00Z");
+ const expired=fakeDb();
+ const staleFeed=await qualifyProtectiveRelease(OWNER,{
+  db:expired.db,sha:()=>SHA,now:()=>observed,
+  readFeeds:(async()=>({
+   ok:true,observedAtMs:observed-45_001,cashMicros:"25000000",
+   orders:[],fills:[],positions:[],settlements:[],
+  })) as never,
+  verifyFee:(async()=>({ok:true,sourceDigest:DIGEST})) as never,
+ });
+ assert.equal(staleFeed.reason,"authenticated_production_read_stale");
+ assert.equal(expired.executed.some(sql=>sql.includes("INSERT INTO private.strata_protective_release_qualification")),false);
+ const slow=fakeDb();
+ let observedClockCalls=0;
+ const expiredFee=await qualifyProtectiveRelease(OWNER,{
+  db:slow.db,sha:()=>SHA,
+  now:()=>++observedClockCalls===1?observed:
+    observedClockCalls===2?observed:observed+45_001,
+  readFeeds:(async()=>({
+   ok:true,observedAtMs:observed,cashMicros:"25000000",
+   orders:[],fills:[],positions:[],settlements:[],
+  })) as never,
+  verifyFee:(async()=>({ok:true,sourceDigest:DIGEST})) as never,
+ });
+ assert.equal(expiredFee.reason,"authenticated_production_qualification_stale");
+ assert.equal(slow.executed.some(sql=>sql.includes("INSERT INTO private.strata_protective_release_qualification")),false);
+});
 test("reviewer cannot impersonate account owner or use ordinary user role",async()=>{
  const h=fakeDb(),data={ownerUserId:OWNER,qualificationId:QID,
   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/107",

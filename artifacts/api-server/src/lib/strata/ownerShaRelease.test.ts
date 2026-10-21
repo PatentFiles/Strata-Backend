@@ -46,6 +46,33 @@ test("owner SHA status refuses ambiguous approvals and database uncertainty",asy
  assert.deepEqual(await ownerShaApprovalStatus("foreign",SHA,one),{available:false,active:false,approvalId:null});
 });
 
+test("owner alone may approve after authentic qualification, but stale freeze requires separate personal consent",async()=>{
+ const sqls:string[]=[];
+ const query=async(sql:string)=>{
+  sqls.push(sql);
+  if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
+   return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,
+    kill_switch:true,cash_precision_verified:true,minimum_exit_micros:10000,
+    cash_micros:"5000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
+    policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
+    configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500}]};
+  if(sql.includes("FROM public.v13_production_observation o"))
+   return {rows:[{digest:evidence}]};
+  if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))
+   return {rows:[{commissioned:true,cash_precision_verified:true,execution_enabled:false,
+    kill_switch:true,blocked_reason:"awaiting_account_commissioning",
+    cash_micros:"5000000",reserved_micros:"0"}]};
+  throw Error("unexpected production action");
+ };
+ const db={query,connect:async()=>({query,release(){}})};
+ const r=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA});
+ assert.equal(r.ok,false);
+ assert.equal(r.reason,"explicit_owner_commissioning_repair_confirmation_required");
+ assert.equal(sqls.some(sql=>sql.includes("UPDATE public.v13_production_account")),false);
+ assert.equal(sqls.some(sql=>sql.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
+ assert.ok(sqls.includes("ROLLBACK"));
+});
 test("global kill stays privileged even after owner AAL2 approval; transaction rolls back",async()=>{
  const sqls:string[]=[];
  const query=async(sql:string)=> {

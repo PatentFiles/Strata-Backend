@@ -155,6 +155,12 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   if(!material)return deny("restricted_production_signer_unavailable");
   const feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,now);
   if(!feeds.ok)return deny(feeds.reason);
+  // Exchange reads are signed, but the proof must also be recent on this
+  // actual invocation: a slow or stale read is never a valid release receipt.
+  if(!Number.isSafeInteger(feeds.observedAtMs)||
+     feeds.observedAtMs!==now ||
+     (deps.now??Date.now)()-now>45_000)
+    return deny("authenticated_production_read_stale");
   // The exact account-specific order/fill ledger is authoritative.
   const found=await db.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1",[account.id]);
   const requests=found.rows.flatMap(row=>{
@@ -190,6 +196,12 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     return deny("current_official_fee_digest_missing");
   if(fee.sourceDigest!==account.fee_artifact_digest)
     return deny("approved_fee_artifact_digest_changed");
+  // Qualification binds current fee proof to the same bounded provider read.
+  // An expired network journey must not produce a fresh owner release token.
+  const completedAt=(deps.now??Date.now)();
+  if(!Number.isSafeInteger(completedAt)||completedAt<now||
+     completedAt-now>45_000)
+    return deny("authenticated_production_qualification_stale");
   if(String(feeds.cashMicros)!==String(account.cash_micros))
     return deny("exchange_and_financial_ledger_cash_mismatch");
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,
