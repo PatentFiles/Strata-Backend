@@ -538,7 +538,7 @@ test("risk-frozen commissioned account cannot START even with account/global fla
  const session=createProductionPersonalSession({
   async query(sql:string){
    if(sql.includes("personal-session:signer")){
-    assert.match(sql,/a\\.blocked_reason/);
+    assert.ok(sql.includes("a.blocked_reason"));
     return {rows:[{
      key_fingerprint:fingerprint,credential_fingerprint:fingerprint,
      decrypted_secret:JSON.stringify({api_key_id:material.keyId,private_key:material.privateKey}),
