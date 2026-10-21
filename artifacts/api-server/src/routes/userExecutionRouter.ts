@@ -107,6 +107,7 @@ export interface UserScopePort {
   prepareOwnerTopup(userId:string,amountCents:number):Promise<TopupStatus>;
   executeOwnerTopup(userId:string,body:unknown):Promise<TopupStatus>;
   reconcileOwnerTopup(userId:string):Promise<TopupStatus>;
+  cancelOwnerTopup(userId:string,confirmation:unknown):Promise<TopupStatus>;
   control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL"): Promise<{
     ok: boolean;
@@ -197,6 +198,7 @@ export function closedUserScopePort(): UserScopePort {
     prepareOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
     executeOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
     reconcileOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
+    cancelOwnerTopup: async()=>({ok:false,reason:"topup_not_configured",planId:null,attemptId:null,state:"unavailable",kind:null,amountCents:null,transferAttempted:false}),
     control: async (userId) => refused(userId),
     safetyControl: async (userId) => ({ ...await refused(userId), executable: false, workerStarted: false, executionActive: false }),
     credentialStatus: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, roles: [] }),
@@ -436,6 +438,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if(!userId)return void res.status(401).json({error:"Unauthorized"});
     ignoreForeignOwner(req.body);
     const result=await port.executeOwnerTopup(userId,req.body??{});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/bot-topup/cancel",async(req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    const result=await port.cancelOwnerTopup(userId,req.body?.confirmation);
     res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.post("/bot-topup/reconcile",async(_req,res)=>{
