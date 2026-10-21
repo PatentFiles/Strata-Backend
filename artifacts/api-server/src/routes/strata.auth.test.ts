@@ -236,3 +236,63 @@ test("a direct session database URL is accepted and a transaction pooler is refu
   });
   assert.equal(acquired, false);
 });
+
+
+test("dashboard BRTI reference uses the Supabase-authenticated Strata path and never starts a worker", async () => {
+  const { privateKey, keys } = await signingKeys();
+  const h = harness();
+  let reads = 0;
+  const app = express();
+  app.use(express.json());
+  app.use("/api/strata", createStrataRouter({
+    verifyToken: (value) => verifySupabaseAccessToken(value, { supabaseUrl: SUPABASE_URL, keys }),
+    roleOf,
+    control: h.supervisor,
+    status: async () => h.supervisor.view(),
+    positions: async () => ({ positions: [] }),
+    orders: async () => ({ orders: [] }),
+    fills: async () => ({ fills: [] }),
+    trades: async () => ({ trades: [] }),
+    latestTrade: async () => ({ unresolved: false, latestCompleted: null }),
+    forwardTestStatus: async () => ({ engineMode: "PAPER" }),
+    forwardTestHistory: async () => ({ positions: [] }),
+    forwardTestSettlementReference: async () => {
+      reads++;
+      return {
+        state: "BRTI_CONFIRMED",
+        indexId: "BRTI",
+        sourceFresh: false,
+        instantSourceFresh: true,
+        tradingAuthority: false,
+        readOnly: true,
+        paperOnly: true,
+        comparison: null,
+        spotComparison: null,
+      };
+    },
+    phase4State: async () => ({}),
+    microLiveState: async () => ({}),
+    emergencyStop: async () => ({ killSwitch: "ON" }),
+  }));
+  const server = await listen(app);
+  const path = "/api/strata/forward-test/settlement-reference";
+  try {
+    assert.equal((await call(server.port, path, "GET")).status, 401);
+    assert.equal(reads, 0);
+    const aal1 = await token(privateKey, { sub: STANDARD_ID, aal: "aal1" });
+    assert.equal((await call(server.port, path, "GET", aal1)).status, 401);
+    assert.equal(reads, 0);
+    const valid = await token(privateKey, { sub: STANDARD_ID });
+    const response = await call(server.port, path, "GET", valid);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.indexId, "BRTI");
+    assert.equal(response.body.tradingAuthority, false);
+    assert.equal(response.body.readOnly, true);
+    assert.equal(response.body.paperOnly, true);
+    assert.equal(reads, 1);
+    assert.equal(h.counts().starts, 0);
+    assert.equal(h.counts().emergencyStops, 0);
+  } finally {
+    await server.close();
+  }
+});
