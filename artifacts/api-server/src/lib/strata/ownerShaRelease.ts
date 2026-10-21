@@ -179,7 +179,7 @@ export async function revokeOwnerShaRelease(ownerId:string,raw:unknown,deps:Depe
   const counts=await tx.query(`SELECT
      (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
      (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) unresolved,
-     (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND state='owned') running`,[accountId]);
+     (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND state='owned' AND heartbeat_at > now()-interval '30 seconds') running`,[accountId]);
   const c=counts.rows[0]!;
   if(counts.rows.length!==1||Number(c.positions)!==0||Number(c.unresolved)!==0||Number(c.running)!==0)
     return reject("cannot_revoke_protection_while_exposure_or_worker_active");
