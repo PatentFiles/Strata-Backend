@@ -18,6 +18,7 @@ import { emptyUserExecutionView, type ControlAction, type UserExecutionView } fr
 import type { PolicyDraft, SharedPreset } from "../lib/strata/sharedPresets";
 import type { KalshiUserRead } from "../lib/strata/kalshiUserRead";
 import { emptyKalshiUserRead } from "../lib/strata/kalshiUserRead";
+import type { OwnerFundingMaintenanceReadiness } from "../lib/strata/ownerFundingMaintenanceReadiness";
 import { QUALIFICATION_CONFIRMATION, RESIDUAL_RISK_CONFIRMATION, type QualificationResult } from "../lib/strata/qualifyAdvancedApi";
 import { readQualificationDiagnostics, type QualificationDiagnostic } from "../lib/strata/qualificationDiagnostics";
 import type { AccountSetupNextRequirement } from "../lib/strata/accountCredentialProbe";
@@ -100,6 +101,7 @@ export interface UserScopePort {
   migrationReady(): Promise<boolean>;
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
+  botTopupReadiness(userId: string): Promise<OwnerFundingMaintenanceReadiness>;
   control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL"): Promise<{
     ok: boolean;
@@ -180,6 +182,12 @@ export function closedUserScopePort(): UserScopePort {
     migrationReady: async () => false,
     settings: async (userId) => emptyUserExecutionView(userId),
     wallet: async () => emptyKalshiUserRead(),
+    botTopupReadiness: async () => ({ok:false,reason:"user_scope_not_migrated",
+      accountScopedMaintenanceEligible:false,executable:false as const,
+      transferAttempted:false as const,variableTransferImplemented:false as const,
+      requiresSignedKalshiCashRead:true as const,
+      requiresAuthenticatedExchangeReconciliation:true as const,
+      requiresOwnerTransferConsent:true as const,recordedBotCashCents:null,reconciledAt:null}),
     control: async (userId) => refused(userId),
     safetyControl: async (userId) => ({ ...await refused(userId), executable: false, workerStarted: false, executionActive: false }),
     credentialStatus: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, roles: [] }),
@@ -399,6 +407,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     // Signed Kalshi GET and receipt evidence persistence ONLY; no fund transfer.
     const report=await port.verifyHistoricalFunding(userId);
     res.status(report.ok?200:409).json(sanitizePublic(report));
+  });
+  router.get("/bot-topup/readiness", async (_req, res) => {
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    // The legacy $25 commissioning POST endpoints remain unchanged.
+    // This independently evaluates the owner's commissioned account only.
+    // It proves ZERO money moved, and must never permit ARM/START.
+    res.status(200).json(sanitizePublic(await port.botTopupReadiness(userId)));
   });
   router.get("/bot-transfer/status", async (_req, res) => {
     const userId=subject(res);
