@@ -41,6 +41,7 @@ import {
 } from "./personalAccountActivation";
 import { createOwnedPolicyDraft, type OwnedPolicyLimits } from "./personalPolicyApproval";
 import { amendOwnedStakePolicy, MIN_OWNER_STAKE_CENTS } from "./ownerStakePolicyAmendment";
+import type { StrictPresetSelection } from "./strictPresetStake";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -82,7 +83,8 @@ const ACCOUNT_SQL = `
          a.cash_micros::text AS cash_micros, a.reserved_micros::text AS reserved_micros,
          a.minimum_exit_micros, a.reconciled_at,
          p.state AS policy_state, p.version AS policy_version, p.max_entry_stake_cents,
-         s.configured_stake_cents, s.revision AS stake_revision
+         s.configured_stake_cents, s.revision AS stake_revision,
+         s.risk_preset_id, s.risk_preset_revision, s.risk_capital_cents
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p ON p.id = a.policy_id
   LEFT JOIN strata_configured_stake s ON s.execution_account_id = a.id
@@ -278,6 +280,9 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
     capitalRemainingCents: cash !== null && reserved !== null ? cash - reserved : null,
     configuredStakeCents: integer(row.configured_stake_cents),
     stakeRevision: integer(row.stake_revision),
+    riskPresetId: text(row.risk_preset_id),
+    riskPresetRevision: integer(row.risk_preset_revision),
+    riskCapitalCents: integer(row.risk_capital_cents),
     approvedMaxEntryStakeCents: text(row.policy_state) === "APPROVED" ? integer(row.max_entry_stake_cents) : null,
     policyApproved: text(row.policy_state) === "APPROVED",
     policyVersion: integer(row.policy_version),
@@ -314,6 +319,9 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
     capitalRemainingCents: account.capitalRemainingCents,
     configuredStakeCents: account.configuredStakeCents,
     stakeRevision: account.stakeRevision,
+    riskPresetId: account.riskPresetId ?? null,
+    riskPresetRevision: account.riskPresetRevision ?? null,
+    riskCapitalCents: account.riskCapitalCents ?? null,
     approvedMaxEntryStakeCents: account.approvedMaxEntryStakeCents,
     policyApproved: account.policyApproved,
     policyVersion: account.policyVersion,
@@ -649,7 +657,7 @@ export function createDatabaseUserScopePort(
       kalshiGenerateRestrictedKey,
       session: options.session,
     }),
-    async stake(userId, cents, revision, policyConfirmation) {
+    async stake(userId, cents, revision, policyConfirmation, presetSelection) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
@@ -689,6 +697,9 @@ export function createDatabaseUserScopePort(
       if (cents > 2_500_000) return refused(userId, "above_hard_stake_ceiling", scoped);
       if (scoped.capitalRemainingCents === null) return refused(userId, "available_cash_unverified", scoped);
       if (cents > scoped.capitalRemainingCents) return refused(userId, "stake_exceeds_available_cash", scoped);
+      if (!presetSelection && cents > (scoped.approvedMaxEntryStakeCents ?? 0)) {
+        return refused(userId,"select_approved_proportional_preset_before_increasing_stake",scoped);
+      }
       const editBlockers = stakeEditBlockers(scoped);
       if (editBlockers.length) return refused(userId, editBlockers[0]!, scoped);
 
@@ -703,6 +714,7 @@ export function createDatabaseUserScopePort(
       if (transactionalDb.connect) {
         const amended = await amendOwnedStakePolicy(
           {connect:transactionalDb.connect.bind(transactionalDb)},userId,account.id,cents,revision,policyConfirmation,
+          presetSelection as StrictPresetSelection | undefined,
         );
         if (!amended.ok) return refused(userId, amended.reason, scoped);
         const refreshed = await ownedAccount(userId);

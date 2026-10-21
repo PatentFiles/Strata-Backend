@@ -166,6 +166,10 @@ jobs:
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/inAppProtectiveRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/inAppProtectiveRelease.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
       - name: Test production GET-only qualification, identity isolation, audit and atomic launch
         run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/inAppProtectiveRelease.test.cjs
+      - name: Bundle strict named proportion calculator regression
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/strictPresetStake.test.ts --bundle --platform=node --format=cjs --outfile=dist/strictPresetStake.test.cjs
+      - name: Verify fixed 6/12/80 percent risk limits and 25k hard cap
+        run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/strictPresetStake.test.cjs
       - name: Bundle atomic owner stake policy consent tests
         run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerStakePolicyAmendment.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerStakePolicyAmendment.test.cjs
       - name: Test stake increase requires owner approval and produces one policy audit

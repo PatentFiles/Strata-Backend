@@ -130,7 +130,7 @@ export interface UserScopePort {
     executable: false;
   }>;
   commissioningStatus(userId: string): Promise<UserCommissioningStatus>;
-  stake(userId: string, cents: number, revision: number | null, policyConfirmation?: string): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
+  stake(userId: string, cents: number, revision: number | null, policyConfirmation?: string, presetSelection?: {presetId:string;presetRevision:number;capitalBudgetCents:number}): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
   presets(userId: string): Promise<SharedPreset[]>;
   previewPreset(userId: string, body: unknown): Promise<{ ok: boolean; reason?: string; presetId?: string; presetRevision?: number; referenceCapitalCents?: number; limits?: {
     capitalLimitCents: number; maxEntryStakeCents: number; maxEntryAllInCents: number; maxDailyLossCents: number; maxTotalLossCents: number; maxQuoteAgeMs: number; maxFeeEvidenceAgeMs: number;
@@ -460,7 +460,17 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const revision = req.body?.revision ?? null;
     if (typeof cents !== "number") return void res.status(400).json({ error: "stake_cents_not_integer" });
     const consent = typeof req.body?.policyConfirmation === "string" ? req.body.policyConfirmation : undefined;
-    const result = await port.stake(userId, cents, typeof revision === "number" ? revision : null, consent);
+    const selectionRaw = req.body?.presetSelection;
+    const presetSelection = selectionRaw &&
+      typeof selectionRaw.presetId === "string" &&
+      Number.isSafeInteger(selectionRaw.presetRevision) &&
+      Number.isSafeInteger(selectionRaw.capitalBudgetCents)
+      ? {presetId:selectionRaw.presetId,presetRevision:selectionRaw.presetRevision,
+         capitalBudgetCents:selectionRaw.capitalBudgetCents} : undefined;
+    if (selectionRaw !== undefined && !presetSelection)
+      return void res.status(400).json({error:"risk_preset_selection_invalid"});
+    const result = await port.stake(userId, cents,
+      typeof revision === "number" ? revision : null, consent, presetSelection);
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
   });
   router.get("/presets", async (_req, res) => {

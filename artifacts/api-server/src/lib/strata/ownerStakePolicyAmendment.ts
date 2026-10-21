@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { digest as v13Digest } from "../v13-production/types";
+import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type SharedPreset } from "./sharedPresets";
+import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPresetStake";
 
 /**
  * Owner-scoped, audited policy amendment when a production stake exceeds the
@@ -62,6 +64,7 @@ function approvedFromRow(p: Row): V13ApprovedLiveMoneyPolicy | null {
 export async function amendOwnedStakePolicy(
   db: Database, ownerId: string, accountId: string, stakeCents: number, expectedRevision: number | null,
   policyConfirmation?: string,
+  presetSelection?: StrictPresetSelection,
 ): Promise<StakeAmendmentResult> {
   if (!Number.isSafeInteger(stakeCents) || stakeCents < MIN_OWNER_STAKE_CENTS || stakeCents > V13_MAX_ENTRY_STAKE_CENTS) {
     return {ok:false,reason:"stake_outside_permitted_range"};
@@ -81,12 +84,53 @@ export async function amendOwnedStakePolicy(
     if (a.commissioned !== true || a.cash_precision_verified !== true || asText(a.policy_id).length===0) {
       return reject("account_not_commissioned");
     }
+    // Risk-preset revision requires the worker stopped AND account disarmed.
+    // Owner cannot change a live armed risk envelope between START checks.
+    if(presetSelection && a.execution_enabled === true && a.kill_switch === false)
+      return reject("disarm_account_before_risk_preset_change");
     const cash = int(a.cash_micros), reserved = int(a.reserved_micros);
     if (cash===null || reserved===null || reserved>cash ||
         !a.reconciled_at || Date.now() - new Date(String(a.reconciled_at)).getTime() > 15*60_000) {
       return reject("fresh_spendable_cash_unverified");
     }
     if (BigInt(stakeCents)*10000n > BigInt(cash-reserved)) return reject("stake_exceeds_available_cash");
+    // A named preset is never authoritative just because the browser selected
+    // it. Resolve its saved revision from the database inside this transaction.
+    let proportional: ReturnType<typeof resolveStrictPresetStake> | null=null;
+    if(presetSelection){
+      if(!presetSelection.presetId || typeof presetSelection.presetId!=="string" ||
+          presetSelection.presetId.length>120)
+        return reject("selected_risk_preset_invalid");
+      let preset:SharedPreset;
+      if(presetSelection.presetId===STANDARD_PROPORTIONAL_PRESET_ID){
+        preset=STANDARD_PROPORTIONAL_PRESET;
+      }else{
+        const named=await tx.query(`SELECT * FROM public.v13_shared_preset
+          WHERE id=$1 FOR SHARE`,[presetSelection.presetId]);
+        if(named.rows.length!==1)return reject("selected_risk_preset_missing");
+        const row=named.rows[0]!;
+        const num=(x:unknown)=>int(x)??-1;
+        preset={
+          id:asText(row.id),name:asText(row.name),description:asText(row.description),
+          creatorUserId:asText(row.creator_user_id),
+          creatorDisplayName:row.creator_display_name==null?null:asText(row.creator_display_name),
+          capitalLimitCents:num(row.capital_limit_cents),
+          maxEntryStakeCents:num(row.max_entry_stake_cents),
+          maxEntryAllInCents:num(row.max_entry_all_in_cents),
+          maxDailyLossCents:num(row.max_daily_loss_cents),
+          maxTotalLossCents:num(row.max_total_loss_cents),
+          maxQuoteAgeMs:num(row.max_quote_age_ms),
+          maxFeeEvidenceAgeMs:num(row.max_fee_evidence_age_ms),
+          minimumExitMicros:num(row.minimum_exit_micros),
+          revision:num(row.revision),
+          createdAt:String(row.created_at??""),
+          updatedAt:String(row.updated_at??""),
+        };
+      }
+      proportional=resolveStrictPresetStake(preset,presetSelection,
+        Math.floor((cash-reserved)/10000),stakeCents);
+      if(!proportional.ok)return reject(proportional.reason);
+    }
     const count = await tx.query(`SELECT
       (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
       (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) unresolved,
@@ -106,7 +150,17 @@ export async function amendOwnedStakePolicy(
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
     let next: V13ApprovedLiveMoneyPolicy=old;
-    if (stakeCents > old.maxEntryStakeCents) {
+    const target=proportional?.ok?proportional.limits:null;
+    const revisesPolicy=target
+      ? old.capitalLimitCents!==target.capitalLimitCents ||
+        old.maxEntryStakeCents!==target.maxEntryStakeCents ||
+        old.maxEntryAllInCents!==target.maxEntryAllInCents ||
+        old.maxDailyLossCents!==target.maxDailyLossCents ||
+        old.maxTotalLossCents!==target.maxTotalLossCents ||
+        old.maxQuoteAgeMs!==target.maxQuoteAgeMs ||
+        old.maxFeeEvidenceAgeMs!==target.maxFeeEvidenceAgeMs
+      : stakeCents > old.maxEntryStakeCents;
+    if (revisesPolicy) {
     if (policyConfirmation !== OWNER_STAKE_POLICY_CONFIRM) return reject("explicit_owner_risk_policy_consent_required");
     // Existing drafts can occupy the next version: never overwrite or reuse
     // their revision numbers when increasing a commissioned policy.
@@ -118,10 +172,12 @@ export async function amendOwnedStakePolicy(
     next = {
       ...old, id: randomUUID(), supersedesPolicyId: old.id, version: lastVersion+1,
       maxEntryStakeCents: stakeCents,
-      maxEntryAllInCents: Math.max(old.maxEntryAllInCents,stakeCents),
-      capitalLimitCents: Math.max(old.capitalLimitCents,stakeCents),
-      maxDailyLossCents: Math.max(old.maxDailyLossCents,stakeCents),
-      maxTotalLossCents: Math.max(old.maxTotalLossCents,stakeCents),
+      maxEntryAllInCents: target?target.maxEntryAllInCents:Math.max(old.maxEntryAllInCents,stakeCents),
+      capitalLimitCents: target?target.capitalLimitCents:Math.max(old.capitalLimitCents,stakeCents),
+      maxDailyLossCents: target?target.maxDailyLossCents:Math.max(old.maxDailyLossCents,stakeCents),
+      maxTotalLossCents: target?target.maxTotalLossCents:Math.max(old.maxTotalLossCents,stakeCents),
+      maxQuoteAgeMs: target?target.maxQuoteAgeMs:old.maxQuoteAgeMs,
+      maxFeeEvidenceAgeMs: target?target.maxFeeEvidenceAgeMs:old.maxFeeEvidenceAgeMs,
       approvedBy: ownerId, approvedAt: when, createdBy: ownerId,
     };
     if(next.maxEntryAllInCents>next.capitalLimitCents) next.capitalLimitCents=next.maxEntryAllInCents;
@@ -151,7 +207,8 @@ export async function amendOwnedStakePolicy(
     if(inserted.rows.length!==1)return reject("policy_revision_not_inserted");
     const amendment={ownerId,accountId,oldPolicyId:old.id,newPolicyId:next.id,
       previousMaxStakeCents:old.maxEntryStakeCents,newMaxStakeCents:stakeCents,
-      policyVersion:next.version,confirmation:OWNER_STAKE_POLICY_CONFIRM};
+      policyVersion:next.version,confirmation:OWNER_STAKE_POLICY_CONFIRM,
+      presetSelection:presetSelection??null};
     await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
       VALUES($1,$2,'OWNER_STAKE_POLICY_AMENDMENT',$3::jsonb,$4)`,
       [randomUUID(),accountId,JSON.stringify(amendment),v13Digest(amendment)]);
@@ -159,7 +216,23 @@ export async function amendOwnedStakePolicy(
       WHERE id=$2 AND owner_user_id=$3::uuid AND policy_id=$4 RETURNING id`,[next.id,accountId,ownerId,old.id]);
     if(linked.rows.length!==1)return reject("policy_revision_link_failed");
     } // Existing smaller stake: retain the approved policy while refreshing owner activation proof.
-    const saved=await tx.query(`INSERT INTO public.strata_configured_stake(id,execution_account_id,configured_stake_cents,revision,updated_at)
+    // Persist the selected versioned preset beside stake, so refreshes and
+    // alternate clients cannot silently reinterpret a risk allocation.
+    const saved=presetSelection
+      ? await tx.query(`INSERT INTO public.strata_configured_stake
+        (id,execution_account_id,configured_stake_cents,revision,updated_at,
+         risk_preset_id,risk_preset_revision,risk_capital_cents)
+        VALUES($1,$1,$2,$3,now(),$5,$6,$7)
+        ON CONFLICT (execution_account_id) WHERE execution_account_id IS NOT NULL
+        DO UPDATE SET configured_stake_cents=EXCLUDED.configured_stake_cents,
+          revision=public.strata_configured_stake.revision+1,
+          risk_preset_id=EXCLUDED.risk_preset_id,
+          risk_preset_revision=EXCLUDED.risk_preset_revision,
+          risk_capital_cents=EXCLUDED.risk_capital_cents,updated_at=now()
+        WHERE ($4::int IS NOT NULL AND public.strata_configured_stake.revision=$4)
+        RETURNING revision`,[accountId,stakeCents,actualRevision===null?1:actualRevision+1,
+          expectedRevision,presetSelection.presetId,presetSelection.presetRevision,presetSelection.capitalBudgetCents])
+      : await tx.query(`INSERT INTO public.strata_configured_stake(id,execution_account_id,configured_stake_cents,revision,updated_at)
       VALUES($1,$1,$2,$3,now()) ON CONFLICT (execution_account_id) WHERE execution_account_id IS NOT NULL
       DO UPDATE SET configured_stake_cents=EXCLUDED.configured_stake_cents,
         revision=public.strata_configured_stake.revision+1,updated_at=now()
