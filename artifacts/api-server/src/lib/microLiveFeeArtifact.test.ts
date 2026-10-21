@@ -834,7 +834,7 @@ test("renewable, fresh official Edge PDF proof must pass canonical origin, captu
  const tampered=await establishVerifiedBridgeFeeDigest(response({...headers,
    "x-strata-source-sha256":"f".repeat(64)}),project,jwt,()=>checkedAt);
  assert.equal(tampered,null);
- const changed=Buffer.concat([bytes,Buffer.from("changed-document")]);
+ const changed=Buffer.from("%PDF-fabricated\\n"+"M".repeat(250)+"\\n%%EOF");
  const changedDigest=createHash("sha256").update(changed).digest("hex");
  const altered=await establishVerifiedBridgeFeeDigest(response({...headers,
    "x-strata-source-sha256":changedDigest},changed),project,jwt,()=>checkedAt);
