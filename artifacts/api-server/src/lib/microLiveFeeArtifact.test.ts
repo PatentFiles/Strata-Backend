@@ -31,7 +31,7 @@ import {
   CANONICAL_FEE_SCHEDULE_URL, MAX_FEE_SCHEDULE_BYTES, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   STANDING_FEE_POLICY_VERSION, establishOfficialFeeDigest, parseFeeSchedulePdf, parseFeeScheduleText,
   verifyCurrentFeeArtifact, verifyOfficialFeePdfBytes,
-  fetchTrustedFeeFromSupabaseBridge,
+  fetchTrustedFeeFromSupabaseBridge, establishVerifiedBridgeFeeDigest,
 } from "./microLiveFeeArtifact";
 
 function examplePdf(text: string): Buffer {
@@ -805,4 +805,43 @@ test("simultaneous official fee validations use one network request, without cac
   assert.equal(calls, 1);
   await establishOfficialFeeDigest(fetchImpl);
   assert.equal(calls, 2, "next request independently checks the source");
+});
+
+
+test("renewable, fresh official Edge PDF proof must pass canonical origin, captured hash, age and full reviewed parser",async()=>{
+ const bytes=readFileSync(resolve(process.cwd(),"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+ const checkedAt=Date.parse("2026-10-21T02:05:00Z");
+ const project="https://wqsmfbzfbiilhtzpqbrb.supabase.co";
+ const jwt="t".repeat(100);
+ const headers={
+  "content-type":"application/pdf",
+  "x-strata-canonical-source":CANONICAL_FEE_SCHEDULE_URL,
+  "x-strata-source-sha256":createHash("sha256").update(bytes).digest("hex"),
+  "x-strata-captured-at":new Date(checkedAt-1000).toISOString(),
+ };
+ const response=(h:Record<string,string>,data:Buffer=bytes) => (async()=>{
+   return new Response(new Uint8Array(data),{status:200,headers:h});
+ }) as typeof fetch;
+ const verified=await establishVerifiedBridgeFeeDigest(response(headers),project,jwt,()=>checkedAt);
+ assert.equal(verified?.ok,true);
+ assert.equal(verified&&verified.ok&&verified.digest,createHash("sha256").update(bytes).digest("hex"));
+ const expired=await establishVerifiedBridgeFeeDigest(response({...headers,
+   "x-strata-captured-at":new Date(checkedAt-3_600_100).toISOString()}),project,jwt,()=>checkedAt);
+ assert.equal(expired,null);
+ const otherSource=await establishVerifiedBridgeFeeDigest(response({...headers,
+   "x-strata-canonical-source":"https://different.example/fees.pdf"}),project,jwt,()=>checkedAt);
+ assert.equal(otherSource,null);
+ const tampered=await establishVerifiedBridgeFeeDigest(response({...headers,
+   "x-strata-source-sha256":"f".repeat(64)}),project,jwt,()=>checkedAt);
+ assert.equal(tampered,null);
+ const changed=Buffer.concat([bytes,Buffer.from("changed-document")]);
+ const changedDigest=createHash("sha256").update(changed).digest("hex");
+ const altered=await establishVerifiedBridgeFeeDigest(response({...headers,
+   "x-strata-source-sha256":changedDigest},changed),project,jwt,()=>checkedAt);
+ assert.equal(altered?.ok,false);
+ assert.equal(JSON.stringify(altered).includes("PRIVATE_KEY"),false);
+ const rateLimited=(async()=>new Response(null,{status:429,headers:{"content-type":"application/json","retry-after":"60"}})) as typeof fetch;
+ assert.equal(await establishVerifiedBridgeFeeDigest(rateLimited,project,jwt,()=>checkedAt),null);
+ const wrongProject=await establishVerifiedBridgeFeeDigest(response(headers),"https://attacker.invalid",jwt,()=>checkedAt);
+ assert.equal(wrongProject,null);
 });
