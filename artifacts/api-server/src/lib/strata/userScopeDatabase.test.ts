@@ -197,7 +197,7 @@ test("user A cannot read user B credentials, balances, stakes, or presets", asyn
   assert.equal(stake.view.configuredStakeCents, 150);
   assert.equal(stake.view.stakeRevision, 2);
   assert.equal(stake.view.workerRunning, false);
-  assert.equal(stakes.get("acct-a"), 120);
+  assert.equal(stakes.get("acct-a"), 150);
   assert.equal(stakes.get("acct-b"), 80);
   const foreignStake = calls.filter((call) => call.text.includes("account-stake:upsert"));
   assert.equal(foreignStake.every((call) => call.params[1] === "acct-a" && call.params[3] === USER_A), true);
