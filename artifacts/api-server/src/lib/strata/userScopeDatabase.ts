@@ -649,7 +649,7 @@ export function createDatabaseUserScopePort(
       kalshiGenerateRestrictedKey,
       session: options.session,
     }),
-    async stake(userId, cents, revision) {
+    async stake(userId, cents, revision, policyConfirmation) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
@@ -702,7 +702,7 @@ export function createDatabaseUserScopePort(
       };
       if (transactionalDb.connect) {
         const amended = await amendOwnedStakePolicy(
-          {connect:transactionalDb.connect.bind(transactionalDb)},userId,account.id,cents,revision,
+          {connect:transactionalDb.connect.bind(transactionalDb)},userId,account.id,cents,revision,policyConfirmation,
         );
         if (!amended.ok) return refused(userId, amended.reason, scoped);
         const refreshed = await ownedAccount(userId);
