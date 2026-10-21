@@ -32,10 +32,10 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
   calls.sql.push(sql);
   if(sql==="COMMIT"&&input.failCommit)throw Error("commit_acknowledgement_lost");
   if(sql.startsWith("SELECT r.reservation_id")){
-   assert.match(sql,/private\.strata_owner_sha_approvals oa/);
+   assert.doesNotMatch(sql,/private\.strata_owner_sha_approvals oa/);
    assert.match(sql,/private\.strata_protective_exit_release v/);
-   assert.match(sql,/oa\.owner_user_id=a\.owner_user_id/);
    assert.match(sql,/v\.independent_reviewer_id<>a\.owner_user_id/);
+   assert.match(sql,/v\.operator_approver_id<>v\.independent_reviewer_id/);
    assert.match(sql,/r\.state='UNKNOWN'/);
    assert.match(sql,/a\.minimum_exit_micros <= \$11::bigint/);
    assert.match(sql,/FOR SHARE OF r,a,g,w,pos/);
