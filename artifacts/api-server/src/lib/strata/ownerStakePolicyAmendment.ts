@@ -103,7 +103,8 @@ export async function amendOwnedStakePolicy(
     if (policies.rows.length!==1) return reject("approved_policy_missing");
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
-    if (stakeCents <= old.maxEntryStakeCents) return reject("policy_amendment_not_required");
+    let next: V13ApprovedLiveMoneyPolicy=old;
+    if (stakeCents > old.maxEntryStakeCents) {
     // Existing drafts can occupy the next version: never overwrite or reuse
     // their revision numbers when increasing a commissioned policy.
     const versions=await tx.query(`SELECT COALESCE(MAX(version),0)::int AS last_version
@@ -111,7 +112,7 @@ export async function amendOwnedStakePolicy(
     const lastVersion=int(versions.rows[0]?.last_version);
     if(lastVersion===null || lastVersion<old.version)return reject("policy_version_unverified");
     const when=new Date();
-    const next: V13ApprovedLiveMoneyPolicy = {
+    next = {
       ...old, id: randomUUID(), supersedesPolicyId: old.id, version: lastVersion+1,
       maxEntryStakeCents: stakeCents,
       maxEntryAllInCents: Math.max(old.maxEntryAllInCents,stakeCents),
@@ -148,6 +149,7 @@ export async function amendOwnedStakePolicy(
     const linked=await tx.query(`UPDATE public.v13_production_account SET policy_id=$1,revision=revision+1
       WHERE id=$2 AND owner_user_id=$3::uuid AND policy_id=$4 RETURNING id`,[next.id,accountId,ownerId,old.id]);
     if(linked.rows.length!==1)return reject("policy_revision_link_failed");
+    } // Existing smaller stake: retain the approved policy while refreshing owner activation proof.
     const saved=await tx.query(`INSERT INTO public.strata_configured_stake(id,execution_account_id,configured_stake_cents,revision,updated_at)
       VALUES($1,$1,$2,$3,now()) ON CONFLICT (execution_account_id) WHERE execution_account_id IS NOT NULL
       DO UPDATE SET configured_stake_cents=EXCLUDED.configured_stake_cents,
