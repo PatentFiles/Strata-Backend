@@ -54,5 +54,11 @@ CREATE TABLE IF NOT EXISTS private.kalshi_owner_topup_legs (
 );
 CREATE INDEX IF NOT EXISTS kalshi_owner_topup_leg_history
  ON private.kalshi_owner_topup_legs(topup_id,leg);
--- Private-schema backend-only access. No new RLS policy, no public grants.
+-- Defensive security parity with existing private financial ledgers:
+-- no direct browser/user-role access, even if private schema exposure changes.
+ALTER TABLE private.kalshi_owner_topups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.kalshi_owner_topup_legs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL PRIVILEGES ON TABLE private.kalshi_owner_topups FROM PUBLIC, anon, authenticated;
+REVOKE ALL PRIVILEGES ON TABLE private.kalshi_owner_topup_legs FROM PUBLIC, anon, authenticated;
+-- Private-schema backend-only access. No browser grants or SELECT policies.
 COMMIT;
