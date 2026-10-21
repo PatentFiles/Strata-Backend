@@ -40,6 +40,38 @@ test("START refuses invalid runtime SHA and bad owner before any DB read",async(
    "protective_exit_owner_unverified");
  assert.equal(called,false);
 });
+test("single AAL2 owner exact-SHA approval satisfies START release without another reviewer",async()=>{
+ let queries=0;
+ const db={query:async(sql:string,args?:unknown[])=>{
+  queries++;
+  // Production owner approval is independent of the legacy reviewer table.
+  assert.equal(sql,OWNER_SHA_STARTUP_RELEASE_SQL);
+  assert.deepEqual(args,[sha,owner]);
+  assert.match(sql,/oa\.revoked_at IS NULL/);
+  assert.match(sql,/a\.commissioned=true/);
+  assert.match(sql,/a\.execution_enabled=true/);
+  assert.match(sql,/a\.kill_switch=false/);
+  return {rows:[{release_id:releaseId}]};
+ }};
+ const result=await verifyProtectiveExitStartupRelease(db,owner,env());
+ assert.deepEqual(result,{ok:true,reason:"protective_exit_release_verified"});
+ assert.equal(queries,1);
+});
+test("owner-only release is fail-closed for revoked, wrong SHA or disabled account",async()=>{
+ for(const reason of ["revoked","different_sha","account_killed"]){
+  let attempts=0;
+  const db={query:async(sql:string)=>{
+   attempts++;
+   if(sql===OWNER_SHA_STARTUP_RELEASE_SQL)return {rows:[]};
+   if(sql===PROTECTIVE_STARTUP_RELEASE_SQL)return {rows:[]};
+   throw Error("unexpected proof source");
+  }};
+  const result=await verifyProtectiveExitStartupRelease(db,owner,env());
+  assert.equal(result.ok,false,reason);
+  assert.equal(result.reason,"protective_exit_exact_deployed_version_approval_missing");
+  assert.equal(attempts,2);
+ }
+});
 test("exact deployed SHA and unrelated reviewer with unexpired release is required",async()=>{
  let calls=0;
  const db={query:async(sql:string,args?:unknown[])=>{
