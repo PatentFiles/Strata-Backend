@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact*'
+      - 'artifacts/api-server/src/lib/strata/monetaryFeeContract*'
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
       - 'artifacts/api-server/src/lib/strata/apiFeeRateReference*'
       - 'artifacts/api-server/src/lib/strata/ownerFee*'

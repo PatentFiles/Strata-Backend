@@ -727,53 +727,30 @@ test("repeated Kalshi 429s back off 60s, 120s, 240s without approving or caching
   }
 });
 
-test("personal commissioning uses the same short-lease trusted bridge after canonical 429", async () => {
-  const official = readFileSync(resolve(process.cwd(),
-    "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
-  const digest = createHash("sha256").update(official).digest("hex");
+test("injected fee transports cannot access the privileged production bridge after 429", async () => {
   const oldFetch = globalThis.fetch;
   const oldUrl = process.env.SUPABASE_URL;
   const oldJwt = process.env.STRATA_FEE_BRIDGE_ANON_JWT;
-  const project = "https://wqsmfbzfbiilhtzpqbrb.supabase.co";
-  const originalUrl = CANONICAL_FEE_SCHEDULE_URL;
   let canonicalGets = 0;
   let bridgeGets = 0;
-  let badHash = false;
   try {
-    process.env.SUPABASE_URL = project;
+    process.env.SUPABASE_URL = "https://wqsmfbzfbiilhtzpqbrb.supabase.co";
     process.env.STRATA_FEE_BRIDGE_ANON_JWT = "x".repeat(100);
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input) === originalUrl) {
-        canonicalGets += 1;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === CANONICAL_FEE_SCHEDULE_URL) {
+        canonicalGets++;
         return new Response("provider throttle", { status: 429,
           headers: { "content-type": "text/plain" } });
       }
-      assert.equal(String(input), project + "/functions/v1/strata-official-fee-source");
-      assert.equal(init?.method, "GET");
-      bridgeGets += 1;
-      return new Response(new Uint8Array(official), {
-        status: 200,
-        headers: {
-          "content-type": "application/pdf",
-          "x-strata-canonical-source": originalUrl,
-          "x-strata-source-sha256": badHash ? "0".repeat(64) : digest,
-          "x-strata-captured-at": new Date().toISOString(),
-        },
-      });
+      bridgeGets++;
+      throw new Error("unexpected privileged bridge call from injected transport");
     }) as typeof fetch;
-    const approvedIdentity = { ...approval, digest };
-    const verified = await verifyCurrentFeeArtifact(approvedIdentity);
-    assert.equal(verified.status, "verified");
-    assert.equal(verified.valid, true);
-    assert.equal(verified.digest, digest);
+    const blocked = await verifyCurrentFeeArtifact(approval);
+    assert.equal(blocked.status, "unavailable");
+    assert.equal(blocked.valid, false);
+    assert.equal(blocked.reason, "official_fee_schedule_http_429");
     assert.equal(canonicalGets, 1);
-    assert.equal(bridgeGets, 1);
-    badHash = true;
-    const tampered = await verifyCurrentFeeArtifact(approvedIdentity);
-    assert.equal(tampered.status, "unavailable");
-    assert.equal(tampered.valid, false);
-    assert.equal(canonicalGets, 2);
-    assert.equal(bridgeGets, 2);
+    assert.equal(bridgeGets, 0, "only the captured production transport can use bridge fallback");
   } finally {
     globalThis.fetch = oldFetch;
     if (oldUrl === undefined) delete process.env.SUPABASE_URL;
