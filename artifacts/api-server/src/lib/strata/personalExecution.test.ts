@@ -15,7 +15,7 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
-import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession } from "./personalExecutionSupervisor";
+import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
   readOwnedApprovedFeeEvidence,
@@ -736,3 +736,23 @@ function fakeWorker() {
     stop() { scheduled = false; },
   };
 }
+
+test("STOP keeps exit worker for positions, nonterminal orders and UNKNOWN intents",()=>{
+ for(const state of [
+   {positions:"1",orders:"0",unresolved:"0"},
+   {positions:"0",orders:"1",unresolved:"0"},
+   {positions:"0",orders:"0",unresolved:"1"},
+ ])assert.deepEqual(classifyStopExposureRow(state),{ok:true,managingExposure:true});
+ assert.deepEqual(classifyStopExposureRow({positions:"0",orders:"0",unresolved:"0"}),{ok:true,managingExposure:false});
+});
+
+test("STOP fails closed when position or order evidence is absent, invalid or unsafe",()=>{
+ for(const row of [
+   undefined,{positions:"0",orders:"0"},
+   {positions:null,orders:"0",unresolved:"0"},
+   {positions:"0",orders:"0",unresolved:"NaN"},
+   {positions:"0",orders:"0",unresolved:"-1"},
+   {positions:"0",orders:"0",unresolved:"9007199254740993"},
+   {positions:"0",orders:0.5,unresolved:"0"},
+ ])assert.deepEqual(classifyStopExposureRow(row),{ok:false,reason:"stop_exposure_unverified"});
+});
