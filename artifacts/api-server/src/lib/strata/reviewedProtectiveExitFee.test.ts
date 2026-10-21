@@ -12,6 +12,9 @@ function harness(input:{approved?:boolean;provider?:boolean;stale?:boolean;readT
  const db={query:async(sql:string,args:unknown[])=>{
   events.push("SIGNED_DB");
   assert.match(sql,/r\.revoked_at IS NULL/);
+  assert.match(sql,/r\.expires_at>now\(\)/);
+  assert.match(sql,/g\.revoked_at IS NULL/);
+  assert.match(sql,/c\.revoked_at IS NULL/);
   assert.match(sql,/r\.reviewer_user_id<>a\.owner_user_id/);
   assert.match(sql,/g\.rate_decision_digest=\$5::text/);
   assert.match(sql,/g\.policy_version=\$3::text/);
