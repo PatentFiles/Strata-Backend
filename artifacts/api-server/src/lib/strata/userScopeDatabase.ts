@@ -130,7 +130,7 @@ const STAKE_EXPOSURE_SQL = `
     (SELECT count(*)::int FROM v13_production_intent i
       WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL','BLOCKED')) AS unresolved,
     (SELECT count(*)::int FROM private.kalshi_account_worker_lease l
-      WHERE l.execution_account_id = a.id AND l.state = 'owned') AS running
+      WHERE l.execution_account_id = a.id AND l.state = 'owned' AND l.heartbeat_at > now()-interval '30 seconds') AS running
   FROM v13_production_account a
   WHERE a.id = $1 AND a.owner_user_id = $2::uuid
 `;
