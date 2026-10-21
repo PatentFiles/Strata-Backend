@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { digest as v13Digest } from "../v13-production/types";
+import { API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
@@ -24,12 +25,15 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
   if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||sql.startsWith("SET LOCAL"))return {rows:[]};
-  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,blocked_reason:input.freeze??null}]};
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,blocked_reason:input.freeze??null,...(input.apiSource?{
+    fee_source_url:"strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555",
+    fee_policy_version:API_SOURCE_POLICY_VERSION,fee_formula_version:API_SOURCE_FORMULA_VERSION,
+  }:{})}]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
       feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
