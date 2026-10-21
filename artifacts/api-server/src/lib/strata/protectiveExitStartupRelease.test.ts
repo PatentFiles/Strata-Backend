@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {verifyProtectiveExitStartupRelease,PROTECTIVE_STARTUP_RELEASE_SQL} from "./protectiveExitStartupRelease";
+import {verifyProtectiveExitStartupRelease,PROTECTIVE_STARTUP_RELEASE_SQL,OWNER_SHA_STARTUP_RELEASE_SQL} from "./protectiveExitStartupRelease";
 
 const owner="11111111-1111-4111-8111-111111111111";
 const releaseId="22222222-2222-4222-8222-222222222222";
@@ -44,13 +44,13 @@ test("exact deployed SHA and unrelated reviewer with unexpired release is requir
  let calls=0;
  const db={query:async(sql:string,args?:unknown[])=>{
   calls++;
-  assert.equal(sql,PROTECTIVE_STARTUP_RELEASE_SQL);
+  assert.ok(sql===PROTECTIVE_STARTUP_RELEASE_SQL||sql===OWNER_SHA_STARTUP_RELEASE_SQL);
   assert.deepEqual(args,[sha,owner]);
-  return {rows:[{release_id:releaseId}]};
+  return {rows:sql===OWNER_SHA_STARTUP_RELEASE_SQL?[]:[{release_id:releaseId}]};
  }};
  const result=await verifyProtectiveExitStartupRelease(db,owner,env());
  assert.deepEqual(result,{ok:true,reason:"protective_exit_release_verified"});
- assert.equal(calls,1);
+ assert.equal(calls,2);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/release_commit_sha=\$1::text/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/independent_reviewer_id <> \$2::uuid/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)\+interval '20 minutes'/);
@@ -58,10 +58,14 @@ test("exact deployed SHA and unrelated reviewer with unexpired release is requir
 });
 test("no release, ambiguous release or DB failures refuse START",async()=>{
  for(const rows of [[],[{release_id:releaseId},{release_id:releaseId}]]) {
-  const outcome=await verifyProtectiveExitStartupRelease({query:async()=>({rows})},owner,env());
+  const outcome=await verifyProtectiveExitStartupRelease({query:async(sql:string)=>({rows:sql===OWNER_SHA_STARTUP_RELEASE_SQL?[]:rows})},owner,env());
   assert.equal(outcome.ok,false);
   assert.equal(outcome.reason,"protective_exit_exact_deployed_version_approval_missing");
  }
+ const duplicate=await verifyProtectiveExitStartupRelease({query:async(sql:string)=>({
+  rows:sql===OWNER_SHA_STARTUP_RELEASE_SQL?[{release_id:releaseId},{release_id:releaseId}]:[],
+ })},owner,env());
+ assert.equal(duplicate.reason,"duplicate_owner_code_approval");
  const broken=await verifyProtectiveExitStartupRelease({query:async()=>{throw Error("offline")}},owner,env());
  assert.equal(broken.reason,"protective_exit_release_evidence_unavailable");
 });
