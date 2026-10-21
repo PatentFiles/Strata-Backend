@@ -157,6 +157,11 @@ test("missing, invalid, expired and wrong-issuer Supabase tokens are denied", as
   const server = await listen(app);
   try {
     assert.equal((await call(server.port, "/api/strata/production/start", "POST")).status, 401);
+    // The modern dashboard calls the Strata namespace with Supabase JWTs.
+    // Missing auth must not disclose the CF Benchmarks read-only feed.
+    const referencePath = "/api/strata/forward-test/settlement-reference";
+    assert.equal((await call(server.port, referencePath, "GET")).status, 401);
+    assert.equal((await call(server.port, referencePath, "GET", "bad-token")).status, 401);
     assert.equal((await call(server.port, "/api/strata/production/start", "POST", "not-a-jwt")).status, 401);
     const expired = await token(privateKey, { sub: DEVELOPER_ID, expires: "-1m" });
     assert.equal((await call(server.port, "/api/strata/production/start", "POST", expired)).status, 401);
@@ -164,6 +169,21 @@ test("missing, invalid, expired and wrong-issuer Supabase tokens are denied", as
     assert.equal((await call(server.port, "/api/strata/production/start", "POST", wrongIssuer)).status, 401);
     const aal1 = await token(privateKey, { sub: DEVELOPER_ID, aal: "aal1" });
     assert.equal((await call(server.port, "/api/strata/production/start", "POST", aal1)).status, 401);
+    assert.equal((await call(server.port, referencePath, "GET", aal1)).status, 401);
+
+    // A standard owner's valid AAL2 token can now read the route without
+    // a Clerk session, signer, trade permission, or any database mutation.
+    const standardJwt = await token(privateKey, { sub: STANDARD_ID });
+    const ref = await call(server.port, referencePath, "GET", standardJwt);
+    assert.equal(ref.status, 200);
+    assert.equal(ref.body.indexId, "BRTI");
+    assert.equal(ref.body.readOnly, true);
+    assert.equal(ref.body.paperOnly, true);
+    assert.equal(ref.body.tradingAuthority, false);
+    assert.equal(ref.body.comparison, null);
+    assert.equal(ref.body.spotComparison, null);
+    assert.equal(typeof ref.body.sourceFresh, "boolean");
+    assert.equal(typeof ref.body.instantSourceFresh, "boolean");
     assert.equal(h.counts().creates, 0);
     assert.equal(h.counts().emergencyStops, 0);
   } finally {

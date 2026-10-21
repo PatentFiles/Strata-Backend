@@ -11,10 +11,13 @@ import { createStrataCommissioningRouter, type CommissioningPort } from "./strat
 import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
 import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
+import { readForwardTestBrtiReference } from "./forwardTest";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
   forwardTestHistory: () => Promise<unknown>;
+  /** Injected only for isolated read-only diagnostics tests. */
+  brtiSettlementReference?: () => Promise<unknown>;
   phase4State: () => Promise<unknown>;
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
@@ -171,6 +174,17 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.get("/forward-test/status", access.requireUser, async (_req, res) => {
     try { res.json(await deps.forwardTestStatus()); }
     catch { res.status(503).json({ error: "Forward-test status is unavailable" }); }
+  });
+  // The published Wallets/Dashboard uses Supabase JWTs, not the legacy
+  // Clerk /api/forward-test endpoint. Reuse its identical read-only payload.
+  // Never expose a current BRTI tick as official settlement or live authority.
+  router.get("/forward-test/settlement-reference", access.requireUser, async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      res.json(await (deps.brtiSettlementReference ?? readForwardTestBrtiReference)());
+    } catch {
+      res.status(503).json({ error: "BRTI reference is temporarily unavailable" });
+    }
   });
   router.get("/forward-test/history", access.requireUser, async (_req, res) => {
     try { res.json(await deps.forwardTestHistory()); }
