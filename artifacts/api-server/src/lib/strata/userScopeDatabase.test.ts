@@ -521,6 +521,8 @@ test("a verified signer still cannot start while the global kill switch is on", 
   const killed = await port.control(USER_A, "KILL");
   assert.equal(killed.ok, true);
   assert.equal(killed.reason, "account_killed");
+  assert.equal(killed.exchangeFlatVerified, false);
+  assert.equal(killed.protectiveExitState, "MANUAL_EXCHANGE_RECONCILIATION_REQUIRED");
   assert.equal(killed.view.killSwitch, true);
   assert.equal(killed.view.workerRunning, false);
   assert.equal(posts, 0);
@@ -652,6 +654,8 @@ test("START reports running only after the session schedules a worker, and produ
   assert.equal(duplicate.view.workerRunning, true);
   const stopped = await port.control(USER_A, "STOP");
   assert.equal(stopped.reason, "entries_stopped");
+  assert.equal(stopped.exchangeFlatVerified, false);
+  assert.equal(stopped.protectiveExitState, "EXCHANGE_RECONCILIATION_REQUIRED");
   assert.equal(stopped.view.workerRunning, false);
   const saved = await port.stake(USER_A, 500, 4);
   assert.equal(saved.ok, true);
