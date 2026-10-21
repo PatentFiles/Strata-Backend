@@ -8,6 +8,7 @@ import { digest as v13Digest } from "../v13-production/types";
  * All entry/exposure checks remain active and the account's kill switches stay untouched.
  */
 export const MIN_OWNER_STAKE_CENTS = 150;
+export const OWNER_STAKE_POLICY_CONFIRM = "I_APPROVE_MY_OWN_STAKE_RISK_POLICY_REVISION";
 
 type Row = Record<string, unknown>;
 type Tx = { query(sql: string, args?: unknown[]): Promise<{rows: Row[];rowCount?: number | null}>; release(): void };
@@ -60,6 +61,7 @@ function approvedFromRow(p: Row): V13ApprovedLiveMoneyPolicy | null {
 
 export async function amendOwnedStakePolicy(
   db: Database, ownerId: string, accountId: string, stakeCents: number, expectedRevision: number | null,
+  policyConfirmation?: string,
 ): Promise<StakeAmendmentResult> {
   if (!Number.isSafeInteger(stakeCents) || stakeCents < MIN_OWNER_STAKE_CENTS || stakeCents > V13_MAX_ENTRY_STAKE_CENTS) {
     return {ok:false,reason:"stake_outside_permitted_range"};
@@ -105,6 +107,7 @@ export async function amendOwnedStakePolicy(
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
     let next: V13ApprovedLiveMoneyPolicy=old;
     if (stakeCents > old.maxEntryStakeCents) {
+    if (policyConfirmation !== OWNER_STAKE_POLICY_CONFIRM) return reject("explicit_owner_risk_policy_consent_required");
     // Existing drafts can occupy the next version: never overwrite or reuse
     // their revision numbers when increasing a commissioned policy.
     const versions=await tx.query(`SELECT COALESCE(MAX(version),0)::int AS last_version
@@ -146,6 +149,12 @@ export async function amendOwnedStakePolicy(
        next.id,next.version,ownerId,next.capitalLimitCents,next.maxEntryStakeCents,next.maxEntryAllInCents,
        next.maxDailyLossCents,next.maxTotalLossCents,next.policyHash,when.toISOString(),old.id,accountId]);
     if(inserted.rows.length!==1)return reject("policy_revision_not_inserted");
+    const amendment={ownerId,accountId,oldPolicyId:old.id,newPolicyId:next.id,
+      previousMaxStakeCents:old.maxEntryStakeCents,newMaxStakeCents:stakeCents,
+      policyVersion:next.version,confirmation:OWNER_STAKE_POLICY_CONFIRM};
+    await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+      VALUES($1,$2,'OWNER_STAKE_POLICY_AMENDMENT',$3::jsonb,$4)`,
+      [randomUUID(),accountId,JSON.stringify(amendment),v13Digest(amendment)]);
     const linked=await tx.query(`UPDATE public.v13_production_account SET policy_id=$1,revision=revision+1
       WHERE id=$2 AND owner_user_id=$3::uuid AND policy_id=$4 RETURNING id`,[next.id,accountId,ownerId,old.id]);
     if(linked.rows.length!==1)return reject("policy_revision_link_failed");
