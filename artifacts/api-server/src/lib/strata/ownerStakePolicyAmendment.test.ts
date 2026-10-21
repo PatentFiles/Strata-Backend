@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
-import {STANDARD_PROPORTIONAL_PRESET} from "./sharedPresets";
+import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
 const ACCOUNT="owned-funded-account";
@@ -111,4 +111,25 @@ test("a spoofed stale preset amount is rejected before risk-policy mutation",asy
  assert.ok(h.sqls.includes("ROLLBACK"));
  assert.equal(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy")),false);
  assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
+});
+
+test("20% $5 owner-approved test preset versions the live policy without arming",async()=>{
+ const h=mock("25000000"),preset=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.ok(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
+ assert.ok(h.sqls.some(x=>x.includes("risk_preset_id,risk_preset_revision,risk_capital_cents")));
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.live_execution_config")));
+ assert.ok(h.sqls.includes("COMMIT"));
+});
+test("20% preset cannot be used to exceed the verified capital or silently replace 6%",async()=>{
+ const h=mock("25000000");
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const excessive=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,5_000,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:25_000});
+ assert.equal(excessive.ok,false);
+ assert.equal(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")),false);
 });
