@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { digest as v13Digest } from "../v13-production/types";
-import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type SharedPreset } from "./sharedPresets";
+import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type SharedPreset } from "./sharedPresets";
 import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPresetStake";
 
 /**
@@ -104,6 +104,8 @@ export async function amendOwnedStakePolicy(
       let preset:SharedPreset;
       if(presetSelection.presetId===STANDARD_PROPORTIONAL_PRESET_ID){
         preset=STANDARD_PROPORTIONAL_PRESET;
+      }else if(presetSelection.presetId===TEST_TWENTY_PERCENT_PRESET_ID){
+        preset=TEST_TWENTY_PERCENT_PRESET;
       }else{
         const named=await tx.query(`SELECT * FROM public.v13_shared_preset
           WHERE id=$1 FOR SHARE`,[presetSelection.presetId]);
