@@ -108,7 +108,7 @@ export interface UserScopePort {
   executeOwnerTopup(userId:string,body:unknown):Promise<TopupStatus>;
   reconcileOwnerTopup(userId:string):Promise<TopupStatus>;
   cancelOwnerTopup(userId:string,confirmation:unknown):Promise<TopupStatus>;
-  control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView }>;
+  control(userId: string, action: ControlAction): Promise<{ ok: boolean; reason?: string; view: UserExecutionView; exchangeFlatVerified?: false; protectiveExitState?: "MANUAL_EXCHANGE_RECONCILIATION_REQUIRED" | "MANAGING_EXISTING_EXPOSURE" | "EXCHANGE_RECONCILIATION_REQUIRED" }>;
   safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL"): Promise<{
     ok: boolean;
     reason?: string;
