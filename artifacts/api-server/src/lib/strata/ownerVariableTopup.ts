@@ -365,6 +365,30 @@ export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:De
  return {...output(p,"topup_post_attempted_exchange_receipt_required"),state:"uncertain",
   transferAttempted:true};
 }
+/**
+ * Public Kalshi subaccount-transfer history exposes transfer_id but does NOT
+ * promise a client_transfer_id. Bind the server-issued ID from the successful
+ * intra-account POST, exact endpoints/amount and claim time. Never infer a
+ * transfer from a matching cash delta alone.
+ */
+export function exactOwnedBotTransferReceipt(
+  item:unknown,serverTransferId:unknown,attemptId:unknown,
+  amountCents:number,attemptedSeconds:number,
+):boolean{
+ if(!item||typeof item!=="object"||Array.isArray(item)||
+    typeof serverTransferId!=="string"||
+    !/^[A-Za-z0-9_-]{8,128}$/.test(serverTransferId)||
+    !Number.isSafeInteger(amountCents)||amountCents<100||
+    !Number.isSafeInteger(attemptedSeconds)||attemptedSeconds<=0)return false;
+ const t=item as Row;
+ return t.transfer_id===serverTransferId &&
+   Number(t.from_subaccount)===0&&Number(t.to_subaccount)===1&&
+   Number(t.exchange_index)===2&&Number(t.amount_cents)===amountCents&&
+   Number.isSafeInteger(Number(t.created_ts))&&
+   Number(t.created_ts)>=attemptedSeconds-120&&
+   Number(t.created_ts)<=attemptedSeconds+300&&
+   (t.client_transfer_id===undefined||t.client_transfer_id===attemptId);
+}
 /** Strict provider receipt + exact signed after balances. NEVER retries POST. */
 export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promise<TopupStatus>{
  const p=await readPlan(db,uid);
@@ -424,12 +448,8 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
     // Kalshi documents transfer_id, not client_transfer_id, in this
     // history. Our same-shard intra-account POST records that exchange-issued
     // transfer_id. Never match an unrelated same-amount transfer by guesswork.
-    if(t.transfer_id===p.exchange_transfer_id &&
-       Number(t.from_subaccount)===0&&Number(t.to_subaccount)===1&&
-       Number(t.exchange_index)===2&&Number(t.amount_cents)===amount&&
-       Number(t.created_ts)>=secs-120&&Number(t.created_ts)<=secs+300&&
-       (t.client_transfer_id===undefined||t.client_transfer_id===p.attempt_id))
-       found++;
+    if(exactOwnedBotTransferReceipt(t,p.exchange_transfer_id,p.attempt_id,
+       amount,secs))found++;
    }
    const next=doc.cursor;
    if(next===undefined||next===null||next===""){complete=true;break;}
