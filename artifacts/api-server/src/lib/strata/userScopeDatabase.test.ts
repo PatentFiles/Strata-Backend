@@ -258,6 +258,35 @@ test("wallet reads the caller's Vault connection before execution ownership exis
   assert.equal(calls.some((call) => call.params.includes("vault-b")), false);
 });
 
+test("wallet reads all primary exchange indexes but never treats primary deposits as bot cash", async () => {
+  const { db } = database(true);
+  const balanceQueries: string[] = [];
+  const port = createDatabaseUserScopePort(db, {
+    kalshiGet: async (_creds, path, query = "") => {
+      if (path.endsWith("/portfolio/balance")) {
+        balanceQueries.push(query);
+        if (query === "?subaccount=0")
+          return { balance_dollars: "100.00", portfolio_value_dollars: "0.00" };
+        if (query === "?subaccount=1&exchange_index=2")
+          return { balance_dollars: "25.00", portfolio_value_dollars: "0.00" };
+        throw new Error("unexpected balance scope");
+      }
+      if (path.endsWith("/account/limits")) return { usage_tier: "advanced" };
+      return {};
+    },
+  });
+  const wallet = await port.wallet(USER_A);
+  assert.deepEqual(balanceQueries.sort(), [
+    "?subaccount=0", "?subaccount=1&exchange_index=2",
+  ]);
+  assert.equal(wallet.credentialVerified, true);
+  assert.equal(wallet.primary.cashCents, 10_000);
+  assert.equal(wallet.botSubaccount?.cashCents, 2_500);
+  assert.equal(wallet.primary.portfolioValueCents, 0);
+  // This wallet read is read-only. It must not rewrite production cash or
+  // permit bot orders to spend an unaudited $100 primary-account deposit.
+});
+
 test("primary balance verifies the credential when limits and activity reads fail", async () => {
   const { db } = database(true);
   const port = createDatabaseUserScopePort(db, {
