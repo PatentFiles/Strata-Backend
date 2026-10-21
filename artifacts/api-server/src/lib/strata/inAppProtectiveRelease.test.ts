@@ -125,6 +125,57 @@ test("Step 12 reports sanitized provider source reasons and still refuses missin
   assert.equal(h.executed.some(s=>s.includes("INSERT INTO private.strata_protective_release_qualification")),false);
  }
 });
+test("Step 12 accepts a genuine reviewed API-source eligibility without a PDF capture",async()=>{
+ const observed=Date.parse("2026-10-20T05:30:00Z"),h=fakeDb({apiSource:true});
+ let pdfReads=0,apiReads=0;
+ const r=await qualifyProtectiveRelease(OWNER,{
+  db:h.db,sha:()=>SHA,now:()=>observed,
+  readFeeds:(async()=>({ok:true,observedAtMs:observed,cashMicros:"25000000",
+    orders:[],fills:[],positions:[],settlements:[]})) as never,
+  verifyFee:(async()=>{pdfReads++;throw Error("PDF must not be used for API-reviewed source")}) as never,
+  verifyApiFee:(async(owner:string,stage:string,url:string)=>{
+   apiReads++;
+   assert.equal(owner,OWNER);assert.equal(stage,"STEP_11");
+   assert.equal(url,"strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555");
+   return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
+    grantId:"55555555-5555-4555-8555-555555555555",sourceUrl:url,
+    digest:"f".repeat(64),feePolicyVersion:API_SOURCE_POLICY_VERSION,
+    formulaVersion:API_SOURCE_FORMULA_VERSION,
+    marketTicker:"KXBTC15M-26OCT200530",verifiedAtMs:observed,
+   }};
+  }) as never,
+ });
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(r.ordersSubmitted,false);
+ assert.equal(pdfReads,0);assert.equal(apiReads,1);
+ assert.equal(h.executed.filter(x=>x.includes("INSERT INTO private.strata_protective_release_qualification")).length,1);
+});
+test("Step 12 denies a revoked, wrong or stale API fee-source review",async()=>{
+ const observed=Date.parse("2026-10-20T05:30:00Z");
+ for(const caseName of ["revoked","wrong_grant","stale"]){
+  const h=fakeDb({apiSource:true});
+  const r=await qualifyProtectiveRelease(OWNER,{
+   db:h.db,sha:()=>SHA,now:()=>observed,
+   readFeeds:(async()=>({ok:true,observedAtMs:observed,cashMicros:"25000000",
+     orders:[],fills:[],positions:[],settlements:[]})) as never,
+   verifyFee:(async()=>{throw Error("unexpected PDF request")}) as never,
+   verifyApiFee:(async()=>{
+    if(caseName==="revoked")return {ok:false,reason:"api_fee_grant_missing_invalid_or_expired"};
+    return {ok:true,identity:{
+     grantId:caseName==="wrong_grant"?"66666666-6666-4666-8666-666666666666":
+      "55555555-5555-4555-8555-555555555555",
+     sourceUrl:"strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555",
+     digest:"f".repeat(64),feePolicyVersion:API_SOURCE_POLICY_VERSION,
+     formulaVersion:API_SOURCE_FORMULA_VERSION,marketTicker:"KXBTC15M-26OCT200530",
+     verifiedAtMs:caseName==="stale"?observed-60_000:observed,
+    }};
+   }) as never,
+  });
+  assert.equal(r.ok,false,caseName);
+  assert.equal(r.ordersSubmitted,false);
+  assert.equal(h.executed.some(s=>s.includes("INSERT INTO private.strata_protective_release_qualification")),false);
+ }
+});
 test("owner-only qualification rejects stale exchange readings and expired provider journeys",async()=>{
  const observed=Date.parse("2026-10-20T05:30:00Z");
  const expired=fakeDb();
