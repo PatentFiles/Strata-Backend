@@ -306,7 +306,7 @@ export function createProductionPersonalSession(
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
       // The signer and lease are captured from this authenticated vault session.
       dispatchProtectiveExit: async selection => {
-        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE === "false") {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
           state.entriesAuthorized = false;
           throw new Error("protective_exit_release_disabled");
         }
@@ -694,6 +694,24 @@ async function heartbeatLease(
   }
 }
 
+/** STOP retains position/UNKNOWN management. Missing or malformed DB evidence is
+ * never interpreted as a flat account and can NEVER release the worker lease.
+ * KILL is deliberately a full halt (not an automatic guaranteed liquidation).
+ */
+export function classifyStopExposureRow(row:Record<string,unknown>|undefined):
+ {ok:true;managingExposure:boolean}|{ok:false;reason:"stop_exposure_unverified"}{
+ if(!row)return {ok:false,reason:"stop_exposure_unverified"};
+ const parse=(value:unknown):number|null=>{
+  const n=typeof value==="number"?value:
+    typeof value==="string"&&/^[0-9]+$/.test(value)?Number(value):NaN;
+  return Number.isSafeInteger(n)&&n>=0?n:null;
+ };
+ const positions=parse(row.positions),orders=parse(row.orders),unresolved=parse(row.unresolved);
+ if(positions===null||orders===null||unresolved===null)
+  return {ok:false,reason:"stop_exposure_unverified"};
+ return {ok:true,managingExposure:positions>0||orders>0||unresolved>0};
+}
+
 async function disarmWorkerLease(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   ownerUserId: string,
@@ -709,10 +727,15 @@ async function disarmWorkerLease(
     const exposure = await db.query(
       `SELECT
          (SELECT count(*) FROM v13_production_position WHERE account_id = $1 AND quantity_hundredths > 0) AS positions,
-         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND exchange_order_id IS NOT NULL AND terminal = false) AS orders`,
+         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND exchange_order_id IS NOT NULL AND terminal = false) AS orders,
+         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND
+           (state IN ('DISPATCHED','UNKNOWN') OR terminal = false)) AS unresolved`,
       [executionAccountId],
     );
-    const managingExposure = Number(exposure.rows[0]?.positions ?? 0) > 0 || Number(exposure.rows[0]?.orders ?? 0) > 0;
+    if(exposure.rows.length!==1)return {entriesBlocked:false,managingExposure:false};
+    const classified=classifyStopExposureRow(exposure.rows[0]);
+    if(!classified.ok)return {entriesBlocked:false,managingExposure:false};
+    const managingExposure=classified.managingExposure;
     const updated = managingExposure
       ? await db.query(HOLD_LEASE_SQL, [executionAccountId, ownerUserId])
       : await releaseWorkerLease(db, ownerUserId, executionAccountId, false, now);
@@ -721,7 +744,6 @@ async function disarmWorkerLease(
     return { entriesBlocked: false, managingExposure: false };
   }
 }
-
 async function releaseWorkerLease(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   ownerUserId: string,

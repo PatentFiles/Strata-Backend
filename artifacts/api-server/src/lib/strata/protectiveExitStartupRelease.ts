@@ -24,6 +24,7 @@ export const OWNER_SHA_STARTUP_RELEASE_SQL = `
   ON a.id=oa.execution_account_id AND a.owner_user_id=oa.owner_user_id
  WHERE oa.owner_user_id=$2::uuid AND oa.release_commit_sha=$1
   AND oa.revoked_at IS NULL AND a.commissioned=true
+  AND a.blocked_reason IS NULL
   AND a.execution_enabled=true AND a.kill_switch=false
  LIMIT 2
 `;
