@@ -243,6 +243,52 @@ export async function prepareOwnerTopup(db:Pool,uid:string,amount:number,deps:De
  }:block("topup_preparation_failed_or_state_ambiguous");
 }
 
+export const OWNER_TOPUP_CANCEL_CONFIRM="I_CANCEL_MY_UNSUBMITTED_KALSHI_TOPUP";
+/** Releases a maintenance hold only when NO exchange transfer was ever attempted. */
+export async function cancelPreparedOwnerTopup(db:Pool,uid:string,confirmation:unknown):Promise<TopupStatus>{
+ if(confirmation!==OWNER_TOPUP_CANCEL_CONFIRM)return block("topup_explicit_cancellation_consent_required");
+ const who=await authority(db,uid,true);
+ const p=await readPlan(db,uid);
+ if(!who||!p||p.plan_state!=="active"||p.leg!==1||p.state!=="prepared"||
+    p.execution_account_id!==who.row.id||
+    who.row.blocked_reason!=="owner_topup_maintenance")
+  return block("topup_cancellation_unavailable_or_transfer_already_attempted");
+ const tx=await db.connect();
+ try{
+  await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  await tx.query("SET LOCAL lock_timeout='1500ms'");
+  const a=await tx.query(`SELECT id,blocked_reason,execution_enabled,kill_switch,
+      reserved_micros::text AS reserved_micros,
+      (SELECT count(*)::int FROM private.kalshi_account_worker_lease w
+        WHERE w.execution_account_id=a.id AND w.state='owned') AS workers
+    FROM public.v13_production_account a
+    WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[who.row.id,uid]);
+  if(a.rows.length!==1||a.rows[0]?.blocked_reason!=="owner_topup_maintenance"||
+     a.rows[0]?.execution_enabled!==false||a.rows[0]?.kill_switch!==true||
+     a.rows[0]?.reserved_micros!=="0"||num(a.rows[0]?.workers)!==0)
+    throw Error("topup_cancel_raced");
+  const x=await tx.query(`UPDATE private.kalshi_owner_topups p
+    SET state='cancelled',cancelled_at=now(),updated_at=now()
+    WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='active'
+      AND NOT EXISTS(SELECT 1 FROM private.kalshi_owner_topup_legs l
+        WHERE l.topup_id=p.id AND (l.leg<>1 OR l.state<>'prepared'))
+      AND (SELECT count(*) FROM private.kalshi_owner_topup_legs l WHERE l.topup_id=p.id)=1
+    RETURNING id`,[p.id,uid]);
+  if(x.rows.length!==1)throw Error("topup_cancel_has_attempts");
+  const released=await tx.query(`UPDATE public.v13_production_account
+    SET blocked_reason=$3 WHERE id=$1 AND owner_user_id=$2::uuid
+      AND blocked_reason='owner_topup_maintenance'
+      AND execution_enabled=false AND kill_switch=true RETURNING id`,
+    [who.row.id,uid,p.prior_blocked_reason??null]);
+  if(released.rows.length!==1)throw Error("topup_cancel_hold_not_released");
+  await tx.query("COMMIT");
+  return {...output(p,"topup_cancelled_before_any_exchange_post",true),
+    state:"unavailable",transferAttempted:false};
+ }catch{
+  try{await tx.query("ROLLBACK");}catch{}
+  return output(p,"topup_cancel_not_confirmed");
+ }finally{tx.release();}
+}
 /** Separate confirmation + transactionally committed, single-use claim. */
 export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:Deps={}):Promise<TopupStatus>{
  const args=input&&typeof input==="object"&&!Array.isArray(input)?input as Row:{};
