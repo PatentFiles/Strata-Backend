@@ -241,6 +241,20 @@ export async function amendOwnedStakePolicy(
       WHERE ($4::int IS NOT NULL AND public.strata_configured_stake.revision=$4)
       RETURNING revision`,[accountId,stakeCents,actualRevision===null?1:actualRevision+1,expectedRevision]);
     if(saved.rows.length!==1)return reject("stake_revision_conflict");
+    // Any edited gross stake/policy envelope changes the owner's risk consent.
+    // An earlier exact-SHA release is NOT authority for the new amount.
+    // Exposure and worker zero-checks above make the revocation safe.
+    const revokedOwnerRelease=await tx.query(`UPDATE private.strata_owner_sha_approvals
+      SET revoked_at=now()
+      WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+        AND revoked_at IS NULL
+      RETURNING approval_id::text`,[ownerId,accountId]);
+    const releaseAudit={ownerId,accountId,stakeCents,policyId:next.id,
+      priorApprovalsRevoked:revokedOwnerRelease.rows.length,
+      reason:"stake_or_risk_envelope_changed_requires_requalification"};
+    await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+      VALUES($1,$2,'OWNER_STAKE_RELEASE_INVALIDATED',$3::jsonb,$4)`,
+      [randomUUID(),accountId,JSON.stringify(releaseAudit),v13Digest(releaseAudit)]);
     const activated=await tx.query(`SELECT EXISTS(SELECT 1 FROM public.v13_production_observation
        WHERE account_id=$1 AND kind='OWNER_ACTIVATION_REQUEST') AS requested`,[accountId]);
     if(activated.rows[0]?.requested===true) {
