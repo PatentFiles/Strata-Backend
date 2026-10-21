@@ -116,3 +116,7 @@ test("isolated tests can run without production release credentials",async()=>{
  }},owner,{NODE_ENV:"test"});
  assert.equal(decision.ok,true);
 });
+
+test("owner SHA query excludes accounts under any persisted risk/commissioning freeze",()=>{
+ assert.match(OWNER_SHA_STARTUP_RELEASE_SQL,/a\\.blocked_reason IS NULL/);
+});
