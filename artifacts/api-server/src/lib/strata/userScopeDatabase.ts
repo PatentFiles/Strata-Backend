@@ -692,24 +692,26 @@ export function createDatabaseUserScopePort(
       const editBlockers = stakeEditBlockers(scoped);
       if (editBlockers.length) return refused(userId, editBlockers[0]!, scoped);
 
-      // If the owner explicitly increases the stake beyond the existing risk
-      // policy, transactionally version that policy, approve the owner change,
-      // save stake and refresh existing activation evidence. Never mutate a
-      // historical approved policy or permit a partial update.
-      if (scoped.approvedMaxEntryStakeCents !== null && cents > scoped.approvedMaxEntryStakeCents) {
-        const transactionDb = db as UserScopeQuery & {
-          connect?: () => Promise<{query:UserScopeQuery["query"];release():void}>;
-        };
-        if (!transactionDb.connect) return refused(userId, "stake_policy_transaction_unavailable", scoped);
+      // Production always updates stake and any necessary policy revision in
+      // ONE serializable transaction. This also updates the owner activation
+      // digest after an ordinary decrease, avoiding stale Step-12 authority.
+      // Test ports without a transactional connection retain the conservative
+      // SQL upsert adapter and can never raise a production policy.
+      const transactionalDb = db as UserScopeQuery & {
+        connect?: () => Promise<{query:UserScopeQuery["query"];release():void}>;
+      };
+      if (transactionalDb.connect) {
         const amended = await amendOwnedStakePolicy(
-          {connect:transactionDb.connect.bind(transactionDb)},userId,account.id,cents,revision,
+          {connect:transactionalDb.connect.bind(transactionalDb)},userId,account.id,cents,revision,
         );
         if (!amended.ok) return refused(userId, amended.reason, scoped);
         const refreshed = await ownedAccount(userId);
         return refreshed
           ? {ok:true as const,view:viewFrom(userId,refreshed)}
-          : refused(userId,"policy_revision_refresh_unavailable",scoped);
+          : refused(userId,"stake_transaction_refresh_unavailable",scoped);
       }
+      if (scoped.approvedMaxEntryStakeCents !== null && cents > scoped.approvedMaxEntryStakeCents)
+        return refused(userId,"stake_policy_transaction_unavailable",scoped);
 
       const change = changeConfiguredStake(userId, scoped, cents);
       if (!change.ok) return refused(userId, change.reason, scoped);
