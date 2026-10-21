@@ -179,25 +179,50 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
      (mapped.orders.length>0||mapped.fills.length>0||mapped.positions.length>0||
       mapped.settlements.length>0||requests.length>0))
     return deny("commissioning_repair_requires_empty_exchange_and_ledger_history");
-  // Standing fee policy is already approved; verify the actual official
-  // fee source and current series/event schedule again before attestation.
-  const fee=await(deps.verifyFee??verifyProtectiveReleaseFeePreflight)();
-  // These are fixed, low-cardinality evidence reason codes only. Never send
-  // provider response bodies, HTTP headers, keys, URLs with query parameters
-  // or signer details to the frontend. Source-verification failures are distinct
-  // from persisted account-policy identity failures, so a 429 can be diagnosed.
-  if(!fee.ok){
-    const reason=typeof fee.reason==="string"&&
-      /^[a-z][a-z0-9_]{2,95}$/.test(fee.reason)
-      ? fee.reason:"fee_preflight_unavailable";
-    return deny("release_fee_"+reason);
+  const sourceUrl=String(account.fee_source_url??"");
+  const reviewedApi=parseReviewedApiSource(sourceUrl);
+  let freshFeeDigest:string;
+  if(reviewedApi){
+    // This reviewed API-source grant is an independently signed model, NOT
+    // evidence that Kalshi's PDF was fetched. Verify the exact owner/source
+    // and fresh official market metadata before recording any qualification.
+    if(account.fee_policy_version!==API_SOURCE_POLICY_VERSION||
+       account.fee_formula_version!==API_SOURCE_FORMULA_VERSION)
+      return deny("release_api_fee_policy_mismatch");
+    const verified=await(deps.verifyApiFee??verifyReviewedApiFeeSourceStage)(
+      ownerId,"STEP_11",sourceUrl);
+    if(!verified.ok){
+      const reason=/^[a-z][a-z0-9_]{2,95}$/.test(verified.reason)
+        ?verified.reason:"fee_source_unavailable";
+      return deny("release_api_fee_"+reason);
+    }
+    const nowFee=(deps.now??Date.now)();
+    if(verified.identity.grantId!==reviewedApi.grantId||
+       verified.identity.sourceUrl!==sourceUrl||
+       verified.identity.feePolicyVersion!==API_SOURCE_POLICY_VERSION||
+       verified.identity.formulaVersion!==API_SOURCE_FORMULA_VERSION||
+       !/^[a-f0-9]{64}$/.test(verified.identity.digest)||
+       !Number.isSafeInteger(verified.identity.verifiedAtMs)||
+       verified.identity.verifiedAtMs>nowFee||
+       nowFee-verified.identity.verifiedAtMs>10_000)
+      return deny("release_api_fee_identity_or_freshness_unverified");
+    freshFeeDigest=verified.identity.digest;
+  }else{
+    // Legacy approved provider-PDF policy remains independently verified.
+    const fee=await(deps.verifyFee??verifyProtectiveReleaseFeePreflight)();
+    if(!fee.ok){
+      const reason=/^[a-z][a-z0-9_]{2,95}$/.test(fee.reason)
+        ?fee.reason:"fee_preflight_unavailable";
+      return deny("release_fee_"+reason);
+    }
+    if(sourceUrl!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf")
+      return deny("approved_fee_source_url_mismatch");
+    if(!/^[a-f0-9]{64}$/.test(String(fee.sourceDigest??"")))
+      return deny("current_official_fee_digest_missing");
+    if(fee.sourceDigest!==account.fee_artifact_digest)
+      return deny("approved_fee_artifact_digest_changed");
+    freshFeeDigest=fee.sourceDigest;
   }
-  if(account.fee_source_url!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf")
-    return deny("approved_fee_source_url_mismatch");
-  if(!/^[a-f0-9]{64}$/.test(String(fee.sourceDigest??"")))
-    return deny("current_official_fee_digest_missing");
-  if(fee.sourceDigest!==account.fee_artifact_digest)
-    return deny("approved_fee_artifact_digest_changed");
   // Qualification binds current fee proof to the same bounded provider read.
   // An expired network journey must not produce a fresh owner release token.
   const completedAt=(deps.now??Date.now)();
@@ -209,7 +234,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,
    cash:feeds.cashMicros,orders:feeds.orders,fills:feeds.fills,
    positions:feeds.positions,settlements:feeds.settlements,
-   fee:fee.sourceDigest,policy:account.policy_id});
+   fee:account.fee_artifact_digest,freshFeeDigest,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
   const recorded=await db.query(`
  INSERT INTO private.strata_protective_release_qualification
  (release_commit_sha,owner_user_id,execution_account_id,evidence_digest)
