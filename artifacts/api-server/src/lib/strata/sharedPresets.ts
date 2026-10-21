@@ -126,6 +126,23 @@ export const STANDARD_PROPORTIONAL_PRESET: SharedPreset = {
   updatedAt: "2026-10-14T00:00:00Z",
 };
 
+/**
+ * Deliberately higher-risk owner-selected test preset. At verified $25 capital
+ * it permits $5 gross entry (20%), $6.25 fee-inclusive, $10 daily, $15 total.
+ * It is NOT selected/approved automatically; same strict backend enforcement.
+ */
+export const TEST_TWENTY_PERCENT_PRESET_ID = "strata-test-c52c53-20pct-v1";
+export const TEST_TWENTY_PERCENT_PRESET: SharedPreset = {
+  ...STANDARD_PROPORTIONAL_PRESET,
+  id: TEST_TWENTY_PERCENT_PRESET_ID,
+  name: "Higher Risk Test — 20% entry",
+  description: "Explicit opt-in. $25 capital: $5 entry, $6.25 fee-inclusive, $10 daily / $15 total loss. Larger potential losses; no automatic activation.",
+  maxEntryStakeCents: 500,
+  maxEntryAllInCents: 625,
+  maxDailyLossCents: 1000,
+  maxTotalLossCents: 1500,
+  revision: 1,
+};
 export interface ScaledPolicyLimits {
   capitalLimitCents: number;
   maxEntryStakeCents: number;
