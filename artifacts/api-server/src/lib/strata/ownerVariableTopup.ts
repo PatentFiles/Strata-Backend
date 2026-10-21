@@ -34,7 +34,8 @@ const block=(reason:string,state:TopupStatus["state"]="unavailable",planId:strin
   transferAttempted=false):TopupStatus=>({
   ok:false,reason,state,planId,attemptId,kind,amountCents,transferAttempted,
 });
-const num=(x:unknown)=> (typeof x==="number"||typeof x==="string") && x!=="" &&\n  Number.isSafeInteger(Number(x))&&Number(x)>=0?Number(x):null;
+const num=(x:unknown)=> (typeof x==="number"||typeof x==="string") && x!=="" &&
+  Number.isSafeInteger(Number(x))&&Number(x)>=0?Number(x):null;
 const str=(x:unknown)=>typeof x==="string"?x:"";
 const micros=(x:unknown):bigint|null=>{
  if(typeof x!=="string"||!/^\d+$/.test(x))return null;
