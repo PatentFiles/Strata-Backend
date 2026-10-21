@@ -27,6 +27,7 @@ import {
   type UserExecutionView,
 } from "./userExecutionScope";
 import type { UserScopePort } from "../../routes/userExecutionRouter";
+import { readOwnerFundingMaintenanceReadiness } from "./ownerFundingMaintenanceReadiness";
 import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
 import {
@@ -445,6 +446,10 @@ export function createDatabaseUserScopePort(
       const account = await ownedAccount(userId);
       if (account && options.session?.isScheduled(userId, account.id) === true) account.workerRunning = true;
       return viewFrom(userId, account);
+    },
+    async botTopupReadiness(userId) {
+      // Read-only maintenance status for THIS owner. Never submits transfers.
+      return readOwnerFundingMaintenanceReadiness(db,userId);
     },
     async wallet(userId) {
       let connection: { rows: Array<Record<string, unknown>> };
