@@ -120,21 +120,19 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
  JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
- -- A release must exist for the exact deployed SHA and owner. A legacy
- -- independent review is still accepted while older accounts transition.
+ -- Account owner AAL2 approval is required at account activation, but NEVER
+ -- constitutes independent review of the executable emergency exit.
+ -- Every signed protective IOC must have a genuinely independent exact-SHA
+ -- technical release, including after a durable owner-SHA authorization.
  JOIN LATERAL (
    SELECT 1 AS code_authorized
    WHERE EXISTS (
-     SELECT 1 FROM private.strata_owner_sha_approvals oa
-     WHERE oa.owner_user_id=a.owner_user_id
-       AND oa.execution_account_id=a.id
-       AND oa.release_commit_sha=$1
-       AND oa.revoked_at IS NULL
-   ) OR EXISTS (
      SELECT 1 FROM private.strata_protective_exit_release v
      WHERE v.release_commit_sha=$1 AND v.state='approved'
-       AND v.expires_at>now() AND v.revoked_at IS NULL
+       AND v.created_at<=now() AND v.expires_at>now()
+       AND v.revoked_at IS NULL
        AND v.independent_reviewer_id<>a.owner_user_id
+       AND v.operator_approver_id<>v.independent_reviewer_id
    )
  ) code_release ON TRUE
  WHERE r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
