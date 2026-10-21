@@ -57,7 +57,11 @@ const REVIEW_SQL=`
    AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'
    AND r.confirmation='I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1'
    AND r.reviewer_user_id<>a.owner_user_id
-   AND r.revoked_at IS NULL
+   -- A naturally expired short-lived grant may retain reviewed model evidence
+   -- for a narrowly scoped exit; an EXPLICITLY REVOKED grant or owner consent
+   -- must never be silently treated as still authorized.
+   AND g.revoked_at IS NULL AND c.revoked_at IS NULL
+   AND r.revoked_at IS NULL AND r.expires_at>now()
    AND r.signed_at<=g.issued_at
    AND c.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'
    AND c.confirmed_at>=g.issued_at

@@ -227,3 +227,36 @@ test("final outbound fence demands a matching DISPATCHED V13 financial EXIT inte
  assert.match(fence!,/i\.terminal=false/);
  assert.match(fence!,/i\.client_order_id<>r\.client_order_id/);
 });
+
+// Production must never treat an absent opt-in as authorization, even when
+// a caller supplies valid order/owner data. This test performs ZERO network I/O.
+test("hosted signed dispatcher rejects absent, malformed and false release switch before DB or POST",async()=>{
+ const prior={
+  mode:process.env.NODE_ENV,
+  hosted:process.env.RAILWAY_SERVICE_ID,
+  flag:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE,
+ };
+ try{
+  process.env.NODE_ENV="production";
+  process.env.RAILWAY_SERVICE_ID="ci-hosted-guard-test";
+  for(const value of [undefined,"","1","TRUE","false"]){
+   if(value===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+   else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=value;
+   let called=0;
+   const result=await dispatchReviewedProtectiveExitOnce(identity,{
+    verifyFee:(async()=>{called++;throw Error("must not probe");}) as never,
+    post:async()=>{called++;throw Error("must not POST");},
+   });
+   assert.equal(result.state,"BLOCKED",String(value));
+   assert.equal(result.reason,"protective_exit_release_disabled",String(value));
+   assert.equal(result.postAttempted,false);
+   assert.equal(called,0);
+  }
+ }finally{
+  if(prior.mode===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=prior.mode;
+  if(prior.hosted===undefined)delete process.env.RAILWAY_SERVICE_ID;
+  else process.env.RAILWAY_SERVICE_ID=prior.hosted;
+  if(prior.flag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=prior.flag;
+ }
+});

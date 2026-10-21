@@ -45,7 +45,9 @@ export async function verifyProtectiveExitStartupRelease(
  if(env.NODE_ENV==="test"&&!hosted){
    return {ok:true,reason:"protective_exit_release_verified"};
  }
- if(env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="false"){
+ // Production START requires an explicit signed-exit capability opt-in.
+ // Absent, empty, misspelled and false values must all fail closed.
+ if(env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"){
    return {ok:false,reason:"protective_exit_release_disabled"};
  }
  const sha=env.RAILWAY_GIT_COMMIT_SHA;

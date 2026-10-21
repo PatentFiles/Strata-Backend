@@ -68,7 +68,7 @@ interface RunningWorker {
 const SIGNER_SQL = `
   -- personal-session:signer
   SELECT a.key_fingerprint, a.cash_micros::text AS cash_micros,
-         a.commissioned, a.execution_enabled, a.kill_switch, a.fee_artifact_digest,
+         a.commissioned, a.execution_enabled, a.kill_switch, a.blocked_reason, a.fee_artifact_digest,
          a.cash_precision_verified, a.subaccount, a.exchange_index,
          c.key_fingerprint AS credential_fingerprint,
          c.financial_account_id::text AS financial_account_id,
@@ -195,6 +195,14 @@ export function createProductionPersonalSession(
         );
         if(hold.rows.length)return {ok:false,reason:"automatic_withdrawal_maintenance_active"};
       }catch{return {ok:false,reason:"automatic_maintenance_safety_unavailable"};}
+    }
+    // A historical commissioning marker or any other account risk hold must
+    // be resolved using the authenticated owner reconciliation/repair workflow.
+    // Commissioned=true and switches OFF are not sufficient to clear a hold.
+    // Never create a worker lease, call Kalshi, or submit an order while held.
+    if (loaded.row.blocked_reason !== null &&
+        loaded.row.blocked_reason !== undefined) {
+      return { ok: false, reason: "execution_account_risk_freeze_requires_reconciliation" };
     }
     if (!flag(loaded.row.commissioned)) return { ok: false, reason: "user_execution_account_not_commissioned" };
     if (flag(loaded.row.kill_switch) || !flag(loaded.row.execution_enabled)) {
