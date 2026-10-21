@@ -568,6 +568,10 @@ export function createDatabaseUserScopePort(
         return {
           ok: true as const,
           reason: "account_killed",
+          // KILL halts ALL automated transport, including protective SELLs.
+          // It is not exchange liquidation or evidence of a flat position.
+          exchangeFlatVerified: false as const,
+          protectiveExitState: "MANUAL_EXCHANGE_RECONCILIATION_REQUIRED" as const,
           view: viewFrom(userId, killedAccount),
         };
       }
@@ -590,6 +594,12 @@ export function createDatabaseUserScopePort(
         return {
           ok: true as const,
           reason: "entries_stopped",
+          // STOP is the safe entry-only pause: an exposure-bearing worker may
+          // remain scheduled to reconcile and dispatch its reviewed exit path.
+          // Neither branch claims the exchange position is flat.
+          exchangeFlatVerified: false as const,
+          protectiveExitState: stopped.managingExposure === true
+            ? "MANAGING_EXISTING_EXPOSURE" as const : "EXCHANGE_RECONCILIATION_REQUIRED" as const,
           view: viewFrom(userId, { ...account, workerRunning: stopped.managingExposure === true }),
         };
       }
