@@ -11,9 +11,11 @@ CREATE TABLE IF NOT EXISTS private.strata_owner_sha_approvals (
   qualification_digest text NOT NULL CHECK (qualification_digest ~ '^[0-9a-f]{64}$'),
   confirmed_at timestamptz NOT NULL DEFAULT now(),
   revoked_at timestamptz,
-  CONSTRAINT strata_owner_sha_approvals_unique UNIQUE(owner_user_id,execution_account_id,release_commit_sha),
   CONSTRAINT strata_owner_sha_approvals_revocation CHECK(revoked_at IS NULL OR revoked_at>=confirmed_at)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS strata_owner_sha_approval_unique_active
+ ON private.strata_owner_sha_approvals(owner_user_id,execution_account_id,release_commit_sha)
+ WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS strata_owner_sha_approval_active
  ON private.strata_owner_sha_approvals(execution_account_id,release_commit_sha)
  WHERE revoked_at IS NULL;
