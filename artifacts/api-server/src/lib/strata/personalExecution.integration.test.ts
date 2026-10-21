@@ -17,7 +17,7 @@ assert.ok(url && /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$
 const USER = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const ACCOUNT = "acct-personal";
-const STAKES = [100, 500, 25_000, 100_000, 500_000, 2_500_000];
+const STAKES = [150, 500, 25_000, 100_000, 500_000, 2_500_000];
 
 after(() => pool.end());
 
@@ -98,9 +98,9 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
 
 test("owned stake revisions persist, and a stale revision cannot overwrite", async () => {
   await reset();
-  await pool.query(UPSERT_STAKE_SQL, [100, ACCOUNT, null, USER]);
+  await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, null, USER]);
   const first = await pool.query("SELECT configured_stake_cents, revision FROM strata_configured_stake WHERE execution_account_id=$1", [ACCOUNT]);
-  assert.equal(Number(first.rows[0].configured_stake_cents), 100);
+  assert.equal(Number(first.rows[0].configured_stake_cents), 150);
   assert.equal(Number(first.rows[0].revision), 1);
   let revision = 1;
   for (const cents of STAKES.slice(1)) {
@@ -109,13 +109,13 @@ test("owned stake revisions persist, and a stale revision cannot overwrite", asy
     revision = Number(saved.rows[0].revision);
     assert.equal(revision > 1, true);
   }
-  const stale = await pool.query(UPSERT_STAKE_SQL, [100, ACCOUNT, 1, USER]);
+  const stale = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, 1, USER]);
   assert.equal(stale.rows.length, 0);
   const current = await pool.query("SELECT configured_stake_cents FROM strata_configured_stake WHERE execution_account_id=$1", [ACCOUNT]);
   assert.equal(Number(current.rows[0].configured_stake_cents), 2_500_000);
   const legacy = await pool.query("SELECT configured_stake_cents FROM strata_configured_stake WHERE id='production'");
   assert.equal(Number(legacy.rows[0].configured_stake_cents), 25);
-  const other = await pool.query(UPSERT_STAKE_SQL, [100, ACCOUNT, revision, OTHER]);
+  const other = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, revision, OTHER]);
   assert.equal(other.rows.length, 0);
 });
 
@@ -326,7 +326,7 @@ test("a reconciled fill and settlement allow a second order without replaying th
   assert.notEqual(posts[0], posts[1]);
 });
 
-test("stake amounts from one dollar through the ceiling are executable sizes, not a hardcoded default", async () => {
+test("stake amounts from the minimum through the ceiling are executable sizes, not a hardcoded default", async () => {
   for (const cents of STAKES) {
     const session = await tradingSession(cents, []);
     const id = await session.executor.prepareEntry(await source(session.now));
@@ -344,9 +344,11 @@ async function reset(): Promise<void> {
     VALUES('production',NULL,1,2,$1,NULL,false,false,true,false,1,1)`, ["c".repeat(64)]);
   await pool.query(`INSERT INTO strata_configured_stake(id,configured_stake_cents,revision,updated_at)
     VALUES('production',25,1,now())`);
+  // Disposable fixture: a verified and sufficiently funded owner account
+  // exercises the new cash-backed SQL stake guard without external requests.
   await pool.query(`INSERT INTO v13_production_account(id,owner_user_id,subaccount,exchange_index,key_fingerprint,
-    cash_precision_verified,commissioned,kill_switch,execution_enabled,cash_micros,initial_cash_micros)
-    VALUES($1,$2,1,2,$3,false,false,true,false,0,0)`, [ACCOUNT, USER, "b".repeat(64)]);
+    cash_precision_verified,commissioned,kill_switch,execution_enabled,cash_micros,initial_cash_micros,reconciled_at)
+    VALUES($1,$2,1,2,$3,false,false,true,false,30000000000,30000000000,now())`, [ACCOUNT, USER, "b".repeat(64)]);
 }
 
 async function tradingSession(
