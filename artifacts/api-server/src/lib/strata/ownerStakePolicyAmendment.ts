@@ -88,7 +88,7 @@ export async function amendOwnedStakePolicy(
     const count = await tx.query(`SELECT
       (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
       (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) unresolved,
-      (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND state='owned') running`,[accountId]);
+      (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND state='owned' AND heartbeat_at > now()-interval '30 seconds') running`,[accountId]);
     const x = count.rows[0];
     if (count.rows.length!==1 || int(x?.positions)!==0 || int(x?.unresolved)!==0 || int(x?.running)!==0) {
       return reject("stake_exposure_or_worker_active");
