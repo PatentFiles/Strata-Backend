@@ -15,6 +15,7 @@ import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
   forwardTestHistory: () => Promise<unknown>;
+  forwardTestSettlementReference?: () => Promise<unknown>;
   phase4State: () => Promise<unknown>;
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
@@ -175,6 +176,16 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.get("/forward-test/history", access.requireUser, async (_req, res) => {
     try { res.json(await deps.forwardTestHistory()); }
     catch { res.status(503).json({ error: "Forward-test history is unavailable" }); }
+  });
+  // The dashboard's Supabase session uses /api/strata/*, not the older
+  // Clerk /api/forward-test/* router. Keep the provider evidence read-only
+  // and the same AAL2 user authorization as existing paper diagnostics.
+  router.get("/forward-test/settlement-reference", access.requireUser, async (_req, res) => {
+    if (!deps.forwardTestSettlementReference) {
+      return void res.status(503).json({ error: "BRTI reference is unavailable" });
+    }
+    try { res.json(await deps.forwardTestSettlementReference()); }
+    catch { res.status(503).json({ error: "BRTI reference is unavailable" }); }
   });
   router.get("/phase4/state", access.requireDeveloper, async (_req, res) => {
     try { res.json(await deps.phase4State()); }
