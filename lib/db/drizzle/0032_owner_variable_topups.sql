@@ -10,13 +10,15 @@ CREATE TABLE IF NOT EXISTS private.kalshi_owner_topups (
  amount_cents integer NOT NULL CHECK (amount_cents BETWEEN 100 AND 2500000),
  source_exchange_index smallint NOT NULL CHECK (source_exchange_index IN (0,2)),
  prior_blocked_reason text,
- state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','completed')),
+ state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','completed','cancelled')),
  created_at timestamptz NOT NULL DEFAULT now(),
  completed_at timestamptz,
+ cancelled_at timestamptz,
  updated_at timestamptz NOT NULL DEFAULT now(),
  CONSTRAINT topup_completion_consistency CHECK
-  ((state='active' AND completed_at IS NULL) OR
-   (state='completed' AND completed_at IS NOT NULL))
+  ((state='active' AND completed_at IS NULL AND cancelled_at IS NULL) OR
+   (state='completed' AND completed_at IS NOT NULL AND cancelled_at IS NULL) OR
+   (state='cancelled' AND completed_at IS NULL AND cancelled_at IS NOT NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS kalshi_owner_one_active_topup_per_account
  ON private.kalshi_owner_topups(execution_account_id) WHERE state='active';
