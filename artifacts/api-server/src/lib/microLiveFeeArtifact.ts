@@ -594,7 +594,12 @@ async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Respon
     if (alternate) return alternate;
     throw error;
   }
-  if (response.status === 429 && fetchImpl === globalThis.fetch) {
+  // An edge WAF (403/429) or a transient provider outage can be
+  // independently retried through the fixed-source, hash-bound, authenticated
+  // Supabase egress. An actual 404, redirect, changed PDF or altered fee
+  // schedule never gains an alternate acceptance path.
+  if ([403,429,500,502,503,504].includes(response.status) &&
+      fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH) {
     const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
       process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
     if (alternate?.status === 200) return alternate;
