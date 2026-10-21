@@ -121,7 +121,8 @@ test("owned stake revisions persist, and a stale revision cannot overwrite", asy
 
 test("concurrent stake updates keep the first revision winner", async () => {
   await reset();
-  await pool.query(UPSERT_STAKE_SQL, [100, ACCOUNT, null, USER]);
+  const initial = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, null, USER]);
+  assert.equal(initial.rows.length,1,"baseline stake must exist before concurrency test");
   const first = await pool.connect();
   const second = await pool.connect();
   try {
