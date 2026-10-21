@@ -479,7 +479,11 @@ export function createDatabaseUserScopePort(
       };
       const botQuery = `?subaccount=${BOT_SUBACCOUNT}&exchange_index=${BOT_EXCHANGE_INDEX}`;
       const activityQuery = `?limit=200&subaccount=${BOT_SUBACCOUNT}`;
-      const primaryOutcome = await read("/trade-api/v2/portfolio/balance", "?subaccount=0&exchange_index=0").then(
+      // A deposit may settle into another exchange index of the PRIMARY wallet.
+      // Kalshi's balance endpoint aggregates ALL exchange indexes when the
+      // exchange_index query is omitted. This is still subaccount 0 only;
+      // bot execution funds are read separately from subaccount 1/index 2.
+      const primaryOutcome = await read("/trade-api/v2/portfolio/balance", "?subaccount=0").then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       );
