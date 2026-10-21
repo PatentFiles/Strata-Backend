@@ -663,6 +663,26 @@ const officialFee429CooldownUntil = new WeakMap<typeof fetch, number>();
 const officialFee429Failures = new WeakMap<typeof fetch, number>();
 const MIN_429_COOLDOWN_SECONDS = 60;
 const MAX_429_BACKOFF_SECONDS = 30 * 60;
+// During a local 429 cooldown, the independently authenticated Edge capture
+// may become available from another provider egress. Probe it at most once
+// every minute, rather than blocking all subsequent owners until local expiry.
+// This is NOT a time extension: only fresh, content-hash-checked PDF bytes can
+// become a proof, and the ordinary strict PDF parser runs on every accepted read.
+const officialFeeBridgeCheckAfter = new WeakMap<typeof fetch, number>();
+const MIN_BRIDGE_RECHECK_MS = 60_000;
+
+/** Read-only provenance renewal. A bridge receipt is never treated as a PDF
+ * identity until the exact-source / capture-age / SHA check AND our reviewed
+ * Kalshi PDF parser both pass. Returning null grants no approval.
+ */
+export async function establishVerifiedBridgeFeeDigest(
+ bridgeFetch:typeof fetch,projectUrl:string|undefined,anonJwt:string|undefined,
+ nowMs:()=>number=Date.now,
+):Promise<EstablishedOfficialFeeDigest|null>{
+ const response=await fetchTrustedFeeFromSupabaseBridge(bridgeFetch,projectUrl,anonJwt,nowMs);
+ if(!response||response.status!==200)return null;
+ return validateFetchedOfficialFeePdf(response,0);
+}
 
 async function fetchAndEstablishOfficialFeeDigest(
   fetchImpl: typeof fetch,
@@ -712,16 +732,35 @@ export async function establishOfficialFeeDigest(
   const retryAt = officialFee429CooldownUntil.get(fetchImpl) ?? 0;
   const now = nowMs();
   if (retryAt > now) {
-    return {
-      ok: false,
-      reason: "official_fee_schedule_http_429",
-      diagnostic: {
-        ...EMPTY_FEE_FETCH,
-        httpStatus: 429,
-        retryAfterSeconds: Math.ceil((retryAt - now) / 1000),
-        networkAttempts: 0,
-      },
+    const cooldown:EstablishedOfficialFeeDigest={
+      ok:false,reason:"official_fee_schedule_http_429",
+      diagnostic:{...EMPTY_FEE_FETCH,httpStatus:429,
+        retryAfterSeconds:Math.ceil((retryAt-now)/1000),networkAttempts:0},
     };
+    // Only the real, captured production fetch may access this preconfigured
+    // fixed-source authenticated bridge. Caller-supplied test/network fetches
+    // cannot gain a different egress or substitute a provider document.
+    if(fetchImpl!==PRODUCTION_FEE_FETCH||globalThis.fetch!==PRODUCTION_FEE_FETCH||
+       (officialFeeBridgeCheckAfter.get(fetchImpl)??0)>now)
+      return cooldown;
+    officialFeeBridgeCheckAfter.set(fetchImpl,now+MIN_BRIDGE_RECHECK_MS);
+    const recovering:Promise<EstablishedOfficialFeeDigest>=(async()=>{
+      let verified:EstablishedOfficialFeeDigest|null=null;
+      try{
+        verified=await establishVerifiedBridgeFeeDigest(PRODUCTION_FEE_FETCH,
+          process.env.SUPABASE_URL,process.env.STRATA_FEE_BRIDGE_ANON_JWT,nowMs);
+      }catch{/* No alternate access: retain original rate-limit refusal. */}
+      if(verified?.ok){
+        officialFee429CooldownUntil.delete(fetchImpl);
+        officialFee429Failures.delete(fetchImpl);
+        return verified;
+      }
+      // An invalid provider document is a distinct hard failure; never hide a
+      // changed formula behind the transport cooldown or accept stale bytes.
+      return verified??cooldown;
+    })().finally(()=>{officialFeeInFlight.delete(fetchImpl);});
+    officialFeeInFlight.set(fetchImpl,recovering);
+    return recovering;
   }
   const task: Promise<EstablishedOfficialFeeDigest> =
     fetchAndEstablishOfficialFeeDigest(fetchImpl)
