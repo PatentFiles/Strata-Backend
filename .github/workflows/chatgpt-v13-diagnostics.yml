@@ -63,6 +63,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/forwardTestStartupGate.test.cjs
           node --test dist/forwardTestStartupGate.test.cjs
+      - name: Owner-scoped funding maintenance preflight (GET-only; no transfer)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFundingMaintenanceReadiness.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerFundingMaintenanceReadiness.test.cjs
+          node --test dist/ownerFundingMaintenanceReadiness.test.cjs
       - name: Regression - commissioned account cannot retain provisional freeze
         working-directory: artifacts/api-server
         run: |

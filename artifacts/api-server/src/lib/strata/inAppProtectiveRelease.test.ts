@@ -244,12 +244,16 @@ test("owner-authorized recovery denies stale signed source, mismatched cash and 
 });
 test("explicit owner reviewed repair refreshes real Kalshi evidence inside transaction even with old worker reconciliation",async()=>{
  const h=fakeDb({freeze:"awaiting_account_commissioning",fresh:false});
+ // The signed provider read and the expected qualification clock refer to
+ // ONE observation. Sampling Date.now() twice made this positive-path test
+ // nondeterministic across millisecond boundaries.
+ const observedAtMs=Date.now();
  let signedReads=0;
  const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
-  db:h.db,sha:()=>SHA,
+  db:h.db,sha:()=>SHA,now:()=>observedAtMs,
   readFeeds:(async()=>{
    signedReads++;
-   return emptySignedFeed();
+   return emptySignedFeed({observedAtMs});
   }) as never,
  });
  assert.equal(r.ok,true,JSON.stringify(r));
