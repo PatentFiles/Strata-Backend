@@ -110,7 +110,7 @@ export async function authorizeOwnerShaRelease(
     if(!feeds.ok||feeds.observedAtMs!==now||Date.now()-now>15_000||
       String(feeds.cashMicros)!==String(current.cash_micros)||
       feeds.orders.length!==0||feeds.fills.length!==0||
-      feeds.positions.length!==0||feeds.settlements.length!==0)
+      feeds.settlements.length!==0)
       return reject("fresh_exchange_zero_exposure_unverified");
     const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
     const snapshot=personalAccountSnapshot(identity,feeds,[]);
