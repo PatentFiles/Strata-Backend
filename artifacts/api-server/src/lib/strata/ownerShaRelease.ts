@@ -18,7 +18,7 @@ export const OWNER_SHA_REVOKE_CONFIRM = "I_REVOKE_MY_OWN_SHA_APPROVAL_WITH_ZERO_
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
 type Row=Record<string,unknown>;
-type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[];rowCount?:number|null}>};
+type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[];rowCount?:number}>};
 type Client=Query&{release():void};
 type Db=Query&{connect():Promise<Client>};
 type Dependencies={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;now?:()=>number};
