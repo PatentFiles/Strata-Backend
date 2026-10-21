@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { digest as v13Digest } from "../v13-production/types";
-import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type SharedPreset } from "./sharedPresets";
+import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type SharedPreset } from "./sharedPresets";
 import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPresetStake";
 
 /**
@@ -104,6 +104,8 @@ export async function amendOwnedStakePolicy(
       let preset:SharedPreset;
       if(presetSelection.presetId===STANDARD_PROPORTIONAL_PRESET_ID){
         preset=STANDARD_PROPORTIONAL_PRESET;
+      }else if(presetSelection.presetId===TEST_TWENTY_PERCENT_PRESET_ID){
+        preset=TEST_TWENTY_PERCENT_PRESET;
       }else{
         const named=await tx.query(`SELECT * FROM public.v13_shared_preset
           WHERE id=$1 FOR SHARE`,[presetSelection.presetId]);
@@ -149,6 +151,11 @@ export async function amendOwnedStakePolicy(
     if (policies.rows.length!==1) return reject("approved_policy_missing");
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
+    // Existing clients may lower a stake inside an already approved policy.
+    // Raising the policy limit must NEVER use the legacy preset-less path.
+    // Otherwise a bare amount + confirmation could silently bypass a 6% cap.
+    if(!presetSelection && stakeCents > old.maxEntryStakeCents)
+      return reject("named_risk_preset_required_for_increase");
     let next: V13ApprovedLiveMoneyPolicy=old;
     const target=proportional?.ok?proportional.limits:null;
     const revisesPolicy=target
@@ -239,6 +246,20 @@ export async function amendOwnedStakePolicy(
       WHERE ($4::int IS NOT NULL AND public.strata_configured_stake.revision=$4)
       RETURNING revision`,[accountId,stakeCents,actualRevision===null?1:actualRevision+1,expectedRevision]);
     if(saved.rows.length!==1)return reject("stake_revision_conflict");
+    // Any edited gross stake/policy envelope changes the owner's risk consent.
+    // An earlier exact-SHA release is NOT authority for the new amount.
+    // Exposure and worker zero-checks above make the revocation safe.
+    const revokedOwnerRelease=await tx.query(`UPDATE private.strata_owner_sha_approvals
+      SET revoked_at=now()
+      WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+        AND revoked_at IS NULL
+      RETURNING approval_id::text`,[ownerId,accountId]);
+    const releaseAudit={ownerId,accountId,stakeCents,policyId:next.id,
+      priorApprovalsRevoked:revokedOwnerRelease.rows.length,
+      reason:"stake_or_risk_envelope_changed_requires_requalification"};
+    await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+      VALUES($1,$2,'OWNER_STAKE_RELEASE_INVALIDATED',$3::jsonb,$4)`,
+      [randomUUID(),accountId,JSON.stringify(releaseAudit),v13Digest(releaseAudit)]);
     const activated=await tx.query(`SELECT EXISTS(SELECT 1 FROM public.v13_production_observation
        WHERE account_id=$1 AND kind='OWNER_ACTIVATION_REQUEST') AS requested`,[accountId]);
     if(activated.rows[0]?.requested===true) {

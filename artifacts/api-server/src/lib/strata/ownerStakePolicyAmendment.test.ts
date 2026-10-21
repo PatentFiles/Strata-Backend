@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
-import {STANDARD_PROPORTIONAL_PRESET} from "./sharedPresets";
+import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
 const ACCOUNT="owned-funded-account";
@@ -56,6 +56,7 @@ function mock(availableMicros="5000000") {
   if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
   if(sql.includes("UPDATE public.v13_production_account SET policy_id"))return {rows:[{id:ACCOUNT}]};
   if(sql.includes("INSERT INTO public.strata_configured_stake"))return {rows:[{revision:2}]};
+  if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[{approval_id:"revoked-owner-release"}]};
   if(sql.includes("SELECT EXISTS(SELECT 1 FROM public.v13_production_observation"))return {rows:[{requested:false}]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   throw Error("unrecognized query");
@@ -68,14 +69,16 @@ test("a risk-policy increase cannot be authorized by stake amount alone",async()
  const h=mock();
  const no=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1);
  assert.equal(no.ok,false);
- assert.equal(no.reason,"explicit_owner_risk_policy_consent_required");
+ assert.equal(no.reason,"named_risk_preset_required_for_increase");
  assert.equal(h.sqls.includes("ROLLBACK"),true);
  assert.equal(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy")),false);
  assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
 });
-test("explicit owner consent atomically versions, audits and saves without START",async()=>{
- const h=mock();
- const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM);
+test("explicit named risk preset and owner consent atomically version and save without START",async()=>{
+ const h=mock("25000000");
+ const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:TEST_TWENTY_PERCENT_PRESET.id,
+   presetRevision:TEST_TWENTY_PERCENT_PRESET.revision,capitalBudgetCents:2500});
  assert.equal(ok.ok,true,JSON.stringify(ok));
  assert.equal(h.sqls.some(s=>s.includes("OWNER_STAKE_POLICY_AMENDMENT")),true);
  assert.equal(h.sqls.includes("COMMIT"),true);
@@ -111,4 +114,36 @@ test("a spoofed stale preset amount is rejected before risk-policy mutation",asy
  assert.ok(h.sqls.includes("ROLLBACK"));
  assert.equal(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy")),false);
  assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
+});
+
+test("20% $5 owner-approved test preset versions the live policy without arming",async()=>{
+ const h=mock("25000000"),preset=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.ok(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
+ assert.ok(h.sqls.some(x=>x.includes("risk_preset_id,risk_preset_revision,risk_capital_cents")));
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.live_execution_config")));
+ assert.ok(h.sqls.some(x=>x.includes("UPDATE private.strata_owner_sha_approvals") &&
+   x.includes("SET revoked_at=now()")));
+ assert.ok(h.sqls.some(x=>x.includes("'OWNER_STAKE_RELEASE_INVALIDATED'")));
+ assert.ok(h.sqls.includes("COMMIT"));
+});
+test("20% preset cannot be used to exceed the verified capital or silently replace 6%",async()=>{
+ const h=mock("25000000");
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const excessive=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,5_000,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:25_000});
+ assert.equal(excessive.ok,false);
+ assert.equal(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")),false);
+});
+
+test("preset-less attempts to raise $1.50 approval to $5 fail even with owner confirmation",async()=>{
+ const h=mock("25000000");
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM);
+ assert.deepEqual(result,{ok:false,reason:"named_risk_preset_required_for_increase"});
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")));
+ assert.ok(!h.sqls.some(x=>x.includes("UPDATE private.strata_owner_sha_approvals")));
 });

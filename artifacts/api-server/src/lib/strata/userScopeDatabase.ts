@@ -16,7 +16,7 @@ import {
   normalizeKalshiMoney,
   type KalshiUserRead,
 } from "./kalshiUserRead";
-import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
+import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 import {
   changeConfiguredStake,
   stakeEditBlockers,
@@ -756,6 +756,7 @@ export function createDatabaseUserScopePort(
       const result = await db.query("SELECT * FROM v13_shared_preset ORDER BY created_at");
       return [
         STANDARD_PROPORTIONAL_PRESET,
+        TEST_TWENTY_PERCENT_PRESET,
         ...result.rows.flatMap((row) => {
           const preset = presetFrom(row);
           return preset ? [preset] : [];
@@ -842,6 +843,8 @@ export function createDatabaseUserScopePort(
       let preset: SharedPreset | null;
       if (fields.presetId === STANDARD_PROPORTIONAL_PRESET_ID) {
         preset = STANDARD_PROPORTIONAL_PRESET;
+      } else if (fields.presetId === TEST_TWENTY_PERCENT_PRESET_ID) {
+        preset = TEST_TWENTY_PERCENT_PRESET;
       } else {
         const found = await db.query("SELECT * FROM v13_shared_preset WHERE id = $1", [fields.presetId]);
         preset = found.rows[0] ? presetFrom(found.rows[0]) : null;

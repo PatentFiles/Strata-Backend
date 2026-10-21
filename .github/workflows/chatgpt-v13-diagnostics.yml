@@ -286,6 +286,19 @@ jobs:
           node --test dist/ownerShardAllocation.test.cjs
           pnpm exec esbuild src/lib/strata/ownerShardAllocation.postgres.test.ts --bundle --platform=node --format=cjs --external:@electric-sql/pglite --outfile=dist/ownerShardAllocation.postgres.test.cjs
           node --test dist/ownerShardAllocation.postgres.test.cjs
+      - name: Test $5-$25000 strict owner stake presets and serialized policy approval
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/strictPresetStake.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/strictPresetStake.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/strictPresetStake.test.cjs
+          pnpm exec esbuild src/lib/strata/ownerStakePolicyAmendment.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerStakePolicyAmendment.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/ownerStakePolicyAmendment.test.cjs
       - name: Test proportional risk presets and owner isolation
         working-directory: artifacts/api-server
         run: |
