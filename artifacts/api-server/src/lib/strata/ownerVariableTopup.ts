@@ -34,7 +34,7 @@ const block=(reason:string,state:TopupStatus["state"]="unavailable",planId:strin
   transferAttempted=false):TopupStatus=>({
   ok:false,reason,state,planId,attemptId,kind,amountCents,transferAttempted,
 });
-const num=(x:unknown)=>Number.isSafeInteger(Number(x))&&Number(x)>=0?Number(x):null;
+const num=(x:unknown)=> (typeof x==="number"||typeof x==="string") && x!=="" &&\n  Number.isSafeInteger(Number(x))&&Number(x)>=0?Number(x):null;
 const str=(x:unknown)=>typeof x==="string"?x:"";
 const micros=(x:unknown):bigint|null=>{
  if(typeof x!=="string"||!/^\d+$/.test(x))return null;
@@ -166,7 +166,7 @@ async function exchangeClear(creds:Creds,expectedBot:bigint,now:number,get:Get):
   if(f.positions.some(v=>{
    const r=v as Row;
    const n=r.position_fp??r.position??r.net_position_fp;
-   return n!==undefined&&Number(n)!==0;
+   return n===undefined||n===null||!Number.isFinite(Number(n))||Number(n)!==0;
   }))return false;
   return !f.orders.some(v=>["resting","pending","open","unknown"].includes(
     str((v as Row).status).toLowerCase()));
