@@ -1756,7 +1756,7 @@ test("Kalshi client exports are explicitly reviewed; account mutations are isola
     "verifyKalshiTradingKeyRestriction", "verifyKalshiTradingKeyTradePermission",
   ];
   const reviewedAccountSetupMutations = [
-    "createScopedKalshiSubaccountOne", "generateScopedKalshiSubaccountOneKey", "mutateScopedKalshi", "postScopedKalshiPilotTransfer", "postScopedKalshiShardAllocation", "postScopedKalshiCashierSweep",
+    "createScopedKalshiSubaccountOne", "generateScopedKalshiSubaccountOneKey", "mutateScopedKalshi", "postScopedKalshiPilotTransfer", "postScopedKalshiShardAllocation", "postScopedKalshiCashierSweep", "postScopedOwnerVariableTopup",
   ];
   assert.deepEqual(
     Object.keys(kalshiClient).sort(),

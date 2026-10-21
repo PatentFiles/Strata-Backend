@@ -63,6 +63,15 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/forwardTestStartupGate.test.cjs
           node --test dist/forwardTestStartupGate.test.cjs
+      - name: Test default-disabled owner variable funding transport and monetary precision
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerVariableTopup.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerVariableTopup.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
+            --external:pino --external:pino-pretty
+          node --test dist/ownerVariableTopup.test.cjs
       - name: Owner-scoped funding maintenance preflight (GET-only; no transfer)
         working-directory: artifacts/api-server
         run: |

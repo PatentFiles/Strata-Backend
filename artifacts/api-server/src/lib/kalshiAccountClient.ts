@@ -582,6 +582,54 @@ export async function postScopedKalshiShardAllocation(
 }
 
 /**
+ * Variable top-up transports. Both are fixed-origin and fixed routing.
+ * The caller MUST commit the permanent once-only financial claim first.
+ * No caller-supplied URL, shard, source or target is supported.
+ * Production flag is OFF unless explicitly enabled after full release review.
+ */
+export async function postScopedOwnerVariableTopup(
+  creds: {keyId:string;privateKey:string},
+  id: string, amountCents: number, kind: "shard"|"bot",
+  fetchImpl: typeof fetch=fetch,
+):Promise<{status:number;body:unknown;unreadable:boolean}>{
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) ||
+     !Number.isSafeInteger(amountCents) || amountCents<100 || amountCents>2500000 ||
+     (kind!=="shard"&&kind!=="bot"))
+    throw new KalshiApiError("INVALID_RESPONSE");
+  if(process.env.KALSHI_API_ENVIRONMENT!=="production" ||
+     process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true")
+    throw new KalshiApiError("INVALID_CREDENTIALS");
+  const path=kind==="bot"
+    ? `${API_PREFIX}/portfolio/subaccounts/transfer`
+    : `${API_PREFIX}/portfolio/intra_exchange_instance_transfer`;
+  const body=kind==="bot" ? {
+    client_transfer_id:id,from_subaccount:0,to_subaccount:1,
+    exchange_index:2,amount_cents:amountCents,
+  } : {
+    client_transfer_id:id,source:"event_contract",destination:"event_contract",
+    amount:amountCents*100,source_exchange_shard:0,destination_exchange_shard:2,
+    source_subaccount:0,destination_subaccount:0,
+  };
+  const timestamp=Date.now().toString();
+  const response=await fetchImpl(`https://external-api.kalshi.com${path}`,{
+    method:"POST",cache:"no-store",redirect:"manual",
+    signal:AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
+    headers:{
+      Accept:"application/json","Content-Type":"application/json",
+      "KALSHI-ACCESS-KEY":creds.keyId,
+      "KALSHI-ACCESS-SIGNATURE":signRequest(creds,"POST",path,timestamp),
+      "KALSHI-ACCESS-TIMESTAMP":timestamp,
+    },
+    body:JSON.stringify(body),
+  });
+  if(response.status!==200)return {status:response.status,body:null,unreadable:true};
+  const raw=await response.text();
+  if(raw.trim()==="")return {status:200,body:null,unreadable:false};
+  try{return {status:200,body:JSON.parse(raw) as unknown,unreadable:false};}
+  catch{return {status:200,body:null,unreadable:true};}
+}
+
+/**
  * The only user-scoped setup mutation transport. The path and exchange index
  * are fixed so callers cannot turn account setup authorization into a general
  * Kalshi write capability.
