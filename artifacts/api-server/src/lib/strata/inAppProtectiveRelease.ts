@@ -174,10 +174,22 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   // Standing fee policy is already approved; verify the actual official
   // fee source and current series/event schedule again before attestation.
   const fee=await(deps.verifyFee??verifyProtectiveReleaseFeePreflight)();
-  if(!fee.ok||
-    account.fee_source_url!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf"||
-    fee.sourceDigest!==account.fee_artifact_digest)
-    return deny("approved_standing_fee_source_not_current");
+  // These are fixed, low-cardinality evidence reason codes only. Never send
+  // provider response bodies, HTTP headers, keys, URLs with query parameters
+  // or signer details to the frontend. Source-verification failures are distinct
+  // from persisted account-policy identity failures, so a 429 can be diagnosed.
+  if(!fee.ok){
+    const reason=typeof fee.reason==="string"&&
+      /^[a-z][a-z0-9_]{2,95}$/.test(fee.reason)
+      ? fee.reason:"fee_preflight_unavailable";
+    return deny("release_fee_"+reason);
+  }
+  if(account.fee_source_url!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf")
+    return deny("approved_fee_source_url_mismatch");
+  if(!/^[a-f0-9]{64}$/.test(String(fee.sourceDigest??"")))
+    return deny("current_official_fee_digest_missing");
+  if(fee.sourceDigest!==account.fee_artifact_digest)
+    return deny("approved_fee_artifact_digest_changed");
   if(String(feeds.cashMicros)!==String(account.cash_micros))
     return deny("exchange_and_financial_ledger_cash_mismatch");
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,

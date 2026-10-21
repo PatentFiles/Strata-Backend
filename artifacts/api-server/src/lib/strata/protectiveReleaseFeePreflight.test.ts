@@ -44,7 +44,7 @@ test("Expired reviewed official source cannot be silently carried forward",async
   direct:pdfUnavailable as never,now:()=>Date.parse("2026-10-21T05:31:00Z"),
   probe:(async()=>{probes++;return observation()}) as never,
  });
- assert.equal(r.ok,false);assert.equal(r.reason,"independent_official_fee_snapshot_expired");
+ assert.equal(r.ok,false);assert.equal(r.reason,"official_fee_schedule_http_429_and_snapshot_expired");
  assert.equal(probes,0);
 });
 test("Current provider fee overrides or stale metadata refuse qualification",async()=>{
@@ -67,4 +67,17 @@ test("Nontransport monetary mismatch is never rescued by snapshot",async()=>{
  });
  assert.equal(r.ok,false);assert.equal(r.reason,"live_event_fee_override");
  assert.equal(called,false);
+});
+
+
+test("Expired snapshot preserves sanitized network transport failure and never claims PDF provenance",async()=>{
+ const result=await verifyProtectiveReleaseFeePreflight({
+   direct:(async()=>({ok:false,reason:"official_monetary_fee_source_unavailable",
+     monetaryFeeAuthorized:false})) as never,
+   now:()=>Date.parse("2026-10-21T02:05:00Z"),
+   probe:(async()=>{throw Error("should not probe a stale snapshot")}) as never,
+ });
+ assert.equal(result.ok,false);
+ assert.equal(result.reason,"official_monetary_fee_source_unavailable_and_snapshot_expired");
+ assert.equal(result.tradingAuthorized,false);
 });

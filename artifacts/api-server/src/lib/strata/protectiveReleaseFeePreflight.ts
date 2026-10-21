@@ -35,8 +35,18 @@ export async function verifyProtectiveReleaseFeePreflight(deps:Dependencies={}):
  if(!allowedFallbackReasons.has(status.reason))
   return {ok:false,reason:status.reason,tradingAuthorized:false};
  const now=(deps.now??Date.now)();
- if(!officialFeeSnapshotLeaseValid(now))
-  return {ok:false,reason:"independent_official_fee_snapshot_expired",tradingAuthorized:false};
+ if(!officialFeeSnapshotLeaseValid(now)){
+  // Preserve the sanitized transport category AND expired lease in one
+  // short fixed reason. Production operators must distinguish HTTP 429 from
+  // network failure; neither case is permission to reuse old provider bytes.
+  const expiredReason=(
+    status.reason==="official_fee_schedule_http_429"||
+    status.reason==="official_fee_schedule_unavailable"||
+    status.reason==="official_monetary_fee_source_unavailable")
+    ? status.reason+"_and_snapshot_expired"
+    : "independent_official_fee_snapshot_expired";
+  return {ok:false,reason:expiredReason,tradingAuthorized:false};
+ }
  const snapshot=INDEPENDENT_OFFICIAL_FEE_SNAPSHOT;
  if(snapshot.sha256!==REVIEWED_REFERENCE_PDF_SHA256||
     snapshot.url!=="https://kalshi.com/docs/kalshi-fee-schedule.pdf"||
