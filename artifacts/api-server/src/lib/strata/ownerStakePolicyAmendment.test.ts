@@ -56,6 +56,7 @@ function mock(availableMicros="5000000") {
   if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
   if(sql.includes("UPDATE public.v13_production_account SET policy_id"))return {rows:[{id:ACCOUNT}]};
   if(sql.includes("INSERT INTO public.strata_configured_stake"))return {rows:[{revision:2}]};
+  if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[{approval_id:"revoked-owner-release"}]};
   if(sql.includes("SELECT EXISTS(SELECT 1 FROM public.v13_production_observation"))return {rows:[{requested:false}]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   throw Error("unrecognized query");
@@ -122,6 +123,9 @@ test("20% $5 owner-approved test preset versions the live policy without arming"
  assert.ok(h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
  assert.ok(h.sqls.some(x=>x.includes("risk_preset_id,risk_preset_revision,risk_capital_cents")));
  assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.live_execution_config")));
+ assert.ok(h.sqls.some(x=>x.includes("UPDATE private.strata_owner_sha_approvals") &&
+   x.includes("SET revoked_at=now()")));
+ assert.ok(h.sqls.some(x=>x.includes("'OWNER_STAKE_RELEASE_INVALIDATED'")));
  assert.ok(h.sqls.includes("COMMIT"));
 });
 test("20% preset cannot be used to exceed the verified capital or silently replace 6%",async()=>{
