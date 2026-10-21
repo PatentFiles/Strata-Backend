@@ -306,7 +306,7 @@ export function createProductionPersonalSession(
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
       // The signer and lease are captured from this authenticated vault session.
       dispatchProtectiveExit: async selection => {
-        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE === "false") {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
           state.entriesAuthorized = false;
           throw new Error("protective_exit_release_disabled");
         }
@@ -703,7 +703,7 @@ export function classifyStopExposureRow(row:Record<string,unknown>|undefined):
  if(!row)return {ok:false,reason:"stop_exposure_unverified"};
  const parse=(value:unknown):number|null=>{
   const n=typeof value==="number"?value:
-    typeof value==="string"&&/^\\d+$/.test(value)?Number(value):NaN;
+    typeof value==="string"&&/^[0-9]+$/.test(value)?Number(value):NaN;
   return Number.isSafeInteger(n)&&n>=0?n:null;
  };
  const positions=parse(row.positions),orders=parse(row.orders),unresolved=parse(row.unresolved);
