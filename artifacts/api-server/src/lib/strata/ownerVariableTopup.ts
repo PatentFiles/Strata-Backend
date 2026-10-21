@@ -183,6 +183,12 @@ const insertLeg=(kind:"shard"|"bot",step:number,id:string,topupId:string,amount:
 export async function prepareOwnerTopup(db:Pool,uid:string,amount:number,deps:Deps={}):Promise<TopupStatus>{
  if(!Number.isSafeInteger(amount)||amount<100||amount>CENTS_LIMIT)
   return block("topup_amount_outside_permitted_range");
+ // A prepare persists a real account maintenance hold. Never allow that
+ // irreversible side effect while the corresponding production transfer
+ // capability is disabled or the database migration is not commissioned.
+ if(process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true" ||
+    process.env.KALSHI_API_ENVIRONMENT!=="production")
+  return block("variable_topup_not_commissioned");
  const who=await authority(db,uid);
  if(!who)return block("owner_commissioned_account_not_safely_disarmed");
  const snapshot=await balances(who.creds,deps.get??getScopedKalshiJson);
