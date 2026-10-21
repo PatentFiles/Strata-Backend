@@ -11,7 +11,7 @@ import {
   readProductionStatus,
   readProductionTrades,
 } from "../lib/v13-production/liveControl";
-import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
+import { readForwardTestHistory, readForwardTestSettlementReference, readForwardTestStatus } from "./forwardTest";
 import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
 import { createDatabaseStakePort } from "../lib/strata/configuredStakeStore";
 import { personalTradingControls } from "../lib/strata/sharedPersonalTradingControls";
@@ -55,6 +55,7 @@ export default createStrataRouter({
   stake: createDatabaseStakePort(() => supervisor().view().workerRunning),
   forwardTestStatus: () => readForwardTestStatus(),
   forwardTestHistory: () => readForwardTestHistory(),
+  forwardTestSettlementReference: () => readForwardTestSettlementReference(),
   phase4State: () => getPhase4State(),
   microLiveState: () => getMicroLiveState(),
   emergencyStop: () => emergencyStopMicroLive(),
