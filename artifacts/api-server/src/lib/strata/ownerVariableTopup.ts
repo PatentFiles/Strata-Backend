@@ -349,7 +349,7 @@ export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:De
  try{
   const x=await (deps.post??postScopedOwnerVariableTopup)(
     who.creds,args.attemptId,amount,kind);
-  if(x.status===200&&!x.unreadable&&kind==="shard"&&x.body&&
+  if(x.status===200&&!x.unreadable&&x.body&&
      typeof x.body==="object"&&!Array.isArray(x.body)){
    const id=(x.body as Row).transfer_id;
    if(typeof id==="string"&&/^[a-zA-Z0-9_-]{8,128}$/.test(id))exchangeId=id;
@@ -364,6 +364,30 @@ export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:De
  }catch{/* unknown COMMIT remains claimed: recovery will read it */}
  return {...output(p,"topup_post_attempted_exchange_receipt_required"),state:"uncertain",
   transferAttempted:true};
+}
+/**
+ * Public Kalshi subaccount-transfer history exposes transfer_id but does NOT
+ * promise a client_transfer_id. Bind the server-issued ID from the successful
+ * intra-account POST, exact endpoints/amount and claim time. Never infer a
+ * transfer from a matching cash delta alone.
+ */
+export function exactOwnedBotTransferReceipt(
+  item:unknown,serverTransferId:unknown,attemptId:unknown,
+  amountCents:number,attemptedSeconds:number,
+):boolean{
+ if(!item||typeof item!=="object"||Array.isArray(item)||
+    typeof serverTransferId!=="string"||
+    !/^[A-Za-z0-9_-]{8,128}$/.test(serverTransferId)||
+    !Number.isSafeInteger(amountCents)||amountCents<100||
+    !Number.isSafeInteger(attemptedSeconds)||attemptedSeconds<=0)return false;
+ const t=item as Row;
+ return t.transfer_id===serverTransferId &&
+   Number(t.from_subaccount)===0&&Number(t.to_subaccount)===1&&
+   Number(t.exchange_index)===2&&Number(t.amount_cents)===amountCents&&
+   Number.isSafeInteger(Number(t.created_ts))&&
+   Number(t.created_ts)>=attemptedSeconds-120&&
+   Number(t.created_ts)<=attemptedSeconds+300&&
+   (t.client_transfer_id===undefined||t.client_transfer_id===attemptId);
 }
 /** Strict provider receipt + exact signed after balances. NEVER retries POST. */
 export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promise<TopupStatus>{
@@ -399,7 +423,9 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
   catch{return output(p,"shard_receipt_read_unavailable");}
   const root=data&&typeof data==="object"?data as Row:{};
   const rec=root.transfer&&typeof root.transfer==="object"?root.transfer as Row:{};
-  if(rec.transfer_id!==p.exchange_transfer_id||rec.status!=="complete"||
+  if(rec.transfer_id!==p.exchange_transfer_id||
+     rec.client_transfer_id!==p.attempt_id||
+     rec.status!=="complete"||
      Number(rec.source_exchange_shard)!==0||Number(rec.destination_exchange_shard)!==2||
      rec.source!=="event_contract"||rec.destination!=="event_contract"||
      dollarsMicro(rec.amount)!==diff)
@@ -419,10 +445,11 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
    for(const v of doc.transfers){
     if(!v||typeof v!=="object"||Array.isArray(v))return output(p,"bot_transfer_history_malformed");
     const t=v as Row;
-    if(t.client_transfer_id===p.attempt_id &&
-       Number(t.from_subaccount)===0&&Number(t.to_subaccount)===1&&
-       Number(t.exchange_index)===2&&Number(t.amount_cents)===amount&&
-       Number(t.created_ts)>=secs-120&&Number(t.created_ts)<=secs+300)found++;
+    // Kalshi documents transfer_id, not client_transfer_id, in this
+    // history. Our same-shard intra-account POST records that exchange-issued
+    // transfer_id. Never match an unrelated same-amount transfer by guesswork.
+    if(exactOwnedBotTransferReceipt(t,p.exchange_transfer_id,p.attempt_id,
+       amount,secs))found++;
    }
    const next=doc.cursor;
    if(next===undefined||next===null||next===""){complete=true;break;}
@@ -430,8 +457,16 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
     return output(p,"bot_transfer_cursor_invalid");
    visited.add(next);cursor=next;
   }
+  if(!str(p.exchange_transfer_id))
+   return output(p,"bot_missing_provider_transfer_id_manual_reconciliation_required");
   if(!complete||found!==1)return output(p,"bot_unique_transfer_receipt_unverified");
  }
+ // Signed cash deltas and a provider receipt are necessary, but live
+ // exposure may change independently. Require another complete provider read
+ // BEFORE any ledger credit or unlock; a missing/ambiguous feed stays blocked.
+ if(!await exchangeClear(who.creds,b.bot,(deps.now??Date.now)(),
+    deps.get??getScopedKalshiJson))
+  return output(p,"topup_post_transfer_exchange_exposure_unverified");
  // Do NOT mark complete unless financial ledger and next-leg attempt are
  // atomically committed while account maintenance remains held.
  const client=await db.connect();let result:TopupStatus|undefined;
