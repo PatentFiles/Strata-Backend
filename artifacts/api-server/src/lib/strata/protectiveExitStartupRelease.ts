@@ -16,6 +16,17 @@ export const PROTECTIVE_STARTUP_RELEASE_SQL = `
    AND v.independent_reviewer_id <> $2::uuid
    AND v.operator_approver_id <> v.independent_reviewer_id
  LIMIT 2`;
+/** Owner-scoped durable code approval for the exact deployed commit. */
+export const OWNER_SHA_STARTUP_RELEASE_SQL = `
+ SELECT oa.approval_id::text AS release_id
+ FROM private.strata_owner_sha_approvals oa
+ JOIN public.v13_production_account a
+  ON a.id=oa.execution_account_id AND a.owner_user_id=oa.owner_user_id
+ WHERE oa.owner_user_id=$2::uuid AND oa.release_commit_sha=$1
+  AND oa.revoked_at IS NULL AND a.commissioned=true
+  AND a.execution_enabled=true AND a.kill_switch=false
+ LIMIT 2
+`;
 const SHA=/^[a-f0-9]{40}$/;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 type Queryable={query(text:string, params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
@@ -41,12 +52,20 @@ export async function verifyProtectiveExitStartupRelease(
  if(!sha||!SHA.test(sha))return {ok:false,reason:"protective_exit_release_version_unknown"};
  if(!UUID.test(ownerId))return {ok:false,reason:"protective_exit_owner_unverified"};
  try{
+  // Backward compatibility: an existing independent legacy release can still
+  // start a worker. The owner path grants no authority when its table is absent.
+  try {
+    const own=await db.query(OWNER_SHA_STARTUP_RELEASE_SQL,[sha,ownerId]);
+    if(own.rows.length===1 && typeof own.rows[0]?.release_id==="string" &&
+       UUID.test(own.rows[0].release_id))
+      return {ok:true,reason:"protective_exit_release_verified"};
+    if(own.rows.length>1)return {ok:false,reason:"duplicate_owner_code_approval"};
+  }catch{/* staged migration unavailable; do not grant owner authority */}
   const evidence=await db.query(PROTECTIVE_STARTUP_RELEASE_SQL,[sha,ownerId]);
   if(evidence.rows.length!==1||
      typeof evidence.rows[0]?.release_id!=="string"||
-     !UUID.test(evidence.rows[0].release_id)){
+     !UUID.test(evidence.rows[0].release_id))
     return {ok:false,reason:"protective_exit_exact_deployed_version_approval_missing"};
-  }
  }catch{
   return {ok:false,reason:"protective_exit_release_evidence_unavailable"};
  }
