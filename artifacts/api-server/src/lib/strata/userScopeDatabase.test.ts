@@ -192,12 +192,12 @@ test("user A cannot read user B credentials, balances, stakes, or presets", asyn
   const settings = await port.settings(USER_A);
   assert.equal(settings.botCashCents, 2500);
   assert.equal(settings.ownerUserId, USER_A);
-  const stake = await port.stake(USER_A, 120, 1);
+  const stake = await port.stake(USER_A, 150, 1);
   assert.equal(stake.ok, true);
-  assert.equal(stake.view.configuredStakeCents, 120);
+  assert.equal(stake.view.configuredStakeCents, 150);
   assert.equal(stake.view.stakeRevision, 2);
   assert.equal(stake.view.workerRunning, false);
-  assert.equal(stakes.get("acct-a"), 120);
+  assert.equal(stakes.get("acct-a"), 150);
   assert.equal(stakes.get("acct-b"), 80);
   const foreignStake = calls.filter((call) => call.text.includes("account-stake:upsert"));
   assert.equal(foreignStake.every((call) => call.params[1] === "acct-a" && call.params[3] === USER_A), true);
@@ -361,7 +361,7 @@ test("stake initializes once, rejects an unsafe revision, and control never repo
     commissioned: true,
     execution_enabled: false,
     kill_switch: true,
-    cash_micros: "100000000",
+    cash_micros: "30000000000",
     reserved_micros: "0",
     minimum_exit_micros: 10000,
     reconciled_at: null,
@@ -409,10 +409,13 @@ test("stake initializes once, rejects an unsafe revision, and control never repo
       return { rows: [], rowCount: 0 };
     },
   });
-  const first = await port.stake(USER_A, 100, null);
+  const first = await port.stake(USER_A, 150, null);
   assert.equal(first.ok, true);
-  assert.equal(first.view.configuredStakeCents, 100);
+  assert.equal(first.view.configuredStakeCents, 150);
   assert.equal(first.view.stakeRevision, 1);
+  const belowMinimum = await port.stake(USER_A, 149, 1);
+  assert.equal(belowMinimum.ok, false);
+  assert.equal(belowMinimum.reason, "stake_below_minimum_150_cents");
   const repeated = await port.stake(USER_A, 500, 1);
   assert.equal(repeated.ok, true);
   assert.equal(repeated.view.configuredStakeCents, 500);

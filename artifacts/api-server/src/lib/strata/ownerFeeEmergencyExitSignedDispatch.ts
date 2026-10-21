@@ -96,7 +96,8 @@ async function signedPost(material:Material,order:Readonly<EmergencyExitOrder>):
    fill_count:r.fill_count,remaining_count:r.remaining_count,ts_ms:r.ts_ms};
 }
 /** All row locks are held across the ONE signed POST, after UNKNOWN committed.
- * The code release record is immutable review evidence, never self-issued.
+ * Only an authenticated exact-SHA owner release or independently reviewed
+ * legacy release may pass. The signed order remains one-use and fenced.
  */
 async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Receipt>,db:DB):
  Promise<{attempted:boolean;receipt:Receipt}>{
@@ -119,7 +120,23 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
  JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
- JOIN private.strata_protective_exit_release v ON v.release_commit_sha=$1 AND v.state='approved'
+ -- A release must exist for the exact deployed SHA and owner. A legacy
+ -- independent review is still accepted while older accounts transition.
+ JOIN LATERAL (
+   SELECT 1 AS code_authorized
+   WHERE EXISTS (
+     SELECT 1 FROM private.strata_owner_sha_approvals oa
+     WHERE oa.owner_user_id=a.owner_user_id
+       AND oa.execution_account_id=a.id
+       AND oa.release_commit_sha=$1
+       AND oa.revoked_at IS NULL
+   ) OR EXISTS (
+     SELECT 1 FROM private.strata_protective_exit_release v
+     WHERE v.release_commit_sha=$1 AND v.state='approved'
+       AND v.expires_at>now() AND v.revoked_at IS NULL
+       AND v.independent_reviewer_id<>a.owner_user_id
+   )
+ ) code_release ON TRUE
  WHERE r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
  AND r.execution_account_id=$4 AND r.client_order_id=$5 AND r.market_ticker=$6
  AND r.reducing_side=$7 AND r.quantity_hundredths=$8::bigint
@@ -136,8 +153,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  AND w.credential_fingerprint=$13::text
  AND w.account_kill=false AND w.heartbeat_at > now()-interval '5 seconds'
  AND pos.quantity_hundredths >= $8::bigint
- AND v.expires_at > now() AND v.revoked_at IS NULL
- AND v.independent_reviewer_id <> a.owner_user_id
+
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
    WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
  AND EXISTS (SELECT 1 FROM public.v13_production_intent i
@@ -147,7 +163,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
    AND i.client_order_id<>r.client_order_id)
- FOR SHARE OF r,a,g,w,pos,v`;
+ FOR SHARE OF r,a,g,w,pos`;
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
     input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint]);

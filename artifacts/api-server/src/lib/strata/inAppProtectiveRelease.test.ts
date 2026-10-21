@@ -164,7 +164,14 @@ test("owner-authorized recovery denies stale signed source, mismatched cash and 
  for(const row of cases){
   const h=fakeDb({freeze:"awaiting_account_commissioning"});
   const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
-   db:h.db,sha:()=>SHA,readFeeds:(async()=>row.feed) as never,
+   db:h.db,sha:()=>SHA,
+   // Avoid preconstructing stale transport timestamps for otherwise valid evidence.
+   readFeeds:(async (_material:unknown,observedAtMs:number)=>{
+    const feed=row.feed;
+    return feed.ok
+      ? {...feed,observedAtMs:row.name==="stale exchange feed"?feed.observedAtMs:observedAtMs}
+      : feed;
+   }) as never,
   });
   assert.equal(r.ok,false,row.name);
   assert.equal(r.reason,row.reason,row.name);

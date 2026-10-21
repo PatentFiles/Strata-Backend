@@ -19,6 +19,7 @@ import {
 import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 import {
   changeConfiguredStake,
+  stakeEditBlockers,
   emptyUserExecutionView,
   policyAuthorityChange,
   type ControlAction,
@@ -39,6 +40,7 @@ import {
   requestOwnedAccountActivation,
 } from "./personalAccountActivation";
 import { createOwnedPolicyDraft, type OwnedPolicyLimits } from "./personalPolicyApproval";
+import { amendOwnedStakePolicy, MIN_OWNER_STAKE_CENTS } from "./ownerStakePolicyAmendment";
 import {
   createLiveQualificationTransport,
   createSqlQualificationGuard,
@@ -128,7 +130,7 @@ const STAKE_EXPOSURE_SQL = `
     (SELECT count(*)::int FROM v13_production_intent i
       WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL','BLOCKED')) AS unresolved,
     (SELECT count(*)::int FROM private.kalshi_account_worker_lease l
-      WHERE l.execution_account_id = a.id AND l.state = 'owned') AS running
+      WHERE l.execution_account_id = a.id AND l.state = 'owned' AND l.heartbeat_at > now()-interval '30 seconds') AS running
   FROM v13_production_account a
   WHERE a.id = $1 AND a.owner_user_id = $2::uuid
 `;
@@ -142,6 +144,9 @@ export const UPSERT_STAKE_SQL = `
   WHERE a.id = $2
     AND a.owner_user_id = $4::uuid
     AND a.owner_user_id IS NOT NULL
+    AND $1::int BETWEEN 150 AND 2500000
+    AND a.cash_micros >= a.reserved_micros + ($1::bigint * 10000)
+    AND a.reconciled_at IS NOT NULL
     AND ($3::int IS NULL OR EXISTS (
       SELECT 1 FROM strata_configured_stake existing
       WHERE existing.execution_account_id = a.id
@@ -644,7 +649,7 @@ export function createDatabaseUserScopePort(
       kalshiGenerateRestrictedKey,
       session: options.session,
     }),
-    async stake(userId, cents, revision) {
+    async stake(userId, cents, revision, policyConfirmation) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
       const account = await ownedAccount(userId);
       if (!account) return refused(userId, "execution_account_missing");
@@ -675,6 +680,39 @@ export function createDatabaseUserScopePort(
         unknownIntentCount,
         unresolvedOrderCount,
       };
+      // A stake is the owner's maximum entry cash exposure, never authority
+      // to spend more than the bot subaccount can cover. The SQL write repeats
+      // the balance check so stale browser state cannot authorize an over-stake.
+      if (!Number.isSafeInteger(cents) || cents < MIN_OWNER_STAKE_CENTS) {
+        return refused(userId, "stake_below_minimum_150_cents", scoped);
+      }
+      if (cents > 2_500_000) return refused(userId, "above_hard_stake_ceiling", scoped);
+      if (scoped.capitalRemainingCents === null) return refused(userId, "available_cash_unverified", scoped);
+      if (cents > scoped.capitalRemainingCents) return refused(userId, "stake_exceeds_available_cash", scoped);
+      const editBlockers = stakeEditBlockers(scoped);
+      if (editBlockers.length) return refused(userId, editBlockers[0]!, scoped);
+
+      // Production always updates stake and any necessary policy revision in
+      // ONE serializable transaction. This also updates the owner activation
+      // digest after an ordinary decrease, avoiding stale Step-12 authority.
+      // Test ports without a transactional connection retain the conservative
+      // SQL upsert adapter and can never raise a production policy.
+      const transactionalDb = db as UserScopeQuery & {
+        connect?: () => Promise<{query:UserScopeQuery["query"];release():void}>;
+      };
+      if (transactionalDb.connect) {
+        const amended = await amendOwnedStakePolicy(
+          {connect:transactionalDb.connect.bind(transactionalDb)},userId,account.id,cents,revision,policyConfirmation,
+        );
+        if (!amended.ok) return refused(userId, amended.reason, scoped);
+        const refreshed = await ownedAccount(userId);
+        return refreshed
+          ? {ok:true as const,view:viewFrom(userId,refreshed)}
+          : refused(userId,"stake_transaction_refresh_unavailable",scoped);
+      }
+      if (scoped.approvedMaxEntryStakeCents !== null && cents > scoped.approvedMaxEntryStakeCents)
+        return refused(userId,"stake_policy_transaction_unavailable",scoped);
+
       const change = changeConfiguredStake(userId, scoped, cents);
       if (!change.ok) return refused(userId, change.reason, scoped);
       if (account.stakeRevision === null ? revision !== null : revision !== account.stakeRevision) {
