@@ -14,8 +14,8 @@ export type ReadonlyResearchBook = {
   ticker:string;
   requestStartedAtMs:number;
   receivedAtMs:number;
-  source:"KALSHI_PUBLIC_REST";
-  timestampAuthority:"LOCAL_RECEIPT_ONLY";
+  source:"KALSHI_PUBLIC_REST"|"KALSHI_SEQUENCED_WEBSOCKET";
+  timestampAuthority:"LOCAL_RECEIPT_ONLY"|"KALSHI_EXCHANGE_SENDING_TIMESTAMP";
   yesBids:ResearchBookLevel[];
   noBids:ResearchBookLevel[];
 };
