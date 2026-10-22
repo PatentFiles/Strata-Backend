@@ -30,7 +30,8 @@ export type ForwardTestFeeds = {
   book?: OrderbookRead;
 };
 
-const KALSHI = "https://api.elections.kalshi.com/trade-api/v2/markets";
+// Kalshi currently recommends the dedicated external Trade API origin.
+const KALSHI = "https://external-api.kalshi.com/trade-api/v2/markets";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD/ticker";
 
 function numeric(value: unknown): number | null {
@@ -71,10 +72,9 @@ function offer(value: number | null) {
 function targetOf(market: Record<string, unknown>) {
   const direct = firstNumber(market, ["floor_strike", "floorStrike", "strike", "target", "threshold"]);
   if (direct !== null) return direct;
-  const title = [market.title, market.subtitle, market.yes_sub_title]
-    .filter((part): part is string => typeof part === "string").join(" ");
-  const match = title.replaceAll(",", "").match(/\$?(\d{4,6}(?:\.\d+)?)/);
-  return match ? numeric(match[1]) : null;
+  // Never infer the settlement strike from human-readable titles. The
+  // wrong four-to-six-digit number could reverse the signal direction.
+  return null;
 }
 
 function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | null {
@@ -113,6 +113,8 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(url, {
     signal,
     cache: "no-store",
+    redirect: "error",
+    credentials: "omit",
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error(`Public market feed returned HTTP ${response.status}`);
