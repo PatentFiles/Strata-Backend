@@ -73,6 +73,12 @@ test("server forward-test history summarizes only its position rows", () => {
   assert.equal(firstFive.summary.totalStake, 25);
   assert.equal(firstFive.summary.totalPnl, 8.95);
   assert.equal(firstFive.summary.openPositionCount, 0);
+  assert.equal(firstFive.executionAudit.mode, "PAPER_RESEARCH_ONLY");
+  assert.equal(firstFive.executionAudit.netPnlVerified, null);
+  assert.equal(firstFive.executionAudit.depthEvidenceAvailable, false);
+  assert.equal(firstFive.executionAudit.assessedQuotes, 5);
+  assert.equal(firstFive.executionAudit.hypotheticalScenarios.length, 3);
+  assert.equal(firstFive.executionAudit.hypotheticalScenarios[0]?.netIsExecutable, false);
   assert.equal(firstFive.positions[0].enteredAt.toISOString(), "2026-09-24T05:01:00.000Z");
   assert.equal(firstFive.positions[0].status, "CLOSED");
   assert.equal(firstFive.positions[0].settlementResult, null);
