@@ -187,6 +187,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     }
   });
   router.get("/forward-test/history", access.requireUser, async (_req, res) => {
+    res.setHeader("Cache-Control","no-store");
     try { res.json(await deps.forwardTestHistory()); }
     catch { res.status(503).json({ error: "Forward-test history is unavailable" }); }
   });
