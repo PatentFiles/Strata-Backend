@@ -62,7 +62,7 @@ export async function savePostActionPaperBook(
  const status=book&&capacity?"CAPTURED":"UNAVAILABLE";
  const id=event.positionId+":"+event.phase;
  try{
-  await db.insert(forwardTestBookSnapshotTable).values({
+  const [inserted]=await db.insert(forwardTestBookSnapshotTable).values({
     id,engineId:event.engineId,paperPositionId:event.positionId,
     marketTicker:event.marketTicker,phase:event.phase,
     positionDirection:event.direction,requestedContracts:event.contracts,
@@ -79,7 +79,8 @@ export async function savePostActionPaperBook(
       usedPriceLevels:capacity.usedPriceLevels,
       interpretation:capacity.interpretation,
     }:null,errorCode:status==="UNAVAILABLE"?(reason??"unavailable"):null,
-  }).onConflictDoNothing();
+  }).onConflictDoNothing().returning({id:forwardTestBookSnapshotTable.id});
+  if(!inserted)return null; // Never misreport an ignored duplicate as new evidence.
  }catch {
    // Schema not yet deployed, network or DB errors are never paper-trading
    // decisions; explicit receipts are absent and completeness metrics stay low.
