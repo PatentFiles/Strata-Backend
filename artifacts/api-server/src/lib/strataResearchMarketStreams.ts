@@ -127,6 +127,28 @@ export class SequencedKalshiBook{
   return book?simulateBookCapacity(book,side,action,qty,limitTicks):null;
  }
 }
+/** Bounded, non-financial operational observation. Source clocks may skew;
+ * these are *observed event ages*, not true network one-way latency. */
+export class MarketEventAgeWindow{
+ private samples:number[]=[];
+ observe(sourceAtMs:number,receivedAtMs:number){
+  const age=receivedAtMs-sourceAtMs;
+  if(!Number.isSafeInteger(sourceAtMs)||!Number.isSafeInteger(receivedAtMs)||
+     age<0||age>10_000)return false;
+  this.samples.push(age);
+  if(this.samples.length>256)this.samples.shift();
+  return true;
+ }
+ summary(){
+  if(!this.samples.length)return {samples:0,lastMs:null,medianMs:null,p95Ms:null,p99Ms:null,
+   timeAuthority:"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK" as const};
+  const a=[...this.samples].sort((x,y)=>x-y);
+  const q=(pct:number)=>a[Math.max(0,Math.ceil(pct*a.length)-1)]!;
+  return {samples:a.length,lastMs:this.samples[this.samples.length-1]!,
+    medianMs:q(0.5),p95Ms:q(0.95),p99Ms:q(0.99),
+    timeAuthority:"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK" as const};
+ }
+}
 export type CoinbaseTicker={
  priceUsd:number;bidUsd:number;askUsd:number;
  sourceAtMs:number;receivedAtMs:number;sequence:number;
