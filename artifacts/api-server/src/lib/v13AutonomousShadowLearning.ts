@@ -202,6 +202,8 @@ export async function runAutonomousShadowResearch(
  }).from(forwardTestPositionTable)
  .where(and(
   eq(forwardTestPositionTable.engineId,"v1.3-paper"),
+  eq(forwardTestPositionTable.strategyParameterSetId,V13_CHAMPION_PARAMETER_SET.id),
+  eq(forwardTestPositionTable.strategyParameterHash,V13_CHAMPION_PARAMETER_HASH),
   gte(forwardTestPositionTable.enteredAt,new Date(now.getTime()-MAX_LOOKBACK_DAYS*DAY)),
  ))
  .orderBy(desc(forwardTestPositionTable.enteredAt)).limit(1200);
