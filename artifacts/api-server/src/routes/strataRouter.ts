@@ -12,12 +12,15 @@ import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } fr
 import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
 import { readForwardTestBrtiReference } from "./forwardTest";
+import { readTriangulatedMarketStatus } from "../lib/strataResearchMarketObserver";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
   forwardTestHistory: () => Promise<unknown>;
   /** Injected only for isolated read-only diagnostics tests. */
   brtiSettlementReference?: () => Promise<unknown>;
+  /** Read-only observer diagnostic; injected by isolated router tests. */
+  marketTriangulation?: () => Promise<unknown>;
   phase4State: () => Promise<unknown>;
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
@@ -185,6 +188,11 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     } catch {
       res.status(503).json({ error: "BRTI reference is temporarily unavailable" });
     }
+  });
+  router.get("/forward-test/market-triangulation", access.requireUser, async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try{res.json(await (deps.marketTriangulation ?? (async()=>readTriangulatedMarketStatus()))());}
+    catch{res.status(503).json({error:"Market data research diagnostics unavailable"});}
   });
   router.get("/forward-test/history", access.requireUser, async (_req, res) => {
     res.setHeader("Cache-Control","no-store");

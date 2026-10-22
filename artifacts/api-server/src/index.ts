@@ -4,6 +4,7 @@ import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
 import { isV13DevelopmentStaged } from "./lib/v13DevelopmentStaging";
 import { startServerForwardTestWorker } from "./lib/forwardTestWorker";
 import { startKalshiBrtiShadowFeed } from "./lib/kalshiBrtiShadowStream";
+import { startTriangulatedMarketObserver } from "./lib/strataResearchMarketObserver";
 import { startShadowObserver } from "./lib/shadowLive";
 import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
 import { verifyProductionShadowReads } from "./lib/productionShadowPreflight";
@@ -73,6 +74,8 @@ app.listen(port, "0.0.0.0", (err) => {
   startServerForwardTestWorker();
   // GET-only reference monitor, default OFF; no order capability or live gate.
   startKalshiBrtiShadowFeed();
+  // Research-only market-data sockets: default OFF; no trade/order authority.
+  startTriangulatedMarketObserver();
   void reconcileMicroLiveAtStartup().then((result) => {
     logger.info({ ready: result.ready, reason: result.reason },
       "Micro-live startup reconciliation barrier completed");
