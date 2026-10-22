@@ -12,6 +12,7 @@ import {createPrivateKey,createSign,constants} from "node:crypto";
 import {getEngineStatus} from "./forwardTestRepository";
 import {readKalshiBrtiShadowStatus} from "./kalshiBrtiShadowStream";
 import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,
+ marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat,
  evaluateTriangulatedMarket,type CoinbaseTicker} from "./strataResearchMarketStreams";
 
 const WS="wss://external-api-ws.kalshi.com/trade-api/ws/v2";
@@ -205,7 +206,8 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
       try{ws.close()}catch{/* fail closed */}
       return;
     }
-    if(sid!==null&&now-lastBookMessageAt>15_000&&ws.readyState===1){
+    if(sid!==null&&marketBookNeedsRefresh(lastBookMessageAt,
+      lastSnapshotRequestAt,now)&&ws.readyState===1){
       requestSnapshot("kalshi_book_idle_snapshot_refresh");
     }
   },2500);
@@ -233,7 +235,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   let lastCoinbaseHeartbeatOrTickerAt=Date.now();
   const cbWatchdog=setInterval(()=>{
     if(halted||coinbase!==ws)return;
-    if(Date.now()-lastCoinbaseHeartbeatOrTickerAt>12_000){
+    if(marketStreamStalled(lastCoinbaseHeartbeatOrTickerAt,Date.now())){
       lastCoinbaseError="coinbase_ticker_and_heartbeat_timeout";
       cb=null;coinbaseState="UNAVAILABLE";
       try{ws.close()}catch{/* fail closed; timeout monitored */}
@@ -260,10 +262,8 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    if(f.type==="error"){lastCoinbaseError="coinbase_subscription_refused";
       coinbaseState="UNAVAILABLE";try{ws.close()}catch{}return;}
    if(f.type==="subscriptions"){coinbaseState="CONNECTED";return;}
-   if(f.type==="heartbeat"&&f.product_id==="BTC-USD"&&
-      typeof f.time==="string"&&Number.isSafeInteger(Date.parse(f.time))){
-     const age=Date.now()-Date.parse(f.time);
-     if(age>=-2000&&age<=3000)lastCoinbaseHeartbeatOrTickerAt=Date.now();
+   if(f.type==="heartbeat"){
+     if(validCoinbaseHeartbeat(f,Date.now()))lastCoinbaseHeartbeatOrTickerAt=Date.now();
      return;
    }
    if(f.type!=="ticker")return;
