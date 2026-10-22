@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import test, { after, before } from "node:test";
 import { and, eq, like, sql } from "drizzle-orm";
 import {
-  db, pool, forwardTestEngineTable,
+  db, pool, forwardTestBookSnapshotTable, forwardTestEngineTable,
   forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable,
 } from "@workspace/db";
 import { evaluateV13Strategy } from "@workspace/v13-strategy";
@@ -17,6 +17,8 @@ import {
 } from "./forwardTestWorker";
 import type { BtcObservation, ForwardTestFeeds, MarketObservation } from "./forwardTestFeeds";
 import { readForwardTestStatus } from "../routes/forwardTest";
+import {savePostActionPaperBook, readPaperBookCaptureCoverage} from "./forwardTestBookCapture";
+import {parseKalshiResearchOrderbook} from "./forwardTestOrderbookDepth";
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 14);
 const engineId = `TEST-WORKER-${suffix}`;
@@ -335,4 +337,37 @@ test("protected status response builder includes lease, activity, and paper-only
   assert.ok(Number.isInteger(status.scoutTriggers));
   assert.ok(Number.isInteger(status.confirmTriggers));
   assert.ok(status.activeWindow === null || status.activeWindow.ticker.length > 0);
+});
+
+test("post-action public Kalshi receipts are append-only, depth-limited, and never actual fills",async()=>{
+ const paperPositionId="TEST-RESEARCH-BOOK-"+suffix;
+ const eventAt=new Date(Date.now()-1000);
+ const event={positionId:paperPositionId,engineId,
+   marketTicker:"KXBTC15M-26OCT221530-30",phase:"ENTRY" as const,
+   direction:"UP" as const,contracts:8,quotePrice:0.45,eventAt};
+ const capture=await savePostActionPaperBook(event,async(ticker)=>{
+  const start=Date.now();
+  return parseKalshiResearchOrderbook({orderbook_fp:{
+   yes_dollars:[["0.4000","1.00"]],
+   no_dollars:[["0.5400","2.00"],["0.5500","3.00"]],
+  }},ticker,start,start+50);
+ });
+ assert.equal(capture?.status,"CAPTURED");
+ assert.equal(capture?.simulatedPriceLimitedFill,5);
+ assert.equal(capture?.simulatedUnfilled,3);
+ assert.equal(capture?.actualFillVerified,false);
+ const [persisted]=await db.select().from(forwardTestBookSnapshotTable)
+    .where(eq(forwardTestBookSnapshotTable.id,paperPositionId+":ENTRY"));
+ assert.equal(persisted?.status,"CAPTURED");
+ assert.equal(persisted?.capacity?.modeledUnfilledContracts,3);
+ const duplicate=await savePostActionPaperBook(event,async()=>{
+   throw Error("temporarily_unavailable");
+ });
+ assert.equal(duplicate,null);
+ const coverage=await readPaperBookCaptureCoverage(engineId);
+ assert.ok(coverage.receipts>=1);
+ assert.equal(coverage.proofOfActualExecution,false);
+ assert.equal(coverage.exchangeTimestampVerified,false);
+ await db.delete(forwardTestBookSnapshotTable)
+   .where(eq(forwardTestBookSnapshotTable.id,paperPositionId+":ENTRY"));
 });
