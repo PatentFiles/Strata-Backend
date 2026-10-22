@@ -36,6 +36,8 @@ let monitor:ReturnType<typeof setInterval>|null=null;
 let cbRetry:ReturnType<typeof setTimeout>|null=null;
 let bookRetry:ReturnType<typeof setTimeout>|null=null;
 let bookEpoch=0;
+let disposeBookTimers:(()=>void)|null=null;
+let disposeCoinbaseTimers:(()=>void)|null=null;
 
 export function readTriangulatedMarketStatus(now=Date.now()){
  const brti=readKalshiBrtiShadowStatus(now);
@@ -92,6 +94,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
  const closeBook=()=>{
   bookEpoch++;
   if(bookRetry){clearTimeout(bookRetry);bookRetry=null;}
+  disposeBookTimers?.();disposeBookTimers=null;
   const socket=kalshi;kalshi=null;depth=null;depthTicker=null;
   if(socket){try{socket.close()}catch{/* no order authority */}}
  };
@@ -212,11 +215,14 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
     }
   },2500);
   watchdog.unref?.();
+  disposeBookTimers=()=>{
+    clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}
+  };
   ws.addEventListener("error",()=>{if(bookEpoch===attempt)
    lastDepthError="kalshi_wss_transport_error";});
   ws.addEventListener("close",()=>{
-   clearResync();
-   if(watchdog){clearInterval(watchdog);watchdog=null;}
+   if(disposeBookTimers){disposeBookTimers();disposeBookTimers=null;}
+   else{clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}}
    if(halted||bookEpoch!==attempt)return;
    kalshi=null;depth?.reset("TRANSPORT_CLOSED");
    depthState="UNAVAILABLE";kalshiReconnects++;
@@ -242,6 +248,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
     }
   },3000);
   cbWatchdog.unref?.();
+  disposeCoinbaseTimers=()=>clearInterval(cbWatchdog);
   ws.addEventListener("open",()=>{
    if(halted||coinbase!==ws)return;
    try{
@@ -282,6 +289,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    lastCoinbaseError="coinbase_ws_transport_error";});
   ws.addEventListener("close",()=>{
    clearInterval(cbWatchdog);
+   if(coinbase===ws)disposeCoinbaseTimers=null;
    if(halted||coinbase!==ws)return;
    coinbase=null;cb=null;coinbaseState="UNAVAILABLE";
    scheduleCoinbase();
@@ -322,6 +330,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   if(monitor){clearInterval(monitor);monitor=null;}
   if(cbRetry){clearTimeout(cbRetry);cbRetry=null;}
   closeBook();
+  disposeCoinbaseTimers?.();disposeCoinbaseTimers=null;
   const c=coinbase;coinbase=null;cb=null;
   try{c?.close()}catch{/* no trade transport */}
   depthState="DISABLED";coinbaseState="DISABLED";
