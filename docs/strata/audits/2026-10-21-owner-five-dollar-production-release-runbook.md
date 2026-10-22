@@ -1,6 +1,20 @@
 # One-owner $5 Strata live-release evidence runbook
 **2026-10-21 · code handoff and go/no-go plan · NOT live authorization**
 
+## Verified readiness delta — 2026-10-22 (supersedes old baseline facts below)
+
+**Do not use a historical "Railway SUCCESS" or old commit as today's deployed release.** Latest checked GitHub backend `main` before the owner-START fence PR: `9faa491ae0cbf3a94da602808406da2abe8a4d6b`; latest frontend `main`: `2399a06fdf67b4d61ebba66950e5475c30e16eeb`. The backend SHA WILL CHANGE after the Step 12 owner-START fence is merged. Use the final reviewed `main` SHA and verify the **runtime** separately. Connected Railway principal sees **zero projects**, so no running SHA/health/worker or signed account balances are verified.
+
+**Completed before Railway:** private owner top-up schema migration 0032 (RLS-denied), paper book research migration 0033 (RLS-denied), backend and frontend integration changes and current-main CI. Neither database migration moves money or issues trades. Old statements in this document that migration 0032 is absent are historical and superseded by this paragraph.
+
+**Still absent in production Supabase as checked 2026-10-22:** independent API fee-rate reviews, API grants, owner fee consents, exact-SHA owner approvals, unexpired protective-exit qualification and valid independently approved protective technical releases (all **zero**). No cash reconciliations within 15 minutes. Global live switch is **true** and manual global kill **false**; one owner lease is marked ARM-requested and owned but has **no fresh heartbeat**. Four stakes are still $1.50 with no selected preset. Do not use these permissive switches or stale lease as evidence of a running authorized worker.
+
+**Mandatory authority separation:** a personally authorized Step 12 `OWNER_SHA_V1` release (AAL2 authenticated owner, exact account and Git SHA) must be present to START **and** an independently reviewed exact-SHA protective-exit technical release must exist. Neither substitutes for the other. A missing schema, missing owner row or unavailable reviewer evidence blocks START. The signed IOC final fence also requires current technical authority. Do not fabricate approvals or clear the global/account kill while exposures are unknown.
+
+**Remaining external pre-START evidence:** regain access to the **existing** Railway project; verify live SHA, real credential/cash/position/order/settlement source, fresh official fee model and owner consent, independently verified protective IOC zero/partial/full/timeout/restart and incident runbook, clean worker fencing, and an expressly approved fee-inclusive $5 stake preset. Then authorize Step 12, ARM, and separately START from Step 13. Do not modify historical P&L or use quote-only paper gains as spendable funds.
+
+---
+
 ## Baselines and scope
 Backend before receipt correction: `bc6e64784d1df5c975b5b33c31527d682505877e`. Frontend: `36df68ee500d9544ed1ce897b50683ccbecd2d77`. Confirm the **NEW** backend `main` commit after this PR merges. Only the signed-in execution owner and dedicated bot subaccount 1 / exchange index 2 are qualified. Do not alter the other three provisionally frozen accounts.
 
@@ -20,7 +34,7 @@ Official API references:
 ## Before deployment: safe repeatable evidence
 1. GitHub: verify merged backend and frontend `main` SHAs and green CI for V13, fee preflight, protective-exit regression, source isolation and frontend pre-live; CI is **code-only** evidence.
 2. Restore viewer/deployer rights to existing Railway project. Capture runtime `RAILWAY_GIT_COMMIT_SHA` (or equivalent signed deployed SHA), service/environment IDs, health, startup checks, error logs and process heartbeat. Do not create another Railway project or replace credentials.
-3. Check Supabase migration history and schema **read-only**. Review `lib/db/drizzle/0032_owner_variable_topups.sql`, then apply via controlled existing deploy migration process exactly once. Verify both private tables exist, permissions/grants are still server-private, unique active-topup index and constraints exist, and that migration applied without touching historical transfers. Keep `STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED=false`.
+3. Check Supabase migration history and schema **read-only**. Migrations `0032_owner_variable_topups` and `0033_paper_orderbook_post_action_research` have already been applied and their RLS checked. Do **not** reapply as new cash/funding actions. If a future migration is pending, apply through the controlled existing deploy process exactly once. Verify both private tables exist, permissions/grants are still server-private, unique active-topup index and constraints exist, and that migration applied without touching historical transfers. Keep `STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED=false`.
 4. Brit publishes **frontend main** to the existing Bolt project. Verify the visible UI revision, `OWNER_SHA_V1` release mode, Wallets signed primary and dedicated-bot balances, and no stale backend APIs. A frontend publish is not proof of backend runtime or fee/cash authority.
 5. Confirm exact owner account and restricted execution/API setup key permissions server-side. Keep live execution STOPPED/DISARMED and account kill ON. Verify no unresolved Kalshi orders/fills/positions/settlements and no UNKNOWN intent; *local* zero positions alone is insufficient.
 
