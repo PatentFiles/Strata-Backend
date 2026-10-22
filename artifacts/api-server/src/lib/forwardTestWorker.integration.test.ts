@@ -344,7 +344,7 @@ test("post-action public Kalshi receipts are append-only, depth-limited, and nev
  const eventAt=new Date(Date.now()-1000);
  const event={positionId:paperPositionId,engineId,
    marketTicker:"KXBTC15M-26OCT221530-30",phase:"ENTRY" as const,
-   direction:"UP" as const,contracts:8,quotePrice:0.45,eventAt};
+   direction:"UP" as const,contracts:8,quotePrice:0.46,eventAt};
  const capture=await savePostActionPaperBook(event,async(ticker)=>{
   const start=Date.now();
   return parseKalshiResearchOrderbook({orderbook_fp:{
