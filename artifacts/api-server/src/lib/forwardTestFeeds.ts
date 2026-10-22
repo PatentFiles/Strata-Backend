@@ -1,3 +1,4 @@
+import { fetchKalshiPublicBook, type OrderbookRead } from "./forwardTestOrderbookDepth";
 // Public market data only. This module never authenticates with a trading
 // account and contains no order endpoint or trading capability.
 export type BtcObservation = {
@@ -25,6 +26,8 @@ export type MarketObservation = {
 export type ForwardTestFeeds = {
   btc: (signal?: AbortSignal) => Promise<BtcObservation>;
   market: (ticker?: string, signal?: AbortSignal) => Promise<MarketObservation>;
+  /** Optional research-only, post-decision book read. Injected tests omit it. */
+  book?: OrderbookRead;
 };
 
 const KALSHI = "https://api.elections.kalshi.com/trade-api/v2/markets";
@@ -117,6 +120,7 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
 }
 
 export const publicForwardTestFeeds: ForwardTestFeeds = {
+  book: fetchKalshiPublicBook,
   async btc(signal) {
     const raw = await getJson(COINBASE, signal);
     if (!raw || typeof raw !== "object") throw new Error("Coinbase returned malformed BTC data");
