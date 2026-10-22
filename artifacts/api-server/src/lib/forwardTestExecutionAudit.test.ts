@@ -46,6 +46,16 @@ test("settled, missing, malformed and duplicate paper observations are excluded 
  assert.equal(x.quoteGrossUsd,16.8);
  assert.equal(x.quoteGrossExLargestWinnerUsd,11.8);
 });
+test("unorderable 1-dollar close quote is excluded rather than breaking the entire history",()=>{
+ const x=auditHistoricalPaperExecution([
+  base("unorderable",{entrySpread:0.01,exitPrice:1,pnl:4}),
+  base("valid",{entrySpread:0.01,entryOffer:0.5,exitPrice:0.6,pnl:1}),
+ ]);
+ assert.equal(x.assessedQuotes,1);
+ assert.equal(x.excludedQuotes,1);
+ assert.equal(x.calibratedScenarios[0]?.modeledTrades,1);
+ assert.equal(x.netPnlVerified,null);
+});
 test("empty paper history gives no false profit",()=>{
  const x=auditHistoricalPaperExecution([]);
  assert.equal(x.completed,0);
