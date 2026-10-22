@@ -641,11 +641,20 @@ export async function getV13AdaptiveResearchRecommendation(
   now = new Date(),
 ): Promise<V13ResearchRecommendation> {
   const summaries: V13ResearchPerformanceSummary[] = [];
-  for (const candidate of V13_BUILT_IN_RESEARCH_CHALLENGERS) {
+  // Rank live prospective research versions, including autonomous
+  // shadow-only candidates. Never rank an unactivated DRAFT or old RETIRED
+  // row as current; this API cannot grant any trading authority.
+  const candidates=await db.select({id:v13StrategyParameterSetTable.id})
+    .from(v13StrategyParameterSetTable).where(and(
+      eq(v13StrategyParameterSetTable.state,"SHADOW"),
+      eq(v13StrategyParameterSetTable.executionAuthority,false),
+    )).orderBy(asc(v13StrategyParameterSetTable.activatedAt)).limit(25);
+  for (const candidate of candidates) {
     try {
       summaries.push(await summarizeV13ShadowCandidatePerformance(candidate.id, now));
     } catch {
-      // Missing/retired candidates are not silently reactivated by scoring.
+      // One corrupt, missing or stale candidate cannot promote another;
+      // incomplete evidence remains unavailable for this candidate.
     }
   }
   return rankV13ResearchSummaries(summaries);
