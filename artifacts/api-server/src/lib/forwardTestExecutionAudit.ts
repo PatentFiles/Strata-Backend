@@ -63,7 +63,7 @@ export type PaperExecutionAudit = {
 const usd=(micro:string)=>Math.round(Number(BigInt(micro))/10_000)/100;
 const dollars=(cents:number)=>Math.round(cents)/100;
 const ticks=(price:number,allowZero=false):number|null=>{
-  if(!Number.isFinite(price)||price<(allowZero?0:0.0001)||price>(allowZero?1:0.9999))return null;
+  if(!Number.isFinite(price)||price<(allowZero?0:0.0001)||price>0.9999)return null;
   const n=Math.round(price*10_000);
   return Math.abs(price*10_000-n)<0.000001&&n>=0&&n<=10_000?n:null;
 };
