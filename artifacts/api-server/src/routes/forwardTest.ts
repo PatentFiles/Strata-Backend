@@ -5,6 +5,7 @@ import {
 } from "@workspace/api-zod";
 import { db, forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable } from "@workspace/db";
 import { readKalshiBrtiShadowStatus } from "../lib/kalshiBrtiShadowStream";
+import {readPaperBookCaptureCoverage} from "../lib/forwardTestBookCapture";
 import { auditHistoricalPaperExecution } from "../lib/forwardTestExecutionAudit";
 import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
 import { and, desc, eq, sql } from "drizzle-orm";
@@ -219,7 +220,21 @@ export async function readForwardTestHistory() {
   const rows = await db.select().from(forwardTestPositionTable)
     .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID))
     .orderBy(desc(forwardTestPositionTable.enteredAt), desc(forwardTestPositionTable.id));
-  return buildForwardTestHistory(rows);
+  const original=buildForwardTestHistory(rows);
+  // Additive research evidence. Missing migration is UNAVAILABLE, never "zero
+  // depth" or proof that market orders would not have filled. Preserve history.
+  try{
+    const observed=await readPaperBookCaptureCoverage(FORWARD_TEST_ENGINE_ID);
+    return {...original,bookCaptureEvidence:{...observed,
+      paperPositions:rows.filter(r=>r.status!=="OPEN").length,
+      captureStatus:"AVAILABLE" as const}};
+  }catch{
+    return {...original,bookCaptureEvidence:{
+      captureStatus:"SCHEMA_OR_DATABASE_UNAVAILABLE" as const,
+      proofOfActualExecution:false as const,
+      exchangeTimestampVerified:false as const,
+      warning:"Book capture database unavailable; not a record of zero liquidity"}};
+  }
 }
 
 router.get("/forward-test/history", async (_req, res): Promise<void> => {
