@@ -21,6 +21,7 @@ import {
   type BtcObservation, type ForwardTestFeeds, type MarketObservation,
 } from "./forwardTestFeeds";
 import { logger } from "./logger";
+import { savePostActionPaperBook, type PaperBookCaptureEvent } from "./forwardTestBookCapture";
 import { forwardTestStartupDecision } from "./forwardTestStartupGate";
 export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
 import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
@@ -50,6 +51,8 @@ export type CycleResult = {
   marketTicker: string | null;
   positionId: string | null;
   error: string | null;
+  /** Research receipt only. No fill or live-order authority. */
+  researchEvent?: PaperBookCaptureEvent;
 };
 
 function roundMoney(value: number) {
@@ -212,7 +215,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   // target is validated above. Never invent a target/quote on malformed data.
   const target = market.target!;
   try {
-  return await withWorkerLeaseTransaction(owner, epoch, async (tx, engine) => {
+  const result = await withWorkerLeaseTransaction(owner, epoch, async (tx, engine) => {
     const [openPosition] = await tx.select().from(forwardTestPositionTable)
       .where(and(eq(forwardTestPositionTable.engineId, engineId),
         eq(forwardTestPositionTable.status, "OPEN"))).for("update").limit(1);
@@ -397,9 +400,30 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       lastError: null,
       updatedAt: now,
     }).where(eq(forwardTestEngineTable.id, engine.id));
+    const researchEvent:PaperBookCaptureEvent|undefined=
+      close&&openPosition&&close.status==="CLOSED"
+        ? {positionId:openPosition.id,engineId,marketTicker:market.ticker,
+           phase:"EXIT",direction:openPosition.direction as "UP"|"DOWN",
+           contracts:Math.floor(openPosition.contracts),
+           quotePrice:close.exitPrice,eventAt:now}
+        : actionable&&positionId&&decision.entrySideOffer!==null&&
+          (decision.direction==="UP"||decision.direction==="DOWN")
+          ? {positionId,engineId,marketTicker:market.ticker,
+             phase:"ENTRY",direction:decision.direction,
+             contracts:Math.floor(PAPER_STAKE/decision.entrySideOffer),
+             quotePrice:decision.entrySideOffer,eventAt:now}
+          : undefined;
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
-      positionId, error: null } satisfies CycleResult;
+      positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
+  // The paper action is ALREADY committed. This public REST GET cannot affect
+  // a signal, position or account, and is labelled POST_ACTION, never a
+  // simultaneous or fill-confirmed snapshot. Mock feeds omit book entirely.
+  if(result.researchEvent && feeds.book){
+    try{await savePostActionPaperBook(result.researchEvent,feeds.book)}
+    catch{/* Research instrumentation may not change paper worker decisions. */}
+  }
+  return result;
   } catch (error) {
     if (error instanceof WorkerLeaseLostError) throw error;
     const reason = error instanceof Error ? error.message : "Failed to persist paper forward-test cycle";
