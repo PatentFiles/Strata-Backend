@@ -5,6 +5,7 @@ import {
 } from "@workspace/api-zod";
 import { db, forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable } from "@workspace/db";
 import { readKalshiBrtiShadowStatus } from "../lib/kalshiBrtiShadowStream";
+import { auditHistoricalPaperExecution } from "../lib/forwardTestExecutionAudit";
 import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { Router, type IRouter, type RequestHandler } from "express";
@@ -195,7 +196,7 @@ export function buildForwardTestHistory(rows: ForwardTestPosition[]) {
     pnl: row.pnl,
   }));
   const completed = rows.filter((row) => row.status === "CLOSED" || row.status === "SETTLED");
-  return GetForwardTestHistoryResponse.parse({
+  const original = GetForwardTestHistoryResponse.parse({
     positions,
     summary: {
       completed: completed.length,
@@ -209,6 +210,9 @@ export function buildForwardTestHistory(rows: ForwardTestPosition[]) {
       openPositionCount: rows.filter((row) => row.status === "OPEN").length,
     },
   });
+  // The original quote-based history and API schema stay backward compatible.
+  // Additive research-only audit; no change to positions, champion or orders.
+  return {...original, executionAudit: auditHistoricalPaperExecution(rows)};
 }
 
 export async function readForwardTestHistory() {
