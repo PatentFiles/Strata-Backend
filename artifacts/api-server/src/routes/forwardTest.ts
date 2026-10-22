@@ -238,6 +238,7 @@ export async function readForwardTestHistory() {
 }
 
 router.get("/forward-test/history", async (_req, res): Promise<void> => {
+  res.setHeader("Cache-Control","no-store");
   res.json(await readForwardTestHistory());
 });
 
