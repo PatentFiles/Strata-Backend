@@ -8,6 +8,7 @@
  */
 import {createPrivateKey,createSign,constants} from "node:crypto";
 import {parseKalshiBrtiInstantFrame,parseKalshiBrtiQuarterHourFrame,type BrtiWindowFrame,type BrtiInstantFrame} from "./cfBenchmarksSettlement";
+import {parseKalshiFastBrtiTick,type FastBrtiTick} from "./cfBenchmarksFastReference";
 // Deliberately no Pino transport import: the authenticated read route must not start log workers.
 
 const WSS_PATH="/trade-api/ws/v2";
@@ -21,6 +22,10 @@ type ReferenceState={
   lastReceivedAtMs:number|null;lastError:string|null;
   connectionEstablishedAtMs:number|null;sourceFresh:boolean;
   tradingAuthority:false;
+  /** Optional 5Hz reference is an instantaneous index, NEVER the 60s settlement. */
+  fastState:"DISABLED"|"SUBSCRIBING"|"CONFIRMED"|"UNAVAILABLE"|"DEGRADED";
+  fastIndex:FastBrtiTick|null;fastSourceFresh:boolean;
+  fastMessageGaps:number;fastLastError:string|null;
 };
 let started=false;
 let stopped=false;
@@ -28,6 +33,12 @@ let state:State="DISABLED";
 let lastFrame:BrtiWindowFrame|null=null;
 let lastIndex:BrtiInstantFrame|null=null;
 let lastReceivedAtMs:number|null=null;
+let lastFast:FastBrtiTick|null=null;
+let fastState:ReferenceState["fastState"]="DISABLED";
+let fastSid:number|null=null;
+let lastFastSeq:number|null=null;
+let fastMessageGaps=0;
+let fastLastError:string|null=null;
 let connectionEstablishedAtMs:number|null=null;
 let lastError:string|null=null;
 let socket:WebSocket|null=null;
@@ -49,16 +60,22 @@ export function readKalshiBrtiShadowStatus(now=Date.now()):ReferenceState {
     now-lastFrame.receivedAtMs>=0&&now-lastFrame.receivedAtMs<=FRESH_MS;
   const instantSourceFresh=lastIndex!==null&&state==="BRTI_CONFIRMED"&&
     now-lastIndex.receivedAtMs>=0&&now-lastIndex.receivedAtMs<=FRESH_MS;
+  const fastSourceFresh=fastState==="CONFIRMED"&&lastFast!==null&&
+    now-lastFast.sourceTimestampMs>=0&&now-lastFast.sourceTimestampMs<=3000&&
+    now-lastFast.receivedAtMs>=0&&now-lastFast.receivedAtMs<=3000;
   return {state,indexId:"BRTI",
     lastFrame:sourceFresh?lastFrame:null,
     lastIndex:instantSourceFresh?lastIndex:null,instantSourceFresh,
     lastReceivedAtMs,connectionEstablishedAtMs,lastError,sourceFresh,
-    tradingAuthority:false};
+    tradingAuthority:false,fastState,fastIndex:fastSourceFresh?lastFast:null,
+    fastSourceFresh,fastMessageGaps,fastLastError};
 }
 /** In-process read-only observer; never binds owner accounts or emits orders. */
 export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{stop:()=>void}{
   if(started||!enabled(env))return {stop:()=>{}};
   started=true;stopped=false;
+  const wantFast=env.STRATA_CF_BRTI_5HZ_SHADOW_ENABLED==="true";
+  fastState=wantFast?"SUBSCRIBING":"DISABLED";
   const apiKey=env.KALSHI_INDEX2_API_KEY_ID?.trim();
   const pem=env.KALSHI_INDEX2_PRIVATE_KEY?.trim().replaceAll("\\n","\n");
   if(!apiKey||!pem||!/^[-\w]{8,128}$/.test(apiKey)){
@@ -70,6 +87,8 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
   const connect=()=>{
     if(stopped)return;
     state="CONNECTING";lastFrame=null;lastIndex=null;
+    lastFast=null;fastSid=null;lastFastSeq=null;
+    fastState=wantFast?"SUBSCRIBING":"DISABLED";
     lastError=null;connectionEstablishedAtMs=null;
     try{
       const key=createPrivateKey(pem);
@@ -94,7 +113,8 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         if(stopped||socket!==ws)return;
         state="CONNECTED";connectionEstablishedAtMs=Date.now();
         ws.send(JSON.stringify({id:1,cmd:"subscribe",params:{
-          channels:["cfbenchmarks_value"],index_ids:["BRTI"],
+          channels:wantFast?["cfbenchmarks_value","cfbenchmarks_value_5hz"]:
+            ["cfbenchmarks_value"],index_ids:["BRTI"],
         }}));
       });
       ws.addEventListener("message",(event)=>{
@@ -104,6 +124,10 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         try{frame=JSON.parse(event.data)}catch{return;}
         if(!obj(frame))return;
         if(frame.type==="error"){
+          if(wantFast&&(frame.id===3||frame.id===4)){
+            fastState="UNAVAILABLE";lastFast=null;
+            fastLastError="fast_cf_benchmark_subscription_refused";return;
+          }
           state="NO_ENTITLEMENT";genericError("cf_benchmark_subscription_error");
           ws.close();return;
         }
@@ -113,6 +137,46 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
           ws.send(JSON.stringify({id:2,cmd:"update_subscription",params:{
             sid,action:"indexlist",
           }}));
+          return;
+        }
+        if(wantFast&&frame.type==="subscribed"&&obj(frame.msg)&&
+           frame.msg.channel==="cfbenchmarks_value_5hz"){
+          const sid=frame.msg.sid;
+          if(typeof sid!=="number"||!Number.isSafeInteger(sid))return;
+          fastSid=sid;
+          ws.send(JSON.stringify({id:4,cmd:"update_subscription",params:{
+            sid,action:"indexlist",
+          }}));
+          return;
+        }
+        if(wantFast&&frame.type==="cfbenchmarks_value_5hz_indexlist"&&obj(frame.msg)){
+          if(frame.sid!==fastSid)return;
+          if(!Array.isArray(frame.msg.index_ids)||!frame.msg.index_ids.includes("BRTI")){
+            fastState="UNAVAILABLE";fastLastError="fast_brti_not_entitled";lastFast=null;
+          }else{
+            fastState="CONFIRMED";fastLastError=null;
+          }
+          return;
+        }
+        if(wantFast&&frame.type==="cfbenchmarks_value_5hz"){
+          if(fastState!=="CONFIRMED"||frame.sid!==fastSid)return;
+          const seq=frame.seq;
+          if(typeof seq!=="number"||!Number.isSafeInteger(seq)||seq<1)return;
+          if(lastFastSeq!==null&&seq!==lastFastSeq+1){
+            fastMessageGaps++;
+            // Ticks are individually sourced; gap degrades continuity, not
+            // the latest verified independent price. Never infer lost ticks.
+            lastFast=null;
+            fastLastError="fast_cf_sequence_discontinuity";
+          }
+          if(lastFastSeq!==null&&seq<=lastFastSeq)return;
+          lastFastSeq=seq;
+          const parsed=parseKalshiFastBrtiTick(frame,Date.now());
+          if(parsed.ok&&(!lastFast||parsed.tick.sourceTimestampMs>lastFast.sourceTimestampMs)){
+            lastFast=parsed.tick;
+          }else if(!parsed.ok){
+            lastFast=null;fastLastError=parsed.reason;
+          }
           return;
         }
         if(frame.type==="cfbenchmarks_value_indexlist"&&obj(frame.msg)){
@@ -147,7 +211,9 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
       ws.addEventListener("error",()=>{if(socket===ws)genericError("websocket_transport_error");});
       ws.addEventListener("close",()=>{
         if(socket!==ws)return;
-        socket=null;lastFrame=null;lastIndex=null;connectionEstablishedAtMs=null;
+        socket=null;lastFrame=null;lastIndex=null;
+        lastFast=null;fastSid=null;lastFastSeq=null;
+        fastState=wantFast?"DEGRADED":"DISABLED";connectionEstablishedAtMs=null;
         if(stopped)return;
         // Explicit provider denial is terminal until the next operator-approved
         // deployment. Do not hammer the credential or bypass entitlement.
@@ -165,6 +231,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
   connect();
   return {stop:()=>{
     stopped=true;state="DISABLED";lastFrame=null;lastIndex=null;
+    fastState="DISABLED";lastFast=null;fastSid=null;lastFastSeq=null;
     if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}
     try{socket?.close()}catch{/* release best effort */}
     socket=null;
