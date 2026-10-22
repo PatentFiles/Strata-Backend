@@ -15,6 +15,15 @@ const WSS_PATH="/trade-api/ws/v2";
 const WSS_HOST="wss://external-api-ws.kalshi.com";
 const RECONNECT_MS=30_000;
 const FRESH_MS=5_000;
+const BRTI_LIVENESS_MS=15_000;
+let activeWatchdog:ReturnType<typeof setInterval>|null=null;
+/** BRTI source must publish valid ticks, not just maintain an open socket. */
+export function brtiStreamTimedOut(lastVerifiedAtMs:number|null,
+ connectedAtMs:number,nowMs:number){
+ const ref=lastVerifiedAtMs??connectedAtMs;
+ return !Number.isSafeInteger(ref)||!Number.isSafeInteger(nowMs)||
+   ref<=0||nowMs<ref||nowMs-ref>BRTI_LIVENESS_MS;
+}
 type State="DISABLED"|"CONFIG_MISSING"|"CONNECTING"|"CONNECTED"|"BRTI_CONFIRMED"|"NO_ENTITLEMENT"|"DISCONNECTED";
 type ReferenceState={
   state:State;indexId:"BRTI";lastFrame:BrtiWindowFrame|null;
@@ -87,6 +96,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
   const connect=()=>{
     if(stopped)return;
     state="CONNECTING";lastFrame=null;lastIndex=null;
+    lastReceivedAtMs=null;
     lastFast=null;fastSid=null;lastFastSeq=null;
     fastState=wantFast?"SUBSCRIBING":"DISABLED";
     lastError=null;connectionEstablishedAtMs=null;
@@ -109,17 +119,31 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         "KALSHI-ACCESS-TIMESTAMP":timestamp,
       }});
       socket=ws;
+      const startedAt=Date.now();
+      const watchdog=setInterval(()=>{
+        if(stopped||socket!==ws)return;
+        if(brtiStreamTimedOut(lastReceivedAtMs,startedAt,Date.now())){
+          genericError("brti_verified_tick_timeout");
+          try{ws.close()}catch{/* reconnect remains fail closed */}
+        }
+      },3000);
+      activeWatchdog=watchdog;
+      watchdog.unref?.();
       ws.addEventListener("open",()=>{
         if(stopped||socket!==ws)return;
         state="CONNECTED";connectionEstablishedAtMs=Date.now();
-        ws.send(JSON.stringify({id:1,cmd:"subscribe",params:{
-          channels:["cfbenchmarks_value"],index_ids:["BRTI"],
-        }}));
-        // Separate request ID: a 5Hz entitlement error must NEVER disable
-        // the authoritative 1Hz BRTI settlement observer.
-        if(wantFast)ws.send(JSON.stringify({id:3,cmd:"subscribe",params:{
-          channels:["cfbenchmarks_value_5hz"],index_ids:["BRTI"],
-        }}));
+        try{
+          ws.send(JSON.stringify({id:1,cmd:"subscribe",params:{
+            channels:["cfbenchmarks_value"],index_ids:["BRTI"],
+          }}));
+          // 5Hz denial cannot disable the independently subscribed 1Hz source.
+          if(wantFast)ws.send(JSON.stringify({id:3,cmd:"subscribe",params:{
+            channels:["cfbenchmarks_value_5hz"],index_ids:["BRTI"],
+          }}));
+        }catch{
+          genericError("brti_subscription_send_failed");
+          try{ws.close()}catch{/* fail closed */}
+        }
       });
       ws.addEventListener("message",(event)=>{
         if(stopped||socket!==ws)return;
@@ -138,9 +162,10 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         if(frame.type==="subscribed"&&obj(frame.msg)&&frame.msg.channel==="cfbenchmarks_value"){
           const sid=frame.msg.sid;
           if(typeof sid!=="number"||!Number.isSafeInteger(sid))return;
-          ws.send(JSON.stringify({id:2,cmd:"update_subscription",params:{
+          try{ws.send(JSON.stringify({id:2,cmd:"update_subscription",params:{
             sid,action:"indexlist",
-          }}));
+          }}));}
+          catch{genericError("brti_indexlist_send_failed");try{ws.close()}catch{}}
           return;
         }
         if(wantFast&&frame.type==="subscribed"&&obj(frame.msg)&&
@@ -148,9 +173,11 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
           const sid=frame.msg.sid;
           if(typeof sid!=="number"||!Number.isSafeInteger(sid))return;
           fastSid=sid;
-          ws.send(JSON.stringify({id:4,cmd:"update_subscription",params:{
+          try{ws.send(JSON.stringify({id:4,cmd:"update_subscription",params:{
             sid,action:"indexlist",
-          }}));
+          }}));}
+          catch{fastState="UNAVAILABLE";lastFast=null;
+            fastLastError="fast_brti_indexlist_send_failed";}
           return;
         }
         if(wantFast&&frame.type==="cfbenchmarks_value_5hz_indexlist"&&obj(frame.msg)){
@@ -214,6 +241,8 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
       });
       ws.addEventListener("error",()=>{if(socket===ws)genericError("websocket_transport_error");});
       ws.addEventListener("close",()=>{
+        clearInterval(watchdog);
+        if(activeWatchdog===watchdog)activeWatchdog=null;
         if(socket!==ws)return;
         socket=null;lastFrame=null;lastIndex=null;
         lastFast=null;fastSid=null;lastFastSeq=null;
@@ -237,6 +266,7 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
     stopped=true;state="DISABLED";lastFrame=null;lastIndex=null;
     fastState="DISABLED";lastFast=null;fastSid=null;lastFastSeq=null;
     if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}
+    if(activeWatchdog){clearInterval(activeWatchdog);activeWatchdog=null;}
     try{socket?.close()}catch{/* release best effort */}
     socket=null;
   }};
