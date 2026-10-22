@@ -72,3 +72,45 @@ test("fee-inclusive paper stress never spends $5 on price alone and ignores liqu
  assert.equal(feeInclusive.observedDepthCoverage,0);
  assert.equal(feeInclusive.feeScheduleProviderVerified,false);
 });
+
+test("spread-calibrated P&L uses each recorded spread, not an arbitrary 1-cent add-on",()=>{
+ const d=new Date("2026-10-22T13:45:00.000Z");
+ const rows=[
+  base("large",{entryOffer:0.015,exitPrice:0.97,entrySpread:0.001,
+     closedAt:d,pnl:318.02}),
+  base("small",{entryOffer:0.5,exitPrice:0.65,entrySpread:0.02,
+     stake:5,contracts:10,pnl:1.5,closedAt:new Date(d.getTime()-60000)}),
+  base("missing",{entryOffer:0.4,exitPrice:0.5,entrySpread:null,
+     stake:4.8,contracts:12,pnl:1.2}),
+ ];
+ const a=auditHistoricalPaperExecution(rows);
+ assert.equal(a.observedSpreadTrades,2);
+ assert.equal(a.unverifiedLiquidityTrades,3);
+ assert.equal(a.asOfClosedAt,d.toISOString());
+ assert.equal(a.calibratedScenarios.length,4);
+ assert.equal(a.calibratedScenarios[0]?.code,"BEST_QUOTES");
+ assert.equal(a.calibratedScenarios[0]?.entryCashCapUsd,5);
+ assert.equal(a.calibratedScenarios[0]?.observedSpreadTrades,2);
+ assert.ok(a.calibratedScenarios[0]!.netConditionalUsd>
+   a.calibratedScenarios[1]!.netConditionalUsd);
+ assert.ok(a.calibratedScenarios[1]!.netConditionalUsd>
+   a.calibratedScenarios[2]!.netConditionalUsd);
+ assert.ok(a.calibratedScenarios[1]!.netConditionalUsd>
+   a.calibratedScenarios[3]!.netConditionalUsd);
+ for(const x of a.calibratedScenarios){
+  assert.equal(x.executable,false);
+  assert.equal(x.depthVerified,false);
+ }
+ assert.equal(a.netPnlVerified,null);
+});
+test("invalid and missing spread are never silently replaced with fixed slippage",()=>{
+ const a=auditHistoricalPaperExecution([
+   base("a",{entrySpread:null}),
+   base("b",{entrySpread:1.2}),
+ ]);
+ assert.equal(a.assessedQuotes,2);
+ assert.equal(a.observedSpreadTrades,0);
+ assert.equal(a.calibratedScenarios[0]!.modeledTrades,0);
+ assert.equal(a.calibratedScenarios[0]!.netConditionalUsd,0);
+ assert.equal(a.netPnlVerified,null);
+});
