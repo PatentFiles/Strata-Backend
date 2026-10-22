@@ -119,7 +119,7 @@ export class SequencedKalshiBook{
   const toLevels=(m:Map<number,number>):ResearchBookLevel[]=>
     [...m].map(([priceTicks,contractsHundredths])=>({priceTicks,contractsHundredths}));
   return {ticker:this.ticker,requestStartedAtMs:this.send!,receivedAtMs:this.received!,
-   source:"KALSHI_PUBLIC_REST",timestampAuthority:"LOCAL_RECEIPT_ONLY",
+   source:"KALSHI_SEQUENCED_WEBSOCKET",timestampAuthority:"KALSHI_EXCHANGE_SENDING_TIMESTAMP",
    yesBids:toLevels(this.yes),noBids:toLevels(this.no)};
  }
  simulate(side:Side,action:"buy"|"sell",qty:number,limitTicks:number,now=Date.now()){
@@ -150,7 +150,7 @@ export function evaluateTriangulatedMarket(
  coinbase:CoinbaseTicker|null,book:MarketDepthState|null,nowMs:number,
 ){
  const b=brti&&Number(brti.indexUsd);
- const aligned=Boolean(b&&Number.isFinite(b)&&b!>0&&coinbase&&
+ const aligned=Boolean(b&&Number.isFinite(b)&&b>0&&coinbase&&
    Math.abs(coinbase.sourceAtMs-brti!.sourceAtMs)<=1200&&
    nowMs-brti!.sourceAtMs>=0&&nowMs-brti!.sourceAtMs<=3000&&
    nowMs-coinbase.sourceAtMs>=0&&nowMs-coinbase.sourceAtMs<=3000);
