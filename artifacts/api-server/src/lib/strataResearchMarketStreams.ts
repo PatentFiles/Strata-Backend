@@ -149,6 +149,28 @@ export class MarketEventAgeWindow{
     timeAuthority:"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK" as const};
  }
 }
+/** Testable liveness policies. Silence cannot upgrade a stale book to fresh. */
+export function marketStreamStalled(lastObservedAtMs:number,nowMs:number,
+ timeoutMs=12_000):boolean{
+ return !Number.isSafeInteger(lastObservedAtMs)||!Number.isSafeInteger(nowMs)||
+  lastObservedAtMs<=0||nowMs<lastObservedAtMs||
+  nowMs-lastObservedAtMs>timeoutMs;
+}
+export function marketBookNeedsRefresh(
+ lastBookEventAtMs:number,lastSnapshotRequestedAtMs:number,nowMs:number,
+):boolean{
+ return Number.isSafeInteger(nowMs)&&
+  marketStreamStalled(lastBookEventAtMs,nowMs,15_000)&&
+  (lastSnapshotRequestedAtMs===0||nowMs-lastSnapshotRequestedAtMs>=10_000);
+}
+export function validCoinbaseHeartbeat(
+ input:unknown,receivedAtMs:number):boolean{
+ if(!record(input)||input.type!=="heartbeat"||input.product_id!=="BTC-USD"||
+   typeof input.time!=="string"||!Number.isSafeInteger(receivedAtMs))return false;
+ const stamp=Date.parse(input.time);
+ const lag=receivedAtMs-stamp;
+ return Number.isSafeInteger(stamp)&&lag>=-2000&&lag<=3000;
+}
 export type CoinbaseTicker={
  priceUsd:number;bidUsd:number;askUsd:number;
  sourceAtMs:number;receivedAtMs:number;sequence:number;
