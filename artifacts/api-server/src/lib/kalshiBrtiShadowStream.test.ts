@@ -17,6 +17,10 @@ test("BRTI shadow feed is off by default and has no trading authority",()=>{
   assert.equal(status.instantSourceFresh,false);
   assert.equal(status.lastIndex,null);
   assert.equal(status.lastFrame,null);
+  assert.equal(status.fastState,"DISABLED");
+  assert.equal(status.fastIndex,null);
+  assert.equal(status.fastSourceFresh,false);
+  assert.equal(status.fastMessageGaps,0);
 });
 
 test("a nonproduction environment cannot enable the production BRTI observer",()=>{
@@ -35,6 +39,13 @@ test("a nonproduction environment cannot enable the production BRTI observer",()
   }),false);
 });
 
+test("optional 5Hz does not start when parent settlement observer is disabled",()=>{
+ const env={NODE_ENV:"production",KALSHI_API_ENVIRONMENT:"production",
+  STRATA_CF_BRTI_5HZ_SHADOW_ENABLED:"true"};
+ assert.equal(kalshiBrtiShadowConfigured(env),false);
+ startKalshiBrtiShadowFeed(env);
+ assert.equal(readKalshiBrtiShadowStatus().fastState,"DISABLED");
+});
 test("shadow config is exact-match and never confers orders or owner authorization",()=>{
   assert.equal(kalshiBrtiShadowConfigured({
     NODE_ENV:"production",KALSHI_API_ENVIRONMENT:"production",
