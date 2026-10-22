@@ -110,6 +110,15 @@ jobs:
             --outfile=dist/kalshiBrtiShadowStream.test.cjs \
             --external:pino --external:pino-pretty
           node --test dist/kalshiBrtiShadowStream.test.cjs
+      - name: Autonomous shadow learning train/holdout and no-promotion safety (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/v13AutonomousShadowLearning.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/v13AutonomousShadowLearning.test.cjs \
+            --external:pg-native --external:drizzle-orm --external:drizzle-orm/* \
+            --external:pino --external:pino-pretty
+          node --test dist/v13AutonomousShadowLearning.test.cjs
       - name: Validate V13 research-only execution stress, depth and outlier model (NO ORDERS)
         working-directory: artifacts/api-server
         run: |

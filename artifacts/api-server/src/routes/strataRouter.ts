@@ -13,6 +13,8 @@ import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
 import { readForwardTestBrtiReference } from "./forwardTest";
 import { readTriangulatedMarketStatus } from "../lib/strataResearchMarketObserver";
+import { getV13AdaptiveResearchRecommendation } from "../lib/v13StrategyResearch";
+import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -21,6 +23,8 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   brtiSettlementReference?: () => Promise<unknown>;
   /** Read-only observer diagnostic; injected by isolated router tests. */
   marketTriangulation?: () => Promise<unknown>;
+  /** Pure read-only research recommendation; never a release or trading action. */
+  adaptiveShadowResearch?: () => Promise<unknown>;
   phase4State: () => Promise<unknown>;
   microLiveState: () => Promise<unknown>;
   emergencyStop: () => Promise<unknown>;
@@ -187,6 +191,23 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
       res.json(await (deps.brtiSettlementReference ?? readForwardTestBrtiReference)());
     } catch {
       res.status(503).json({ error: "BRTI reference is temporarily unavailable" });
+    }
+  });
+  router.get("/forward-test/adaptive-shadow-research", access.requireUser, async (_req, res) => {
+    res.setHeader("Cache-Control","no-store");
+    try{
+      const result=await (deps.adaptiveShadowResearch ??
+        (()=>getV13AdaptiveResearchRecommendation()))();
+      res.json({
+        mode:"PAPER_ONLY_SHADOW_RESEARCH",executionAuthority:false,
+        automaticPromotion:false,liveStrategyUnchanged:true,
+        pinnedChampion:{id:V13_CHAMPION_PARAMETER_SET.id,hash:V13_CHAMPION_PARAMETER_HASH},
+        // Review eligibility means evidence quantity, NOT approved after-fee edge.
+        qualification:"PROSPECTIVE_QUOTE_OUTCOMES_NOT_VERIFIED_EXCHANGE_PNL",
+        result,
+      });
+    }catch{
+      res.status(503).json({error:"Shadow research ranking temporarily unavailable"});
     }
   });
   router.get("/forward-test/market-triangulation", access.requireUser, async (_req, res) => {
