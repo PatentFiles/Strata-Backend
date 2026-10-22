@@ -115,6 +115,11 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   kalshi=ws;
   let sid:number|null=null;
   let recovering=false;
+  let resyncTimer:ReturnType<typeof setTimeout>|null=null;
+  const clearResync=()=>{
+    if(resyncTimer){clearTimeout(resyncTimer);resyncTimer=null;}
+    recovering=false;
+  };
   ws.addEventListener("open",()=>{
    if(halted||bookEpoch!==attempt)return;
    depthState="AWAITING_SNAPSHOT";
@@ -142,16 +147,31 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    const applied=depth?.ingest(frame,Date.now());
    if(applied){
      depthState="CONNECTED";
-     if(f.type==="orderbook_snapshot")recovering=false;
+     if(f.type==="orderbook_snapshot")clearResync();
    }else if(depth&&!depth.get().ready){
      depthState="AWAITING_SNAPSHOT";
      // A gap is not repaired with an unordered REST snapshot.
      // Request an authoritative snapshot in the same subscription.
      if(!recovering&&sid!==null){
        recovering=true;lastDepthError="kalshi_book_resync_requested";
-       ws.send(JSON.stringify({id:102,cmd:"update_subscription",params:{
-         sid,action:"get_snapshot",market_tickers:[ticker],
-       }}));
+       try{
+         ws.send(JSON.stringify({id:102,cmd:"update_subscription",params:{
+           sid,action:"get_snapshot",market_tickers:[ticker],
+         }}));
+       }catch{
+         lastDepthError="kalshi_book_snapshot_request_failed";
+         try{ws.close()}catch{/* closed or offline */}
+         return;
+       }
+       // If a fresh snapshot never arrives, reconnect rather than permanently
+       // remaining in a silent "recovering" state after a seq gap.
+       resyncTimer=setTimeout(()=>{
+         if(!halted&&bookEpoch===attempt&&recovering){
+           lastDepthError="kalshi_book_snapshot_timeout";
+           try{ws.close()}catch{/* reconnection reconciles the source */}
+         }
+       },5000);
+       resyncTimer.unref?.();
        // The stream stays unavailable until a genuine snapshot.
      }
    }
@@ -159,6 +179,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   ws.addEventListener("error",()=>{if(bookEpoch===attempt)
    lastDepthError="kalshi_wss_transport_error";});
   ws.addEventListener("close",()=>{
+   clearResync();
    if(halted||bookEpoch!==attempt)return;
    kalshi=null;depth?.reset("TRANSPORT_CLOSED");
    depthState="UNAVAILABLE";kalshiReconnects++;
