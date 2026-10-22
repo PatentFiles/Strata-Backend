@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {auditHistoricalPaperExecution,type HistoricalPaperQuote} from "./forwardTestExecutionAudit";
+import {stressV13ResearchQuotes} from "./v13ResearchExecutionStress";
 
 const base=(id:string,opts:Partial<HistoricalPaperQuote>={}):HistoricalPaperQuote=>({
  id,marketTicker:"KXBTC15M-26OCT210445-45",status:"CLOSED",
@@ -51,4 +52,23 @@ test("empty paper history gives no false profit",()=>{
  assert.equal(x.quoteGrossUsd,0);
  assert.equal(x.hypotheticalScenarios[0]?.modeledTrades,0);
  assert.equal(x.netPnlVerified,null);
+});
+
+test("fee-inclusive paper stress never spends $5 on price alone and ignores liquidity assumptions as proof",()=>{
+ const trade={id:"one",marketTicker:"KXBTC15M-26OCT211500-00",
+  entryOfferTicks:5000,exitBidTicks:6000,
+  entryDepthContracts:null,exitDepthContracts:null};
+ const priceOnly=stressV13ResearchQuotes([trade],{
+  stakeCents:500,adverseEntryTicks:0,adverseExitTicks:0,
+  maxContractsPerTrade:20,assumedQuadraticCoefficientBps:700,
+ });
+ const feeInclusive=stressV13ResearchQuotes([trade],{
+  stakeCents:500,adverseEntryTicks:0,adverseExitTicks:0,
+  maxContractsPerTrade:20,assumedQuadraticCoefficientBps:700,
+  feeInclusiveEntryBudget:true,
+ });
+ assert.equal(priceOnly.modeledContracts,10);
+ assert.equal(feeInclusive.modeledContracts,9);
+ assert.equal(feeInclusive.observedDepthCoverage,0);
+ assert.equal(feeInclusive.feeScheduleProviderVerified,false);
 });
