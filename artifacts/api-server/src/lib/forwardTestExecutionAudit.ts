@@ -96,8 +96,9 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
  // and its exit is already a BID, so BEST_QUOTES adds ZERO extra spread.
  // Subsequent multipliers are additional uncertainty stress, not measured
  // slippage, nor proven execution-time liquidity.
+ const paperById=new Map(completed.map(r=>[r.id,r] as const));
  const spreadQuotes=accepted.flatMap(q=>{
-   const source=completed.find(r=>r.id===q.id);
+   const source=paperById.get(q.id);
    const spread=source?.entrySpread;
    const t=spread===null||spread===undefined?null:ticks(spread,true);
    return t===null?[]:[{...q,observedSpreadTicks:t}];
@@ -108,12 +109,14 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
    {code:"TWO_SPREADS" as const,label:"Plus 2× each trade's observed entry spread",multiple:2,coeff:700},
    {code:"ONE_SPREAD_DOUBLE_FEE" as const,label:"1× observed spread; doubled fee stress",multiple:1,coeff:1400},
  ].map(c=>{
-   const modeledRows:ResearchQuoteRoundTrip[]=spreadQuotes.map(r=>({
-      id:r.id,marketTicker:r.marketTicker,
-      entryOfferTicks:Math.min(9999,r.entryOfferTicks+c.multiple*r.observedSpreadTicks),
-      exitBidTicks:Math.max(0,r.exitBidTicks-c.multiple*r.observedSpreadTicks),
-      entryDepthContracts:null,exitDepthContracts:null,
-   }));
+   const modeledRows:ResearchQuoteRoundTrip[]=spreadQuotes.flatMap(r=>{
+     const entryTicks=r.entryOfferTicks+c.multiple*r.observedSpreadTicks;
+     if(entryTicks>=10000)return []; // No acceptable entry within $1 contract.
+     return [{id:r.id,marketTicker:r.marketTicker,
+       entryOfferTicks:entryTicks,
+       exitBidTicks:Math.max(0,r.exitBidTicks-c.multiple*r.observedSpreadTicks),
+       entryDepthContracts:null,exitDepthContracts:null}];
+   });
    const inputs={stakeCents:500,adverseEntryTicks:0,adverseExitTicks:0,
      assumedQuadraticCoefficientBps:c.coeff,feeInclusiveEntryBudget:true};
    const result=stressV13ResearchQuotes(modeledRows,inputs);
@@ -128,7 +131,7 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
  });
  const latest=completed.map(r=>r.closedAt?.getTime()).filter(
    (n):n is number=>typeof n==="number"&&Number.isFinite(n));
- const asOfClosedAt=latest.length?new Date(Math.max(...latest)).toISOString():null;
+ const asOfClosedAt=latest.length?new Date(latest.reduce((a,b)=>Math.max(a,b),0)).toISOString():null;
  const cases=[
   {label:"1-contract capacity stress",max:1,entry:100,exit:100},
   {label:"5-contract capacity stress",max:5,entry:100,exit:100},
