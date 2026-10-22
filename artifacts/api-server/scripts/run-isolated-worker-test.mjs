@@ -12,6 +12,7 @@ const tables = [
   "forward_test_btc_points",
   "forward_test_evaluations",
   "forward_test_positions",
+  "forward_test_book_snapshots",
   "forward_test_windows",
 ];
 
