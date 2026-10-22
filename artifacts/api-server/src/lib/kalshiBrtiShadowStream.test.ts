@@ -4,6 +4,7 @@ import {
   kalshiBrtiShadowConfigured,
   readKalshiBrtiShadowStatus,
   startKalshiBrtiShadowFeed,
+  brtiStreamTimedOut,
 } from "./kalshiBrtiShadowStream";
 
 test("BRTI shadow feed is off by default and has no trading authority",()=>{
@@ -55,4 +56,14 @@ test("shadow config is exact-match and never confers orders or owner authorizati
   assert.equal("ordersSubmitted" in record,false);
   assert.equal("ownerAuthorized" in record,false);
   assert.equal("signedMutations" in record,false);
+});
+
+test("BRTI observer watchdog requires current verified index ticks, not merely an open socket",()=>{
+ const t=Date.parse("2026-10-22T16:45:00.000Z");
+ assert.equal(brtiStreamTimedOut(null,t,t+14_999),false);
+ assert.equal(brtiStreamTimedOut(null,t,t+15_000),false);
+ assert.equal(brtiStreamTimedOut(null,t,t+15_001),true);
+ assert.equal(brtiStreamTimedOut(t+9000,t,t+22_000),false);
+ assert.equal(brtiStreamTimedOut(t+9000,t,t+24_001),true);
+ assert.equal(brtiStreamTimedOut(t+9000,t,t+8000),true);
 });

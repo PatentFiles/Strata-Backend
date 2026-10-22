@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket} from "./strataResearchMarketStreams";
+import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket,marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat} from "./strataResearchMarketStreams";
 const ticker="KXBTC15M-26OCT221530-30";
 const marketId="9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1";
 const now=Date.parse("2026-10-22T15:20:05.000Z");
@@ -90,4 +90,23 @@ test("source event age sample window reports bounded median/p95/p99 and rejects 
  assert.ok(stats.p95Ms!<=stats.p99Ms!);
  assert.ok(stats.p99Ms!<=300);
  assert.equal(stats.timeAuthority,"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK");
+});
+
+test("Coinbase heartbeat accepts BTC-only timely frames, rejects stale, future and wrong product",()=>{
+ const timestamp=new Date(now-350).toISOString();
+ assert.equal(validCoinbaseHeartbeat({type:"heartbeat",product_id:"BTC-USD",time:timestamp},now),true);
+ assert.equal(validCoinbaseHeartbeat({type:"heartbeat",product_id:"ETH-USD",time:timestamp},now),false);
+ assert.equal(validCoinbaseHeartbeat({type:"heartbeat",product_id:"BTC-USD",time:new Date(now-4000).toISOString()},now),false);
+ assert.equal(validCoinbaseHeartbeat({type:"heartbeat",product_id:"BTC-USD",time:new Date(now+3000).toISOString()},now),false);
+ assert.equal(validCoinbaseHeartbeat({type:"heartbeat",product_id:"BTC-USD",time:"not-a-date"},now),false);
+});
+test("stalled subscribe/heartbeat and quiet books require recovery without claiming fills",()=>{
+ assert.equal(marketStreamStalled(now,now+6000),false);
+ assert.equal(marketStreamStalled(now,now+12000),false);
+ assert.equal(marketStreamStalled(now,now+12001),true);
+ assert.equal(marketStreamStalled(now,now-1),true);
+ assert.equal(marketBookNeedsRefresh(now,0,now+15001),true);
+ assert.equal(marketBookNeedsRefresh(now,now+14000,now+15001),false);
+ assert.equal(marketBookNeedsRefresh(now,now+15001,now+26000),true);
+ assert.equal(marketBookNeedsRefresh(now,now+15001,now+25000),false);
 });

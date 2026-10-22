@@ -12,6 +12,7 @@ import {createPrivateKey,createSign,constants} from "node:crypto";
 import {getEngineStatus} from "./forwardTestRepository";
 import {readKalshiBrtiShadowStatus} from "./kalshiBrtiShadowStream";
 import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,
+ marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat,
  evaluateTriangulatedMarket,type CoinbaseTicker} from "./strataResearchMarketStreams";
 
 const WS="wss://external-api-ws.kalshi.com/trade-api/ws/v2";
@@ -35,6 +36,8 @@ let monitor:ReturnType<typeof setInterval>|null=null;
 let cbRetry:ReturnType<typeof setTimeout>|null=null;
 let bookRetry:ReturnType<typeof setTimeout>|null=null;
 let bookEpoch=0;
+let disposeBookTimers:(()=>void)|null=null;
+let disposeCoinbaseTimers:(()=>void)|null=null;
 
 export function readTriangulatedMarketStatus(now=Date.now()){
  const brti=readKalshiBrtiShadowStatus(now);
@@ -91,6 +94,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
  const closeBook=()=>{
   bookEpoch++;
   if(bookRetry){clearTimeout(bookRetry);bookRetry=null;}
+  disposeBookTimers?.();disposeBookTimers=null;
   const socket=kalshi;kalshi=null;depth=null;depthTicker=null;
   if(socket){try{socket.close()}catch{/* no order authority */}}
  };
@@ -118,17 +122,51 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   kalshi=ws;
   let sid:number|null=null;
   let recovering=false;
+  const connectedAt=Date.now();
+  let lastBookMessageAt=connectedAt;
+  let lastSnapshotRequestAt=0;
   let resyncTimer:ReturnType<typeof setTimeout>|null=null;
+  let watchdog:ReturnType<typeof setInterval>|null=null;
   const clearResync=()=>{
     if(resyncTimer){clearTimeout(resyncTimer);resyncTimer=null;}
     recovering=false;
   };
+  const requestSnapshot=(reason:string)=>{
+    // Kalshi can remain connected with no orderbook deltas when the market is
+    // quiet. A bounded fresh *exchange* snapshot repairs stale observations
+    // without mistaking silence for proof of current executable depth.
+    if(halted||bookEpoch!==attempt||sid===null||recovering||
+      Date.now()-lastSnapshotRequestAt<10_000)return;
+    recovering=true;lastSnapshotRequestAt=Date.now();
+    lastDepthError=reason;
+    try{
+      ws.send(JSON.stringify({id:102,cmd:"update_subscription",params:{
+        sid,action:"get_snapshot",market_tickers:[ticker],
+      }}));
+    }catch{
+      lastDepthError="kalshi_book_snapshot_request_failed";
+      try{ws.close()}catch{/* reconnect or stay fail-closed */}
+      return;
+    }
+    resyncTimer=setTimeout(()=>{
+      if(!halted&&bookEpoch===attempt&&recovering){
+        lastDepthError="kalshi_book_snapshot_timeout";
+        try{ws.close()}catch{/* fail closed */}
+      }
+    },5000);
+    resyncTimer.unref?.();
+  };
   ws.addEventListener("open",()=>{
    if(halted||bookEpoch!==attempt)return;
    depthState="AWAITING_SNAPSHOT";
-   ws.send(JSON.stringify({id:101,cmd:"subscribe",params:{
-     channels:["orderbook_delta"],market_ticker:ticker,
-   }}));
+   try{
+     ws.send(JSON.stringify({id:101,cmd:"subscribe",params:{
+       channels:["orderbook_delta"],market_ticker:ticker,
+     }}));
+   }catch{
+     lastDepthError="kalshi_subscription_send_failed";
+     try{ws.close()}catch{/* fail closed */}
+   }
   });
   ws.addEventListener("message",event=>{
    if(halted||bookEpoch!==attempt||typeof event.data!=="string"||
@@ -149,41 +187,47 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    if(sid===null||f.sid!==sid)return;
    const applied=depth?.ingest(frame,Date.now());
    if(applied){
-     depthAges.observe(Number(f.sending_ts_ms),Date.now());
+     lastBookMessageAt=Date.now();
+     depthAges.observe(Number(f.sending_ts_ms),lastBookMessageAt);
      depthState="CONNECTED";
      if(f.type==="orderbook_snapshot")clearResync();
    }else if(depth&&!depth.get().ready){
      depthState="AWAITING_SNAPSHOT";
      // A gap is not repaired with an unordered REST snapshot.
      // Request an authoritative snapshot in the same subscription.
-     if(!recovering&&sid!==null){
-       recovering=true;lastDepthError="kalshi_book_resync_requested";
-       try{
-         ws.send(JSON.stringify({id:102,cmd:"update_subscription",params:{
-           sid,action:"get_snapshot",market_tickers:[ticker],
-         }}));
-       }catch{
-         lastDepthError="kalshi_book_snapshot_request_failed";
-         try{ws.close()}catch{/* closed or offline */}
-         return;
-       }
-       // If a fresh snapshot never arrives, reconnect rather than permanently
-       // remaining in a silent "recovering" state after a seq gap.
-       resyncTimer=setTimeout(()=>{
-         if(!halted&&bookEpoch===attempt&&recovering){
-           lastDepthError="kalshi_book_snapshot_timeout";
-           try{ws.close()}catch{/* reconnection reconciles the source */}
-         }
-       },5000);
-       resyncTimer.unref?.();
-       // The stream stays unavailable until a genuine snapshot.
-     }
+     requestSnapshot("kalshi_book_resync_requested");
+     // Never reinstate depth until a true Kalshi subscription snapshot.
    }
   });
+  // Enforce subscribe-ack and snapshot liveness. Book messages may be silent
+  // in low-liquidity markets; refresh only by genuine Kalshi snapshots.
+  watchdog=setInterval(()=>{
+    if(halted||bookEpoch!==attempt)return;
+    const now=Date.now();
+    if(sid===null&&now-connectedAt>12_000){
+      lastDepthError="kalshi_subscribe_ack_timeout";
+      try{ws.close()}catch{/* fail closed */}
+      return;
+    }
+    if(sid!==null&&marketBookNeedsRefresh(lastBookMessageAt,
+      lastSnapshotRequestAt,now)&&ws.readyState===1){
+      requestSnapshot("kalshi_book_idle_snapshot_refresh");
+    }
+  },2500);
+  watchdog.unref?.();
+  disposeBookTimers=()=>{
+    clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}
+  };
   ws.addEventListener("error",()=>{if(bookEpoch===attempt)
    lastDepthError="kalshi_wss_transport_error";});
   ws.addEventListener("close",()=>{
-   clearResync();
+   // A late close from a previous ticker/socket may not cancel timers
+   // belonging to a new subscription.
+   if(bookEpoch===attempt&&kalshi===ws&&disposeBookTimers){
+     disposeBookTimers();disposeBookTimers=null;
+   }else{
+     clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}
+   }
    if(halted||bookEpoch!==attempt)return;
    kalshi=null;depth?.reset("TRANSPORT_CLOSED");
    depthState="UNAVAILABLE";kalshiReconnects++;
@@ -199,10 +243,26 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    return scheduleCoinbase();
   }
   coinbase=ws;
+  let lastCoinbaseHeartbeatOrTickerAt=Date.now();
+  const cbWatchdog=setInterval(()=>{
+    if(halted||coinbase!==ws)return;
+    if(marketStreamStalled(lastCoinbaseHeartbeatOrTickerAt,Date.now())){
+      lastCoinbaseError="coinbase_ticker_and_heartbeat_timeout";
+      cb=null;coinbaseState="UNAVAILABLE";
+      try{ws.close()}catch{/* fail closed; timeout monitored */}
+    }
+  },3000);
+  cbWatchdog.unref?.();
+  disposeCoinbaseTimers=()=>clearInterval(cbWatchdog);
   ws.addEventListener("open",()=>{
    if(halted||coinbase!==ws)return;
-   ws.send(JSON.stringify({type:"subscribe",product_ids:["BTC-USD"],
-     channels:["ticker","heartbeat"]}));
+   try{
+     ws.send(JSON.stringify({type:"subscribe",product_ids:["BTC-USD"],
+       channels:["ticker","heartbeat"]}));
+   }catch{
+     lastCoinbaseError="coinbase_subscription_send_failed";
+     try{ws.close()}catch{/* fail closed */}
+   }
   });
   ws.addEventListener("message",event=>{
    if(halted||coinbase!==ws||typeof event.data!=="string"||
@@ -214,6 +274,10 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    if(f.type==="error"){lastCoinbaseError="coinbase_subscription_refused";
       coinbaseState="UNAVAILABLE";try{ws.close()}catch{}return;}
    if(f.type==="subscriptions"){coinbaseState="CONNECTED";return;}
+   if(f.type==="heartbeat"){
+     if(validCoinbaseHeartbeat(f,Date.now()))lastCoinbaseHeartbeatOrTickerAt=Date.now();
+     return;
+   }
    if(f.type!=="ticker")return;
    const parsed=parseCoinbaseRealtimeTicker(raw,Date.now());
    if(!parsed){cbInvalid++;return;}
@@ -223,11 +287,14 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
      cbSequenceRegressions++;return;
    }
    cb=parsed;lastCoinbaseSeq=parsed.sequence;coinbaseState="CONNECTED";
+   lastCoinbaseHeartbeatOrTickerAt=Date.now();
    cbAges.observe(parsed.sourceAtMs,parsed.receivedAtMs);
   });
   ws.addEventListener("error",()=>{if(coinbase===ws)
    lastCoinbaseError="coinbase_ws_transport_error";});
   ws.addEventListener("close",()=>{
+   clearInterval(cbWatchdog);
+   if(coinbase===ws)disposeCoinbaseTimers=null;
    if(halted||coinbase!==ws)return;
    coinbase=null;cb=null;coinbaseState="UNAVAILABLE";
    scheduleCoinbase();
@@ -268,6 +335,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   if(monitor){clearInterval(monitor);monitor=null;}
   if(cbRetry){clearTimeout(cbRetry);cbRetry=null;}
   closeBook();
+  disposeCoinbaseTimers?.();disposeCoinbaseTimers=null;
   const c=coinbase;coinbase=null;cb=null;
   try{c?.close()}catch{/* no trade transport */}
   depthState="DISABLED";coinbaseState="DISABLED";
