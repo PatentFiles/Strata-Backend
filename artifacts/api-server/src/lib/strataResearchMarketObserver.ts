@@ -221,8 +221,13 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   ws.addEventListener("error",()=>{if(bookEpoch===attempt)
    lastDepthError="kalshi_wss_transport_error";});
   ws.addEventListener("close",()=>{
-   if(disposeBookTimers){disposeBookTimers();disposeBookTimers=null;}
-   else{clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}}
+   // A late close from a previous ticker/socket may not cancel timers
+   // belonging to a new subscription.
+   if(bookEpoch===attempt&&kalshi===ws&&disposeBookTimers){
+     disposeBookTimers();disposeBookTimers=null;
+   }else{
+     clearResync();if(watchdog){clearInterval(watchdog);watchdog=null;}
+   }
    if(halted||bookEpoch!==attempt)return;
    kalshi=null;depth?.reset("TRANSPORT_CLOSED");
    depthState="UNAVAILABLE";kalshiReconnects++;
