@@ -141,15 +141,17 @@ export async function readForwardTestBrtiReference() {
            tick.sourceTimestampMs>=window.startsAt.getTime()&&
            tick.sourceTimestampMs<=window.endsAt.getTime()){
           const p=Number(tick.currentIndexUsd);
-          const coinbase=engine?.btcPrice;
           spotComparison={
             ticker:window.ticker,
             source:"CF_BENCHMARKS_BRTI_CURRENT_INDEX",
             spotUsd:tick.currentIndexUsd,
             strikeUsd:window.target.toFixed(2),
             spreadToStrikeUsd:Math.round((p-window.target)*100)/100,
-            coinbaseBasisUsd:typeof coinbase==="number"&&Number.isFinite(coinbase)&&coinbase>0
-              ?Math.round((coinbase-p)*100)/100:null,
+            // Current engine persists Coinbase price but NOT the provider's
+            // source timestamp. Never present an unsynchronized price
+            // difference as an observed, same-instant settlement-index basis.
+            coinbaseBasisUsd:null,
+            coinbaseBasisStatus:"UNVERIFIED_COINBASE_PROVIDER_TIMESTAMP",
             observedAtMs:tick.sourceTimestampMs,
             settlementAuthority:false,readOnly:true,tradingAuthority:false,
           };
@@ -159,7 +161,7 @@ export async function readForwardTestBrtiReference() {
   }
   return {...status,comparison,spotComparison,producer:"KALSHI_AUTHENTICATED_CF_BENCHMARKS",
     sourceIndex:"BRTI",readOnly:true,paperOnly:true,tradingAuthority:false,
-    warning:"Reference only. Not a Kalshi official settlement or entry authorization."};
+    warning:"Reference only. 1Hz final-minute BRTI is not official settlement. Optional 5Hz index is instant-price research only. Coinbase source time is not persisted, so same-instant basis is unverified. Neither permits trade entry."};
 }
 
 // Legacy Clerk-authenticated endpoint keeps the same payload. The modern

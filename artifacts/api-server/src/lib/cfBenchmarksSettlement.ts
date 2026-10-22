@@ -140,7 +140,9 @@ export type BrtiComparison={
 /** Historical/current Kalshi strike is authoritative; not a Coinbase-derived strike. */
 export function compareBrtiToKalshiStrike(
   frame:BrtiWindowFrame,
-  market:{ticker:string;target:number;closeAtMs:number;coinbaseSpot?:number|null},
+  market:{ticker:string;target:number;closeAtMs:number;coinbaseSpot?:number|null;
+    /** No timestamp means Coinbase/BRTI basis is unverified, not zero. */
+    coinbaseProviderTimestampMs?:number|null},
 ):BrtiComparison|null{
   if(!/^KXBTC15M[A-Za-z0-9._-]+$/.test(market.ticker)||
      !Number.isFinite(market.target)||market.target<=0||
@@ -148,6 +150,9 @@ export function compareBrtiToKalshiStrike(
      market.closeAtMs!==frame.quarterCloseTimestampMs) return null;
   const price=Number(frame.windowAverageUsd);
   const basis=market.coinbaseSpot;
+  const aligned=typeof market.coinbaseProviderTimestampMs==="number"&&
+    Number.isSafeInteger(market.coinbaseProviderTimestampMs)&&
+    Math.abs(market.coinbaseProviderTimestampMs-frame.sourceTimestampMs)<=1200;
   return {
     marketTicker:market.ticker,referenceSource:"CF_BENCHMARKS_BRTI",
     settlementAuthority:false,
@@ -157,7 +162,7 @@ export function compareBrtiToKalshiStrike(
     windowAverageUsd:frame.windowAverageUsd,
     windowSize:frame.windowSize,
     spreadToStrikeUsd:Math.round((price-market.target)*100)/100,
-    coinbaseBasisUsd:typeof basis==="number"&&Number.isFinite(basis)&&basis>0
+    coinbaseBasisUsd:aligned&&typeof basis==="number"&&Number.isFinite(basis)&&basis>0
       ?Math.round((basis-price)*100)/100:null,
     observedAtMs:frame.sourceTimestampMs,
     quarterCloseTimestampMs:frame.quarterCloseTimestampMs,

@@ -95,6 +95,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/cfBenchmarksSettlement.test.cjs
           node --test dist/cfBenchmarksSettlement.test.cjs
+      - name: Validate optional 5Hz BRTI publisher clock, raw price, and independent feed-quality gates
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/cfBenchmarksFastReference.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/cfBenchmarksFastReference.test.cjs
+          node --test dist/cfBenchmarksFastReference.test.cjs
       - name: Verify BRTI shadow observer remains disabled without explicit production enablement
         working-directory: artifacts/api-server
         run: |
