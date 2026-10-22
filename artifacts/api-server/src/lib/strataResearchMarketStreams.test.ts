@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket} from "./strataResearchMarketStreams";
+import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket} from "./strataResearchMarketStreams";
 const ticker="KXBTC15M-26OCT221530-30";
 const marketId="9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1";
 const now=Date.parse("2026-10-22T15:20:05.000Z");
@@ -74,4 +74,20 @@ test("triangulation refuses to conflate spot correlation, liquidity, settlement 
  const stale=evaluateTriangulatedMarket(index,tickerQuote,b.get(now+10000),now+10000);
  assert.equal(stale.sourcesFreshAndAligned,false);
  assert.equal(stale.spotBasisUsd,null);
+});
+
+test("source event age sample window reports bounded median/p95/p99 and rejects invalid clocks",()=>{
+ const ages=new MarketEventAgeWindow();
+ assert.equal(ages.summary().samples,0);
+ assert.equal(ages.observe(now+100,now),false);
+ assert.equal(ages.observe(now,now+15000),false);
+ for(let i=1;i<=300;i++)assert.equal(ages.observe(now,now+i),true);
+ const stats=ages.summary();
+ assert.equal(stats.samples,256);
+ assert.equal(stats.lastMs,300);
+ assert.ok(stats.medianMs!==null&&stats.p95Ms!==null&&stats.p99Ms!==null);
+ assert.ok(stats.medianMs!<=stats.p95Ms!);
+ assert.ok(stats.p95Ms!<=stats.p99Ms!);
+ assert.ok(stats.p99Ms!<=300);
+ assert.equal(stats.timeAuthority,"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK");
 });
