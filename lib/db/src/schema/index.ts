@@ -25,6 +25,7 @@ export * from "./forwardTestEngine";
 export * from "./forwardTestWindow";
 export * from "./forwardTestEvaluation";
 export * from "./forwardTestPosition";
+export * from "./forwardTestBookSnapshot";
 export * from "./forwardTestBtcPoint";
 export * from "./liveExecutionConfig";
 export * from "./v13LiveMoneyPolicy";
