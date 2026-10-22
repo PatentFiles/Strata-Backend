@@ -110,6 +110,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/v13ResearchExecutionStress.test.cjs
           node --test dist/v13ResearchExecutionStress.test.cjs
+      - name: Validate read-only Kalshi complementary orderbook and capacity modeling (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/forwardTestOrderbookDepth.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/forwardTestOrderbookDepth.test.cjs
+          node --test dist/forwardTestOrderbookDepth.test.cjs
       - name: Audit hypothetical paper P&L, 333-contract capacity outlier and missing-depth uncertainty
         working-directory: artifacts/api-server
         run: |
