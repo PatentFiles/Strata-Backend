@@ -26,6 +26,7 @@ import { forwardTestStartupDecision } from "./forwardTestStartupGate";
 export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
 import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
 import { ensureV13BuiltInResearchChallengers, recordV13ShadowOpportunities } from "./v13StrategyResearch";
+import { autonomousShadowLearningConfigured, runAutonomousShadowResearch } from "./v13AutonomousShadowLearning";
 
 export const FORWARD_TEST_CADENCE_MS = 5_000;
 const LEASE_SECONDS = 20;
@@ -449,6 +450,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   const controller = new AbortController();
   let stopped = false;
   let lease: Awaited<ReturnType<typeof acquireWorkerLease>> = null;
+  let lastAutolearnDay: string | null = null;
   const pause = () => new Promise<void>((resolve) => {
     const onAbort = () => {
       clearTimeout(timer);
@@ -495,6 +497,21 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
             } catch (error) {
               // Research must never block or alter champion/micro-live behavior.
               logger.warn({ err: error }, "V13 shadow opportunity evaluation failed");
+            }
+            // New daily candidates are trained only AFTER the champion's
+            // committed cycle, on a separate non-blocking research promise.
+            // The runtime flag is opt-in; no automatic promotion or trades.
+            if (autonomousShadowLearningConfigured() && !controller.signal.aborted) {
+              const today = new Date().toISOString().slice(0,10);
+              if (today !== lastAutolearnDay) {
+                lastAutolearnDay = today;
+                void runAutonomousShadowResearch(new Date(),controller.signal)
+                  .then(result => logger.info({status:result.status,
+                    reason:result.reason,candidateId:result.candidateId??null},
+                    "Autonomous shadow-only learning cycle"))
+                  .catch(error => logger.warn({err:error},
+                    "Autonomous shadow research failed; champion unchanged"));
+              }
             }
           }
         }
