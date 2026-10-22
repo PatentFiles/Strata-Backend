@@ -51,7 +51,9 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
  const completed=rows.filter(r=>r.status==="CLOSED"||r.status==="SETTLED");
  const cents=completed.map(r=>Number.isFinite(r.pnl)?Math.round((r.pnl??0)*100):0);
  const sum=cents.reduce((a,b)=>a+b,0);
- const largest=Math.max(0,...cents);
+ const largest=cents.reduce((m,n)=>Math.max(m,n),0);
+ const largestQuoteId=completed.find(r=>r.pnl!==null&&
+   Math.round(r.pnl*100)===largest)?.id??null;
  const accepted:ResearchQuoteRoundTrip[]=[];
  const ids=new Set<string>();
  let excluded=0;
@@ -74,16 +76,18 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
   {label:"20-contract capacity stress",max:20,entry:100,exit:100},
  ];
  const scenarios=cases.map(c=>{
-  const result=stressV13ResearchQuotes(accepted,{
+  const assumptions={
    stakeCents:500,adverseEntryTicks:c.entry,adverseExitTicks:c.exit,
-   maxContractsPerTrade:c.max,
-   assumedQuadraticCoefficientBps:700,
-  });
+   maxContractsPerTrade:c.max,assumedQuadraticCoefficientBps:700,
+  };
+  const result=stressV13ResearchQuotes(accepted,assumptions);
+  const outlierExcluded=stressV13ResearchQuotes(
+   accepted.filter(r=>r.id!==largestQuoteId),assumptions);
   return {label:c.label,assumedMaxContracts:c.max,adverseEntryTicks:c.entry,
    adverseExitTicks:c.exit,assumedQuadraticCoefficientBps:700,
    modeledTrades:result.modeledTrades,
    assumedNetUsd:usd(result.modeledNetMicros),
-   assumedNetExLargestWinnerUsd:usd(result.modeledNetExLargestWinnerMicros),
+   assumedNetExLargestWinnerUsd:usd(outlierExcluded.modeledNetMicros),
    depthCoverage:result.observedDepthCoverage,netIsExecutable:false as const};
  });
  return {
