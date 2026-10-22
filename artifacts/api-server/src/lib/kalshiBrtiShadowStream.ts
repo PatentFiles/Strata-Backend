@@ -113,8 +113,12 @@ export function startKalshiBrtiShadowFeed(env:NodeJS.ProcessEnv=process.env):{st
         if(stopped||socket!==ws)return;
         state="CONNECTED";connectionEstablishedAtMs=Date.now();
         ws.send(JSON.stringify({id:1,cmd:"subscribe",params:{
-          channels:wantFast?["cfbenchmarks_value","cfbenchmarks_value_5hz"]:
-            ["cfbenchmarks_value"],index_ids:["BRTI"],
+          channels:["cfbenchmarks_value"],index_ids:["BRTI"],
+        }}));
+        // Separate request ID: a 5Hz entitlement error must NEVER disable
+        // the authoritative 1Hz BRTI settlement observer.
+        if(wantFast)ws.send(JSON.stringify({id:3,cmd:"subscribe",params:{
+          channels:["cfbenchmarks_value_5hz"],index_ids:["BRTI"],
         }}));
       });
       ws.addEventListener("message",(event)=>{
