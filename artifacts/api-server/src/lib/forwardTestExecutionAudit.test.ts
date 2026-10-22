@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {auditHistoricalPaperExecution,type HistoricalPaperQuote} from "./forwardTestExecutionAudit";
+
+const base=(id:string,opts:Partial<HistoricalPaperQuote>={}):HistoricalPaperQuote=>({
+ id,marketTicker:"KXBTC15M-26OCT210445-45",status:"CLOSED",
+ entryOffer:0.015,exitPrice:0.9700,stake:4.995,contracts:333,pnl:318.02,...opts,
+});
+test("dominant $5 quote outlier is not treated as proven executable depth or net P&L",()=>{
+ const audit=auditHistoricalPaperExecution([
+  base("winner"),base("small",{entryOffer:0.50,exitPrice:0.51,stake:5,contracts:10,pnl:0.10}),
+ ]);
+ assert.equal(audit.mode,"PAPER_RESEARCH_ONLY");
+ assert.equal(audit.tradingAuthority,false);
+ assert.equal(audit.netPnlVerified,null);
+ assert.equal(audit.quoteGrossUsd,318.12);
+ assert.equal(audit.quoteGrossExLargestWinnerUsd,0.10);
+ assert.equal(audit.largestQuoteWinnerUsd,318.02);
+ assert.equal(audit.assessedQuotes,2);
+ assert.equal(audit.depthEvidenceAvailable,false);
+ assert.deepEqual(audit.hypotheticalScenarios.map(s=>s.assumedMaxContracts),[1,5,20]);
+ for(const scenario of audit.hypotheticalScenarios){
+  assert.equal(scenario.netIsExecutable,false);
+  assert.equal(scenario.depthCoverage,0);
+ }
+ const [one,five,twenty]=audit.hypotheticalScenarios;
+ assert.ok(one!.assumedNetUsd<five!.assumedNetUsd);
+ assert.ok(five!.assumedNetUsd<twenty!.assumedNetUsd);
+ assert.ok(twenty!.assumedNetUsd<318.12);
+});
+test("settled, missing, malformed and duplicate paper observations are excluded conservatively",()=>{
+ const rows=[
+  base("settled",{status:"SETTLED",pnl:5}),
+  base("missing",{exitPrice:null,pnl:4}),
+  base("invalid",{entryOffer:1.75,pnl:3}),
+  base("first",{entryOffer:0.4,exitPrice:0.6,stake:4.8,contracts:12,pnl:2.4}),
+  base("first",{entryOffer:0.4,exitPrice:0.6,stake:4.8,contracts:12,pnl:2.4}),
+  base("open",{status:"OPEN",pnl:null}),
+ ];
+ const x=auditHistoricalPaperExecution(rows);
+ assert.equal(x.completed,5);
+ assert.equal(x.assessedQuotes,1);
+ assert.equal(x.excludedQuotes,4);
+ assert.equal(x.netPnlVerified,null);
+ assert.equal(x.quoteGrossUsd,16.8);
+ assert.equal(x.quoteGrossExLargestWinnerUsd,11.8);
+});
+test("empty paper history gives no false profit",()=>{
+ const x=auditHistoricalPaperExecution([]);
+ assert.equal(x.completed,0);
+ assert.equal(x.quoteGrossUsd,0);
+ assert.equal(x.hypotheticalScenarios[0]?.modeledTrades,0);
+ assert.equal(x.netPnlVerified,null);
+});
