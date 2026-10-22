@@ -25,6 +25,8 @@ export interface ResearchExecutionStress {
   adverseExitTicks: number;
   /** Assumed coefficient in bps; 700 = 0.07 of q*p*(1-p). Not official fee evidence. */
   assumedQuadraticCoefficientBps: number;
+  /** Research-only assumed max per IOC, NOT observed book depth. */
+  maxContractsPerTrade?: number;
 }
 export interface ResearchExecutionStressResult {
   mode: "SHADOW_ONLY";
@@ -77,6 +79,7 @@ export function stressV13ResearchQuotes(
       !whole(assumptions.adverseEntryTicks, 0, 9_999) ||
       !whole(assumptions.adverseExitTicks, 0, 9_999) ||
       !whole(assumptions.assumedQuadraticCoefficientBps, 0, 10_000) ||
+      (assumptions.maxContractsPerTrade!==undefined && !whole(assumptions.maxContractsPerTrade,1,25_000_000)) ||
       rows.length > 100_000) {
     throw new Error("invalid_research_stress_assumptions");
   }
@@ -103,6 +106,7 @@ export function stressV13ResearchQuotes(
     if (entryTicks >= 10_000) continue; // no acceptable executable entry at the stress price
     const maxContractsByStake = Math.floor(assumptions.stakeCents * 100 / entryTicks);
     const entries = Math.min(maxContractsByStake,
+      assumptions.maxContractsPerTrade ?? maxContractsByStake,
       r.entryDepthContracts ?? maxContractsByStake);
     if (entries === 0) continue;
     const exitTicks = Math.max(0, r.exitBidTicks - assumptions.adverseExitTicks);
