@@ -11,7 +11,7 @@
 import {createPrivateKey,createSign,constants} from "node:crypto";
 import {getEngineStatus} from "./forwardTestRepository";
 import {readKalshiBrtiShadowStatus} from "./kalshiBrtiShadowStream";
-import {SequencedKalshiBook,parseCoinbaseRealtimeTicker,
+import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,
  evaluateTriangulatedMarket,type CoinbaseTicker} from "./strataResearchMarketStreams";
 
 const WS="wss://external-api-ws.kalshi.com/trade-api/ws/v2";
@@ -27,6 +27,8 @@ let depthState:Reason="DISABLED",coinbaseState:Reason="DISABLED";
 let cb:CoinbaseTicker|null=null;
 let lastCoinbaseSeq:number|null=null;
 let cbInvalid=0,cbSequenceRegressions=0,kalshiReconnects=0;
+const cbAges=new MarketEventAgeWindow();
+const depthAges=new MarketEventAgeWindow();
 let lastDepthError:string|null=null;
 let lastCoinbaseError:string|null=null;
 let monitor:ReturnType<typeof setInterval>|null=null;
@@ -56,7 +58,8 @@ export function readTriangulatedMarketStatus(now=Date.now()){
   health:evaluateTriangulatedMarket(index,validCb,book,now),
   diagnostics:{cbInvalid,cbSequenceRegressions,kalshiReconnects,
     bookGaps:book?.gaps??0,bookInvalid:book?.invalidFrames??0,
-    lastDepthError,lastCoinbaseError},
+    lastDepthError,lastCoinbaseError,
+    ageDiagnostics:{coinbaseTickerEvent:cbAges.summary(),kalshiOrderbookUpdate:depthAges.summary()}},
   noOrdersSubmitted:true,liveDecisionAuthority:false};
 }
 export function triangulationConfigured(env:NodeJS.ProcessEnv=process.env){
@@ -146,6 +149,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
    if(sid===null||f.sid!==sid)return;
    const applied=depth?.ingest(frame,Date.now());
    if(applied){
+     depthAges.observe(Number(f.sending_ts_ms),Date.now());
      depthState="CONNECTED";
      if(f.type==="orderbook_snapshot")clearResync();
    }else if(depth&&!depth.get().ready){
@@ -219,6 +223,7 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
      cbSequenceRegressions++;return;
    }
    cb=parsed;lastCoinbaseSeq=parsed.sequence;coinbaseState="CONNECTED";
+   cbAges.observe(parsed.sourceAtMs,parsed.receivedAtMs);
   });
   ws.addEventListener("error",()=>{if(coinbase===ws)
    lastCoinbaseError="coinbase_ws_transport_error";});
