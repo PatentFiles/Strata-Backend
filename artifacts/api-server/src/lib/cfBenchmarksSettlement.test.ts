@@ -38,12 +38,26 @@ test("uses Kalshi quarter-hour final-minute average, never generic trailing aver
   const compare=compareBrtiToKalshiStrike(result.frame,{
     ticker:"KXBTC15M-26OCT202030-30",target:68310.75,closeAtMs:quarterClose,
     coinbaseSpot:68314.25,
+    coinbaseProviderTimestampMs:tick,
   });
   assert.ok(compare);
   assert.equal(compare.settlementAuthority,false);
   assert.equal(compare.spreadToStrikeUsd,0.5);
   assert.equal(compare.coinbaseBasisUsd,3);
   assert.equal(compare.sourcePriceType,"KALSHI_15M_FINAL_MINUTE_WINDOW_AVERAGE");
+});
+test("Coinbase/BRTI basis never inferred without aligned publisher timestamps",()=>{
+ const result=parseKalshiBrtiQuarterHourFrame(websocket(),tick+100);
+ if(!result.ok)throw Error("source fixture");
+ const m={ticker:"KXBTC15M-26OCT202030-30",
+  target:68310.75,closeAtMs:quarterClose,coinbaseSpot:68314.25};
+ assert.equal(compareBrtiToKalshiStrike(result.frame,m)?.coinbaseBasisUsd,null);
+ assert.equal(compareBrtiToKalshiStrike(result.frame,{
+  ...m,coinbaseProviderTimestampMs:tick+5000,
+ })?.coinbaseBasisUsd,null);
+ assert.equal(compareBrtiToKalshiStrike(result.frame,{
+  ...m,coinbaseProviderTimestampMs:tick+200,
+ })?.coinbaseBasisUsd,3);
 });
 test("never considers 60-sample window authoritative final Kalshi settlement",()=>{
   const result=parseKalshiBrtiQuarterHourFrame(websocket({ts:quarterClose,count:60,end:quarterClose}),quarterClose+60);
