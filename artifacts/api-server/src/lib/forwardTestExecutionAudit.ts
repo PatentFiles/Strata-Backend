@@ -79,6 +79,7 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
   const assumptions={
    stakeCents:500,adverseEntryTicks:c.entry,adverseExitTicks:c.exit,
    maxContractsPerTrade:c.max,assumedQuadraticCoefficientBps:700,
+   feeInclusiveEntryBudget:true,
   };
   const result=stressV13ResearchQuotes(accepted,assumptions);
   const outlierExcluded=stressV13ResearchQuotes(
@@ -103,7 +104,7 @@ export function auditHistoricalPaperExecution(rows:readonly HistoricalPaperQuote
    "Historical entry/exit book depth and signed IOC fills are absent; no scenario is executable or validated net P&L",
    "All stress scenarios assume 1/5/20 contracts of immediate liquidity at their stressed quote prices; actual fill size may be zero",
    "A 1-cent adverse move is assumed on each leg, not measured slippage, and 7% quadratic coefficient is illustrative, not an approved exact-market fee schedule",
-   "Model uses whole-contract quantities, $5 gross price budget and simplistic per-order fee rounding; real venue order admission also reserves fees",
+   "Model uses whole-contract quantities and a $5 fee-inclusive entry cash ceiling, with illustrative per-order cent rounding; real venue may have different effective fees",
    "Coinbase-versus-CF Benchmarks BRTI settlement basis and actual provider settlement remain unverified",
    "Legacy gross P&L is retained unchanged; no historical rows are overwritten or relabeled as real money",
   ],
