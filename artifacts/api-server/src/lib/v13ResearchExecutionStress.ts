@@ -27,6 +27,8 @@ export interface ResearchExecutionStress {
   assumedQuadraticCoefficientBps: number;
   /** Research-only assumed max per IOC, NOT observed book depth. */
   maxContractsPerTrade?: number;
+  /** Reserve simulated entry taker fees inside the total cash budget. */
+  feeInclusiveEntryBudget?: boolean;
 }
 export interface ResearchExecutionStressResult {
   mode: "SHADOW_ONLY";
@@ -105,9 +107,24 @@ export function stressV13ResearchQuotes(
     const entryTicks = r.entryOfferTicks + assumptions.adverseEntryTicks;
     if (entryTicks >= 10_000) continue; // no acceptable executable entry at the stress price
     const maxContractsByStake = Math.floor(assumptions.stakeCents * 100 / entryTicks);
-    const entries = Math.min(maxContractsByStake,
+    let entries = Math.min(maxContractsByStake,
       assumptions.maxContractsPerTrade ?? maxContractsByStake,
       r.entryDepthContracts ?? maxContractsByStake);
+    if(assumptions.feeInclusiveEntryBudget){
+      // Monotonic cash debit; bounded binary search, not O(contract count).
+      // Price and assumed taker fees share fixed-point microdollar arithmetic.
+      const cashBudget=BigInt(assumptions.stakeCents)*MICROS_PER_CENT;
+      let lo=0,hi=entries;
+      while(lo<hi){
+        const candidate=Math.floor((lo+hi+1)/2);
+        const debit=BigInt(candidate)*BigInt(entryTicks)*MICROS_PER_TICK+
+          illustrativeQuadraticFeeCents(candidate,entryTicks,
+            assumptions.assumedQuadraticCoefficientBps)*MICROS_PER_CENT;
+        if(debit<=cashBudget)lo=candidate;
+        else hi=candidate-1;
+      }
+      entries=lo;
+    }
     if (entries === 0) continue;
     const exitTicks = Math.max(0, r.exitBidTicks - assumptions.adverseExitTicks);
     const exited = Math.min(entries, r.exitDepthContracts ?? entries);
