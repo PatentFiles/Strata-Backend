@@ -37,6 +37,7 @@ test("migration preview refuses armed accounts and never writes production state
  const db={connect:async()=>({query:async(sql:string)=>{
    statements.push(sql);
    return {rows:[{state:"APPROVED",commissioned:true,
+     policy_id:POLICY,policy_hash:HASH,version:1,
      fee_policy_version:"micro-live-standing-fee-policy-v1",
      execution_enabled:true,kill_switch:false,blocked_reason:null,
      cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
