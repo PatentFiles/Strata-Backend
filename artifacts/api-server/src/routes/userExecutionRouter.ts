@@ -7,7 +7,7 @@ import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
 import { recordApiFeeRateReview, issueApiFeeSourceGrant, recordApiFeeOwnerConsent, revokeApiFeeOwnerConsent, revokeApiFeeSourceGrant, inspectApiFeeSourceReadiness } from "../lib/strata/apiFeeHumanApprovals";
 import {signStandingFeeModel,consentStandingFeeDelegation,
- revokeStandingFeeDelegation,revokeStandingFeeModel}
+ revokeStandingFeeDelegation,revokeStandingFeeModel,inspectStandingFeeReadiness}
  from "../lib/strata/apiFeeStandingDelegation";
 import { inspectOperatorFeeCandidate } from "../lib/strata/operatorFeeCandidateRead";
 import { inspectCommissioningFeeEvidence } from "../lib/strata/commissioningFeeEvidenceDiagnostic";
@@ -668,6 +668,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.status(result.ok?200:403).json(sanitizePublic(result));
   });
   // Versioned, independently reviewed standing monetary model, NOT quote/order approval.
+  router.get("/fees/standing/readiness",async(_req,res)=>{
+   const owner=subject(res);
+   if(!owner)return void res.status(401).json({error:"Unauthorized"});
+   res.setHeader("Cache-Control","private, no-store");
+   const out=await inspectStandingFeeReadiness(owner);
+   res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
   router.post("/fees/standing-model/review",async(req,res)=>{
    const actor=subject(res);
    if(!actor)return void res.status(401).json({error:"Unauthorized"});
