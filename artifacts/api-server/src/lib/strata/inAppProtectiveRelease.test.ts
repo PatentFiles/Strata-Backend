@@ -347,6 +347,10 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
       if(sql.includes("FROM private.strata_owner_sha_approvals")){
         return {rows:[{approval_id:RID}]};
       }
+      // No reviewed technical release accompanies this valid owner consent.
+      if(sql.includes("FROM private.strata_protective_release_reviews v")){
+        return {rows:[]};
+      }
       if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
         technicalSql=sql;
         return {rows:[]};
