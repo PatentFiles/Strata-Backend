@@ -4,6 +4,7 @@ import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitS
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
+import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
@@ -26,7 +27,7 @@ const time=(n:number)=>new Date(n).toISOString();
 const accountSQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.commissioned,a.execution_enabled,
  a.kill_switch,a.cash_precision_verified,a.minimum_exit_micros,a.cash_micros::text AS cash_micros,
- a.blocked_reason,a.revision,
+ a.blocked_reason,a.revision,a.reconciled_at,
  a.key_fingerprint,a.policy_id,a.commissioning_digest,a.fee_artifact_digest,
  a.kalshi_connection_id, p.state AS policy_state,p.fee_source_url,p.fee_policy_version,
  p.fee_formula_version,p.approved_at,p.max_entry_stake_cents,p.max_entry_all_in_cents,
@@ -122,6 +123,17 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
   }catch{ownerMode=false;}
   const global=await db.query("SELECT live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
   const account=owner.ok?owner.account:null;
+   const approvedSource=account?String(account.fee_source_url??""):"";
+   const feeSourceMode=account
+    ? parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2" :
+      approvedSource==="https://kalshi.com/docs/kalshi-fee-schedule.pdf"
+       ? "LEGACY_PDF_V1" : "UNRECOGNIZED"
+    : "UNAVAILABLE";
+   const observedCash=account?.reconciled_at==null?NaN:
+     Date.parse(String(account.reconciled_at));
+   const observedNow=(deps.now??Date.now)();
+   const cashReconciliationStale=!Number.isFinite(observedCash)||
+     observedCash>observedNow+10_000||observedNow-observedCash>15*60_000;
   return {ok:true,reason:owner.ok?"status_verified":owner.reason,sha,ownerId,
    qualificationId:qualification.rows[0]?.qualification_id??null,
    qualificationExpiresAt:qualification.rows[0]?.expires_at??null,
@@ -136,6 +148,13 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
     releaseActive:active.rows.length===1&&(!ownerMode||ownerApproved),
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
+    // Read-only evidence: approved policy does not prove live fee eligibility.
+    feeSourceMode,
+    legacyPdfSnapshotExpired:feeSourceMode==="LEGACY_PDF_V1"
+      ?!officialFeeSnapshotLeaseValid(observedNow):false,
+    cashReconciliationStale,
+    cashReconciledAt:account?.reconciled_at??null,
+    approvedStakeCents:account?Number(account.configured_stake_cents):null,
    provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
    accountExecutionEnabled:account?truth(account.execution_enabled):false,
    globalExecutionEnabled:truth(global.rows[0]?.live_execution_enabled),
