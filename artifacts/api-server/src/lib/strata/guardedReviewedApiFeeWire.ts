@@ -31,6 +31,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    AND a.subaccount=1 AND a.exchange_index=2
    AND a.commissioned=true AND a.execution_enabled=true
    AND a.kill_switch=false AND a.cash_precision_verified=true
+   AND a.blocked_reason IS NULL
    AND a.key_fingerprint=$3
    AND p.policy_hash=$4 AND p.state='APPROVED'
    AND p.fee_source_url=$5
@@ -43,6 +44,25 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    AND lease.state='owned' AND lease.account_kill=false
    AND lease.fencing_token=$6::bigint AND lease.holder_id=$7
    AND lease.heartbeat_at>now()-interval '30 seconds'
+   -- An entry/increase needs BOTH independently reviewed executable EXIT code
+   -- and this account owner's separately authenticated exact-SHA release.
+   -- Neither the checkbox nor any client-provided reduce_only flag grants it.
+   AND (NOT $8::boolean OR (
+      EXISTS (
+        SELECT 1 FROM private.strata_owner_sha_approvals oa
+        WHERE oa.owner_user_id=a.owner_user_id
+          AND oa.execution_account_id=a.id
+          AND oa.release_commit_sha=$9 AND oa.revoked_at IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM private.strata_protective_exit_release x
+        WHERE x.release_commit_sha=$9 AND x.state='approved'
+          AND x.revoked_at IS NULL AND x.created_at<=now()
+          AND x.expires_at>now()+interval '20 minutes'
+          AND x.independent_reviewer_id<>a.owner_user_id
+          AND x.operator_approver_id<>x.independent_reviewer_id
+      )
+   ))
  FOR SHARE OF a,p,live,c,lease
 `;
 export function createGuardedReviewedApiFeeFetch(
@@ -106,9 +126,16 @@ export function createGuardedReviewedApiFeeFetch(
   if(typeof ticker!=="string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(ticker) ||
      order.subaccount!==1 || order.exchange_index!==2)
     throw new Error("api_fee_order_scope_invalid");
-  // Entry/increase remains closed until independently validated exit procedure
-  // and real exchange reconciliation evidence is approved. No browser override.
-  if(order.reduce_only!==true)
+  // A new entry is possible ONLY when exact deployed SHA, signed protective
+  // EXIT capability, owner SHA authorization, and fresh Kalshi/readiness
+  // evidence are independently present. This is not a browser bypass.
+  if (order.reduce_only!==true && order.reduce_only!==false)
+    throw new Error("api_fee_reduce_only_indicator_invalid");
+  const isEntry=order.reduce_only===false;
+  const deployedSha=process.env.RAILWAY_GIT_COMMIT_SHA;
+  if(isEntry && (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true" ||
+     process.env.NODE_ENV!=="production" ||
+     !/^[a-f0-9]{40}$/.test(deployedSha??"")))
     throw new Error("api_fee_source_new_entry_blocked_pending_exit_validation");
   if(order.time_in_force!=="immediate_or_cancel"||
      order.self_trade_prevention_type!=="taker_at_cross"||
@@ -120,7 +147,7 @@ export function createGuardedReviewedApiFeeFetch(
      Number(order.count)<=0 ||
      typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price) ||
      Number(order.price)<=0)
-    throw new Error("api_fee_exit_order_shape_unverified");
+    throw new Error("api_fee_order_shape_unverified");
   const client=await(deps.connect?.()??pool.connect());
   let committed=false;
   try{
@@ -129,10 +156,13 @@ export function createGuardedReviewedApiFeeFetch(
    await client.query("SET LOCAL statement_timeout='15000ms'");
    const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
-    expectedFencingToken,expectedLeaseHolderId,
+    expectedFencingToken,expectedLeaseHolderId,isEntry,
+    isEntry?deployedSha:null,
    ]);
    if(finalAccount.rows.length!==1)
-    throw new Error("api_fee_final_account_signer_or_kill_closed");
+    throw new Error(isEntry?
+     "api_fee_final_entry_exit_release_owner_or_account_closed":
+     "api_fee_final_account_signer_or_kill_closed");
    // A signed reviewed-API fee source is itself the independently reviewed
    // monetary model for this market. Requiring a separate PDF fetch here
    // makes the approved PDF-free alternative impossible during HTTP 429.
