@@ -1,4 +1,4 @@
-import { V13_MAX_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
+import { V13_MAX_ENTRY_STAKE_CENTS, V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {
   scaleSharedRiskPreset, type SharedPreset, type ScaledPolicyLimits,
 } from "./sharedPresets";
@@ -36,7 +36,7 @@ export function resolveStrictPresetStake(
   const result=scaleSharedRiskPreset(preset,selection.capitalBudgetCents);
   if(!result.ok)return {ok:false,reason:result.reason};
   const stake=result.limits.maxEntryStakeCents;
-  if (stake<150 || stake>V13_MAX_ENTRY_STAKE_CENTS) {
+  if (stake<V13_MIN_ENTRY_STAKE_CENTS || stake>V13_MAX_ENTRY_STAKE_CENTS) {
     return {ok:false,reason:"selected_preset_stake_outside_live_range"};
   }
   if (!Number.isSafeInteger(requestedStakeCents) ||
