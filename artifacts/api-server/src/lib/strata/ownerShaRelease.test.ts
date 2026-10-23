@@ -192,7 +192,7 @@ test("legacy-enabled commissioned owner can repair only the stale marker and app
       orders:[],fills:[],positions:[],settlements:[],
     })) as never});
  assert.equal(result.ok,true,JSON.stringify(result));
- assert.equal(result.approvalId,QID);
+ assert.equal("approvalId" in result ? result.approvalId : null,QID);
  assert.equal(result.ordersSubmitted,false);
  assert.equal(calls.includes("COMMIT"),true);
  const repairAt=calls.findIndex(s=>s.includes("SET blocked_reason=NULL"));
