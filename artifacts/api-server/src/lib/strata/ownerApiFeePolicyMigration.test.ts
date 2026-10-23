@@ -95,3 +95,30 @@ test("eligible owner receives read-only exact policy identity for subsequent exp
  assert.match(sqls[0]!,/p\.policy_hash,p\.version/);
  assert.doesNotMatch(sqls[0]!,/UPDATE|INSERT|DELETE/i);
 });
+
+test("legacy commissioning sentinel needs a SECOND exact owner confirmation and never silently clears",async()=>{
+ const statements:string[]=[];
+ const db={connect:async()=>({query:async(sql:string)=>{
+  statements.push(sql);
+  if(sql.includes("FROM public.v13_production_account"))return {rows:[{
+   id:POLICY,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
+   execution_enabled:false,kill_switch:true,policy_id:POLICY,
+   blocked_reason:"awaiting_account_commissioning",cash_micros:"25000000",
+   reserved_micros:"0",reconciled_at:new Date().toISOString()
+  }]};
+  return {rows:[]};
+ },release(){}})};
+ const verify=async()=>({
+  ok:true,reason:"reviewed_api_fee_source_stage_current",
+  identity:{grantId:"33333333-3333-4333-8333-333333333333",
+   sourceUrl:"strata-api-reviewed://kxbtc15m/33333333-3333-4333-8333-333333333333",
+   digest:HASH,feePolicyVersion:"strata_api_fee_source_signed_review_v2",
+   formulaVersion:"standard_quadratic_v1",marketTicker:"KXBTC15M-26OCT222015",
+   verifiedAtMs:Date.now()}
+ }) as never;
+ const r=await migrateOwnedApiFeePolicy(OWNER,request,{db,verify});
+ assert.equal(r.ok,false);
+ assert.equal(r.reason,"explicit_owner_commissioning_repair_confirmation_required");
+ assert.ok(statements.includes("ROLLBACK"));
+ assert.equal(statements.some(sql=>/UPDATE public\.v13_(live_money_policy|production_account)/.test(sql)),false);
+});
