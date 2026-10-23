@@ -148,7 +148,7 @@ export async function consentStandingFeeDelegation(
  * One SQL UPDATE atomically rechecks owner consent, reviewer role, grant
  * revocations, policy hash and deployed SHA on every snapshot / ORDER ENTRY.
  */
-const CONTINUE_SQL = [
+export const CONTINUE_SQL = [
  "UPDATE private.strata_api_fee_standing_delegations d",
  "SET lease_expires_at=LEAST(d.valid_until,now()+interval '15 minutes')",
  "FROM private.strata_api_fee_standing_models m,",
