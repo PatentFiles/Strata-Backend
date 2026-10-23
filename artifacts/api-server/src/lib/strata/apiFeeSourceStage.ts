@@ -88,7 +88,7 @@ export const READ_API_FEE_STAGE_SQL=`
 export async function verifyReviewedApiFeeSourceStage(
   ownerUserId:string, stage:ApiFeeStage, expectedSourceUrl?:string,
   exactOrderMarket?:string,
-  deps:{db?:Db; probe?:typeof probeCurrentKalshiFeeApi;now?:()=>number}={},
+  deps:{db?:Db; probe?:typeof probeCurrentKalshiFeeApi;now?:()=>number;sha?:()=>string}={},
 ):Promise<VerifiedApiSourceStage> {
  if(!UUID_RE.test(ownerUserId) || !["STEP_9","STEP_11","ORDER_ENTRY"].includes(stage))
    return no("api_fee_owner_or_stage_invalid");
@@ -121,7 +121,7 @@ export async function verifyReviewedApiFeeSourceStage(
   if(records.length!==0||!parsed||stage==="STEP_9")
     return no("api_fee_independent_reviews_missing_or_ambiguous");
   const renewed=await renewStandingFeeObservationLease(
-    ownerUserId,parsed.grantId,stage,{db:deps.db as never});
+    ownerUserId,parsed.grantId,stage,{db:deps.db as never,sha:deps.sha});
   if(!renewed.ok)return no(renewed.reason);
   return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
     grantId:parsed.grantId,sourceUrl:expectedSourceUrl!,
