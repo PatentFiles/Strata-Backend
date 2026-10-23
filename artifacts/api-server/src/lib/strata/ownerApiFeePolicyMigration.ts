@@ -5,7 +5,7 @@ import {digest as auditDigest} from "../v13-production/types";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 import {readOwnedKalshiFeeds} from "./personalExchangeRead";
-import {loadedMaterial} from "./inAppProtectiveRelease";
+import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
 
 /** Owner AAL2 route only. Never switches a live/armed account or fabricates fee provenance. */
 export const OWNER_API_FEE_MIGRATION_CONFIRM="I_APPROVE_MIGRATING_MY_ACCOUNT_TO_REVIEWED_API_FEES_V2";
@@ -17,7 +17,7 @@ type Db={connect():Promise<Q&{release():void}>};
 type Failure={ok:false;reason:string;policyMigrated:false;tradingAuthorized:false};
 const fail=(reason:string):Failure=>({ok:false,reason,policyMigrated:false,tradingAuthorized:false});
 type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;
- expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;newPolicyId?:string;newVersion?:number};
+ expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;requiresCommissioningRepair?:boolean;newPolicyId?:string;newVersion?:number};
 type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof readOwnedKalshiFeeds;now?:()=>number};
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
@@ -52,7 +52,8 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
    return fail("fresh_cash_reconciliation_required");
   return {ok:true,reason:"owner_fee_migration_preview_only",policyMigrated:false,tradingAuthorized:false,
    expectedPolicyId:txt(a.policy_id),expectedPolicyHash:txt(a.policy_hash),
-   expectedPolicyVersion:Number(a.version)};
+   expectedPolicyVersion:Number(a.version),
+    requiresCommissioningRepair:a.blocked_reason==='awaiting_account_commissioning'};
  }catch{return fail("fee_migration_preview_unavailable");}
  finally{tx?.release();}
 }
@@ -81,6 +82,11 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
   if(a.execution_enabled!==false||a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!=null&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
+  const repairing=a.blocked_reason==="awaiting_account_commissioning";
+  if(repairing&&b.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
+   return fail("explicit_owner_commissioning_repair_confirmation_required");
+  if(!repairing&&b.provisionalRepairConfirmation!==undefined)
+   return fail("commissioning_repair_confirmation_not_applicable");
   if(!UUID.test(id)||txt(a.policy_id)!==b.expectedPolicyId)return fail("policy_concurrency_conflict");
   const reconciled=safeTime(a.reconciled_at),now=(deps.now??Date.now)();
   if(!Number.isFinite(reconciled)||reconciled>now+10_000||now-reconciled>15*60_000)
@@ -168,10 +174,13 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
     accountId:id,fingerprint:txt(a.key_fingerprint),fee:fresh.identity.digest,policyId
   })).digest("hex");
   const linked=await tx.query(`UPDATE public.v13_production_account
-    SET policy_id=$1,fee_artifact_digest=$2,commissioning_digest=$3,revision=revision+1
+    SET policy_id=$1,fee_artifact_digest=$2,commissioning_digest=$3,revision=revision+1,
+      blocked_reason=CASE WHEN blocked_reason='awaiting_account_commissioning'
+        AND $7::boolean THEN NULL ELSE blocked_reason END
     WHERE id=$4 AND owner_user_id=$5::uuid AND policy_id=$6
       AND execution_enabled=false AND kill_switch=true AND commissioned=true
-    RETURNING id`,[policyId,fresh.identity.digest,commissioningDigest,id,ownerId,old.id]);
+      AND (blocked_reason IS NULL OR ($7::boolean AND blocked_reason='awaiting_account_commissioning'))
+    RETURNING id`,[policyId,fresh.identity.digest,commissioningDigest,id,ownerId,old.id,repairing]);
   if(linked.rows.length!==1)return fail("account_policy_switch_conflict");
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
@@ -179,7 +188,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
   const event={accountId:id,ownerId,oldPolicyId:old.id,newPolicyId:policyId,
    oldPolicyHash:old.policyHash,newPolicyHash:next.policyHash,feeDigest:fresh.identity.digest,
    grantId:fresh.identity.grantId,reason:"owner_authorized_pdf_to_reviewed_api_source",
-   staleActivationRequiresFreshRequest:true};
+   staleActivationRequiresFreshRequest:true,staleCommissioningFreezeRepaired:repairing};
   await tx.query(`INSERT INTO public.v13_production_observation
      (id,account_id,kind,payload,digest)
      VALUES($1,$2,'OWNER_API_FEE_POLICY_MIGRATION',$3::jsonb,$4)`,
