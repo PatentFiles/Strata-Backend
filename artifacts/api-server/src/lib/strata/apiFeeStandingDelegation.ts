@@ -60,6 +60,10 @@ export async function signStandingFeeModel(
  try{
  return await tx(deps.db??pool,async c=>{
   if(!await admin(c,reviewerId))return deny("technical_admin_required");
+  // Serialize concurrent real human attestations for this deployment/model.
+  // A stale model is not automatically extended by this transaction.
+  await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",
+   [release+":"+PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
   const conflicts=await c.query("SELECT model_id FROM private.strata_api_fee_standing_models WHERE release_commit_sha=$1 AND rate_decision_digest=$2 AND revoked_at IS NULL AND valid_until>now() LIMIT 1",[release,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
   if(conflicts.rows.length)return deny("active_signed_standing_fee_model_already_exists");
   const id=randomUUID();
