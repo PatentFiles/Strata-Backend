@@ -33,6 +33,7 @@ const accountSQL=`
  stake.configured_stake_cents
  FROM public.v13_production_account a
  LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+  AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
  LEFT JOIN public.strata_configured_stake stake ON stake.execution_account_id=a.id
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 LIMIT 2`;
 export async function readReleaseOwner(db:Query,ownerId:string):Promise<{ok:true;account:DbRow}|{ok:false;reason:string}>{
@@ -105,8 +106,11 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
   const active=await db.query(`
  SELECT release_id::text,expires_at FROM private.strata_protective_exit_release
- WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL AND expires_at>now()
- LIMIT 2`,[sha]);
+ WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL
+ AND expires_at>now()+interval '20 minutes'
+ AND independent_reviewer_id<>$2::uuid
+ AND operator_approver_id<>independent_reviewer_id
+ LIMIT 2`,[sha,ownerId]);
   // New owner SHA releases are account-specific and durable until revoked.
   // Missing staged schema retains the legacy status without granting authority.
   let ownerMode=false,ownerApproved=false,ownerApprovalId:null|string=null;
@@ -126,7 +130,9 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    reviewed:review.rows.length===1,
    releaseMode:ownerMode?'OWNER_SHA_V1':'LEGACY_TWO_HOUR',
    codeApprovalActive:ownerApproved,codeApprovalId:ownerApprovalId,
-   releaseActive:ownerApproved||active.rows.length===1,
+   // Owner SHA consent alone must never report an active protective release.
+    // START independently requires both approvals at the exact deployed SHA.
+    releaseActive:active.rows.length===1,
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
    provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
