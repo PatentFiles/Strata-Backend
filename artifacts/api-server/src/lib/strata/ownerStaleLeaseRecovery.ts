@@ -99,7 +99,11 @@ export async function recoverOwnerStaleLease(
    if (records.rows.length!==1) return fail("owner_lease_not_unique_or_missing");
    account=records.rows[0]!;
    const id=val(account.id);
-   if (deps.isScheduled?.(ownerId,id)) return fail("worker_still_running");
+   // A missing local registry is an UNKNOWN live worker, not evidence that the
+   // worker is stopped. The HTTP route injects the real process supervisor.
+   if (typeof deps.isScheduled !== "function")
+     return fail("worker_registry_unavailable");
+   if (deps.isScheduled(ownerId,id)) return fail("worker_still_running");
    const intents = await db.query(
      "SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[id]);
    for (const row of intents.rows) {
