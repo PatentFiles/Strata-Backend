@@ -116,6 +116,12 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
  const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:txt(pre.key_fingerprint)};
  const mapped=personalAccountSnapshot(identity,feeds,requests);
  if(!("identity" in mapped))return fail(mapped.reason);
+ // Each persisted production intent must be represented in the complete
+ // signed provider order history. An unseen, UNKNOWN or silently omitted
+ // locally-recorded order cannot be treated as a closed account.
+ const localIds=requests.map(r=>r.clientOrderId);
+ if(new Set(localIds).size!==localIds.length||mapped.orders.length!==requests.length)
+   return fail("exchange_and_ledger_history_incomplete");
  // Reconciled completed orders, fills and settlements are historical assets,
  // not open exposure. Do not require an untouched account to migrate its fee
  // model; reject unmatched history and any resting order or open position.
