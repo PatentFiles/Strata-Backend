@@ -1,4 +1,5 @@
 import { Router, type IRouter, type RequestHandler } from "express";
+import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strata/ownerApiFeePolicyMigration";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
@@ -844,6 +845,22 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     const result = await port.approvedPolicyFeeEvidence(userId);
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // AAL2 JWT subject only; no account id or owner id accepted from a client.
+  router.get("/fees/api-policy-migration/preview",async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await previewOwnedApiFeeMigration(owner);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/fees/api-policy-migration/confirm",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const result=await migrateOwnedApiFeePolicy(owner,req.body??{});
+    res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.post("/policy/approve", async (req, res) => {
     const userId = subject(res);
