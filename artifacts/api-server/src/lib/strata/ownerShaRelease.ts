@@ -49,6 +49,42 @@ export async function authorizeOwnerShaRelease(
  if(!UUID.test(ownerId)||!SHA.test(sha)||args.qualificationId==null||
     !UUID.test(String(args.qualificationId))||args.confirmation!==OWNER_SHA_RELEASE_CONFIRM)
    return reject("owner_identity_sha_qualification_or_confirmation_invalid");
+ // Preflight the owner and, if necessary, obtain signed exchange evidence
+ // BEFORE opening the 12-second write transaction. The old implementation
+ // performed multiple paginated Kalshi GETs while holding FOR UPDATE,
+ // causing lock starvation and transaction timeouts on Step 12.
+ let preflight:null|{accountId:string;policyId:string;fingerprint:string;
+   cashMicros:string;revision:string;observedAtMs:number}=null;
+ try{
+  const visible=await readReleaseOwner(db,ownerId);
+  if(!visible.ok)return reject(visible.reason);
+  const a=visible.account;
+  const repair=a.blocked_reason==="awaiting_account_commissioning";
+  const alreadyEnabled=isTrue(a.execution_enabled)&&!isTrue(a.kill_switch);
+  if(repair&&args.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
+    return reject("explicit_owner_commissioning_repair_confirmation_required");
+  if(!repair&&args.provisionalRepairConfirmation!==undefined)
+    return reject("commissioning_repair_confirmation_not_applicable");
+  if(repair||alreadyEnabled){
+    const material=await loadedMaterial(db,a);
+    if(!material)return reject("account_restricted_signer_unavailable");
+    const observedAtMs=(deps.now??Date.now)();
+    const feeds=await (deps.readFeeds??readOwnedKalshiFeeds)(material,observedAtMs);
+    if(!feeds.ok||feeds.observedAtMs!==observedAtMs||
+       (deps.now??Date.now)()-observedAtMs>15_000||
+       String(feeds.cashMicros)!==String(a.cash_micros)||
+       feeds.orders.length!==0||feeds.fills.length!==0||feeds.settlements.length!==0)
+      return reject("fresh_exchange_zero_exposure_unverified");
+    const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
+    const snapshot=personalAccountSnapshot(identity,feeds,[]);
+    if(!("identity" in snapshot)||snapshot.orders.length||snapshot.fills.length||
+       snapshot.positions.length||snapshot.settlements.length)
+      return reject("owner_release_snapshot_mismatch");
+    preflight={accountId:String(a.id),policyId:String(a.policy_id),
+      fingerprint:String(a.key_fingerprint),cashMicros:String(a.cash_micros),
+      revision:String(a.revision),observedAtMs};
+  }
+ }catch{return reject("owner_release_preflight_unavailable");}
  let tx:Client|null=null,done=false;
  try{
   tx=await db.connect();
@@ -61,7 +97,7 @@ export async function authorizeOwnerShaRelease(
   const accountId=String(a.id);
   const account=await tx.query(`SELECT id,owner_user_id,commissioned,execution_enabled,kill_switch,
     blocked_reason,cash_precision_verified,cash_micros::text,reserved_micros::text,
-    reconciled_at,minimum_exit_micros,key_fingerprint
+    reconciled_at,minimum_exit_micros,key_fingerprint,revision
     FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid
     FOR UPDATE`,[accountId,ownerId]);
   if(account.rows.length!==1)return reject("owned_execution_account_unavailable");
@@ -117,20 +153,16 @@ export async function authorizeOwnerShaRelease(
     const c=counts.rows[0]!;
     if(counts.rows.length!==1||["intents","events","positions","reservations","running_leases"].some(k=>Number(c[k])!==0))
       return reject("owner_release_requires_zero_financial_history_or_worker_lease");
-    const material=await loadedMaterial(tx,a);
-    if(!material)return reject("account_restricted_signer_unavailable");
-    const now=(deps.now??Date.now)();
-    const feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,now);
-    if(!feeds.ok||feeds.observedAtMs!==now||Date.now()-now>15_000||
-      String(feeds.cashMicros)!==String(current.cash_micros)||
-      feeds.orders.length!==0||feeds.fills.length!==0||
-      feeds.settlements.length!==0)
-      return reject("fresh_exchange_zero_exposure_unverified");
-    const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
-    const snapshot=personalAccountSnapshot(identity,feeds,[]);
-    if(!("identity" in snapshot)||snapshot.orders.length||snapshot.fills.length||
-      snapshot.positions.length||snapshot.settlements.length)
-      return reject("owner_release_snapshot_mismatch");
+    // Revalidate the external snapshot against the locked account and
+    // current revocable evidence. No external I/O is permitted inside BEGIN.
+    if(!preflight||preflight.accountId!==accountId||
+       preflight.policyId!==String(a.policy_id)||
+       preflight.fingerprint!==String(current.key_fingerprint)||
+       preflight.cashMicros!==String(current.cash_micros)||
+       preflight.revision!==String(current.revision)||
+       (deps.now??Date.now)()-preflight.observedAtMs>15_000)
+      return reject("fresh_exchange_preflight_stale_or_account_changed");
+    const now=preflight.observedAtMs;
      if(repairing){
      const repaired=await tx.query(`UPDATE public.v13_production_account
       SET blocked_reason=NULL,revision=revision+1
