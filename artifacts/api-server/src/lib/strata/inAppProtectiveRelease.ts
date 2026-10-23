@@ -130,9 +130,10 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    reviewed:review.rows.length===1,
    releaseMode:ownerMode?'OWNER_SHA_V1':'LEGACY_TWO_HOUR',
    codeApprovalActive:ownerApproved,codeApprovalId:ownerApprovalId,
-   // Owner SHA consent alone must never report an active protective release.
-    // START independently requires both approvals at the exact deployed SHA.
-    releaseActive:active.rows.length===1,
+   // Owner-only approval is not sufficient: the frontend releaseActive signal
+    // must require BOTH owner exact-SHA consent and independent technical exit
+    // release, matching START. Legacy mode retains its technical release gate.
+    releaseActive:active.rows.length===1&&(!ownerMode||ownerApproved),
    releaseExpiresAt:active.rows[0]?.expires_at??null,
    accountReady:owner.ok,
    provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
