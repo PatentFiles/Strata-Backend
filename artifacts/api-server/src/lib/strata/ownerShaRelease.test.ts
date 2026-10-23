@@ -101,3 +101,47 @@ test("global kill stays privileged even after owner AAL2 approval; transaction r
  assert.equal(sqls.some(s=>s.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
  assert.equal(sqls.some(s=>s.includes("UPDATE public.live_execution_config")),false);
 });
+
+/**
+ * Regression for real pre-owner-SHA accounts: commission + execution_enabled
+ * may both be true while no SHA-bound owner approval exists. The release is
+ * permitted only through fresh, independently verifiable ZERO-exposure proof,
+ * never by inheriting the old execution flag or requesting another login.
+ */
+test("legacy-enabled Step 12 refuses a running lease without writing an approval",async()=>{
+ const sqls:string[]=[];
+ const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
+   sqls.push(sql);
+   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
+   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
+     return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:true,
+       kill_switch:false,cash_precision_verified:true,minimum_exit_micros:10000,
+       cash_micros:"25000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
+       policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
+       configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500}]};
+   if(sql.includes("FROM public.v13_production_observation o"))
+     return {rows:[{digest:evidence}]};
+   if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))
+     return {rows:[{id:ACCOUNT,commissioned:true,cash_precision_verified:true,
+       execution_enabled:true,kill_switch:false,blocked_reason:null,
+       cash_micros:"25000000",reserved_micros:"0"}]};
+   if(sql.includes("FROM public.live_execution_config"))
+     return {rows:[{mode:"V13_PRODUCTION",live_execution_enabled:true,manual_kill_switch:false}]};
+   if(sql.includes("FROM private.strata_protective_release_qualification"))
+     return {rows:[{qualification_id:QID,evidence_digest:feeDigest}]};
+   if(sql.includes("WITH unresolved_intents"))
+     return {rows:[{n:"0"}]};
+   if(sql.includes("FROM public.v13_production_intent WHERE account_id=")&&
+      sql.includes("running_leases"))
+     return {rows:[{intents:0,events:0,positions:0,reservations:0,running_leases:1}]};
+   throw Error("unexpected query: "+sql.slice(0,70));
+ };
+ const db={query,connect:async()=>({query,release(){}})};
+ const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA});
+ assert.equal(result.ok,false,JSON.stringify(result));
+ assert.equal(result.reason,"owner_release_requires_zero_financial_history_or_worker_lease");
+ assert.equal(sqls.some(s=>s.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
+ assert.equal(sqls.some(s=>s.includes("UPDATE public.v13_production_account")),false);
+ assert.equal(sqls.includes("COMMIT"),false);
+ assert.ok(sqls.includes("ROLLBACK"));
+});
