@@ -32,7 +32,7 @@ function mock(row:Record<string,unknown>|null=account,prior=false){
 }
 const args={confirmation:OWNER_V3_FEE_CONFIRM};
 const run=(db:ReturnType<typeof mock>["db"],check=async()=>proof)=>
- recordOwnerV3FeeEvidence(OWNER,args,{db,check,sha:()=>SHA,now:()=>1792778400000});
+ recordOwnerV3FeeEvidence(OWNER,args,{db,check,sha:()=>SHA,now:()=>1792778400000,enabled:()=>true});
 test("owner-only actual-source consent produces a NO-TRADE immutable receipt",async()=>{
  const {db,sqls}=mock();const result=await run(db);
  assert.equal(result.ok,true);
@@ -67,6 +67,16 @@ test("stale or invalid official fee evidence never writes an owner receipt",asyn
  const {db,sqls}=mock();
  const v=await run(db,async()=>{throw Error("HTTP 429")});
  assert.equal(v.reason,"official_fee_source_unavailable");assert.equal(sqls.length,0);
+});
+test("unfinished V3 consent deployment stays off by default without even reading Kalshi",async()=>{
+ let called=false;
+ const out=await recordOwnerV3FeeEvidence(OWNER,args,{
+   sha:()=>SHA,db:{connect:async()=>{called=true;throw Error("unexpected")}},
+   check:async()=>{called=true;return proof},enabled:()=>false,
+ });
+ assert.equal(out.reason,"owner_fee_v3_feature_disabled");
+ assert.equal(out.tradingAuthorized,false);
+ assert.equal(called,false);
 });
 test("owner must be stopped, disarmed, flat worker, and cash-precision verified",async()=>{
  for(const row of [
