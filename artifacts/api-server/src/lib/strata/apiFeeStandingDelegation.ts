@@ -18,7 +18,6 @@ const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
 const OFFICIAL=/^https:\/\/(?:help\.)?kalshi\.com\/(?:docs\/|en\/articles\/|regulatory\/)[A-Za-z0-9.\/_-]+$/;
-const MAX_MODEL_MS=30*24*60*60_000;
 type Row=Record<string,unknown>;
 type Client={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>;release():void};
 type Db={query:Client["query"];connect():Promise<Client>};
@@ -106,7 +105,7 @@ export async function consentStandingFeeDelegation(
     "AND g.grant_id=$2::uuid AND g.revoked_at IS NULL",
     "AND g.expires_at>now()+interval '60 seconds' AND g.policy_version=$3",
     "AND g.rate_decision_digest=$4 AND g.scope='KXBTC15M:INDEX2'",
-    "FOR UPDATE OF a LIMIT 2"
+    "LIMIT 2 FOR UPDATE OF a"
   ].join(" "),[ownerId,b.grantId,API_POLICY_SIGNED_REVIEW_V1,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
   if(locked.rows.length!==1||!DIGEST.test(text(locked.rows[0]?.policy_hash)))
    return deny("approved_owned_policy_or_fresh_grant_required");
@@ -120,7 +119,7 @@ export async function consentStandingFeeDelegation(
     "AND m.release_commit_sha=$3 AND m.rate_decision_digest=$4",
     "AND m.fee_model_version=$5 AND m.scope='KXBTC15M:INDEX2'",
     "AND m.revoked_at IS NULL AND m.valid_until>now()+interval '1 day'",
-    "FOR SHARE OF m LIMIT 2"
+    "LIMIT 2 FOR SHARE OF m"
   ].join(" "),[b.modelId,ownerId,release,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION]);
   if(model.rows.length!==1)return deny("independent_standing_fee_model_missing_or_expired");
   const fresh=await c.query([
