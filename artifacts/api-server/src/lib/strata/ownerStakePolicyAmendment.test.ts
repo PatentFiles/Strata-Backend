@@ -91,17 +91,15 @@ test("stake beyond $25,000 is rejected before any DB side effect",async()=>{
  assert.equal(h.sqls.length,0);
 });
 
-test("explicitly chosen standard preset atomically derives matching $25 capital, 6% stake and policy ceilings",async()=>{
+test("historical $1.50 standard preset cannot be newly saved below the owner's $5 live minimum",async()=>{
  const h=mock("25000000");
  const preset=STANDARD_PROPORTIONAL_PRESET;
  const chosen={presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500};
- const ok=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,150,1,
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,150,1,
    OWNER_STAKE_POLICY_CONFIRM,chosen);
- assert.equal(ok.ok,true,JSON.stringify(ok));
- assert.ok(h.sqls.some(s=>s.includes("risk_preset_id,risk_preset_revision,risk_capital_cents")));
- assert.ok(h.sqls.some(s=>s.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
- assert.ok(h.sqls.some(s=>s.includes("INSERT INTO public.v13_production_observation")));
- assert.ok(h.sqls.includes("COMMIT"));
+ assert.equal(result.ok,false);
+ assert.equal(result.reason,"stake_outside_permitted_range");
+ assert.equal(h.sqls.length,0);
 });
 
 test("a spoofed stale preset amount is rejected before risk-policy mutation",async()=>{

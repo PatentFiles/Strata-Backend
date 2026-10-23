@@ -148,7 +148,7 @@ export const UPSERT_STAKE_SQL = `
   WHERE a.id = $2
     AND a.owner_user_id = $4::uuid
     AND a.owner_user_id IS NOT NULL
-    AND $1::int BETWEEN 150 AND 2500000
+    AND $1::int BETWEEN 500 AND 2500000
     AND a.cash_micros >= a.reserved_micros + ($1::bigint * 10000)
     AND a.reconciled_at IS NOT NULL
     AND ($3::int IS NULL OR EXISTS (
@@ -717,7 +717,7 @@ export function createDatabaseUserScopePort(
       // to spend more than the bot subaccount can cover. The SQL write repeats
       // the balance check so stale browser state cannot authorize an over-stake.
       if (!Number.isSafeInteger(cents) || cents < MIN_OWNER_STAKE_CENTS) {
-        return refused(userId, "stake_below_minimum_150_cents", scoped);
+        return refused(userId, "stake_below_minimum_500_cents", scoped);
       }
       if (cents > 2_500_000) return refused(userId, "above_hard_stake_ceiling", scoped);
       if (scoped.capitalRemainingCents === null) return refused(userId, "available_cash_unverified", scoped);

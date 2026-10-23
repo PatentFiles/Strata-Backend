@@ -17,7 +17,7 @@ assert.ok(url && /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$
 const USER = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const ACCOUNT = "acct-personal";
-const STAKES = [150, 500, 25_000, 100_000, 500_000, 2_500_000];
+const STAKES = [500, 1000, 25_000, 100_000, 500_000, 2_500_000];
 
 after(() => pool.end());
 
@@ -98,9 +98,9 @@ test("owner readiness resolves its account with a UUID owner and text policy cre
 
 test("owned stake revisions persist, and a stale revision cannot overwrite", async () => {
   await reset();
-  await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, null, USER]);
+  await pool.query(UPSERT_STAKE_SQL, [500, ACCOUNT, null, USER]);
   const first = await pool.query("SELECT configured_stake_cents, revision FROM strata_configured_stake WHERE execution_account_id=$1", [ACCOUNT]);
-  assert.equal(Number(first.rows[0].configured_stake_cents), 150);
+  assert.equal(Number(first.rows[0].configured_stake_cents), 500);
   assert.equal(Number(first.rows[0].revision), 1);
   let revision = 1;
   for (const cents of STAKES.slice(1)) {
@@ -109,26 +109,26 @@ test("owned stake revisions persist, and a stale revision cannot overwrite", asy
     revision = Number(saved.rows[0].revision);
     assert.equal(revision > 1, true);
   }
-  const stale = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, 1, USER]);
+  const stale = await pool.query(UPSERT_STAKE_SQL, [500, ACCOUNT, 1, USER]);
   assert.equal(stale.rows.length, 0);
   const current = await pool.query("SELECT configured_stake_cents FROM strata_configured_stake WHERE execution_account_id=$1", [ACCOUNT]);
   assert.equal(Number(current.rows[0].configured_stake_cents), 2_500_000);
   const legacy = await pool.query("SELECT configured_stake_cents FROM strata_configured_stake WHERE id='production'");
   assert.equal(Number(legacy.rows[0].configured_stake_cents), 25);
-  const other = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, revision, OTHER]);
+  const other = await pool.query(UPSERT_STAKE_SQL, [500, ACCOUNT, revision, OTHER]);
   assert.equal(other.rows.length, 0);
 });
 
 test("concurrent stake updates keep the first revision winner", async () => {
   await reset();
-  const initial = await pool.query(UPSERT_STAKE_SQL, [150, ACCOUNT, null, USER]);
+  const initial = await pool.query(UPSERT_STAKE_SQL, [500, ACCOUNT, null, USER]);
   assert.equal(initial.rows.length,1,"baseline stake must exist before concurrency test");
   const first = await pool.connect();
   const second = await pool.connect();
   try {
     await first.query("BEGIN");
     await second.query("BEGIN");
-    const winner = first.query(UPSERT_STAKE_SQL, [500, ACCOUNT, 1, USER]);
+    const winner = first.query(UPSERT_STAKE_SQL, [1000, ACCOUNT, 1, USER]);
     await winner;
     const loser = second.query(UPSERT_STAKE_SQL, [25_000, ACCOUNT, 1, USER]);
     await first.query("COMMIT");
@@ -140,7 +140,7 @@ test("concurrent stake updates keep the first revision winner", async () => {
     second.release();
   }
   const row = await pool.query("SELECT configured_stake_cents, revision FROM strata_configured_stake WHERE execution_account_id=$1", [ACCOUNT]);
-  assert.equal(Number(row.rows[0].configured_stake_cents), 500);
+  assert.equal(Number(row.rows[0].configured_stake_cents), 1000);
   assert.equal(Number(row.rows[0].revision), 2);
 });
 
