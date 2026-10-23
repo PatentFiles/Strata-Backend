@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
  signStandingFeeModel,consentStandingFeeDelegation,
  renewStandingFeeObservationLease,revokeStandingFeeDelegation,
- STANDING_MODEL_CONFIRM,STANDING_OWNER_CONFIRM
+ inspectStandingFeeReadiness,STANDING_MODEL_CONFIRM,STANDING_OWNER_CONFIRM
 } from "./apiFeeStandingDelegation";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -71,4 +71,38 @@ test("issue154: no owner can revoke another owner's delegation without own JWT i
  },{db:noWrites as never});
  assert.equal(result.ok,false);
  assert.equal(result.tradingAuthorized,false);
+});
+
+test("issue154: owner status is read-only, exact-SHA-scoped and never an order authorization",async()=>{
+ let reads=0;
+ const db={query:async(sql:string)=>{
+  reads++;
+  if(sql.includes("FROM private.strata_api_fee_standing_models m"))
+   return {rows:[{model_id:MODEL,valid_until:"2026-11-20T00:00:00Z"}]};
+  if(sql.includes("FROM private.strata_api_fee_standing_delegations d"))
+   return {rows:[{delegation_id:GRANT,grant_id:GRANT,valid_until:"2026-11-19T00:00:00Z",
+    lease_expires_at:"2026-10-23T15:40:00Z"}]};
+  throw Error("unexpected read");
+ }};
+ const current=await inspectStandingFeeReadiness(OWNER,{db:db as never,sha:()=>SHA});
+ assert.equal(current.ok,true);
+ assert.equal(current.modelId,MODEL);
+ assert.equal(current.delegationId,GRANT);
+ assert.equal(current.tradingAuthorized,false);
+ assert.equal(reads,2);
+ const missing=await inspectStandingFeeReadiness("invalid",{db:db as never,sha:()=>SHA});
+ assert.equal(missing.ok,false);
+ assert.equal(reads,2);
+});
+test("issue154: missing, ambiguous or unreadable technical model cannot be treated as approved",async()=>{
+ for(const rows of [
+  [] as Record<string,unknown>[],
+  [{model_id:MODEL},{model_id:GRANT}]
+ ]){
+  const q=await inspectStandingFeeReadiness(OWNER,{
+   db:{query:async()=>({rows})} as never,sha:()=>SHA});
+  assert.equal(q.tradingAuthorized,false);
+  assert.equal(q.delegationId,null);
+  if(rows.length>1)assert.equal(q.ok,false);
+ }
 });
