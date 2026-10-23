@@ -109,3 +109,34 @@ test("no database and no reviewed grant cannot create fee approval",async()=>{
   undefined,{...d,db:{query:async()=>{throw Error("not connected");}}});
  assert.equal(v.ok,false);
 });
+
+test("issue154: after 15min/2h bootstrap expiration fresh provider metadata renews ONLY standing observation lease",async()=>{
+ let calls=0,atomic="";
+ const db={query:async(sql:string,params?:unknown[])=>{
+  calls++;
+  if(sql.includes("SELECT g.grant_id"))return {rows:[]};
+  if(sql.startsWith("UPDATE private.strata_api_fee_standing_delegations")){
+   atomic=sql;
+   assert.deepEqual(params?.slice(0,4),[owner,gid,"a".repeat(40),"ORDER_ENTRY"]);
+   return {rows:[{delegation_id:"77777777-7777-4777-8777-777777777777",
+    valid_until:new Date(now+30*86400000).toISOString()}]};
+  }
+  throw Error("unexpected SQL");
+ }};
+ const v=await verifyReviewedApiFeeSourceStage(owner,"ORDER_ENTRY",sourceUrl,ticker,
+  {...deps(),db,sha:()=>"a".repeat(40)});
+ assert.equal(v.ok,true);
+ assert.equal(calls,2);
+ assert.match(atomic,/reviewed_role\.role='ADMIN'/);
+ assert.match(atomic,/d\.revoked_at IS NULL/);
+});
+test("issue154: Kalshi 429 or changed event model never renews standing DB lease",async()=>{
+ let queries=0;
+ const db={query:async()=>{queries++;return {rows:[]};}};
+ const unavailable=await verifyReviewedApiFeeSourceStage(owner,"ORDER_ENTRY",sourceUrl,ticker,{
+  ...deps(),sha:()=>"a".repeat(40),db,
+  probe:async()=>({ok:false,reason:"fee_api_http_429"} as never),
+ });
+ assert.equal(unavailable.ok,false);
+ assert.equal(queries,0);
+});
