@@ -88,7 +88,7 @@ export async function recordOwnerV3FeeEvidence(
        owner_confirmation,expires_at)
      VALUES($1,$2::uuid,$3,$4,$5,$6,'STEP_9',
        'official_kalshi_server_verified_v3',$7,now()+interval '2 hours')
-     RETURNING attestation_id::text,expires_at
+     RETURNING attestation_id::text,expires_at::text AS expires_at
    `,[id,ownerId,row.id,sha,fee.sourceDigest,fee.marketTicker,OWNER_V3_FEE_CONFIRM]);
    if(inserted.rows.length!==1)return denied("owner_fee_v3_evidence_not_recorded");
    await tx.query("COMMIT");
