@@ -148,7 +148,7 @@ export const UPSERT_STAKE_SQL = `
   WHERE a.id = $2
     AND a.owner_user_id = $4::uuid
     AND a.owner_user_id IS NOT NULL
-    AND $1::int BETWEEN 150 AND 2500000
+    AND $1::int BETWEEN 500 AND 2500000
     AND a.cash_micros >= a.reserved_micros + ($1::bigint * 10000)
     AND a.reconciled_at IS NOT NULL
     AND ($3::int IS NULL OR EXISTS (
