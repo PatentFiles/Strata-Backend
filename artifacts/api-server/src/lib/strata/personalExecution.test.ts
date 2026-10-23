@@ -15,7 +15,7 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
-import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow } from "./personalExecutionSupervisor";
+import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow, verifiedStartCash } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
   readOwnedApprovedFeeEvidence,
@@ -429,6 +429,37 @@ function order(): Request {
     timeInForce: "IOC", reduceOnly: false, clientOrderId: `v13p-${USER}`,
   };
 }
+
+test("production START requires exact fresh cash parity regardless of historical settled orders",()=>{
+  const base={
+    ledgerMicros:"25000000",
+    exchangeMicros:"25000000",
+    reservedMicros:"0",
+    reconciledAt:new Date(NOW).toISOString(),
+    observedAtMs:NOW,
+  };
+  assert.deepEqual(verifiedStartCash(base),{ok:true});
+  // A former order and settled fill never exempt a cash mismatch. This
+  // predicate intentionally does not depend on the order-history length.
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"24900000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reservedMicros:"26000000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW-16*60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:null}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW+60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"oops"}),{
+    ok:false,reason:"cash_evidence_unverified",
+  });
+});
 
 test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
   const queries: string[] = [];
