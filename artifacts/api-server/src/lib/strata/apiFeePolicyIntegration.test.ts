@@ -55,7 +55,11 @@ test("worker rechecks reviewed source for every exact-market read and every fina
  assert.match(fence,/FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL/);
  assert.match(fence,/live\.manual_kill_switch=false/);
  assert.match(fence,/c\.revoked_at IS NULL/);
- assert.match(fence,/if\(order\.reduce_only!==true\)/);
+ assert.match(fence,/order\\.reduce_only!==true && order\\.reduce_only!==false/);
+ assert.match(fence,/api_fee_source_new_entry_blocked_pending_exit_validation/);
+ assert.match(fence,/private\\.strata_owner_sha_approvals/);
+ assert.match(fence,/private\\.strata_protective_exit_release/);
+ assert.match(fence,/a\\.blocked_reason IS NULL/);
  assert.match(fence,/verifyReviewedApiFeeSourceStage/);
  assert.match(fence,/client\.query\("BEGIN"\)/);
  assert.match(fence,/await transport\(request,init\)/);
@@ -89,6 +93,10 @@ test("signed API fee model is rechecked at Step 9, Step 11 and the final order f
  assert.match(fence,/checked\.identity\.feePolicyVersion/);
  assert.match(fence,/checked\.identity\.formulaVersion/);
  assert.match(fence,/checked\.identity\.digest/);
- assert.match(fence,/if\(order\.reduce_only!==true\)/);
+ assert.match(fence,/order\\.reduce_only!==true && order\\.reduce_only!==false/);
+ assert.match(fence,/api_fee_source_new_entry_blocked_pending_exit_validation/);
+ assert.match(fence,/private\\.strata_owner_sha_approvals/);
+ assert.match(fence,/private\\.strata_protective_exit_release/);
+ assert.match(fence,/a\\.blocked_reason IS NULL/);
  assert.match(fence,/live\.manual_kill_switch=false/);
 });
