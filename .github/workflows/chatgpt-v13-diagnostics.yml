@@ -274,6 +274,15 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/ownedMarketFeeMetadata.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedMarketFeeMetadata.test.cjs
           node --test dist/ownedMarketFeeMetadata.test.cjs
+      - name: Test exact-SHA owner authorization and legacy-enabled Step 12 regression
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerShaRelease.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerShaRelease.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
+            --external:pino --external:pino-pretty
+          node --test dist/ownerShaRelease.test.cjs
       - name: Test V13 production and micro-live safety suites
         working-directory: artifacts/api-server
         run: pnpm run test:v13-safety-all
