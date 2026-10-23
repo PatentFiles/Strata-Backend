@@ -112,7 +112,7 @@ export async function authorizeOwnerShaRelease(
      (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
      (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1) reservations,
      (SELECT count(*)::int FROM private.kalshi_account_worker_lease
-       WHERE execution_account_id=(SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1) reservations AND state='owned'
+       WHERE execution_account_id=$1 AND state='owned'
          AND heartbeat_at>now()-interval '30 seconds') running_leases`,[accountId]);
     const c=counts.rows[0]!;
     if(counts.rows.length!==1||["intents","events","positions","reservations","running_leases"].some(k=>Number(c[k])!==0))
