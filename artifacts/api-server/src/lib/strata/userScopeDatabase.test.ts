@@ -465,7 +465,7 @@ test("stake initializes once, rejects an unsafe revision, and control never repo
   assert.equal(ceiling.ok, false);
   assert.equal(ceiling.reason, "above_hard_stake_ceiling");
   running = 1;
-  const blocked = await port.stake(USER_A, 250, row.stake_revision);
+  const blocked = await port.stake(USER_A, 500, row.stake_revision);
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, "worker_running");
   const started = await port.control(USER_A, "START");
