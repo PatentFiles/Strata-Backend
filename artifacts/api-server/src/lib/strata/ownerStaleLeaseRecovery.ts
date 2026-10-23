@@ -61,7 +61,7 @@ const ACCOUNT = [
  "WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 LIMIT 2"
 ].join(" ");
 const LOCK_ACCOUNT = [
- "SELECT id,revision,cash_micros::text,key_fingerprint FROM public.v13_production_account",
+ "SELECT id,revision,cash_micros::text,key_fingerprint,blocked_reason,execution_enabled,kill_switch FROM public.v13_production_account",
  "WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE"
 ].join(" ");
 const LOCK_LEASE = [
@@ -92,6 +92,7 @@ export async function recoverOwnerStaleLease(
  const db = deps.db ?? pool, now = deps.now ?? Date.now;
  const signedGet = deps.readFeeds ?? readOwnedKalshiFeeds;
  let account: Row, beforeReadAt = 0, signedCash = "";
+ let material:{keyId:string;privateKey:string}|null=null;
  const requests: Request[] = [];
  try {
    const records = await db.query(ACCOUNT,[ownerId]);
@@ -106,13 +107,13 @@ export async function recoverOwnerStaleLease(
      if (!req || typeof req!=="object") return fail("intent_history_unreadable");
      requests.push(req as Request);
    }
-   const creds=await loadedMaterial(db as never,{
+   material=await loadedMaterial(db as never,{
      id, owner_id:ownerId, kalshi_connection_id:account.kalshi_connection_id,
      key_fingerprint:account.key_fingerprint
    });
-   if (!creds) return fail("restricted_signer_not_available");
+   if (!material) return fail("restricted_signer_not_available");
    beforeReadAt=now();
-   const feed=await signedGet(creds,beforeReadAt);
+   const feed=await signedGet(material,beforeReadAt);
    if (!feed.ok || feed.observedAtMs!==beforeReadAt) return fail("signed_kalshi_read_unavailable");
    const identity: Identity={subaccount:1,exchangeIndex:2,keyFingerprint:val(account.key_fingerprint)};
    const snapshot=personalAccountSnapshot(identity,feed,requests);
@@ -150,6 +151,9 @@ export async function recoverOwnerStaleLease(
      val(a.rows[0]?.revision)!==val(account.revision) ||
      val(a.rows[0]?.cash_micros)!==val(account.cash_micros) ||
      val(a.rows[0]?.key_fingerprint)!==val(account.key_fingerprint) ||
+     val(a.rows[0]?.blocked_reason)!==val(account.blocked_reason) ||
+     a.rows[0]?.execution_enabled!==account.execution_enabled ||
+     a.rows[0]?.kill_switch!==account.kill_switch ||
      val(l.rows[0]?.fencing_token)!==val(account.fencing_token) ||
      val(l.rows[0]?.holder_id)!==val(account.holder_id) ||
      timestamp(l.rows[0]?.heartbeat_at)!==timestamp(account.heartbeat_at) ||
@@ -169,8 +173,26 @@ export async function recoverOwnerStaleLease(
    committed=true;
  } catch {return fail("stale_lease_transaction_failed");}
  finally {if(client){if(!committed)try{await client.query("ROLLBACK");}catch{}client.release();}}
- // Does not claim a fresh post-recovery exchange attestation; the account
- // remains blocked until a NEW owner qualification and reconciliation succeed.
- return {ok:true as const,reason:"stale_lease_released_new_signed_qualification_required",
+ // A second signed read proves post-fence absence of open exchange exposure.
+ // If this fails, the lease is already safely fenced/released, but do NOT
+ // certify recovery or allow an automatic restart. Risk freeze is unchanged.
+ try {
+   if (!material) return fail("post_recovery_signer_unavailable");
+   const finishedAt=now(),post=await signedGet(material,finishedAt);
+   if(!post.ok||post.observedAtMs!==finishedAt||now()-finishedAt>15000||
+      post.cashMicros!==signedCash)
+     return fail("post_recovery_signed_exchange_unverified");
+   const identity:Identity={subaccount:1,exchangeIndex:2,
+     keyFingerprint:val(account.key_fingerprint)};
+   const snapshot=personalAccountSnapshot(identity,post,requests);
+   if(!("identity" in snapshot)||snapshot.positions.length!==0||
+      snapshot.orders.some(o=>!o.terminal))
+     return fail("post_recovery_signed_exchange_exposure");
+   await db.query(
+     "INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES($1,$2,'OWNER_STALE_LEASE_POST_RECOVERY_PROOF',$3::jsonb,$4)",
+     [randomUUID(),id,JSON.stringify({ownerId,id,finishedAt,cash:signedCash}),
+      hash({ownerId,id,finishedAt,cash:signedCash})]);
+ }catch{return fail("post_recovery_proof_unavailable");}
+ return {ok:true as const,reason:"stale_lease_fenced_disarmed_post_proof_verified",
   ordersSubmitted:false as const,workerStarted:false as const,riskFreezeCleared:false as const};
 }
