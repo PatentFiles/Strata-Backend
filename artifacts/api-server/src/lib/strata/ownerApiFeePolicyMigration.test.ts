@@ -163,6 +163,8 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
   policy_hash:old.policyHash,created_by:old.createdBy,approved_by:old.approvedBy,
   approved_at:old.approvedAt,
  };
+ const market="KXBTC15M-26OCT220000";
+ const historicalRequest={market,side:"YES",action:"BUY",contracts:1,limitMicros:400000,timeInForce:"IOC",reduceOnly:false,clientOrderId:"historical-reconciled-1"} as const;
  const statements:{sql:string;params?:unknown[]}[]=[];
  const query=async(sql:string,params?:unknown[])=>{
   statements.push({sql,params});
@@ -179,7 +181,7 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
   if(sql.includes("FROM private.kalshi_connection_credentials"))return {rows:[{
    decrypted_secret:JSON.stringify({api_key_id:"test-only-id",private_key:"fake-test-only"}),
   }]};
-  if(sql.includes("SELECT request FROM public.v13_production_intent"))return {rows:[]};
+  if(sql.includes("SELECT request FROM public.v13_production_intent"))return {rows:[{request:historicalRequest}]};
   if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[row]};
   if(sql.includes("FROM private.strata_api_fee_source_grants g"))return {rows:[{grant_id:"33333333-3333-4333-8333-333333333333"}]};
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
@@ -192,7 +194,15 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
  };
  const db={connect:async()=>({query,release(){}})};
  const read=async(_creds:unknown,t:number)=>({ok:true,observedAtMs:t,cashMicros:"25000000",
-  orders:[],fills:[],positions:[],settlements:[]}) as never;
+  orders:[{client_order_id:historicalRequest.clientOrderId,order_id:"historical-order-1",
+   status:"executed",ticker:market,book_side:"bid",yes_price_dollars:"0.400000",
+   initial_count_fp:"1.00",fill_count_fp:"1.00"}],
+  fills:[{order_id:"historical-order-1",trade_id:"historical-fill-1",ticker:market,
+   count_fp:"1.00",yes_price_dollars:"0.400000",fee_cost:"0.010000",
+   created_time:"2026-10-20T01:00:00Z"}],
+  positions:[],
+  settlements:[{ticker:market,yes_count_fp:"1.00",no_count_fp:"0.00",
+   market_result:"yes",settled_time:"2026-10-20T01:15:00Z",revenue_dollars:"1.000000"}]}) as never;
  const verify=async()=>({ok:true,identity:{
   grantId:"33333333-3333-4333-8333-333333333333",
   sourceUrl:"strata-api-reviewed://kxbtc15m/33333333-3333-4333-8333-333333333333",
@@ -208,6 +218,8 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
  if(!res.ok)return;
  assert.equal(res.tradingAuthorized,false);
  assert.equal(res.newVersion,2);
+ assert.ok(statements.some(x=>x.sql.includes("SELECT request FROM public.v13_production_intent")));
+ assert.equal(statements.some(x=>/DELETE FROM public\.v13_production_(intent|position|observation)/.test(x.sql)),false);
  assert.ok(statements.some(x=>x.sql==="COMMIT"));
  const create=statements.find(x=>x.sql.includes("INSERT INTO public.v13_live_money_policy"));
  assert.ok(create);
