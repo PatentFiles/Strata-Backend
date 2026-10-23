@@ -588,6 +588,9 @@ test("START reports running only after the session schedules a worker, and produ
     ...account(USER_A, "acct-a", true, "25000000"),
     kill_switch: false,
     execution_enabled: true,
+    // The actual lease ARM flag, not eligibility, controls reported armed.
+    worker_arm_requested: true,
+    worker_lease_state: "released",
     reconciled_at: "2026-10-13T00:00:00.000Z",
     configured_stake_cents: 100,
     stake_revision: 4,
