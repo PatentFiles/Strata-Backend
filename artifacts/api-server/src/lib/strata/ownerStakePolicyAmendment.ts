@@ -86,10 +86,27 @@ export async function amendOwnedStakePolicy(
     if (a.commissioned !== true || a.cash_precision_verified !== true || asText(a.policy_id).length===0) {
       return reject("account_not_commissioned");
     }
-    // Risk-preset revision requires the worker stopped AND account disarmed.
-    // Owner cannot change a live armed risk envelope between START checks.
-    if(presetSelection && a.execution_enabled === true && a.kill_switch === false)
-      return reject("disarm_account_before_risk_preset_change");
+    // execution_enabled is a durable *eligibility* permission, not an ARM
+    // request. DISARM only clears the account-worker's arm_requested flag.
+    // A disarmed account must be able to amend its risk policy without a
+    // privileged operator toggling its durable eligibility or kill switch.
+    // Lock this lease with the account row: never allow policy mutation while
+    // a worker owns a lease (even if its heartbeat is stale), while an ARM
+    // request is active, or when lease safety state is unknown.
+    if(presetSelection){
+      const lease=await tx.query(`SELECT state,arm_requested,account_kill
+        FROM private.kalshi_account_worker_lease
+        WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,
+        [accountId,ownerId]);
+      if(lease.rows.length>1)return reject("worker_lease_not_unique");
+      if(lease.rows.length===1){
+        const l=lease.rows[0]!;
+        if(l.arm_requested!==false)return reject("disarm_account_before_risk_preset_change");
+        if(l.state==="owned")return reject("worker_lease_recovery_required");
+        if(l.state!=="released"||l.account_kill===true)
+          return reject("worker_lease_state_not_editable");
+      }
+    }
     const cash = int(a.cash_micros), reserved = int(a.reserved_micros);
     if (cash===null || reserved===null || reserved>cash ||
         !a.reconciled_at || Date.now() - new Date(String(a.reconciled_at)).getTime() > 15*60_000) {

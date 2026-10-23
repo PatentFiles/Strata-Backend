@@ -40,7 +40,7 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock(availableMicros="5000000") {
+function mock(availableMicros="5000000",leaseState:"released"|"owned"="released",armRequested=false) {
  const sqls:string[]=[];
  const query=async(sql:string)=> {
   sqls.push(sql);
@@ -49,7 +49,9 @@ function mock(availableMicros="5000000") {
    return {rows:[{id:ACCOUNT,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
     policy_id:old.id,cash_micros:availableMicros,reserved_micros:"0",
     reconciled_at:new Date().toISOString(),fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
-    minimum_exit_micros:10000}]};
+    minimum_exit_micros:10000,execution_enabled:true,kill_switch:false}]};
+  if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
+    return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:false}]};
   if(sql.includes("SELECT\n      (SELECT count(*)::int FROM public.v13_production_position"))
    return {rows:[{positions:0,unresolved:0,running:0}]};
   if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:[{revision:1}]};
@@ -147,4 +149,33 @@ test("preset-less attempts to raise $1.50 approval to $5 fail even with owner co
  assert.deepEqual(result,{ok:false,reason:"named_risk_preset_required_for_increase"});
  assert.ok(!h.sqls.some(x=>x.includes("UPDATE public.v13_live_money_policy")));
  assert.ok(!h.sqls.some(x=>x.includes("UPDATE private.strata_owner_sha_approvals")));
+});
+
+test("real DISARM permits a $5 policy save even when execution eligibility remains enabled",async()=>{
+ const h=mock("25000000","released",false);
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+   OWNER_STAKE_POLICY_CONFIRM,
+   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.ok(h.sqls.some(s=>s.includes("FROM private.kalshi_account_worker_lease")&&s.includes("FOR UPDATE")));
+ assert.ok(h.sqls.includes("COMMIT"));
+});
+
+test("disarmed but stale OWNED lease cannot silently allow a $5 policy change",async()=>{
+ const h=mock("25000000","owned",false),p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+   OWNER_STAKE_POLICY_CONFIRM,
+   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:false,reason:"worker_lease_recovery_required"});
+ assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
+ assert.equal(h.sqls.includes("COMMIT"),false);
+});
+test("live requested ARM still refuses owner risk-policy changes",async()=>{
+ const h=mock("25000000","released",true),p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+   OWNER_STAKE_POLICY_CONFIRM,
+   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:false,reason:"disarm_account_before_risk_preset_change"});
+ assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
 });
