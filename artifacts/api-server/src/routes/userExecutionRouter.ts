@@ -2,6 +2,7 @@ import { Router, type IRouter, type RequestHandler } from "express";
 import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strata/ownerApiFeePolicyMigration";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
+import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
@@ -658,6 +659,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await inspectRuntimeDbIdentity(actor);
     res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  // #165 phase 1: verified owner-only official fee evidence candidate, strictly
+  // read-only. This endpoint never grants V3 authority or approves live entries.
+  router.get("/fees/single-owner/evidence-preview", async (_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await inspectSingleOwnerFeePreflight(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   router.get("/fees/api-source-readiness", async (req,res)=>{
     const viewer=subject(res);
