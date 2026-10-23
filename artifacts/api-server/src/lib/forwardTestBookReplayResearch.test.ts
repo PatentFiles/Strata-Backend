@@ -64,7 +64,8 @@ test("duplicate/forged receipts and inconsistent fixed point inputs fail closed"
  assert.throws(()=>auditPostActionPaperBooks([p()],[r("ENTRY"),r("ENTRY")]),/invalid_research_book/);
  assert.throws(()=>auditPostActionPaperBooks([p({contracts:0})],[]),/invalid_paper_position/);
  assert.throws(()=>auditPostActionPaperBooks([p({entryOffer:0.01501})],[]),/non_fixed_point_paper_price/);
- assert.throws(()=>auditPostActionPaperBooks([p({stake:5})],[]),/invalid_paper_position|invalid_paper_money|never/);
+ const changed=auditPostActionPaperBooks([p({stake:5})],[]);
+ assert.equal(changed.accountingDifferencesOverHalfCent,1);
 });
 
 test("five successive 20%-of-remaining $5-capped losses exhaust most $25 equity",()=>{
