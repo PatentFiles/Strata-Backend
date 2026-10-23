@@ -80,7 +80,7 @@ export function verifiedStartCash(input: {
   reconciledAt: unknown;
   observedAtMs: number;
 }): {ok:true}|{ok:false;reason:string}{
-  const money=/^\\d+$/;
+  const money=/^\d+$/;
   const ledger=typeof input.ledgerMicros==="string"?input.ledgerMicros:"";
   const exchange=typeof input.exchangeMicros==="string"?input.exchangeMicros:"";
   const reserved=typeof input.reservedMicros==="string"?input.reservedMicros:"";
