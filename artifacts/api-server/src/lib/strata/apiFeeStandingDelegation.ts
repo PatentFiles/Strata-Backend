@@ -51,7 +51,7 @@ export async function signStandingFeeModel(
  if(!UUID.test(reviewerId)||!SHA.test(release)||b.confirmation!==STANDING_MODEL_CONFIRM||
     b.rateDecisionDigest!==PDF_FREE_API_RATE_REVIEW_DECISION_SHA256||
     !OFFICIAL.test(text(b.evidenceUrl))||!DIGEST.test(text(b.evidenceSha256))||
-    typeof b.note!=="string"||b.note.trim().length<120||b.note.trim().length>1800)
+    typeof b.note!=="string"||String(b.note).trim().length<120||String(b.note).trim().length>1800)
    return deny("independent_official_model_review_evidence_required");
  let proof;
  try{proof=preparePdfFreeApiFeePolicyReview(await (deps.probe??probeCurrentKalshiFeeApi)());}
@@ -70,7 +70,7 @@ export async function signStandingFeeModel(
    "VALUES($1::uuid,$2::uuid,$3,$4,'KXBTC15M:INDEX2',$5,$6,$7,$8,now(),now()+interval '30 days')",
    "RETURNING model_id::text,valid_until"
   ].join(" "),[id,reviewerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
-    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,release,b.evidenceUrl,b.evidenceSha256,b.note.trim()]);
+    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,release,b.evidenceUrl,b.evidenceSha256,String(b.note).trim()]);
   return r.rows.length===1?{...deny("standing_model_signed_only"),ok:true as const,
    modelId:id,validUntil:r.rows[0]?.valid_until}:deny("model_review_not_saved");
  });
@@ -203,7 +203,7 @@ export async function revokeStandingFeeDelegation(
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  if(!UUID.test(ownerId)||!UUID.test(text(b.delegationId))||
     b.confirmation!=="REVOKE_MY_STANDING_FEE_DELEGATION"||
-    typeof b.reason!=="string"||b.reason.trim().length<8||b.reason.trim().length>250)
+    typeof b.reason!=="string"||String(b.reason).trim().length<8||String(b.reason).trim().length>250)
    return deny("explicit_owner_standing_revocation_required");
  try{
   return await tx(deps.db??pool,async c=>{
@@ -212,7 +212,7 @@ export async function revokeStandingFeeDelegation(
      "SET revoked_at=now(),revocation_reason=$3",
      "WHERE delegation_id=$1::uuid AND owner_user_id=$2::uuid",
      "AND revoked_at IS NULL RETURNING delegation_id::text"
-   ].join(" "),[b.delegationId,ownerId,b.reason.trim()]);
+   ].join(" "),[b.delegationId,ownerId,String(b.reason).trim()]);
    return r.rows.length===1?{...deny("standing_fee_delegation_revoked"),ok:true as const}:
     deny("standing_fee_delegation_not_active");
   });
@@ -225,7 +225,7 @@ export async function revokeStandingFeeModel(
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  if(!UUID.test(adminId)||!UUID.test(text(b.modelId))||
     b.confirmation!=="REVOKE_REVIEWED_STANDING_FEE_MODEL"||
-    typeof b.reason!=="string"||b.reason.trim().length<8||b.reason.trim().length>250)
+    typeof b.reason!=="string"||String(b.reason).trim().length<8||String(b.reason).trim().length>250)
    return deny("explicit_standing_fee_admin_revocation_required");
  try{
   return await tx(deps.db??pool,async c=>{
@@ -235,7 +235,7 @@ export async function revokeStandingFeeModel(
     "SET revoked_at=now(),revocation_reason=$3",
     "WHERE model_id=$1::uuid AND reviewer_admin_id=$2::uuid",
     "AND revoked_at IS NULL RETURNING model_id::text"
-   ].join(" "),[b.modelId,adminId,b.reason.trim()]);
+   ].join(" "),[b.modelId,adminId,String(b.reason).trim()]);
    return r.rows.length===1?{...deny("standing_fee_model_revoked"),ok:true as const}:
     deny("standing_model_not_active");
   });
