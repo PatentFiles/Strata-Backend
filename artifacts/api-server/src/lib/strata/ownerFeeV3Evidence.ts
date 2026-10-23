@@ -19,7 +19,7 @@ type Row=Record<string,unknown>;
 type Client={query:(sql:string,args?:unknown[])=>Promise<{rows:Row[]}>;release:()=>void};
 type Db={connect:()=>Promise<Client>};
 type FeeCheck=()=>Promise<MonetaryFeeEvidenceContract>;
-type Deps={db?:Db;check?:FeeCheck;sha?:()=>string;now?:()=>number};
+type Deps={db?:Db;check?:FeeCheck;sha?:()=>string;now?:()=>number;enabled?:()=>boolean};
 type Receipt={
   ok:boolean;reason:string;receiptId?:string;expiresAt?:string;
   evidenceRecorded:boolean;grantIssued:false;policyMigrated:false;
@@ -39,6 +39,8 @@ export async function recordOwnerV3FeeEvidence(
    return denied("explicit_authenticated_owner_v3_fee_consent_required");
  const sha=(deps.sha??deployedGitSha)().toLowerCase();
  if(!SHA.test(sha))return denied("exact_deployed_backend_sha_unavailable");
+ if(!(deps.enabled??(()=>process.env.STRATA_OWNER_FEE_V3_CONSENT_ENABLED==="true"))())
+   return denied("owner_fee_v3_feature_disabled");
  const start=(deps.now??Date.now)();
  if(!Number.isSafeInteger(start)||start<=0)return denied("owner_fee_v3_clock_invalid");
  let fee:MonetaryFeeEvidenceContract;
