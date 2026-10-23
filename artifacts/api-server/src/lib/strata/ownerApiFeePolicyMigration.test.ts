@@ -1,3 +1,4 @@
+import {readFileSync} from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {migrateOwnedApiFeePolicy,previewOwnedApiFeeMigration,OWNER_API_FEE_MIGRATION_CONFIRM,migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
@@ -102,6 +103,34 @@ test("eligible owner receives read-only exact policy identity for subsequent exp
  assert.doesNotMatch(sqls[0]!,/UPDATE|INSERT|DELETE/i);
 });
 
+test("owner preview permits killed and stopped account with durable eligibility still enabled",async()=>{
+ const queries:string[]=[];
+ const db={connect:async()=>({query:async(sql:string)=>{
+  queries.push(sql);
+  return {rows:[{id:"strata-account-test",policy_id:POLICY,policy_hash:HASH,
+   version:1,state:"APPROVED",commissioned:true,
+   fee_policy_version:"micro-live-standing-fee-policy-v1",
+   execution_enabled:true,kill_switch:true,
+   blocked_reason:"awaiting_account_commissioning",
+   cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
+ },release(){}})};
+ const result=await previewOwnedApiFeeMigration(OWNER,{db});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ if(!result.ok)return;
+ assert.equal(result.requiresCommissioningRepair,true);
+ assert.equal(result.tradingAuthorized,false);
+ assert.equal(queries.some(q=>/UPDATE|INSERT|DELETE/.test(q)),false);
+});
+test("owner fee migration rejects actual ARM worker state in final transactional exposure fence",()=>{
+ // Preview or durable eligibility must NEVER constitute ARM/START proof.
+ // A currently owned or arm-requested lease is explicitly part of the
+ // transaction's forbidden exposure COUNT and the policy swap remains
+ // conditioned on account kill_switch=true.
+ const source=readFileSync(new URL("./ownerApiFeePolicyMigration.ts",import.meta.url),"utf8");
+ assert.match(source,/arm_requested IS DISTINCT FROM FALSE/);
+ assert.match(source,/AND kill_switch=true AND commissioned=true/);
+ assert.doesNotMatch(source,/SET kill_switch=false/);
+});
 test("legacy commissioning sentinel needs a SECOND exact owner confirmation and never silently clears",async()=>{
  const statements:string[]=[];
  const db={connect:async()=>({query:async(sql:string)=>{
