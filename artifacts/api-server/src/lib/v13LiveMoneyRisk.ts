@@ -6,6 +6,8 @@ import {
 } from "@workspace/v13-strategy";
 
 export const V13_MAX_ENTRY_STAKE_CENTS = 2_500_000;
+/** Hard floor for NEW V13 entry orders; historical $1.50 policies remain auditable but cannot open exposure. */
+export const V13_MIN_ENTRY_STAKE_CENTS = 500;
 
 export type V13ApprovedLiveMoneyPolicy = {
   id: string;
@@ -197,6 +199,12 @@ export function evaluateV13LiveMoneyRisk(
   if (input.realizedDailyLossCents >= p.maxDailyLossCents ||
       input.realizedTotalLossCents >= p.maxTotalLossCents) {
     return { ok: false, reason: "live_money_loss_limit_reached" };
+  }
+
+  // This evaluator admits exposure-increasing entries only. Protective exits use
+  // their separate reduce-only path and must remain possible below this floor.
+  if (input.plannedGrossCents < V13_MIN_ENTRY_STAKE_CENTS) {
+    return { ok: false, reason: "live_money_entry_below_minimum_stake" };
   }
 
   const plannedAllInCents =
