@@ -86,10 +86,13 @@ const ACCOUNT_SQL = `
          a.minimum_exit_micros, a.reconciled_at,
          p.state AS policy_state, p.version AS policy_version, p.max_entry_stake_cents,
          s.configured_stake_cents, s.revision AS stake_revision,
-         s.risk_preset_id, s.risk_preset_revision, s.risk_capital_cents
+         s.risk_preset_id, s.risk_preset_revision, s.risk_capital_cents,
+         wl.state AS worker_lease_state, wl.arm_requested AS worker_arm_requested
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p ON p.id = a.policy_id
   LEFT JOIN strata_configured_stake s ON s.execution_account_id = a.id
+  LEFT JOIN private.kalshi_account_worker_lease wl ON wl.execution_account_id=a.id
+    AND wl.owner_user_id=a.owner_user_id
   WHERE a.owner_user_id = $1::uuid
 `;
 
@@ -276,6 +279,9 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
     exchangeIndex: integer(row.exchange_index) ?? BOT_EXCHANGE_INDEX,
     commissioned: flag(row.commissioned),
     executionEnabled: flag(row.execution_enabled),
+    workerArmRequested: row.worker_arm_requested===null||row.worker_arm_requested===undefined
+      ?null:flag(row.worker_arm_requested),
+    workerLeaseState: text(row.worker_lease_state),
     killSwitch: row.kill_switch === null || row.kill_switch === undefined ? true : flag(row.kill_switch),
     cashCents: cash,
     reservedCents: reserved,
@@ -328,7 +334,11 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
     policyApproved: account.policyApproved,
     policyVersion: account.policyVersion,
     workerRunning: account.workerRunning === true,
-    armed: account.executionEnabled === true && account.killSwitch === false,
+    // Actual lease ARM intent, not durable account execution permission.
+    armed: account.workerArmRequested===true && account.executionEnabled===true &&
+      account.killSwitch===false,
+    workerArmRequested:account.workerArmRequested??null,
+    workerLeaseState:account.workerLeaseState??null,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
     reconciledAt: account.reconciledAt,
