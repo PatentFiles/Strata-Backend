@@ -73,6 +73,10 @@ export async function authorizeOwnerShaRelease(
   // repaired by its AAL2 owner after an authenticated zero-exposure proof.
   // Require a *separate* owner confirmation; never silently clear a freeze.
   const repairing=current.blocked_reason==="awaiting_account_commissioning";
+   // Legacy accounts could already be enabled before exact-SHA approvals existed.
+   // Require authenticated zero-exposure and no active worker lease before
+   // honoring a first owner consent. Never grandfather live authority.
+   const legacyEnabled=isTrue(current.execution_enabled)&&!isTrue(current.kill_switch);
   if(repairing && args.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
     return reject("explicit_owner_commissioning_repair_confirmation_required");
   if(!repairing && args.provisionalRepairConfirmation!==undefined)
@@ -99,18 +103,20 @@ export async function authorizeOwnerShaRelease(
 
   if(current.blocked_reason!=null&&current.blocked_reason!=="awaiting_account_commissioning")
     return reject("account_frozen_for_independent_remediation");
-  if(current.blocked_reason==="awaiting_account_commissioning"){
-    // Repair only the known stale commissioning flag, never an arbitrary freeze.
-    // A completely empty exchange AND local financial ledger must be proved
-    // by a fresh signed GET within this transaction before the owner release.
+  if(repairing || legacyEnabled){
+     // A stale marker repair or adoption of a pre-enabled legacy account
+     // requires a fresh, fully empty authenticated exchange and local ledger.
     const counts=await tx.query(`SELECT
      (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1) intents,
      (SELECT count(*)::int FROM public.v13_production_event WHERE account_id=$1) events,
      (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
-     (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1) reservations`,[accountId]);
+     (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1) reservations,
+     (SELECT count(*)::int FROM private.kalshi_account_worker_lease
+       WHERE execution_account_id=$1 AND state='owned'
+         AND heartbeat_at>now()-interval '30 seconds') running_leases`,[accountId]);
     const c=counts.rows[0]!;
-    if(counts.rows.length!==1||["intents","events","positions","reservations"].some(k=>Number(c[k])!==0))
-      return reject("commissioning_repair_requires_zero_financial_history");
+    if(counts.rows.length!==1||["intents","events","positions","reservations","running_leases"].some(k=>Number(c[k])!==0))
+      return reject("owner_release_requires_zero_financial_history_or_worker_lease");
     const material=await loadedMaterial(tx,a);
     if(!material)return reject("account_restricted_signer_unavailable");
     const now=(deps.now??Date.now)();
@@ -124,8 +130,9 @@ export async function authorizeOwnerShaRelease(
     const snapshot=personalAccountSnapshot(identity,feeds,[]);
     if(!("identity" in snapshot)||snapshot.orders.length||snapshot.fills.length||
       snapshot.positions.length||snapshot.settlements.length)
-      return reject("commissioning_repair_snapshot_mismatch");
-    const repaired=await tx.query(`UPDATE public.v13_production_account
+      return reject("owner_release_snapshot_mismatch");
+     if(repairing){
+     const repaired=await tx.query(`UPDATE public.v13_production_account
       SET blocked_reason=NULL,revision=revision+1
       WHERE id=$1 AND owner_user_id=$2::uuid
       AND blocked_reason='awaiting_account_commissioning'
@@ -139,9 +146,9 @@ export async function authorizeOwnerShaRelease(
     await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
       VALUES($1,$2,'OWNER_COMMISSIONING_FREEZE_REPAIR',$3::jsonb,$4)`,
       [randomUUID(),accountId,JSON.stringify(audit),v13Digest(audit)]);
-  }
-
-  const existing=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals
+     }
+   }
+   const existing=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
     AND revoked_at IS NULL FOR UPDATE`,[ownerId,accountId,sha]);
   if(existing.rows.length>1)return reject("duplicate_owner_sha_approval");
@@ -161,8 +168,17 @@ export async function authorizeOwnerShaRelease(
         AND kill_switch=true AND commissioned=true AND blocked_reason IS NULL
       RETURNING id`,[accountId,ownerId]);
     if(enabled.rows.length!==1)return reject("owner_account_activation_fence_failed");
-  }
-  const record={ownerId,accountId,sha,approvalId,qualificationId:String(args.qualificationId)};
+   } else {
+     // The row is locked and must still reflect exactly the pre-enabled state.
+     // It gained no implicit authority from the historical execution flag.
+     if(!legacyEnabled)return reject("owner_account_activation_state_invalid");
+     const stillEnabled=await tx.query(`SELECT id FROM public.v13_production_account
+       WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
+         AND execution_enabled=true AND kill_switch=false
+         AND blocked_reason IS NULL AND reserved_micros=0`,[accountId,ownerId]);
+     if(stillEnabled.rows.length!==1)return reject("legacy_enabled_account_fence_failed");
+   }
+   const record={ownerId,accountId,sha,approvalId,qualificationId:String(args.qualificationId)};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
     VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION',$3::jsonb,$4)`,
     [randomUUID(),accountId,JSON.stringify(record),v13Digest(record)]);
