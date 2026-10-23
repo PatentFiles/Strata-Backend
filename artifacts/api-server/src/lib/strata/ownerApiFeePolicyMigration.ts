@@ -38,6 +38,21 @@ export function migrationFlatHistoryCheck(snapshot:Snapshot,requests:Request[]):
   return {ok:false,reason:"exchange_and_ledger_history_incomplete"};
  if(snapshot.positions.length!==0||snapshot.orders.some(o=>!o.terminal))
   return {ok:false,reason:"authenticated_exchange_not_flat"};
+ // A terminal order alone is NOT proof that all exchange fills were captured.
+ // Match every order's reported filled quantity against unique mapped trades;
+ // historical archived endpoints can be incomplete even if pagination finishes.
+ const orderIds=new Set(snapshot.orders.map(order=>order.orderId));
+ const totals=new Map<string,bigint>();
+ for(const fill of snapshot.fills){
+  if(!orderIds.has(fill.orderId)||!/^\d+$/.test(fill.quantityHundredths))
+   return {ok:false,reason:"authenticated_exchange_fills_unreconciled"};
+  totals.set(fill.orderId,(totals.get(fill.orderId)??0n)+BigInt(fill.quantityHundredths));
+ }
+ for(const order of snapshot.orders){
+  if(!/^\d+$/.test(order.filledHundredths)||
+     (totals.get(order.orderId)??0n)!==BigInt(order.filledHundredths))
+    return {ok:false,reason:"authenticated_exchange_fills_unreconciled"};
+ }
  return {ok:true};
 }
 /** GET preview has zero mutation and exposes only eligibility, never credentials. */
@@ -91,6 +106,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
  // credentials, policy ID, worker fence, cash and grant before any mutation.
  let tx:Awaited<ReturnType<Db["connect"]>>|null=null,done=false;
  let pre:Row={};let requests:Request[]=[];
+ let credentials:Awaited<ReturnType<typeof loadedMaterial>>=null;
  let feedStarted=0;
  let feeds:Awaited<ReturnType<typeof readOwnedKalshiFeeds>>={ok:false,reason:"unverified"};
  try {
@@ -110,8 +126,8 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
      if(pre.blocked_reason==="awaiting_account_commissioning"&&
         b.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
        return fail("explicit_owner_commissioning_repair_confirmation_required");
-     const material=await loadedMaterial(preTx as never,{...pre,owner_id:ownerId});
-     if(!material)return fail("restricted_signer_unavailable");
+     credentials=await loadedMaterial(preTx as never,{...pre,owner_id:ownerId});
+     if(!credentials)return fail("restricted_signer_unavailable");
      const intentRows=await preTx.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[pre.id]);
      requests=[];
      for(const row of intentRows.rows){
@@ -120,10 +136,14 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
          return fail("financial_intent_unreadable");
        requests.push(request as Request);
      }
-     feedStarted=(deps.now??Date.now)();
-     feeds=await (deps.read??readOwnedKalshiFeeds)(material,feedStarted);
    }finally{preTx.release();}
+   // Release the DB connection BEFORE awaiting any external Kalshi requests.
+   // Never monopolize pool capacity while an exchange call stalls or retries.
+   if(!credentials)return fail("restricted_signer_unavailable");
+   feedStarted=(deps.now??Date.now)();
+   feeds=await (deps.read??readOwnedKalshiFeeds)(credentials,feedStarted);
  }catch{return fail("authenticated_exchange_preflight_unavailable");}
+ finally{credentials=null;}
  if(!feeds.ok)return fail(feeds.reason);
  const feedAge=(deps.now??Date.now)()-feedStarted;
  if(feeds.observedAtMs!==feedStarted||feedAge<0||feedAge>45_000)
@@ -163,6 +183,15 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
    return fail("fresh_cash_reconciliation_required");
   const funds=BigInt(String(a.cash_micros)),reserved=BigInt(String(a.reserved_micros));
   if(funds<0n||reserved!==0n||String(feeds.cashMicros)!==String(a.cash_micros))return fail("cash_or_reservations_unverified");
+  // The account revision fences policy/cash changes. A separate re-read
+  // fingerprints the financial intent history so newly inserted terminal
+  // events cannot escape because they did not bump the account revision.
+  const lockedHistory=await tx.query(
+    "SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[id]);
+  const stableHistory=(rows:Row[])=>JSON.stringify(rows.map(row=>
+    typeof row.request==="string"?JSON.parse(row.request):row.request));
+  if(stableHistory(lockedHistory.rows)!==JSON.stringify(requests))
+    return fail("financial_history_changed_during_migration");
   const exposure=await tx.query(`SELECT
    (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
    (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
