@@ -340,10 +340,9 @@ test("release account lookup binds the policy to both execution account and owne
 
 test("owner SHA consent alone never reports a live technical protective-exit release",async()=>{
   const h=fakeDb();
-  const query=h.db.query.bind(h.db);
+  const query=(h.db as unknown as {query:(sql:string,params?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>}).query;
   let technicalSql="";
   const db={
-    ...h.db,
     query:async(sql:string,params?:unknown[])=>{
       if(sql.includes("FROM private.strata_owner_sha_approvals")){
         return {rows:[{approval_id:RID}]};
