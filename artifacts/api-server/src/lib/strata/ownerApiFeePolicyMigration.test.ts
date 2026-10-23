@@ -102,6 +102,25 @@ test("eligible owner receives read-only exact policy identity for subsequent exp
  assert.doesNotMatch(sqls[0]!,/UPDATE|INSERT|DELETE/i);
 });
 
+test("owner preview permits killed and stopped account with durable eligibility still enabled",async()=>{
+ const queries:string[]=[];
+ const db={connect:async()=>({query:async(sql:string)=>{
+  queries.push(sql);
+  return {rows:[{id:"strata-account-test",policy_id:POLICY,policy_hash:HASH,
+   version:1,state:"APPROVED",commissioned:true,
+   fee_policy_version:"micro-live-standing-fee-policy-v1",
+   execution_enabled:true,kill_switch:true,
+   blocked_reason:"awaiting_account_commissioning",
+   cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
+ },release(){}})};
+ const result=await previewOwnedApiFeeMigration(OWNER,{db});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ if(!result.ok)return;
+ assert.equal(result.requiresCommissioningRepair,true);
+ assert.equal(result.tradingAuthorized,false);
+ assert.equal(queries.some(q=>/UPDATE|INSERT|DELETE/.test(q)),false);
+});
+
 test("legacy commissioning sentinel needs a SECOND exact owner confirmation and never silently clears",async()=>{
  const statements:string[]=[];
  const db={connect:async()=>({query:async(sql:string)=>{

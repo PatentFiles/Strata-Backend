@@ -60,7 +60,8 @@ export async function recordOwnerV3FeeEvidence(
    // Lock the owner's account to serialize competing consent/migration attempts.
    const a=await tx.query(`
      SELECT a.id,a.execution_enabled,a.kill_switch,a.cash_precision_verified,
-            l.state AS lease_state
+            l.state AS lease_state,l.arm_requested AS lease_arm_requested,
+            l.account_kill AS lease_account_kill
      FROM public.v13_production_account a
      LEFT JOIN private.kalshi_account_worker_lease l
        ON l.execution_account_id=a.id AND l.owner_user_id=a.owner_user_id
@@ -69,9 +70,17 @@ export async function recordOwnerV3FeeEvidence(
    `,[ownerId]);
    if(a.rows.length!==1)return denied("owner_account_missing_or_ambiguous");
    const row=a.rows[0]!;
-   if(row.execution_enabled!==false||row.kill_switch!==true)
+   // Execution eligibility is NOT the same as a running worker. The
+   // stopped/killed account can record official evidence without enabling
+   // entries, but a live lease or ARM request cannot.
+   if(row.kill_switch!==true)
      return denied("stop_and_disarm_before_owner_fee_v3_consent");
    if(row.lease_state==="owned")return denied("signed_stale_worker_recovery_required");
+   if(row.lease_state!=null &&
+      (row.lease_arm_requested!==false ||
+       !((row.lease_state==="released"&&row.lease_account_kill===false) ||
+         (row.lease_state==="killed"&&row.lease_account_kill===true))))
+     return denied("worker_lease_not_safely_stopped");
    if(row.cash_precision_verified!==true)return denied("cash_precision_unverified");
    if((deps.now??Date.now)()-start>15_000)
      return denied("official_fee_source_stale");

@@ -8,7 +8,7 @@ const proof:MonetaryFeeEvidenceContract={ok:true,reason:"verified",stage:"STEP_9
   marketTicker:"KXBTC15M-TEST",sourceDigest:"b".repeat(64),verifiedAt:"2026-10-23T18:00:00.000Z",
   monetaryFeeAuthorized:true,policyApproved:false,tradingAuthorized:false};
 const account={id:"strata-account-test",kill_switch:true,execution_enabled:false,
-  cash_precision_verified:true,lease_state:"released"};
+  cash_precision_verified:true,lease_state:"released",lease_arm_requested:false,lease_account_kill:false};
 function mock(row:Record<string,unknown>|null=account,prior=false){
  const sqls:string[]=[];
  const tx={
@@ -80,7 +80,8 @@ test("unfinished V3 consent deployment stays off by default without even reading
 });
 test("owner must be stopped, disarmed, flat worker, and cash-precision verified",async()=>{
  for(const row of [
-  {...account,execution_enabled:true},{...account,kill_switch:false},
+  {...account,kill_switch:false},{...account,lease_state:"killed",lease_account_kill:false},
+  {...account,lease_arm_requested:true},
   {...account,lease_state:"owned"},{...account,cash_precision_verified:false},null,
  ]){
   const {db,sqls}=mock(row);const v=await run(db);
@@ -88,6 +89,17 @@ test("owner must be stopped, disarmed, flat worker, and cash-precision verified"
   assert.equal(sqls.some(s=>s.includes("INSERT INTO private.strata_owner_fee_evidence_v3")),false);
   assert.ok(sqls.includes("ROLLBACK"));
  }
+});
+test("killed owner with durable eligibility enabled can record only official fee evidence",async()=>{
+ const {db,sqls}=mock({...account,execution_enabled:true,kill_switch:true,
+    lease_state:"killed",lease_arm_requested:false,lease_account_kill:true});
+ const result=await run(db);
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.grantIssued,false);
+ assert.equal(result.tradingAuthorized,false);
+ assert.equal(result.ordersSubmitted,false);
+ assert.equal(sqls.includes("COMMIT"),true);
+ assert.equal(sqls.some(q=>/UPDATE .*kill|UPDATE .*worker|INSERT INTO public\.v13_production_intent/.test(q)),false);
 });
 test("duplicate current exact-SHA owner consent is serialized and rejected",async()=>{
  const {db,sqls}=mock(account,true);const v=await run(db);

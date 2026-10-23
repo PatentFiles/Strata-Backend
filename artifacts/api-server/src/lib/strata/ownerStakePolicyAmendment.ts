@@ -103,7 +103,13 @@ export async function amendOwnedStakePolicy(
         const l=lease.rows[0]!;
         if(l.arm_requested!==false)return reject("disarm_account_before_risk_preset_change");
         if(l.state==="owned")return reject("worker_lease_recovery_required");
-        if(l.state!=="released"||l.account_kill===true)
+        // A KILLED lease with both kill switches active is the safe
+        // stopped state for an owner risk-policy SAVE. This does not clear
+        // the lease or permit an entry; ARM/START remain forbidden.
+        const safelyKilled=l.state==="killed"&&l.account_kill===true&&
+          a.kill_switch===true;
+        const safelyReleased=l.state==="released"&&l.account_kill===false;
+        if(!safelyKilled&&!safelyReleased)
           return reject("worker_lease_state_not_editable");
       }
     }

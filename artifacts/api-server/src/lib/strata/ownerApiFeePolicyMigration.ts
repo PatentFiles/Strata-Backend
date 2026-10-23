@@ -8,7 +8,9 @@ import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRe
 import type {Identity,Request,Snapshot} from "../v13-production/types";
 import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
 
-/** Owner AAL2 route only. Never switches a live/armed account or fabricates fee provenance. */
+/** Owner AAL2 route only. STOP is the kill switch ON, not the
+ * durable execution eligibility bit. A killed, disarmed lease can be
+ * migrated only after authenticated exchange flatness, without ARM/START. */
 export const OWNER_API_FEE_MIGRATION_CONFIRM="I_APPROVE_MIGRATING_MY_ACCOUNT_TO_REVIEWED_API_FEES_V2";
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{64}$/;
@@ -78,7 +80,7 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
   if(!POLICY_ID.test(txt(a.policy_id))||!SHA.test(txt(a.policy_hash))||
      !Number.isSafeInteger(Number(a.version))||Number(a.version)<1)
     return fail("previous_policy_identity_unverified");
-  if(a.execution_enabled!==false||a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
+  if(a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!==null&&a.blocked_reason!==undefined&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
   if(a.cash_precision_verified!==true||Date.now()-safeTime(a.reconciled_at)>15*60_000)
@@ -117,7 +119,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
      pre=rows.rows[0]!;
      if(pre.commissioned!==true||pre.cash_precision_verified!==true)
        return fail("account_commissioning_unverified");
-     if(pre.execution_enabled!==false||pre.kill_switch!==true)
+     if(pre.kill_switch!==true)
        return fail("stop_and_disarm_before_fee_migration");
      if(!txt(pre.id)||txt(pre.policy_id)!==b.expectedPolicyId)
        return fail("policy_concurrency_conflict");
@@ -166,7 +168,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
   if(accounts.rows.length!==1)return fail("owned_account_not_unique");
   const a=accounts.rows[0]!,id=txt(a.id);
   if(a.commissioned!==true||a.cash_precision_verified!==true)return fail("account_commissioning_unverified");
-  if(a.execution_enabled!==false||a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
+  if(a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!=null&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
   const repairing=a.blocked_reason==="awaiting_account_commissioning";
@@ -196,7 +198,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
    (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
    (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
    (SELECT count(*)::int FROM private.kalshi_account_worker_lease
-      WHERE execution_account_id=$1 AND state='owned') workers,
+      WHERE execution_account_id=$1 AND (state='owned' OR arm_requested IS DISTINCT FROM FALSE)) workers,
    (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
       WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[id]);
   const ex=exposure.rows[0];
@@ -267,7 +269,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
       blocked_reason=CASE WHEN blocked_reason='awaiting_account_commissioning'
         AND $7::boolean THEN NULL ELSE blocked_reason END
     WHERE id=$4 AND owner_user_id=$5::uuid AND policy_id=$6
-      AND execution_enabled=false AND kill_switch=true AND commissioned=true
+      AND kill_switch=true AND commissioned=true
       AND (blocked_reason IS NULL OR ($7::boolean AND blocked_reason='awaiting_account_commissioning'))
     RETURNING id`,[policyId,fresh.identity.digest,commissioningDigest,id,ownerId,old.id,repairing]);
   if(linked.rows.length!==1)return fail("account_policy_switch_conflict");

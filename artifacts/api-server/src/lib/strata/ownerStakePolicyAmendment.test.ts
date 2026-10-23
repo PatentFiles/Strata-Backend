@@ -40,7 +40,7 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock(availableMicros="5000000",leaseState:"released"|"owned"="released",armRequested=false) {
+function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed") {
  const sqls:string[]=[];
  const policyInsertArgs:unknown[][]=[];
  const query=async(sql:string,args:unknown[]=[])=> {
@@ -50,9 +50,9 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"="released"
    return {rows:[{id:ACCOUNT,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
     policy_id:old.id,cash_micros:availableMicros,reserved_micros:"0",
     reconciled_at:new Date().toISOString(),fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
-    minimum_exit_micros:10000,execution_enabled:true,kill_switch:false}]};
+    minimum_exit_micros:10000,execution_enabled:true,kill_switch:accountKill}]};
   if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
-    return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:false}]};
+    return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:accountKill}]};
   if(sql.includes("SELECT\n      (SELECT count(*)::int FROM public.v13_production_position"))
    return {rows:[{positions:0,unresolved:0,running:0}]};
   if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:[{revision:1}]};
@@ -163,6 +163,32 @@ test("real DISARM permits a $5 policy save even when execution eligibility remai
  assert.ok(h.sqls.includes("COMMIT"));
 });
 
+test("killed lease and owner kill switch ON permit ONLY a safe $5 policy SAVE, never ARM or START",async()=>{
+ const h=mock("25000000","killed",false,true),p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(h.sqls.includes("COMMIT"),true);
+ assert.equal(h.sqls.some(q=>/UPDATE private\\.kalshi_account_worker_lease|SET kill_switch=false|submitOrder|kalshiPost|productionStart|productionArm/.test(q)),false);
+ assert.equal(h.sqls.some(q=>q.includes("INSERT INTO public.strata_configured_stake")),true);
+});
+test("killed lease without both stop kill interlocks may NEVER edit owner policy",async()=>{
+ const h=mock("25000000","killed",false,false),p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:false,reason:"worker_lease_state_not_editable"});
+ assert.equal(h.sqls.includes("COMMIT"),false);
+});
+test("killed lease with pending ARM cannot edit even while account kill is ON",async()=>{
+ const h=mock("25000000","killed",true,true),p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,
+  {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:false,reason:"disarm_account_before_risk_preset_change"});
+ assert.equal(h.sqls.some(q=>q.includes("INSERT INTO public.strata_configured_stake")),false);
+});
 test("disarmed but stale OWNED lease cannot silently allow a $5 policy change",async()=>{
  const h=mock("25000000","owned",false),p=TEST_TWENTY_PERCENT_PRESET;
  const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
