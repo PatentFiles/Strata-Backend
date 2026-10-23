@@ -15,7 +15,7 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
 import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
-import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow } from "./personalExecutionSupervisor";
+import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow, verifiedStartCash } from "./personalExecutionSupervisor";
 import {
   approveOwnedPolicyForUser,
   readOwnedApprovedFeeEvidence,
@@ -430,6 +430,37 @@ function order(): Request {
   };
 }
 
+test("production START requires exact fresh cash parity regardless of historical settled orders",()=>{
+  const base={
+    ledgerMicros:"25000000",
+    exchangeMicros:"25000000",
+    reservedMicros:"0",
+    reconciledAt:new Date(NOW).toISOString(),
+    observedAtMs:NOW,
+  };
+  assert.deepEqual(verifiedStartCash(base),{ok:true});
+  // A former order and settled fill never exempt a cash mismatch. This
+  // predicate intentionally does not depend on the order-history length.
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"24900000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reservedMicros:"26000000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW-16*60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:null}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW+60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"oops"}),{
+    ok:false,reason:"cash_evidence_unverified",
+  });
+});
+
 test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
   const queries: string[] = [];
   const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
@@ -463,7 +494,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
           key_fingerprint: fingerprint, credential_fingerprint: fingerprint,
           decrypted_secret: JSON.stringify({ api_key_id: material.keyId, private_key: material.privateKey }),
           commissioned: true, execution_enabled: true, kill_switch: false, cash_precision_verified: true,
-          cash_micros: "1000000", fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
+          cash_micros: "1000000", reserved_micros: "0", reconciled_at: new Date(NOW).toISOString(),
+           fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
           fee_policy_version: "standing", fee_source_url: "https://kalshi.com/fees", fee_formula_version: "quadratic",
           policy_state: "APPROVED", configured_stake_cents: "100", subaccount: 1, exchange_index: 2,
         }] };

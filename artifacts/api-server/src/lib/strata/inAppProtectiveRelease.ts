@@ -26,7 +26,7 @@ const time=(n:number)=>new Date(n).toISOString();
 const accountSQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.commissioned,a.execution_enabled,
  a.kill_switch,a.cash_precision_verified,a.minimum_exit_micros,a.cash_micros::text AS cash_micros,
- a.blocked_reason,
+ a.blocked_reason,a.revision,
  a.key_fingerprint,a.policy_id,a.commissioning_digest,a.fee_artifact_digest,
  a.kalshi_connection_id, p.state AS policy_state,p.fee_source_url,p.fee_policy_version,
  p.fee_formula_version,p.approved_at,p.max_entry_stake_cents,p.max_entry_all_in_cents,

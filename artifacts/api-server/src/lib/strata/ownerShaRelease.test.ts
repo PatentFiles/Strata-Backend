@@ -118,13 +118,14 @@ test("legacy-enabled Step 12 refuses a running lease without writing an approval
        kill_switch:false,cash_precision_verified:true,minimum_exit_micros:10000,
        cash_micros:"25000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
        policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
-       configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500}]};
+       configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500,
+       revision:1,key_fingerprint:"f".repeat(64),kalshi_connection_id:QID}]};
    if(sql.includes("FROM public.v13_production_observation o"))
      return {rows:[{digest:evidence}]};
    if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))
      return {rows:[{id:ACCOUNT,commissioned:true,cash_precision_verified:true,
        execution_enabled:true,kill_switch:false,blocked_reason:null,
-       cash_micros:"25000000",reserved_micros:"0"}]};
+       cash_micros:"25000000",reserved_micros:"0",revision:1,key_fingerprint:"f".repeat(64)}]};
    if(sql.includes("FROM public.live_execution_config"))
      return {rows:[{mode:"V13_PRODUCTION",live_execution_enabled:true,manual_kill_switch:false}]};
    if(sql.includes("FROM private.strata_protective_release_qualification"))
@@ -134,10 +135,16 @@ test("legacy-enabled Step 12 refuses a running lease without writing an approval
    if(sql.includes("FROM public.v13_production_intent WHERE account_id=")&&
       sql.includes("running_leases"))
      return {rows:[{intents:0,events:0,positions:0,reservations:0,running_leases:1}]};
+   if(sql.includes("FROM private.kalshi_connection_credentials c"))
+     return {rows:[{decrypted_secret:JSON.stringify({api_key_id:"offline-key-id",private_key:"offline-only"})}]};
    throw Error("unexpected query: "+sql.slice(0,70));
  };
  const db={query,connect:async()=>({query,release(){}})};
- const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA});
+ const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA,
+   readFeeds:(async(_material:unknown,observedAtMs:number)=>({
+     ok:true,observedAtMs,cashMicros:"25000000",
+     orders:[],fills:[],positions:[],settlements:[],
+   })) as never});
  assert.equal(result.ok,false,JSON.stringify(result));
  assert.equal(result.reason,"owner_release_requires_zero_financial_history_or_worker_lease");
  assert.equal(sqls.some(s=>s.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
@@ -157,13 +164,14 @@ test("legacy-enabled commissioned owner can repair only the stale marker and app
        cash_micros:"25000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
        policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
        key_fingerprint:"f".repeat(64),configured_stake_cents:stake,
-       kalshi_connection_id:QID,max_entry_stake_cents:2500,max_entry_all_in_cents:2500}]};
+       kalshi_connection_id:QID,max_entry_stake_cents:2500,max_entry_all_in_cents:2500,
+       blocked_reason:"awaiting_account_commissioning",revision:1}]};
    if(sql.includes("FROM public.v13_production_observation o"))
      return {rows:[{digest:evidence}]};
    if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))
      return {rows:[{id:ACCOUNT,commissioned:true,cash_precision_verified:true,
        execution_enabled:true,kill_switch:false,blocked_reason:"awaiting_account_commissioning",
-       cash_micros:"25000000",reserved_micros:"0"}]};
+       cash_micros:"25000000",reserved_micros:"0",revision:1,key_fingerprint:"f".repeat(64)}]};
    if(sql.includes("FROM public.live_execution_config"))
      return {rows:[{mode:"V13_PRODUCTION",live_execution_enabled:true,manual_kill_switch:false}]};
    if(sql.includes("FROM private.strata_protective_release_qualification"))
