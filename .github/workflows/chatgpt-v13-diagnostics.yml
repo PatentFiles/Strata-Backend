@@ -367,6 +367,15 @@ jobs:
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
             --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/singleOwnerFeePreflight.test.cjs
+      - name: Test owner V3 official-source consent receipt (no trading authority)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFeeV3Evidence.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerFeeV3Evidence.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
+            --external:drizzle-orm --external:drizzle-orm/*
+          node --test dist/ownerFeeV3Evidence.test.cjs
       - name: Test $5-$25000 strict owner stake presets and serialized policy approval
         working-directory: artifacts/api-server
         run: |

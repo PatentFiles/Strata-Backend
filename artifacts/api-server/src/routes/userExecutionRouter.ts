@@ -3,6 +3,7 @@ import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strat
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
+import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
@@ -668,6 +669,16 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const out=await inspectSingleOwnerFeePreflight(owner);
     res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // #165 V3: owner self-consent to an official server-verified fee RECEIPT.
+  // No review impersonation, migration, trading or approval is performed.
+  router.post("/fees/single-owner/evidence-consent", async (req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await recordOwnerV3FeeEvidence(owner,req.body??{});
+    res.status(out.ok?201:409).json(sanitizePublic(out));
   });
   router.get("/fees/api-source-readiness", async (req,res)=>{
     const viewer=subject(res);
