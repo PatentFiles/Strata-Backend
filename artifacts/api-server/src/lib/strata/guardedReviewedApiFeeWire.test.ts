@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+import {encodeProductionOrder} from "../v13-production/transport";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
 const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -365,4 +366,23 @@ test("P0: absent technical release, owner approval or risk-freeze keeps new-entr
   if(oldNode===undefined)delete process.env.NODE_ENV;
   else process.env.NODE_ENV=oldNode;
  }
+});
+
+test("P0: production V2 executor emits an explicit false for ENTRY and true for EXIT",()=>{
+ const entry=encodeProductionOrder({
+  market:ticker,side:"YES",action:"BUY",contracts:1,
+  limitMicros:550000,timeInForce:"IOC",
+  clientOrderId:"v13p-88888888-8888-4888-8888-888888888888",
+  reduceOnly:false,
+ } as never);
+ assert.equal(entry.reduce_only,false);
+ assert.equal(entry.subaccount,1);assert.equal(entry.exchange_index,2);
+ assert.equal(entry.time_in_force,"immediate_or_cancel");
+ const exit=encodeProductionOrder({
+  market:ticker,side:"YES",action:"SELL",contracts:1,
+  limitMicros:550000,timeInForce:"IOC",
+  clientOrderId:"v13p-88888888-8888-4888-8888-888888888888",
+  reduceOnly:true,
+ } as never);
+ assert.equal(exit.reduce_only,true);
 });
