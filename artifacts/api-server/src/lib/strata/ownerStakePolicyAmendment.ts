@@ -9,7 +9,9 @@ import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPr
  * existing approved policy. Saving the stake does NOT arm or start the bot.
  * All entry/exposure checks remain active and the account's kill switches stay untouched.
  */
-export const MIN_OWNER_STAKE_CENTS = 150;
+// New owner-approved live stakes start at $5. Historical $1.50 policy rows
+// remain immutable until the owner saves a versioned replacement.
+export const MIN_OWNER_STAKE_CENTS = 500;
 export const OWNER_STAKE_POLICY_CONFIRM = "I_APPROVE_MY_OWN_STAKE_RISK_POLICY_REVISION";
 
 type Row = Record<string, unknown>;
