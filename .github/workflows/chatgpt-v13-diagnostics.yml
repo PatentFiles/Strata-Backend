@@ -147,6 +147,13 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/forwardTestExecutionAudit.test.cjs
           node --test dist/forwardTestExecutionAudit.test.cjs
+      - name: Validate book-backed paper accounting and $5 research failure matrix (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/forwardTestBookReplayResearch.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/forwardTestBookReplayResearch.test.cjs
+          node --test dist/forwardTestBookReplayResearch.test.cjs
       - name: Test paper strategy execution semantics
         run: |
           pnpm --filter @workspace/api-server exec esbuild ../btc-paper-dashboard/src/lib/strategy.self-test.ts \
