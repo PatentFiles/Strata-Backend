@@ -4,6 +4,9 @@ import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
 import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
+// Run the fee-source migration transaction regressions in the existing
+// CI safety test entrypoint, not typecheck alone.
+import "./ownerApiFeePolicyMigration.test";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
 const ACCOUNT="owned-funded-account";
