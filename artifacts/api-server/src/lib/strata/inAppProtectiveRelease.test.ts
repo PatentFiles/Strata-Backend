@@ -356,7 +356,9 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
   };
   const status=await protectiveReleaseStatus(OWNER,OWNER,{db:db as never,sha:()=>SHA});
   assert.equal(status.ok,true,JSON.stringify(status));
-  if(!status.ok) return;
+  if(!("codeApprovalActive" in status && "releaseActive" in status)){
+    throw new Error("release_status_shape_unavailable");
+  }
   assert.equal(status.codeApprovalActive,true);
   assert.equal(status.releaseActive,false);
   assert.match(technicalSql,/expires_at>now\(\)\+interval '20 minutes'/);
