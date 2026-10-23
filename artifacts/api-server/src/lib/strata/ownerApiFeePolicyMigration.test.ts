@@ -73,8 +73,8 @@ test("migration refuses an armed account before touching policy or exchange bala
  });
  assert.equal(r.ok,false);
  assert.equal(r.reason,"stop_and_disarm_before_fee_migration");
- assert.ok(statements.some(sql=>sql==="ROLLBACK"));
  assert.equal(statements.some(sql=>sql.includes("UPDATE public.v13_live_money_policy")),false);
+ assert.equal(statements.some(sql=>sql==="BEGIN ISOLATION LEVEL SERIALIZABLE"),false);
 });
 
 test("eligible owner receives read-only exact policy identity for subsequent explicit confirm",async()=>{
@@ -124,12 +124,12 @@ test("legacy commissioning sentinel needs a SECOND exact owner confirmation and 
  const r=await migrateOwnedApiFeePolicy(OWNER,request,{db,verify});
  assert.equal(r.ok,false);
  assert.equal(r.reason,"explicit_owner_commissioning_repair_confirmation_required");
- assert.ok(statements.includes("ROLLBACK"));
  assert.equal(statements.some(sql=>/UPDATE public\.v13_(live_money_policy|production_account)/.test(sql)),false);
+ assert.equal(statements.some(sql=>sql==="BEGIN ISOLATION LEVEL SERIALIZABLE"),false);
 });
 
 test("versioned migration atomically replaces ONLY the fee source, retains risk and champion, and invalidates old owner release",async()=>{
- const accountId="44444444-4444-4444-8444-444444444444";
+ const accountId="strata-kalshi-owner-opaque-v13-account";
  const now=Date.now();
  const old:V13ApprovedLiveMoneyPolicy={
   id:POLICY,version:1,supersedesPolicyId:null,state:"APPROVED",
@@ -179,6 +179,7 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
   if(sql.includes("FROM private.kalshi_connection_credentials"))return {rows:[{
    decrypted_secret:JSON.stringify({api_key_id:"test-only-id",private_key:"fake-test-only"}),
   }]};
+  if(sql.includes("SELECT request FROM public.v13_production_intent"))return {rows:[]};
   if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[row]};
   if(sql.includes("FROM private.strata_api_fee_source_grants g"))return {rows:[{grant_id:"33333333-3333-4333-8333-333333333333"}]};
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
