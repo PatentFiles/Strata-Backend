@@ -29,7 +29,7 @@ const asDate = (v: unknown): Date | null => {
   return Number.isFinite(d.getTime()) ? d : null;
 };
 
-function approvedFromRow(p: Row): V13ApprovedLiveMoneyPolicy | null {
+export function approvedFromRow(p: Row): V13ApprovedLiveMoneyPolicy | null {
   const required = [
     "version", "capital_limit_cents", "max_entry_stake_cents", "max_entry_all_in_cents",
     "max_open_positions", "max_daily_loss_cents", "max_total_loss_cents",
