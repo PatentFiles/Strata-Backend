@@ -14,6 +14,7 @@ import {
 import { PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
  PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
+import {renewStandingFeeObservationLease} from "./apiFeeStandingDelegation";
 
 export const API_SOURCE_POLICY_VERSION=API_POLICY_SIGNED_REVIEW_V1;
 export const API_SOURCE_FORMULA_VERSION=STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
@@ -111,7 +112,26 @@ export async function verifyReviewedApiFeeSourceStage(
   ]);
   records=loaded.rows;
  }catch{return no("api_fee_database_review_unavailable");}
- if(records.length!==1)return no("api_fee_independent_reviews_missing_or_ambiguous");
+ if(records.length!==1){
+  // A previously approved per-owner 15m bootstrap grant must NEVER be
+  // re-signed after expiry. For the already-migrated policy, however, a
+  // separate owner AAL2 delegation + independently signed standing model
+  // can renew only the 15m technical observation lease. The live Kalshi
+  // observation above was verified BEFORE this atomic DB revocation check.
+  if(records.length!==0||!parsed||stage==="STEP_9")
+    return no("api_fee_independent_reviews_missing_or_ambiguous");
+  const renewed=await renewStandingFeeObservationLease(
+    ownerUserId,parsed.grantId,stage,{db:deps.db as never});
+  if(!renewed.ok)return no(renewed.reason);
+  return {ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
+    grantId:parsed.grantId,sourceUrl:expectedSourceUrl!,
+    digest:candidate.reviewCandidateDigest,
+    feePolicyVersion:API_SOURCE_POLICY_VERSION,
+    formulaVersion:API_SOURCE_FORMULA_VERSION,
+    marketTicker:candidate.marketTicker,
+    verifiedAtMs:Date.parse(candidate.verifiedAt),
+  }};
+ }
  const r=records[0]!;
  const stages=Array.isArray(r.authorized_stages)?r.authorized_stages.filter(
    (x):x is ApiFeeStage=>x==="STEP_9"||x==="STEP_11"||x==="ORDER_ENTRY"):[];
