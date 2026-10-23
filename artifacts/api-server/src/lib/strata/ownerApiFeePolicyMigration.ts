@@ -71,7 +71,54 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
  const first=await verify(ownerId,"STEP_9");
  if(!first.ok)return fail("reviewed_api_fee_"+first.reason);
  const db=deps.db??pool;
+ // Signed provider reads are intentionally OUTSIDE the serializable write
+ // transaction. After the I/O completes, lock and re-check account revision,
+ // credentials, policy ID, worker fence, cash and grant before any mutation.
  let tx:Awaited<ReturnType<Db["connect"]>>|null=null,done=false;
+ let pre:Row={};let requests:Request[]=[];
+ let feedStarted=0;
+ let feeds:Awaited<ReturnType<typeof readOwnedKalshiFeeds>>={ok:false,reason:"unverified"};
+ try {
+   const preTx=await db.connect();
+   try{
+     const rows=await preTx.query("SELECT * FROM public.v13_production_account WHERE owner_user_id=$1::uuid AND subaccount=1 AND exchange_index=2",[ownerId]);
+     if(rows.rows.length!==1)return fail("owned_account_not_unique");
+     pre=rows.rows[0]!;
+     if(pre.commissioned!==true||pre.cash_precision_verified!==true)
+       return fail("account_commissioning_unverified");
+     if(pre.execution_enabled!==false||pre.kill_switch!==true)
+       return fail("stop_and_disarm_before_fee_migration");
+     if(!txt(pre.id)||txt(pre.policy_id)!==b.expectedPolicyId)
+       return fail("policy_concurrency_conflict");
+     const material=await loadedMaterial(preTx as never,{...pre,owner_id:ownerId});
+     if(!material)return fail("restricted_signer_unavailable");
+     const intentRows=await preTx.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[pre.id]);
+     requests=[];
+     for(const row of intentRows.rows){
+       const request=typeof row.request==="string"?JSON.parse(row.request):row.request;
+       if(!request||typeof request!=="object"||Array.isArray(request))
+         return fail("financial_intent_unreadable");
+       requests.push(request as Request);
+     }
+     feedStarted=(deps.now??Date.now)();
+     feeds=await (deps.read??readOwnedKalshiFeeds)(material,feedStarted);
+   }finally{preTx.release();}
+ }catch{return fail("authenticated_exchange_preflight_unavailable");}
+ if(!feeds.ok)return fail(feeds.reason);
+ const feedAge=(deps.now??Date.now)()-feedStarted;
+ if(feeds.observedAtMs!==feedStarted||feedAge<0||feedAge>45_000)
+   return fail("authenticated_exchange_preflight_stale");
+ const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:txt(pre.key_fingerprint)};
+ const mapped=personalAccountSnapshot(identity,feeds,requests);
+ if(!("identity" in mapped))return fail(mapped.reason);
+ // Reconciled completed orders, fills and settlements are historical assets,
+ // not open exposure. Do not require an untouched account to migrate its fee
+ // model; reject unmatched history and any resting order or open position.
+ if(mapped.positions.length!==0||mapped.orders.some(o=>!o.terminal))
+   return fail("authenticated_exchange_not_flat");
+ const fresh=await verify(ownerId,"STEP_9",first.identity.sourceUrl);
+ if(!fresh.ok||fresh.identity.grantId!==first.identity.grantId||
+   fresh.identity.digest!==first.identity.digest)return fail("reviewed_api_fee_grant_changed");
  try{
   tx=await db.connect();
   await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
@@ -109,16 +156,8 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
   const ex=exposure.rows[0];
   if(exposure.rows.length!==1||[ex?.intents,ex?.positions,ex?.workers,ex?.exits].some(n=>n!==0))
    return fail("orders_positions_workers_or_exits_not_proven_empty");
-  const material=await loadedMaterial(tx as never,{
-   ...a,owner_id:ownerId
-  });
-  if(!material)return fail("restricted_signer_unavailable");
-  const feeds=await (deps.read??readOwnedKalshiFeeds)(material,now);
-  if(!feeds.ok)return fail(feeds.reason);
-  if(feeds.observedAtMs!==now||(deps.now??Date.now)()-now>45_000||
-     String(feeds.cashMicros)!==String(a.cash_micros)||
-     [feeds.orders,feeds.fills,feeds.positions,feeds.settlements].some(x=>x.length!==0))
-   return fail("authenticated_exchange_flat_cash_proof_required");
+  if((deps.now??Date.now)()-feedStarted>45_000)
+   return fail("authenticated_exchange_preflight_stale");
   const rs=await tx.query(`SELECT * FROM public.v13_live_money_policy
    WHERE id=$1 AND execution_account_id=$2 AND created_by=$3
     AND state='APPROVED' FOR UPDATE`,[a.policy_id,id,ownerId]);
@@ -127,9 +166,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
      old.policyHash!==b.expectedPolicyHash||old.version!==b.expectedPolicyVersion)
    return fail("approved_policy_hash_or_version_changed");
   if(old.feePolicyVersion===API_SOURCE_POLICY_VERSION)return fail("already_using_reviewed_api_fee_policy");
-  const fresh=await verify(ownerId,"STEP_9",first.identity.sourceUrl);
-  if(!fresh.ok||fresh.identity.grantId!==first.identity.grantId||
-    fresh.identity.digest!==first.identity.digest)return fail("reviewed_api_fee_grant_changed");
+  // Fee provider preflight completed before BEGIN. Grant is locked below.
   const g=await tx.query(`SELECT g.grant_id FROM private.strata_api_fee_source_grants g
     JOIN private.strata_api_fee_owner_consents c ON c.grant_id=g.grant_id
       AND c.owner_user_id=g.owner_user_id
