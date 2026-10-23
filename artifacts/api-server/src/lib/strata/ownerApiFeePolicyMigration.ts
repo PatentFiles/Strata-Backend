@@ -52,7 +52,7 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
 export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:Inputs={}):Promise<Result>{
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  if(!UUID.test(ownerId)||b.confirmation!==OWNER_API_FEE_MIGRATION_CONFIRM||
-    !UUID.test(b.expectedPolicyId)||!SHA.test(txt(b.expectedPolicyHash))||
+    !UUID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
     !Number.isSafeInteger(b.expectedPolicyVersion)||Number(b.expectedPolicyVersion)<1)
    return fail("explicit_owner_fee_migration_version_confirmation_required");
  const verify=deps.verify??verifyReviewedApiFeeSourceStage;
