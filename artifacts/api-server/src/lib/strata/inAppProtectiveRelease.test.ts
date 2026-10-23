@@ -369,3 +369,38 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
   assert.match(technicalSql,/independent_reviewer_id<>\$2::uuid/);
   assert.match(technicalSql,/operator_approver_id<>independent_reviewer_id/);
 });
+
+test("OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent and technical exit approval",async()=>{
+  for(const scenario of [
+    {name:"technical-only",owner:false,technical:1,expected:false},
+    {name:"both",owner:true,technical:1,expected:true},
+    {name:"duplicate-technical",owner:true,technical:2,expected:false},
+  ]){
+    const h=fakeDb();
+    const query=(h.db as unknown as {
+      query:(sql:string,params?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>
+    }).query;
+    const db={query:async(sql:string,params?:unknown[])=>{
+      if(sql.includes("FROM private.strata_owner_sha_approvals")){
+        return {rows:scenario.owner?[{approval_id:RID}]:[]};
+      }
+      if(sql.includes("FROM private.strata_protective_release_reviews v")){
+        return {rows:[]};
+      }
+      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+        return {rows:Array.from({length:scenario.technical},()=>({
+          release_id:RID,expires_at:new Date(Date.now()+60*60_000).toISOString(),
+        }))};
+      }
+      return query(sql,params);
+    }};
+    const status=await protectiveReleaseStatus(OWNER,OWNER,{db:db as never,sha:()=>SHA});
+    assert.equal(status.ok,true,scenario.name+": "+JSON.stringify(status));
+    if(!("releaseActive" in status && "codeApprovalActive" in status)){
+      throw new Error("owner_release_status_shape_unavailable");
+    }
+    assert.equal(status.releaseMode,"OWNER_SHA_V1",scenario.name);
+    assert.equal(status.releaseActive,scenario.expected,scenario.name);
+    assert.equal(status.codeApprovalActive,scenario.owner,scenario.name);
+  }
+});
