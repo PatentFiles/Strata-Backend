@@ -494,7 +494,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
           key_fingerprint: fingerprint, credential_fingerprint: fingerprint,
           decrypted_secret: JSON.stringify({ api_key_id: material.keyId, private_key: material.privateKey }),
           commissioned: true, execution_enabled: true, kill_switch: false, cash_precision_verified: true,
-          cash_micros: "1000000", fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
+          cash_micros: "1000000", reserved_micros: "0", reconciled_at: new Date(NOW).toISOString(),
+           fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
           fee_policy_version: "standing", fee_source_url: "https://kalshi.com/fees", fee_formula_version: "quadratic",
           policy_state: "APPROVED", configured_stake_cents: "100", subaccount: 1, exchange_index: 2,
         }] };
