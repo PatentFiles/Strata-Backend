@@ -160,6 +160,18 @@ export async function recoverOwnerStaleLease(
      l.rows[0]?.state!=="owned" || now()-beforeReadAt>15000 ||
      deps.isScheduled?.(ownerId,id))
       return fail("stale_lease_fence_or_account_changed");
+   // Do not allow a newly inserted (even terminal) financial intent to escape
+   // the signed preflight if another process races reconciliation.
+   const history=await client.query(
+    "SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[id]);
+   let comparable:Request[];
+   try{comparable=history.rows.map(row=>{
+     const value=typeof row.request==="string"?JSON.parse(row.request):row.request;
+     if(!value||typeof value!=="object")throw Error("bad_intent");
+     return value as Request;
+   });}catch{return fail("financial_intent_changed_during_recovery");}
+   if(hash(comparable)!==hash(requests))
+     return fail("financial_intent_changed_during_recovery");
    const released=await client.query(CAS_RELEASE,
      [id,ownerId,account.holder_id,account.fencing_token,account.heartbeat_at]);
    if(released.rows.length!==1)return fail("stale_lease_atomic_fence_refused");
