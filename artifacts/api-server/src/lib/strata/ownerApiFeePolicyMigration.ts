@@ -90,6 +90,11 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
        return fail("stop_and_disarm_before_fee_migration");
      if(!txt(pre.id)||txt(pre.policy_id)!==b.expectedPolicyId)
        return fail("policy_concurrency_conflict");
+     if(pre.blocked_reason!=null&&pre.blocked_reason!=="awaiting_account_commissioning")
+       return fail("unresolved_account_risk_freeze");
+     if(pre.blocked_reason==="awaiting_account_commissioning"&&
+        b.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
+       return fail("explicit_owner_commissioning_repair_confirmation_required");
      const material=await loadedMaterial(preTx as never,{...pre,owner_id:ownerId});
      if(!material)return fail("restricted_signer_unavailable");
      const intentRows=await preTx.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[pre.id]);
