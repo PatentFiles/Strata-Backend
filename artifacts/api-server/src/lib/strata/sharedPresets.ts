@@ -135,7 +135,7 @@ export const TEST_TWENTY_PERCENT_PRESET_ID = "strata-test-c52c53-20pct-v1";
 export const TEST_TWENTY_PERCENT_PRESET: SharedPreset = {
   ...STANDARD_PROPORTIONAL_PRESET,
   id: TEST_TWENTY_PERCENT_PRESET_ID,
-  name: "Higher Risk Test — 20% entry",
+  name: "Live Start — 20% Allocation",
   description: "Explicit opt-in. $25 capital: $5 entry, $6.25 fee-inclusive, $10 daily / $15 total loss. Larger potential losses; no automatic activation.",
   maxEntryStakeCents: 500,
   maxEntryAllInCents: 625,
