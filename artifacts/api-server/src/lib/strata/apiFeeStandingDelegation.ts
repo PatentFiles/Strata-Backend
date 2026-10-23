@@ -195,3 +195,49 @@ export async function renewStandingFeeObservationLease(
   return {ok:true,validUntil:updated.rows[0]?.valid_until};
  }catch{return {ok:false,reason:"standing_fee_lease_unavailable"};}
 }
+
+/** Revocation takes effect on the very next provider observation/ORDER ENTRY. */
+export async function revokeStandingFeeDelegation(
+ ownerId:string,raw:unknown,deps:Pick<Deps,"db">={}
+){
+ const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
+ if(!UUID.test(ownerId)||!UUID.test(text(b.delegationId))||
+    b.confirmation!=="REVOKE_MY_STANDING_FEE_DELEGATION"||
+    typeof b.reason!=="string"||b.reason.trim().length<8||b.reason.trim().length>250)
+   return deny("explicit_owner_standing_revocation_required");
+ try{
+  return await tx(deps.db??pool,async c=>{
+   const r=await c.query([
+     "UPDATE private.strata_api_fee_standing_delegations",
+     "SET revoked_at=now(),revocation_reason=$3",
+     "WHERE delegation_id=$1::uuid AND owner_user_id=$2::uuid",
+     "AND revoked_at IS NULL RETURNING delegation_id::text"
+   ].join(" "),[b.delegationId,ownerId,b.reason.trim()]);
+   return r.rows.length===1?{...deny("standing_fee_delegation_revoked"),ok:true as const}:
+    deny("standing_fee_delegation_not_active");
+  });
+ }catch{return deny("standing_fee_revocation_unavailable");}
+}
+
+export async function revokeStandingFeeModel(
+ adminId:string,raw:unknown,deps:Pick<Deps,"db">={}
+){
+ const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
+ if(!UUID.test(adminId)||!UUID.test(text(b.modelId))||
+    b.confirmation!=="REVOKE_REVIEWED_STANDING_FEE_MODEL"||
+    typeof b.reason!=="string"||b.reason.trim().length<8||b.reason.trim().length>250)
+   return deny("explicit_standing_fee_admin_revocation_required");
+ try{
+  return await tx(deps.db??pool,async c=>{
+   if(!await admin(c,adminId))return deny("technical_admin_required");
+   const r=await c.query([
+    "UPDATE private.strata_api_fee_standing_models",
+    "SET revoked_at=now(),revocation_reason=$3",
+    "WHERE model_id=$1::uuid AND reviewer_admin_id=$2::uuid",
+    "AND revoked_at IS NULL RETURNING model_id::text"
+   ].join(" "),[b.modelId,adminId,b.reason.trim()]);
+   return r.rows.length===1?{...deny("standing_fee_model_revoked"),ok:true as const}:
+    deny("standing_model_not_active");
+  });
+ }catch{return deny("standing_model_revocation_unavailable");}
+}
