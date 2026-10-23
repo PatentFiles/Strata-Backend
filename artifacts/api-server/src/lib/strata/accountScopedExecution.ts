@@ -151,8 +151,7 @@ export const ACQUIRE_LEASE_SQL = `
     AND arm_requested = true
     AND (
       state <> 'owned'
-      OR holder_id = $2
-      OR heartbeat_at < $9::timestamptz
+      OR (holder_id = $2 AND heartbeat_at >= $9::timestamptz)
     )
   RETURNING fencing_token::text AS fencing_token
 `;
