@@ -64,7 +64,11 @@ export async function inspectSingleOwnerFeePreflight(
   }catch{return fail("owner_fee_preflight_database_unavailable");}
   const actions:string[]=[];
   if(account.lease_state==="owned")actions.push("recover_stale_worker_with_signed_kalshi");
-  if(account.execution_enabled!==false||account.kill_switch!==true)
+  // Durable eligibility is not an active worker. A killed lease with
+  // the owner/account kill switches engaged is the safe stopped state.
+  // Do not report a false STOP blocker solely because execution_enabled
+  // remains true from historical commissioning.
+  if(account.kill_switch!==true)
     actions.push("stop_and_disarm_before_policy_migration");
   if(int(account.configured_stake_cents)!==500)
     actions.push("approve_and_save_five_dollar_policy");
