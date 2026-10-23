@@ -12,7 +12,7 @@ const QID="33333333-3333-4333-8333-333333333333";
 const policyId="approved-owned-policy";
 const feeDigest="b".repeat(64);
 const cDigest="c".repeat(64);
-const stake=150;
+const stake=500;
 const evidence=v13Digest({accountId:ACCOUNT,policyId,feeDigest,stakeCents:stake,
   commissioningDigest:cDigest,minimumExitMicros:10000});
 const confirmation={qualificationId:QID,confirmation:OWNER_SHA_RELEASE_CONFIRM};
@@ -73,6 +73,41 @@ test("owner alone may approve after authentic qualification, but stale freeze re
  assert.equal(sqls.some(sql=>sql.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
  assert.ok(sqls.includes("ROLLBACK"));
 });
+test("historical $1.50 configured stake cannot authorize exact-SHA owner release",async()=>{
+ const oldStake=150;
+ const legacyEvidence=v13Digest({accountId:ACCOUNT,policyId,feeDigest,stakeCents:oldStake,
+   commissioningDigest:cDigest,minimumExitMicros:10000});
+ const sqls:string[]=[];
+ const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
+   sqls.push(sql);
+   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
+   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
+     return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,
+       kill_switch:true,cash_precision_verified:true,minimum_exit_micros:10000,
+       cash_micros:"25000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
+       policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
+       configured_stake_cents:oldStake,max_entry_stake_cents:150,max_entry_all_in_cents:200}]};
+   if(sql.includes("FROM public.v13_production_observation o"))
+     return {rows:[{digest:legacyEvidence}]};
+   if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))
+     return {rows:[{id:ACCOUNT,commissioned:true,cash_precision_verified:true,
+       execution_enabled:false,kill_switch:true,blocked_reason:null,
+       cash_micros:"25000000",reserved_micros:"0"}]};
+   if(sql.includes("FROM public.live_execution_config"))
+     return {rows:[{mode:"V13_PRODUCTION",live_execution_enabled:true,manual_kill_switch:false}]};
+   if(sql.includes("FROM private.strata_protective_release_qualification"))
+     return {rows:[{qualification_id:QID,evidence_digest:feeDigest}]};
+   if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
+   throw Error("Unexpected SQL before minimum stake gate: "+sql.slice(0,90));
+ };
+ const db={query,connect:async()=>({query,release(){}})};
+ const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA});
+ assert.deepEqual(result,{ok:false,reason:"approved_stake_or_available_cash_unverified",ordersSubmitted:false});
+ assert.equal(sqls.some(q=>q.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
+ assert.equal(sqls.some(q=>q.includes("UPDATE public.v13_production_account")),false);
+ assert.ok(sqls.includes("ROLLBACK"));
+});
+
 test("global kill stays privileged even after owner AAL2 approval; transaction rolls back",async()=>{
  const sqls:string[]=[];
  const query=async(sql:string)=> {

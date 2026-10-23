@@ -146,11 +146,11 @@ test("concurrent stake updates keep the first revision winner", async () => {
 
 test("a changed owned stake sizes the next mock order, and a crash does not replay the POST", async () => {
   const posts: string[] = [];
-  const session = await tradingSession(100, posts);
-  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=500, revision=2 WHERE execution_account_id=$1", [ACCOUNT]);
-  session.book = book(500, session.now);
+  const session = await tradingSession(500, posts);
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=1000, revision=2 WHERE execution_account_id=$1", [ACCOUNT]);
+  session.book = book(1000, session.now);
   const sized = await session.executor.prepareEntry(await source(session.now));
-  assert.equal((await requestOf(sized)).contracts, contractsFor(500));
+  assert.equal((await requestOf(sized)).contracts, contractsFor(1000));
   await session.executor.dispatch(sized);
   assert.equal(posts.length, 1);
   assert.equal(posts[0]!.includes("\"subaccount\":1"), true);
@@ -159,7 +159,7 @@ test("a changed owned stake sizes the next mock order, and a crash does not repl
   await session.executor.dispatch(sized);
   assert.equal(posts.length, 1);
   const crashPosts: string[] = [];
-  const crashed = await tradingSession(100, crashPosts, 60_000_000_000, (stage) => {
+  const crashed = await tradingSession(500, crashPosts, 60_000_000_000, (stage) => {
     if (stage === "after_post_before_commit") throw new Error("crash");
   });
   const crashedId = await crashed.executor.prepareEntry(await source(crashed.now));
@@ -174,7 +174,7 @@ test("a changed owned stake sizes the next mock order, and a crash does not repl
 
 test("three independently approved owners cannot alter the current owner's V2 entry or policy", async () => {
   const posts: string[] = [];
-  const session = await tradingSession(100, posts);
+  const session = await tradingSession(500, posts);
   const approved = { ...policy(), executionAccountId: ACCOUNT, entryPolicyVersion: V13_ENTRY_POLICY_VERSION };
   approved.policyHash = computeV13LiveMoneyPolicyHash(approved);
   await pool.query(
@@ -251,16 +251,16 @@ test("three independently approved owners cannot alter the current owner's V2 en
 });
 
 test("insufficient cash, stale depth, kill, and the other owner cannot submit", async () => {
-  const poor = await tradingSession(100, [], 1_000);
+  const poor = await tradingSession(500, [], 1_000);
   await assert.rejects(poor.executor.prepareEntry(await source(poor.now)), /cash|insufficient|live_money/);
   assert.equal(poor.posts.length, 0);
-  const stale = await tradingSession(100, []);
-  stale.book = book(100, stale.now - 20_000);
+  const stale = await tradingSession(500, []);
+  stale.book = book(500, stale.now - 20_000);
   await assert.rejects(stale.executor.prepareEntry(await source(stale.now)), /stale|fee_evidence|market_evidence/);
-  const killed = await tradingSession(100, []);
+  const killed = await tradingSession(500, []);
   await pool.query("UPDATE v13_production_account SET kill_switch=true WHERE id=$1", [ACCOUNT]);
   await assert.rejects(killed.executor.prepareEntry(await source(killed.now)), /production_authority_disabled_or_uncommissioned|account_kill/);
-  const foreign = await tradingSession(100, []);
+  const foreign = await tradingSession(500, []);
   foreign.executor.accountOwnerUserId = OTHER;
   await assert.rejects(foreign.executor.prepareEntry(await source(foreign.now)), /foreign_execution_account|production_policy_missing/);
   assert.equal(foreign.posts.length, 0);
@@ -268,7 +268,7 @@ test("insufficient cash, stale depth, kill, and the other owner cannot submit", 
 
 test("a mock partial fill reconciles once and a later dispatch does not post again", async () => {
   const posts: string[] = [];
-  const session = await tradingSession(100, posts);
+  const session = await tradingSession(500, posts);
   const id = await session.executor.prepareEntry(await source(session.now));
   const request = await requestOf(id);
   await session.executor.dispatch(id);
@@ -286,7 +286,7 @@ test("a mock partial fill reconciles once and a later dispatch does not post aga
 
 test("a reconciled fill and settlement allow a second order without replaying the first", async () => {
   const posts: string[] = [];
-  const session = await tradingSession(100, posts);
+  const session = await tradingSession(500, posts);
   const id = await session.executor.prepareEntry(await source(session.now));
   const request = await requestOf(id);
   await session.executor.dispatch(id);

@@ -1,3 +1,4 @@
+import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
@@ -131,7 +132,7 @@ export async function authorizeOwnerShaRelease(
   const unresolved=await readUnresolvedIntentMode((sql,p)=>tx!.query(sql,p),accountId);
   if(!unresolved.ok||unresolved.mode!=="entries")return reject("unresolved_orders_prevent_owner_release");
   const stake=Number(a.configured_stake_cents),cash=micros(current.cash_micros),reserved=micros(current.reserved_micros);
-  if(!Number.isSafeInteger(stake)||stake<150||stake>2_500_000||
+  if(!Number.isSafeInteger(stake)||stake<V13_MIN_ENTRY_STAKE_CENTS||stake>2_500_000||
     !Number.isSafeInteger(Number(a.max_entry_stake_cents))||
     stake>Number(a.max_entry_stake_cents)||stake>Number(a.max_entry_all_in_cents)||
     cash===null||reserved===null||reserved>cash||

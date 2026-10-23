@@ -20,8 +20,8 @@ function policy(): V13ApprovedLiveMoneyPolicy {
     strategyVersion: "V1.3", strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
     strategyParameterHash: V13_CHAMPION_PARAMETER_HASH, championSelectionReviewId: "test-review",
     championSelectionEvidenceHash: "a".repeat(64), championSelectedBy: "simulated-owner",
-    championSelectedAt: new Date(0), capitalLimitCents: 10_000, maxEntryStakeCents: 100,
-    maxEntryAllInCents: 120, maxOpenPositions: 1, maxDailyLossCents: 1000, maxTotalLossCents: 2000,
+    championSelectedAt: new Date(0), capitalLimitCents: 10_000, maxEntryStakeCents: 500,
+    maxEntryAllInCents: 550, maxOpenPositions: 1, maxDailyLossCents: 1000, maxTotalLossCents: 2000,
     maxQuoteAgeMs: 15_000, maxFeeEvidenceAgeMs: 15_000,
     feePolicyVersion: "test-fees", feeSourceUrl: "https://invalid.test/fees", feeFormulaVersion: "test-v1",
     requireFullDepth: true, entryTimeInForce: "IOC", entryLimitSource: "SIGNAL_REFERENCE_OFFER",
@@ -36,10 +36,10 @@ class SimulatedExchange implements Exchange {
   throwPost = false; throwCancel = false; beforePost: (() => Promise<void>) | null = null;
   now = Date.now();
   book: MarketEvidence = {
-    observedAtMs: this.now, bestAskDollars: "0.5000", asks: [{ priceDollars: "0.5000", availableContracts: "2" }],
-    bestBidDollars: "0.4500", bids: [{ priceDollars: "0.4500", availableContracts: "2" }],
+    observedAtMs: this.now, bestAskDollars: "0.5000", asks: [{ priceDollars: "0.5000", availableContracts: "10" }],
+    bestBidDollars: "0.4500", bids: [{ priceDollars: "0.4500", availableContracts: "10" }],
     fee: { policyVersion: "test-fees", sourceUrl: "https://invalid.test/fees", formulaVersion: "test-v1",
-      fingerprint: "test-fingerprint-0000001", verifiedAtMs: this.now, contracts: 2, limitPrice: 0.5,
+      fingerprint: "test-fingerprint-0000001", verifiedAtMs: this.now, contracts: 10, limitPrice: 0.5,
       reservedEntryFeeCents: 2, reservedExitFeeCents: 3 },
   };
   evidence: Snapshot = {
@@ -145,7 +145,7 @@ test("real PostgreSQL: concurrent duplicate/crossing claims reserve once and sub
   const f = await fixture(), source = await f.source();
   const ids = await Promise.all(Array.from({ length: 12 }, () => f.executor.prepareEntry(source)));
   assert.equal(new Set(ids).size, 1);
-  assert.equal((await f.ledger.readAccount()).reserved_micros, "1050000");
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "5050000");
   await Promise.all(ids.map(id => f.executor.dispatch(id)));
   assert.equal(f.exchange.posts.length, 1);
   const duplicateCross = await f.source(randomUUID(), "test-cross");
@@ -166,7 +166,7 @@ test("dispatch-commit crash survives restart without replay or releasing uncerta
   const restarted = new ProductionExecutor(f.ledger, f.exchange, () => f.exchange.now);
   await restarted.reconcile(); await restarted.dispatch(id);
   assert.equal(f.exchange.posts.length, 0);
-  assert.equal((await f.ledger.readAccount()).reserved_micros, "1050000");
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "5050000");
   await assert.rejects(restarted.prepareEntry(await f.source(randomUUID(), "another")), /uncertain/);
 });
 test("timeout after accepted POST and crash after POST never replay; authoritative partial fills recover", async () => {
@@ -523,19 +523,19 @@ test("unknown policy revision and champion-hash approval mismatch cannot reserve
 });
 test("configured stake is pinned and a later revision cannot resize a prepared entry", async () => {
   const f = await fixture();
-  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=50, revision=2 WHERE id='production'");
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=500, revision=2 WHERE id='production'");
   f.exchange.book.fee = {
     ...f.exchange.book.fee,
     fingerprint: "test-fingerprint-one-contract",
-    contracts: 1,
+    contracts: 10,
     reservedEntryFeeCents: 1,
     reservedExitFeeCents: 2,
   };
   const id = await f.executor.prepareEntry(await f.source());
   const prepared = (await pool.query("SELECT decision, request FROM v13_production_intent WHERE id=$1", [id])).rows[0];
-  assert.equal(prepared.decision.configuredStakeCents, 50);
+  assert.equal(prepared.decision.configuredStakeCents, 500);
   assert.equal(prepared.decision.stakeRevision, 2);
-  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=100, revision=3 WHERE id='production'");
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=501, revision=3 WHERE id='production'");
   await assert.rejects(f.executor.dispatch(id), /production_pinned_stake_changed_or_unproven/);
   assert.equal(f.exchange.posts.length, 0);
   const still = (await pool.query("SELECT request FROM v13_production_intent WHERE id=$1", [id])).rows[0];
@@ -543,7 +543,7 @@ test("configured stake is pinned and a later revision cannot resize a prepared e
 });
 test("configured stake above the approved maximum cannot enter", async () => {
   const f = await fixture();
-  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=101 WHERE id='production'");
+  await pool.query("UPDATE strata_configured_stake SET configured_stake_cents=501 WHERE id='production'");
   await assert.rejects(f.executor.prepareEntry(await f.source()), /configured_stake_above_approved_maximum/);
   assert.equal(f.exchange.posts.length, 0);
 });

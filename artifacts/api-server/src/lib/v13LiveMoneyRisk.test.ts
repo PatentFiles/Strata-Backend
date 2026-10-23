@@ -135,10 +135,10 @@ function launchPolicy(): V13ApprovedLiveMoneyPolicy {
   const policy: V13ApprovedLiveMoneyPolicy = {
     ...approved(),
     capitalLimitCents: 15_000,
-    maxEntryStakeCents: 150,
-    maxEntryAllInCents: 200,
+    maxEntryStakeCents: 500,
+    maxEntryAllInCents: 550,
     maxOpenPositions: 1,
-    maxDailyLossCents: 500,
+    maxDailyLossCents: 800,
     maxTotalLossCents: 1_500,
     maxQuoteAgeMs: 1_000,
     maxFeeEvidenceAgeMs: 1_000,
@@ -164,48 +164,60 @@ function launchInput(plannedGrossCents: number, reservedEntryFeeCents: number, r
   };
 }
 
-test("$150 launch all-in includes both fee reserves and rejects one cent over $2", () => {
+test("new entries below $5 gross fail even under an approved legacy $1.50 policy", () => {
+  const legacy = launchPolicy();
+  legacy.maxEntryStakeCents = 150;
+  legacy.maxEntryAllInCents = 200;
+  legacy.policyHash = computeV13LiveMoneyPolicyHash(legacy);
+  assert.deepEqual(evaluateV13LiveMoneyRisk({...launchInput(150, 0, 0), policy: legacy}), {
+    ok: false, reason: "live_money_entry_below_minimum_stake",
+  });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(499, 0, 0)), {
+    ok: false, reason: "live_money_entry_below_minimum_stake",
+  });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 0, 0)), {
+    ok: true, plannedAllInCents: 500,
+  });
+});
+
+test("$5 launch all-in includes both reserved fees and enforces the $5.50 ceiling", () => {
   assert.equal(launchPolicy().maxOpenPositions, 1);
-  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 24, 25)), { ok: true, plannedAllInCents: 199 });
-  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 25, 25)), { ok: true, plannedAllInCents: 200 });
-  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 25, 26)), {
-    ok: false,
-    reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 24, 25)), { ok: true, plannedAllInCents: 549 });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 25, 25)), { ok: true, plannedAllInCents: 550 });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 25, 26)), {
+    ok: false, reason: "live_money_entry_exceeds_capital_or_stake_limit",
   });
-  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(150, 51, 0)), {
-    ok: false,
-    reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 51, 0)), {
+    ok: false, reason: "live_money_entry_exceeds_capital_or_stake_limit",
   });
-  assert.equal(evaluateV13LiveMoneyRisk(launchInput(151, 0, 0)).ok, false);
+  assert.equal(evaluateV13LiveMoneyRisk(launchInput(501, 0, 0)).ok, false);
   const twoPositions = launchPolicy();
   twoPositions.maxOpenPositions = 2;
   twoPositions.policyHash = computeV13LiveMoneyPolicyHash(twoPositions);
-  assert.equal(evaluateV13LiveMoneyRisk({ ...launchInput(150, 25, 25), policy: twoPositions }).ok, false);
+  assert.equal(evaluateV13LiveMoneyRisk({...launchInput(500, 25, 25), policy: twoPositions}).ok, false);
 });
 
-test("$5 daily and $15 total remaining loss budgets block an entry that would exceed either", () => {
-  const fit = launchInput(150, 25, 25);
-  assert.deepEqual(evaluateV13LiveMoneyRisk(fit), { ok: true, plannedAllInCents: 200 });
-  fit.realizedDailyLossCents = 300;
+test("fee-inclusive $5.50 loss reservation rejects depleted daily and total budgets", () => {
+  const fit = launchInput(500, 25, 25);
+  assert.deepEqual(evaluateV13LiveMoneyRisk(fit), { ok: true, plannedAllInCents: 550 });
+  fit.realizedDailyLossCents = 250;
   assert.equal(evaluateV13LiveMoneyRisk(fit).ok, true);
-  fit.realizedDailyLossCents = 301;
+  fit.realizedDailyLossCents = 251;
   assert.deepEqual(evaluateV13LiveMoneyRisk(fit), {
-    ok: false,
-    reason: "live_money_entry_exceeds_remaining_loss_budget",
+    ok: false, reason: "live_money_entry_exceeds_remaining_loss_budget",
   });
-  fit.realizedDailyLossCents = 500;
+  fit.realizedDailyLossCents = 800;
   assert.equal(evaluateV13LiveMoneyRisk(fit).ok, false);
-  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 500, 1_500, 0), false);
-  const total = launchInput(150, 25, 25);
-  total.realizedTotalLossCents = 1_300;
+  assert.equal(remainingLossBudgetAllowsEntry(550, 800, 800, 1_500, 0), false);
+  const total = launchInput(500, 25, 25);
+  total.realizedTotalLossCents = 950;
   assert.equal(evaluateV13LiveMoneyRisk(total).ok, true);
-  total.realizedTotalLossCents = 1_301;
+  total.realizedTotalLossCents = 951;
   assert.deepEqual(evaluateV13LiveMoneyRisk(total), {
-    ok: false,
-    reason: "live_money_entry_exceeds_remaining_loss_budget",
+    ok: false, reason: "live_money_entry_exceeds_remaining_loss_budget",
   });
-  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 0, 1_500, 1_301), false);
-  assert.equal(remainingLossBudgetAllowsEntry(200, 500, 300, 1_500, 1_300), true);
+  assert.equal(remainingLossBudgetAllowsEntry(550, 800, 0, 1_500, 951), false);
+  assert.equal(remainingLossBudgetAllowsEntry(550, 800, 250, 1_500, 950), true);
 });
 
 test("policy hash binds a non-null entry policy version and leaves null unbound", () => {
