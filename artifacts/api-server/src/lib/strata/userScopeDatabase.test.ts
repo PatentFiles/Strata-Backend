@@ -30,7 +30,7 @@ function account(owner: string | null, id: string, commissioned: boolean, cashMi
     reconciled_at: null,
     policy_state: "APPROVED",
     policy_version: 1,
-    max_entry_stake_cents: 150,
+    max_entry_stake_cents: 500,
     configured_stake_cents: owner === USER_A ? 100 : 80,
     stake_revision: 1,
   };
@@ -192,12 +192,12 @@ test("user A cannot read user B credentials, balances, stakes, or presets", asyn
   const settings = await port.settings(USER_A);
   assert.equal(settings.botCashCents, 2500);
   assert.equal(settings.ownerUserId, USER_A);
-  const stake = await port.stake(USER_A, 150, 1);
+  const stake = await port.stake(USER_A, 500, 1);
   assert.equal(stake.ok, true);
-  assert.equal(stake.view.configuredStakeCents, 150);
+  assert.equal(stake.view.configuredStakeCents, 500);
   assert.equal(stake.view.stakeRevision, 2);
   assert.equal(stake.view.workerRunning, false);
-  assert.equal(stakes.get("acct-a"), 150);
+  assert.equal(stakes.get("acct-a"), 500);
   assert.equal(stakes.get("acct-b"), 80);
   const foreignStake = calls.filter((call) => call.text.includes("account-stake:upsert"));
   assert.equal(foreignStake.every((call) => call.params[1] === "acct-a" && call.params[3] === USER_A), true);
@@ -438,13 +438,13 @@ test("stake initializes once, rejects an unsafe revision, and control never repo
       return { rows: [], rowCount: 0 };
     },
   });
-  const first = await port.stake(USER_A, 150, null);
+  const first = await port.stake(USER_A, 500, null);
   assert.equal(first.ok, true);
-  assert.equal(first.view.configuredStakeCents, 150);
+  assert.equal(first.view.configuredStakeCents, 500);
   assert.equal(first.view.stakeRevision, 1);
-  const belowMinimum = await port.stake(USER_A, 149, 1);
+  const belowMinimum = await port.stake(USER_A, 499, 1);
   assert.equal(belowMinimum.ok, false);
-  assert.equal(belowMinimum.reason, "stake_below_minimum_150_cents");
+  assert.equal(belowMinimum.reason, "stake_below_minimum_500_cents");
   const repeated = await port.stake(USER_A, 500, 1);
   assert.equal(repeated.ok, true);
   assert.equal(repeated.view.configuredStakeCents, 500);
