@@ -71,3 +71,27 @@ test("migration refuses an armed account before touching policy or exchange bala
  assert.ok(statements.some(sql=>sql==="ROLLBACK"));
  assert.equal(statements.some(sql=>sql.includes("UPDATE public.v13_live_money_policy")),false);
 });
+
+test("eligible owner receives read-only exact policy identity for subsequent explicit confirm",async()=>{
+ const sqls:string[]=[];
+ const db={connect:async()=>({query:async(sql:string)=>{
+  sqls.push(sql);
+  return {rows:[{id:"44444444-4444-4444-8444-444444444444",
+   policy_id:POLICY,policy_hash:HASH,version:3,
+   state:"APPROVED",commissioned:true,
+   fee_policy_version:"micro-live-standing-fee-policy-v1",
+   execution_enabled:false,kill_switch:true,blocked_reason:null,
+   cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
+ },release(){}})};
+ const result=await previewOwnedApiFeeMigration(OWNER,{db});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ if(!result.ok) return;
+ assert.equal(result.policyMigrated,false);
+ assert.equal(result.tradingAuthorized,false);
+ assert.equal(result.expectedPolicyId,POLICY);
+ assert.equal(result.expectedPolicyHash,HASH);
+ assert.equal(result.expectedPolicyVersion,3);
+ assert.equal(sqls.length,1);
+ assert.match(sqls[0]!,/p\.policy_hash,p\.version/);
+ assert.doesNotMatch(sqls[0]!,/UPDATE|INSERT|DELETE/i);
+});
