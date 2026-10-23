@@ -10,6 +10,8 @@ export interface ScopedAccount {
   exchangeIndex: number;
   commissioned: boolean;
   executionEnabled: boolean;
+  workerArmRequested?: boolean | null;
+  workerLeaseState?: string | null;
   killSwitch: boolean;
   cashCents: number | null;
   reservedCents: number | null;
@@ -60,6 +62,8 @@ export interface UserExecutionView {
   policyVersion: number | null;
   workerRunning: boolean;
   armed: boolean;
+  workerArmRequested?: boolean | null;
+  workerLeaseState?: string | null;
   killSwitch: boolean | null;
   commissioningState: string | null;
   reconciledAt: string | null;
@@ -133,6 +137,8 @@ export function emptyUserExecutionView(ownerUserId: string): UserExecutionView {
     policyVersion: null,
     workerRunning: false,
     armed: false,
+    workerArmRequested:null,
+    workerLeaseState:null,
     killSwitch: null,
     commissioningState: null,
     reconciledAt: null,
@@ -176,7 +182,12 @@ export function viewForCaller(callerUserId: string, account: ScopedAccount | nul
     policyApproved: account.policyApproved,
     policyVersion: account.policyVersion,
     workerRunning: account.workerRunning,
-    armed: account.executionEnabled === true && account.killSwitch === false,
+    armed: account.workerArmRequested===undefined
+      ?account.executionEnabled === true && account.killSwitch === false
+      :account.workerArmRequested===true && account.executionEnabled===true &&
+       account.killSwitch===false,
+    workerArmRequested:account.workerArmRequested??null,
+    workerLeaseState:account.workerLeaseState??null,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
     reconciledAt: account.reconciledAt,
