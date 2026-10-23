@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {migrateOwnedApiFeePolicy,previewOwnedApiFeeMigration,OWNER_API_FEE_MIGRATION_CONFIRM} from "./ownerApiFeePolicyMigration";
+import {migrateOwnedApiFeePolicy,previewOwnedApiFeeMigration,OWNER_API_FEE_MIGRATION_CONFIRM,migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
+import type {Snapshot,Request} from "../v13-production/types";
 
 import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
@@ -234,4 +235,30 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
  assert.ok(statements.some(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals")));
  assert.ok(statements.some(x=>x.sql.includes("OWNER_API_FEE_POLICY_MIGRATION")));
  assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);
+});
+
+test("completed history remains migratable; UNKNOWN, missing orders, open positions and incomplete snapshots fail closed",()=>{
+ const request:Request={market:"KXBTC15M-26OCT220000",side:"YES",action:"BUY",
+   contracts:1,limitMicros:400000,timeInForce:"IOC",reduceOnly:false,clientOrderId:"historical-1"};
+ const flat:Snapshot={
+  identity:{subaccount:1,exchangeIndex:2,keyFingerprint:HASH},
+  observedAtMs:Date.now(),complete:true,authenticated:true,historyFromMs:0,
+  cashMicros:"25000000",cashExact:true,unexplainedCashActivity:false,
+  orders:[{orderId:"terminal-history",request,terminal:true,filledHundredths:"100"}],
+  fills:[{id:"historical-fill",orderId:"terminal-history",clientOrderId:"historical-1",
+    market:request.market,side:"YES",action:"BUY",quantityHundredths:"100",
+    priceMicros:400000,grossMicros:"400000",feeMicros:"10000",occurredAtMs:Date.now()-60_000}],
+  settlements:[{id:"historical-settlement",market:request.market,side:"YES",result:"YES",
+    quantityHundredths:"100",payoutMicros:"1000000",feeMicros:"0",occurredAtMs:Date.now()-30_000}],
+  positions:[],
+ };
+ assert.deepEqual(migrationFlatHistoryCheck(flat,[request]),{ok:true});
+ assert.equal(migrationFlatHistoryCheck({...flat,orders:[]},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,orders:[{...flat.orders[0]!,terminal:false}]},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,positions:[{market:request.market,side:"YES",quantityHundredths:"100"}]},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,complete:false},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,authenticated:false},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,cashExact:false},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,unexplainedCashActivity:true},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck(flat,[request,request]).ok,false);
 });
