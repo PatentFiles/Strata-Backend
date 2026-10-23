@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {migrateOwnedApiFeePolicy,previewOwnedApiFeeMigration,OWNER_API_FEE_MIGRATION_CONFIRM} from "./ownerApiFeePolicyMigration";
 
+import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
+import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
+import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+
 const OWNER="11111111-1111-4111-8111-111111111111";
 const POLICY="22222222-2222-4222-8222-222222222222";
 const HASH="a".repeat(64);
@@ -121,4 +125,99 @@ test("legacy commissioning sentinel needs a SECOND exact owner confirmation and 
  assert.equal(r.reason,"explicit_owner_commissioning_repair_confirmation_required");
  assert.ok(statements.includes("ROLLBACK"));
  assert.equal(statements.some(sql=>/UPDATE public\.v13_(live_money_policy|production_account)/.test(sql)),false);
+});
+
+test("versioned migration atomically replaces ONLY the fee source, retains risk and champion, and invalidates old owner release",async()=>{
+ const accountId="44444444-4444-4444-8444-444444444444";
+ const now=Date.now();
+ const old:V13ApprovedLiveMoneyPolicy={
+  id:POLICY,version:1,supersedesPolicyId:null,state:"APPROVED",
+  strategyVersion:"V1.3",strategyParameterSetId:V13_CHAMPION_PARAMETER_SET.id,
+  strategyParameterHash:V13_CHAMPION_PARAMETER_HASH,entryPolicyVersion:V13_ENTRY_POLICY_VERSION,
+  championSelectionReviewId:"independent-champion",championSelectionEvidenceHash:"b".repeat(64),
+  championSelectedBy:OWNER,championSelectedAt:new Date("2026-10-01T00:00:00Z"),
+  capitalLimitCents:2500,maxEntryStakeCents:150,maxEntryAllInCents:200,maxOpenPositions:1,
+  maxDailyLossCents:250,maxTotalLossCents:500,maxQuoteAgeMs:1000,maxFeeEvidenceAgeMs:1000,
+  feePolicyVersion:"micro-live-standing-fee-policy-v1",
+  feeSourceUrl:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
+  feeFormulaVersion:API_SOURCE_FORMULA_VERSION,requireFullDepth:true,
+  entryTimeInForce:"IOC",entryLimitSource:"SIGNAL_REFERENCE_OFFER",
+  policyHash:null,createdBy:OWNER,approvedBy:OWNER,approvedAt:new Date("2026-10-01T01:00:00Z"),
+ };
+ old.policyHash=computeV13LiveMoneyPolicyHash(old);
+ const row={
+  id:old.id,version:old.version,state:old.state,supersedes_policy_id:old.supersedesPolicyId,
+  strategy_version:old.strategyVersion,strategy_parameter_set_id:old.strategyParameterSetId,
+  strategy_parameter_hash:old.strategyParameterHash,entry_policy_version:old.entryPolicyVersion,
+  champion_selection_review_id:old.championSelectionReviewId,
+  champion_selection_evidence_hash:old.championSelectionEvidenceHash,
+  champion_selected_by:old.championSelectedBy,champion_selected_at:old.championSelectedAt,
+  capital_limit_cents:old.capitalLimitCents,max_entry_stake_cents:old.maxEntryStakeCents,
+  max_entry_all_in_cents:old.maxEntryAllInCents,max_open_positions:old.maxOpenPositions,
+  max_daily_loss_cents:old.maxDailyLossCents,max_total_loss_cents:old.maxTotalLossCents,
+  max_quote_age_ms:old.maxQuoteAgeMs,max_fee_evidence_age_ms:old.maxFeeEvidenceAgeMs,
+  fee_policy_version:old.feePolicyVersion,fee_source_url:old.feeSourceUrl,
+  fee_formula_version:old.feeFormulaVersion,require_full_depth:old.requireFullDepth,
+  entry_time_in_force:old.entryTimeInForce,entry_limit_source:old.entryLimitSource,
+  policy_hash:old.policyHash,created_by:old.createdBy,approved_by:old.approvedBy,
+  approved_at:old.approvedAt,
+ };
+ const statements:{sql:string;params?:unknown[]}[]=[];
+ const query=async(sql:string,params?:unknown[])=>{
+  statements.push({sql,params});
+  if(sql.startsWith("BEGIN")||sql.startsWith("SET LOCAL")||sql==="COMMIT"||sql==="ROLLBACK")return {rows:[]};
+  if(sql.includes("SELECT * FROM public.v13_production_account"))return {rows:[{
+   id:accountId,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
+   execution_enabled:false,kill_switch:true,blocked_reason:null,policy_id:POLICY,
+   cash_micros:"25000000",reserved_micros:"0",reconciled_at:new Date(now).toISOString(),
+   key_fingerprint:"b".repeat(64),
+  }]};
+  if(sql.includes("SELECT\n   (SELECT count(*)::int FROM public.v13_production_intent"))return {rows:[{
+   intents:0,positions:0,workers:0,exits:0,
+  }]};
+  if(sql.includes("FROM private.kalshi_connection_credentials"))return {rows:[{
+   decrypted_secret:JSON.stringify({api_key_id:"test-only-id",private_key:"fake-test-only"}),
+  }]};
+  if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[row]};
+  if(sql.includes("FROM private.strata_api_fee_source_grants g"))return {rows:[{grant_id:"33333333-3333-4333-8333-333333333333"}]};
+  if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
+  if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:POLICY}]};
+  if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
+  if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:accountId}]};
+  if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[]};
+  if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
+  throw Error("unexpected SQL in migration test");
+ };
+ const db={connect:async()=>({query,release(){}})};
+ const read=async(_creds:unknown,t:number)=>({ok:true,observedAtMs:t,cashMicros:"25000000",
+  orders:[],fills:[],positions:[],settlements:[]}) as never;
+ const verify=async()=>({ok:true,identity:{
+  grantId:"33333333-3333-4333-8333-333333333333",
+  sourceUrl:"strata-api-reviewed://kxbtc15m/33333333-3333-4333-8333-333333333333",
+  digest:HASH,feePolicyVersion:API_SOURCE_POLICY_VERSION,
+  formulaVersion:API_SOURCE_FORMULA_VERSION,marketTicker:"KXBTC15M-26OCT222015",
+  verifiedAtMs:now,
+ }}) as never;
+ const res=await migrateOwnedApiFeePolicy(OWNER,{
+  confirmation:OWNER_API_FEE_MIGRATION_CONFIRM,expectedPolicyId:POLICY,
+  expectedPolicyHash:old.policyHash,expectedPolicyVersion:1,
+ },{db,read,verify,now:()=>now});
+ assert.equal(res.ok,true,JSON.stringify(res));
+ if(!res.ok)return;
+ assert.equal(res.tradingAuthorized,false);
+ assert.equal(res.newVersion,2);
+ assert.ok(statements.some(x=>x.sql==="COMMIT"));
+ const create=statements.find(x=>x.sql.includes("INSERT INTO public.v13_live_money_policy"));
+ assert.ok(create);
+ // All existing entry, position, capital, and drawdown rules are copied,
+ // only fee-source identity values are substituted.
+ assert.match(create.sql,/p\.strategy_parameter_hash/);
+ assert.match(create.sql,/p\.max_open_positions/);
+ assert.match(create.sql,/p\.max_entry_stake_cents/);
+ assert.match(create.sql,/p\.max_total_loss_cents/);
+ assert.equal(create.params?.[2],API_SOURCE_POLICY_VERSION);
+ assert.equal(create.params?.[4],API_SOURCE_FORMULA_VERSION);
+ assert.ok(statements.some(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals")));
+ assert.ok(statements.some(x=>x.sql.includes("OWNER_API_FEE_POLICY_MIGRATION")));
+ assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);
 });
