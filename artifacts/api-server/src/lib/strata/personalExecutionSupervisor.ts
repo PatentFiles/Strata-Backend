@@ -65,9 +65,41 @@ interface RunningWorker {
   disarm?: (action: LeaseAction) => Promise<{ entriesBlocked: boolean; managingExposure: boolean }>;
 }
 
+/**
+ * Production cash is authoritative only after the authenticated Kalshi
+ * Subaccount 1 / Exchange Index 2 balance has been reconciled to the ledger.
+ * A previously traded but fully settled account must be treated identically
+ * to a never-traded account: neither may skip the cash comparison.
+ *
+ * This function neither modifies a balance nor changes a release decision.
+ */
+export function verifiedStartCash(input: {
+  ledgerMicros: unknown;
+  exchangeMicros: unknown;
+  reservedMicros: unknown;
+  reconciledAt: unknown;
+  observedAtMs: number;
+}): {ok:true}|{ok:false;reason:string}{
+  const money=/^\\d+$/;
+  const ledger=typeof input.ledgerMicros==="string"?input.ledgerMicros:"";
+  const exchange=typeof input.exchangeMicros==="string"?input.exchangeMicros:"";
+  const reserved=typeof input.reservedMicros==="string"?input.reservedMicros:"";
+  if(!money.test(ledger)||!money.test(exchange)||!money.test(reserved))
+    return {ok:false,reason:"cash_evidence_unverified"};
+  if(BigInt(reserved)>BigInt(ledger)||BigInt(ledger)!==BigInt(exchange))
+    return {ok:false,reason:"cash_evidence_mismatch"};
+  const reconciled=Date.parse(String(input.reconciledAt??""));
+  const observed=input.observedAtMs;
+  if(!Number.isFinite(reconciled)||!Number.isFinite(observed)||
+     reconciled>observed+10_000||observed-reconciled>15*60_000)
+    return {ok:false,reason:"fresh_cash_reconciliation_required"};
+  return {ok:true};
+}
+
 const SIGNER_SQL = `
   -- personal-session:signer
   SELECT a.key_fingerprint, a.cash_micros::text AS cash_micros,
+         a.reconciled_at, a.reserved_micros::text AS reserved_micros,
          a.commissioned, a.execution_enabled, a.kill_switch, a.blocked_reason, a.fee_artifact_digest,
          a.cash_precision_verified, a.subaccount, a.exchange_index,
          c.key_fingerprint AS credential_fingerprint,
@@ -241,9 +273,16 @@ export function createProductionPersonalSession(
     const requests = await loadRequests(db, input.accountId);
     const snapshot = emptySnapshot(identity, feeds, requests);
     if (!("identity" in snapshot)) return snapshot;
-    const flat = snapshot.orders.length === 0 && snapshot.fills.length === 0 &&
-      snapshot.settlements.length === 0 && snapshot.positions.length === 0;
-    if (flat && feeds.cashMicros !== text(loaded.row.cash_micros)) return { ok: false, reason: "cash_evidence_mismatch" };
+    // Never bypass cash reconciliation just because the account has historical
+    // settled fills. A non-empty history is not permission to spend stale cash.
+    const cashProof=verifiedStartCash({
+      ledgerMicros:loaded.row.cash_micros,
+      exchangeMicros:feeds.cashMicros,
+      reservedMicros:loaded.row.reserved_micros,
+      reconciledAt:loaded.row.reconciled_at,
+      observedAtMs:observedAt,
+    });
+    if(!cashProof.ok)return cashProof;
     const alternate=parseOwnerFeeSource(sourceUrl);
     const apiSource=parseReviewedApiSource(sourceUrl);
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
