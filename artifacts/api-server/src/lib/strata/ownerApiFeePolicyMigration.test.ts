@@ -254,6 +254,11 @@ test("completed history remains migratable; UNKNOWN, missing orders, open positi
  };
  assert.deepEqual(migrationFlatHistoryCheck(flat,[request]),{ok:true});
  assert.equal(migrationFlatHistoryCheck({...flat,orders:[]},[request]).ok,false);
+ assert.deepEqual(migrationFlatHistoryCheck({...flat,fills:[]},[request]),{
+   ok:false,reason:"authenticated_exchange_fills_unreconciled"
+ });
+ assert.equal(migrationFlatHistoryCheck({...flat,orders:[{...flat.orders[0]!,filledHundredths:"200"}]},[request]).ok,false);
+ assert.equal(migrationFlatHistoryCheck({...flat,fills:[...flat.fills,{...flat.fills[0]!,id:"double-counted-fill"}]},[request]).ok,false);
  assert.equal(migrationFlatHistoryCheck({...flat,orders:[{...flat.orders[0]!,terminal:false}]},[request]).ok,false);
  assert.equal(migrationFlatHistoryCheck({...flat,positions:[{market:request.market,side:"YES",quantityHundredths:"100"}]},[request]).ok,false);
  assert.equal(migrationFlatHistoryCheck({...flat,complete:false},[request]).ok,false);
