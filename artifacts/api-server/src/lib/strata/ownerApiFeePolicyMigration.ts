@@ -16,7 +16,8 @@ type Q={query(sql:string,args?:unknown[]):Promise<{rows:Row[];rowCount?:number|n
 type Db={connect():Promise<Q&{release():void}>};
 type Failure={ok:false;reason:string;policyMigrated:false;tradingAuthorized:false};
 const fail=(reason:string):Failure=>({ok:false,reason,policyMigrated:false,tradingAuthorized:false});
-type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;\n expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;newPolicyId?:string;newVersion?:number};
+type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;
+ expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;newPolicyId?:string;newVersion?:number};
 type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof readOwnedKalshiFeeds;now?:()=>number};
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
