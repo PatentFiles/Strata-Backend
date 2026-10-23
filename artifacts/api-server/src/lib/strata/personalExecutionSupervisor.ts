@@ -680,13 +680,10 @@ async function claimWorkerLease(
       ]);
     }
     if (current.rows[0]?.state === "owned") {
-      await db.query(
-        `UPDATE private.kalshi_account_worker_lease
-         SET arm_requested = true
-         WHERE execution_account_id = $1 AND owner_user_id = $2::uuid
-           AND state = 'owned' AND account_kill = false AND heartbeat_at < $3::timestamptz`,
-        [input.executionAccountId, input.ownerUserId, input.staleBefore],
-      );
+      // Never turn on an old worker's arm_requested flag or steal the token
+      // because its heartbeat is stale. Owner must explicitly reconcile and
+      // fence it using a signed flat-exchange recovery first.
+      return {ok:false,reason:"owned_worker_lease_requires_fenced_recovery"};
     } else {
       const armed = await db.query(ARM_LEASE_SQL, [
         input.executionAccountId, input.ownerUserId, input.fingerprint, input.vaultSecretId, input.now,

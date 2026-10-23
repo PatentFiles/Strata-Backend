@@ -4,6 +4,8 @@ import {
   pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease} from "../lib/strata/ownerShaRelease";
+import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
+import {personalTradingSession} from "../lib/strata/sharedPersonalTradingControls";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
 
 type Identity={subject:string;role:string|null};
@@ -49,6 +51,15 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:"unauthorized"});
   const result=await authorizeProtectiveRelease(actor.subject,req.body);
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // Issue #155: explicit signed read-only Kalshi flat proof, short CAS lease
+ // fence and post-fence qualification. Never ARM, START or clear a freeze.
+ router.post("/owner-stale-lease-recover",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const result=await recoverOwnerStaleLease(actor.subject,req.body?.confirmation,{isScheduled:(ownerId,accountId)=>personalTradingSession.isScheduled(ownerId,accountId)});
+  res.setHeader("Cache-Control","private, no-store");
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
  // Owner-only AAL2 routes: owner identity comes from the signed JWT, never
