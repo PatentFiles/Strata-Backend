@@ -25,7 +25,10 @@ export function encodeProductionOrder(r: Request) {
     side: (r.action === "BUY") === (r.side === "YES") ? "bid" : "ask",
     count: r.contracts.toFixed(2), price: (yesPrice / 1_000_000).toFixed(4),
     time_in_force: "immediate_or_cancel", self_trade_prevention_type: "taker_at_cross",
-    post_only: false, cancel_order_on_pause: true, ...(r.reduceOnly ? { reduce_only: true } : {}),
+    // Emit an EXPLICIT false for ENTRY. The final reviewed fee transport
+    // must distinguish a genuine BUY from a malformed/absent reduce_only flag.
+    // Kalshi V2 accepts a boolean; true remains required for reducing EXITs.
+    post_only: false, cancel_order_on_pause: true, reduce_only: r.reduceOnly,
     subaccount: 1, exchange_index: 2,
   };
 }
