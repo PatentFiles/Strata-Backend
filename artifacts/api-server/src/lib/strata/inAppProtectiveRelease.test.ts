@@ -404,3 +404,20 @@ test("OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent 
     assert.equal(status.codeApprovalActive,scenario.owner,scenario.name);
   }
 });
+
+test("Step12 status returns legacy fee evidence diagnostics without claiming qualification",async()=>{
+ const h=fakeDb();
+ const t=Date.parse("2026-10-23T19:00:00Z");
+ const base=(h.db as unknown as {query:(sql:string,p?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>}).query;
+ const statusDb={query:async(sql:string,p?:unknown[])=>{
+  if(sql.includes("FROM private.strata_owner_sha_approvals")||
+     sql.includes("FROM private.strata_protective_release_reviews v"))
+   return {rows:[]};
+  return base(sql,p);
+ }};
+ const s=await protectiveReleaseStatus(OWNER,OWNER,{db:statusDb as never,sha:()=>SHA,now:()=>t});
+ assert.equal(s.ok,true);
+ assert.ok("feeSourceMode" in s);
+ assert.ok("legacyPdfSnapshotExpired" in s);
+ assert.equal(s.ordersSubmitted,false);
+});
