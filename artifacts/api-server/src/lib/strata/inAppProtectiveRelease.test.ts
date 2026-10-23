@@ -4,7 +4,8 @@ import { digest as v13Digest } from "../v13-production/types";
 import { API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
-  authorizeProtectiveRelease,REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
+  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
+  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
@@ -323,4 +324,43 @@ test("explicit owner reviewed repair refreshes real Kalshi evidence inside trans
  assert.equal(h.executed.some(s=>s.includes("INSERT INTO public.v13_production_intent")),false);
  assert.ok(h.executed.some(s=>s.includes("statement_timestamp()-interval '15 seconds'")));
  assert.equal(h.executed.some(s=>s.includes("AND reconciled_at>now()-interval '15 seconds'")),false);
+});
+
+test("release account lookup binds the policy to both execution account and owner",async()=>{
+  let sqlText="";
+  const db={query:async(sql:string)=>{
+    sqlText=sql;
+    return {rows:[]};
+  }};
+  const result=await readReleaseOwner(db as never,OWNER);
+  assert.deepEqual(result,{ok:false,reason:"owned_account_missing_or_ambiguous"});
+  assert.match(sqlText,/p\.execution_account_id\s*=\s*a\.id/);
+  assert.match(sqlText,/p\.created_by\s*=\s*a\.owner_user_id::text/);
+});
+
+test("owner SHA consent alone never reports a live technical protective-exit release",async()=>{
+  const h=fakeDb();
+  const query=h.db.query.bind(h.db);
+  let technicalSql="";
+  const db={
+    ...h.db,
+    query:async(sql:string,params?:unknown[])=>{
+      if(sql.includes("FROM private.strata_owner_sha_approvals")){
+        return {rows:[{approval_id:RID}]};
+      }
+      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+        technicalSql=sql;
+        return {rows:[]};
+      }
+      return query(sql,params);
+    },
+  };
+  const status=await protectiveReleaseStatus(OWNER,OWNER,{db:db as never,sha:()=>SHA});
+  assert.equal(status.ok,true,JSON.stringify(status));
+  if(!status.ok) return;
+  assert.equal(status.codeApprovalActive,true);
+  assert.equal(status.releaseActive,false);
+  assert.match(technicalSql,/expires_at>now\(\)\+interval '20 minutes'/);
+  assert.match(technicalSql,/independent_reviewer_id<>\$2::uuid/);
+  assert.match(technicalSql,/operator_approver_id<>independent_reviewer_id/);
 });
