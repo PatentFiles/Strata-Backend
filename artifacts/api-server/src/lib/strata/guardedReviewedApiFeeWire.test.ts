@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+import {encodeProductionOrder} from "../v13-production/transport";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
 const account="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -258,4 +259,130 @@ test("reviewed API grant with incorrect formula or digest cannot submit an order
   await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify(order)}),/grant_or_market_closed/);
   assert.equal(sent,0);
  }
+});
+
+test("P0: final new-entry gate requires real production SHA and signed exit flag before DB or POST",async()=>{
+ let opened=0,posted=0;
+ const db={query:async()=>({rows:[{id:account}]}),release(){}};
+ const transport=(async()=>{posted++;return new Response("{}");}) as typeof fetch;
+ const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,transport,policyHash,signer,token,leaseHolder,{
+  connect:(async()=>{opened++;return db;}) as never
+ });
+ const oldFlag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ const oldSha=process.env.RAILWAY_GIT_COMMIT_SHA;
+ const oldNode=process.env.NODE_ENV;
+ try{
+  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE="false";
+  process.env.NODE_ENV="production";
+  process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})}),
+   /new_entry_blocked/);
+  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE="true";
+  process.env.RAILWAY_GIT_COMMIT_SHA="outdated or unknown";
+  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})}),
+   /new_entry_blocked/);
+  assert.equal(posted,0);assert.equal(opened,0);
+ }finally{
+  if(oldFlag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=oldFlag;
+  if(oldSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;
+  else process.env.RAILWAY_GIT_COMMIT_SHA=oldSha;
+  if(oldNode===undefined)delete process.env.NODE_ENV;
+  else process.env.NODE_ENV=oldNode;
+ }
+});
+test("P0: independent exit + exact-SHA owner approval bound at SQL fence for any new order",async()=>{
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/a\.blocked_reason IS NULL/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/private\.strata_owner_sha_approvals oa/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/oa\.execution_account_id=a\.id/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/oa\.release_commit_sha=\$9/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/private\.strata_protective_exit_release x/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/x\.independent_reviewer_id<>a\.owner_user_id/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/x\.expires_at>now\(\)\+interval '20 minutes'/);
+ let sent=0;const calls:string[]=[];
+ const db={async query(sql:string,params?:unknown[]){
+  calls.push(sql==="BEGIN"?"BEGIN":sql==="COMMIT"?"COMMIT":sql.startsWith("ROLLBACK")?"ROLLBACK":"SQL");
+  if(sql.includes("SELECT a.id")){
+    assert.deepEqual(params?.slice(-2),[true,"a".repeat(40)]);
+    return {rows:[{id:account}]};
+  }
+  return {rows:[]};
+ },release(){}};
+ const oldFlag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ const oldSha=process.env.RAILWAY_GIT_COMMIT_SHA;
+ const oldNode=process.env.NODE_ENV;
+ try{
+  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE="true";
+  process.env.NODE_ENV="production";
+  process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+  const approved=async()=>({ok:true,reason:"reviewed_api_fee_source_stage_current",identity:{
+   grantId:grant,sourceUrl:source,digest:"a".repeat(64),
+   feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION,
+   marketTicker:ticker,verifiedAtMs:Date.now()
+  }});
+  const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,
+   (async()=>{sent++;return new Response("{}",{status:201});}) as typeof fetch,
+   policyHash,signer,token,leaseHolder,{
+    connect:(async()=>db) as never,verify:approved as never
+   });
+  await wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})});
+  assert.equal(sent,1);assert.ok(calls.indexOf("COMMIT")>calls.indexOf("BEGIN"));
+ }finally{
+  if(oldFlag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=oldFlag;
+  if(oldSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;
+  else process.env.RAILWAY_GIT_COMMIT_SHA=oldSha;
+  if(oldNode===undefined)delete process.env.NODE_ENV;
+  else process.env.NODE_ENV=oldNode;
+ }
+});
+test("P0: absent technical release, owner approval or risk-freeze keeps new-entry DB gate closed",async()=>{
+ const oldFlag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ const oldSha=process.env.RAILWAY_GIT_COMMIT_SHA;
+ const oldNode=process.env.NODE_ENV;
+ try{
+  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE="true";
+  process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+  process.env.NODE_ENV="production";
+  let posted=0,rolled=0;
+  const db={async query(sql:string){
+   if(sql.includes("SELECT a.id"))return {rows:[]};
+   if(sql==="ROLLBACK")rolled++;
+   return {rows:[]};
+  },release(){}};
+  const wrapped=createGuardedReviewedApiFeeFetch(owner,account,source,
+   (async()=>{posted++;return new Response("{}");}) as typeof fetch,
+   policyHash,signer,token,leaseHolder,{
+    connect:(async()=>db) as never
+   });
+  await assert.rejects(wrapped(url,{method:"POST",body:JSON.stringify({...order,reduce_only:false})}),
+   /final_entry_exit_release_owner_or_account_closed/);
+  assert.equal(posted,0);assert.equal(rolled,1);
+ }finally{
+  if(oldFlag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=oldFlag;
+  if(oldSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;
+  else process.env.RAILWAY_GIT_COMMIT_SHA=oldSha;
+  if(oldNode===undefined)delete process.env.NODE_ENV;
+  else process.env.NODE_ENV=oldNode;
+ }
+});
+
+test("P0: production V2 executor emits an explicit false for ENTRY and true for EXIT",()=>{
+ const entry=encodeProductionOrder({
+  market:ticker,side:"YES",action:"BUY",contracts:1,
+  limitMicros:550000,timeInForce:"IOC",
+  clientOrderId:"v13p-88888888-8888-4888-8888-888888888888",
+  reduceOnly:false,
+ } as never);
+ assert.equal(entry.reduce_only,false);
+ assert.equal(entry.subaccount,1);assert.equal(entry.exchange_index,2);
+ assert.equal(entry.time_in_force,"immediate_or_cancel");
+ const exit=encodeProductionOrder({
+  market:ticker,side:"YES",action:"SELL",contracts:1,
+  limitMicros:550000,timeInForce:"IOC",
+  clientOrderId:"v13p-88888888-8888-4888-8888-888888888888",
+  reduceOnly:true,
+ } as never);
+ assert.equal(exit.reduce_only,true);
 });
