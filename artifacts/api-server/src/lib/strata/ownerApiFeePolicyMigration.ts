@@ -152,7 +152,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
   const funds=BigInt(String(a.cash_micros)),reserved=BigInt(String(a.reserved_micros));
   if(funds<0n||reserved!==0n||String(feeds.cashMicros)!==String(a.cash_micros))return fail("cash_or_reservations_unverified");
   const exposure=await tx.query(`SELECT
-   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN')) intents,
+   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
    (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
    (SELECT count(*)::int FROM private.kalshi_account_worker_lease
       WHERE execution_account_id=$1 AND state='owned') workers,
