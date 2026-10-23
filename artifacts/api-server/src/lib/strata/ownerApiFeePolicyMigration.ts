@@ -4,13 +4,16 @@ import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
 import {digest as auditDigest} from "../v13-production/types";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
-import {readOwnedKalshiFeeds} from "./personalExchangeRead";
+import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
+import type {Identity,Request} from "../v13-production/types";
 import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
 
 /** Owner AAL2 route only. Never switches a live/armed account or fabricates fee provenance. */
 export const OWNER_API_FEE_MIGRATION_CONFIRM="I_APPROVE_MIGRATING_MY_ACCOUNT_TO_REVIEWED_API_FEES_V2";
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{64}$/;
+// V13 execution-account IDs are opaque strings; historical policy IDs need not be UUIDs.
+const POLICY_ID=/^[a-zA-Z0-9_:.\-]{8,160}$/;
 type Row=Record<string,unknown>;
 type Q={query(sql:string,args?:unknown[]):Promise<{rows:Row[];rowCount?:number|null}>};
 type Db={connect():Promise<Q&{release():void}>};
@@ -42,7 +45,7 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
   if(a.fee_policy_version===API_SOURCE_POLICY_VERSION)return fail("already_using_reviewed_api_fee_policy");
   // Provide exact immutable expected prior-policy identity for the owner
   // to review and for the confirm endpoint to compare atomically.
-  if(!UUID.test(txt(a.policy_id))||!SHA.test(txt(a.policy_hash))||
+  if(!POLICY_ID.test(txt(a.policy_id))||!SHA.test(txt(a.policy_hash))||
      !Number.isSafeInteger(Number(a.version))||Number(a.version)<1)
     return fail("previous_policy_identity_unverified");
   if(a.execution_enabled!==false||a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
@@ -61,7 +64,7 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
 export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:Inputs={}):Promise<Result>{
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  if(!UUID.test(ownerId)||b.confirmation!==OWNER_API_FEE_MIGRATION_CONFIRM||
-    !UUID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
+    !POLICY_ID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
     !Number.isSafeInteger(b.expectedPolicyVersion)||Number(b.expectedPolicyVersion)<1)
    return fail("explicit_owner_fee_migration_version_confirmation_required");
  const verify=deps.verify??verifyReviewedApiFeeSourceStage;
@@ -87,19 +90,22 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
    return fail("explicit_owner_commissioning_repair_confirmation_required");
   if(!repairing&&b.provisionalRepairConfirmation!==undefined)
    return fail("commissioning_repair_confirmation_not_applicable");
-  if(!UUID.test(id)||txt(a.policy_id)!==b.expectedPolicyId)return fail("policy_concurrency_conflict");
+  if(!id||id!==txt(pre.id)||String(a.revision)!==String(pre.revision)||
+     txt(a.key_fingerprint)!==txt(pre.key_fingerprint)||
+     txt(a.kalshi_connection_id)!==txt(pre.kalshi_connection_id)||
+     txt(a.policy_id)!==b.expectedPolicyId)return fail("policy_concurrency_conflict");
   const reconciled=safeTime(a.reconciled_at),now=(deps.now??Date.now)();
   if(!Number.isFinite(reconciled)||reconciled>now+10_000||now-reconciled>15*60_000)
    return fail("fresh_cash_reconciliation_required");
   const funds=BigInt(String(a.cash_micros)),reserved=BigInt(String(a.reserved_micros));
-  if(funds<25_000_000n||reserved!==0n)return fail("cash_or_reservations_unverified");
+  if(funds<0n||reserved!==0n||String(feeds.cashMicros)!==String(a.cash_micros))return fail("cash_or_reservations_unverified");
   const exposure=await tx.query(`SELECT
-   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1) intents,
-   (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1) positions,
+   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN')) intents,
+   (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
    (SELECT count(*)::int FROM private.kalshi_account_worker_lease
-      WHERE execution_account_id=$1 AND state='owned' AND heartbeat_at>now()-interval '30 seconds') workers,
+      WHERE execution_account_id=$1 AND state='owned') workers,
    (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state NOT IN ('terminal','released','cancelled')) exits`,[id]);
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[id]);
   const ex=exposure.rows[0];
   if(exposure.rows.length!==1||[ex?.intents,ex?.positions,ex?.workers,ex?.exits].some(n=>n!==0))
    return fail("orders_positions_workers_or_exits_not_proven_empty");
