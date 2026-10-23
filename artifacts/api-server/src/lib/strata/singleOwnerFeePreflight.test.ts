@@ -73,6 +73,17 @@ test("provider failure or tampered source does not verify any authority",async()
  const exception=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>{throw Error("429")}});
  assert.equal(exception.reason,"official_monetary_fee_source_unavailable");
 });
+test("a safely killed owner with durable eligibility has no false STOP blocker",async()=>{
+ const {db}=make({...account,execution_enabled:true,kill_switch:true,
+   lease_state:"killed",configured_stake_cents:150,blocked_reason:"awaiting_account_commissioning"});
+ const out=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>good});
+ assert.equal(out.ok,true);
+ assert.equal(out.tradingAuthorized,false);
+ assert.equal(out.suggestedNextActions.includes("stop_and_disarm_before_policy_migration"),false);
+ assert.equal(out.suggestedNextActions.includes("approve_and_save_five_dollar_policy"),true);
+ assert.equal(out.suggestedNextActions.includes("refresh_owner_commissioning"),true);
+});
+
 test("legacy low stake and unfenced worker are reported without mutating them",async()=>{
  const {db}=make({...account,configured_stake_cents:150,lease_state:"owned",
    execution_enabled:true,kill_switch:false,blocked_reason:"awaiting_account_commissioning"});
