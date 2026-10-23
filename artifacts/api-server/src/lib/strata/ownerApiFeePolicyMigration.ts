@@ -16,7 +16,7 @@ type Q={query(sql:string,args?:unknown[]):Promise<{rows:Row[];rowCount?:number|n
 type Db={connect():Promise<Q&{release():void}>};
 type Failure={ok:false;reason:string;policyMigrated:false;tradingAuthorized:false};
 const fail=(reason:string):Failure=>({ok:false,reason,policyMigrated:false,tradingAuthorized:false});
-type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;newPolicyId?:string;newVersion?:number};
+type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;\n expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;newPolicyId?:string;newVersion?:number};
 type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof readOwnedKalshiFeeds;now?:()=>number};
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
@@ -30,7 +30,7 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
   tx=await db.connect();
   const rs=await tx.query(`SELECT a.id,a.execution_enabled,a.kill_switch,a.blocked_reason,
     a.commissioned,a.reconciled_at,a.cash_precision_verified,a.policy_id,
-    p.state,p.fee_source_url,p.fee_policy_version
+    p.state,p.fee_source_url,p.fee_policy_version,p.policy_hash,p.version
     FROM public.v13_production_account a
     JOIN public.v13_live_money_policy p ON p.id=a.policy_id
       AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
@@ -39,12 +39,19 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
   const a=rs.rows[0]!;
   if(a.state!=="APPROVED"||a.commissioned!==true)return fail("approved_commissioned_policy_required");
   if(a.fee_policy_version===API_SOURCE_POLICY_VERSION)return fail("already_using_reviewed_api_fee_policy");
+  // Provide exact immutable expected prior-policy identity for the owner
+  // to review and for the confirm endpoint to compare atomically.
+  if(!UUID.test(txt(a.policy_id))||!SHA.test(txt(a.policy_hash))||
+     !Number.isSafeInteger(Number(a.version))||Number(a.version)<1)
+    return fail("previous_policy_identity_unverified");
   if(a.execution_enabled!==false||a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!==null&&a.blocked_reason!==undefined&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
   if(a.cash_precision_verified!==true||Date.now()-safeTime(a.reconciled_at)>15*60_000)
    return fail("fresh_cash_reconciliation_required");
-  return {ok:true,reason:"owner_fee_migration_preview_only",policyMigrated:false,tradingAuthorized:false};
+  return {ok:true,reason:"owner_fee_migration_preview_only",policyMigrated:false,tradingAuthorized:false,
+   expectedPolicyId:txt(a.policy_id),expectedPolicyHash:txt(a.policy_hash),
+   expectedPolicyVersion:Number(a.version)};
  }catch{return fail("fee_migration_preview_unavailable");}
  finally{tx?.release();}
 }
