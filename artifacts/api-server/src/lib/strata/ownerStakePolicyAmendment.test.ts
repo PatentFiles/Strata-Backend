@@ -42,7 +42,8 @@ const policyRow={
 };
 function mock(availableMicros="5000000",leaseState:"released"|"owned"="released",armRequested=false) {
  const sqls:string[]=[];
- const query=async(sql:string)=> {
+ const policyInsertArgs:unknown[][]=[];
+ const query=async(sql:string,args:unknown[]=[])=> {
   sqls.push(sql);
   if(sql.startsWith("BEGIN")||sql.startsWith("SET LOCAL")||sql==="ROLLBACK"||sql==="COMMIT")return {rows:[]};
   if(sql.includes("SELECT * FROM public.v13_production_account"))
@@ -58,7 +59,7 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"="released"
   if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[policyRow]};
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
   if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:old.id}]};
-  if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
+  if(sql.includes("INSERT INTO public.v13_live_money_policy")){policyInsertArgs.push(args);return {rows:[{id:"new-policy"}]};}
   if(sql.includes("UPDATE public.v13_production_account SET policy_id"))return {rows:[{id:ACCOUNT}]};
   if(sql.includes("INSERT INTO public.strata_configured_stake"))return {rows:[{revision:2}]};
   if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[{approval_id:"revoked-owner-release"}]};
@@ -67,7 +68,7 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"="released"
   throw Error("unrecognized query");
  };
  const db={connect:async()=>({query,release(){}})};
- return {db,sqls};
+ return {db,sqls,policyInsertArgs};
 }
 
 test("a risk-policy increase cannot be authorized by stake amount alone",async()=>{
@@ -178,4 +179,18 @@ test("live requested ARM still refuses owner risk-policy changes",async()=>{
    {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
  assert.deepEqual(result,{ok:false,reason:"disarm_account_before_risk_preset_change"});
  assert.equal(h.sqls.some(s=>s.includes("INSERT INTO public.strata_configured_stake")),false);
+});
+
+test("preset risk-policy SQL persists quote-age/fee-age matching signed hash fields",async()=>{
+ const h=mock("25000000");
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+  OWNER_STAKE_POLICY_CONFIRM,{presetId:TEST_TWENTY_PERCENT_PRESET.id,
+  presetRevision:TEST_TWENTY_PERCENT_PRESET.revision,capitalBudgetCents:2500});
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(h.policyInsertArgs.length,1);
+ assert.equal(h.policyInsertArgs[0]?.[12],TEST_TWENTY_PERCENT_PRESET.maxQuoteAgeMs);
+ assert.equal(h.policyInsertArgs[0]?.[13],TEST_TWENTY_PERCENT_PRESET.maxFeeEvidenceAgeMs);
+ const insert=h.sqls.find(x=>x.includes("INSERT INTO public.v13_live_money_policy"))??"";
+ assert.match(insert,/\$13,\$14/);
+ assert.equal(insert.includes("p.max_quote_age_ms,p.max_fee_evidence_age_ms"),false);
 });

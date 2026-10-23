@@ -223,13 +223,14 @@ export async function amendOwnedStakePolicy(
       SELECT $1,$2,p.id,'APPROVED',p.execution_account_id,$3,
        p.strategy_version,p.strategy_parameter_set_id,p.strategy_parameter_hash,p.entry_policy_version,
        p.champion_selection_review_id,p.champion_selection_evidence_hash,p.champion_selected_by,p.champion_selected_at,
-       $4,$5,$6,p.max_open_positions,$7,$8,p.max_quote_age_ms,p.max_fee_evidence_age_ms,
+       $4,$5,$6,p.max_open_positions,$7,$8,$13,$14,
        p.fee_policy_version,p.fee_source_url,p.fee_formula_version,p.require_full_depth,
        p.entry_time_in_force,p.entry_limit_source,$9,$3,$10::timestamptz
       FROM public.v13_live_money_policy p WHERE p.id=$11 AND p.state='REVOKED'
        AND p.execution_account_id=$12 RETURNING id`,[
        next.id,next.version,ownerId,next.capitalLimitCents,next.maxEntryStakeCents,next.maxEntryAllInCents,
-       next.maxDailyLossCents,next.maxTotalLossCents,next.policyHash,when.toISOString(),old.id,accountId]);
+       next.maxDailyLossCents,next.maxTotalLossCents,next.policyHash,when.toISOString(),old.id,accountId,
+        next.maxQuoteAgeMs,next.maxFeeEvidenceAgeMs]);
     if(inserted.rows.length!==1)return reject("policy_revision_not_inserted");
     const amendment={ownerId,accountId,oldPolicyId:old.id,newPolicyId:next.id,
       previousMaxStakeCents:old.maxEntryStakeCents,newMaxStakeCents:stakeCents,
