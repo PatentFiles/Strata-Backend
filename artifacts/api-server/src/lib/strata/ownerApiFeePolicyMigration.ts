@@ -5,7 +5,7 @@ import {digest as auditDigest} from "../v13-production/types";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
-import type {Identity,Request} from "../v13-production/types";
+import type {Identity,Request,Snapshot} from "../v13-production/types";
 import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
 
 /** Owner AAL2 route only. Never switches a live/armed account or fabricates fee provenance. */
@@ -25,6 +25,21 @@ type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof 
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
 
+/** Fail-closed flatness predicate over a complete, authenticated and
+ * reconciled exchange snapshot. Historical terminal trades are immutable
+ * evidence, not pending exposure. */
+export function migrationFlatHistoryCheck(snapshot:Snapshot,requests:Request[]):{ok:true}|{ok:false;reason:string}{
+ if(!snapshot.authenticated||!snapshot.complete||!snapshot.cashExact||
+    snapshot.unexplainedCashActivity)
+  return {ok:false,reason:"authenticated_exchange_history_incomplete"};
+ const local=requests.map(r=>r.clientOrderId);
+ if(local.some(x=>!x)||new Set(local).size!==local.length||
+    snapshot.orders.length!==requests.length)
+  return {ok:false,reason:"exchange_and_ledger_history_incomplete"};
+ if(snapshot.positions.length!==0||snapshot.orders.some(o=>!o.terminal))
+  return {ok:false,reason:"authenticated_exchange_not_flat"};
+ return {ok:true};
+}
 /** GET preview has zero mutation and exposes only eligibility, never credentials. */
 export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={}):Promise<Result>{
  if(!UUID.test(ownerId))return fail("owner_identity_invalid");
@@ -116,17 +131,8 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
  const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:txt(pre.key_fingerprint)};
  const mapped=personalAccountSnapshot(identity,feeds,requests);
  if(!("identity" in mapped))return fail(mapped.reason);
- // Each persisted production intent must be represented in the complete
- // signed provider order history. An unseen, UNKNOWN or silently omitted
- // locally-recorded order cannot be treated as a closed account.
- const localIds=requests.map(r=>r.clientOrderId);
- if(new Set(localIds).size!==localIds.length||mapped.orders.length!==requests.length)
-   return fail("exchange_and_ledger_history_incomplete");
- // Reconciled completed orders, fills and settlements are historical assets,
- // not open exposure. Do not require an untouched account to migrate its fee
- // model; reject unmatched history and any resting order or open position.
- if(mapped.positions.length!==0||mapped.orders.some(o=>!o.terminal))
-   return fail("authenticated_exchange_not_flat");
+ const flat=migrationFlatHistoryCheck(mapped,requests);
+ if(!flat.ok)return fail(flat.reason);
  const fresh=await verify(ownerId,"STEP_9",first.identity.sourceUrl);
  if(!fresh.ok||fresh.identity.grantId!==first.identity.grantId||
    fresh.identity.digest!==first.identity.digest)return fail("reviewed_api_fee_grant_changed");
