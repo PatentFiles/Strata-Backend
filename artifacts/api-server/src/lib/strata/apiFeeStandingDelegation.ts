@@ -251,3 +251,57 @@ export async function revokeStandingFeeModel(
   });
  }catch{return deny("standing_model_revocation_unavailable");}
 }
+
+/** Read-only, AAL2 JWT owner-scoped display. The displayed model identity is
+ * NOT an approval; live readiness still requires the official per-order API
+ * observation and every execution/risk/release gate.
+ */
+export async function inspectStandingFeeReadiness(
+ ownerId:string,deps:Pick<Deps,"db"|"sha">={}
+){
+ const release=(deps.sha??deployedGitSha)();
+ if(!UUID.test(ownerId)||!SHA.test(release))
+  return {...deny("owner_or_backend_sha_unavailable"),modelId:null,modelValidUntil:null,
+   delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+ try{
+  const db=deps.db??pool;
+  const models=await db.query([
+    "SELECT m.model_id::text,m.valid_until",
+    "FROM private.strata_api_fee_standing_models m",
+    "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
+    "JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))",
+    "AND r.role='ADMIN'",
+    "WHERE m.release_commit_sha=$1 AND m.rate_decision_digest=$2",
+    "AND m.fee_model_version=$3 AND m.scope='KXBTC15M:INDEX2'",
+    "AND m.revoked_at IS NULL AND m.valid_until>now()+interval '1 minute'",
+    "LIMIT 2"
+  ].join(" "),[release,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION]);
+  if(models.rows.length>1)return {...deny("standing_fee_models_ambiguous"),
+   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+  const model=models.rows[0];
+  const delegation=model?await db.query([
+    "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at",
+    "FROM private.strata_api_fee_standing_delegations d",
+    "JOIN public.v13_production_account a ON a.owner_user_id=d.owner_user_id",
+    "AND a.subaccount=1 AND a.exchange_index=2",
+    "JOIN public.v13_live_money_policy p ON p.id=a.policy_id",
+    "AND p.execution_account_id=a.id AND p.policy_hash=d.policy_hash",
+    "WHERE d.owner_user_id=$1::uuid AND d.model_id=$2::uuid",
+    "AND d.revoked_at IS NULL AND d.valid_until>now()",
+    "AND d.release_commit_sha=$3 LIMIT 2"
+  ].join(" "),[ownerId,model.model_id,release]):{rows:[] as Row[]};
+  if(delegation.rows.length>1)return {...deny("standing_fee_delegations_ambiguous"),
+   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+  const d=delegation.rows[0];
+  return {
+   ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
+   ok:true as const,modelId:model?text(model.model_id):null,
+   modelValidUntil:model?.valid_until??null,
+   delegationId:d?text(d.delegation_id):null,
+   delegationValidUntil:d?.valid_until??null,
+   leaseExpiresAt:d?.lease_expires_at??null,
+   grantId:d?text(d.grant_id):null,
+  };
+ }catch{return {...deny("standing_fee_readiness_unavailable"),
+  modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};}
+}
