@@ -37,14 +37,23 @@ test("expired source observation does not create fee-authorizing PDF bytes",asyn
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry),null);
  assert.equal(await recentPinnedOfficialFeeSnapshot(expiry+86400000),null);
 });
-test("production transport uses bounded verified PDF bytes without network inside lease",async()=>{
+test("production transport refuses the bundled snapshot as fresh fee authority",async()=>{
  const savedNow=Date.now;
+ const savedJwt=process.env.STRATA_FEE_BRIDGE_ANON_JWT;
  try{
   Date.now=()=>Date.parse(INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.checkedAt)+120000;
+  // No issuer-authenticated Edge read can occur with this intentionally
+  // invalid bridge key. A historical, hash-valid PDF must not grant fees.
+  process.env.STRATA_FEE_BRIDGE_ANON_JWT="";
   const proof=await establishOfficialFeeDigest();
-  assert.equal(proof.ok,true);
-  if(proof.ok)assert.equal(proof.digest,INDEPENDENT_OFFICIAL_FEE_SNAPSHOT.sha256);
- }finally{Date.now=savedNow;}
+  assert.equal(proof.ok,false);
+  if(!proof.ok)assert.equal(proof.reason,"official_fee_schedule_unavailable");
+  assert.equal("digest" in proof,false);
+ }finally{
+  Date.now=savedNow;
+  if(savedJwt===undefined)delete process.env.STRATA_FEE_BRIDGE_ANON_JWT;
+  else process.env.STRATA_FEE_BRIDGE_ANON_JWT=savedJwt;
+ }
 });
 test("after expiry real digest entry refuses an unavailable canonical provider",async()=>{
  const savedFetch=globalThis.fetch,savedNow=Date.now;
