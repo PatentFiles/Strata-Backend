@@ -412,8 +412,11 @@ export async function authorizeProtectiveRelease(
    commissioned,cash_precision_verified FROM public.v13_production_account
  WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[accountId,ownerId]);
   const current=locked.rows[0];
+  // execution_enabled is durable eligibility, not the current ARM state.
+  // Both (false,true) and (true,true) are valid killed account states;
+  // only (false,false) is a contradictory live-but-ineligible state.
   if(locked.rows.length!==1||!current||
-     truth(current.execution_enabled)===truth(current.kill_switch))
+     (!truth(current.execution_enabled)&&!truth(current.kill_switch)))
     return deny("account_inconsistent_execution_kill_state");
   const frozen=current.blocked_reason;
   if(frozen!==null&&frozen!==undefined&&frozen!=="awaiting_account_commissioning")
@@ -422,7 +425,7 @@ export async function authorizeProtectiveRelease(
     return deny("explicit_commissioning_repair_confirmation_required");
   if(frozen!=="awaiting_account_commissioning"&&repairing)
     return deny("commissioning_repair_not_applicable");
-  const accountNeedsEnable=!truth(current.execution_enabled);
+  const accountNeedsEnable=truth(current.kill_switch);
   const global=await client.query(`
  SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config
  WHERE id='singleton' FOR UPDATE`);
@@ -566,7 +569,8 @@ export async function authorizeProtectiveRelease(
     const updated=await client.query(`
  UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false
  WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
- AND execution_enabled=false AND kill_switch=true RETURNING id`,[accountId,ownerId]);
+ AND execution_enabled=$3 AND kill_switch=true RETURNING id`,
+    [accountId,ownerId,truth(current.execution_enabled)]);
     if(updated.rows.length!==1)return deny("account_enable_failed");
   }
   if(globalNeedsEnable){
