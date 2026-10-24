@@ -7,6 +7,8 @@
  * with the provider's complete order/fill records. No new permission is issued.
  */
 import {createHash} from "node:crypto";
+import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
+import type {Identity,Request} from "../v13-production/types";
 const UUID=/^[a-zA-Z0-9_:.-]{8,160}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
 type Fill={tradeId:string;orderId:string;ticker:string;quantityHundredths:string;
@@ -85,4 +87,52 @@ export function reconcileWalletV4OrderFees(
    actualFeeMicros:fee.toString(),filledHundredths:filled.toString(),
    netCashDebitMicros:(gross+fee).toString(),
    needsAdjustment:fee!==reserved,tradingAuthorized:false};
+}
+
+/**
+ * Server-only authenticated Kalshi receipt connector. Does not expose keys or
+ * permit any POST. The existing exact-subaccount/exchange-index reader obtains
+ * current+historical orders/fills/settlements and validates complete pagination.
+ * personalAccountSnapshot confirms every matched order and fee-bearing fill.
+ */
+export async function reconcileWalletV4AuthenticatedKalshiReceipts(
+ input:{credentials:{keyId:string;privateKey:string};identity:Identity;
+        requests:Request[];ledger:Ledger;nowMs?:number},
+):Promise<FeeReconcileResult>{
+ const observedAtMs=input.nowMs??Date.now();
+ if(!Number.isSafeInteger(observedAtMs)||Math.abs(Date.now()-observedAtMs)>15_000||
+    input.identity.subaccount!==1||input.identity.exchangeIndex!==2)
+   return fail("v4_wallet_authenticated_identity_or_clock_invalid");
+ const read=await readOwnedKalshiFeeds(input.credentials,observedAtMs);
+ if(!read.ok)return fail(read.reason);
+ const snapshot=personalAccountSnapshot(input.identity,read,input.requests);
+ if("ok" in snapshot)return fail(snapshot.reason);
+ if(!snapshot.authenticated||!snapshot.complete||!snapshot.cashExact||
+    snapshot.unexplainedCashActivity)
+   return fail("v4_wallet_authenticated_snapshot_incomplete");
+ const order=snapshot.orders.find(o=>o.orderId===input.ledger.orderId);
+ if(!order||!order.terminal||order.request.market!==input.ledger.ticker||
+    !/^\d+$/.test(order.filledHundredths)||
+    order.filledHundredths!==input.ledger.expectedFilledHundredths)
+   return fail("v4_wallet_order_finality_or_fill_count_unverified");
+ const scoped=snapshot.fills.filter(f=>f.orderId===order.orderId);
+ if(scoped.some(f=>f.market!==input.ledger.ticker||
+    !/^\d+$/.test(f.feeMicros)||!/^\d+$/.test(f.quantityHundredths)||
+    !Number.isSafeInteger(f.priceMicros)||f.priceMicros%100!==0))
+   return fail("v4_wallet_provider_fill_precision_unverified");
+ const accepted:Fill[]=scoped.map(f=>({
+   tradeId:f.id,orderId:f.orderId,ticker:f.market,
+   quantityHundredths:f.quantityHundredths,
+   executionPriceTicks:f.priceMicros/100,
+   exchangeFeeMicros:f.feeMicros,feeVerified:true,
+ }));
+ const authoritativeFillDigest=createHash("sha256").update(JSON.stringify(
+   [...accepted].sort((a,b)=>a.tradeId.localeCompare(b.tradeId))
+ )).digest("hex");
+ return reconcileWalletV4OrderFees(input.ledger,accepted,true,{
+   source:"kalshi_server_authenticated",ownerId:input.ledger.ownerId,
+   accountId:input.ledger.accountId,orderId:order.orderId,
+   marketTicker:order.request.market,observedAtMs,
+   complete:true,authoritativeFillDigest,
+ });
 }
