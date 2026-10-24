@@ -8,7 +8,9 @@
  * alone must NEVER enable a trade; the signed POST must retain all legacy
  * account, worker, kill, liquidity, exposure, and protective-exit fences.
  */
-import {estimateDynamicFeeMicros,type DynamicFeeModel} from "./dynamicOfficialFeeSchedule";
+import {estimateDynamicFeeMicros,computeDynamicFeeModelDigest,
+ type DynamicFeeModel} from "./dynamicOfficialFeeSchedule";
+import {CANONICAL_FEE_SCHEDULE_URL} from "../microLiveFeeArtifact";
 
 const SHA=/^[a-f0-9]{40}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
@@ -77,7 +79,12 @@ export function boundDynamicFeeEntryV4(
     observed.modelDigest!==approval.modelDigest||
     observed.publicationDigest!==approval.officialPublicationDigest||
     observed.marketTicker!==order.marketTicker||
+    observed.issuer!==CANONICAL_FEE_SCHEDULE_URL||
+    observed.feeType!=="quadratic"||observed.feeMultiplier!=="1"||
+    !/^20\\d{2}-\\d{2}-\\d{2}$/.test(observed.effectiveDate)||
+    Date.parse(observed.effectiveDate)>order.nowMs||
     !DIGEST.test(observed.metadataDigest)||!DIGEST.test(observed.modelDigest)||
+    computeDynamicFeeModelDigest(observed)!==observed.modelDigest||
     observed.tradingAuthorized!==false||
     observed.requiresVersionedReview!==true)
    return deny("v4_provider_fee_model_changed_stale_or_unverified");
