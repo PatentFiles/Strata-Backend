@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {boundDynamicFeeEntryV4,DYNAMIC_FEE_POLICY_VERSION_V4,
  type VersionedFeeAuthorityV4,type ExactOrderRiskV4} from "./dynamicFeeOrderRiskV4";
-import type {DynamicFeeModel} from "./dynamicOfficialFeeSchedule";
+import {computeDynamicFeeModelDigest,type DynamicFeeModel} from "./dynamicOfficialFeeSchedule";
 
 const now=Date.parse("2026-10-23T20:00:00.000Z");
 const owner="11111111-1111-4111-8111-111111111111";
@@ -23,9 +23,12 @@ const observed:DynamicFeeModel={
  takerRatePpm:70_000,makerRatePpm:17_500,
  defaultTakerMultiplierPpm:1_000_000,defaultMakerMultiplierPpm:0,
  marketTicker:market,eventTicker:market,metadataDigest:"d".repeat(64),
+ feeType:"quadratic",feeMultiplier:"1",
  modelDigest,observedAt:new Date(now-500).toISOString(),
  tradingAuthorized:false,requiresVersionedReview:true,
 };
+observed.modelDigest=computeDynamicFeeModelDigest(observed);
+grant.modelDigest=observed.modelDigest;
 const order:ExactOrderRiskV4={
  ownerId:owner,executionAccountId:account,deployedSha:sha,
  marketTicker:market,side:"YES",action:"BUY",reduceOnly:false,
@@ -38,14 +41,20 @@ test("gross $5/fees per 0.01 partial fill/exit fees account for all-in $5.30",()
  const v=boundDynamicFeeEntryV4(grant,observed,order);
  assert.deepEqual(v,{ok:true,grossMicros:5_000_000n,
    maximumEntryFeeMicros:200_000n,allInCents:530,
-   modelDigest,tradingAuthorized:false});
+   modelDigest:observed.modelDigest,tradingAuthorized:false});
 });
 test("new rate changes computed worst-fill upper bound, never uses 0.07 constant",()=>{
- const high=boundDynamicFeeEntryV4(grant,{...observed,takerRatePpm:90_000},order);
+ const revised={...observed,takerRatePpm:90_000};
+ revised.modelDigest=computeDynamicFeeModelDigest(revised);
+ // Model drift NEVER reuses old owner's consent.
+ assert.equal(boundDynamicFeeEntryV4(grant,revised,order).ok,false);
+ const high=boundDynamicFeeEntryV4({...grant,modelDigest:revised.modelDigest},revised,order);
  assert.equal(high.ok,true);
  if(high.ok){assert.equal(high.maximumEntryFeeMicros,300_000n);
  assert.equal(high.allInCents,540);}
- const over=boundDynamicFeeEntryV4(grant,{...observed,takerRatePpm:200_000},
+ const overModel={...observed,takerRatePpm:200_000};
+ overModel.modelDigest=computeDynamicFeeModelDigest(overModel);
+ const over=boundDynamicFeeEntryV4({...grant,modelDigest:overModel.modelDigest},overModel,
  {...order,reservedExitFeeCents:115});
  assert.equal(over.ok,false);
 });
@@ -54,6 +63,9 @@ test("changed/revoked/stale/other owner/SHA/market/consent always rejects",()=>{
  [grant,{...observed,modelDigest:"e".repeat(64)},order],
  [grant,{...observed,publicationDigest:"e".repeat(64)},order],
  [grant,{...observed,metadataDigest:"!"},order],
+ [grant,{...observed,takerRatePpm:1},order],
+ [grant,{...observed,issuer:"https://attacker.invalid/pdf"},order],
+ [grant,{...observed,feeType:"unknown"},order],
  [grant,{...observed,observedAt:new Date(now-11_000).toISOString()},order],
  [{...grant,revokedAtMs:now-1},observed,order],
  [{...grant,expiresAtMs:now+10_000},observed,order],
