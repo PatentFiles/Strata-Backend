@@ -25,10 +25,10 @@ function responses() {
     "/series/KXBTC15M": {
       series: { ticker: "KXBTC15M", exchange_index: 2, fee_type: "quadratic", fee_multiplier: 1 },
     },
-    "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100": {
+    "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false": {
       series_fee_change_arr: [], cursor: "",
     },
-    ["/events/fee_changes?event_ticker=" + eventTicker + "&show_historical=false&limit=100"]: {
+    ["/events/fee_changes?event_ticker=" + eventTicker + "&limit=100"]: {
       event_fee_changes: [], cursor: "",
     },
   } as Record<string, Record<string, unknown>>;
@@ -59,6 +59,41 @@ test("read-only two-source candidate accepts fixed series + clear event + comple
   assert.equal(result.commissioningApproved, false);
   assert.equal(result.tradingEnabled, false);
 });
+test("official API shape: active market may omit deprecated expiration_time and nullable expected_expiration_time",async()=>{
+ const pages=responses();
+ const market=pages["/markets/" + ticker].market as Record<string,unknown>;
+ delete market.expiration_time;
+ market.expected_expiration_time=null;
+ (pages["/markets?series_ticker=KXBTC15M&status=open&limit=100"].markets as Record<string,unknown>[])[0]!.status="active";
+ market.status="active";
+ const outcome=await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker);
+ assert.equal(outcome.ok,true,JSON.stringify(outcome));
+ // The authoritative maximum expiration remains mandatory.
+ delete market.latest_expiration_time;
+ assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,false);
+ // Every supplied optional timestamp must still be valid.
+ market.latest_expiration_time=done;
+ market.expected_expiration_time="not-a-timestamp";
+ assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,false);
+});
+test("provider fee-change requests use only documented parameter sets",async()=>{
+ const page=responses();
+ const expected=[
+  "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false",
+  "/events/fee_changes?event_ticker="+eventTicker+"&limit=100",
+ ];
+ const called:string[]=[];
+ const fetchImpl=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+  const path=String(input).replace(KALSHI_API_ORIGIN,"");
+  called.push(path);
+  if(path.startsWith("/series/fee_changes")||path.startsWith("/events/fee_changes"))
+   assert.ok(expected.includes(path),"unsupported fee-change query: "+path);
+  return transport(page)(input,init);
+ }) as typeof fetch;
+ const result=await probeCurrentKalshiFeeApi(fetchImpl,()=>now,ticker);
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.ok(expected.every(path=>called.includes(path)));
+});
 test("rejects incorrect series multiplier or unrecognized fee type", async () => {
   for (const patch of [{fee_multiplier:0.5},{fee_type:"flat"}]) {
     const pages=responses();
@@ -71,7 +106,7 @@ test("rejects event override or any fee change scheduled before market lifecycle
   (pages["/events/" + eventTicker].event as Record<string,unknown>).fee_multiplier_override=2;
   assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now)).ok,false);
   const other=responses();
-  other["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100"].series_fee_change_arr=[
+  other["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"].series_fee_change_arr=[
     {id:"change1",scheduled_ts:"2026-10-15T22:01:00Z",series_ticker:"KXBTC15M",
       fee_type:"quadratic",fee_multiplier:1},
   ];
@@ -79,7 +114,7 @@ test("rejects event override or any fee change scheduled before market lifecycle
 });
 test("rejects incomplete pagination, missing metadata, ambiguous target and provider failures", async () => {
   const pages=responses();
-  pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100"].cursor="missing-page";
+  pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"].cursor="missing-page";
   assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now)).ok,false);
   const broken=responses();
   broken["/series/KXBTC15M"]={series:null};

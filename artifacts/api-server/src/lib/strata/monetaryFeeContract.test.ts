@@ -53,9 +53,9 @@ function feeApiPages(){
    fee_type_override:null,fee_multiplier_override:null}},
   "/series/KXBTC15M":{series:{ticker:"KXBTC15M",exchange_index:2,
    fee_type:"quadratic",fee_multiplier:1}},
-  "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100":{
+  "/series/fee_changes?series_ticker=KXBTC15M&show_historical=false":{
    series_fee_change_arr:[],cursor:""},
-  ["/events/fee_changes?event_ticker="+marketTicker+"&show_historical=false&limit=100"]:{
+  ["/events/fee_changes?event_ticker="+marketTicker+"&limit=100"]:{
    event_fee_changes:[],cursor:""},
  } as Record<string,Record<string,unknown>>;
 }
@@ -96,7 +96,7 @@ test("official monetary proof cannot override wrong multiplier, event fee except
   if(patch==="override")
    (pages["/events/"+marketTicker].event as Record<string,unknown>).fee_multiplier_override=2;
   if(patch==="future_change")
-   pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100"].series_fee_change_arr=[
+   pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"].series_fee_change_arr=[
     {id:"fee_change_1",scheduled_ts:"2026-10-15T22:03:00Z"}];
   const outcome=await verifyMonetaryFeeContract("ORDER_ENTRY",marketTicker,
    kalshiFeed(pages),()=>fixtureClock,pinnedPdfProof);

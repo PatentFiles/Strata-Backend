@@ -136,9 +136,14 @@ export async function probeCurrentKalshiFeeApi(
       getJson("/markets/" + encodeURIComponent(ticker), fetchImpl),
       getJson("/events/" + encodeURIComponent(eventTicker), fetchImpl),
       getJson("/series/KXBTC15M", fetchImpl),
-      getJson("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100", fetchImpl),
+      // Kalshi's documented getSeriesFeeChanges takes series_ticker and
+      // show_historical; it does NOT declare a limit argument. The event
+      // counterpart accepts event_ticker/limit/cursor, NOT show_historical.
+      // Unsupported query parameters can make the entire V4 evidence path
+      // fail at HTTP 400 even when the series has the standard fee.
+      getJson("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false", fetchImpl),
       getJson("/events/fee_changes?event_ticker=" + encodeURIComponent(eventTicker) +
-        "&show_historical=false&limit=100", fetchImpl),
+        "&limit=100", fetchImpl),
     ]);
     const market = plain(m.market), event = plain(e.event), series = plain(s.series);
     if (!market || !event || !series || market.ticker !== ticker ||
@@ -154,12 +159,19 @@ export async function probeCurrentKalshiFeeApi(
       return fail("market_or_event_fee_override_unreviewed");
 
     const closeAt = canonicalTime(market.close_time);
-    const expires = [market.expiration_time,market.latest_expiration_time,
-      market.expected_expiration_time].map(canonicalTime);
+    // expiration_time is deprecated and expected_expiration_time is
+    // nullable/optional in Kalshi's market schema. Check all supplied values
+    // but do not require ALL aliases to exist. latest_expiration_time remains
+    // the authoritative mandatory upper bound for fee-change evaluation.
+    const latest = canonicalTime(market.latest_expiration_time);
+    const optionalExpiry = [market.expiration_time, market.expected_expiration_time]
+      .filter(value => value !== undefined && value !== null)
+      .map(canonicalTime);
     if (closeAt === null || closeAt <= clock() ||
-        expires.some(t => t === null || t < closeAt))
+        latest === null || latest < closeAt ||
+        optionalExpiry.some(t => t === null || t < closeAt))
       return fail("market_lifecycle_unverified");
-    const lifecycleEnd = Math.max(closeAt,...expires as number[]);
+    const lifecycleEnd = Math.max(closeAt,latest,...optionalExpiry as number[]);
     if (!safeChanges(sc,"series_fee_change_arr",lifecycleEnd) ||
         !safeChanges(ec,"event_fee_changes",lifecycleEnd))
       return fail("fee_change_schedule_unverified");

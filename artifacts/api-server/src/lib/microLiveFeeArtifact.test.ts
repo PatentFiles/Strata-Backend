@@ -630,6 +630,17 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
     anonJwt, () => now);
   assert.ok(result);
   assert.equal((await verifyOfficialFeePdfBytes(Buffer.from(await result!.arrayBuffer()))).ok, true);
+  // V4 monetary model observation is stricter than the existing <=1h
+  // infrastructure lease: a 60-second max capture age is mandatory.
+  const recent=await fetchTrustedFeeFromSupabaseBridge(responding(props),origin,
+    anonJwt,()=>now,60_000);
+  assert.equal(recent?.status,200);
+  const staleForV4=await fetchTrustedFeeFromSupabaseBridge(responding({
+    ...props,"x-strata-captured-at":new Date(now-60_001).toISOString(),
+  }),origin,anonJwt,()=>now,60_000);
+  assert.equal(staleForV4,null);
+  assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props),
+    origin,anonJwt,()=>now,60*60*1000+1),null);
   assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props),
     "https://wrong-project.supabase.co", anonJwt, () => now), null);
   assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding({
