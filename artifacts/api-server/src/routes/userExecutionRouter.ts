@@ -4,6 +4,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule";
+import {observeOfficialTariffHtml} from "../lib/strata/officialTariffHtmlObservation";
 import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
 import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeConsent} from "../lib/strata/walletV4OwnerConsent";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
@@ -635,6 +636,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control", "private, no-store");
     const evidence = await probeCurrentKalshiFeeApi();
     res.status(evidence.ok ? 200 : 409).json(sanitizePublic(evidence));
+  });
+  // One authenticated LIVE first-party HTML fetch, strictly evidence-only.
+  // No caller-supplied URL, fee override, source signature or other account.
+  router.get("/fees/official-tariff-html",async (_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const evidence=await observeOfficialTariffHtml();
+    res.status(evidence.ok?200:409).json(sanitizePublic(evidence));
   });
   // Read-only Step 9 preparation: canonical official API observation with a
   // versioned, NON-AUTHORIZING review-candidate digest. No PDF fetch, account
