@@ -6,6 +6,7 @@ const owner="11111111-1111-4111-8111-111111111111";
 const sha="a".repeat(40);
 const now=Date.parse("2026-10-23T20:00:00Z");
 const row={id:"wallet-test-account",commissioned:true,
+ execution_enabled:true,kill_switch:false,blocked_reason:null,
  cash_precision_verified:true,reconciled_at:new Date(now-5_000),
  cash_micros:"25000000",reserved_micros:"0",configured_stake_cents:500,
  risk_capital_cents:2500,risk_preset_id:TEST_TWENTY_PERCENT_PRESET.id,
@@ -31,6 +32,12 @@ test("Wallets owner readiness checks actual saved preset and all current authori
  assert.equal(queries.length,2);
  assert.match(queries[0]!,/a.owner_user_id=\$1::uuid/);
  assert.match(queries[1]!,/g.owner_user_id=\$1::uuid/);
+ assert.match(queries[0]!,/a.execution_enabled,a.kill_switch,a.blocked_reason/);
+ assert.match(queries[1]!,/g.expires_at>now\(\)\+interval '30 seconds'/);
+ assert.match(queries[1]!,/e.expires_at>now\(\)\+interval '30 seconds'/);
+ assert.match(queries[1]!,/pr.expires_at>now\(\)\+interval '20 minutes'/);
+ assert.match(queries[1]!,/pr.independent_reviewer_id<>\$1::uuid/);
+ assert.match(queries[1]!,/pr.operator_approver_id<>pr.independent_reviewer_id/);
 });
 test("Missing/ambiguous owned account and unknown deployed SHA always fail closed",async()=>{
  const none=await inspectWalletV4Readiness(owner,{
@@ -87,4 +94,45 @@ test("insufficient capital and malformed policy hash cannot qualify",async()=>{
  r=await inspectWalletV4Readiness(owner,{
   db:{async query(){return {rows:[invalid]};}},getSha:()=>"",now:()=>now});
  assert.equal(r.checks.approvedStakePolicy,false);
+});
+
+
+test("Wallets V4 signed POST readiness remains false during account kill, disarm, or commissioning hold",async()=>{
+ const authoritative={
+  model_evidence:true,fee_authority:true,owner_sha_approval:true,
+  protective_exit_release:true,
+ };
+ const verify=async(account:Record<string,unknown>)=>{
+  let reads=0;
+  const result=await inspectWalletV4Readiness(owner,{
+   db:{async query(){reads++;return {rows:reads===1?[account]:[authoritative]};}},
+   getSha:()=>sha,now:()=>now,
+   featureState:()=>({signedPost:true,protectiveExit:true}),
+  });
+  assert.equal(reads,2);
+  assert.equal(result.ok,true);
+  assert.equal(result.checks.feeAuthority,true);
+  assert.equal(result.checks.protectiveExitRelease,true);
+  assert.equal(result.tradingAuthorized,false);
+  assert.equal(result.ordersSubmitted,false);
+  return result;
+ };
+ const ready=await verify(row);
+ assert.equal(ready.checks.signedPostAuthority,true);
+ assert.equal(ready.blockers.includes("wallet_v4_account_execution_authority_inactive"),false);
+ for(const patch of [
+   {kill_switch:true},
+   {execution_enabled:false},
+   {blocked_reason:"awaiting_account_commissioning"},
+   {blocked_reason:"frozen_pending_review"},
+   {kill_switch:null},
+   {execution_enabled:null},
+   {blocked_reason:undefined},
+ ]){
+   const stopped=await verify({...row,...patch});
+   assert.equal(stopped.checks.signedPostAuthority,false,JSON.stringify(patch));
+   assert.ok(stopped.blockers.includes("wallet_v4_account_execution_authority_inactive"),
+     JSON.stringify(patch));
+   assert.ok(stopped.blockers.includes("wallet_v4_signedPostAuthority_required"));
+ }
 });

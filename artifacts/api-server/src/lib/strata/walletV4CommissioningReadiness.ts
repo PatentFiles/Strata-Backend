@@ -36,6 +36,7 @@ const fail=(reason:string):WalletV4Readiness=>({
 });
 const ACCOUNT_SQL=`
  SELECT a.id,a.commissioned,a.cash_precision_verified,a.reconciled_at,
+ a.execution_enabled,a.kill_switch,a.blocked_reason,
  a.cash_micros::text AS cash_micros,a.reserved_micros::text AS reserved_micros,
  s.configured_stake_cents,s.risk_capital_cents,s.risk_preset_id,s.risk_preset_revision,
  p.policy_hash,p.fee_policy_version,p.state,
@@ -51,7 +52,7 @@ const AUTH_SQL=`
  EXISTS(SELECT 1 FROM private.strata_wallet_v4_fee_evidence e
   WHERE e.owner_user_id=$1::uuid AND e.execution_account_id=$2
     AND e.deployed_sha=$3 AND e.revoked_at IS NULL
-    AND e.observed_at<=now() AND e.expires_at>now()) AS model_evidence,
+    AND e.observed_at<=now() AND e.expires_at>now()+interval '30 seconds') AS model_evidence,
  EXISTS(SELECT 1 FROM private.strata_wallet_v4_fee_authority g
   JOIN private.strata_wallet_v4_fee_evidence e
     ON e.evidence_id=g.evidence_id AND e.owner_user_id=g.owner_user_id
@@ -60,15 +61,18 @@ const AUTH_SQL=`
   WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2
     AND g.deployed_sha=$3 AND g.policy_hash=$4
     AND g.revoked_at IS NULL AND g.approved_at<=now()
-    AND g.expires_at>now() AND e.revoked_at IS NULL
-    AND e.expires_at>now()
+    AND g.expires_at>now()+interval '30 seconds' AND e.revoked_at IS NULL
+    AND e.observed_at<=now() AND e.expires_at>now()+interval '30 seconds'
     AND 'ORDER_ENTRY'=ANY(g.authorized_stages)) AS fee_authority,
  EXISTS(SELECT 1 FROM private.strata_owner_sha_approvals r
   WHERE r.owner_user_id=$1::uuid AND r.execution_account_id=$2
     AND r.release_commit_sha=$3 AND r.revoked_at IS NULL) AS owner_sha_approval,
  EXISTS(SELECT 1 FROM private.strata_protective_exit_release pr
   WHERE pr.release_commit_sha=$3 AND pr.state='approved'
-    AND pr.revoked_at IS NULL AND pr.expires_at>now()) AS protective_exit_release
+    AND pr.revoked_at IS NULL AND pr.created_at<=now()
+    AND pr.expires_at>now()+interval '20 minutes'
+    AND pr.independent_reviewer_id<>$1::uuid
+    AND pr.operator_approver_id<>pr.independent_reviewer_id) AS protective_exit_release
 `;
 /** Only the JWT-supplied subject may be passed; no request-body account IDs. */
 export async function inspectWalletV4Readiness(
@@ -118,7 +122,12 @@ export async function inspectWalletV4Readiness(
     signedPost:process.env.STRATA_WALLET_V4_SIGNED_POST_ENABLED==="true",
     protectiveExit:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="true",
   })))();
-  checks.signedPostAuthority=runtime.signedPost===true &&
+  // The final signed-POST SQL explicitly requires an enabled, un-killed
+  // and unblocked account. Do not show a ready-to-submit gate for an
+  // account held for commissioning or intentionally stopped by its owner.
+  const accountEntryEligible=a.execution_enabled===true &&
+    a.kill_switch===false && a.blocked_reason===null;
+  checks.signedPostAuthority=accountEntryEligible && runtime.signedPost===true &&
     runtime.protectiveExit===true && checks.accountOwned &&
     checks.commissioned && checks.approvedStakePolicy &&
     checks.cashReconciled && checks.modelEvidence && checks.feeAuthority &&
@@ -126,6 +135,7 @@ export async function inspectWalletV4Readiness(
     deployedSha!==null;
   const blockers=Object.entries(checks).filter(([,value])=>!value)
    .map(([name])=>"wallet_v4_"+name+"_required");
+  if(!accountEntryEligible)blockers.unshift("wallet_v4_account_execution_authority_inactive");
   if(!deployedSha)blockers.unshift("wallet_v4_deployed_sha_unavailable");
   return {ok:true,reason:"wallet_v4_read_only_gate_report",
    accountId,deployedSha,checks,blockers,
