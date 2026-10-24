@@ -31,6 +31,8 @@ export type OwnerFeePreflight={
   v3EvidenceReceiptPresent:boolean;
   sourceDigest?:string;
   marketTicker?:string;
+  rateLimitOrigin?:"provider"|"shared_cooldown"|"backend_local"|"bridge_unclassified";
+  retryAt?:string;
 };
 const fail=(reason:string,next:string[]=[]):OwnerFeePreflight=>({
   ok:false,reason,evidenceVerified:false,ownerAuthenticated:false,
@@ -50,6 +52,10 @@ const SAFE_MONETARY_FAILURES=new Set([
  "official_fee_schedule_http_403",
  "official_fee_schedule_http_404",
  "official_fee_schedule_http_429",
+ "official_fee_schedule_http_429_provider",
+ "official_fee_schedule_http_429_shared_cooldown",
+ "official_fee_schedule_http_429_backend_local",
+ "official_fee_schedule_http_429_bridge_unclassified",
  "official_fee_schedule_http_500",
  "official_fee_schedule_http_502",
  "official_fee_schedule_http_503",
@@ -190,7 +196,9 @@ export async function inspectSingleOwnerFeePreflight(
      !/^KXBTC15M-[A-Za-z0-9-]+$/.test(str(evidence.marketTicker)))
     return {...fail(safeMonetaryFailure(evidence.ok
       ? "official_monetary_fee_source_unverified" : evidence.reason),actions),
-      ownerAuthenticated:true,v3SchemaInstalled,v3EvidenceReceiptPresent};
+      ownerAuthenticated:true,v3SchemaInstalled,v3EvidenceReceiptPresent,
+     ...(evidence.rateLimitOrigin?{rateLimitOrigin:evidence.rateLimitOrigin}:{}),
+     ...(evidence.retryAt?{retryAt:evidence.retryAt}:{})};
   return {
     ok:true,reason:"owner_official_fee_evidence_read_only_candidate",
     evidenceVerified:true,ownerAuthenticated:true,
