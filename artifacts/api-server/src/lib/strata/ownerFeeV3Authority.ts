@@ -77,23 +77,30 @@ export async function issueOwnerV3FeeAuthority(ownerId:string,raw:unknown,deps:D
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='10000ms'");
   const owner=await tx.query(`SELECT a.id,a.commissioned,a.kill_switch,
-    a.cash_precision_verified,l.state AS lease_state,l.arm_requested,
-    l.account_kill
+    a.cash_precision_verified
     FROM public.v13_production_account a
-    LEFT JOIN private.kalshi_account_worker_lease l
-     ON l.execution_account_id=a.id AND l.owner_user_id=a.owner_user_id
     WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
-    FOR UPDATE OF a,l`,[ownerId]);
+    FOR UPDATE OF a`,[ownerId]);
   if(owner.rows.length!==1)return denied("v3_owned_account_missing_or_ambiguous");
   const a=owner.rows[0]!;
+  // PostgreSQL cannot FOR UPDATE the nullable side of a LEFT JOIN.
+  // Lock the lease directly while holding the owner/account lock.
+  const leases=await tx.query(`SELECT state AS lease_state,arm_requested,
+    account_kill FROM private.kalshi_account_worker_lease
+    WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,
+    [a.id,ownerId]);
+  if(leases.rows.length>1)return denied("v3_worker_lease_ambiguous");
+  const lease=leases.rows[0]??{};
+  const state=lease.lease_state, armed=lease.arm_requested,
+    leaseKill=lease.account_kill;
   if(a.commissioned!==true||a.kill_switch!==true||
      a.cash_precision_verified!==true)return denied("v3_safe_commissioned_stop_required");
-  if(a.lease_state==="owned"||a.arm_requested===true)
+  if(state==="owned"||armed===true)
     return denied("v3_worker_lease_or_arm_not_stopped");
-  if(a.lease_state!=null &&
-     !(a.arm_requested===false &&
-        (a.lease_state==="killed"&&a.account_kill===true ||
-         a.lease_state==="released"&&a.account_kill===false)))
+  if(state!=null &&
+     !(armed===false &&
+        (state==="killed"&&leaseKill===true ||
+         state==="released"&&leaseKill===false)))
     return denied("v3_worker_state_unknown");
   // The evidence attestation remains immutable and independent from the new
   // grant. It must be for the same owner, scoped account, SHA and source bytes.
