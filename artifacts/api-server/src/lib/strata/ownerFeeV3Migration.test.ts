@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import {
  migrateOwnedV3FeePolicy,previewOwnedV3FeeMigration,
  OWNER_V3_POLICY_MIGRATION_CONFIRM,v3MigrationFlatHistoryCheck,
+ deriveOwnerV3PresetLimits,
 } from "./ownerFeeV3Migration";
 import {V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
 import type {Snapshot,Request} from "../v13-production/types";
-import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
+import {computeV13LiveMoneyPolicyHash,evaluateV13LiveMoneyRisk,type V13ApprovedLiveMoneyPolicy} from "../v13LiveMoneyRisk";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
-import {TEST_TWENTY_PERCENT_PRESET_ID} from "./sharedPresets";
+import {TEST_TWENTY_PERCENT_PRESET_ID,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
 const OWNER="11111111-1111-4111-8111-111111111111",
   POLICY="22222222-2222-4222-8222-222222222222",
   GRANT="33333333-3333-4333-8333-333333333333",
@@ -103,8 +104,8 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   strategyParameterHash:V13_CHAMPION_PARAMETER_HASH,entryPolicyVersion:V13_ENTRY_POLICY_VERSION,
   championSelectionReviewId:"independent-champion",championSelectionEvidenceHash:"b".repeat(64),
   championSelectedBy:OWNER,championSelectedAt:new Date("2026-10-01T00:00:00Z"),
-  capitalLimitCents:2500,maxEntryStakeCents:500,maxEntryAllInCents:550,maxOpenPositions:1,
-  maxDailyLossCents:250,maxTotalLossCents:500,maxQuoteAgeMs:1000,maxFeeEvidenceAgeMs:1000,
+  capitalLimitCents:2500,maxEntryStakeCents:150,maxEntryAllInCents:200,maxOpenPositions:1,
+  maxDailyLossCents:500,maxTotalLossCents:1500,maxQuoteAgeMs:5000,maxFeeEvidenceAgeMs:15000,
   feePolicyVersion:"micro-live-standing-fee-policy-v1",
   feeSourceUrl:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
   feeFormulaVersion:V3_FEE_FORMULA_VERSION,requireFullDepth:true,
@@ -152,7 +153,8 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   if(sql.includes("FROM private.strata_owner_fee_authority_v3 g"))
     return {rows:[{authority_id:"33333333-3333-4333-8333-333333333333"}]};
   if(sql.includes("FROM public.strata_configured_stake"))
-    return {rows:[{configured_stake_cents:500,risk_preset_id:TEST_TWENTY_PERCENT_PRESET_ID,risk_capital_cents:2500}]};
+    return {rows:[{configured_stake_cents:500,risk_preset_id:TEST_TWENTY_PERCENT_PRESET_ID,
+      risk_preset_revision:TEST_TWENTY_PERCENT_PRESET.revision,risk_capital_cents:2500}]};
   if(sql.includes("FROM private.kalshi_account_worker_lease"))
     return {rows:[{state:"killed",arm_requested:false,account_kill:true}]};
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
@@ -195,16 +197,57 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
  assert.ok(statements.some(x=>x.sql==="COMMIT"));
  const create=statements.find(x=>x.sql.includes("INSERT INTO public.v13_live_money_policy"));
  assert.ok(create);
- // All existing entry, position, capital, and drawdown rules are copied,
- // only fee-source identity values are substituted.
+ // Superseded V1 still has 150/200 caps. The new policy uses the
+ // selected, approved 20% preset: 500 gross, 625 including fees, 1000 daily.
  assert.match(create.sql,/p\.strategy_parameter_hash/);
  assert.match(create.sql,/p\.max_open_positions/);
- assert.match(create.sql,/p\.max_entry_stake_cents/);
- assert.match(create.sql,/p\.max_total_loss_cents/);
+ assert.doesNotMatch(create.sql,/p\.max_entry_stake_cents/);
+ assert.doesNotMatch(create.sql,/p\.max_entry_all_in_cents/);
+ assert.match(create.sql,/\$11::int,\$12::int,\$13::int/);
+ assert.deepEqual(create.params?.slice(10),[2500,500,625,1000,1500,5000,15000]);
  assert.equal(create.params?.[2],V3_FEE_POLICY_VERSION);
  assert.equal(create.params?.[4],V3_FEE_FORMULA_VERSION);
+ const persisted={...old,id:create.params?.[0] as string,version:2,
+   supersedesPolicyId:old.id,capitalLimitCents:2500,maxEntryStakeCents:500,
+   maxEntryAllInCents:625,maxDailyLossCents:1000,maxTotalLossCents:1500,
+   maxQuoteAgeMs:5000,maxFeeEvidenceAgeMs:15000,
+   feePolicyVersion:V3_FEE_POLICY_VERSION,feeSourceUrl:SOURCE,
+   feeFormulaVersion:V3_FEE_FORMULA_VERSION,approvedBy:OWNER,
+   approvedAt:new Date(create.params?.[7] as string)};
+ assert.equal(create.params?.[5],computeV13LiveMoneyPolicyHash(persisted));
+ const riskInput={policy:{...persisted,policyHash:computeV13LiveMoneyPolicyHash(persisted)},
+   plannedGrossCents:500,reservedEntryFeeCents:100,reservedExitFeeCents:25,
+   availableCashCents:2500,capitalRemainingCents:2500,openPositions:0,
+   realizedDailyLossCents:0,realizedTotalLossCents:0,quoteAgeMs:1000,
+   feeEvidenceAgeMs:1000,feePolicyVersion:V3_FEE_POLICY_VERSION,
+   feeSourceUrl:SOURCE,feeFormulaVersion:V3_FEE_FORMULA_VERSION,
+   feeEvidenceFingerprint:"verified",fullDepthProven:true};
+ assert.deepEqual(evaluateV13LiveMoneyRisk(riskInput),{ok:true,plannedAllInCents:625});
+ assert.equal(evaluateV13LiveMoneyRisk({...riskInput,reservedExitFeeCents:26}).ok,false);
+ assert.equal(evaluateV13LiveMoneyRisk({...riskInput,plannedGrossCents:499}).ok,false);
  assert.ok(statements.some(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals")));
  assert.ok(statements.some(x=>x.sql.includes("OWNER_V3_FEE_POLICY_MIGRATION")));
  assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);
 });
 
+
+test("V3 $5 preset proof is exact-versioned and bounded by authenticated cash",()=>{
+ const saved={configured_stake_cents:500,risk_preset_id:TEST_TWENTY_PERCENT_PRESET_ID,
+   risk_preset_revision:TEST_TWENTY_PERCENT_PRESET.revision,risk_capital_cents:2500};
+ const good=deriveOwnerV3PresetLimits(saved,25_000_000n);
+ assert.equal(good.ok,true,JSON.stringify(good));
+ if(good.ok)assert.deepEqual(good.limits,{
+   capitalLimitCents:2500,maxEntryStakeCents:500,maxEntryAllInCents:625,
+   maxDailyLossCents:1000,maxTotalLossCents:1500,
+   maxQuoteAgeMs:5000,maxFeeEvidenceAgeMs:15000,
+ });
+ for(const broken of [
+   {...saved,risk_preset_revision:0},
+   {...saved,risk_preset_id:"unapproved"},
+   {...saved,risk_capital_cents:5000},
+   {...saved,configured_stake_cents:499},
+   {...saved,risk_preset_revision:null},
+ ])assert.equal(deriveOwnerV3PresetLimits(broken,25_000_000n).ok,false,JSON.stringify(broken));
+ assert.equal(deriveOwnerV3PresetLimits(saved,24_999_999n).ok,false);
+ assert.equal(deriveOwnerV3PresetLimits(saved,-1n).ok,false);
+});
