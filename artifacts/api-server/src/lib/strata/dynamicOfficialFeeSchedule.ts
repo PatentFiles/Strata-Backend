@@ -148,6 +148,14 @@ export function estimateDynamicFeeMicros(
  * failures including 429, redirect, stale provider data and fee exceptions
  * are returned as denials, with zero trading authority.
  */
+/** Maximum wall-clock for the whole official-PDF + authenticated fee-API
+ * observation. A direct PDF timeout (10s) followed by verified strict bridge
+ * egress (up to 18s) and fee-API read can exceed the old 15s total cap.
+ * The *source* bridge is independently constrained to a real <=60s capture
+ * and exact-market quotes are rechecked at the signed order boundary.
+ */
+export const MAX_V4_DISCOVERY_WALL_MS=45_000;
+
 export async function observeDynamicKalshiFees(
  marketTicker:string,reviewedDigest:string|null=null,
  fetchImpl:typeof fetch=globalThis.fetch,now:()=>number=Date.now,
@@ -166,7 +174,7 @@ export async function observeDynamicKalshiFees(
     !SHA.test(provider.metadataDigest))
    return deny(provider.ok?"dynamic_fee_provider_identity_incomplete":provider.reason);
  const age=now()-started;
- if(age<0||age>15_000)return deny("dynamic_fee_observation_expired");
+ if(age<0||age>MAX_V4_DISCOVERY_WALL_MS)return deny("dynamic_fee_observation_expired");
  // The API probe currently rejects unreviewed non-standard multipliers,
  // overrides, fee-type changes and effective changes automatically.
  const modelBase={issuer:CANONICAL_FEE_SCHEDULE_URL,
