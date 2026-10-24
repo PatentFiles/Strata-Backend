@@ -35,12 +35,12 @@ const order:ExactOrderRiskV4={
  timeInForce:"IOC",postOnly:false,limitPriceTicks:5000,
  contractsHundredths:1000,availableCashCents:2500,capitalRemainingCents:2500,
  approvedPolicyGrossCents:500,approvedPolicyAllInCents:625,
- reservedExitFeeCents:10,nowMs:now,
+ reservedExitFeeCents:20,nowMs:now,
 };
-test("gross $5/fees per 0.01 partial fill/exit fees account for all-in $5.30",()=>{
+test("gross $5/fees per 0.01 partial fill/exit fees account for all-in $5.40",()=>{
  const v=boundDynamicFeeEntryV4(grant,observed,order);
  assert.deepEqual(v,{ok:true,grossMicros:5_000_000n,
-   maximumEntryFeeMicros:200_000n,allInCents:530,
+   maximumEntryFeeMicros:200_000n,allInCents:540,
    modelDigest:observed.modelDigest,tradingAuthorized:false});
 });
 test("new rate changes computed worst-fill upper bound, never uses 0.07 constant",()=>{
@@ -48,10 +48,11 @@ test("new rate changes computed worst-fill upper bound, never uses 0.07 constant
  revised.modelDigest=computeDynamicFeeModelDigest(revised);
  // Model drift NEVER reuses old owner's consent.
  assert.equal(boundDynamicFeeEntryV4(grant,revised,order).ok,false);
- const high=boundDynamicFeeEntryV4({...grant,modelDigest:revised.modelDigest},revised,order);
+ const high=boundDynamicFeeEntryV4({...grant,modelDigest:revised.modelDigest},revised,
+   {...order,reservedExitFeeCents:30});
  assert.equal(high.ok,true);
  if(high.ok){assert.equal(high.maximumEntryFeeMicros,300_000n);
- assert.equal(high.allInCents,540);}
+ assert.equal(high.allInCents,560);}
  const overModel={...observed,takerRatePpm:200_000};
  overModel.modelDigest=computeDynamicFeeModelDigest(overModel);
  const over=boundDynamicFeeEntryV4({...grant,modelDigest:overModel.modelDigest},overModel,
@@ -85,12 +86,12 @@ test("execution-side, min $5, all-in cash, gross and fee budgets fail closed",()
  for(const partial of [
    {action:"SELL"},{reduceOnly:true},{timeInForce:"GTC"},{postOnly:true},
    {limitPriceTicks:0},{contractsHundredths:999},
-   {availableCashCents:529},{capitalRemainingCents:529},
-   {approvedPolicyAllInCents:529},{approvedPolicyGrossCents:499},
+   {availableCashCents:539},{capitalRemainingCents:539},
+   {approvedPolicyAllInCents:539},{reservedExitFeeCents:19},{approvedPolicyGrossCents:499},
    {reservedExitFeeCents:200},{contractsHundredths:0},
  ])assert.equal(boundDynamicFeeEntryV4(grant,observed,{
    ...order,...partial} as ExactOrderRiskV4).ok,false,JSON.stringify(partial));
- assert.equal(boundDynamicFeeEntryV4({...grant,maxAllInEntryCents:529},
+ assert.equal(boundDynamicFeeEntryV4({...grant,maxAllInEntryCents:539},
    observed,order).ok,false);
  assert.equal(boundDynamicFeeEntryV4(grant,observed,{
    ...order,side:"NO"}).ok,true);
