@@ -7,6 +7,7 @@
  * review signature, issuance timestamp, or other authority.
  */
 import { pool } from "@workspace/db";
+import { deployedGitSha } from "./deployedGitSha";
 import { verifyMonetaryFeeContract, type MonetaryFeeEvidenceContract } from "./monetaryFeeContract";
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -57,7 +58,7 @@ const OWNER_SQL=`
 /** Safe to invoke without a reviewer. Never inserts policy, grant or order rows. */
 export async function inspectSingleOwnerFeePreflight(
   ownerId:string,
-  deps:{db?:Queryable;observe?:Evidence}={},
+  deps:{db?:Queryable;observe?:Evidence;sha?:()=>string}={},
 ):Promise<OwnerFeePreflight> {
   if(!UUID.test(ownerId))return fail("owner_identity_invalid");
   const db=deps.db??pool as unknown as Queryable;
@@ -92,8 +93,7 @@ export async function inspectSingleOwnerFeePreflight(
     if(v3SchemaInstalled) {
       // A receipt is a non-executable owner consent candidate, not a fee-source grant.
       // Only an exact current runtime SHA is relevant; never reuse prior deployments.
-      const {deployedGitSha}=await import("./deployedGitSha");
-      const sha=deployedGitSha();
+      const sha=(deps.sha??deployedGitSha)();
       if(/^[a-f0-9]{40}$/.test(sha)){
         const receipt=await db.query(`
           SELECT attestation_id FROM private.strata_owner_fee_evidence_v3
@@ -118,11 +118,13 @@ export async function inspectSingleOwnerFeePreflight(
   actions.push("exact_sha_protective_exit_exchange_qualification_required");
   let evidence:MonetaryFeeEvidenceContract;
   try{evidence=await (deps.observe??(()=>verifyMonetaryFeeContract("STEP_9")))();}
-  catch{return {...fail("official_monetary_fee_source_unavailable",actions),ownerAuthenticated:true};}
+  catch{return {...fail("official_monetary_fee_source_unavailable",actions),ownerAuthenticated:true,
+    v3SchemaInstalled,v3EvidenceReceiptPresent};}
   if(!evidence.ok||!evidence.monetaryFeeAuthorized||evidence.stage!=="STEP_9"||
      !/^[a-f0-9]{64}$/.test(str(evidence.sourceDigest)) ||
      !/^KXBTC15M-[A-Za-z0-9-]+$/.test(str(evidence.marketTicker)))
-    return {...fail("official_monetary_fee_source_unverified",actions),ownerAuthenticated:true};
+    return {...fail("official_monetary_fee_source_unverified",actions),ownerAuthenticated:true,
+      v3SchemaInstalled,v3EvidenceReceiptPresent};
   return {
     ok:true,reason:"owner_official_fee_evidence_read_only_candidate",
     evidenceVerified:true,ownerAuthenticated:true,
