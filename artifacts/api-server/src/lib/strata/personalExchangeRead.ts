@@ -1,4 +1,4 @@
-import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
@@ -28,6 +28,25 @@ export function ownedPositionHistoryQuery(cursor: string | null = null): string 
  return `?${PAIR_QUERY}&settlement_status=all&count_filter=position%2Ctotal_traded${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`;
 }
 
+/** No response body or secret is surfaced in release diagnostics. Every
+ * category still blocks the signed account read; a 429 is not a reason to
+ * resubmit another request inside this qualification attempt.
+ */
+export function classifyOwnedKalshiReadFailure(error:unknown):string{
+ if(!(error instanceof KalshiApiError))return "kalshi_read_failed";
+ if(error.type==="NOT_CONFIGURED")return "kalshi_read_signer_not_configured";
+ if(error.type==="INVALID_CREDENTIALS")return "kalshi_read_signer_invalid";
+ if(error.type==="NETWORK_ERROR")return "kalshi_read_network_unavailable";
+ if(error.type==="HTTP_ERROR"){
+  if(error.status===429)return "kalshi_read_rate_limited";
+  if(error.status===401)return "kalshi_read_authentication_rejected";
+  if(error.status===403)return "kalshi_read_permission_denied";
+  if(typeof error.status==="number"&&error.status>=500&&error.status<=599)
+    return "kalshi_read_provider_unavailable";
+ }
+ return "kalshi_read_failed";
+}
+
 export interface OwnedKalshiRead {
   ok: true;
   observedAtMs: number;
@@ -47,8 +66,8 @@ export async function readOwnedKalshiFeeds(
   let balance: unknown;
   try {
     balance = await get(creds, BALANCE_PATH, "?subaccount=1&exchange_index=2");
-  } catch {
-    return { ok: false, reason: "kalshi_read_failed" };
+  } catch(error) {
+    return { ok: false, reason: classifyOwnedKalshiReadFailure(error) };
   }
   if (!scopeEcho(balance)) return { ok: false, reason: "account_target_pair_mismatch" };
   const cash = readSubaccountSpendableCash({
@@ -61,19 +80,21 @@ export async function readOwnedKalshiFeeds(
     primaryBalance: {},
   });
   if (!cash.ok) return cash;
+  // Failure must stop the entire signed scan before any additional Kalshi
+  // GET is sent. In particular, a provider 429 must not fan out into five
+  // unnecessary signed history requests.
   const orders = await pages(get, creds, ORDER_PATH, ["orders"]);
+  if ("failed" in orders) return {ok:false,reason:orders.failed};
   const archivedOrders = await pages(get, creds, HISTORICAL_ORDER_PATH, ["orders"]);
+  if ("failed" in archivedOrders) return {ok:false,reason:archivedOrders.failed};
   const fills = await pages(get, creds, FILL_PATH, ["fills"]);
+  if ("failed" in fills) return {ok:false,reason:fills.failed};
   const archivedFills = await pages(get, creds, HISTORICAL_FILL_PATH, ["fills"]);
+  if ("failed" in archivedFills) return {ok:false,reason:archivedFills.failed};
   const positions = await pages(get, creds, POSITION_PATH, ["market_positions", "positions"]);
+  if ("failed" in positions) return {ok:false,reason:positions.failed};
   const settlements = await pages(get, creds, SETTLEMENT_PATH, ["settlements"]);
-  const feeds = [orders, archivedOrders, fills, archivedFills, positions, settlements];
-  const failed = feeds.find((page) => "failed" in page);
-  if (failed && "failed" in failed) return { ok: false, reason: failed.failed };
-  if (!isPage(orders) || !isPage(archivedOrders) || !isPage(fills) || !isPage(archivedFills) ||
-      !isPage(positions) || !isPage(settlements)) {
-    return { ok: false, reason: "personal_exchange_history_unreconciled" };
-  }
+  if ("failed" in settlements) return {ok:false,reason:settlements.failed};
   const currentEmpty = orders.rows.length === 0 && fills.rows.length === 0 &&
     settlements.rows.length === 0 && !openPositions(positions.rows);
   if ((archivedOrders.unavailable || archivedFills.unavailable) && !currentEmpty) {
@@ -209,10 +230,6 @@ export function emptySnapshot(
 
 type Page = { rows: unknown[]; unavailable: boolean };
 
-function isPage(page: Page | { failed: string }): page is Page {
-  return !("failed" in page);
-}
-
 async function pages(
   get: typeof getScopedKalshiJson,
   creds: { keyId: string; privateKey: string },
@@ -232,7 +249,7 @@ async function pages(
       if (status === 404 && rows.length === 0 && (path === HISTORICAL_ORDER_PATH || path === HISTORICAL_FILL_PATH)) {
         return { rows: [], unavailable: true };
       }
-      return { failed: "kalshi_read_failed" };
+      return { failed: classifyOwnedKalshiReadFailure(error) };
     }
     const parsed = pageOf(payload, keys);
     if (!parsed || (parsed.cursor && seen.has(parsed.cursor))) {

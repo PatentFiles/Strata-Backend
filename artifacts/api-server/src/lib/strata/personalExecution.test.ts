@@ -28,7 +28,8 @@ import {
   requestOwnedAccountActivation,
   reportOwnedActivation,
 } from "./personalAccountActivation";
-import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds } from "./personalExchangeRead";
+import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds, classifyOwnedKalshiReadFailure } from "./personalExchangeRead";
+import { KalshiApiError, getScopedKalshiJson } from "../kalshiAccountClient";
 import type { MarketEvidence, Request } from "../v13-production/types";
 
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -461,6 +462,68 @@ test("production START requires exact fresh cash parity regardless of historical
   });
 });
 
+test("signed Kalshi portfolio GET rejects redirects before forwarding credentials",async()=>{
+ let requests=0,policy:string|undefined;
+ const transport=(async(_url:string,init?:RequestInit)=>{
+  requests++;
+  policy=init?.redirect;
+  return new Response("",{status:302,
+   headers:{location:"https://attacker.invalid/collect"}});
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",transport,"https://external-api.kalshi.com"),
+  (error:unknown)=>error instanceof KalshiApiError&&error.type==="HTTP_ERROR"&&error.status===302,
+ );
+ assert.equal(policy,"manual");
+ assert.equal(requests,1);
+});
+test("signed Kalshi transport failures are typed, secret-free, and never retried",async()=>{
+ let sent=0;
+ const failing=(async()=>{
+  sent++;
+  throw new Error("internal connection error with private_key=must_not_surface");
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",failing,"https://external-api.kalshi.com"),
+  (err:unknown)=>err instanceof KalshiApiError&&err.type==="NETWORK_ERROR"&&
+    !/private_key|must_not_surface/.test(err.message),
+ );
+ assert.equal(sent,1);
+});
+test("owner exchange qualification distinguishes signed GET rejection and 429 without retries or secret leakage",async()=>{
+ const variants=[
+  {error:new KalshiApiError("HTTP_ERROR",401),reason:"kalshi_read_authentication_rejected"},
+  {error:new KalshiApiError("HTTP_ERROR",403),reason:"kalshi_read_permission_denied"},
+  {error:new KalshiApiError("HTTP_ERROR",429),reason:"kalshi_read_rate_limited"},
+  {error:new KalshiApiError("HTTP_ERROR",503),reason:"kalshi_read_provider_unavailable"},
+  {error:new KalshiApiError("INVALID_CREDENTIALS"),reason:"kalshi_read_signer_invalid"},
+  {error:new KalshiApiError("NOT_CONFIGURED"),reason:"kalshi_read_signer_not_configured"},
+  {error:new KalshiApiError("NETWORK_ERROR"),reason:"kalshi_read_network_unavailable"},
+  {error:new Error("api_key_id=never-log private_key=secret"),reason:"kalshi_read_failed"},
+ ];
+ for(const row of variants){
+  assert.equal(classifyOwnedKalshiReadFailure(row.error),row.reason);
+  let calls=0;
+  const res=await readOwnedKalshiFeeds(keyMaterial(),NOW,async()=>{
+    calls++;throw row.error;
+  });
+  assert.deepEqual(res,{ok:false,reason:row.reason});
+  assert.equal(calls,1,"never retry a failed signed read in one attempt");
+  assert.doesNotMatch(JSON.stringify(res),/api_key_id|private_key|secret/);
+ }
+ for(const row of variants.slice(0,4)){
+  let calls=0;
+  const res=await readOwnedKalshiFeeds(keyMaterial(),NOW,async(_creds,path)=>{
+    calls++;
+    if(path.includes("balance"))return {balance_dollars:"25.0000",subaccount:1,exchange_index:2};
+    throw row.error;
+  });
+  assert.deepEqual(res,{ok:false,reason:row.reason});
+  assert.equal(calls,2,"failure must abort first history page without retries");
+ }
+});
 test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
   const queries: string[] = [];
   const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {

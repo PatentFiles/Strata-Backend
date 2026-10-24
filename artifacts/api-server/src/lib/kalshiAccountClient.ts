@@ -443,16 +443,25 @@ export async function getScopedKalshiJson(
   }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
-  const response = await fetchImpl(`${host}${path}${query}`, {
-    method: "GET",
-    cache: "no-store",
-    headers: {
-      Accept: "application/json",
-      "KALSHI-ACCESS-KEY": creds.keyId,
-      "KALSHI-ACCESS-SIGNATURE": signature,
-      "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    },
-  });
+  let response:Response;
+  try {
+    response = await fetchImpl(`${host}${path}${query}`, {
+      method: "GET",
+      cache: "no-store",
+      // Never follow provider redirects with credential-bearing headers.
+      redirect: "manual",
+      headers: {
+        Accept: "application/json",
+        "KALSHI-ACCESS-KEY": creds.keyId,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+      },
+    });
+  } catch {
+    // Transport exceptions may include sensitive request URLs or headers.
+    // Preserve only a typed nonsecret error at the portfolio read boundary.
+    throw new KalshiApiError("NETWORK_ERROR");
+  }
   if (!response.ok) throw new KalshiApiError("HTTP_ERROR", response.status);
   return await response.json() as unknown;
 }
