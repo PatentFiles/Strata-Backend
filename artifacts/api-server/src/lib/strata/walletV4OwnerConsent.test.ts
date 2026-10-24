@@ -5,6 +5,7 @@ import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeCon
  WALLET_V4_REVOKE_CONFIRM} from "./walletV4OwnerConsent";
 import type {DynamicFeeResult} from "./dynamicOfficialFeeSchedule";
 import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
+import {MAX_V4_DISCOVERY_WALL_MS} from "./dynamicOfficialFeeSchedule";
 
 const owner="11111111-1111-4111-8111-111111111111";
 const sha="a".repeat(40),hash="b".repeat(64),source="c".repeat(64),metadata="d".repeat(64);
@@ -137,4 +138,66 @@ test("V4 fee authorization policy snapshot supports any valid saved $5-$25,000 s
    assert.equal(approvedDynamicStakeSnapshot({...p,risk_capital_cents:budget+100}).ok,false);
    assert.equal(approvedDynamicStakeSnapshot({...p,risk_preset_revision:-1}).ok,false);
  }
+});
+
+test("real authenticated fallback can complete at 28s without bypassing current 15s model freshness",async()=>{
+ assert.equal(MAX_V4_DISCOVERY_WALL_MS,45_000);
+ let clock=started+1_000;
+ const provider=async()=>{
+   clock=started+29_000;
+   return {...valid,model:{...valid.model,observedAt:new Date(clock).toISOString()}};
+ };
+ const {db}=dbFake(sql=>{
+   if(sql.includes("FROM public.v13_production_account")&&sql.includes("FOR UPDATE"))
+     return {rows:[{id:"test-wallet",commissioned:true,kill_switch:true,
+        execution_enabled:false,cash_precision_verified:true}]};
+   if(sql.includes("FROM private.kalshi_account_worker_lease"))return {rows:[]};
+   if(sql.includes("INSERT INTO private.strata_wallet_v4_fee_evidence"))
+     return {rows:[{evidence_id:consent.evidenceId}]};
+   return {rows:[]};
+ });
+ const r=await recordWalletV4FeeEvidence(owner,evidence,{
+    ...deps,db,now:()=>clock,observe:provider});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ if(r.ok)assert.equal(r.tradingAuthorized,false);
+ const stale=await recordWalletV4FeeEvidence(owner,evidence,{
+   ...deps,db,now:()=>clock,
+   observe:async()=>({...valid,model:{...valid.model,
+     observedAt:new Date(clock-15_001).toISOString()}})});
+ assert.equal(stale.ok,false);
+ clock=started+1_000;
+ const expired=await recordWalletV4FeeEvidence(owner,evidence,{
+   ...deps,db,now:()=>{return clock},
+   observe:async()=>{clock=started+46_001;return {...valid,model:{...valid.model,
+      observedAt:new Date(clock).toISOString()}}}});
+ assert.equal(expired.ok,false);
+});
+test("explicit owner consent still requires a genuinely recent reobserved model after long bridge read",async()=>{
+ let clock=started+1_000;
+ const {db}=dbFake(sql=>{
+   if(sql.includes("SELECT market_ticker,official_source_digest"))
+     return {rows:[{market_ticker:ticker,official_source_digest:source}]};
+   if(sql.includes("FROM public.v13_production_account")&&sql.includes("FOR UPDATE"))
+     return {rows:[{id:"test-wallet",commissioned:true,kill_switch:true,
+      execution_enabled:false,cash_precision_verified:true}]};
+   if(sql.includes("FROM private.kalshi_account_worker_lease"))return {rows:[]};
+   if(sql.includes("FROM private.strata_wallet_v4_fee_evidence")&&sql.includes("FOR SHARE"))
+     return {rows:[{market_ticker:ticker,official_source_digest:source,
+       expires_at:new Date(started+9*60_000)}]};
+   if(sql.includes("v13_live_money_policy"))return {rows:[]};
+   return {rows:[]};
+ });
+ const result=await authorizeWalletV4FeeModel(owner,consent,{
+   ...deps,db,now:()=>clock,observe:async()=>{
+     clock=started+29_000;
+     return {...valid,model:{...valid.model,observedAt:new Date(clock).toISOString()}};
+   }});
+ assert.equal(result.reason,"wallet_v4_approved_policy_not_found",JSON.stringify(result));
+ clock=started+1_000;
+ const expired=await authorizeWalletV4FeeModel(owner,consent,{
+   ...deps,db,now:()=>clock,observe:async()=>{
+     clock=started+46_001;
+     return {...valid,model:{...valid.model,observedAt:new Date(clock).toISOString()}};
+   }});
+ assert.equal(expired.ok,false);
 });
