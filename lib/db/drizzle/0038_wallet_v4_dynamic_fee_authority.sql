@@ -2,6 +2,10 @@
 -- These records do NOT enable the trading worker and do NOT replace V1/V2/V3.
 -- Only privileged audited server code may insert; all browser roles denied.
 BEGIN;
+-- Composite FK prevents one Wallets user from authorizing another user's
+-- execution account even if a privileged application writer is defective.
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_v4_owner_account_identity
+ ON public.v13_production_account(id,owner_user_id);
 CREATE TABLE IF NOT EXISTS private.strata_wallet_v4_fee_evidence (
  evidence_id uuid PRIMARY KEY,
  owner_user_id uuid NOT NULL REFERENCES auth.users(id),
@@ -17,6 +21,9 @@ CREATE TABLE IF NOT EXISTS private.strata_wallet_v4_fee_evidence (
  observed_at timestamptz NOT NULL DEFAULT now(),
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
+ CONSTRAINT wallet_v4_evidence_account_owner_fk FOREIGN KEY
+  (execution_account_id,owner_user_id)
+  REFERENCES public.v13_production_account(id,owner_user_id),
  CONSTRAINT wallet_v4_evidence_bound CHECK (expires_at>observed_at AND expires_at<=observed_at+interval '15 minutes'),
  CONSTRAINT wallet_v4_effective CHECK (effective_at<=observed_at),
  CONSTRAINT wallet_v4_revoke_clock CHECK (revoked_at IS NULL OR revoked_at>=observed_at)
@@ -41,6 +48,9 @@ CREATE TABLE IF NOT EXISTS private.strata_wallet_v4_fee_authority (
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
  revocation_reason text,
+ CONSTRAINT wallet_v4_authority_account_owner_fk FOREIGN KEY
+  (execution_account_id,owner_user_id)
+  REFERENCES public.v13_production_account(id,owner_user_id),
  CONSTRAINT wallet_v4_authority_scoped_fk FOREIGN KEY
   (evidence_id,owner_user_id,execution_account_id,deployed_sha,model_digest)
   REFERENCES private.strata_wallet_v4_fee_evidence
