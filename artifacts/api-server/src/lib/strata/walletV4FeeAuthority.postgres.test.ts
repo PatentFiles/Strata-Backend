@@ -27,9 +27,9 @@ test("Wallets V4 immutable owner AAL2 fee authority has scoped FK, TTL and priva
      THEN CREATE ROLE ${role}; END IF; END $$`);
   const migration=readFileSync("../../lib/db/drizzle/0038_wallet_v4_dynamic_fee_authority.sql","utf8")
     .replace("BEGIN;","").replace("COMMIT;","")
-    .replace(/\\bprivate\\./g,p+".")
-    .replace(/\\bpublic\\./g,pub+".")
-    .replace(/\\bauth\\./g,auth+".");
+    .replaceAll("private.",p+".")
+    .replaceAll("public.",pub+".")
+    .replaceAll("auth.",auth+".");
   await client.query(migration);
   const names=await client.query(`SELECT relname,relrowsecurity FROM pg_class
      WHERE relname IN ('strata_wallet_v4_fee_evidence','strata_wallet_v4_fee_authority')`);
