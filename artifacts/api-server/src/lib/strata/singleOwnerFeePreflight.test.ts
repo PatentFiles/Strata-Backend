@@ -89,6 +89,56 @@ test("provider failure or tampered source does not verify any authority",async()
  const exception=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>{throw Error("429")},sha:()=>SHA});
  assert.equal(exception.reason,"official_monetary_fee_source_unavailable");
 });
+
+test("owner preflight surfaces known provider cooldown and market failures without granting authority",async()=>{
+ for(const reason of [
+   "official_fee_schedule_http_429",
+   "official_fee_schedule_formula_unverifiable",
+   "official_fee_schedule_unavailable",
+   "no_current_open_kxbtc15m_market",
+   "market_listing_incomplete",
+   "fee_change_schedule_unverified",
+ ]){
+   const {db}=make();
+   const out=await inspectSingleOwnerFeePreflight(OWNER,{
+     db,sha:()=>SHA,observe:async()=>({...good,ok:false,reason,
+       monetaryFeeAuthorized:false}),
+   });
+   assert.equal(out.reason,reason);
+   assert.equal(out.ok,false);
+   assert.equal(out.evidenceVerified,false);
+   assert.equal(out.ownerAuthenticated,true);
+   assert.equal(out.tradingAuthorized,false);
+   assert.equal(out.sourceGrantRecorded,false);
+   assert.equal(out.ordersSubmitted,false);
+ }
+});
+test("unrecognized or malicious upstream details cannot leak through preflight",async()=>{
+ for(const reason of [
+   "HTTP 429 Bearer private-token",
+   "official_fee_schedule_http_418",
+   "https://attacker.example/private/secret",
+   "provider_monetary_fee_schedule_and_market_verified",
+ ]){
+  const {db}=make();
+  const out=await inspectSingleOwnerFeePreflight(OWNER,{
+    db,sha:()=>SHA,observe:async()=>({...good,ok:false,reason,
+      monetaryFeeAuthorized:false}),
+  });
+  assert.equal(out.reason,"official_monetary_fee_source_unverified");
+  assert.equal(out.tradingAuthorized,false);
+  assert.equal(out.evidenceVerified,false);
+ }
+});
+test("invalid digest cannot inherit a success-looking provider reason",async()=>{
+ const {db}=make();
+ const out=await inspectSingleOwnerFeePreflight(OWNER,{
+   db,sha:()=>SHA,observe:async()=>({...good,sourceDigest:"not-a-digest"}),
+ });
+ assert.equal(out.reason,"official_monetary_fee_source_unverified");
+ assert.equal(out.evidenceVerified,false);
+ assert.equal(out.tradingAuthorized,false);
+});
 test("a safely killed owner with durable eligibility has no false STOP blocker",async()=>{
  const {db}=make({...account,execution_enabled:true,kill_switch:true,
    lease_state:"killed",configured_stake_cents:150,blocked_reason:"awaiting_account_commissioning"});
