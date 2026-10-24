@@ -127,10 +127,17 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
   const global=await db.query("SELECT live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
   const account=owner.ok?owner.account:null;
    const approvedSource=account?String(account.fee_source_url??""):"";
+   // The V4 dynamic model and legacy pinned model share the canonical
+   // issuer URL. Identity is the APPROVED policy version, not the URL.
+   // Misreporting V4 as legacy sends the owner through an obsolete 2h
+   // snapshot renewal even when strict V4 evidence is the actual gate.
    const feeSourceMode=account
-    ? parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2" :
-      approvedSource==="https://kalshi.com/docs/kalshi-fee-schedule.pdf"
-       ? "LEGACY_PDF_V1" : "UNRECOGNIZED"
+    ? account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4
+       ? approvedSource===CANONICAL_FEE_SCHEDULE_URL
+          ? "DYNAMIC_PROVIDER_V4" : "UNRECOGNIZED"
+       : parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2"
+       : approvedSource===CANONICAL_FEE_SCHEDULE_URL
+          ? "LEGACY_PDF_V1" : "UNRECOGNIZED"
     : "UNAVAILABLE";
    const observedCash=account?.reconciled_at==null?NaN:
      Date.parse(String(account.reconciled_at));
