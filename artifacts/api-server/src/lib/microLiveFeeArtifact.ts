@@ -824,7 +824,8 @@ export async function establishVerifiedBridgeFeeDigest(
  nowMs:()=>number=Date.now,
 ):Promise<EstablishedOfficialFeeDigest|null>{
  const response=await fetchTrustedFeeFromSupabaseBridge(bridgeFetch,projectUrl,anonJwt,nowMs);
- if(!response||response.status!==200)return null;
+ if(!response || (response.status!==200 && response.status!==429))return null;
+ // A signed bridge 429 is a diagnostic, never fee or order authority.
  return validateFetchedOfficialFeePdf(response,0);
 }
 
