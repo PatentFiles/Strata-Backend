@@ -229,7 +229,7 @@ test("min30/cap20 challenger only accepts qualified champion entries with suffic
   const entered=buildV13ShadowOpportunity({...source(0.40,10),secondsRemaining:30},previous,set);
   assert.equal(entered.wouldEnter,true);
   assert.ok(entered.reason.includes("PAPER_SHADOW_NO_EXECUTION"));
-  assert.ok(entered.reason.includes("illustrative_qty=12"));
+  assert.ok(entered.reason.includes("illustrative_qty=11")); // 12 contracts would exceed $5 after illustrative fee
   for(const left of [0,21.8,29.999,null]){
     const rejected=buildV13ShadowOpportunity({...source(0.40,10),secondsRemaining:left},previous,set);
     assert.equal(rejected.wouldEnter,false);
