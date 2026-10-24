@@ -214,9 +214,11 @@ export async function amendOwnedStakePolicy(
       maxFeeEvidenceAgeMs: target?target.maxFeeEvidenceAgeMs:old.maxFeeEvidenceAgeMs,
       // Current policy snapshot changes to V4 only through explicit owner
       // consent. V4 exchange fee authority remains a separate approval.
+      // DB-approved policies require nonempty source/formula metadata. Never
+      // treat those string fields as the actual signed exchange fee receipt.
       feePolicyVersion:target?DYNAMIC_FEE_POLICY_VERSION_V4:old.feePolicyVersion,
-      feeSourceUrl:target?null:old.feeSourceUrl,
-      feeFormulaVersion:target?null:old.feeFormulaVersion,
+      feeSourceUrl:old.feeSourceUrl, // Source reference only; NOT verified V4 fee evidence.
+      feeFormulaVersion:target?DYNAMIC_FEE_POLICY_VERSION_V4:old.feeFormulaVersion,
       approvedBy: ownerId, approvedAt: when, createdBy: ownerId,
     };
     if(next.maxEntryAllInCents>next.capitalLimitCents) next.capitalLimitCents=next.maxEntryAllInCents;
