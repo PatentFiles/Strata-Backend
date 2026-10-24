@@ -381,6 +381,9 @@ jobs:
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
             --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/singleOwnerFeePreflight.test.cjs
+      - name: Verify owner V3 authority schema in isolated disposable PostgreSQL (NO LIVE DB)
+        working-directory: artifacts/api-server
+        run: node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerFeeV3Authority.postgres.test.ts
       - name: Test owner-only V3 grant, revocation fencing and signed fee migration (NO ORDERS)
         working-directory: artifacts/api-server
         run: |
