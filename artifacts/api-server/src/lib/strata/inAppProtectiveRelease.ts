@@ -4,6 +4,9 @@ import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitS
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
+import { observeDynamicKalshiFees, computeDynamicFeeModelDigest, type DynamicFeeResult } from "./dynamicOfficialFeeSchedule";
+import { DYNAMIC_FEE_POLICY_VERSION_V4 } from "./dynamicFeeOrderRiskV4";
+import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
@@ -18,7 +21,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
 type Db=Query & {connect():Promise<Query&{release():void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -30,7 +33,7 @@ const accountSQL=`
  a.blocked_reason,a.revision,a.reconciled_at,
  a.key_fingerprint,a.policy_id,a.commissioning_digest,a.fee_artifact_digest,
  a.kalshi_connection_id, p.state AS policy_state,p.fee_source_url,p.fee_policy_version,
- p.fee_formula_version,p.approved_at,p.max_entry_stake_cents,p.max_entry_all_in_cents,
+ p.fee_formula_version,p.policy_hash,p.approved_at,p.max_entry_stake_cents,p.max_entry_all_in_cents,
  stake.configured_stake_cents
  FROM public.v13_production_account a
  LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id
@@ -208,7 +211,61 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const sourceUrl=String(account.fee_source_url??"");
   const reviewedApi=parseReviewedApiSource(sourceUrl);
   let freshFeeDigest:string;
-  if(reviewedApi){
+  let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
+    authorityId:string}=null;
+  if(account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4){
+    // A V4-approved policy must NEVER fall through the legacy pinned-PDF
+    // qualifier merely because both policies identify the same issuer URL.
+    // Require actual owner/MFA consent for this precise account, policy and
+    // deployed SHA, then independently re-observe official bytes and exact
+    // Kalshi market fees. A stored grant alone is not a current issuer quote.
+    if(sourceUrl!==CANONICAL_FEE_SCHEDULE_URL||
+       account.fee_formula_version!==DYNAMIC_FEE_POLICY_VERSION_V4||
+       !/^[a-f0-9]{64}$/.test(String(account.policy_hash??"")))
+      return deny("release_v4_policy_source_or_formula_invalid");
+    const grant=await db.query(`
+ SELECT g.authority_id::text,e.market_ticker,e.model_digest,e.official_source_digest
+ FROM private.strata_wallet_v4_fee_authority g
+ JOIN private.strata_wallet_v4_fee_evidence e
+ ON e.evidence_id=g.evidence_id AND e.owner_user_id=g.owner_user_id
+ AND e.execution_account_id=g.execution_account_id
+ AND e.deployed_sha=g.deployed_sha AND e.model_digest=g.model_digest
+ WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2
+ AND g.deployed_sha=$3 AND g.policy_hash=$4
+ AND g.policy_version='strata_owner_provider_dynamic_fee_v4'
+ AND g.revoked_at IS NULL AND g.approved_at<=now()
+ AND g.expires_at>now()+interval '60 seconds'
+ AND e.revoked_at IS NULL AND e.observed_at<=now()
+ AND e.expires_at>now()+interval '60 seconds'
+ AND 'ORDER_ENTRY'=ANY(g.authorized_stages)
+ ORDER BY g.approved_at DESC LIMIT 2`,
+      [ownerId,account.id,sha,account.policy_hash]);
+    if(grant.rows.length!==1)return deny("release_v4_owner_fee_grant_missing_or_ambiguous");
+    const g=grant.rows[0]!;
+    const ticker=String(g.market_ticker??"");
+    if(!/^KXBTC15M-[A-Za-z0-9-]+$/.test(ticker)||
+       !/^[a-f0-9]{64}$/.test(String(g.model_digest??""))||
+       !/^[a-f0-9]{64}$/.test(String(g.official_source_digest??""))||
+       !valid(g.authority_id))
+      return deny("release_v4_fee_grant_identity_invalid");
+    const observed=await(deps.observeV4Fee??(ticker=>observeDynamicKalshiFees(ticker)))(ticker);
+    if(!observed.ok)return deny("release_v4_official_fee_"+(
+      /^[a-z][a-z0-9_]{2,95}$/.test(observed.reason)?observed.reason:"unavailable"));
+    const m=observed.model,observedAtMs=Date.parse(m.observedAt),feeNow=(deps.now??Date.now)();
+    if(m.marketTicker!==ticker||m.modelDigest!==g.model_digest||
+       m.publicationDigest!==g.official_source_digest||
+       m.issuer!==CANONICAL_FEE_SCHEDULE_URL||
+       m.feeType!=="quadratic"||m.feeMultiplier!=="1"||
+       m.tradingAuthorized!==false||m.requiresVersionedReview!==true||
+       computeDynamicFeeModelDigest(m)!==m.modelDigest||
+       !/^[a-f0-9]{64}$/.test(m.metadataDigest)||
+       !Number.isSafeInteger(feeNow)||!Number.isFinite(observedAtMs)||
+       observedAtMs>feeNow||feeNow-observedAtMs>10_000)
+      return deny("release_v4_official_fee_model_changed_or_stale");
+    freshFeeDigest=m.publicationDigest;
+    v4FeeBinding={marketTicker:ticker,modelDigest:m.modelDigest,
+      metadataDigest:m.metadataDigest,authorityId:String(g.authority_id)};
+  }else if(reviewedApi){
     // This reviewed API-source grant is an independently signed model, NOT
     // evidence that Kalshi's PDF was fetched. Verify the exact owner/source
     // and fresh official market metadata before recording any qualification.
@@ -260,7 +317,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,
    cash:feeds.cashMicros,orders:feeds.orders,fills:feeds.fills,
    positions:feeds.positions,settlements:feeds.settlements,
-   fee:account.fee_artifact_digest,freshFeeDigest,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
+   fee:account.fee_artifact_digest,freshFeeDigest,v4FeeBinding,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
   const recorded=await db.query(`
  INSERT INTO private.strata_protective_release_qualification
  (release_commit_sha,owner_user_id,execution_account_id,evidence_digest)
