@@ -19,6 +19,25 @@ const doc=(taker="0.07",maker="0.0175",tail="KXBTCY BTC price EOY 0 0")=>[
  "Last updated and effective: July 7, 2026",
 ].join(" ");
 
+test("official July PDF explanatory Maker Fees mention never truncates taker formula",()=>{
+ const officialStructure=doc().replace("Trading Fees",
+  "Kalshi Trading Fees").replace(
+  "fees = round up(M x 0.07",
+  "Trading fees are only charged for orders immediately matched. "
+  +"Other orders can be included in our “Maker Fees” section. "
+  +"The general trading formula is: fees = round up(M x 0.07");
+ const result=parseDynamicKalshiPublication(officialStructure,NOW);
+ assert.equal(result.ok,true,JSON.stringify(result));
+ if(result.ok){
+   assert.equal(result.takerRatePpm,70_000);
+   assert.equal(result.makerRatePpm,17_500);
+ }
+ const absentFormula=officialStructure.replace(
+  "fees = round up(M x 0.07","this formula was removed (M x 0.07");
+ assert.equal(parseDynamicKalshiPublication(absentFormula,NOW).ok,false);
+ const wrongOrder=doc().replace("Non-Standard Fees","Unverified Fees");
+ assert.equal(parseDynamicKalshiPublication(wrongOrder,NOW).ok,false);
+});
 test("provider-extracted fee rates are dynamic decimals, not hard-coded 0.07",()=>{
  const first=parseDynamicKalshiPublication(doc(),NOW);
  assert.equal(first.ok,true,JSON.stringify(first));
