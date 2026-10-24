@@ -10,7 +10,7 @@ import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
 import {observeDynamicKalshiFees,type DynamicFeeResult} from "./dynamicOfficialFeeSchedule";
-import {TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
+import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 export const WALLET_V4_EVIDENCE_CONFIRM="I_RECORD_MY_OFFICIAL_KALSHI_DYNAMIC_FEE_EVIDENCE_V4";
 export const WALLET_V4_CONSENT_CONFIRM="I_APPROVE_MY_WALLET_DYNAMIC_FEE_MODEL_V4";
@@ -179,15 +179,11 @@ export async function authorizeWalletV4FeeModel(ownerId:string,raw:unknown,deps:
      FOR SHARE OF p,s`,[a.accountId,ownerId]);
    if(policies.rows.length!==1)return denied("wallet_v4_approved_policy_not_found");
    const p=policies.rows[0]!;
-   if(p.fee_policy_version!==VERSION||p.state!=="APPROVED"||
-      !HASH.test(field(p.policy_hash))||
-      p.capital_limit_cents!==2500||p.max_entry_stake_cents!==500||
-      p.max_entry_all_in_cents!==625||p.max_daily_loss_cents!==1000||
-      p.max_total_loss_cents!==1500||
-      p.configured_stake_cents!==500||p.risk_capital_cents!==2500||
-      p.risk_preset_id!==TEST_TWENTY_PERCENT_PRESET.id||
-      p.risk_preset_revision!==TEST_TWENTY_PERCENT_PRESET.revision)
-    return denied("wallet_v4_matching_approved_five_dollar_policy_required");
+   // The backend-verified owner risk preset and saved versioned policy, not a
+   // global fixed stake, determine the permitted fee-consent scope.
+   // Actual final order submission remains separately fail-closed.
+   if(!approvedDynamicStakeSnapshot(p).ok)
+    return denied("wallet_v4_matching_approved_dynamic_stake_policy_required");
    const old=await c.query(
     "SELECT authority_id FROM private.strata_wallet_v4_fee_authority WHERE evidence_id=$1::uuid FOR UPDATE",
     [evidenceId]);
