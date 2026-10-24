@@ -150,10 +150,14 @@ export async function observeDynamicKalshiFees(
  // issuer bytes and unchanged market fee terms. metadataDigest separately
  // identifies each time-stamped provider observation; never hash its clock
  // into the durable version candidate or every refresh would appear to drift.
- const {metadataDigest:_ephemeralObservation,...feeIdentity}=modelBase;
  const modelDigest=createHash("sha256").update(JSON.stringify({
-   ...feeIdentity,feeType:provider.feeType,
-   feeMultiplier:provider.feeMultiplier,
+   issuer:modelBase.issuer,publicationDigest:modelBase.publicationDigest,
+   effectiveDate:modelBase.effectiveDate,
+   takerRatePpm:modelBase.takerRatePpm,makerRatePpm:modelBase.makerRatePpm,
+   defaultTakerMultiplierPpm:modelBase.defaultTakerMultiplierPpm,
+   defaultMakerMultiplierPpm:modelBase.defaultMakerMultiplierPpm,
+   marketTicker,eventTicker:modelBase.eventTicker,
+   feeType:provider.feeType,feeMultiplier:provider.feeMultiplier,
  })).digest("hex");
  return {ok:true,reason:"dynamic_fee_observation_for_review_only",
    model:{...modelBase,modelDigest,observedAt:new Date(now()).toISOString(),
