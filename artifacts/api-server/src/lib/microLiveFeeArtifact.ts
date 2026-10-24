@@ -540,7 +540,7 @@ export function officialFeeFetchDiagnostic(
     : null;
   const candidate = response.headers.get("x-strata-internal-fee-retry-at");
   const retryAt = status === 429 && candidate &&
-    /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$/.test(candidate) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate) &&
     Number.isFinite(Date.parse(candidate)) ? candidate : null;
   try {
     const url = new URL(location);
@@ -644,7 +644,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       const rawDeadline = res.headers.get("x-strata-next-allowed-at") ?? "";
       const deadlineMs = Date.parse(rawDeadline);
       const exactDeadline =
-        /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$/.test(rawDeadline) &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(rawDeadline) &&
         Number.isFinite(deadlineMs) && deadlineMs >= nowMs() &&
         deadlineMs <= nowMs() + 86_400_000
           ? new Date(deadlineMs).toISOString() : null;
