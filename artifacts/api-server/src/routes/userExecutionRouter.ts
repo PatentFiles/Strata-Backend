@@ -3,6 +3,7 @@ import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strat
 import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
+import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
 import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
@@ -670,6 +671,21 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if(!owner)return void res.status(401).json({error:"Unauthorized"});
     res.setHeader("Cache-Control","private, no-store");
     const out=await inspectSingleOwnerFeePreflight(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // Dynamic official monetary fee discovery is a feature-flagged owner-only
+  // READ, not a V3 grant or an approved payable fee schedule. Off by default:
+  // no extra provider PDF/API pressure while exchange traffic is rate limited.
+  router.get("/fees/single-owner/dynamic-schedule-preview",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    if(process.env.STRATA_DYNAMIC_FEE_PREVIEW_ENABLED!=="true")
+      return void res.status(503).json({ok:false,
+        reason:"dynamic_fee_observation_disabled",tradingAuthorized:false});
+    const ticker=typeof req.query.marketTicker==="string"?req.query.marketTicker:"";
+    const digest=typeof req.query.reviewedDigest==="string"?req.query.reviewedDigest:null;
+    const out=await observeDynamicKalshiFees(ticker,digest);
     res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   // #165 V3: owner self-consent to an official server-verified fee RECEIPT.

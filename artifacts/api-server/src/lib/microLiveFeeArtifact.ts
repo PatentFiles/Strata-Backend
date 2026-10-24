@@ -281,6 +281,43 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
   };
 }
 
+/**
+ * NON-AUTHORIZING dynamic fee observation. This intentionally bypasses neither
+ * the hard-pinned legacy acceptance path nor its source-origin safeguards.
+ * Read fresh official bytes for change detection; unknown rates/documents
+ * can be observed but NEVER silently made an executable fee grant.
+ * Browser-provided URLs, cached snapshots, bridge receipts, redirects and
+ * any unexpected HTTP response are rejected in this path.
+ */
+export async function readUnapprovedOfficialFeePublication(
+  fetchImpl:typeof fetch=globalThis.fetch,
+):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
+ {ok:false;reason:string}> {
+ let response:Response;
+ try {
+   response=await fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
+     method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
+     redirect:"error",cache:"no-store",signal:AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+   });
+ }catch{return {ok:false,reason:"dynamic_fee_publication_unavailable"};}
+ if(response.status!==200)return {ok:false,reason:`dynamic_fee_publication_http_${response.status}`};
+ if(response.redirected||!response.url||!officialFeeLocationAccepted(response))
+   return {ok:false,reason:"dynamic_fee_publication_origin_invalid"};
+ if(mediaType(response.headers.get("content-type"))!=="application/pdf")
+   return {ok:false,reason:"dynamic_fee_publication_media_type_invalid"};
+ let bytes:Buffer|null=null;
+ try{bytes=await readPdfWithinLimit(response);}
+ catch{return {ok:false,reason:"dynamic_fee_publication_body_invalid"};}
+ if(!bytes)return {ok:false,reason:"dynamic_fee_publication_body_invalid"};
+ let text:string|null=null;
+ try{text=await extractFeeScheduleDocumentText(bytes);}
+ catch{return {ok:false,reason:"dynamic_fee_publication_pdf_invalid"};}
+ if(!text)return {ok:false,reason:"dynamic_fee_publication_pdf_invalid"};
+ return {ok:true,digest:createHash("sha256").update(bytes).digest("hex"),
+   normalizedText:text.replace(/\s+/g," ").trim(),
+   observedAt:new Date().toISOString()};
+}
+
 async function readPdfWithinLimit(response: Response): Promise<Buffer | null> {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null) {
