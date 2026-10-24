@@ -637,7 +637,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       (!res.url || res.url === bridgeUrl) &&
       mediaType(res.headers.get("content-type")) === "application/json") {
     const retry = Number(res.headers.get("retry-after"));
-    if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 1800) {
+    if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 86400) {
       const provenance = res.headers.get("x-strata-fee-429-origin");
       const origin = provenance === "shared_cooldown" || provenance === "provider"
         ? provenance : "bridge_unclassified";
