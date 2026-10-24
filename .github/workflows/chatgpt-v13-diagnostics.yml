@@ -423,6 +423,16 @@ jobs:
             --bundle --platform=node --format=cjs \
             --outfile=dist/walletV4FeeReceiptReconciliation.test.cjs
           node --test dist/walletV4FeeReceiptReconciliation.test.cjs
+      - name: Verify V4 strict official fee bridge capture freshness (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild ../../supabase/functions/strata-official-fee-source/index.ts \
+            --bundle --platform=neutral --format=esm --external:npm:* \
+            --outfile=dist/walletV4FeeBridgeEdge.compile.mjs
+          pnpm exec esbuild ../../supabase/functions/strata-official-fee-source/cachePolicy.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/walletV4FeeBridgeFreshness.test.cjs
+          node --test dist/walletV4FeeBridgeFreshness.test.cjs
       - name: Test dynamic V4 fee-inclusive order-risk kernel (NO ORDERS)
         working-directory: artifacts/api-server
         run: |
