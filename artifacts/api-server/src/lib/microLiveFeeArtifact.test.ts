@@ -618,9 +618,11 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
     "x-strata-source-sha256": goodHash,
     "x-strata-captured-at": new Date(now - 5000).toISOString(),
   };
-  const responding = (headers: Record<string,string>, body: Buffer = bytes) =>
+  const responding = (headers: Record<string,string>, body: Buffer = bytes,
+    strictV4 = false) =>
     (async (url: string | Request | URL, init?: RequestInit) => {
-      assert.equal(String(url), origin + "/functions/v1/strata-official-fee-source");
+      assert.equal(String(url), origin + "/functions/v1/strata-official-fee-source" +
+        (strictV4 ? "?max_age_seconds=60" : ""));
       assert.equal(init?.method, "GET");
       assert.equal(init?.redirect, "error");
       assert.equal((init?.headers as Record<string,string>).apikey, anonJwt);
@@ -632,12 +634,12 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
   assert.equal((await verifyOfficialFeePdfBytes(Buffer.from(await result!.arrayBuffer()))).ok, true);
   // V4 monetary model observation is stricter than the existing <=1h
   // infrastructure lease: a 60-second max capture age is mandatory.
-  const recent=await fetchTrustedFeeFromSupabaseBridge(responding(props),origin,
+  const recent=await fetchTrustedFeeFromSupabaseBridge(responding(props,bytes,true),origin,
     anonJwt,()=>now,60_000);
   assert.equal(recent?.status,200);
   const staleForV4=await fetchTrustedFeeFromSupabaseBridge(responding({
     ...props,"x-strata-captured-at":new Date(now-60_001).toISOString(),
-  }),origin,anonJwt,()=>now,60_000);
+  },bytes,true),origin,anonJwt,()=>now,60_000);
   assert.equal(staleForV4,null);
   assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props),
     origin,anonJwt,()=>now,60*60*1000+1),null);
@@ -658,6 +660,22 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
   assert.equal(await fetchTrustedFeeFromSupabaseBridge(responding(props,
     Buffer.from("%PDF-tampered" + "x".repeat(500) + "%%EOF")),
     origin, anonJwt, () => now), null);
+});
+
+test("strict V4 official bridge cooldown never reuses stale PDF or approves fees",async()=>{
+  const origin="https://wqsmfbzfbiilhtzpqbrb.supabase.co";
+  const jwt="x".repeat(100);
+  const called:string[]=[];
+  const throttled=(async(input:string|Request|URL)=>{
+    called.push(String(input));
+    return new Response(JSON.stringify({ok:false,reason:"official_source_refresh_rate_limited_or_unavailable"}),
+      {status:429,headers:{"content-type":"application/json","retry-after":"1690"}});
+  }) as typeof fetch;
+  const result=await fetchTrustedFeeFromSupabaseBridge(throttled,origin,jwt,Date.now,60_000);
+  assert.equal(result?.status,429);
+  assert.equal(result?.headers.get("retry-after"),"1690");
+  assert.deepEqual(called,[origin+"/functions/v1/strata-official-fee-source?max_age_seconds=60"]);
+  assert.equal(result?.headers.get("x-strata-source-sha256"),null);
 });
 
 test("trusted bridge cooldown reports retry without accepting any fee artifact", async () => {
