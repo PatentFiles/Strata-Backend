@@ -381,6 +381,19 @@ jobs:
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
             --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/singleOwnerFeePreflight.test.cjs
+      - name: Test owner-only V3 grant, revocation fencing and signed fee migration (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFeeV3Authority.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerFeeV3Authority.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/ownerFeeV3Authority.test.cjs
+          pnpm exec esbuild src/lib/strata/ownerFeeV3Migration.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/ownerFeeV3Migration.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/ownerFeeV3Migration.test.cjs
       - name: Test owner V3 official-source consent receipt (no trading authority)
         working-directory: artifacts/api-server
         run: |
