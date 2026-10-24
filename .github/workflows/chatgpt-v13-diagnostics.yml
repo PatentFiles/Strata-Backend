@@ -400,6 +400,14 @@ jobs:
             --outfile=dist/ownerFeeV3Migration.test.cjs \
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/ownerFeeV3Migration.test.cjs
+      - name: Test Wallets V4 owner MFA consent lifecycle (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/walletV4OwnerConsent.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/walletV4OwnerConsent.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/walletV4OwnerConsent.test.cjs
       - name: Test authenticated Wallets V4 owner-scoped commissioning readiness (NO ORDERS)
         working-directory: artifacts/api-server
         run: |

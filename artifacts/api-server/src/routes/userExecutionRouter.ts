@@ -5,6 +5,7 @@ import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity"
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule";
 import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
+import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeConsent} from "../lib/strata/walletV4OwnerConsent";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
 import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
@@ -664,6 +665,33 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await inspectRuntimeDbIdentity(actor);
     res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  // AAL2 owner-authenticated Wallets-only V4 evidence/consent lifecycle.
+  // requireUser validates JWT AAL2; never accept browser-supplied owner IDs.
+  // Even when grants are recorded, signed POST V4 remains disabled.
+  router.post("/fees/wallets/v4/evidence",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await recordWalletV4FeeEvidence(owner,req.body);
+    res.status(out.ok?201:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/wallets/v4/consent",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await authorizeWalletV4FeeModel(owner,req.body);
+    res.status(out.ok?201:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/wallets/v4/revoke",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await revokeWalletV4FeeConsent(owner,req.body);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   // Wallets-only Step 12 V4 diagnostics. JWT owner-scoped, no body account selector.
   // Returns explicit blocked readiness; does not authorize or submit orders.
