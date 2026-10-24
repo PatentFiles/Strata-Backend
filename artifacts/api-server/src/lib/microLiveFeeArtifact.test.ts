@@ -881,3 +881,21 @@ test("renewable, fresh official Edge PDF proof must pass canonical origin, captu
  const wrongProject=await establishVerifiedBridgeFeeDigest(response(headers),"https://attacker.invalid",jwt,()=>checkedAt);
  assert.equal(wrongProject,null);
 });
+
+test("production monetary PDF authority uses one shared provider lease and never a pinned fixture",()=>{
+  const source=readFileSync("src/lib/microLiveFeeArtifact.ts","utf8");
+  const body=source.slice(source.indexOf("async function fetchOfficialFeeSchedule("),
+    source.indexOf("/**\n * Validate one official PDF response."));
+  assert.match(body,/fetchImpl===PRODUCTION_FEE_FETCH/);
+  assert.match(body,/fetchTrustedFeeFromSupabaseBridge\(PRODUCTION_FEE_FETCH/);
+  assert.match(body,/Date\.now,60_000/);
+  assert.match(body,/throw Error\("official_fee_capture_gate_unavailable"\)/);
+  assert.doesNotMatch(body,/recentPinnedOfficialFeeSnapshot\(/);
+  assert.doesNotMatch(body,/if\s*\(alternate\?\.status\s*===\s*200\)/);
+  const edge=source.slice(source.indexOf("export async function readUnapprovedOfficialFeePublication"),
+    source.indexOf("async function readPdfWithinLimit"));
+  assert.match(edge,/if\(!directSuppressed&&!centrallyGated\)/);
+  assert.match(edge,/const canBridge=centrallyGated/);
+  assert.match(edge,/response=verified; \/\/ Genuine rate-limit denial/);
+  assert.doesNotMatch(edge,/recentPinnedOfficialFeeSnapshot\(/);
+});
