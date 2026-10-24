@@ -115,8 +115,12 @@ export async function amendOwnedStakePolicy(
       }
     }
     const cash = int(a.cash_micros), reserved = int(a.reserved_micros);
+    const reconciliationAgeMs=Date.now()-new Date(String(a.reconciled_at??"")).getTime();
+    // Fail closed on absent, malformed, future-dated or expired signed cash.
+    // A stale display balance is not authority for a versioned live stake.
     if (cash===null || reserved===null || reserved>cash ||
-        !a.reconciled_at || Date.now() - new Date(String(a.reconciled_at)).getTime() > 15*60_000) {
+        !Number.isFinite(reconciliationAgeMs) || reconciliationAgeMs<0 ||
+        reconciliationAgeMs>15*60_000) {
       return reject("fresh_spendable_cash_unverified");
     }
     if (BigInt(stakeCents)*10000n > BigInt(cash-reserved)) return reject("stake_exceeds_available_cash");

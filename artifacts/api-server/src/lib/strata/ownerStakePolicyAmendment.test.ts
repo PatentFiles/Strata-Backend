@@ -41,7 +41,7 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true) {
+function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true,reconciledAt=new Date().toISOString()) {
  const sqls:string[]=[];
  const policyInsertArgs:unknown[][]=[];
  const query=async(sql:string,args:unknown[]=[])=> {
@@ -50,7 +50,7 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="
   if(sql.includes("SELECT * FROM public.v13_production_account"))
    return {rows:[{id:ACCOUNT,owner_user_id:OWNER,commissioned:true,cash_precision_verified:true,
     policy_id:old.id,cash_micros:availableMicros,reserved_micros:"0",
-    reconciled_at:new Date().toISOString(),fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
+    reconciled_at:reconciledAt,fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
     minimum_exit_micros:10000,execution_enabled:true,kill_switch:accountKill}]};
   if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
     return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:accountKill}]};
@@ -253,4 +253,21 @@ test("owner can save approved $5 V4 allocation after old stake row was removed",
  const stakeInsert=h.sqls.find(x=>x.includes("INSERT INTO public.strata_configured_stake"))??"";
  assert.match(stakeInsert,/ON CONFLICT \(execution_account_id\)/);
  assert.ok(h.sqls.includes("COMMIT"));
+});
+
+test("owner V1-to-V4 upgrade rejects expired or future signed cash even with correct $5/20% owner approval",async()=>{
+ const preset=TEST_TWENTY_PERCENT_PRESET;
+ for(const staleTimestamp of [
+   new Date(Date.now()-16*60_000).toISOString(),
+   new Date(Date.now()+60_000).toISOString(),
+   'not-a-timestamp',
+ ]){
+  const h=mock("25000000","killed",false,true,false,staleTimestamp);
+  const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,null,
+    OWNER_STAKE_POLICY_CONFIRM,{presetId:preset.id,
+      presetRevision:preset.revision,capitalBudgetCents:2500});
+  assert.deepEqual(result,{ok:false,reason:"fresh_spendable_cash_unverified"});
+  assert.equal(h.sqls.includes("COMMIT"),false);
+  assert.equal(h.sqls.some(q=>/UPDATE public\.v13_live_money_policy|INSERT INTO public\.v13_live_money_policy|INSERT INTO public\.strata_configured_stake|UPDATE private\.strata_owner_sha_approvals/.test(q)),false);
+ }
 });
