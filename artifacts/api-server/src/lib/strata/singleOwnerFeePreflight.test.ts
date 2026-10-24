@@ -15,7 +15,8 @@ const account={
  id:"strata-owner-test",commissioned:true,execution_enabled:false,kill_switch:true,
  blocked_reason:null,subaccount:1,exchange_index:2,
  fee_policy_version:"micro-live-standing-fee-policy-v1",policy_state:"APPROVED",
- configured_stake_cents:500,lease_state:"released",
+ configured_stake_cents:500,lease_state:"released",arm_requested:false,
+ lease_account_kill:false,max_entry_stake_cents:500,max_entry_all_in_cents:550,
 };
 const make=(row:Record<string,unknown>|null=account,
   opts:{schema?:boolean;receipt?:boolean;readFailure?:boolean}={})=>{
@@ -24,6 +25,8 @@ const make=(row:Record<string,unknown>|null=account,
    sqls.push(sql);
    assert.ok(/^\s*SELECT\b/i.test(sql),"read-only query required");
    if(sql.includes("to_regclass")){
+     assert.match(sql,/strata_owner_fee_v3_immutable_guard/);
+     assert.match(sql,/pg_catalog\.pg_trigger/);
      assert.deepEqual(args,[]);
      if(opts.readFailure)throw Error("database unavailable");
      return {rows:[{installed:opts.schema!==false}]};
@@ -135,4 +138,26 @@ test("expired or different-SHA receipt never counts as current consent",async()=
  const out=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>good,sha:()=>SHA});
  assert.equal(out.v3EvidenceReceiptPresent,false);
  assert.ok(sqls.some(q=>q.includes("release_commit_sha=$3")&&q.includes("revoked_at IS NULL")&&q.includes("expires_at>now()")));
+});
+
+test("old approved $1.50 limits are diagnosed independently from saved stake",async()=>{
+ const {db}=make({...account,configured_stake_cents:500,
+   max_entry_stake_cents:150,max_entry_all_in_cents:200,
+   fee_policy_version:"micro-live-standing-fee-policy-v1"});
+ const out=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>good,sha:()=>SHA});
+ assert.ok(out.suggestedNextActions.includes("legacy_v1_fee_policy_requires_verified_migration"));
+ assert.ok(out.suggestedNextActions.includes("approved_policy_stake_cap_below_five_dollars"));
+ assert.ok(out.suggestedNextActions.includes("approved_policy_all_in_cap_below_five_dollars"));
+ assert.ok(!out.suggestedNextActions.includes("approve_and_save_five_dollar_policy"));
+ assert.equal(out.tradingAuthorized,false);
+});
+test("unsafe killed/released lease never counts as cleanly disarmed",async()=>{
+ for(const changed of [{lease_state:"killed",arm_requested:true,lease_account_kill:true},
+                       {lease_state:"killed",arm_requested:false,lease_account_kill:false},
+                       {lease_state:"released",arm_requested:true,lease_account_kill:false}]){
+   const {db}=make({...account,...changed});
+   const out=await inspectSingleOwnerFeePreflight(OWNER,{db,observe:async()=>good,sha:()=>SHA});
+   assert.ok(out.suggestedNextActions.includes("worker_lease_not_safely_disarmed"));
+   assert.equal(out.tradingAuthorized,false);
+ }
 });
