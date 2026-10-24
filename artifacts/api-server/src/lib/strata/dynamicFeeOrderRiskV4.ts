@@ -123,7 +123,10 @@ export function boundDynamicFeeEntryV4(
  if(allInCentsBig>BigInt(Number.MAX_SAFE_INTEGER))
     return deny("v4_all_in_precision_overflow");
  const allInCents=Number(allInCentsBig);
- if(grossCents<500n||grossCents>BigInt(approval.maxGrossEntryCents)||
+ // The $5 floor is enforced on PRE-ROUNDING economic notional. A 499.5¢
+ // order must not pass solely because display cents round upward to 500¢.
+ if(grossMicros<500n*MICROS_PER_CENT||
+    grossCents>BigInt(approval.maxGrossEntryCents)||
     grossCents>BigInt(order.approvedPolicyGrossCents)||
     allInCents>approval.maxAllInEntryCents||
     allInCents>order.approvedPolicyAllInCents||
