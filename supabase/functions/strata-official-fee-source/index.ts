@@ -13,15 +13,23 @@ const encoder = new TextEncoder();
 const endpoint = Deno.env.get("SUPABASE_URL");
 const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-function json(reason: string, status: number, retryAfterSeconds?: number): Response {
-  const headers: Record<string, string> = {
-    "content-type": "application/json", "cache-control": "no-store",
+type FeeLimitOrigin = "shared_cooldown" | "provider";
+function json(reason: string, status: number, retryAfterSeconds?: number,
+  origin?: FeeLimitOrigin, nextAllowedAt?: string): Response {
+  const headers: Record<string,string> = {
+    "content-type":"application/json","cache-control":"no-store",
   };
-  if (status === 429 && Number.isSafeInteger(retryAfterSeconds) &&
-      retryAfterSeconds! >= 1 && retryAfterSeconds! <= 1800) {
-    headers["retry-after"] = String(retryAfterSeconds);
+  if(status===429 && origin && Number.isSafeInteger(retryAfterSeconds) &&
+     retryAfterSeconds!>=1 && retryAfterSeconds!<=86400){
+    headers["retry-after"]=String(retryAfterSeconds);
+    headers["x-strata-fee-429-origin"]=origin;
+    if(nextAllowedAt && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(nextAllowedAt))
+      headers["x-strata-next-allowed-at"]=nextAllowedAt;
+    // Non-sensitive, structured operator diagnostic. No key, user ID, or PDF.
+    console.info(JSON.stringify({event:"strata_official_fee_rate_limit",
+      origin,retryAfterSeconds,nextAllowedAt:nextAllowedAt??null}));
   }
-  return new Response(JSON.stringify({ ok: false, reason }), { status, headers });
+  return new Response(JSON.stringify({ok:false,reason}),{status,headers});
 }
 function hex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, "0")).join("");
@@ -121,10 +129,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .select("next_allowed_at").eq("id", true).maybeSingle();
       if (throttle.error || !throttle.data) return json("capture_throttle_unavailable", 503);
       const next = Date.parse(throttle.data.next_allowed_at);
-      const seconds = Number.isFinite(next)
-        ? Math.max(1, Math.min(1800, Math.ceil((next - Date.now()) / 1000)))
-        : 1800;
-      return json("official_source_refresh_rate_limited_or_unavailable", 429, seconds);
+      if(!Number.isFinite(next))return json("capture_throttle_unavailable",503);
+      const seconds=Math.max(1,Math.min(86400,Math.ceil((next-Date.now())/1000)));
+      return json("official_source_refresh_rate_limited_or_unavailable",429,
+        seconds,"shared_cooldown",new Date(next).toISOString());
     }
     let response: Response;
     try {
@@ -137,7 +145,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (!response.ok) {
       // The atomic capture lease is 30m even when the provider rejects the
       // request. Return that window to the authenticated caller; never spin.
-      if (response.status === 429) return json("canonical_source_http_429", 429, 1800);
+      if(response.status===429){
+        // The upstream really responded 429 on this invocation, as distinct
+        // from the shared lease rejecting a request without provider contact.
+        const throttle=await client.from("strata_official_fee_capture_throttle")
+          .select("next_allowed_at").eq("id",true).maybeSingle();
+        const saved=throttle.error?NaN:Date.parse(throttle.data?.next_allowed_at??"");
+        const upstreamHeader=response.headers.get("retry-after");
+        const upstreamSeconds=upstreamHeader && /^\d{1,5}$/.test(upstreamHeader)
+          ? Number(upstreamHeader):0;
+        const maxDelay=Number.isSafeInteger(upstreamSeconds)&&upstreamSeconds<=86400
+          ? upstreamSeconds:0;
+        const deadline=Math.max(Number.isFinite(saved)?saved:0,
+          Date.now()+maxDelay*1000);
+        // No fabricated deadline if the shared lease could not be confirmed.
+        if(!Number.isFinite(saved))return json("capture_throttle_unavailable",503);
+        const seconds=Math.max(1,Math.min(86400,Math.ceil((deadline-Date.now())/1000)));
+        return json("canonical_source_http_429",429,seconds,
+          "provider",new Date(deadline).toISOString());
+      }
       return json(`canonical_source_http_${response.status}`, 502);
     }
     if (response.url !== OFFICIAL_URL ||
