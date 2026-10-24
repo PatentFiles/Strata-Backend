@@ -4,6 +4,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule";
+import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
 import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
@@ -663,6 +664,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await inspectRuntimeDbIdentity(actor);
     res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  // Wallets-only Step 12 V4 diagnostics. JWT owner-scoped, no body account selector.
+  // Returns explicit blocked readiness; does not authorize or submit orders.
+  router.get("/fees/wallets/v4/readiness",async (_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await inspectWalletV4Readiness(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   // #165 phase 1: verified owner-only official fee evidence candidate, strictly
   // read-only. This endpoint never grants V3 authority or approves live entries.
