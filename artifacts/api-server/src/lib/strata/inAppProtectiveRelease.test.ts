@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { digest as v13Digest } from "../v13-production/types";
 import { API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
+import { DYNAMIC_FEE_POLICY_VERSION_V4 } from "./dynamicFeeOrderRiskV4";
+import { computeDynamicFeeModelDigest, type DynamicFeeModel } from "./dynamicOfficialFeeSchedule";
+import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
@@ -13,6 +16,23 @@ const SHA="a".repeat(40);
 const DIGEST="b".repeat(64);
 const QID="33333333-3333-4333-8333-333333333333";
 const RID="44444444-4444-4444-8444-444444444444";
+const V4_TICKER="KXBTC15M-26OCT200530";
+const V4_CLOCK=Date.parse("2026-10-20T05:30:00Z");
+const V4_BASE:Omit<DynamicFeeModel,"modelDigest">={
+ issuer:CANONICAL_FEE_SCHEDULE_URL,
+ publicationDigest:"c".repeat(64),effectiveDate:"2026-07-07",
+ takerRatePpm:70000,makerRatePpm:17500,
+ defaultTakerMultiplierPpm:1000000,defaultMakerMultiplierPpm:1000000,
+ feeType:"quadratic",feeMultiplier:"1",
+ marketTicker:V4_TICKER,eventTicker:V4_TICKER,metadataDigest:"d".repeat(64),
+ observedAt:new Date(V4_CLOCK).toISOString(),
+ tradingAuthorized:false,requiresVersionedReview:true,
+};
+const V4_MODEL:DynamicFeeModel={...V4_BASE,modelDigest:computeDynamicFeeModelDigest(V4_BASE)};
+const v4Observed=(model:DynamicFeeModel=V4_MODEL)=>({
+ ok:true as const,reason:"dynamic_fee_observation_for_review_only" as const,
+ model,providerContentChanged:false,tradingAuthorized:false as const,
+});
 const emptySignedFeed=(override:Record<string,unknown>={})=>({
  ok:true as const,observedAtMs:Date.now(),cashMicros:"25000000",
  orders:[],fills:[],positions:[],settlements:[],...override,
@@ -26,7 +46,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed"}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
@@ -34,6 +54,10 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,blocked_reason:input.freeze??null,...(input.apiSource?{
     fee_source_url:"strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555",
     fee_policy_version:API_SOURCE_POLICY_VERSION,fee_formula_version:API_SOURCE_FORMULA_VERSION,
+  }:{}),...(input.v4Source?{
+    fee_policy_version:DYNAMIC_FEE_POLICY_VERSION_V4,
+    fee_formula_version:DYNAMIC_FEE_POLICY_VERSION_V4,
+    policy_hash:"f".repeat(64),
   }:{})}]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
@@ -42,6 +66,14 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
       minimumExitMicros:Number(account.minimum_exit_micros)})
   }]};
   if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
+  if(sql.includes("FROM private.strata_wallet_v4_fee_authority g")){
+    const row={authority_id:QID,market_ticker:V4_TICKER,
+      model_digest:V4_MODEL.modelDigest,official_source_digest:V4_MODEL.publicationDigest};
+    if(input.v4Grant==="missing")return {rows:[]};
+    if(input.v4Grant==="duplicate")return {rows:[row,row]};
+    if(input.v4Grant==="malformed")return {rows:[{...row,official_source_digest:"invalid"}]};
+    return {rows:[row]};
+  }
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
     decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
   }]};
@@ -151,6 +183,67 @@ test("Step 12 accepts a genuine reviewed API-source eligibility without a PDF ca
  assert.equal(pdfReads,0);assert.equal(apiReads,1);
  assert.equal(h.executed.filter(x=>x.includes("INSERT INTO private.strata_protective_release_qualification")).length,1);
 });
+
+test("V4 protective qualification uses exact owner-approved dynamic issuer model, never legacy PDF preflight",async()=>{
+ const h=fakeDb({v4Source:true});
+ let readModel=0,legacyReads=0;
+ const r=await qualifyProtectiveRelease(OWNER,{
+  db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
+  readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
+   orders:[],fills:[],positions:[],settlements:[]})) as never,
+  verifyFee:(async()=>{legacyReads++;throw Error("wrong policy branch");}) as never,
+  observeV4Fee:async(ticker)=>{
+    assert.equal(ticker,V4_TICKER);readModel++;return v4Observed();
+  },
+ });
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(r.ordersSubmitted,false);
+ assert.equal(legacyReads,0);
+ assert.equal(readModel,1);
+ assert.ok(h.executed.some(sql=>sql.includes("g.policy_hash=$4")&&
+   sql.includes("e.execution_account_id=g.execution_account_id")&&
+   sql.includes("g.deployed_sha=$3")&&sql.includes("g.expires_at>now()+interval '60 seconds'")));
+ assert.equal(h.executed.filter(sql=>sql.includes("INSERT INTO private.strata_protective_release_qualification")).length,1);
+ assert.equal(h.executed.some(sql=>sql.includes("UPDATE public.v13_production_account")||
+   sql.includes("INSERT INTO private.strata_protective_exit_release")),false);
+});
+
+test("V4 qualification fails closed on absent, duplicate, malformed, changed, future or stale owner fee evidence",async()=>{
+ const cases=[
+  {name:"missing",grant:"missing" as const,expected:"release_v4_owner_fee_grant_missing_or_ambiguous"},
+  {name:"duplicate",grant:"duplicate" as const,expected:"release_v4_owner_fee_grant_missing_or_ambiguous"},
+  {name:"malformed",grant:"malformed" as const,expected:"release_v4_fee_grant_identity_invalid"},
+  {name:"changed",model:{...V4_MODEL,publicationDigest:"e".repeat(64)},expected:"release_v4_official_fee_model_changed_or_stale"},
+  {name:"clock_future",model:{...V4_MODEL,observedAt:new Date(V4_CLOCK+1000).toISOString()},expected:"release_v4_official_fee_model_changed_or_stale"},
+  {name:"clock_stale",model:{...V4_MODEL,observedAt:new Date(V4_CLOCK-10001).toISOString()},expected:"release_v4_official_fee_model_changed_or_stale"},
+  {name:"wrong_market",model:{...V4_MODEL,marketTicker:"KXBTC15M-FOREIGN"},expected:"release_v4_official_fee_model_changed_or_stale"},
+ ];
+ for(const c of cases){
+   const h=fakeDb({v4Source:true,v4Grant:"grant" in c?c.grant:"valid"});
+   const r=await qualifyProtectiveRelease(OWNER,{
+    db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
+    readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
+     orders:[],fills:[],positions:[],settlements:[]})) as never,
+    verifyFee:(async()=>{throw Error("Legacy proof used for V4");}) as never,
+    observeV4Fee:async()=>v4Observed("model" in c?c.model:V4_MODEL),
+   });
+   assert.equal(r.ok,false,c.name);
+   assert.equal(r.reason,c.expected,c.name);
+   assert.equal(r.ordersSubmitted,false,c.name);
+   assert.equal(h.executed.some(sql=>sql.includes("INSERT INTO private.strata_protective_release_qualification")),false,c.name);
+ }
+ const unavailable=fakeDb({v4Source:true});
+ const failed=await qualifyProtectiveRelease(OWNER,{
+   db:unavailable.db,sha:()=>SHA,now:()=>V4_CLOCK,
+   readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
+    orders:[],fills:[],positions:[],settlements:[]})) as never,
+   observeV4Fee:async()=>({ok:false,reason:"dynamic_fee_publication_http_429",tradingAuthorized:false}),
+ });
+ assert.equal(failed.ok,false);
+ assert.equal(failed.reason,"release_v4_official_fee_dynamic_fee_publication_http_429");
+ assert.equal(unavailable.executed.some(sql=>sql.includes("INSERT INTO private.strata_protective_release_qualification")),false);
+});
+
 test("Step 12 denies a revoked, wrong or stale API fee-source review",async()=>{
  const observed=Date.parse("2026-10-20T05:30:00Z");
  for(const caseName of ["revoked","wrong_grant","stale"]){
