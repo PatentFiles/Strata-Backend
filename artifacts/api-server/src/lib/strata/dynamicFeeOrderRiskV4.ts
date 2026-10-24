@@ -120,9 +120,16 @@ export function boundDynamicFeeEntryV4(
  if(feePerHundredth===null)return deny("v4_dynamic_fee_bound_unavailable");
  const units=BigInt(order.contractsHundredths);
  const grossMicros=units*BigInt(order.limitPriceTicks);
- // Sum independently ceiled fee amounts. No maker discount or rebate
- // credit is allowed on IOC entry, even if the book reports maker liquidity.
+ // Sum independently rounded fragments; no maker discount or rebate credit.
  const maximumEntryFeeMicros=feePerHundredth*units;
+ // For an unrestricted future taker SELL, p*(1-p) is maximal at 50 cents,
+ // regardless of the entry price. Never trust a caller's lower exit reserve.
+ const exitPerHundredth=estimateDynamicFeeMicros(
+    observed.takerRatePpm,observed.defaultTakerMultiplierPpm,1,5000);
+ if(exitPerHundredth===null)return deny("v4_protective_exit_fee_bound_unavailable");
+ const minimumExitReserveCents=ceil(exitPerHundredth*units,MICROS_PER_CENT);
+ if(BigInt(order.reservedExitFeeCents)<minimumExitReserveCents)
+   return deny("v4_protective_exit_fee_reserve_understated");
  const allInMicros=grossMicros+maximumEntryFeeMicros+
     BigInt(order.reservedExitFeeCents)*MICROS_PER_CENT;
  const grossCents=ceil(grossMicros,MICROS_PER_CENT);
