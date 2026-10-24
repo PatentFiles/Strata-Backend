@@ -76,6 +76,67 @@ test("official API shape: active market may omit deprecated expiration_time and 
  market.expected_expiration_time="not-a-timestamp";
  assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,false);
 });
+test("cursor-paginated official open-market listing is read completely before selecting earliest active contract",async()=>{
+ const pages=responses();
+ const list="/markets?series_ticker=KXBTC15M&status=open&limit=100";
+ const newer="KXBTC15M-26OCT15T2230";
+ pages[list].cursor="next-page";
+ pages[list+"&cursor=next-page"]={markets:[{
+   ticker:newer,event_ticker:newer,status:"open",
+   close_time:"2026-10-15T22:30:00Z",
+ }],cursor:""};
+ const requested:string[]=[];
+ const read=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+   const path=String(input).slice(KALSHI_API_ORIGIN.length);
+   requested.push(path);
+   return transport(pages)(input,init);
+ }) as typeof fetch;
+ const result=await probeCurrentKalshiFeeApi(read,()=>now);
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.marketTicker,ticker);
+ assert.deepEqual(requested.slice(0,2),[list,list+"&cursor=next-page"]);
+ assert.equal(result.pdfProvenanceApproved,false);
+ assert.equal(result.tradingEnabled,false);
+});
+test("incomplete Kalshi pagination fails closed on loops, duplicates, malformed cursors and excess page count",async()=>{
+ const list="/markets?series_ticker=KXBTC15M&status=open&limit=100";
+ for(const kind of ["loop","duplicate","malformed","oversized","empty","unbounded"]){
+   const pages=responses();const requested:string[]=[];
+   let cursors=0;
+   const read=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+     const path=String(input).slice(KALSHI_API_ORIGIN.length);
+     requested.push(path);
+     if(path.startsWith(list)){
+       let body:Record<string,unknown>;
+       if(kind==="malformed")body={markets:[{ticker,event_ticker:eventTicker}],cursor:42};
+       else if(kind==="oversized")body={markets:[],cursor:"x".repeat(2049)};
+       else if(kind==="empty")body={markets:[],cursor:"next"};
+       else if(kind==="duplicate")body={
+         markets:[{ticker,event_ticker:eventTicker,close_time:future,status:"open"}],
+         cursor:path===list?"next":"",
+       };
+       else if(kind==="loop")body={
+         markets:[{ticker:"KXBTC15M-"+cursors,event_ticker:eventTicker,close_time:future,status:"open"}],
+         cursor:"next",
+       };
+       else body={
+         markets:[{ticker:"KXBTC15M-"+cursors,event_ticker:eventTicker,close_time:future,status:"open"}],
+         cursor:"page-"+cursors,
+       };
+       cursors++;
+       return new Response(JSON.stringify(body),{status:200,headers:{"content-type":"application/json"}});
+     }
+     return transport(pages)(input,init);
+   }) as typeof fetch;
+   const result=await probeCurrentKalshiFeeApi(read,()=>now);
+   assert.equal(result.ok,false,kind);
+   assert.equal(result.reason,"market_listing_incomplete",kind);
+   assert.equal(result.tradingEnabled,false);
+   assert.equal(result.pdfProvenanceApproved,false);
+   assert.ok(requested.length<=8,kind+" must never exceed maximum pages");
+   assert.ok(requested.every(q=>q.startsWith(list)),kind+" must not read fee details from incomplete markets");
+ }
+});
 test("provider fee-change requests use only documented parameter sets",async()=>{
  const page=responses();
  const expected=[
