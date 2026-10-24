@@ -286,22 +286,38 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
  * the hard-pinned legacy acceptance path nor its source-origin safeguards.
  * Read fresh official bytes for change detection; unknown rates/documents
  * can be observed but NEVER silently made an executable fee grant.
- * Browser-provided URLs, cached snapshots, bridge receipts, redirects and
- * any unexpected HTTP response are rejected in this path.
+ * Browser URLs, pinned/local snapshots and redirects remain rejected.
+ * Only when the ORIGINAL production transport hits a transient provider
+ * outage may the existing authenticated Supabase origin bridge supply an
+ * independently hash-verified official PDF captured in the last 60 seconds.
+ * A missing/misconfigured bridge still fails closed; tests cannot invoke it.
  */
 export async function readUnapprovedOfficialFeePublication(
   fetchImpl:typeof fetch=globalThis.fetch,
 ):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
  {ok:false;reason:string}> {
- let response:Response;
+ let response:Response|null=null;
+ let trustedBridge=false;
  try {
    response=await fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
      method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
      redirect:"error",cache:"no-store",signal:AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
    });
- }catch{return {ok:false,reason:"dynamic_fee_publication_unavailable"};}
+ }catch{ /* Only the captured production transport may use the bridge. */ }
+ // Never use a pinned build snapshot as V4 dynamic, provider-backed evidence.
+ // Existing official Edge egress validates fixed URL, JWT, SHA-256 of every
+ // byte and actual capture timestamp. Narrow age further to <=60 seconds.
+ if((response===null||[403,429,500,502,503,504].includes(response.status))&&
+    fetchImpl===PRODUCTION_FEE_FETCH && globalThis.fetch===PRODUCTION_FEE_FETCH){
+   const verified=await fetchTrustedFeeFromSupabaseBridge(
+     globalThis.fetch,process.env.SUPABASE_URL,
+     process.env.STRATA_FEE_BRIDGE_ANON_JWT,Date.now,60_000);
+   if(verified?.status===200){response=verified;trustedBridge=true;}
+ }
+ if(!response)return {ok:false,reason:"dynamic_fee_publication_unavailable"};
  if(response.status!==200)return {ok:false,reason:`dynamic_fee_publication_http_${response.status}`};
- if(response.redirected||!response.url||!officialFeeLocationAccepted(response))
+ // Bridge is synthetic only AFTER fixed-provider hash and captured-at checks.
+ if(response.redirected||(!trustedBridge&&!response.url)||!officialFeeLocationAccepted(response))
    return {ok:false,reason:"dynamic_fee_publication_origin_invalid"};
  if(mediaType(response.headers.get("content-type"))!=="application/pdf")
    return {ok:false,reason:"dynamic_fee_publication_media_type_invalid"};
@@ -530,8 +546,11 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   projectUrl: string | undefined,
   anonJwt: string | undefined,
   nowMs: () => number = Date.now,
+  maxCaptureAgeMs: number = MAX_FEE_EDGE_CAPTURE_AGE_MS,
 ): Promise<Response | null> {
   if (projectUrl?.replace(/\/$/, "") !== SUPABASE_FEE_PROJECT_URL ||
+      !Number.isSafeInteger(maxCaptureAgeMs) || maxCaptureAgeMs<=0 ||
+      maxCaptureAgeMs>MAX_FEE_EDGE_CAPTURE_AGE_MS ||
       !anonJwt || anonJwt.length < 80 || anonJwt.length > 4096) return null;
   let res: Response;
   try {
@@ -562,7 +581,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   const recorded = res.headers.get("x-strata-source-sha256") ?? "";
   const captured = Date.parse(res.headers.get("x-strata-captured-at") ?? "");
   if (!HEX_SHA256.test(recorded) || !Number.isFinite(captured) ||
-      captured > nowMs() + 10_000 || nowMs() - captured >= MAX_FEE_EDGE_CAPTURE_AGE_MS) {
+      captured > nowMs() + 10_000 || nowMs() - captured >= maxCaptureAgeMs) {
     return null;
   }
   let bytes: Buffer | null;
