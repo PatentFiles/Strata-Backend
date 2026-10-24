@@ -400,6 +400,14 @@ jobs:
             --outfile=dist/ownerFeeV3Migration.test.cjs \
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/ownerFeeV3Migration.test.cjs
+      - name: Test authenticated Wallets V4 owner-scoped commissioning readiness (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/walletV4CommissioningReadiness.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/walletV4CommissioningReadiness.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/walletV4CommissioningReadiness.test.cjs
       - name: Test Wallets V4 exact Kalshi fee receipt reconciliation (NO ORDERS)
         working-directory: artifacts/api-server
         run: |
