@@ -89,9 +89,11 @@ export async function inspectSingleOwnerFeePreflight(
     actions.push("legacy_v1_fee_policy_requires_verified_migration");
   if(account.policy_state!=="APPROVED")
     actions.push("approved_policy_missing");
-  if(int(account.max_entry_stake_cents)===null||int(account.max_entry_stake_cents)!<500)
+  const approvedStakeCap=int(account.max_entry_stake_cents);
+  const approvedAllInCap=int(account.max_entry_all_in_cents);
+  if(approvedStakeCap===null||approvedStakeCap<500)
     actions.push("approved_policy_stake_cap_below_five_dollars");
-  if(int(account.max_entry_all_in_cents)===null||int(account.max_entry_all_in_cents)!<500)
+  if(approvedAllInCap===null||approvedAllInCap<500)
     actions.push("approved_policy_all_in_cap_below_five_dollars");
   if(account.commissioned!==true||str(account.blocked_reason)==="awaiting_account_commissioning")
     actions.push("refresh_owner_commissioning");
