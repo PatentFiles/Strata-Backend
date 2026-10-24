@@ -38,6 +38,44 @@ const fail=(reason:string,next:string[]=[]):OwnerFeePreflight=>({
   tradingAuthorized:false,ordersSubmitted:false,suggestedNextActions:next,
   v3SchemaInstalled:false,v3EvidenceReceiptPresent:false,
 });
+/**
+ * Only expose fixed, non-sensitive provider/market error codes to an authenticated
+ * owner. The underlying monetary verifier is authoritative; never echo arbitrary
+ * upstream responses, stack traces, HTTP bodies or credential-bearing URLs.
+ * Returning the precise known failure does NOT authorize fees or execution.
+ */
+const SAFE_MONETARY_FAILURES=new Set([
+ "official_monetary_fee_source_unavailable",
+ "official_fee_schedule_unavailable",
+ "official_fee_schedule_http_403",
+ "official_fee_schedule_http_404",
+ "official_fee_schedule_http_429",
+ "official_fee_schedule_http_500",
+ "official_fee_schedule_http_502",
+ "official_fee_schedule_http_503",
+ "official_fee_schedule_http_504",
+ "official_fee_schedule_redirected",
+ "official_fee_schedule_content_type_invalid",
+ "official_fee_schedule_size_or_body_invalid",
+ "official_fee_schedule_pdf_unparseable",
+ "official_fee_schedule_formula_unverifiable",
+ "official_monetary_fee_digest_invalid",
+ "no_current_open_kxbtc15m_market",
+ "market_listing_incomplete",
+ "market_target_ambiguous",
+ "exact_market_not_in_complete_open_listing",
+ "official_api_metadata_unavailable",
+ "market_event_identity_invalid",
+ "series_event_fee_mismatch",
+ "market_or_event_fee_override_unreviewed",
+ "market_lifecycle_unverified",
+ "fee_change_schedule_unverified",
+ "market_fee_evidence_stale",
+ "monetary_fee_source_stale",
+]);
+const safeMonetaryFailure=(reason:unknown)=>typeof reason==="string" &&
+ SAFE_MONETARY_FAILURES.has(reason)?reason:"official_monetary_fee_source_unverified";
+
 const str=(value:unknown)=>typeof value==="string"?value:"";
 const int=(value:unknown)=>typeof value==="number"&&Number.isSafeInteger(value)?value:
   typeof value==="string"&&/^\d+$/.test(value)&&Number.isSafeInteger(Number(value))?Number(value):null;
@@ -150,8 +188,9 @@ export async function inspectSingleOwnerFeePreflight(
   if(!evidence.ok||!evidence.monetaryFeeAuthorized||evidence.stage!=="STEP_9"||
      !/^[a-f0-9]{64}$/.test(str(evidence.sourceDigest)) ||
      !/^KXBTC15M-[A-Za-z0-9-]+$/.test(str(evidence.marketTicker)))
-    return {...fail("official_monetary_fee_source_unverified",actions),ownerAuthenticated:true,
-      v3SchemaInstalled,v3EvidenceReceiptPresent};
+    return {...fail(safeMonetaryFailure(evidence.ok
+      ? "official_monetary_fee_source_unverified" : evidence.reason),actions),
+      ownerAuthenticated:true,v3SchemaInstalled,v3EvidenceReceiptPresent};
   return {
     ok:true,reason:"owner_official_fee_evidence_read_only_candidate",
     evidenceVerified:true,ownerAuthenticated:true,
