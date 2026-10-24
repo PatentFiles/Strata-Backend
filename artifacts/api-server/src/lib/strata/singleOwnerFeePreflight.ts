@@ -45,7 +45,9 @@ const int=(value:unknown)=>typeof value==="number"&&Number.isSafeInteger(value)?
 const OWNER_SQL=`
  SELECT a.id,a.commissioned,a.execution_enabled,a.kill_switch,a.blocked_reason,
    a.subaccount,a.exchange_index,p.fee_policy_version,p.state AS policy_state,
-   s.configured_stake_cents,l.state AS lease_state
+   p.max_entry_stake_cents,p.max_entry_all_in_cents,
+   s.configured_stake_cents,l.state AS lease_state,l.arm_requested,
+   l.account_kill AS lease_account_kill
  FROM public.v13_production_account a
  LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id
  LEFT JOIN public.strata_configured_stake s ON s.execution_account_id=a.id
@@ -70,6 +72,11 @@ export async function inspectSingleOwnerFeePreflight(
   }catch{return fail("owner_fee_preflight_database_unavailable");}
   const actions:string[]=[];
   if(account.lease_state==="owned")actions.push("recover_stale_worker_with_signed_kalshi");
+  if(account.lease_state!=null&&(
+      account.arm_requested!==false||
+      (account.lease_state==="killed"&&account.lease_account_kill!==true)||
+      (account.lease_state==="released"&&account.lease_account_kill!==false)))
+    actions.push("worker_lease_not_safely_disarmed");
   // Durable eligibility is not an active worker. A killed lease with
   // the owner/account kill switches engaged is the safe stopped state.
   // Do not report a false STOP blocker solely because execution_enabled
@@ -78,6 +85,14 @@ export async function inspectSingleOwnerFeePreflight(
     actions.push("stop_and_disarm_before_policy_migration");
   if(int(account.configured_stake_cents)!==500)
     actions.push("approve_and_save_five_dollar_policy");
+  if(str(account.fee_policy_version)==="micro-live-standing-fee-policy-v1")
+    actions.push("legacy_v1_fee_policy_requires_verified_migration");
+  if(account.policy_state!=="APPROVED")
+    actions.push("approved_policy_missing");
+  if(int(account.max_entry_stake_cents)===null||int(account.max_entry_stake_cents)!<500)
+    actions.push("approved_policy_stake_cap_below_five_dollars");
+  if(int(account.max_entry_all_in_cents)===null||int(account.max_entry_all_in_cents)!<500)
+    actions.push("approved_policy_all_in_cap_below_five_dollars");
   if(account.commissioned!==true||str(account.blocked_reason)==="awaiting_account_commissioning")
     actions.push("refresh_owner_commissioning");
   // #165: report installed database state, not the old permanent "schema not released" message.
@@ -86,7 +101,17 @@ export async function inspectSingleOwnerFeePreflight(
   let v3SchemaInstalled=false,v3EvidenceReceiptPresent=false;
   try {
     const schema=await db.query(
-      "SELECT to_regclass('private.strata_owner_fee_evidence_v3') IS NOT NULL AS installed",
+      `SELECT
+         (to_regclass('private.strata_owner_fee_evidence_v3') IS NOT NULL
+          AND EXISTS (
+           SELECT 1 FROM pg_catalog.pg_trigger t
+           JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
+           JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+           WHERE t.tgrelid=to_regclass('private.strata_owner_fee_evidence_v3')
+             AND t.tgname='strata_owner_fee_v3_immutable_guard'
+             AND NOT t.tgisinternal AND n.nspname='private'
+             AND p.proname='strata_owner_fee_v3_immutable_guard'
+          )) AS installed`,
       [],
     );
     v3SchemaInstalled=schema.rows.length===1&&schema.rows[0]?.installed===true;
