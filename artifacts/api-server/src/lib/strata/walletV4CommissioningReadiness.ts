@@ -5,7 +5,7 @@
  */
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
-import {TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
+import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 type Row=Record<string,unknown>;
 type Q={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
@@ -15,14 +15,14 @@ const SHA=/^[0-9a-f]{40}$/i;
 const iso=(x:unknown)=>x instanceof Date?x.getTime():Date.parse(String(x??""));
 export type WalletV4Readiness={
  ok:boolean;reason:string;accountId:string|null;deployedSha:string|null;
- checks:{accountOwned:boolean;commissioned:boolean;fiveDollarPreset:boolean;
+ checks:{accountOwned:boolean;commissioned:boolean;approvedStakePolicy:boolean;
    cashReconciled:boolean;modelEvidence:boolean;feeAuthority:boolean;
    ownerShaApproval:boolean;protectiveExitRelease:boolean;
    signedPostAuthority:boolean};
  blockers:string[];tradingAuthorized:false;ordersSubmitted:false;
 };
 const empty=():WalletV4Readiness["checks"]=>({
- accountOwned:false,commissioned:false,fiveDollarPreset:false,
+ accountOwned:false,commissioned:false,approvedStakePolicy:false,
  cashReconciled:false,modelEvidence:false,feeAuthority:false,
  ownerShaApproval:false,protectiveExitRelease:false,
  signedPostAuthority:false,
@@ -35,7 +35,9 @@ const ACCOUNT_SQL=`
  SELECT a.id,a.commissioned,a.cash_precision_verified,a.reconciled_at,
  a.cash_micros::text AS cash_micros,a.reserved_micros::text AS reserved_micros,
  s.configured_stake_cents,s.risk_capital_cents,s.risk_preset_id,s.risk_preset_revision,
- p.policy_hash
+ p.policy_hash,p.fee_policy_version,p.state,
+ p.capital_limit_cents,p.max_entry_stake_cents,p.max_entry_all_in_cents,
+ p.max_daily_loss_cents,p.max_total_loss_cents
  FROM public.v13_production_account a
  LEFT JOIN public.strata_configured_stake s ON s.execution_account_id=a.id
  LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id
@@ -85,17 +87,16 @@ export async function inspectWalletV4Readiness(
   const checks=empty();
   checks.accountOwned=true;
   checks.commissioned=a.commissioned===true;
-  checks.fiveDollarPreset=a.configured_stake_cents===500&&
-   a.risk_capital_cents===2500&&
-   a.risk_preset_id===TEST_TWENTY_PERCENT_PRESET.id&&
-   a.risk_preset_revision===TEST_TWENTY_PERCENT_PRESET.revision;
+  const approved=approvedDynamicStakeSnapshot(a);
+  checks.approvedStakePolicy=approved.ok;
   const cash=/^\d+$/.test(String(a.cash_micros??""))?
    BigInt(String(a.cash_micros)):0n;
   const reserved=/^\d+$/.test(String(a.reserved_micros??""))?
    BigInt(String(a.reserved_micros)):cash+1n;
   const reconciled=iso(a.reconciled_at);
   checks.cashReconciled=a.cash_precision_verified===true&&
-   cash>=25_000_000n&&reserved<=cash&&
+   reserved<=cash&&approved.ok&&approved.capitalCents!==null&&
+   cash-reserved>=BigInt(approved.capitalCents)*10_000n&&
    Number.isFinite(reconciled)&&reconciled<=now&&now-reconciled<=900_000;
   if(deployedSha&&/^[a-f0-9]{64}$/.test(String(a.policy_hash??""))){
    const proof=await db.query(AUTH_SQL,

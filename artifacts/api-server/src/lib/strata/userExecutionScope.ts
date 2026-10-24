@@ -1,4 +1,4 @@
-import { V13_MAX_ENTRY_STAKE_CENTS, evaluateV13LiveMoneyRisk, type V13LiveMoneyRiskInput } from "../v13LiveMoneyRisk";
+import { V13_MAX_ENTRY_STAKE_CENTS, V13_MIN_ENTRY_STAKE_CENTS, evaluateV13LiveMoneyRisk, type V13LiveMoneyRiskInput } from "../v13LiveMoneyRisk";
 import { BOT_EXCHANGE_INDEX, BOT_SUBACCOUNT } from "./kalshiUserRead";
 import { applyPresetToDraft, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 
@@ -167,13 +167,24 @@ export function accountBelongsTo(callerUserId: string, account: ScopedAccount): 
 
 export function viewForCaller(callerUserId: string, account: ScopedAccount | null): UserExecutionView {
   if (!account || !accountBelongsTo(callerUserId, account)) return emptyUserExecutionView(callerUserId);
+  // The historical commissioned amount remains in the audit database, but
+  // cannot be an *active* runtime stake below the current $5 entry floor.
+  // Returning null requires a new owner-approved, versioned Dashboard SAVE;
+  // it never mutates the historical policy or loosens the order POST guard.
+  const effectiveStake = account.configuredStakeCents !== null &&
+    Number.isSafeInteger(account.configuredStakeCents) &&
+    account.configuredStakeCents >= V13_MIN_ENTRY_STAKE_CENTS &&
+    account.configuredStakeCents <= V13_MAX_ENTRY_STAKE_CENTS &&
+    account.approvedMaxEntryStakeCents !== null &&
+    account.configuredStakeCents <= account.approvedMaxEntryStakeCents
+      ? account.configuredStakeCents : null;
   return {
     ...emptyUserExecutionView(callerUserId),
     executionAccountExists: true,
     botCashCents: account.cashCents,
     reservedBotCashCents: account.reservedCents,
     capitalRemainingCents: account.capitalRemainingCents,
-    configuredStakeCents: account.configuredStakeCents,
+    configuredStakeCents: effectiveStake,
     stakeRevision: account.stakeRevision,
     riskPresetId: account.riskPresetId ?? null,
     riskPresetRevision: account.riskPresetRevision ?? null,
