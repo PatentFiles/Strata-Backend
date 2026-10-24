@@ -53,6 +53,9 @@ export const FINAL_V4_ADMISSION_SQL=[
  " WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2",
  " AND a.commissioned=true AND a.execution_enabled=true AND a.kill_switch=false",
  " AND a.blocked_reason IS NULL AND a.cash_precision_verified=true",
+ // Match the Wallets 15-minute freshness gate, but recheck transactionally
+ // at the signed POST boundary: UI refresh cannot authorize stale cash.
+ " AND a.reconciled_at<=now() AND a.reconciled_at>now()-interval '15 minutes'",
  " AND p.fee_policy_version='strata_owner_provider_dynamic_fee_v4'",
  " AND p.state='APPROVED' AND p.policy_hash=$3",
  " AND s.revision=$4 AND s.configured_stake_cents BETWEEN 500 AND 2500000",

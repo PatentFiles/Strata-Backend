@@ -79,6 +79,7 @@ test("real scoped SQL must require current owner SHA, exit release and row locks
  assert.match(FINAL_V4_ADMISSION_SQL,/FOR SHARE OF a,p,s,live,lease,c,g,e,oa,x/);
  assert.match(FINAL_V4_ADMISSION_SQL,/AND lease\.state='owned'/);
  assert.match(FINAL_V4_ADMISSION_SQL,/AND a\.kill_switch=false/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/AND a\.reconciled_at<=now\(\) AND a\.reconciled_at>now\(\)-interval '15 minutes'/);
 });
 test("approved 500 cent trade passes fee component only, never grants execution",async()=>{
  const c=tx();
