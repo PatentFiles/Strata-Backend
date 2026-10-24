@@ -9,7 +9,7 @@
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
-import {observeDynamicKalshiFees,type DynamicFeeResult} from "./dynamicOfficialFeeSchedule";
+import {observeDynamicKalshiFees,MAX_V4_DISCOVERY_WALL_MS,type DynamicFeeResult} from "./dynamicOfficialFeeSchedule";
 import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 export const WALLET_V4_EVIDENCE_CONFIRM="I_RECORD_MY_OFFICIAL_KALSHI_DYNAMIC_FEE_EVIDENCE_V4";
@@ -80,7 +80,7 @@ const fresh=(r:DynamicFeeResult,ticker:string,started:number,current:number)=>
  HASH.test(r.model.metadataDigest)&&
  r.model.feeType==="quadratic"&&r.model.feeMultiplier==="1"&&
  date(r.model.observedAt)<=current&&current-date(r.model.observedAt)<=15_000&&
- current>=started&&current-started<=15_000;
+ current>=started&&current-started<=MAX_V4_DISCOVERY_WALL_MS;
 
 export async function recordWalletV4FeeEvidence(ownerId:string,raw:unknown,deps:WalletV4ConsentDeps={}){
  const b=body(raw),ticker=field(b.marketTicker),expectedSha=field(b.expectedDeployedSha),
@@ -102,7 +102,7 @@ export async function recordWalletV4FeeEvidence(ownerId:string,raw:unknown,deps:
   return await runTx(db,async c=>{
    const a=await safeAccount(c,ownerId);
    if(!a.ok)return denied(a.reason);
-   if(now(deps)-start>15_000)return denied("wallet_v4_provider_observation_expired");
+   if(now(deps)-start>MAX_V4_DISCOVERY_WALL_MS)return denied("wallet_v4_provider_observation_expired");
    const id=randomUUID(),m=proof.model;
    const observationAt=new Date(now(deps));
    const expiry=new Date(observationAt.getTime()+10*60_000);
@@ -157,7 +157,7 @@ export async function authorizeWalletV4FeeModel(ownerId:string,raw:unknown,deps:
   return await runTx(db,async c=>{
    const a=await safeAccount(c,ownerId);
    if(!a.ok)return denied(a.reason);
-   if(now(deps)-start>15_000)return denied("wallet_v4_consent_quote_expired");
+   if(now(deps)-start>MAX_V4_DISCOVERY_WALL_MS)return denied("wallet_v4_consent_quote_expired");
    const e=await c.query(
     `SELECT evidence_id,market_ticker,model_digest,official_source_digest,expires_at
      FROM private.strata_wallet_v4_fee_evidence
