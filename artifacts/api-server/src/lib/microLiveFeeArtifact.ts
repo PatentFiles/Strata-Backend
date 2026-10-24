@@ -197,7 +197,8 @@ export function parseFeeScheduleText(text: string): ParsedFeeSchedule | null {
   };
 }
 
-async function extractFeeScheduleDocumentText(bytes: Buffer): Promise<string | null> {
+/** The bounded official PDF extractor shared by production and real-fixture V4 tests. */
+export async function extractFeeScheduleDocumentText(bytes: Buffer): Promise<string | null> {
   if (bytes.length < 100 || bytes.length > MAX_FEE_SCHEDULE_BYTES ||
       bytes.subarray(0, 5).toString() !== "%PDF-" ||
       !bytes.subarray(Math.max(0, bytes.length - 2048)).includes(Buffer.from("%%EOF"))) {
