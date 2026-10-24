@@ -211,3 +211,22 @@ test("unsafe killed/released lease never counts as cleanly disarmed",async()=>{
    assert.equal(out.tradingAuthorized,false);
  }
 });
+
+test("authentic issuer/bridge/local 429 reasons and exact retry deadline are owner-only diagnostics",async()=>{
+ const retryAt="2026-10-24T22:46:58.810Z";
+ for(const origin of ["provider","shared_cooldown","backend_local","bridge_unclassified"] as const){
+  const {db}=make();
+  const reason="official_fee_schedule_http_429_"+origin;
+  const out=await inspectSingleOwnerFeePreflight(OWNER,{db,sha:()=>SHA,observe:async()=>({
+   ...good,ok:false,reason,monetaryFeeAuthorized:false,rateLimitOrigin:origin,retryAt,
+  })});
+  assert.equal(out.reason,reason);
+  assert.equal(out.rateLimitOrigin,origin);
+  assert.equal(out.retryAt,retryAt);
+  assert.equal(out.ownerAuthenticated,true);
+  assert.equal(out.tradingAuthorized,false);
+  assert.equal(out.evidenceVerified,false);
+  assert.equal(out.sourceGrantRecorded,false);
+  assert.equal(out.ordersSubmitted,false);
+ }
+});
