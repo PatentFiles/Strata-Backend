@@ -58,6 +58,7 @@ export function parseOfficialTariffHtml(raw:string,observedAtMs:number):Official
     !/<h2\b[^>]*>\s*Standard fees\s*<\/h2>/i.test(raw)||
     !/<h2\b[^>]*>\s*Non-standard fees\s*<\/h2>/i.test(raw)||
     !/\bMost markets\b/i.test(text))
+   return deny("official_tariff_html_structure_unverified");
  const range=/\bMost markets\s+-\s+1\s+(\$\d+\.\d{2}\s*-\s*\$\d+\.\d{2})\s+taker fees\b/i.exec(text);
  if(!range)return deny("official_tariff_standard_fee_range_unverified");
  const pages=/\bPage\s+(\d+)\s+of\s+(\d+)\s*\(\s*(\d+)\s+total series\s*\)/i.exec(text);
