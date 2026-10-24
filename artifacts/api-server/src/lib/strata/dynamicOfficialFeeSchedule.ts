@@ -81,10 +81,21 @@ export function parseDynamicKalshiPublication(text:string,nowMs:number):{
  if(!Number.isSafeInteger(nowMs)||nowMs<=0||text.length<100||text.length>500_000)
    return {ok:false,reason:"dynamic_fee_document_or_clock_invalid"};
  const doc=text.replace(/\s+/g," ").trim();
- const trading=doc.indexOf("Trading Fees"),maker=doc.indexOf("Maker Fees");
- const nonstandard=doc.indexOf("Non-Standard Fees");
- const perps=doc.indexOf("Perpetual Futures Fees");
- if(trading!==0||maker<=trading||nonstandard<=maker||perps<=nonstandard)
+ // The PDF cover may contain issuer branding before the first heading.
+ // Its Trading Fees *prose* also mentions “Maker Fees” before the actual
+ // maker section. Never split at that explanatory mention: first locate
+ // the taker formula, then the later maker-heading/formula pair.
+ const trading=doc.indexOf("Trading Fees");
+ const takerFormulaStart=trading>=0?doc.indexOf("fees = round up",trading):-1;
+ const maker=takerFormulaStart>=0?doc.indexOf("Maker Fees",takerFormulaStart):-1;
+ const makerFormulaStart=maker>=0?doc.indexOf("fees = round up",maker):-1;
+ const nonstandard=doc.indexOf("Non-Standard Fees",makerFormulaStart);
+ const perps=doc.indexOf("Perpetual Futures Fees",nonstandard);
+ // Extra cover text is accepted only in a small, strictly bounded prefix.
+ // A malformed or ambiguous section ordering always fails closed.
+ if(trading<0||trading>256||takerFormulaStart<=trading||
+    maker<=takerFormulaStart||makerFormulaStart<=maker||
+    nonstandard<=makerFormulaStart||perps<=nonstandard)
    return {ok:false,reason:"dynamic_fee_document_structure_changed"};
  const takerSection=doc.slice(trading,maker);
  const makerSection=doc.slice(maker,Math.min(nonstandard,maker+1300));
