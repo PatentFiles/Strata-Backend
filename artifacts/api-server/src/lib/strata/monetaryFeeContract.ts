@@ -13,6 +13,8 @@ export type MonetaryFeeEvidenceContract = {
   marketTicker?:string;eventTicker?:string;sourceDigest?:string;
   verifiedAt?:string;monetaryFeeAuthorized:boolean;
   policyApproved:false;tradingAuthorized:false;
+  rateLimitOrigin?:"provider"|"shared_cooldown"|"backend_local"|"bridge_unclassified";
+  retryAt?:string;
 };
 const deny=(stage:ApiFeeStage,reason:string):MonetaryFeeEvidenceContract=>({
   ok:false,reason,stage,monetaryFeeAuthorized:false,
@@ -32,7 +34,18 @@ export async function verifyMonetaryFeeContract(
  // series multiplier. No browser claims, uploads or self-attestations.
  let proof:PdfProof;
  try{proof=await establish();}catch{return deny(stage,"official_monetary_fee_source_unavailable");}
- if(!proof.ok)return deny(stage,proof.reason);
+ if(!proof.ok){
+   // Transport classification is diagnostic-only, never a fee grant.
+   const origin=proof.diagnostic.rateLimitOrigin;
+   const suffix=origin==="provider"?"provider":origin==="shared_cooldown"
+     ?"shared_cooldown":origin==="backend_local"?"backend_local":
+     origin==="bridge_unclassified"?"bridge_unclassified":null;
+   const reason=proof.reason==="official_fee_schedule_http_429" && suffix
+     ? "official_fee_schedule_http_429_"+suffix:proof.reason;
+   return {...deny(stage,reason),
+     ...(suffix?{rateLimitOrigin:origin!}:{}),
+     ...(proof.diagnostic.retryAt?{retryAt:proof.diagnostic.retryAt}:{})};
+ }
  if(!/^[a-f0-9]{64}$/.test(proof.digest))
    return deny(stage,"official_monetary_fee_digest_invalid");
  const observation=await probeCurrentKalshiFeeApi(fetchImpl,now,exactMarketTicker);
