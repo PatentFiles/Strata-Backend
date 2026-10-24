@@ -11,6 +11,16 @@ const UUID=/^[a-zA-Z0-9_:.-]{8,160}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
 type Fill={tradeId:string;orderId:string;ticker:string;quantityHundredths:string;
   executionPriceTicks:number;exchangeFeeMicros:string;feeVerified:boolean;};
+/**
+ * A boolean from caller data is NOT proof of authenticated Kalshi receipts.
+ * Keep all existing research/test callers fail-closed until a server-owned
+ * exchange adapter supplies independent, scope-bound provenance.
+ */
+export type AuthenticatedKalshiReceiptProof={
+ source:"kalshi_server_authenticated";ownerId:string;accountId:string;
+ orderId:string;marketTicker:string;observedAtMs:number;complete:true;
+ authoritativeFillDigest:string;
+};
 type Ledger={ownerId:string;accountId:string;orderId:string;ticker:string;
   expectedModelDigest:string;authorizedGrossMicros:string;maximumEntryFeesMicros:string;
   expectedFilledHundredths:string;feeReservedMicros:string;};
@@ -22,7 +32,16 @@ const amount=(raw:string)=>/^(0|[1-9]\d{0,20})$/.test(raw)?BigInt(raw):null;
 const price=(n:number)=>Number.isSafeInteger(n)&&n>0&&n<10000;
 export function reconcileWalletV4OrderFees(
  l:Ledger, fills:readonly Fill[], providerComplete:boolean,
+ proof?:AuthenticatedKalshiReceiptProof,
 ):FeeReconcileResult{
+ if(!proof||proof.source!=="kalshi_server_authenticated"||
+    proof.complete!==true||proof.ownerId!==l?.ownerId||
+    proof.accountId!==l?.accountId||proof.orderId!==l?.orderId||
+    proof.marketTicker!==l?.ticker||
+    !DIGEST.test(proof.authoritativeFillDigest)||
+    !Number.isSafeInteger(proof.observedAtMs)||
+    Math.abs(Date.now()-proof.observedAtMs)>15_000)
+   return fail("v4_wallet_authenticated_receipt_provenance_required");
  if(!l||!Array.isArray(fills)||!providerComplete||
     !UUID.test(l.ownerId)||!UUID.test(l.accountId)||
     !UUID.test(l.orderId)||!/^KXBTC15M-[A-Za-z0-9-]+$/.test(l.ticker)||
