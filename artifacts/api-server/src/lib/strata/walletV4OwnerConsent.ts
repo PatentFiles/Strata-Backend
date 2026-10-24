@@ -105,13 +105,13 @@ export async function recordWalletV4FeeEvidence(ownerId:string,raw:unknown,deps:
    const observationAt=new Date(now(deps));
    const expiry=new Date(observationAt.getTime()+10*60_000);
    const row=await c.query(
-    \`INSERT INTO private.strata_wallet_v4_fee_evidence
+    `INSERT INTO private.strata_wallet_v4_fee_evidence
     (evidence_id,owner_user_id,execution_account_id,deployed_sha,
      market_ticker,model_digest,official_source_digest,market_metadata_digest,
      effective_at,fee_type,taker_coefficient_ppm,observed_at,expires_at)
     VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9::timestamptz,
       'quadratic',$10,$11::timestamptz,$12::timestamptz)
-    RETURNING evidence_id::text\`,
+    RETURNING evidence_id::text`,
     [id,ownerId,a.accountId,currentSha,ticker,m.modelDigest,m.publicationDigest,
      m.metadataDigest,m.effectiveDate,m.takerRatePpm,observationAt.toISOString(),expiry.toISOString()]);
    if(row.rows.length!==1)return denied("wallet_v4_evidence_insert_not_confirmed");
@@ -157,18 +157,18 @@ export async function authorizeWalletV4FeeModel(ownerId:string,raw:unknown,deps:
    if(!a.ok)return denied(a.reason);
    if(now(deps)-start>15_000)return denied("wallet_v4_consent_quote_expired");
    const e=await c.query(
-    \`SELECT evidence_id,market_ticker,model_digest,official_source_digest,expires_at
+    `SELECT evidence_id,market_ticker,model_digest,official_source_digest,expires_at
      FROM private.strata_wallet_v4_fee_evidence
      WHERE evidence_id=$1::uuid AND owner_user_id=$2::uuid
        AND execution_account_id=$3 AND deployed_sha=$4 AND model_digest=$5
        AND revoked_at IS NULL AND expires_at>now()+interval '60 seconds'
-     FOR SHARE\`,
+     FOR SHARE`,
      [evidenceId,ownerId,a.accountId,currentSha,expectedModel]);
    if(e.rows.length!==1||e.rows[0]!.market_ticker!==ticker||
       e.rows[0]!.official_source_digest!==sourceDigest)
     return denied("wallet_v4_model_evidence_changed_during_lock");
    const policies=await c.query(
-    \`SELECT p.policy_hash,p.fee_policy_version,p.state,p.capital_limit_cents,
+    `SELECT p.policy_hash,p.fee_policy_version,p.state,p.capital_limit_cents,
        p.max_entry_stake_cents,p.max_entry_all_in_cents,p.max_daily_loss_cents,
        p.max_total_loss_cents,s.configured_stake_cents,s.risk_capital_cents,
        s.risk_preset_id,s.risk_preset_revision
@@ -176,7 +176,7 @@ export async function authorizeWalletV4FeeModel(ownerId:string,raw:unknown,deps:
      JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
      JOIN public.strata_configured_stake s ON s.execution_account_id=a.id
      WHERE a.id=$1 AND a.owner_user_id=$2::uuid
-     FOR SHARE OF p,s\`,[a.accountId,ownerId]);
+     FOR SHARE OF p,s`,[a.accountId,ownerId]);
    if(policies.rows.length!==1)return denied("wallet_v4_approved_policy_not_found");
    const p=policies.rows[0]!;
    if(p.fee_policy_version!==VERSION||p.state!=="APPROVED"||
@@ -197,14 +197,14 @@ export async function authorizeWalletV4FeeModel(ownerId:string,raw:unknown,deps:
      now(deps)+10*60_000));
    if(expiresAt.getTime()-now(deps)<60_000)return denied("wallet_v4_consent_expires_too_soon");
    const result=await c.query(
-    \`INSERT INTO private.strata_wallet_v4_fee_authority
+    `INSERT INTO private.strata_wallet_v4_fee_authority
     (authority_id,evidence_id,owner_user_id,execution_account_id,
       deployed_sha,model_digest,policy_hash,policy_version,confirmation,
       aal2_verified_at,authorized_stages,expires_at)
     VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,
       now(),ARRAY['STEP_9','STEP_11','ORDER_ENTRY']::text[],
       $10::timestamptz)
-    RETURNING authority_id::text\`,
+    RETURNING authority_id::text`,
     [id,evidenceId,ownerId,a.accountId,currentSha,expectedModel,
       p.policy_hash,VERSION,WALLET_V4_CONSENT_CONFIRM,expiresAt.toISOString()]);
    if(result.rows.length!==1)return denied("wallet_v4_grant_not_confirmed");
@@ -226,18 +226,18 @@ export async function revokeWalletV4FeeConsent(ownerId:string,raw:unknown,deps:W
   const db=deps.db??pool as unknown as Db;
   return await runTx(db,async c=>{
    const rows=await c.query(
-    \`SELECT g.authority_id FROM private.strata_wallet_v4_fee_authority g
+    `SELECT g.authority_id FROM private.strata_wallet_v4_fee_authority g
      JOIN public.v13_production_account a
      ON a.id=g.execution_account_id AND a.owner_user_id=g.owner_user_id
      WHERE g.authority_id=$1::uuid AND g.owner_user_id=$2::uuid
        AND a.subaccount=1 AND a.exchange_index=2 AND g.revoked_at IS NULL
-     FOR UPDATE OF g\`,[b.authorityId,ownerId]);
+     FOR UPDATE OF g`,[b.authorityId,ownerId]);
    if(rows.rows.length!==1)return denied("wallet_v4_active_owned_authority_not_found");
    const updated=await c.query(
-    \`UPDATE private.strata_wallet_v4_fee_authority
+    `UPDATE private.strata_wallet_v4_fee_authority
        SET revoked_at=now(),revocation_reason='owner_approved_revocation'
        WHERE authority_id=$1::uuid AND owner_user_id=$2::uuid
-         AND revoked_at IS NULL RETURNING authority_id\`,[b.authorityId,ownerId]);
+         AND revoked_at IS NULL RETURNING authority_id`,[b.authorityId,ownerId]);
    if(updated.rows.length!==1)return denied("wallet_v4_revocation_not_recorded");
    return {ok:true as const,reason:"wallet_v4_fee_consent_revoked",
     evidenceRecorded:false as const,grantIssued:false as const,
