@@ -4,6 +4,7 @@ import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeCon
  WALLET_V4_EVIDENCE_CONFIRM,WALLET_V4_CONSENT_CONFIRM,
  WALLET_V4_REVOKE_CONFIRM} from "./walletV4OwnerConsent";
 import type {DynamicFeeResult} from "./dynamicOfficialFeeSchedule";
+import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 const owner="11111111-1111-4111-8111-111111111111";
 const sha="a".repeat(40),hash="b".repeat(64),source="c".repeat(64),metadata="d".repeat(64);
@@ -116,4 +117,24 @@ test("Revocation requires owner confirmation even when feature disabled",async()
  assert.equal(r.ok,true);
  assert.ok(all.some(s=>s.includes("revoked_at=now()")));
  assert.ok(all.includes("COMMIT"));
+});
+
+test("V4 fee authorization policy snapshot supports any valid saved $5-$25,000 stake",()=>{
+ for(const [stake,budget] of [[500,2500],[5000,25000],[1945700,9728500],[2500000,12500000]]){
+   const p={fee_policy_version:"strata_owner_provider_dynamic_fee_v4",state:"APPROVED",
+     policy_hash:"c".repeat(64),configured_stake_cents:stake,max_entry_stake_cents:stake,
+     max_entry_all_in_cents:Math.floor(stake*1.25),
+     capital_limit_cents:budget,risk_capital_cents:budget,
+     max_daily_loss_cents:budget,max_total_loss_cents:budget,
+     risk_preset_id:"owner-approved-shared-policy",risk_preset_revision:3};
+   const r=approvedDynamicStakeSnapshot(p);
+   assert.equal(r.ok,true);
+   assert.equal(r.stakeCents,stake);
+   assert.equal(r.capitalCents,budget);
+   assert.equal(approvedDynamicStakeSnapshot({...p,configured_stake_cents:150}).ok,false);
+   assert.equal(approvedDynamicStakeSnapshot({...p,max_entry_stake_cents:150}).ok,false);
+   assert.equal(approvedDynamicStakeSnapshot({...p,policy_hash:"not verified"}).ok,false);
+   assert.equal(approvedDynamicStakeSnapshot({...p,risk_capital_cents:budget+100}).ok,false);
+   assert.equal(approvedDynamicStakeSnapshot({...p,risk_preset_revision:-1}).ok,false);
+ }
 });
