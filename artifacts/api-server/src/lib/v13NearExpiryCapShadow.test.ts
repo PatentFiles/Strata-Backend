@@ -33,7 +33,7 @@ test("non-fixedpoint price, absent quote and over-expensive contract fail closed
     assert.equal(assessNearExpiryCapShadow(600,price).wouldEnter,false);
   const tooExpensive=assessNearExpiryCapShadow(200,0.9999);
   assert.equal(tooExpensive.reason,"RESEARCH_CANDIDATE");
-  assert.equal(tooExpensive.modeledContracts,5); // fee rounding to 1c per research order
+  assert.equal(tooExpensive.modeledContracts,4); // five contracts exceed $5 after a 1c illustrative fee
 });
 
 test("research result cannot authorize a real order or claim fee evidence",()=>{
