@@ -46,7 +46,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
@@ -93,7 +93,7 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("INSERT INTO private.strata_protective_release_reviews"))
    return {rows:[{id:RID,expires_at:"2026-10-20T06:00:00Z"}]};
   if(sql.includes("FROM public.v13_production_account")&&sql.includes("FOR UPDATE"))
-   return {rows:[{id:account.id,execution_enabled:input.accountLive??false,kill_switch:!(input.accountLive??false),cash_micros:"25000000",
+   return {rows:[{id:account.id,execution_enabled:input.accountLive??false,kill_switch:input.eligibleKilled===true?true:!(input.accountLive??false),cash_micros:"25000000",
     blocked_reason:input.freeze??null,commissioned:true,cash_precision_verified:true,reserved_micros:"0",
     reconciled_at:new Date(Date.now()-(input.fresh===false?60_000:1000)).toISOString()}]};
   if(sql.includes("FROM public.live_execution_config"))return {rows:[{
@@ -339,6 +339,21 @@ test("owner consent inserts exact signed release then atomically enables account
  assert.ok(h.executed.indexOf("COMMIT")>globalUpdate);
 });
 
+
+test("eligible but killed owner remains stopped until genuine reviewed release",async()=>{
+ const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(r.ordersSubmitted,false);
+ assert.ok(h.executed.some(q=>q.includes("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false")));
+ assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false);
+});
+test("eligible but killed owner cannot bypass independent technical review",async()=>{
+ const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,review:false});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,false);
+ assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
+});
 test("owner's independently qualified stopped account can release when shared master is already enabled",async()=>{
  const h=fakeDb({globalLive:true});
  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
