@@ -19,9 +19,9 @@ test("Wallets V4 immutable owner AAL2 fee authority has scoped FK, TTL and priva
   await client.query("BEGIN");
   await client.query(`CREATE SCHEMA ${p}; CREATE SCHEMA ${pub}; CREATE SCHEMA ${auth}`);
   await client.query(`CREATE TABLE ${auth}.users (id uuid primary key)`);
-  await client.query(`CREATE TABLE ${pub}.v13_production_account (id text primary key)`);
+  await client.query(`CREATE TABLE ${pub}.v13_production_account (id text primary key,owner_user_id uuid not null)`);
   await client.query(`INSERT INTO ${auth}.users(id) VALUES($1),($2)`,[owner,stranger]);
-  await client.query(`INSERT INTO ${pub}.v13_production_account(id) VALUES('wallet-test-account')`);
+  await client.query(`INSERT INTO ${pub}.v13_production_account(id,owner_user_id) VALUES('wallet-test-account',$1)`,[owner]);
   for(const role of ["anon","authenticated","service_role"])
    await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}')
      THEN CREATE ROLE ${role}; END IF; END $$`);
