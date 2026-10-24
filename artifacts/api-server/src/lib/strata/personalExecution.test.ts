@@ -478,6 +478,20 @@ test("signed Kalshi portfolio GET rejects redirects before forwarding credential
  assert.equal(policy,"manual");
  assert.equal(requests,1);
 });
+test("signed Kalshi transport failures are typed, secret-free, and never retried",async()=>{
+ let sent=0;
+ const failing=(async()=>{
+  sent++;
+  throw new Error("internal connection error with private_key=must_not_surface");
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",failing,"https://external-api.kalshi.com"),
+  (err:unknown)=>err instanceof KalshiApiError&&err.type==="NETWORK_ERROR"&&
+    !/private_key|must_not_surface/.test(err.message),
+ );
+ assert.equal(sent,1);
+});
 test("owner exchange qualification distinguishes signed GET rejection and 429 without retries or secret leakage",async()=>{
  const variants=[
   {error:new KalshiApiError("HTTP_ERROR",401),reason:"kalshi_read_authentication_rejected"},
