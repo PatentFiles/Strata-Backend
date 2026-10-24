@@ -10,12 +10,14 @@
  * account migration and exact-SHA final-order/exit admission still apply.
  */
 import {randomUUID} from "node:crypto";
+import {digest as auditDigest} from "../v13-production/types";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
 import {verifyMonetaryFeeContract,type MonetaryFeeEvidenceContract} from "./monetaryFeeContract";
 import type {ApiFeeStage} from "./apiFeeGrantEligibility";
 
 export const V3_FEE_GRANT_CONFIRM="I_APPROVE_MY_OWN_VERIFIED_MONETARY_FEE_GRANT_V3";
+export const V3_FEE_GRANT_REVOKE_CONFIRM="I_REVOKE_MY_OWN_OFFICIAL_MONETARY_FEE_AUTHORITY_V3";
 export const V3_FEE_POLICY_VERSION="strata_owner_official_monetary_fee_v3" as const;
 export const V3_FEE_FORMULA_VERSION="standard-quadratic-0.07-v1" as const;
 export const V3_FEE_PUBLICATION_URL="https://kalshi.com/docs/kalshi-fee-schedule.pdf" as const;
@@ -225,4 +227,54 @@ export async function verifyOwnerV3FeeAuthority(
       marketTicker:str(fee.marketTicker),releaseCommitSha:sha}};
  }catch{return reject("v3_authority_database_unavailable");}
  finally{c?.release();}
+}
+
+/**
+ * Owner's ability to revoke V3 monetary authority is intentionally available
+ * even when the feature issuance flag is OFF. Revocation cannot issue authority,
+ * clear a freeze, relax risk policy, or submit a venue order. Admission must
+ * re-check revoked_at in the last transaction before each POST.
+ */
+export async function revokeOwnerV3FeeAuthority(ownerId:string,raw:unknown,deps:Deps={}){
+ const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
+ if(!UUID.test(ownerId)||!UUID.test(str(b.authorityId))||
+    b.confirmation!==V3_FEE_GRANT_REVOKE_CONFIRM)
+  return {ok:false as const,reason:"explicit_owner_v3_fee_revocation_required",
+    revoked:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const};
+ const db=deps.db??pool as unknown as Db;
+ let tx:Client|null=null,committed=false;
+ try{
+  tx=await db.connect();
+  await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  await tx.query("SET LOCAL lock_timeout='1500ms'");
+  await tx.query("SET LOCAL statement_timeout='10000ms'");
+  const own=await tx.query(`SELECT g.authority_id,g.execution_account_id
+    FROM private.strata_owner_fee_authority_v3 g
+    JOIN public.v13_production_account a
+      ON a.id=g.execution_account_id AND a.owner_user_id=g.owner_user_id
+      AND a.subaccount=1 AND a.exchange_index=2
+    WHERE g.authority_id=$1::uuid AND g.owner_user_id=$2::uuid
+      AND g.revoked_at IS NULL
+    FOR UPDATE OF g`,[b.authorityId,ownerId]);
+  if(own.rows.length!==1)return {ok:false as const,
+    reason:"v3_authority_missing_or_already_revoked",
+    revoked:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const};
+  const updated=await tx.query(`UPDATE private.strata_owner_fee_authority_v3
+    SET revoked_at=now(),revocation_reason='owner_requested_v3_fee_revocation'
+    WHERE authority_id=$1::uuid AND owner_user_id=$2::uuid
+      AND revoked_at IS NULL RETURNING authority_id::text`,[b.authorityId,ownerId]);
+  if(updated.rows.length!==1)throw Error("revocation_cas_conflict");
+  const event={authorityId:b.authorityId,ownerId,
+    executionAccountId:own.rows[0]?.execution_account_id,
+    reason:"owner_explicit_v3_monetary_fee_authority_revocation"};
+  await tx.query(`INSERT INTO public.v13_production_observation
+    (id,account_id,kind,payload,digest)
+    VALUES($1,$2,'OWNER_V3_FEE_AUTHORITY_REVOKED',$3::jsonb,$4)`,
+    [randomUUID(),event.executionAccountId,JSON.stringify(event),auditDigest(event)]);
+  await tx.query("COMMIT");committed=true;
+  return {ok:true as const,reason:"owner_v3_fee_authority_revoked",
+    revoked:true as const,ordersSubmitted:false as const,tradingAuthorized:false as const};
+ }catch{return {ok:false as const,reason:"v3_authority_revocation_transaction_failed",
+   revoked:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const};}
+ finally{if(tx){if(!committed)try{await tx.query("ROLLBACK");}catch{}tx.release();}}
 }
