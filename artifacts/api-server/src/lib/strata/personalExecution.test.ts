@@ -29,7 +29,7 @@ import {
   reportOwnedActivation,
 } from "./personalAccountActivation";
 import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds, classifyOwnedKalshiReadFailure } from "./personalExchangeRead";
-import { KalshiApiError } from "../kalshiAccountClient";
+import { KalshiApiError, getScopedKalshiJson } from "../kalshiAccountClient";
 import type { MarketEvidence, Request } from "../v13-production/types";
 
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -462,6 +462,22 @@ test("production START requires exact fresh cash parity regardless of historical
   });
 });
 
+test("signed Kalshi portfolio GET rejects redirects before forwarding credentials",async()=>{
+ let requests=0,policy:string|undefined;
+ const transport=(async(_url:string,init?:RequestInit)=>{
+  requests++;
+  policy=init?.redirect;
+  return new Response("",{status:302,
+   headers:{location:"https://attacker.invalid/collect"}});
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",transport,"https://external-api.kalshi.com"),
+  (error:unknown)=>error instanceof KalshiApiError&&error.type==="HTTP_ERROR"&&error.status===302,
+ );
+ assert.equal(policy,"manual");
+ assert.equal(requests,1);
+});
 test("owner exchange qualification distinguishes signed GET rejection and 429 without retries or secret leakage",async()=>{
  const variants=[
   {error:new KalshiApiError("HTTP_ERROR",401),reason:"kalshi_read_authentication_rejected"},
