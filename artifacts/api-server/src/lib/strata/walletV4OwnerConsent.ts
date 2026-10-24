@@ -59,8 +59,10 @@ async function safeAccount(c:Client,ownerId:string){
   [ownerId]);
  if(owned.rows.length!==1)return {ok:false as const,reason:"wallet_v4_owner_account_missing_or_ambiguous"};
  const a=owned.rows[0]!;
+ // execution_enabled is durable eligibility, NOT permission to place an order.
+ // Kill switch ON and non-owned, unarmed lease are the safety authority.
  if(a.commissioned!==true||a.kill_switch!==true||
-    a.execution_enabled!==false||a.cash_precision_verified!==true)
+    a.cash_precision_verified!==true)
    return {ok:false as const,reason:"wallet_v4_safe_commissioned_stop_required"};
  const lease=await c.query("SELECT state,arm_requested,account_kill FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[a.id,ownerId]);
  if(lease.rows.length>1)return {ok:false as const,reason:"wallet_v4_worker_lease_ambiguous"};
