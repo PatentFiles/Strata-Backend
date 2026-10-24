@@ -80,19 +80,21 @@ export async function readOwnedKalshiFeeds(
     primaryBalance: {},
   });
   if (!cash.ok) return cash;
+  // Failure must stop the entire signed scan before any additional Kalshi
+  // GET is sent. In particular, a provider 429 must not fan out into five
+  // unnecessary signed history requests.
   const orders = await pages(get, creds, ORDER_PATH, ["orders"]);
+  if ("failed" in orders) return {ok:false,reason:orders.failed};
   const archivedOrders = await pages(get, creds, HISTORICAL_ORDER_PATH, ["orders"]);
+  if ("failed" in archivedOrders) return {ok:false,reason:archivedOrders.failed};
   const fills = await pages(get, creds, FILL_PATH, ["fills"]);
+  if ("failed" in fills) return {ok:false,reason:fills.failed};
   const archivedFills = await pages(get, creds, HISTORICAL_FILL_PATH, ["fills"]);
+  if ("failed" in archivedFills) return {ok:false,reason:archivedFills.failed};
   const positions = await pages(get, creds, POSITION_PATH, ["market_positions", "positions"]);
+  if ("failed" in positions) return {ok:false,reason:positions.failed};
   const settlements = await pages(get, creds, SETTLEMENT_PATH, ["settlements"]);
-  const feeds = [orders, archivedOrders, fills, archivedFills, positions, settlements];
-  const failed = feeds.find((page) => "failed" in page);
-  if (failed && "failed" in failed) return { ok: false, reason: failed.failed };
-  if (!isPage(orders) || !isPage(archivedOrders) || !isPage(fills) || !isPage(archivedFills) ||
-      !isPage(positions) || !isPage(settlements)) {
-    return { ok: false, reason: "personal_exchange_history_unreconciled" };
-  }
+  if ("failed" in settlements) return {ok:false,reason:settlements.failed};
   const currentEmpty = orders.rows.length === 0 && fills.rows.length === 0 &&
     settlements.rows.length === 0 && !openPositions(positions.rows);
   if ((archivedOrders.unavailable || archivedFills.unavailable) && !currentEmpty) {
@@ -227,10 +229,6 @@ export function emptySnapshot(
 }
 
 type Page = { rows: unknown[]; unavailable: boolean };
-
-function isPage(page: Page | { failed: string }): page is Page {
-  return !("failed" in page);
-}
 
 async function pages(
   get: typeof getScopedKalshiJson,
