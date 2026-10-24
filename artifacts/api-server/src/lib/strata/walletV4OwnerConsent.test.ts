@@ -165,6 +165,7 @@ test("real authenticated fallback can complete at 28s without bypassing current 
    observe:async()=>({...valid,model:{...valid.model,
      observedAt:new Date(clock-15_001).toISOString()}})});
  assert.equal(stale.ok,false);
+ clock=started+1_000;
  const expired=await recordWalletV4FeeEvidence(owner,evidence,{
    ...deps,db,now:()=>{return clock},
    observe:async()=>{clock=started+46_001;return {...valid,model:{...valid.model,
@@ -192,6 +193,7 @@ test("explicit owner consent still requires a genuinely recent reobserved model 
      return {...valid,model:{...valid.model,observedAt:new Date(clock).toISOString()}};
    }});
  assert.equal(result.reason,"wallet_v4_approved_policy_not_found",JSON.stringify(result));
+ clock=started+1_000;
  const expired=await authorizeWalletV4FeeModel(owner,consent,{
    ...deps,db,now:()=>clock,observe:async()=>{
      clock=started+46_001;
