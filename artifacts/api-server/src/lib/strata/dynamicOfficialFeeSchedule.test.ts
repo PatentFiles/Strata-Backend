@@ -1,7 +1,7 @@
 import test from "node:test";
 import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
-import {extractFeeScheduleDocumentText} from "../microLiveFeeArtifact";
+import {extractFeeScheduleDocumentText,readUnapprovedOfficialFeePublication} from "../microLiveFeeArtifact";
 
 import assert from "node:assert/strict";
 import {parseDynamicKalshiPublication,estimateDynamicFeeMicros,observeDynamicKalshiFees} from "./dynamicOfficialFeeSchedule";
@@ -107,6 +107,48 @@ test("read-only runtime refuses malformed market before any network call",async(
  assert.equal(result.ok,false);
  assert.equal(result.tradingAuthorized,false);
  assert.equal(calls,0);
+});
+test("V4 fee PDF rate limit obeys official Retry-After without repeated Kalshi requests or fee proof",async()=>{
+ let now=Date.parse("2026-10-24T12:00:00Z"),calls=0;
+ const transport=(async()=>{
+   calls++;
+   if(calls===1)return new Response(null,{status:429,headers:{"retry-after":"1800"}});
+   return new Response(null,{status:404});
+ }) as typeof fetch;
+ const first=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.deepEqual(first,{ok:false,reason:"dynamic_fee_publication_http_429"});
+ now+=60_000;
+ const second=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.deepEqual(second,{ok:false,reason:"dynamic_fee_publication_http_429"});
+ assert.equal(calls,1,"provider 429 must not be hammered during 30-minute official backoff");
+ now+=1_740_000;
+ const retry=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.deepEqual(retry,{ok:false,reason:"dynamic_fee_publication_http_404"});
+ assert.equal(calls,2,"direct source can be rechecked after its actual Retry-After");
+});
+test("V4 unknown or malicious Retry-After is bounded, never interpreted as approval",async()=>{
+ let now=Date.parse("2026-10-24T12:00:00Z"),calls=0;
+ const transport=(async()=>{
+   calls++;
+   return new Response(null,{status:429,headers:{"retry-after":"malicious-non-numeric"}});
+ }) as typeof fetch;
+ const initial=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.equal(initial.ok,false);
+ now+=59_000;
+ const suppressed=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.equal(suppressed.ok,false);
+ assert.equal(calls,1);
+ now+=1_000;
+ const after=await readUnapprovedOfficialFeePublication(transport,()=>now);
+ assert.equal(after.ok,false);
+ assert.equal(calls,2);
+ // Second 429 ramps the cooldown to two minutes, even with a forged header.
+ now+=119_000;
+ assert.equal((await readUnapprovedOfficialFeePublication(transport,()=>now)).ok,false);
+ assert.equal(calls,2);
+ now+=1_000;
+ assert.equal((await readUnapprovedOfficialFeePublication(transport,()=>now)).ok,false);
+ assert.equal(calls,3);
 });
 test("unavailable official PDF, HTTP 429 and redirect are non-authorizing",async()=>{
  for(const status of [429,404,503]){

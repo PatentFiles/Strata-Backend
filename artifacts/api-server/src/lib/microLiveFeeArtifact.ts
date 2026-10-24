@@ -293,27 +293,73 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
  * independently hash-verified official PDF captured in the last 60 seconds.
  * A missing/misconfigured bridge still fails closed; tests cannot invoke it.
  */
+// A production issuer/CDN 429 is a request-supply constraint, not a missing
+// owner permission. Keep the V4 dynamic-document rate limit separate from
+// the standing V3 digest path: NEVER cache accepted PDF bytes, fee models,
+// consents, or authorizations. These maps store only cooldown deadlines.
+// The maps are process-local; Supabase Edge enforces the shared project lease.
+const v4OfficialPdfDirectRetryAt = new WeakMap<typeof fetch,number>();
+const v4OfficialPdfDirectFailures = new WeakMap<typeof fetch,number>();
+const v4OfficialPdfBridgeRetryAt = new WeakMap<typeof fetch,number>();
+const V4_MIN_429_COOLDOWN_MS = 60_000;
+const V4_MAX_429_COOLDOWN_MS = 86_400_000;
+const V4_BRIDGE_MIN_INTERVAL_MS = 60_000;
+
 export async function readUnapprovedOfficialFeePublication(
   fetchImpl:typeof fetch=globalThis.fetch,
+  nowMs:()=>number=Date.now,
 ):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
  {ok:false;reason:string}> {
+ const start=nowMs();
+ const directRetryAt=v4OfficialPdfDirectRetryAt.get(fetchImpl)??0;
+ const directSuppressed=directRetryAt>start;
  let response:Response|null=null;
  let trustedBridge=false;
- try {
-   response=await fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
-     method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
-     redirect:"error",cache:"no-store",signal:AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
-   });
- }catch{ /* Only the captured production transport may use the bridge. */ }
- // Never use a pinned build snapshot as V4 dynamic, provider-backed evidence.
- // Existing official Edge egress validates fixed URL, JWT, SHA-256 of every
- // byte and actual capture timestamp. Narrow age further to <=60 seconds.
- if((response===null||[403,429,500,502,503,504].includes(response.status))&&
-    fetchImpl===PRODUCTION_FEE_FETCH && globalThis.fetch===PRODUCTION_FEE_FETCH){
+ if(!directSuppressed){
+   try {
+     response=await fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
+       method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
+       redirect:"error",cache:"no-store",signal:AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+     });
+   }catch{ /* Only the captured production transport may use the bridge. */ }
+   if(response?.status===429){
+     const retry=parsedRetryAfterSeconds(response);
+     const failures=Math.min(10,(v4OfficialPdfDirectFailures.get(fetchImpl)??0)+1);
+     v4OfficialPdfDirectFailures.set(fetchImpl,failures);
+     // CDN checkpoints can persist. A missing Retry-After ramps 1, 2, 4,
+     // 8... minutes (capped 30m); an actual provider wait is always honored.
+     const exponential=Math.min(30*60_000,
+       V4_MIN_429_COOLDOWN_MS*2**(failures-1));
+     const pause=Math.max(exponential,Math.min(V4_MAX_429_COOLDOWN_MS,
+       (retry??0)*1000));
+     v4OfficialPdfDirectRetryAt.set(fetchImpl,nowMs()+pause);
+   }else if(response?.status===200){
+     v4OfficialPdfDirectRetryAt.delete(fetchImpl);
+     v4OfficialPdfDirectFailures.delete(fetchImpl);
+   }
+ }
+ // The issuer is on cooldown: never issue another direct GET until its
+ // Retry-After expires. A genuine alternate Edge capture may still work,
+ // but it is probed only at its own bounded cadence.
+ if(directSuppressed)response=new Response(null,{status:429});
+ // Never use pinned build snapshots as V4 dynamic, provider-backed evidence.
+ // Edge validates fixed URL, SHA-256, and actual captured-at <=60 seconds.
+ const canBridge=fetchImpl===PRODUCTION_FEE_FETCH&&
+   globalThis.fetch===PRODUCTION_FEE_FETCH &&
+   (v4OfficialPdfBridgeRetryAt.get(fetchImpl)??0)<=nowMs();
+ if((response===null||[403,429,500,502,503,504].includes(response.status))&&canBridge){
+   // At most one alternate upstream attempt per minute. If it returns its
+   // shared 429 lease, honor the longer Retry-After without spinning.
+   v4OfficialPdfBridgeRetryAt.set(fetchImpl,nowMs()+V4_BRIDGE_MIN_INTERVAL_MS);
    const verified=await fetchTrustedFeeFromSupabaseBridge(
      globalThis.fetch,process.env.SUPABASE_URL,
-     process.env.STRATA_FEE_BRIDGE_ANON_JWT,Date.now,60_000);
+     process.env.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,60_000);
    if(verified?.status===200){response=verified;trustedBridge=true;}
+   else if(verified?.status===429){
+     const retry=parsedRetryAfterSeconds(verified);
+     if(retry!==null)v4OfficialPdfBridgeRetryAt.set(fetchImpl,
+       nowMs()+Math.max(V4_BRIDGE_MIN_INTERVAL_MS,retry*1000));
+   }
  }
  if(!response)return {ok:false,reason:"dynamic_fee_publication_unavailable"};
  if(response.status!==200)return {ok:false,reason:`dynamic_fee_publication_http_${response.status}`};
