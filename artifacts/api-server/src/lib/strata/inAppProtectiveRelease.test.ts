@@ -562,3 +562,32 @@ test("Step12 status returns legacy fee evidence diagnostics without claiming qua
  assert.ok("legacyPdfSnapshotExpired" in s);
  assert.equal(s.ordersSubmitted,false);
 });
+
+
+test("Step12 status identifies approved V4 policy by version, never falsely as legacy PDF",async()=>{
+ for(const scenario of [
+  {name:"approved_v4",opts:{v4Source:true},expected:"DYNAMIC_PROVIDER_V4",legacyExpired:false},
+  {name:"legacy_pdf",opts:{},expected:"LEGACY_PDF_V1",legacyExpired:true},
+  {name:"reviewed_api",opts:{apiSource:true},expected:"REVIEWED_API_V2",legacyExpired:false},
+ ]){
+  const h=fakeDb(scenario.opts),base=(h.db as unknown as {
+    query:(sql:string,params?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>
+  }).query;
+  const db={query:async(sql:string,params?:unknown[])=>{
+    if(sql.includes("FROM private.strata_owner_sha_approvals")||
+       sql.includes("FROM private.strata_protective_release_reviews v"))
+      return {rows:[]};
+    return base(sql,params);
+  }};
+  const res=await protectiveReleaseStatus(OWNER,OWNER,{
+    db:db as never,sha:()=>SHA,now:()=>Date.parse("2026-10-24T18:00:00Z"),
+  });
+  assert.equal(res.ok,true,scenario.name+": "+JSON.stringify(res));
+  if(!("feeSourceMode" in res && "legacyPdfSnapshotExpired" in res))
+    throw Error("source status shape unverified");
+  assert.equal(res.feeSourceMode,scenario.expected,scenario.name);
+  assert.equal(res.legacyPdfSnapshotExpired,scenario.legacyExpired,scenario.name);
+  assert.equal(res.releaseActive,false);
+  assert.equal(res.ordersSubmitted,false);
+ }
+});
