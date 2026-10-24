@@ -3,6 +3,7 @@ import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS, type V13Appro
 import { digest as v13Digest } from "../v13-production/types";
 import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type SharedPreset } from "./sharedPresets";
 import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPresetStake";
+import {DYNAMIC_FEE_POLICY_VERSION_V4} from "./dynamicFeeOrderRiskV4";
 
 /**
  * Owner-scoped, audited policy amendment when a production stake exceeds the
