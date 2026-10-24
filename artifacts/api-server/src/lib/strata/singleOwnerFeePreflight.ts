@@ -24,6 +24,10 @@ export type OwnerFeePreflight={
   tradingAuthorized:false;
   ordersSubmitted:false;
   suggestedNextActions:string[];
+  /** Database objects exist; never indicates executable V3 authority. */
+  v3SchemaInstalled:boolean;
+  /** Current owner/account/SHA consent receipt, evidence-only. */
+  v3EvidenceReceiptPresent:boolean;
   sourceDigest?:string;
   marketTicker?:string;
 };
@@ -31,6 +35,7 @@ const fail=(reason:string,next:string[]=[]):OwnerFeePreflight=>({
   ok:false,reason,evidenceVerified:false,ownerAuthenticated:false,
   ownerConsentRecorded:false,sourceGrantRecorded:false,reviewAuthorityRecorded:false,
   tradingAuthorized:false,ordersSubmitted:false,suggestedNextActions:next,
+  v3SchemaInstalled:false,v3EvidenceReceiptPresent:false,
 });
 const str=(value:unknown)=>typeof value==="string"?value:"";
 const int=(value:unknown)=>typeof value==="number"&&Number.isSafeInteger(value)?value:
@@ -74,8 +79,42 @@ export async function inspectSingleOwnerFeePreflight(
     actions.push("approve_and_save_five_dollar_policy");
   if(account.commissioned!==true||str(account.blocked_reason)==="awaiting_account_commissioning")
     actions.push("refresh_owner_commissioning");
-  // An existing V1/V2 policy must never be silently reinterpreted as a V3 owner grant.
-  actions.push("owner_fee_v3_schema_and_consent_not_yet_released");
+  // #165: report installed database state, not the old permanent "schema not released" message.
+  // The schema and receipt confer NO fee grant, policy migration, or trading permission.
+  // Both reads are scoped and bounded. Missing schema or unavailable reads fail closed.
+  let v3SchemaInstalled=false,v3EvidenceReceiptPresent=false;
+  try {
+    const schema=await db.query(
+      "SELECT to_regclass('private.strata_owner_fee_evidence_v3') IS NOT NULL AS installed",
+      [],
+    );
+    v3SchemaInstalled=schema.rows.length===1&&schema.rows[0]?.installed===true;
+    if(v3SchemaInstalled) {
+      // A receipt is a non-executable owner consent candidate, not a fee-source grant.
+      // Only an exact current runtime SHA is relevant; never reuse prior deployments.
+      const {deployedGitSha}=await import("./deployedGitSha");
+      const sha=deployedGitSha();
+      if(/^[a-f0-9]{40}$/.test(sha)){
+        const receipt=await db.query(`
+          SELECT attestation_id FROM private.strata_owner_fee_evidence_v3
+          WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+            AND release_commit_sha=$3 AND revoked_at IS NULL AND expires_at>now()
+          LIMIT 2
+        `,[ownerId,account.id,sha]);
+        v3EvidenceReceiptPresent=receipt.rows.length===1;
+      }else actions.push("exact_runtime_sha_unavailable_for_v3_evidence");
+    }
+    actions.push(v3SchemaInstalled
+      ?v3EvidenceReceiptPresent
+        ?"owner_fee_v3_evidence_only_grant_and_migration_still_required"
+        :"owner_fee_v3_evidence_consent_not_recorded"
+      :"owner_fee_v3_schema_migration_required");
+  }catch{
+    v3SchemaInstalled=false;
+    v3EvidenceReceiptPresent=false;
+    actions.push("owner_fee_v3_schema_or_receipt_read_unavailable");
+  }
+  actions.push("owner_fee_v3_execution_grant_and_policy_migration_not_released");
   actions.push("exact_sha_protective_exit_exchange_qualification_required");
   let evidence:MonetaryFeeEvidenceContract;
   try{evidence=await (deps.observe??(()=>verifyMonetaryFeeContract("STEP_9")))();}
@@ -91,5 +130,6 @@ export async function inspectSingleOwnerFeePreflight(
     reviewAuthorityRecorded:false,tradingAuthorized:false,ordersSubmitted:false,
     sourceDigest:evidence.sourceDigest,marketTicker:evidence.marketTicker,
     suggestedNextActions:actions,
+    v3SchemaInstalled,v3EvidenceReceiptPresent,
   };
 }
