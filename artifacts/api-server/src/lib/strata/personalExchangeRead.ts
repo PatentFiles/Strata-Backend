@@ -1,4 +1,4 @@
-import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
@@ -28,6 +28,25 @@ export function ownedPositionHistoryQuery(cursor: string | null = null): string 
  return `?${PAIR_QUERY}&settlement_status=all&count_filter=position%2Ctotal_traded${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`;
 }
 
+/** No response body or secret is surfaced in release diagnostics. Every
+ * category still blocks the signed account read; a 429 is not a reason to
+ * resubmit another request inside this qualification attempt.
+ */
+export function classifyOwnedKalshiReadFailure(error:unknown):string{
+ if(!(error instanceof KalshiApiError))return "kalshi_read_failed";
+ if(error.type==="NOT_CONFIGURED")return "kalshi_read_signer_not_configured";
+ if(error.type==="INVALID_CREDENTIALS")return "kalshi_read_signer_invalid";
+ if(error.type==="NETWORK_ERROR")return "kalshi_read_network_unavailable";
+ if(error.type==="HTTP_ERROR"){
+  if(error.status===429)return "kalshi_read_rate_limited";
+  if(error.status===401)return "kalshi_read_authentication_rejected";
+  if(error.status===403)return "kalshi_read_permission_denied";
+  if(typeof error.status==="number"&&error.status>=500&&error.status<=599)
+    return "kalshi_read_provider_unavailable";
+ }
+ return "kalshi_read_failed";
+}
+
 export interface OwnedKalshiRead {
   ok: true;
   observedAtMs: number;
@@ -47,8 +66,8 @@ export async function readOwnedKalshiFeeds(
   let balance: unknown;
   try {
     balance = await get(creds, BALANCE_PATH, "?subaccount=1&exchange_index=2");
-  } catch {
-    return { ok: false, reason: "kalshi_read_failed" };
+  } catch(error) {
+    return { ok: false, reason: classifyOwnedKalshiReadFailure(error) };
   }
   if (!scopeEcho(balance)) return { ok: false, reason: "account_target_pair_mismatch" };
   const cash = readSubaccountSpendableCash({
@@ -232,7 +251,7 @@ async function pages(
       if (status === 404 && rows.length === 0 && (path === HISTORICAL_ORDER_PATH || path === HISTORICAL_FILL_PATH)) {
         return { rows: [], unavailable: true };
       }
-      return { failed: "kalshi_read_failed" };
+      return { failed: classifyOwnedKalshiReadFailure(error) };
     }
     const parsed = pageOf(payload, keys);
     if (!parsed || (parsed.cursor && seen.has(parsed.cursor))) {
