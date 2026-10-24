@@ -1,4 +1,8 @@
 import test from "node:test";
+import {readFileSync} from "node:fs";
+import {resolve} from "node:path";
+import {extractFeeScheduleDocumentText} from "../microLiveFeeArtifact";
+
 import assert from "node:assert/strict";
 import {parseDynamicKalshiPublication,estimateDynamicFeeMicros,observeDynamicKalshiFees} from "./dynamicOfficialFeeSchedule";
 
@@ -19,6 +23,25 @@ const doc=(taker="0.07",maker="0.0175",tail="KXBTCY BTC price EOY 0 0")=>[
  "Last updated and effective: July 7, 2026",
 ].join(" ");
 
+test("real byte-for-byte reviewed official Kalshi PDF parses into executable-candidate dynamic fees",async()=>{
+ const fixture=readFileSync(resolve(process.cwd(),
+   "../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+ const extracted=await extractFeeScheduleDocumentText(fixture);
+ assert.ok(extracted,"actual Kalshi PDF fixture must be readable");
+ const model=parseDynamicKalshiPublication(extracted!,NOW);
+ assert.equal(model.ok,true,JSON.stringify(model));
+ if(model.ok){
+   assert.equal(model.effectiveDate,"2026-07-07");
+   assert.equal(model.takerRatePpm,70000);
+   assert.equal(model.makerRatePpm,17500);
+   assert.equal(model.defaultTakerMultiplierPpm,1000000);
+   assert.equal(model.defaultMakerMultiplierPpm,0);
+ }
+ // Original issuer exceptions stay mandatory: never rewrite PDF inputs to
+ // get a passing parser, or hard-code a rate when source parsing fails.
+ const changed=extracted!.replace("Non-Standard Fees","Not Reviewed Fees");
+ assert.equal(parseDynamicKalshiPublication(changed,NOW).ok,false);
+});
 test("official July PDF explanatory Maker Fees mention never truncates taker formula",()=>{
  const officialStructure=doc().replace("Trading Fees",
   "Kalshi Trading Fees").replace(
