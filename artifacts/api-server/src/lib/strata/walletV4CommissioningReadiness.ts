@@ -52,7 +52,7 @@ const AUTH_SQL=`
  EXISTS(SELECT 1 FROM private.strata_wallet_v4_fee_evidence e
   WHERE e.owner_user_id=$1::uuid AND e.execution_account_id=$2
     AND e.deployed_sha=$3 AND e.revoked_at IS NULL
-    AND e.observed_at<=now() AND e.expires_at>now()) AS model_evidence,
+    AND e.observed_at<=now() AND e.expires_at>now()+interval '30 seconds') AS model_evidence,
  EXISTS(SELECT 1 FROM private.strata_wallet_v4_fee_authority g
   JOIN private.strata_wallet_v4_fee_evidence e
     ON e.evidence_id=g.evidence_id AND e.owner_user_id=g.owner_user_id
@@ -61,15 +61,18 @@ const AUTH_SQL=`
   WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2
     AND g.deployed_sha=$3 AND g.policy_hash=$4
     AND g.revoked_at IS NULL AND g.approved_at<=now()
-    AND g.expires_at>now() AND e.revoked_at IS NULL
-    AND e.expires_at>now()
+    AND g.expires_at>now()+interval '30 seconds' AND e.revoked_at IS NULL
+    AND e.observed_at<=now() AND e.expires_at>now()+interval '30 seconds'
     AND 'ORDER_ENTRY'=ANY(g.authorized_stages)) AS fee_authority,
  EXISTS(SELECT 1 FROM private.strata_owner_sha_approvals r
   WHERE r.owner_user_id=$1::uuid AND r.execution_account_id=$2
     AND r.release_commit_sha=$3 AND r.revoked_at IS NULL) AS owner_sha_approval,
  EXISTS(SELECT 1 FROM private.strata_protective_exit_release pr
   WHERE pr.release_commit_sha=$3 AND pr.state='approved'
-    AND pr.revoked_at IS NULL AND pr.expires_at>now()) AS protective_exit_release
+    AND pr.revoked_at IS NULL AND pr.created_at<=now()
+    AND pr.expires_at>now()+interval '20 minutes'
+    AND pr.independent_reviewer_id<>$1::uuid
+    AND pr.operator_approver_id<>pr.independent_reviewer_id) AS protective_exit_release
 `;
 /** Only the JWT-supplied subject may be passed; no request-body account IDs. */
 export async function inspectWalletV4Readiness(
