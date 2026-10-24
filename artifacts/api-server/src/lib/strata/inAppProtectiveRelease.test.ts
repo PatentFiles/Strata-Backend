@@ -46,7 +46,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed"}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
@@ -93,11 +93,12 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("INSERT INTO private.strata_protective_release_reviews"))
    return {rows:[{id:RID,expires_at:"2026-10-20T06:00:00Z"}]};
   if(sql.includes("FROM public.v13_production_account")&&sql.includes("FOR UPDATE"))
-   return {rows:[{id:account.id,execution_enabled:false,kill_switch:true,cash_micros:"25000000",
+   return {rows:[{id:account.id,execution_enabled:input.accountLive??false,kill_switch:!(input.accountLive??false),cash_micros:"25000000",
     blocked_reason:input.freeze??null,commissioned:true,cash_precision_verified:true,reserved_micros:"0",
     reconciled_at:new Date(Date.now()-(input.fresh===false?60_000:1000)).toISOString()}]};
   if(sql.includes("FROM public.live_execution_config"))return {rows:[{
-    mode:"V13_PRODUCTION",live_execution_enabled:false,manual_kill_switch:true,
+    mode:"V13_PRODUCTION",live_execution_enabled:input.globalLive??false,
+    manual_kill_switch:input.globalInconsistent===true?true:!(input.globalLive??false),
   }]};
   if(sql.includes("FROM private.strata_protective_release_reviews r")&&
      sql.includes("JOIN private.strata_protective_release_qualification"))
@@ -336,6 +337,53 @@ test("owner consent inserts exact signed release then atomically enables account
  const globalUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.live_execution_config"));
  assert.ok(insert>0&&accountUpdate>insert&&globalUpdate>accountUpdate);
  assert.ok(h.executed.indexOf("COMMIT")>globalUpdate);
+});
+
+test("owner's independently qualified stopped account can release when shared master is already enabled",async()=>{
+ const h=fakeDb({globalLive:true});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
+  db:h.db,sha:()=>SHA,
+ });
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(r.ordersSubmitted,false);
+ const technical=h.executed.findIndex(q=>q.includes("FROM private.strata_protective_release_reviews r"));
+ const owned=h.executed.findIndex(q=>q.includes("UPDATE public.v13_production_account"));
+ const release=h.executed.findIndex(q=>q.includes("INSERT INTO private.strata_protective_exit_release"));
+ assert.ok(technical>0&&release>technical&&owned>release);
+ assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false,
+  "an already live global gate must NEVER be rewritten to qualify another account");
+ assert.ok(h.executed.includes("COMMIT"));
+});
+
+test("already enabled account cannot outrun a globally stopped or inconsistent master",async()=>{
+ for(const [name,input,reason] of [
+  ["account active/global stopped",{accountLive:true,globalLive:false},
+   "account_global_release_state_mismatch"],
+  ["inconsistent global kill",{globalLive:true,globalInconsistent:true},
+   "global_execution_kill_state_inconsistent"],
+ ] as const){
+  const h=fakeDb(input);
+  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
+   db:h.db,sha:()=>SHA,
+  });
+  assert.equal(r.ok,false,name);
+  assert.equal(r.reason,reason,name);
+  assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false,name);
+  assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false,name);
+  assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false,name);
+  assert.ok(h.executed.includes("ROLLBACK"),name);
+ }
+});
+
+test("globally enabled master still cannot bypass absent independent reviewer",async()=>{
+ const h=fakeDb({globalLive:true,review:false});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
+  db:h.db,sha:()=>SHA,
+ });
+ assert.equal(r.ok,false);
+ assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false);
+ assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
+ assert.ok(h.executed.includes("ROLLBACK"));
 });
 
 test("provisional freeze cannot be cleared without distinct explicit owner consent",async()=>{
