@@ -4,6 +4,8 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
+import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
+import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
@@ -680,6 +682,33 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const out=await recordOwnerV3FeeEvidence(owner,req.body??{});
     res.status(out.ok?201:409).json(sanitizePublic(out));
   });
+  // V3 monetary fee source authorization; requires authenticated owner AAL2.
+  // Explicit feature-flag plus immutable server-verified fee consent needed.
+  // Does not migrate policy, enable entries, or bypass legacy V2 review.
+  router.post("/fees/single-owner/authority/issue",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await issueOwnerV3FeeAuthority(owner,req.body??{});
+    res.status(out.ok?201:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/single-owner/authority/revoke",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await revokeOwnerV3FeeAuthority(owner,req.body??{});
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  router.get("/fees/single-owner/authority/check",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    const source=typeof req.query.sourceUrl==="string"?req.query.sourceUrl:"";
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await verifyOwnerV3FeeAuthority(owner,"STEP_9",source);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
   router.get("/fees/api-source-readiness", async (req,res)=>{
     const viewer=subject(res);
     if(!viewer)return void res.status(401).json({error:"Unauthorized"});
@@ -924,6 +953,24 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await migrateOwnedApiFeePolicy(owner,req.body??{});
     res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  // Guarded V1->V3 policy migration. Existing V2 remains separate.
+  // Owner AAL2, provider signed cash/order/fill reconciliation, atomic CAS
+  // and confirmed historical freeze repair are REQUIRED inside backend.
+  router.get("/fees/single-owner/migration/preview",async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await previewOwnedV3FeeMigration(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/single-owner/migration/confirm",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await migrateOwnedV3FeePolicy(owner,req.body??{});
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   router.post("/policy/approve", async (req, res) => {
     const userId = subject(res);
