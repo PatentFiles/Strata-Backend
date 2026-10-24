@@ -299,6 +299,7 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
 // consents, or authorizations. These maps store only cooldown deadlines.
 // The maps are process-local; Supabase Edge enforces the shared project lease.
 const v4OfficialPdfDirectRetryAt = new WeakMap<typeof fetch,number>();
+const v4OfficialPdfDirectFailures = new WeakMap<typeof fetch,number>();
 const v4OfficialPdfBridgeRetryAt = new WeakMap<typeof fetch,number>();
 const V4_MIN_429_COOLDOWN_MS = 60_000;
 const V4_MAX_429_COOLDOWN_MS = 86_400_000;
@@ -323,11 +324,18 @@ export async function readUnapprovedOfficialFeePublication(
    }catch{ /* Only the captured production transport may use the bridge. */ }
    if(response?.status===429){
      const retry=parsedRetryAfterSeconds(response);
-     const pause=Math.max(V4_MIN_429_COOLDOWN_MS,Math.min(V4_MAX_429_COOLDOWN_MS,
-       (retry??60)*1000));
+     const failures=Math.min(10,(v4OfficialPdfDirectFailures.get(fetchImpl)??0)+1);
+     v4OfficialPdfDirectFailures.set(fetchImpl,failures);
+     // CDN checkpoints can persist. A missing Retry-After ramps 1, 2, 4,
+     // 8... minutes (capped 30m); an actual provider wait is always honored.
+     const exponential=Math.min(30*60_000,
+       V4_MIN_429_COOLDOWN_MS*2**(failures-1));
+     const pause=Math.max(exponential,Math.min(V4_MAX_429_COOLDOWN_MS,
+       (retry??0)*1000));
      v4OfficialPdfDirectRetryAt.set(fetchImpl,nowMs()+pause);
    }else if(response?.status===200){
      v4OfficialPdfDirectRetryAt.delete(fetchImpl);
+     v4OfficialPdfDirectFailures.delete(fetchImpl);
    }
  }
  // The issuer is on cooldown: never issue another direct GET until its
