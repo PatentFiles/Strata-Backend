@@ -3,6 +3,11 @@
 -- Backend may create a grant only after fresh, server-verified official
 -- monetary source and owner AAL2 consent. No entry-release effect.
 BEGIN;
+-- Composite unique key ensures a grant cannot be associated with a DIFFERENT
+-- owner's consent, deployment SHA or provider digest, even by a buggy writer.
+CREATE UNIQUE INDEX IF NOT EXISTS strata_owner_v3_evidence_scope_identity
+  ON private.strata_owner_fee_evidence_v3
+  (attestation_id,owner_user_id,execution_account_id,release_commit_sha,source_digest);
 CREATE TABLE IF NOT EXISTS private.strata_owner_fee_authority_v3 (
  authority_id uuid PRIMARY KEY,
  attestation_id uuid NOT NULL UNIQUE REFERENCES private.strata_owner_fee_evidence_v3(attestation_id),
@@ -23,6 +28,10 @@ CREATE TABLE IF NOT EXISTS private.strata_owner_fee_authority_v3 (
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
  revocation_reason text,
+ CONSTRAINT v3_authority_evidence_identity_fk FOREIGN KEY
+  (attestation_id,owner_user_id,execution_account_id,release_commit_sha,official_source_digest)
+   REFERENCES private.strata_owner_fee_evidence_v3
+   (attestation_id,owner_user_id,execution_account_id,release_commit_sha,source_digest),
  CONSTRAINT v3_authority_ttl CHECK (
    expires_at > issued_at AND expires_at <= issued_at + interval '15 minutes'),
  CONSTRAINT v3_authority_revoke_clock CHECK (revoked_at IS NULL OR revoked_at >= issued_at)
