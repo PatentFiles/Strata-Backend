@@ -120,9 +120,8 @@ test("official PDF formula and own fee table must agree for both one and 100 con
  ]){
   const result=parseDynamicKalshiPublication(malformed,NOW);
   assert.equal(result.ok,false,malformed.slice(-180));
-  assert.equal(result.reason,"official_fee_reference_table_formula_mismatch"===result.reason||
-     result.reason==="official_fee_reference_table_missing_or_reordered"
-     ?result.reason:"unexpected_failure_reason");
+  assert.ok(["official_fee_reference_table_formula_mismatch",
+    "official_fee_reference_table_missing_or_reordered"].includes(result.reason),result.reason);
  }
 });
 
