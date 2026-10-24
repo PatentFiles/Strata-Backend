@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
- issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,encodeV3FeeSource,
- parseV3FeeSource,V3_FEE_GRANT_CONFIRM,V3_FEE_FORMULA_VERSION,
+ issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority,encodeV3FeeSource,
+ parseV3FeeSource,V3_FEE_GRANT_CONFIRM,V3_FEE_GRANT_REVOKE_CONFIRM,V3_FEE_FORMULA_VERSION,
 } from "./ownerFeeV3Authority";
 
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -134,4 +134,31 @@ test("V3 verifier checks owner, immutable receipt digest, current provider and e
   assert.equal(x.ok,allow,JSON.stringify(x));
   if(x.ok)assert.equal(x.identity.feePolicyVersion,"strata_owner_official_monetary_fee_v3");
  }
+});
+
+test("owner explicitly revokes V3 authority transactionally and writes immutable audit",async()=>{
+ const statements:string[]=[];
+ const db={connect:async()=>({query:async(sql:string)=>{
+   statements.push(sql);
+   if(sql.includes("SELECT g.authority_id,g.execution_account_id"))return {rows:[{
+     authority_id:GRANT,execution_account_id:"strata-account-test",
+   }]};
+   if(sql.includes("UPDATE private.strata_owner_fee_authority_v3"))return {rows:[{authority_id:GRANT}]};
+   return {rows:[]};
+ },release(){}})};
+ const x=await revokeOwnerV3FeeAuthority(OWNER,{
+   authorityId:GRANT,confirmation:V3_FEE_GRANT_REVOKE_CONFIRM,
+ },{db:db as never,enabled:()=>false});
+ assert.equal(x.ok,true,JSON.stringify(x));
+ assert.equal(x.revoked,true);
+ assert.equal(x.ordersSubmitted,false);
+ assert.equal(x.tradingAuthorized,false);
+ assert.ok(statements.some(s=>s.includes("UPDATE private.strata_owner_fee_authority_v3")));
+ assert.ok(statements.some(s=>s.includes("OWNER_V3_FEE_AUTHORITY_REVOKED")));
+ assert.equal(statements.at(-1),"COMMIT");
+});
+test("V3 grant cannot be revoked without authenticated owner confirmation",async()=>{
+ const x=await revokeOwnerV3FeeAuthority(OWNER,{authorityId:GRANT,confirmation:"not owner"});
+ assert.equal(x.ok,false);
+ assert.equal(x.tradingAuthorized,false);
 });
