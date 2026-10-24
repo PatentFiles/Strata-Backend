@@ -314,7 +314,7 @@ export async function readUnapprovedOfficialFeePublication(
  catch{return {ok:false,reason:"dynamic_fee_publication_pdf_invalid"};}
  if(!text)return {ok:false,reason:"dynamic_fee_publication_pdf_invalid"};
  return {ok:true,digest:createHash("sha256").update(bytes).digest("hex"),
-   normalizedText:text.replace(/\\s+/g," ").trim(),
+   normalizedText:text.replace(/\s+/g," ").trim(),
    observedAt:new Date().toISOString()};
 }
 
