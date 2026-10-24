@@ -9,6 +9,9 @@ const original={
  authorizedGrossMicros:"5000000",maximumEntryFeesMicros:"200000",
  expectedFilledHundredths:"1000",feeReservedMicros:"200000",
 };
+const proof={source:"kalshi_server_authenticated" as const,ownerId:original.ownerId,
+ accountId:original.accountId,orderId:original.orderId,marketTicker:original.ticker,
+ observedAtMs:Date.now(),complete:true as const,authoritativeFillDigest:"e".repeat(64)};
 const fills=[
  {tradeId:"t-001",orderId:original.orderId,ticker:original.ticker,
    quantityHundredths:"600",executionPriceTicks:5000,
@@ -18,7 +21,7 @@ const fills=[
    exchangeFeeMicros:"80000",feeVerified:true},
 ];
 test("exact Kalshi-derived split-fill fees reconcile against original fee bounds",()=>{
- const result=reconcileWalletV4OrderFees(original,fills,true);
+ const result=reconcileWalletV4OrderFees(original,fills,true,proof);
  assert.equal(result.ok,true);
  if(result.ok){
   assert.equal(result.filledHundredths,"1000");
@@ -27,15 +30,15 @@ test("exact Kalshi-derived split-fill fees reconcile against original fee bounds
   assert.equal(result.needsAdjustment,false);
   assert.equal(result.receiptDigest.length,64);
   assert.equal(result.tradingAuthorized,false);
-  assert.equal(reconcileWalletV4OrderFees(original,[...fills].reverse(),true).ok,true);
+  assert.equal(reconcileWalletV4OrderFees(original,[...fills].reverse(),true,proof).ok,true);
  }
 });
 test("zero-fill completed IOC produces zero fees only if ledger also says zero",()=>{
  const l={...original,expectedFilledHundredths:"0"};
- const r=reconcileWalletV4OrderFees(l,[],true);
+ const r=reconcileWalletV4OrderFees(l,[],true,proof);
  assert.equal(r.ok,true);
  if(r.ok){assert.equal(r.actualFeeMicros,"0");assert.equal(r.needsAdjustment,true);}
- assert.equal(reconcileWalletV4OrderFees(original,[],true).ok,false);
+ assert.equal(reconcileWalletV4OrderFees(original,[],true,proof).ok,false);
 });
 test("incomplete, duplicate, incorrect owner order and bad fee receipts fail closed",()=>{
  const bad=[
@@ -53,5 +56,11 @@ test("incomplete, duplicate, incorrect owner order and bad fee receipts fail clo
    [{...original,expectedModelDigest:""},fills,true],
  ] as const;
  for(const [l,f,c] of bad)
-  assert.equal(reconcileWalletV4OrderFees(l,f,c).ok,false);
+  assert.equal(reconcileWalletV4OrderFees(l,f,c,proof).ok,false);
+});
+
+test("Wallets rejects receipt input without server-bound source proof",()=>{
+ assert.equal(reconcileWalletV4OrderFees(original,fills,true).ok,false);
+ assert.equal(reconcileWalletV4OrderFees(original,fills,true,{...proof,ownerId:"other"}).ok,false);
+ assert.equal(reconcileWalletV4OrderFees(original,fills,true,{...proof,observedAtMs:0}).ok,false);
 });
