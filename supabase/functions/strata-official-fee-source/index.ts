@@ -3,6 +3,7 @@
 // JWT required at the Supabase gateway. The only outbound provider request is
 // https://kalshi.com/docs/kalshi-fee-schedule.pdf; storage remains private.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { isUsableFeeCapture, parseBridgeMode } from "./cachePolicy.ts";
 
 const OFFICIAL_URL = "https://kalshi.com/docs/kalshi-fee-schedule.pdf";
 const BUCKET = "strata-official-fee-artifacts";
@@ -72,7 +73,8 @@ function pdfResponse(bytes: Uint8Array, digest: string, capturedAt: string): Res
 Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method !== "GET") return json("method_not_allowed", 405);
   // This is not an arbitrary URL proxy. Reject every query/path variant.
-  if (new URL(req.url).search) return json("unsupported_query", 400);
+  const mode = parseBridgeMode(new URL(req.url).search);
+  if (mode === null) return json("unsupported_query", 400);
   if (!endpoint || !serviceRole) return json("bridge_configuration_missing", 503);
   try {
     const client = createClient(endpoint, serviceRole, {
@@ -87,12 +89,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (recent.error) return json("capture_index_unavailable", 503);
     if (recent.data) {
       const saved = recent.data;
-      const captureTime = Date.parse(saved.captured_at);
-      const expiry = Date.parse(saved.expires_at);
-      // DB row + file must both be authentic and inside the configured lease.
-      if (Number.isFinite(captureTime) && Number.isFinite(expiry) &&
-          captureTime <= now + 10000 && now < expiry &&
-          expiry - captureTime <= 3600000 && now - captureTime < 3600000) {
+      // Normal consumers may reuse a hash-verified publication for up to
+      // 55 minutes. V4 callers demand an ACTUAL upstream capture younger
+      // than 60 seconds. Never re-stamp or mislabel a cached object as new.
+      // On V4 cache miss, enter the SAME project-wide claim/cooldown path.
+      if (isUsableFeeCapture(saved.captured_at, saved.expires_at, now, mode)) {
         const fetched = await client.storage.from(BUCKET).download(saved.storage_path);
         if (!fetched.error && fetched.data) {
           const bytes = new Uint8Array(await fetched.data.arrayBuffer());
