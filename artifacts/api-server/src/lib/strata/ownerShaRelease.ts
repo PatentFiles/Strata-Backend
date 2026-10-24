@@ -62,11 +62,14 @@ export async function authorizeOwnerShaRelease(
   const a=visible.account;
   const repair=a.blocked_reason==="awaiting_account_commissioning";
   const alreadyEnabled=isTrue(a.execution_enabled)&&!isTrue(a.kill_switch);
+  // A provisioned account may have durable eligibility but be stopped.
+  // Still require authenticated, signed, zero-exposure reconciliation.
+  const stagedStopped=isTrue(a.execution_enabled)&&isTrue(a.kill_switch);
   if(repair&&args.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
     return reject("explicit_owner_commissioning_repair_confirmation_required");
   if(!repair&&args.provisionalRepairConfirmation!==undefined)
     return reject("commissioning_repair_confirmation_not_applicable");
-  if(repair||alreadyEnabled){
+  if(repair||alreadyEnabled||stagedStopped){
     const material=await loadedMaterial(db,a);
     if(!material)return reject("account_restricted_signer_unavailable");
     const observedAtMs=(deps.now??Date.now)();
@@ -104,7 +107,7 @@ export async function authorizeOwnerShaRelease(
   if(account.rows.length!==1)return reject("owned_execution_account_unavailable");
   const current=account.rows[0]!;
   if(!isTrue(current.commissioned)||!isTrue(current.cash_precision_verified)||
-     (isTrue(current.execution_enabled)===isTrue(current.kill_switch)))
+     (!isTrue(current.execution_enabled)&&!isTrue(current.kill_switch)))
     return reject("commissioning_or_account_kill_state_invalid");
   // A previously commissioned account's stale provisioner marker can be
   // repaired by its AAL2 owner after an authenticated zero-exposure proof.
@@ -114,6 +117,7 @@ export async function authorizeOwnerShaRelease(
    // Require authenticated zero-exposure and no active worker lease before
    // honoring a first owner consent. Never grandfather live authority.
    const legacyEnabled=isTrue(current.execution_enabled)&&!isTrue(current.kill_switch);
+   const stagedStopped=isTrue(current.execution_enabled)&&isTrue(current.kill_switch);
   if(repairing && args.provisionalRepairConfirmation!==PROVISIONAL_REPAIR_CONFIRM)
     return reject("explicit_owner_commissioning_repair_confirmation_required");
   if(!repairing && args.provisionalRepairConfirmation!==undefined)
@@ -140,7 +144,7 @@ export async function authorizeOwnerShaRelease(
 
   if(current.blocked_reason!=null&&current.blocked_reason!=="awaiting_account_commissioning")
     return reject("account_frozen_for_independent_remediation");
-  if(repairing || legacyEnabled){
+  if(repairing || legacyEnabled || stagedStopped){
      // A stale marker repair or adoption of a pre-enabled legacy account
      // requires a fresh, fully empty authenticated exchange and local ledger.
     const counts=await tx.query(`SELECT
@@ -202,14 +206,16 @@ export async function authorizeOwnerShaRelease(
       RETURNING id`,[accountId,ownerId]);
     if(enabled.rows.length!==1)return reject("owner_account_activation_fence_failed");
    } else {
-     // The row is locked and must still reflect exactly the pre-enabled state.
-     // It gained no implicit authority from the historical execution flag.
-     if(!legacyEnabled)return reject("owner_account_activation_state_invalid");
+     // Already eligible but stopped: owner authorization is a recorded
+     // receipt only. Never silently clear the account kill switch here.
+     // A later protected ARM flow must requalify the technical exit release.
+     if(!legacyEnabled&&!stagedStopped)return reject("owner_account_activation_state_invalid");
      const stillEnabled=await tx.query(`SELECT id FROM public.v13_production_account
        WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
-         AND execution_enabled=true AND kill_switch=false
-         AND blocked_reason IS NULL AND reserved_micros=0`,[accountId,ownerId]);
-     if(stillEnabled.rows.length!==1)return reject("legacy_enabled_account_fence_failed");
+         AND execution_enabled=true AND kill_switch=$3
+         AND blocked_reason IS NULL AND reserved_micros=0`,
+       [accountId,ownerId,stagedStopped]);
+     if(stillEnabled.rows.length!==1)return reject("preenabled_account_fence_failed");
    }
    const record={ownerId,accountId,sha,approvalId,qualificationId:String(args.qualificationId)};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
