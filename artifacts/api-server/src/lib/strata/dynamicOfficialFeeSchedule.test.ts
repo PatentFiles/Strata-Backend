@@ -142,6 +142,13 @@ test("V4 unknown or malicious Retry-After is bounded, never interpreted as appro
  const after=await readUnapprovedOfficialFeePublication(transport,()=>now);
  assert.equal(after.ok,false);
  assert.equal(calls,2);
+ // Second 429 ramps the cooldown to two minutes, even with a forged header.
+ now+=119_000;
+ assert.equal((await readUnapprovedOfficialFeePublication(transport,()=>now)).ok,false);
+ assert.equal(calls,2);
+ now+=1_000;
+ assert.equal((await readUnapprovedOfficialFeePublication(transport,()=>now)).ok,false);
+ assert.equal(calls,3);
 });
 test("unavailable official PDF, HTTP 429 and redirect are non-authorizing",async()=>{
  for(const status of [429,404,503]){
