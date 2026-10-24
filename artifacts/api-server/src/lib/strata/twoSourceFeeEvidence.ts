@@ -17,6 +17,9 @@ export const REVIEWED_REFERENCE_PDF_SHA256 =
   "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601";
 const MAX_BYTES = 256_000;
 const TIMEOUT_MS = 10_000;
+// Bound issuer pagination to prevent unbounded scans during live preflight.
+const MAX_MARKET_PAGES = 8;
+const MARKET_PAGE_SIZE = 100;
 const SERIES = KALSHI_SERIES;
 const tickerPattern = /^KXBTC15M-[A-Za-z0-9-]+$/;
 
@@ -94,6 +97,43 @@ function safeChanges(data: JsonObject, key: string, windowEnd: number): boolean 
   });
 }
 
+/**
+ * Kalshi /markets is cursor-paginated. A nonempty cursor on page one does
+ * NOT mean the response is invalid; it means all remaining pages must be
+ * read before choosing an exact market. Reject a missing/looping cursor,
+ * duplicate market, malformed response, or a scan beyond its fixed limit.
+ * This only supplies a READ-ONLY fee diagnostic, never trading authority.
+ */
+async function completeOpenMarketListing(fetchImpl:typeof fetch):
+  Promise<{ok:true;markets:JsonObject[]}|{ok:false}> {
+  const markets:JsonObject[]=[];
+  const visited=new Set<string>();
+  const tickers=new Set<string>();
+  let cursor="";
+  for(let pageNumber=0;pageNumber<MAX_MARKET_PAGES;pageNumber++){
+    const query="/markets?series_ticker=KXBTC15M&status=open&limit="+MARKET_PAGE_SIZE+
+      (cursor?"&cursor="+encodeURIComponent(cursor):"");
+    const listing=await getJson(query,fetchImpl);
+    if(!Array.isArray(listing.markets)||listing.markets.length>MARKET_PAGE_SIZE||
+       typeof listing.cursor!=="string"||listing.cursor.length>2048||
+       (listing.markets.length===0&&listing.cursor!==""))
+      return {ok:false};
+    for(const candidate of listing.markets){
+      const market=plain(candidate);
+      if(!market||typeof market.ticker!=="string"||
+         !tickerPattern.test(market.ticker)||tickers.has(market.ticker))
+        return {ok:false};
+      tickers.add(market.ticker);
+      markets.push(market);
+    }
+    if(listing.cursor==="")return markets.length?{ok:true,markets}:{ok:false};
+    if(visited.has(listing.cursor))return {ok:false};
+    visited.add(listing.cursor);
+    cursor=listing.cursor;
+  }
+  return {ok:false};
+}
+
 /** A positive result is an API observation, NOT authorization of the PDF. */
 export async function probeCurrentKalshiFeeApi(
   fetchImpl: typeof fetch = globalThis.fetch,
@@ -106,14 +146,11 @@ export async function probeCurrentKalshiFeeApi(
     return fail("exact_market_identity_invalid");
   const started = clock();
   try {
-    const listing = await getJson(
-      "/markets?series_ticker=KXBTC15M&status=open&limit=100", fetchImpl);
-    if (!Array.isArray(listing.markets) || listing.cursor ||
-        listing.markets.length === 0 || listing.markets.length > 100)
-      return fail("market_listing_incomplete");
+    const listing = await completeOpenMarketListing(fetchImpl);
+    if(!listing.ok)return fail("market_listing_incomplete");
     const now = clock();
-    const open = listing.markets.map(plain).filter((m): m is JsonObject =>
-      !!m && (m.status === "open" || m.status === "active") &&
+    const open = listing.markets.filter((m): m is JsonObject =>
+      (m.status === "open" || m.status === "active") &&
       canonicalTime(m.close_time) !== null &&
       canonicalTime(m.close_time)! > now &&
       (m.exchange_index === undefined || m.exchange_index === 2) &&
