@@ -103,7 +103,7 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   strategyParameterHash:V13_CHAMPION_PARAMETER_HASH,entryPolicyVersion:V13_ENTRY_POLICY_VERSION,
   championSelectionReviewId:"independent-champion",championSelectionEvidenceHash:"b".repeat(64),
   championSelectedBy:OWNER,championSelectedAt:new Date("2026-10-01T00:00:00Z"),
-  capitalLimitCents:2500,maxEntryStakeCents:500,maxEntryAllInCents:550,maxOpenPositions:1,
+  capitalLimitCents:2500,maxEntryStakeCents:150,maxEntryAllInCents:200,maxOpenPositions:1,
   maxDailyLossCents:250,maxTotalLossCents:500,maxQuoteAgeMs:1000,maxFeeEvidenceAgeMs:1000,
   feePolicyVersion:"micro-live-standing-fee-policy-v1",
   feeSourceUrl:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
@@ -195,11 +195,15 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
  assert.ok(statements.some(x=>x.sql==="COMMIT"));
  const create=statements.find(x=>x.sql.includes("INSERT INTO public.v13_live_money_policy"));
  assert.ok(create);
- // All existing entry, position, capital, and drawdown rules are copied,
- // only fee-source identity values are substituted.
+ // Existing legacy 150/200 caps MUST be upgraded in the replacement row,
+ // never in the historical policy; the new 500c all-in ceiling includes fees.
  assert.match(create.sql,/p\.strategy_parameter_hash/);
  assert.match(create.sql,/p\.max_open_positions/);
- assert.match(create.sql,/p\.max_entry_stake_cents/);
+ assert.doesNotMatch(create.sql,/p\.max_entry_stake_cents/);
+ assert.doesNotMatch(create.sql,/p\.max_entry_all_in_cents/);
+ assert.match(create.sql,/\$11::int,\$12::int/);
+ assert.equal(create.params?.[10],500);
+ assert.equal(create.params?.[11],500);
  assert.match(create.sql,/p\.max_total_loss_cents/);
  assert.equal(create.params?.[2],V3_FEE_POLICY_VERSION);
  assert.equal(create.params?.[4],V3_FEE_FORMULA_VERSION);
