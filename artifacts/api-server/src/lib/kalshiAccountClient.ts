@@ -446,6 +446,9 @@ export async function getScopedKalshiJson(
   const response = await fetchImpl(`${host}${path}${query}`, {
     method: "GET",
     cache: "no-store",
+    // Never let a signed private-account GET follow a CDN/provider redirect
+    // to a different endpoint or origin with credential-bearing headers.
+    redirect: "manual",
     headers: {
       Accept: "application/json",
       "KALSHI-ACCESS-KEY": creds.keyId,
