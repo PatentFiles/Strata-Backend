@@ -552,9 +552,16 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       !Number.isSafeInteger(maxCaptureAgeMs) || maxCaptureAgeMs<=0 ||
       maxCaptureAgeMs>MAX_FEE_EDGE_CAPTURE_AGE_MS ||
       !anonJwt || anonJwt.length < 80 || anonJwt.length > 4096) return null;
+  // Only strict V4 review requests may ask the Edge function to refresh
+  // upstream when its cached PDF is older than 60 seconds. General V2/V3
+  // consumers retain the existing rate-limited publication-cache behavior.
+  const strictV4 = maxCaptureAgeMs <= 60_000;
+  const bridgeUrl = strictV4
+    ? SUPABASE_FEE_EDGE_URL + "?max_age_seconds=60"
+    : SUPABASE_FEE_EDGE_URL;
   let res: Response;
   try {
-    res = await bridgeFetch(SUPABASE_FEE_EDGE_URL, {
+    res = await bridgeFetch(bridgeUrl, {
       method: "GET", redirect: "error",
       headers: { Accept: "application/pdf", Authorization: `Bearer ${anonJwt}`,
         apikey: anonJwt, "Cache-Control": "no-cache" },
@@ -565,7 +572,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   // local worker's backoff has elapsed. Propagate ONLY the bounded wait, NEVER
   // evidence or an approval, from our exact authenticated Edge Function.
   if (res.status === 429 &&
-      (!res.url || res.url === SUPABASE_FEE_EDGE_URL) &&
+      (!res.url || res.url === bridgeUrl) &&
       mediaType(res.headers.get("content-type")) === "application/json") {
     const retry = Number(res.headers.get("retry-after"));
     if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 1800) {
@@ -573,7 +580,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
         headers: { "retry-after": String(retry) } });
     }
   }
-  if (res.status !== 200 || res.url && res.url !== SUPABASE_FEE_EDGE_URL ||
+  if (res.status !== 200 || res.url && res.url !== bridgeUrl ||
       mediaType(res.headers.get("content-type")) !== "application/pdf" ||
       res.headers.get("x-strata-canonical-source") !== CANONICAL_FEE_SCHEDULE_URL) {
     return null;
