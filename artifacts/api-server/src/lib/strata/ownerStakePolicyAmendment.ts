@@ -185,7 +185,8 @@ export async function amendOwnedStakePolicy(
     let next: V13ApprovedLiveMoneyPolicy=old;
     const target=proportional?.ok?proportional.limits:null;
     const revisesPolicy=target
-      ? old.capitalLimitCents!==target.capitalLimitCents ||
+      ? old.feePolicyVersion!==DYNAMIC_FEE_POLICY_VERSION_V4 ||
+        old.capitalLimitCents!==target.capitalLimitCents ||
         old.maxEntryStakeCents!==target.maxEntryStakeCents ||
         old.maxEntryAllInCents!==target.maxEntryAllInCents ||
         old.maxDailyLossCents!==target.maxDailyLossCents ||
@@ -211,6 +212,11 @@ export async function amendOwnedStakePolicy(
       maxTotalLossCents: target?target.maxTotalLossCents:Math.max(old.maxTotalLossCents,stakeCents),
       maxQuoteAgeMs: target?target.maxQuoteAgeMs:old.maxQuoteAgeMs,
       maxFeeEvidenceAgeMs: target?target.maxFeeEvidenceAgeMs:old.maxFeeEvidenceAgeMs,
+      // Current policy snapshot changes to V4 only through explicit owner
+      // consent. V4 exchange fee authority remains a separate approval.
+      feePolicyVersion:target?DYNAMIC_FEE_POLICY_VERSION_V4:old.feePolicyVersion,
+      feeSourceUrl:target?null:old.feeSourceUrl,
+      feeFormulaVersion:target?null:old.feeFormulaVersion,
       approvedBy: ownerId, approvedAt: when, createdBy: ownerId,
     };
     if(next.maxEntryAllInCents>next.capitalLimitCents) next.capitalLimitCents=next.maxEntryAllInCents;
@@ -231,13 +237,14 @@ export async function amendOwnedStakePolicy(
        p.strategy_version,p.strategy_parameter_set_id,p.strategy_parameter_hash,p.entry_policy_version,
        p.champion_selection_review_id,p.champion_selection_evidence_hash,p.champion_selected_by,p.champion_selected_at,
        $4,$5,$6,p.max_open_positions,$7,$8,$13,$14,
-       p.fee_policy_version,p.fee_source_url,p.fee_formula_version,p.require_full_depth,
+       $15,$16,$17,p.require_full_depth,
        p.entry_time_in_force,p.entry_limit_source,$9,$3,$10::timestamptz
       FROM public.v13_live_money_policy p WHERE p.id=$11 AND p.state='REVOKED'
        AND p.execution_account_id=$12 RETURNING id`,[
        next.id,next.version,ownerId,next.capitalLimitCents,next.maxEntryStakeCents,next.maxEntryAllInCents,
        next.maxDailyLossCents,next.maxTotalLossCents,next.policyHash,when.toISOString(),old.id,accountId,
-        next.maxQuoteAgeMs,next.maxFeeEvidenceAgeMs]);
+        next.maxQuoteAgeMs,next.maxFeeEvidenceAgeMs,
+        next.feePolicyVersion,next.feeSourceUrl,next.feeFormulaVersion]);
     if(inserted.rows.length!==1)return reject("policy_revision_not_inserted");
     const amendment={ownerId,accountId,oldPolicyId:old.id,newPolicyId:next.id,
       previousMaxStakeCents:old.maxEntryStakeCents,newMaxStakeCents:stakeCents,
