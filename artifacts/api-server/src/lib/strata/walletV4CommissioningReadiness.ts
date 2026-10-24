@@ -36,6 +36,7 @@ const fail=(reason:string):WalletV4Readiness=>({
 });
 const ACCOUNT_SQL=`
  SELECT a.id,a.commissioned,a.cash_precision_verified,a.reconciled_at,
+ a.execution_enabled,a.kill_switch,a.blocked_reason,
  a.cash_micros::text AS cash_micros,a.reserved_micros::text AS reserved_micros,
  s.configured_stake_cents,s.risk_capital_cents,s.risk_preset_id,s.risk_preset_revision,
  p.policy_hash,p.fee_policy_version,p.state,
@@ -118,7 +119,12 @@ export async function inspectWalletV4Readiness(
     signedPost:process.env.STRATA_WALLET_V4_SIGNED_POST_ENABLED==="true",
     protectiveExit:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="true",
   })))();
-  checks.signedPostAuthority=runtime.signedPost===true &&
+  // The final signed-POST SQL explicitly requires an enabled, un-killed
+  // and unblocked account. Do not show a ready-to-submit gate for an
+  // account held for commissioning or intentionally stopped by its owner.
+  const accountEntryEligible=a.execution_enabled===true &&
+    a.kill_switch===false && a.blocked_reason===null;
+  checks.signedPostAuthority=accountEntryEligible && runtime.signedPost===true &&
     runtime.protectiveExit===true && checks.accountOwned &&
     checks.commissioned && checks.approvedStakePolicy &&
     checks.cashReconciled && checks.modelEvidence && checks.feeAuthority &&
@@ -126,6 +132,7 @@ export async function inspectWalletV4Readiness(
     deployedSha!==null;
   const blockers=Object.entries(checks).filter(([,value])=>!value)
    .map(([name])=>"wallet_v4_"+name+"_required");
+  if(!accountEntryEligible)blockers.unshift("wallet_v4_account_execution_authority_inactive");
   if(!deployedSha)blockers.unshift("wallet_v4_deployed_sha_unavailable");
   return {ok:true,reason:"wallet_v4_read_only_gate_report",
    accountId,deployedSha,checks,blockers,
