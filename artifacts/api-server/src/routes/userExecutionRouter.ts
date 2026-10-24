@@ -4,7 +4,7 @@ import { sanitizePublic } from "../lib/v13-production/sanitize";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
-import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
+import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
 import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
@@ -692,6 +692,14 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const out=await issueOwnerV3FeeAuthority(owner,req.body??{});
     res.status(out.ok?201:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/single-owner/authority/revoke",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await revokeOwnerV3FeeAuthority(owner,req.body??{});
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   router.get("/fees/single-owner/authority/check",async(req,res)=>{
     const owner=subject(res);
