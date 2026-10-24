@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import {NEAR_EXPIRY_CAP_RESEARCH_ID} from "./v13NearExpiryCapShadow";
 import test, { after } from "node:test";
 import { eq } from "drizzle-orm";
 import { db, pool, v13StrategyParameterSetTable } from "@workspace/db";
@@ -223,6 +224,26 @@ test("v2 later qualified champion crossing is visible to zero-authority research
   assert.equal(buildV13ShadowOpportunity(input, { ...prior, signedBuffer: 1 }, set).wouldEnter, false);
 });
 
+test("min30/cap20 challenger only accepts qualified champion entries with sufficient time and research cash",()=>{
+  const set=shadowSet(NEAR_EXPIRY_CAP_RESEARCH_ID,V13_CHAMPION_PARAMETER_SET.parameters);
+  const entered=buildV13ShadowOpportunity({...source(0.40,10),secondsRemaining:30},previous,set);
+  assert.equal(entered.wouldEnter,true);
+  assert.ok(entered.reason.includes("PAPER_SHADOW_NO_EXECUTION"));
+  assert.ok(entered.reason.includes("illustrative_qty=12"));
+  for(const left of [0,21.8,29.999,null]){
+    const rejected=buildV13ShadowOpportunity({...source(0.40,10),secondsRemaining:left},previous,set);
+    assert.equal(rejected.wouldEnter,false);
+    if(left!==null&&left>0) assert.ok(rejected.reason.includes("INSUFFICIENT_TIME"));
+  }
+  const cheap=buildV13ShadowOpportunity({...source(0.015,10),secondsRemaining:90},previous,set);
+  assert.equal(cheap.wouldEnter,true);
+  assert.ok(cheap.reason.includes("illustrative_qty=20"));
+  assert.equal(cheap.parameterSetId,NEAR_EXPIRY_CAP_RESEARCH_ID);
+  assert.equal(cheap.parameterHash,V13_CHAMPION_PARAMETER_HASH);
+  const notQualified=buildV13ShadowOpportunity({...source(0.40,10),freshCross:false,secondsRemaining:90},previous,set);
+  assert.equal(notQualified.wouldEnter,false);
+});
+
 test("research parameter hash mismatch fails closed", () => {
   assert.throws(() => buildV13ShadowOpportunity(
     source(0.40, 10),
@@ -258,7 +279,9 @@ test("built-in adaptive shortlist seeds only zero-authority shadow rows", async 
     assert.equal(row?.state, "SHADOW");
     assert.equal(row?.executionAuthority, false);
     assert.equal(row?.parameterHash, hashV13StrategyParameters(candidate.parameters));
-    assert.notEqual(row?.parameterHash, V13_CHAMPION_PARAMETER_HASH);
+    if(candidate.id===NEAR_EXPIRY_CAP_RESEARCH_ID)
+      assert.equal(row?.parameterHash,V13_CHAMPION_PARAMETER_HASH); // identical entry signals, additional ID-bound time/quantity overlay
+    else assert.notEqual(row?.parameterHash, V13_CHAMPION_PARAMETER_HASH);
     await db.delete(v13StrategyParameterSetTable)
       .where(eq(v13StrategyParameterSetTable.id, candidate.id));
   }
