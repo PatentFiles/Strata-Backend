@@ -8,7 +8,8 @@ import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
 import {digest as auditDigest} from "../v13-production/types";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {verifyOwnerV3FeeAuthority,parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
-import {TEST_TWENTY_PERCENT_PRESET_ID} from "./sharedPresets";
+import {TEST_TWENTY_PERCENT_PRESET,TEST_TWENTY_PERCENT_PRESET_ID} from "./sharedPresets";
+import {resolveStrictPresetStake} from "./strictPresetStake";
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
 import type {Identity,Request,Snapshot} from "../v13-production/types";
 import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
@@ -33,6 +34,37 @@ type Inputs={db?:Db;verify?:typeof verifyOwnerV3FeeAuthority;
 const v3Enabled=(deps:Inputs)=>(deps.enabled??(()=>process.env.STRATA_OWNER_FEE_V3_MIGRATION_ENABLED==="true"))();
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
+
+/**
+ * The owner's SAVED, revision-bound 20% preset is the authority for new
+ * financial limits, not the superseded $1.50 policy or browser input.
+ * This is a policy replacement, not an amendment to historical rows.
+ */
+export function deriveOwnerV3PresetLimits(stake:Row,verifiedCashMicros:bigint){
+ const cents=verifiedCashMicros/10_000n;
+ if(verifiedCashMicros<0n||cents>BigInt(Number.MAX_SAFE_INTEGER))
+   return {ok:false as const,reason:"v3_verified_cash_outside_safe_range"};
+ const value=(v:unknown)=>v===null||v===undefined?NaN:Number(v);
+ const stakeCents=value(stake.configured_stake_cents);
+ const capitalCents=value(stake.risk_capital_cents);
+ const revision=value(stake.risk_preset_revision);
+ if(stake.risk_preset_id!==TEST_TWENTY_PERCENT_PRESET_ID||
+    !Number.isSafeInteger(stakeCents)||!Number.isSafeInteger(capitalCents)||
+    !Number.isSafeInteger(revision)||stakeCents!==500||capitalCents!==2500)
+   return {ok:false as const,reason:"owner_approved_five_dollar_twenty_percent_preset_required"};
+ const resolved=resolveStrictPresetStake(TEST_TWENTY_PERCENT_PRESET,{
+   presetId:TEST_TWENTY_PERCENT_PRESET_ID,
+   presetRevision:revision,capitalBudgetCents:capitalCents,
+ },Number(cents),stakeCents);
+ if(!resolved.ok)return {ok:false as const,reason:resolved.reason};
+ // Fail closed if the named preset changed its risk schedule after review.
+ if(resolved.limits.maxEntryStakeCents!==500||
+    resolved.limits.maxEntryAllInCents!==625||
+    resolved.limits.maxDailyLossCents!==1000||
+    resolved.limits.maxTotalLossCents!==1500)
+   return {ok:false as const,reason:"v3_owner_preset_contract_changed"};
+ return {ok:true as const,limits:resolved.limits};
+}
 
 /** Fail-closed flatness predicate over a complete, authenticated and
  * reconciled exchange snapshot. Historical terminal trades are immutable
@@ -252,13 +284,16 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
         risk_capital_cents,risk_preset_revision
       FROM public.strata_configured_stake
       WHERE execution_account_id=$1 FOR UPDATE`,[id]);
-  if(stake.rows.length!==1||
-     stake.rows[0]?.configured_stake_cents!==500||
-     stake.rows[0]?.risk_preset_id!==TEST_TWENTY_PERCENT_PRESET_ID||
-     Number(stake.rows[0]?.risk_capital_cents)!==2500)
-    return fail("owner_approved_five_dollar_twenty_percent_preset_required");
-  if(old.maxEntryStakeCents<500||old.maxEntryAllInCents<500||
-     old.capitalLimitCents<2500||funds<25_000_000n)
+  if(stake.rows.length!==1)return fail("owner_approved_five_dollar_twenty_percent_preset_required");
+  const preset=deriveOwnerV3PresetLimits(stake.rows[0]!,funds-reserved);
+  if(!preset.ok)return fail(preset.reason);
+  const limits=preset.limits;
+  // The legacy V1 policy may cap entry at 150 cents; that is the REASON for
+  // this atomic replacement, not a precondition to prohibit the migration.
+  // Its verified capital ceiling must still cover the selected $25 budget.
+  if(old.capitalLimitCents<limits.capitalLimitCents||
+     old.maxEntryStakeCents<1||old.maxEntryAllInCents<old.maxEntryStakeCents||
+     funds<25_000_000n)
     return fail("approved_fee_inclusive_risk_limits_inadequate");
   const leases=await tx.query(`SELECT state,arm_requested,account_kill
      FROM private.kalshi_account_worker_lease
@@ -278,6 +313,13 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
   if(!Number.isSafeInteger(nextVersion)||nextVersion<=old.version)return fail("policy_version_unverified");
   const policyId=randomUUID(),at=new Date();
   const next={...old,id:policyId,version:nextVersion,supersedesPolicyId:old.id,
+   capitalLimitCents:limits.capitalLimitCents,
+   maxEntryStakeCents:limits.maxEntryStakeCents,
+   maxEntryAllInCents:limits.maxEntryAllInCents,
+   maxDailyLossCents:limits.maxDailyLossCents,
+   maxTotalLossCents:limits.maxTotalLossCents,
+   maxQuoteAgeMs:limits.maxQuoteAgeMs,
+   maxFeeEvidenceAgeMs:limits.maxFeeEvidenceAgeMs,
    feePolicyVersion:fresh.identity.feePolicyVersion,feeSourceUrl:fresh.identity.sourceUrl,
    feeFormulaVersion:fresh.identity.formulaVersion,approvedBy:ownerId,approvedAt:at};
   next.policyHash=computeV13LiveMoneyPolicyHash(next);
@@ -296,13 +338,16 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
    SELECT $1,$2,p.id,'APPROVED',p.execution_account_id,p.created_by,
      p.strategy_version,p.strategy_parameter_set_id,p.strategy_parameter_hash,p.entry_policy_version,
      p.champion_selection_review_id,p.champion_selection_evidence_hash,p.champion_selected_by,p.champion_selected_at,
-     p.capital_limit_cents,p.max_entry_stake_cents,p.max_entry_all_in_cents,p.max_open_positions,
-     p.max_daily_loss_cents,p.max_total_loss_cents,p.max_quote_age_ms,p.max_fee_evidence_age_ms,
+     $11::int,$12::int,$13::int,p.max_open_positions,
+     $14::int,$15::int,$16::int,$17::int,
      $3,$4,$5,p.require_full_depth,p.entry_time_in_force,p.entry_limit_source,$6,$7,$8
    FROM public.v13_live_money_policy p WHERE p.id=$9 AND p.state='REVOKED'
     AND p.execution_account_id=$10 RETURNING id`,[
    policyId,nextVersion,next.feePolicyVersion,next.feeSourceUrl,next.feeFormulaVersion,
-   next.policyHash,ownerId,at.toISOString(),old.id,id]);
+   next.policyHash,ownerId,at.toISOString(),old.id,id,
+   limits.capitalLimitCents,limits.maxEntryStakeCents,limits.maxEntryAllInCents,
+   limits.maxDailyLossCents,limits.maxTotalLossCents,
+   limits.maxQuoteAgeMs,limits.maxFeeEvidenceAgeMs]);
   if(inserted.rows.length!==1)return fail("replacement_policy_insert_failed");
   const commissioningDigest=createHash("sha256").update(JSON.stringify({
     accountId:id,fingerprint:txt(a.key_fingerprint),fee:fresh.identity.sourceDigest,policyId
