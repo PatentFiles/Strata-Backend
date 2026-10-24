@@ -257,8 +257,15 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
      stake.rows[0]?.risk_preset_id!==TEST_TWENTY_PERCENT_PRESET_ID||
      Number(stake.rows[0]?.risk_capital_cents)!==2500)
     return fail("owner_approved_five_dollar_twenty_percent_preset_required");
-  if(old.maxEntryStakeCents<500||old.maxEntryAllInCents<500||
-     old.capitalLimitCents<2500||funds<25_000_000n)
+  // Upgrade the *new* immutable policy rather than requiring the legacy
+  // $1.50/$2 caps to authorize a $5 stake. All-in exposure (including fees)
+  // remains bounded to 20% of the verified $25 risk capital. A nominal $5
+  // entry with additional fees is therefore NOT automatically affordable.
+  const proposedStakeCents=500,proposedAllInCents=500;
+  if(old.capitalLimitCents<2500||funds<25_000_000n||
+     !Number.isSafeInteger(old.maxEntryStakeCents)||
+     !Number.isSafeInteger(old.maxEntryAllInCents)||
+     old.maxEntryStakeCents<=0||old.maxEntryAllInCents<old.maxEntryStakeCents)
     return fail("approved_fee_inclusive_risk_limits_inadequate");
   const leases=await tx.query(`SELECT state,arm_requested,account_kill
      FROM private.kalshi_account_worker_lease
@@ -278,6 +285,7 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
   if(!Number.isSafeInteger(nextVersion)||nextVersion<=old.version)return fail("policy_version_unverified");
   const policyId=randomUUID(),at=new Date();
   const next={...old,id:policyId,version:nextVersion,supersedesPolicyId:old.id,
+   maxEntryStakeCents:proposedStakeCents,maxEntryAllInCents:proposedAllInCents,
    feePolicyVersion:fresh.identity.feePolicyVersion,feeSourceUrl:fresh.identity.sourceUrl,
    feeFormulaVersion:fresh.identity.formulaVersion,approvedBy:ownerId,approvedAt:at};
   next.policyHash=computeV13LiveMoneyPolicyHash(next);
@@ -296,13 +304,14 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
    SELECT $1,$2,p.id,'APPROVED',p.execution_account_id,p.created_by,
      p.strategy_version,p.strategy_parameter_set_id,p.strategy_parameter_hash,p.entry_policy_version,
      p.champion_selection_review_id,p.champion_selection_evidence_hash,p.champion_selected_by,p.champion_selected_at,
-     p.capital_limit_cents,p.max_entry_stake_cents,p.max_entry_all_in_cents,p.max_open_positions,
+     p.capital_limit_cents,$11::int,$12::int,p.max_open_positions,
      p.max_daily_loss_cents,p.max_total_loss_cents,p.max_quote_age_ms,p.max_fee_evidence_age_ms,
      $3,$4,$5,p.require_full_depth,p.entry_time_in_force,p.entry_limit_source,$6,$7,$8
    FROM public.v13_live_money_policy p WHERE p.id=$9 AND p.state='REVOKED'
     AND p.execution_account_id=$10 RETURNING id`,[
    policyId,nextVersion,next.feePolicyVersion,next.feeSourceUrl,next.feeFormulaVersion,
-   next.policyHash,ownerId,at.toISOString(),old.id,id]);
+   next.policyHash,ownerId,at.toISOString(),old.id,id,
+   proposedStakeCents,proposedAllInCents]);
   if(inserted.rows.length!==1)return fail("replacement_policy_insert_failed");
   const commissioningDigest=createHash("sha256").update(JSON.stringify({
     accountId:id,fingerprint:txt(a.key_fingerprint),fee:fresh.identity.sourceDigest,policyId
