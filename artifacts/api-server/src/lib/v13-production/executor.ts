@@ -4,10 +4,19 @@ import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLI
   V13_LEGACY_ENTRY_POLICY, previousBufferFromSide, evaluateV13Strategy } from "@workspace/v13-strategy";
 import { remainingLossBudgetAllowsEntry } from "../v13LiveMoneyRisk";
 import { preflightV13LiveMoneyEntry } from "../v13LiveMoneyEntryPreflight";
+import {verifyWalletV4FinalSignedAdmission} from "../strata/walletV4FinalSignedAdmission";
+import {DYNAMIC_FEE_POLICY_VERSION_V4} from "../strata/dynamicFeeOrderRiskV4";
 import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
 import { canonical, cents, digest, money, requireProof, type Exchange, type MarketEvidence, type Request } from "./types";
 
+/** Only a previously saved, verified integer revision can be signed. */
+function stakeRevisionFromDecision(decision:unknown):number {
+ const value=(decision as {stakeRevision?:unknown}|null)?.stakeRevision;
+ requireProof(typeof value==="number"&&Number.isSafeInteger(value)&&value>=1,
+   "wallet_v4_final_pinned_stake_revision_missing");
+ return value;
+}
 /**
  * Never constructed or started by API startup. Production mutation authority
  * is separate from micro-live and never inherits paper positions or sizing.
@@ -359,6 +368,19 @@ export class ProductionExecutor {
               p.maxTotalLossCents,
               Math.ceil(Number(money(losses.total_loss)) / 10_000),
             ), "live_money_entry_exceeds_remaining_loss_budget");
+            if(p.feePolicyVersion===DYNAMIC_FEE_POLICY_VERSION_V4){
+              requireProof(this.accountOwnerUserId, "wallet_v4_final_owner_required");
+              const result=await verifyWalletV4FinalSignedAdmission(tx,{
+                ownerId:this.accountOwnerUserId,accountId:a.id,
+                policyHash:p.policyHash,stakeRevision:stakeRevisionFromDecision(i.decision),
+                request:i.request,
+                reservedExitFeeCents:Number(book.fee.reservedExitFeeCents),
+                availableCashMicros:String(a.cash_micros),
+                reservedCashMicros:String(a.reserved_micros),
+                nowMs:this.now(),
+              });
+              requireProof(result.ok,result.ok?"wallet_v4_final_guard_unexpected":result.reason);
+            }
           }
         };
         await final();
