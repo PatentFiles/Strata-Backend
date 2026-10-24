@@ -397,6 +397,13 @@ jobs:
             --outfile=dist/ownerFeeV3Migration.test.cjs \
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/ownerFeeV3Migration.test.cjs
+      - name: Test Wallets V4 exact Kalshi fee receipt reconciliation (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/walletV4FeeReceiptReconciliation.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/walletV4FeeReceiptReconciliation.test.cjs
+          node --test dist/walletV4FeeReceiptReconciliation.test.cjs
       - name: Test dynamic V4 fee-inclusive order-risk kernel (NO ORDERS)
         working-directory: artifacts/api-server
         run: |
