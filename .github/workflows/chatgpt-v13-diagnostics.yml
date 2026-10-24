@@ -506,6 +506,13 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/personalOwnerMonetaryCommission.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalOwnerMonetaryCommission.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:pdfjs-dist
           node --test dist/personalOwnerMonetaryCommission.test.cjs
+      - name: Verify first-party LIVE HTML tariff completeness never grants authority
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/officialTariffHtmlObservation.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/officialTariffHtmlObservation.test.cjs
+          node --test dist/officialTariffHtmlObservation.test.cjs
       - name: Verify independently observed official PDF snapshot and immutable 24h lease
         working-directory: artifacts/api-server
         run: |
