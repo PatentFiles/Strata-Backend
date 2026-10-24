@@ -700,6 +700,33 @@ test("trusted bridge cooldown reports retry without accepting any fee artifact",
   assert.equal(await fetchTrustedFeeFromSupabaseBridge(unbounded, origin, jwt), null);
 });
 
+test("Edge 429 identifies shared lease versus provider and preserves exact UTC retry deadline",async()=>{
+ const origin="https://wqsmfbzfbiilhtzpqbrb.supabase.co",jwt="x".repeat(100);
+ const now=Date.parse("2026-10-24T22:17:00.000Z"),retryAt="2026-10-24T22:46:58.810Z";
+ for(const source of ["shared_cooldown","provider"]){
+  const edge=(async()=>new Response("{}",{status:429,headers:{
+   "content-type":"application/json","retry-after":"1799",
+   "x-strata-fee-429-origin":source,"x-strata-next-allowed-at":retryAt,
+  }})) as typeof fetch;
+  const resp=await fetchTrustedFeeFromSupabaseBridge(edge,origin,jwt,()=>now);
+  assert.equal(resp?.status,429);
+  const observed=officialFeeFetchDiagnostic(resp!,0);
+  assert.equal(observed.rateLimitOrigin,source);
+  assert.equal(observed.retryAt,retryAt);
+  assert.equal(resp?.headers.get("x-strata-source-sha256"),null);
+  const denied=await establishVerifiedBridgeFeeDigest(edge,origin,jwt,()=>now);
+  assert.equal(denied?.ok,false);
+  assert.equal(denied?.diagnostic.retryAt,retryAt);
+ }
+ const unknown=(async()=>new Response("{}",{status:429,headers:{
+  "content-type":"application/json","retry-after":"120",
+  "x-strata-fee-429-origin":"unsafe_unknown",
+  "x-strata-next-allowed-at":"not-an-iso-date",
+ }})) as typeof fetch;
+ const resp=await fetchTrustedFeeFromSupabaseBridge(unknown,origin,jwt,()=>now);
+ assert.equal(officialFeeFetchDiagnostic(resp!,0).rateLimitOrigin,"bridge_unclassified");
+ assert.equal(officialFeeFetchDiagnostic(resp!,0).retryAt,null);
+});
 test("429 cooldown respects Retry-After and never treats previous bytes as current evidence", async () => {
   let clock = 1_000_000;
   const official = readFileSync(resolve(process.cwd(),
@@ -847,7 +874,10 @@ test("renewable, fresh official Edge PDF proof must pass canonical origin, captu
  assert.equal(altered?.ok,false);
  assert.equal(JSON.stringify(altered).includes("PRIVATE_KEY"),false);
  const rateLimited=(async()=>new Response(null,{status:429,headers:{"content-type":"application/json","retry-after":"60"}})) as typeof fetch;
- assert.equal(await establishVerifiedBridgeFeeDigest(rateLimited,project,jwt,()=>checkedAt),null);
+ const blockedBridge=await establishVerifiedBridgeFeeDigest(rateLimited,project,jwt,()=>checkedAt);
+ assert.equal(blockedBridge?.ok,false);
+ assert.equal(blockedBridge?.reason,"official_fee_schedule_http_429");
+ assert.equal(blockedBridge?.diagnostic.rateLimitOrigin,"bridge_unclassified");
  const wrongProject=await establishVerifiedBridgeFeeDigest(response(headers),"https://attacker.invalid",jwt,()=>checkedAt);
  assert.equal(wrongProject,null);
 });
