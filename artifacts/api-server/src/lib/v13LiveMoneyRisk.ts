@@ -136,6 +136,14 @@ export function evaluateV13LiveMoneyRisk(
   input: V13LiveMoneyRiskInput,
 ): V13LiveMoneyRiskDecision {
   const p = input.policy;
+  // A V4 dynamic-model observation or pure sizing result must NEVER be
+  // mistaken for an executable fee authority. Until a locked, signed POST
+  // gate verifies persisted owner AAL2 grant + current provider fee model,
+  // all V4 entries fail closed, even with an otherwise valid policy hash.
+  // Historical V1/V2/V3 policy identities retain their existing behavior.
+  if (p.feePolicyVersion === "strata_owner_provider_dynamic_fee_v4") {
+    return {ok:false,reason:"live_money_v4_final_post_authority_not_implemented"};
+  }
   if (p.state !== "APPROVED" || p.strategyVersion !== "V1.3" ||
       (p.entryPolicyVersion != null && p.entryPolicyVersion !== V13_ENTRY_POLICY_VERSION &&
        p.entryPolicyVersion !== V13_LEGACY_ENTRY_POLICY) ||

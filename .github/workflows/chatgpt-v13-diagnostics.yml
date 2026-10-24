@@ -397,6 +397,14 @@ jobs:
             --outfile=dist/ownerFeeV3Migration.test.cjs \
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/ownerFeeV3Migration.test.cjs
+      - name: Test dynamic V4 fee-inclusive order-risk kernel (NO ORDERS)
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/dynamicFeeOrderRiskV4.test.ts \
+            --bundle --platform=node --format=cjs \
+            --outfile=dist/dynamicFeeOrderRiskV4.test.cjs \
+            --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          node --test dist/dynamicFeeOrderRiskV4.test.cjs
       - name: Test read-only dynamic Kalshi monetary model discovery (NO ORDERS)
         working-directory: artifacts/api-server
         run: |
