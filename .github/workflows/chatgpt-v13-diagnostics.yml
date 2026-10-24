@@ -429,7 +429,7 @@ jobs:
           pnpm exec esbuild ../../supabase/functions/strata-official-fee-source/index.ts \
             --bundle --platform=neutral --format=esm --external:npm:* \
             --outfile=dist/walletV4FeeBridgeEdge.compile.mjs
-          pnpm exec esbuild src/lib/strata/walletV4FeeBridgeFreshness.test.ts \
+          pnpm exec esbuild ../../supabase/functions/strata-official-fee-source/cachePolicy.test.ts \
             --bundle --platform=node --format=cjs \
             --outfile=dist/walletV4FeeBridgeFreshness.test.cjs
           node --test dist/walletV4FeeBridgeFreshness.test.cjs
