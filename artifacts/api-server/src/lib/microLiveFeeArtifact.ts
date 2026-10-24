@@ -479,6 +479,10 @@ export interface OfficialFeeFetchDiagnostic {
   finalPathname: string | null;
   retryAfterSeconds: number | null;
   networkAttempts: number;
+  /** Informational only; never fee or trading authority. */
+  rateLimitOrigin?: "provider"|"shared_cooldown"|"backend_local"|"bridge_unclassified"|null;
+  /** Exact authenticated shared-lease deadline, if supplied. */
+  retryAt?: string|null;
 }
 
 const EMPTY_FEE_FETCH: OfficialFeeFetchDiagnostic = {
@@ -529,6 +533,15 @@ export function officialFeeFetchDiagnostic(
   const contentType = mediaType(response.headers.get("content-type"));
   const location = response.url || CANONICAL_FEE_SCHEDULE_URL;
   const retryAfterSeconds = parsedRetryAfterSeconds(response);
+  const tag = response.headers.get("x-strata-internal-fee-429-origin");
+  const rateLimitOrigin = status === 429
+    ? tag === "shared_cooldown" || tag === "provider" || tag === "bridge_unclassified"
+      ? tag : "provider"
+    : null;
+  const candidate = response.headers.get("x-strata-internal-fee-retry-at");
+  const retryAt = status === 429 && candidate &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate) &&
+    Number.isFinite(Date.parse(candidate)) ? candidate : null;
   try {
     const url = new URL(location);
     const hostnameSafe = url.protocol === "https:" &&
@@ -542,6 +555,7 @@ export function officialFeeFetchDiagnostic(
       finalPathname: pathSafe ? url.pathname : null,
       retryAfterSeconds,
       networkAttempts,
+      rateLimitOrigin,retryAt,
     };
   } catch {
     return {
@@ -551,6 +565,7 @@ export function officialFeeFetchDiagnostic(
       finalPathname: null,
       retryAfterSeconds,
       networkAttempts,
+      rateLimitOrigin,retryAt,
     };
   }
 }
@@ -622,9 +637,23 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       (!res.url || res.url === bridgeUrl) &&
       mediaType(res.headers.get("content-type")) === "application/json") {
     const retry = Number(res.headers.get("retry-after"));
-    if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 1800) {
-      return new Response(null, { status: 429,
-        headers: { "retry-after": String(retry) } });
+    if (Number.isSafeInteger(retry) && retry >= 1 && retry <= 86400) {
+      const provenance = res.headers.get("x-strata-fee-429-origin");
+      const origin = provenance === "shared_cooldown" || provenance === "provider"
+        ? provenance : "bridge_unclassified";
+      const rawDeadline = res.headers.get("x-strata-next-allowed-at") ?? "";
+      const deadlineMs = Date.parse(rawDeadline);
+      const exactDeadline =
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(rawDeadline) &&
+        Number.isFinite(deadlineMs) && deadlineMs >= nowMs() &&
+        deadlineMs <= nowMs() + 86_400_000
+          ? new Date(deadlineMs).toISOString() : null;
+      const headers: Record<string,string> = {
+        "retry-after": String(retry),
+        "x-strata-internal-fee-429-origin": origin,
+      };
+      if(exactDeadline) headers["x-strata-internal-fee-retry-at"]=exactDeadline;
+      return new Response(null, {status:429,headers});
     }
   }
   if (res.status !== 200 || res.url && res.url !== bridgeUrl ||
@@ -795,7 +824,8 @@ export async function establishVerifiedBridgeFeeDigest(
  nowMs:()=>number=Date.now,
 ):Promise<EstablishedOfficialFeeDigest|null>{
  const response=await fetchTrustedFeeFromSupabaseBridge(bridgeFetch,projectUrl,anonJwt,nowMs);
- if(!response||response.status!==200)return null;
+ if(!response || (response.status!==200 && response.status!==429))return null;
+ // A signed bridge 429 is a diagnostic, never fee or order authority.
  return validateFetchedOfficialFeePdf(response,0);
 }
 
@@ -850,7 +880,8 @@ export async function establishOfficialFeeDigest(
     const cooldown:EstablishedOfficialFeeDigest={
       ok:false,reason:"official_fee_schedule_http_429",
       diagnostic:{...EMPTY_FEE_FETCH,httpStatus:429,
-        retryAfterSeconds:Math.ceil((retryAt-now)/1000),networkAttempts:0},
+        retryAfterSeconds:Math.ceil((retryAt-now)/1000),networkAttempts:0,
+        rateLimitOrigin:"backend_local",retryAt:new Date(retryAt).toISOString()},
     };
     // Only the real, captured production fetch may access this preconfigured
     // fixed-source authenticated bridge. Caller-supplied test/network fetches

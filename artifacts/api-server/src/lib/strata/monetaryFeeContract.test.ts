@@ -112,3 +112,22 @@ test("wrong exact market never qualifies even with an official monetary digest",
  assert.equal(proof.ok,false);
  assert.equal(proof.monetaryFeeAuthorized,false);
 });
+
+test("429 proof source origin and retry time reach fee contract without generating an approval",async()=>{
+ const date="2026-10-24T22:46:58.810Z";
+ for(const origin of ["provider","shared_cooldown","backend_local","bridge_unclassified"] as const){
+   const proof={ok:false as const,reason:"official_fee_schedule_http_429",diagnostic:{
+     httpStatus:429,contentType:null,finalOrigin:null,finalPathname:null,
+     retryAfterSeconds:60,networkAttempts:origin==="backend_local"?0:1,
+     rateLimitOrigin:origin,retryAt:date,
+   }};
+   const r=await verifyMonetaryFeeContract("STEP_9",undefined,globalThis.fetch,Date.now,
+      async()=>proof);
+   assert.equal(r.ok,false);
+   assert.equal(r.reason,"official_fee_schedule_http_429_"+origin);
+   assert.equal(r.rateLimitOrigin,origin);
+   assert.equal(r.retryAt,date);
+   assert.equal(r.monetaryFeeAuthorized,false);
+   assert.equal(r.tradingAuthorized,false);
+ }
+});
