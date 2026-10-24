@@ -423,7 +423,12 @@ export async function authorizeProtectiveRelease(
      truth(global.rows[0]?.live_execution_enabled)===truth(global.rows[0]?.manual_kill_switch))
    return deny("global_execution_kill_state_inconsistent");
   const globalNeedsEnable=!truth(global.rows[0]?.live_execution_enabled);
-  if(accountNeedsEnable!==globalNeedsEnable)
+  // Global admission may already be enabled for another commissioned owner.
+  // It must not force an unrelated account's kill switch off, nor prevent
+  // independently qualified activation of THIS owner. Do not re-enable an
+  // account that is already on while the shared gate is killed: that remains
+  // a privileged global release, not an account authorization.
+  if(!accountNeedsEnable&&globalNeedsEnable)
     return deny("account_global_release_state_mismatch");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>client!.query(sql,p),accountId);
   if(!unresolved.ok||unresolved.mode!=="entries")return deny("release_unresolved_order");
