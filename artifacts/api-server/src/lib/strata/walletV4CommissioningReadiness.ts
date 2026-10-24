@@ -1,7 +1,9 @@
 /**
  * Issue #165: Wallets-only, authenticated owner-scoped V4 release diagnostics.
  * READ-ONLY. Zero grant issuance, account mutation, policy amendment or orders.
- * "ready" is deliberately false until signed-POST V4 enforcement exists.
+ * Readiness represents verified capabilities and evidence; this endpoint
+ * NEVER submits or authorizes a trade. Execution is independently fenced
+ * again inside the final signed POST, including revoked exact-SHA evidence.
  */
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
@@ -9,7 +11,8 @@ import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 type Row=Record<string,unknown>;
 type Q={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
-type Deps={db?:Q;getSha?:()=>string;now?:()=>number};
+type Deps={db?:Q;getSha?:()=>string;now?:()=>number;
+  featureState?:()=>{signedPost:boolean;protectiveExit:boolean}};
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA=/^[0-9a-f]{40}$/i;
 const iso=(x:unknown)=>x instanceof Date?x.getTime():Date.parse(String(x??""));
@@ -108,7 +111,19 @@ export async function inspectWalletV4Readiness(
     checks.protectiveExitRelease=proof.rows[0]!.protective_exit_release===true;
    }
   }
-  // Explicitly NOT a go-live release: V4 signed-POST checks are still absent.
+  // Installed V4 final-POST checks are NOT an owner approval. Report the
+  // runtime opt-ins only when every other checked prerequisite is current.
+  // Never infer signed-post readiness from a code commit or an env var alone.
+  const runtime=(deps.featureState??(()=>({
+    signedPost:process.env.STRATA_WALLET_V4_SIGNED_POST_ENABLED==="true",
+    protectiveExit:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE==="true",
+  })))();
+  checks.signedPostAuthority=runtime.signedPost===true &&
+    runtime.protectiveExit===true && checks.accountOwned &&
+    checks.commissioned && checks.approvedStakePolicy &&
+    checks.cashReconciled && checks.modelEvidence && checks.feeAuthority &&
+    checks.ownerShaApproval && checks.protectiveExitRelease &&
+    deployedSha!==null;
   const blockers=Object.entries(checks).filter(([,value])=>!value)
    .map(([name])=>"wallet_v4_"+name+"_required");
   if(!deployedSha)blockers.unshift("wallet_v4_deployed_sha_unavailable");
