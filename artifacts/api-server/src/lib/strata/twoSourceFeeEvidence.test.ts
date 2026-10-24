@@ -98,6 +98,18 @@ test("cursor-paginated official open-market listing is read completely before se
  assert.equal(result.pdfProvenanceApproved,false);
  assert.equal(result.tradingEnabled,false);
 });
+test("genuinely empty current open listing is an explicit market-unavailable condition, never approved evidence",async()=>{
+ const pages=responses();
+ pages["/markets?series_ticker=KXBTC15M&status=open&limit=100"]={
+   markets:[],cursor:"",
+ };
+ const r=await probeCurrentKalshiFeeApi(transport(pages),()=>now);
+ assert.equal(r.ok,false);
+ assert.equal(r.reason,"no_current_open_kxbtc15m_market");
+ assert.equal(r.pdfProvenanceApproved,false);
+ assert.equal(r.commissioningApproved,false);
+ assert.equal(r.tradingEnabled,false);
+});
 test("incomplete Kalshi pagination fails closed on loops, duplicates, malformed cursors and excess page count",async()=>{
  const list="/markets?series_ticker=KXBTC15M&status=open&limit=100";
  for(const kind of ["loop","duplicate","malformed","oversized","empty","unbounded"]){
