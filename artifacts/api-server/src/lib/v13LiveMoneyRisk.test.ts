@@ -312,3 +312,14 @@ test("stale or mismatched fee evidence blocks before live entry", () => {
   missingFingerprint.feeEvidenceFingerprint = "";
   assert.equal(evaluateV13LiveMoneyRisk(missingFingerprint).ok, false);
 });
+
+test("V4 dynamic fee preview never bypasses unsigned last-POST authority", () => {
+  const input = baseInput();
+  input.policy.feePolicyVersion = "strata_owner_provider_dynamic_fee_v4";
+  input.feePolicyVersion = "strata_owner_provider_dynamic_fee_v4";
+  input.policy.policyHash = computeV13LiveMoneyPolicyHash(input.policy);
+  assert.deepEqual(evaluateV13LiveMoneyRisk(input), {
+    ok: false,
+    reason: "live_money_v4_final_post_authority_not_implemented",
+  });
+});
