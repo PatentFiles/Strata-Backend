@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import {assessNearExpiryCapShadow, NEAR_EXPIRY_CAP_RESEARCH_ID, NEAR_EXPIRY_CAP_RESEARCH_VERSION} from "./v13NearExpiryCapShadow";
 import { and, asc, desc, eq, gte, inArray, isNotNull, lt } from "drizzle-orm";
 import {
   db,
@@ -194,6 +195,15 @@ export const V13_BUILT_IN_RESEARCH_CHALLENGERS = Object.freeze([
     label: "C50/Confirm22 strict challenger",
     parameters: V13_RESEARCH_PRESETS.C50_CONFIRM22,
   },
+  {
+    // Strict prospective entry subset of the PINNED champion. Unlike the
+    // price/separation candidates, this adds a 30s expiry and fee-inclusive
+    // 20-contract research filter. Quantity is a PROXY, not a simulated fill.
+    id: NEAR_EXPIRY_CAP_RESEARCH_ID,
+    version: NEAR_EXPIRY_CAP_RESEARCH_VERSION,
+    label: "Min 30s / max 20 whole contracts — PAPER SHADOW ONLY",
+    parameters: V13_CHAMPION_PARAMETER_SET.parameters,
+  },
 ]);
 
 /**
@@ -326,7 +336,7 @@ export function buildV13ShadowOpportunity(
       source.strategyParameterSetId === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategyParameterHash === V13_CHAMPION_PARAMETER_HASH
     : policy === V13_LEGACY_ENTRY_POLICY && firstCross;
-  const wouldEnter = Boolean(
+  const baseWouldEnter = Boolean(
     entryAvailable && source.freshCross && decision.freshCross &&
     source.secondsRemaining !== null && source.secondsRemaining > 0 &&
     source.upOffer !== null && source.upOffer > 0 && source.upOffer <= 1 &&
@@ -336,6 +346,11 @@ export function buildV13ShadowOpportunity(
     decision.entrySideOffer !== null &&
     (decision.direction === "UP" || decision.direction === "DOWN"),
   );
+  const nearExpiryOverlay =
+    parameterSet.id === NEAR_EXPIRY_CAP_RESEARCH_ID && baseWouldEnter
+      ? assessNearExpiryCapShadow(source.secondsRemaining,decision.entrySideOffer)
+      : null;
+  const wouldEnter=baseWouldEnter && (nearExpiryOverlay?.wouldEnter??true);
 
   return {
     parameterSetId: parameterSet.id,
@@ -348,7 +363,15 @@ export function buildV13ShadowOpportunity(
     qualifyingTrigger: decision.qualifyingTrigger,
     wouldEnter,
     entryOffer: wouldEnter ? decision.entrySideOffer : null,
-    reason: decision.reason,
+    // Capped quantity is an explicitly named RESEARCH proxy carried in the
+    // immutable shadow receipt. NEVER book paper or exchange fills from it.
+    reason: nearExpiryOverlay
+      ? [decision.reason,"PAPER_SHADOW_NO_EXECUTION",nearExpiryOverlay.reason,
+         "max20", "min30s",
+         "illustrative_qty="+nearExpiryOverlay.modeledContracts,
+         "illustrative_entry_fee_cents="+nearExpiryOverlay.illustrativeEntryFeeCents
+        ].join("|")
+      : decision.reason,
   };
 }
 
@@ -538,6 +561,11 @@ export async function summarizeV13ShadowCandidatePerformance(
   parameterSetId: string,
   now = new Date(),
 ): Promise<V13ResearchPerformanceSummary> {
+  // The expiry/quantity overlay changes the number of contracts. The generic
+  // shadow report reuses champion FULL-SIZE P&L and would materially overstate
+  // this candidate. Do not include it in unadjusted leader rankings.
+  if(parameterSetId===NEAR_EXPIRY_CAP_RESEARCH_ID)
+    throw Error("quantity_capped_shadow_requires_independent_cost_and_depth_replay");
   const [parameterSet] = await db.select().from(v13StrategyParameterSetTable)
     .where(eq(v13StrategyParameterSetTable.id, parameterSetId)).limit(1);
   if (
