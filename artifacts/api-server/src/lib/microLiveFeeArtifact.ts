@@ -311,11 +311,15 @@ export async function readUnapprovedOfficialFeePublication(
 ):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
  {ok:false;reason:string}> {
  const start=nowMs();
+ // Shared producer lease also gates V4; never issue a separate production
+ // canonical PDF GET ahead of its atomic Supabase claim.
+ const centrallyGated=fetchImpl===PRODUCTION_FEE_FETCH&&
+   globalThis.fetch===PRODUCTION_FEE_FETCH;
  const directRetryAt=v4OfficialPdfDirectRetryAt.get(fetchImpl)??0;
  const directSuppressed=directRetryAt>start;
  let response:Response|null=null;
  let trustedBridge=false;
- if(!directSuppressed){
+ if(!directSuppressed&&!centrallyGated){
    try {
      response=await fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
        method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
@@ -344,8 +348,7 @@ export async function readUnapprovedOfficialFeePublication(
  if(directSuppressed)response=new Response(null,{status:429});
  // Never use pinned build snapshots as V4 dynamic, provider-backed evidence.
  // Edge validates fixed URL, SHA-256, and actual captured-at <=60 seconds.
- const canBridge=fetchImpl===PRODUCTION_FEE_FETCH&&
-   globalThis.fetch===PRODUCTION_FEE_FETCH &&
+ const canBridge=centrallyGated &&
    (v4OfficialPdfBridgeRetryAt.get(fetchImpl)??0)<=nowMs();
  if((response===null||[403,429,500,502,503,504].includes(response.status))&&canBridge){
    // At most one alternate upstream attempt per minute. If it returns its
@@ -356,6 +359,7 @@ export async function readUnapprovedOfficialFeePublication(
      process.env.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,60_000);
    if(verified?.status===200){response=verified;trustedBridge=true;}
    else if(verified?.status===429){
+     response=verified; // Genuine rate-limit denial, never fee evidence.
      const retry=parsedRetryAfterSeconds(verified);
      if(retry!==null)v4OfficialPdfBridgeRetryAt.set(fetchImpl,
        nowMs()+Math.max(V4_BRIDGE_MIN_INTERVAL_MS,retry*1000));
@@ -704,50 +708,21 @@ export async function recentPinnedOfficialFeeSnapshot(now:number=Date.now()):Pro
 }
 
 async function fetchOfficialFeeSchedule(fetchImpl: typeof fetch): Promise<Response> {
-  // A 24h origin-confirmed receipt avoids hammering a currently throttled
-  // static PDF endpoint. Test-injected transports never use this fallback.
-  // When the lease ends this automatically resumes the normal live retrieval
-  // path and refuses all unverified bytes or metadata-only authorizations.
-  if (fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH) {
-    const snapshot = await recentPinnedOfficialFeeSnapshot();
-    if (snapshot) return snapshot;
+  // One authenticated, atomic shared Supabase capture lease coordinates every
+  // production worker and fee verification path. No per-worker Kalshi GET
+  // before checking the shared deadline, and no fallthrough on provider 429.
+  // Monetary approvals cannot substitute pinned artifacts or stale fixtures.
+  if(fetchImpl===PRODUCTION_FEE_FETCH && globalThis.fetch===PRODUCTION_FEE_FETCH){
+    const verified=await fetchTrustedFeeFromSupabaseBridge(PRODUCTION_FEE_FETCH,
+      process.env.SUPABASE_URL,process.env.STRATA_FEE_BRIDGE_ANON_JWT,Date.now,60_000);
+    if(verified)return verified; // Verified <=60s actual issuer bytes or 429 denial.
+    throw Error("official_fee_capture_gate_unavailable"); // Fail closed.
   }
-  let response: Response;
-  try {
-    response = await fetchImpl(CANONICAL_FEE_SCHEDULE_URL, {
-      method: "GET",
-      headers: { Accept: "application/pdf", "Cache-Control": "no-cache" },
-      redirect: "error",
-      signal: AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
-    });
-  } catch (error) {
-    // The trusted Edge function is a fallback solely for production transport
-    // failures. Injected test fetches never trigger network access.
-    if (fetchImpl !== PRODUCTION_FEE_FETCH || globalThis.fetch !== PRODUCTION_FEE_FETCH) throw error;
-    const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
-      process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate?.status === 200) return alternate;
-    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
-      ? await recentPinnedOfficialFeeSnapshot() : null;
-    if (snapshot) return snapshot;
-    if (alternate) return alternate;
-    throw error;
-  }
-  // An edge WAF (403/429) or a transient provider outage can be
-  // independently retried through the fixed-source, hash-bound, authenticated
-  // Supabase egress. An actual 404, redirect, changed PDF or altered fee
-  // schedule never gains an alternate acceptance path.
-  if ([403,429,500,502,503,504].includes(response.status) &&
-      fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH) {
-    const alternate = await fetchTrustedFeeFromSupabaseBridge(globalThis.fetch,
-      process.env.SUPABASE_URL, process.env.STRATA_FEE_BRIDGE_ANON_JWT);
-    if (alternate?.status === 200) return alternate;
-    const snapshot = fetchImpl === PRODUCTION_FEE_FETCH && globalThis.fetch === PRODUCTION_FEE_FETCH
-      ? await recentPinnedOfficialFeeSnapshot() : null;
-    if (snapshot) return snapshot;
-    if (alternate) return alternate;
-  }
-  return response;
+  // Only isolated injected transports use the old direct-issuer test route.
+  return fetchImpl(CANONICAL_FEE_SCHEDULE_URL,{
+    method:"GET",headers:{Accept:"application/pdf","Cache-Control":"no-cache"},
+    redirect:"error",signal:AbortSignal.timeout(MAX_FEE_SOURCE_READ_MS),
+  });
 }
 
 /**
