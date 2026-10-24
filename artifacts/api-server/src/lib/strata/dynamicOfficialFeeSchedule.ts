@@ -29,6 +29,8 @@ export type DynamicFeeModel={
  makerRatePpm:number;
  defaultTakerMultiplierPpm:number;
  defaultMakerMultiplierPpm:number;
+ feeType:"quadratic";
+ feeMultiplier:"1";
  marketTicker:string;
  eventTicker:string;
  metadataDigest:string;
@@ -44,6 +46,22 @@ export type DynamicFeeResult=
  | {ok:false;reason:string;tradingAuthorized:false};
 
 const deny=(reason:string):DynamicFeeResult=>({ok:false,reason,tradingAuthorized:false});
+
+/** Stable version identity: never include observation clocks or API poll digests. */
+export function computeDynamicFeeModelDigest(model:Omit<DynamicFeeModel,
+ "modelDigest"|"observedAt"|"metadataDigest"|"tradingAuthorized"|"requiresVersionedReview">):string {
+ const canonical={
+   issuer:model.issuer,publicationDigest:model.publicationDigest,
+   effectiveDate:model.effectiveDate,
+   takerRatePpm:model.takerRatePpm,makerRatePpm:model.makerRatePpm,
+   defaultTakerMultiplierPpm:model.defaultTakerMultiplierPpm,
+   defaultMakerMultiplierPpm:model.defaultMakerMultiplierPpm,
+   marketTicker:model.marketTicker,eventTicker:model.eventTicker,
+   feeType:model.feeType,feeMultiplier:model.feeMultiplier,
+ };
+ return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
 
 /** Decimal-to-integer, no JS floating-point monetary conversions. */
 function decimalPpm(raw:string):number|null{
@@ -145,20 +163,13 @@ export async function observeDynamicKalshiFees(
    takerRatePpm:parsed.takerRatePpm,makerRatePpm:parsed.makerRatePpm,
    defaultTakerMultiplierPpm:parsed.defaultTakerMultiplierPpm,
    defaultMakerMultiplierPpm:parsed.defaultMakerMultiplierPpm,
-   marketTicker,eventTicker:provider.eventTicker,metadataDigest:provider.metadataDigest};
+   marketTicker,eventTicker:provider.eventTicker,metadataDigest:provider.metadataDigest,
+   feeType:provider.feeType!,feeMultiplier:provider.feeMultiplier!};
  // Model identity must remain stable across repeat reads of unchanged
  // issuer bytes and unchanged market fee terms. metadataDigest separately
  // identifies each time-stamped provider observation; never hash its clock
  // into the durable version candidate or every refresh would appear to drift.
- const modelDigest=createHash("sha256").update(JSON.stringify({
-   issuer:modelBase.issuer,publicationDigest:modelBase.publicationDigest,
-   effectiveDate:modelBase.effectiveDate,
-   takerRatePpm:modelBase.takerRatePpm,makerRatePpm:modelBase.makerRatePpm,
-   defaultTakerMultiplierPpm:modelBase.defaultTakerMultiplierPpm,
-   defaultMakerMultiplierPpm:modelBase.defaultMakerMultiplierPpm,
-   marketTicker,eventTicker:modelBase.eventTicker,
-   feeType:provider.feeType,feeMultiplier:provider.feeMultiplier,
- })).digest("hex");
+ const modelDigest=computeDynamicFeeModelDigest(modelBase);
  return {ok:true,reason:"dynamic_fee_observation_for_review_only",
    model:{...modelBase,modelDigest,observedAt:new Date(now()).toISOString(),
      tradingAuthorized:false,requiresVersionedReview:true},
