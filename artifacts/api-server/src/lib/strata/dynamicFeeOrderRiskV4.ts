@@ -81,7 +81,7 @@ export function boundDynamicFeeEntryV4(
     observed.marketTicker!==order.marketTicker||
     observed.issuer!==CANONICAL_FEE_SCHEDULE_URL||
     observed.feeType!=="quadratic"||observed.feeMultiplier!=="1"||
-    !/^20\\d{2}-\\d{2}-\\d{2}$/.test(observed.effectiveDate)||
+    !/^20\d{2}-\d{2}-\d{2}$/.test(observed.effectiveDate)||
     Date.parse(observed.effectiveDate)>order.nowMs||
     !DIGEST.test(observed.metadataDigest)||!DIGEST.test(observed.modelDigest)||
     computeDynamicFeeModelDigest(observed)!==observed.modelDigest||
