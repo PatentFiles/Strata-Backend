@@ -381,6 +381,9 @@ jobs:
             --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* \
             --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/singleOwnerFeePreflight.test.cjs
+      - name: Verify Wallets V4 private fee authorization schema in isolated PostgreSQL (NO LIVE DB)
+        working-directory: artifacts/api-server
+        run: node scripts/run-v13-disposable-postgres.mjs src/lib/strata/walletV4FeeAuthority.postgres.test.ts
       - name: Verify owner V3 authority schema in isolated disposable PostgreSQL (NO LIVE DB)
         working-directory: artifacts/api-server
         run: node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerFeeV3Authority.postgres.test.ts
