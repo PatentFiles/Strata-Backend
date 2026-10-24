@@ -31,7 +31,7 @@ import {
   CANONICAL_FEE_SCHEDULE_URL, MAX_FEE_SCHEDULE_BYTES, STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
   STANDING_FEE_POLICY_VERSION, establishOfficialFeeDigest, parseFeeSchedulePdf, parseFeeScheduleText,
   verifyCurrentFeeArtifact, verifyOfficialFeePdfBytes,
-  fetchTrustedFeeFromSupabaseBridge, establishVerifiedBridgeFeeDigest,
+  fetchTrustedFeeFromSupabaseBridge, establishVerifiedBridgeFeeDigest, officialFeeFetchDiagnostic,
 } from "./microLiveFeeArtifact";
 
 function examplePdf(text: string): Buffer {
