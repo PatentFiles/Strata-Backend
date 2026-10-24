@@ -4,6 +4,7 @@ import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
 import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
+import {DYNAMIC_FEE_POLICY_VERSION_V4} from "./dynamicFeeOrderRiskV4";
 // Run the fee-source migration transaction regressions in the existing
 // CI safety test entrypoint, not typecheck alone.
 import "./ownerApiFeePolicyMigration.test";
@@ -219,4 +220,23 @@ test("preset risk-policy SQL persists quote-age/fee-age matching signed hash fie
  const insert=h.sqls.find(x=>x.includes("INSERT INTO public.v13_live_money_policy"))??"";
  assert.match(insert,/\$13,\$14/);
  assert.equal(insert.includes("p.max_quote_age_ms,p.max_fee_evidence_age_ms"),false);
+});
+
+test("owner-confirmed stake amendment retires old V1 policy and persists current V4 policy",async()=>{
+ const h=mock("25000000");
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM,{
+   presetId:TEST_TWENTY_PERCENT_PRESET.id,
+   presetRevision:TEST_TWENTY_PERCENT_PRESET.revision,capitalBudgetCents:2500
+ });
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(h.policyInsertArgs.length,1);
+ const args=h.policyInsertArgs[0]!;
+ assert.equal(args[14],DYNAMIC_FEE_POLICY_VERSION_V4);
+ assert.equal(args[15],null);
+ assert.equal(args[16],null);
+ const migrationSql=h.sqls.find(sql=>sql.includes("INSERT INTO public.v13_live_money_policy"))??"";
+ assert.match(migrationSql,/\$15,\$16,\$17,p\.require_full_depth/);
+ assert.ok(h.sqls.some(sql=>sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
+ assert.ok(h.sqls.includes("COMMIT"));
+ assert.equal(h.sqls.some(sql=>/SET kill_switch=false|productionArm|productionStart|submitOrder|kalshiPost/.test(sql)),false);
 });
