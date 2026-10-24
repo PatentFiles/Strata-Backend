@@ -105,7 +105,7 @@ function safeChanges(data: JsonObject, key: string, windowEnd: number): boolean 
  * This only supplies a READ-ONLY fee diagnostic, never trading authority.
  */
 async function completeOpenMarketListing(fetchImpl:typeof fetch):
-  Promise<{ok:true;markets:JsonObject[]}|{ok:false}> {
+  Promise<{ok:true;markets:JsonObject[]}|{ok:false;reason:string}> {
   const markets:JsonObject[]=[];
   const visited=new Set<string>();
   const tickers=new Set<string>();
@@ -117,21 +117,22 @@ async function completeOpenMarketListing(fetchImpl:typeof fetch):
     if(!Array.isArray(listing.markets)||listing.markets.length>MARKET_PAGE_SIZE||
        typeof listing.cursor!=="string"||listing.cursor.length>2048||
        (listing.markets.length===0&&listing.cursor!==""))
-      return {ok:false};
+      return {ok:false,reason:"market_listing_incomplete"};
     for(const candidate of listing.markets){
       const market=plain(candidate);
       if(!market||typeof market.ticker!=="string"||
          !tickerPattern.test(market.ticker)||tickers.has(market.ticker))
-        return {ok:false};
+        return {ok:false,reason:"market_listing_incomplete"};
       tickers.add(market.ticker);
       markets.push(market);
     }
-    if(listing.cursor==="")return markets.length?{ok:true,markets}:{ok:false};
-    if(visited.has(listing.cursor))return {ok:false};
+    if(listing.cursor==="")return markets.length?{ok:true,markets}:
+      {ok:false,reason:"no_current_open_kxbtc15m_market"};
+    if(visited.has(listing.cursor))return {ok:false,reason:"market_listing_incomplete"};
     visited.add(listing.cursor);
     cursor=listing.cursor;
   }
-  return {ok:false};
+  return {ok:false,reason:"market_listing_incomplete"};
 }
 
 /** A positive result is an API observation, NOT authorization of the PDF. */
@@ -147,7 +148,7 @@ export async function probeCurrentKalshiFeeApi(
   const started = clock();
   try {
     const listing = await completeOpenMarketListing(fetchImpl);
-    if(!listing.ok)return fail("market_listing_incomplete");
+    if(!listing.ok)return fail(listing.reason);
     const now = clock();
     const open = listing.markets.filter((m): m is JsonObject =>
       (m.status === "open" || m.status === "active") &&
