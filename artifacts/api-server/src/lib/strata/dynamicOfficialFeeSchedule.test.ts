@@ -5,8 +5,20 @@ import {extractFeeScheduleDocumentText,readUnapprovedOfficialFeePublication} fro
 
 import assert from "node:assert/strict";
 import {parseDynamicKalshiPublication,estimateDynamicFeeMicros,observeDynamicKalshiFees} from "./dynamicOfficialFeeSchedule";
+import {issuerWholeCentFee,verifyIssuerGeneralFeeTable} from "./officialFeeTableParity";
 
 const NOW=Date.parse("2026-10-23T20:00:00Z");
+const priceMoney=(cents:number)=>"$"+Math.floor(cents/100)+"."+(cents%100).toString().padStart(2,"0");
+const witness=(taker:string)=>{
+ const rate=Math.round(Number(taker)*1_000_000);
+ return "General Trading Fees Table Price of 1 contract Fee for 1 contract Price for 100 contracts Fee for 100 contracts "+
+  [1,5,10,25,50,75,90,99].map(p=>{
+   const one=issuerWholeCentFee(rate,1,p);
+   const hundred=issuerWholeCentFee(rate,100,p);
+   if(one===null||hundred===null)throw Error("unrepresentable test rate");
+   return [priceMoney(p),priceMoney(one),priceMoney(p*100),priceMoney(hundred)].join(" ");
+  }).join(" ");
+};
 const doc=(taker="0.07",maker="0.0175",tail="KXBTCY BTC price EOY 0 0")=>[
  "Trading Fees",
  "The following terms apply to all event contract markets on the exchange, apart from specific products listed below, which have their own fee schedule.",
@@ -16,6 +28,7 @@ const doc=(taker="0.07",maker="0.0175",tail="KXBTCY BTC price EOY 0 0")=>[
  "Maker Fees",
  "fees = round up(M x "+maker+" x C x P x (1-P))",
  "M = the multiplier for each contract (default is 0 unless otherwise indicated)",
+ witness(taker),
  "Non-Standard Fees",
  "Series Maker Multiplier Taker Multiplier",
  tail,
@@ -89,6 +102,29 @@ test("unknown market exceptions, ambiguous fees, malformed structure and dates a
   doc().replace("0.07","0.1234567"),
  ])assert.equal(parseDynamicKalshiPublication(altered,NOW).ok,false,altered);
 });
+test("official PDF formula and own fee table must agree for both one and 100 contracts",()=>{
+ const live=doc();
+ const verified=verifyIssuerGeneralFeeTable(live,70_000);
+ assert.equal(verified.ok,true,JSON.stringify(verified));
+ assert.equal(issuerWholeCentFee(70_000,1,50),2);
+ assert.equal(issuerWholeCentFee(70_000,100,50),175);
+ // The published 1-contract table rounds $0.0175 to $0.02;
+ // the separate V4 centicent model quotes 17,500 micros before any
+ // full-cent table rounding. Do not silently confuse those conventions.
+ assert.equal(estimateDynamicFeeMicros(70_000,1_000_000,100,5000),17_500n);
+ for(const malformed of [
+  live.replace("General Trading Fees Table","Unavailable Worked Examples"),
+  live.replace("$0.50 $0.02 $50.00 $1.75","$0.50 $0.01 $50.00 $1.75"),
+  live.replace("$0.50 $0.02 $50.00 $1.75","$0.50 $0.02 $50.00 $1.74"),
+  live.replace("$0.50 $0.02 $50.00 $1.75","$0.50 $0.02 $50.00 $1.75 $0.50 $0.02 $50.00 $1.75"),
+ ]){
+  const result=parseDynamicKalshiPublication(malformed,NOW);
+  assert.equal(result.ok,false,malformed.slice(-180));
+  assert.ok(["official_fee_reference_table_formula_mismatch",
+    "official_fee_reference_table_missing_or_reordered"].includes(result.reason),result.reason);
+ }
+});
+
 test("integer monetary fee calculation respects order-side multiplier and split rounding",()=>{
  assert.equal(estimateDynamicFeeMicros(70000,1000000,100,5000),17500n);
  assert.equal(estimateDynamicFeeMicros(80000,1000000,100,5000),20000n);

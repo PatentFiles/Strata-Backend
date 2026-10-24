@@ -13,6 +13,7 @@
 import {createHash} from "node:crypto";
 import {readUnapprovedOfficialFeePublication,CANONICAL_FEE_SCHEDULE_URL} from "../microLiveFeeArtifact";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
+import {verifyIssuerGeneralFeeTable} from "./officialFeeTableParity";
 
 const PPM=1_000_000n;
 const MICRO_DENOM=10_000_000_000_000_000n;
@@ -106,6 +107,11 @@ export function parseDynamicKalshiPublication(text:string,nowMs:number):{
  const makerMult=makerDefault?decimalPpm(makerDefault[1]!):null;
  if(taker===null||make===null||takerMult===null||makerMult===null)
    return {ok:false,reason:"dynamic_fee_formula_unverifiable"};
+ // The issuer publishes both the algebraic formula and worked examples.
+ // Require those IN THE SAME FRESH DOCUMENT to agree at whole-cent table
+ // rounding; do not infer the issuer's actual charged fee from formula alone.
+ const table=verifyIssuerGeneralFeeTable(doc,taker);
+ if(!table.ok)return {ok:false,reason:table.reason};
  // Do not infer applicability from the default when the issuer explicitly
  // lists our series in its exception table. Requires a new exact-market
  // monetary proof rather than an optimistic default.
