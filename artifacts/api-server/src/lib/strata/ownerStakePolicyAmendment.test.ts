@@ -4,6 +4,7 @@ import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from "../
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
 import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
+import {DYNAMIC_FEE_POLICY_VERSION_V4} from "./dynamicFeeOrderRiskV4";
 // Run the fee-source migration transaction regressions in the existing
 // CI safety test entrypoint, not typecheck alone.
 import "./ownerApiFeePolicyMigration.test";
@@ -40,7 +41,7 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed") {
+function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true) {
  const sqls:string[]=[];
  const policyInsertArgs:unknown[][]=[];
  const query=async(sql:string,args:unknown[]=[])=> {
@@ -55,7 +56,7 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="
     return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:accountKill}]};
   if(sql.includes("SELECT\n      (SELECT count(*)::int FROM public.v13_production_position"))
    return {rows:[{positions:0,unresolved:0,running:0}]};
-  if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:[{revision:1}]};
+  if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:previousStakePresent?[{revision:1}]:[]};
   if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[policyRow]};
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
   if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:old.id}]};
@@ -219,4 +220,37 @@ test("preset risk-policy SQL persists quote-age/fee-age matching signed hash fie
  const insert=h.sqls.find(x=>x.includes("INSERT INTO public.v13_live_money_policy"))??"";
  assert.match(insert,/\$13,\$14/);
  assert.equal(insert.includes("p.max_quote_age_ms,p.max_fee_evidence_age_ms"),false);
+});
+
+test("owner-confirmed stake amendment retires old V1 policy and persists current V4 policy",async()=>{
+ const h=mock("25000000");
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,OWNER_STAKE_POLICY_CONFIRM,{
+   presetId:TEST_TWENTY_PERCENT_PRESET.id,
+   presetRevision:TEST_TWENTY_PERCENT_PRESET.revision,capitalBudgetCents:2500
+ });
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(h.policyInsertArgs.length,1);
+ const args=h.policyInsertArgs[0]!;
+ assert.equal(args[14],DYNAMIC_FEE_POLICY_VERSION_V4);
+ assert.equal(args[15],old.feeSourceUrl);
+ assert.equal(args[16],DYNAMIC_FEE_POLICY_VERSION_V4);
+ const migrationSql=h.sqls.find(sql=>sql.includes("INSERT INTO public.v13_live_money_policy"))??"";
+ assert.match(migrationSql,/\$15,\$16,\$17,p\.require_full_depth/);
+ assert.ok(h.sqls.some(sql=>sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'")));
+ assert.ok(h.sqls.includes("COMMIT"));
+ assert.equal(h.sqls.some(sql=>/SET kill_switch=false|productionArm|productionStart|submitOrder|kalshiPost/.test(sql)),false);
+});
+
+test("owner can save approved $5 V4 allocation after old stake row was removed",async()=>{
+ const h=mock("25000000","released",false,false,false);
+ const preset=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,null,OWNER_STAKE_POLICY_CONFIRM,{
+   presetId:preset.id,presetRevision:preset.revision,capitalBudgetCents:2500
+ });
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(h.policyInsertArgs.length,1);
+ assert.equal(h.policyInsertArgs[0]?.[14],DYNAMIC_FEE_POLICY_VERSION_V4);
+ const stakeInsert=h.sqls.find(x=>x.includes("INSERT INTO public.strata_configured_stake"))??"";
+ assert.match(stakeInsert,/ON CONFLICT \(execution_account_id\)/);
+ assert.ok(h.sqls.includes("COMMIT"));
 });
