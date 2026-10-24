@@ -279,3 +279,25 @@ test("user-scope migration is additive and does not rewrite the legacy account",
   assert.equal(/ALTER TABLE public\.financial_accounts[\s\S]*bot_eligible/.test(sql), false);
   assert.equal(sql.includes("live_execution_enabled = true"), false);
 });
+
+test("active stake readback is unconfigured below $5; original rows remain unchanged",()=>{
+ const old=account(USER_A,{configuredStakeCents:150,approvedMaxEntryStakeCents:150,stakeRevision:19});
+ const view=viewForCaller(USER_A,old);
+ assert.equal(view.configuredStakeCents,null);
+ assert.equal(view.stakeRevision,19);
+ assert.equal(old.configuredStakeCents,150);
+ assert.equal(view.armed,false);
+});
+test("stake readback supports arbitrary approved dollar amounts up to $25,000",()=>{
+ for(const cents of [500,5000,1945700,2500000]){
+   const a=account(USER_A,{configuredStakeCents:cents,approvedMaxEntryStakeCents:cents});
+   assert.equal(viewForCaller(USER_A,a).configuredStakeCents,cents);
+ }
+ for(const cents of [100,2500001]){
+   const a=account(USER_A,{configuredStakeCents:cents,approvedMaxEntryStakeCents:cents});
+   assert.equal(viewForCaller(USER_A,a).configuredStakeCents,null);
+ }
+ const unapproved=account(USER_A,{configuredStakeCents:500,approvedMaxEntryStakeCents:150});
+ assert.equal(viewForCaller(USER_A,unapproved).configuredStakeCents,null);
+ assert.equal(viewForCaller(USER_B,account(USER_A,{configuredStakeCents:500})).configuredStakeCents,null);
+});
