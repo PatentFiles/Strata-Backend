@@ -32,6 +32,12 @@ test("Wallets owner readiness checks actual saved preset and all current authori
  assert.equal(queries.length,2);
  assert.match(queries[0]!,/a.owner_user_id=\$1::uuid/);
  assert.match(queries[1]!,/g.owner_user_id=\$1::uuid/);
+ assert.match(queries[0]!,/a.execution_enabled,a.kill_switch,a.blocked_reason/);
+ assert.match(queries[1]!,/g.expires_at>now\(\)\+interval '30 seconds'/);
+ assert.match(queries[1]!,/e.expires_at>now\(\)\+interval '30 seconds'/);
+ assert.match(queries[1]!,/pr.expires_at>now\(\)\+interval '20 minutes'/);
+ assert.match(queries[1]!,/pr.independent_reviewer_id<>\$1::uuid/);
+ assert.match(queries[1]!,/pr.operator_approver_id<>pr.independent_reviewer_id/);
 });
 test("Missing/ambiguous owned account and unknown deployed SHA always fail closed",async()=>{
  const none=await inspectWalletV4Readiness(owner,{
