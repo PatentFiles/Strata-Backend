@@ -10,7 +10,9 @@ const row={id:"wallet-test-account",commissioned:true,
  cash_micros:"25000000",reserved_micros:"0",configured_stake_cents:500,
  risk_capital_cents:2500,risk_preset_id:TEST_TWENTY_PERCENT_PRESET.id,
  risk_preset_revision:TEST_TWENTY_PERCENT_PRESET.revision,
- policy_hash:"b".repeat(64)};
+ policy_hash:"b".repeat(64),fee_policy_version:"strata_owner_provider_dynamic_fee_v4",state:"APPROVED",
+ capital_limit_cents:2500,max_entry_stake_cents:500,max_entry_all_in_cents:625,
+ max_daily_loss_cents:1000,max_total_loss_cents:1500};
 test("Wallets owner readiness checks actual saved preset and all current authoritative records but never issues trade grants",async()=>{
  const queries:string[]=[];
  const db={async query(sql:string){queries.push(sql);return {
@@ -20,7 +22,7 @@ test("Wallets owner readiness checks actual saved preset and all current authori
  }]};}};
  const result=await inspectWalletV4Readiness(owner,{db,getSha:()=>sha,now:()=>now});
  assert.equal(result.ok,true);
- assert.equal(result.checks.fiveDollarPreset,true);
+ assert.equal(result.checks.approvedStakePolicy,true);
  assert.equal(result.checks.feeAuthority,true);
  assert.equal(result.checks.signedPostAuthority,false);
  assert.equal(result.tradingAuthorized,false);
@@ -50,10 +52,39 @@ test("Stale cash, unknown stake revision and transient database errors refuse re
     risk_preset_revision:-1}]};}},
   getSha:()=>sha,now:()=>now});
  assert.equal(stale.checks.cashReconciled,false);
- assert.equal(stale.checks.fiveDollarPreset,false);
+ assert.equal(stale.checks.approvedStakePolicy,false);
  const down=await inspectWalletV4Readiness(owner,{
   db:{async query():Promise<{rows:Record<string,unknown>[]}>{throw Error("DB unavailable");}},
   getSha:()=>sha,now:()=>now});
  assert.equal(down.ok,false);
  assert.equal(down.tradingAuthorized,false);
+});
+
+test("valid arbitrary $50 and $19,457 policies are read back using signed required capital",async()=>{
+ for(const [stake,budget,fee] of [[5000,25000,6250],[1945700,9728500,2432125]]){
+   const policy={...row,cash_micros:String(budget*10000),reserved_micros:"0",
+     configured_stake_cents:stake,risk_capital_cents:budget,
+     max_entry_stake_cents:stake,max_entry_all_in_cents:fee,
+     capital_limit_cents:budget,max_daily_loss_cents:budget,
+     max_total_loss_cents:budget};
+   let queries=0;
+   const response=await inspectWalletV4Readiness(owner,{
+     db:{async query(){queries++;return {rows:queries===1?[policy]:[{
+        model_evidence:false,fee_authority:false,owner_sha_approval:false,protective_exit_release:false
+     }]};}},getSha:()=>sha,now:()=>now
+   });
+   assert.equal(response.checks.approvedStakePolicy,true);
+   assert.equal(response.checks.cashReconciled,true);
+   assert.equal(response.tradingAuthorized,false);
+ }
+});
+test("insufficient capital and malformed policy hash cannot qualify",async()=>{
+ const insufficient={...row,cash_micros:"100000",reserved_micros:"0"};
+ let r=await inspectWalletV4Readiness(owner,{
+  db:{async query(){return {rows:[insufficient]};}},getSha:()=>"",now:()=>now});
+ assert.equal(r.checks.cashReconciled,false);
+ const invalid={...row,policy_hash:"bad",max_entry_stake_cents:150};
+ r=await inspectWalletV4Readiness(owner,{
+  db:{async query(){return {rows:[invalid]};}},getSha:()=>"",now:()=>now});
+ assert.equal(r.checks.approvedStakePolicy,false);
 });
