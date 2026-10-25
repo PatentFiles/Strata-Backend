@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/commissioningFeeEvidenceDiagnostic.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -24,3 +26,7 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/twoSourceFeeEvidence.test.cjs
       - run: node artifacts/api-server/dist/twoSourceFeeEvidence.test.cjs
+      - name: Verify all five owner release evidence gates fail closed with no Kalshi requests or orders
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFiveGateReleaseAudit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFiveGateReleaseAudit.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerFiveGateReleaseAudit.test.cjs
