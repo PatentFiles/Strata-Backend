@@ -144,9 +144,9 @@ test("grant expiry uses PostgreSQL clock and returns DB-committed timestamp",asy
  assert.equal(state.commits,1);
  const grantInsert=state.calls.find(sql=>sql.includes("INSERT INTO private.strata_api_fee_source_grants"));
  assert.ok(grantInsert);
- assert.match(grantInsert,/LEAST\\(now\\(\\)\\+interval '15 minutes',\\$8::timestamptz\\)/);
- assert.match(grantInsert,/RETURNING grant_id,expires_at/);
- assert.doesNotMatch(grantInsert,/issued_at,expires_at\\)\\s*VALUES[^]*now\\(\\),\\$8::timestamptz/);
+ assert.ok(grantInsert.includes("LEAST(now()+interval '15 minutes',$8::timestamptz)"));
+ assert.ok(grantInsert.includes("RETURNING grant_id,expires_at"));
+ assert.equal(grantInsert.includes("now(),$8::timestamptz"),false);
  assertNoAuthority(result);
 });
 test("owner consent requires authenticated grant ownership and explicit confirmation",async()=>{
