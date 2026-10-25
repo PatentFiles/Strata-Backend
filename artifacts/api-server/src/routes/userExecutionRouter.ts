@@ -7,6 +7,7 @@ import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule
 import {observeOfficialTariffHtml} from "../lib/strata/officialTariffHtmlObservation";
 import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
 import {inspectOwnerFiveGateReleaseAudit} from "../lib/strata/ownerFiveGateReleaseAudit";
+import {inspectIsolatedIssuerFeeSourceStatus} from "../lib/strata/isolatedIssuerFeeSourceStatus";
 import {inspectOwnerSignedExchangeReleaseProof} from "../lib/strata/ownerSignedExchangeReleaseProof";
 import {previewOwnerV4CommissioningRepair,repairOwnerV4CommissioningHold} from "../lib/strata/ownerV4CommissioningRepair";
 import {inspectOwnerAccountOnboardingReadiness} from "../lib/strata/ownerAccountOnboardingReadiness";
@@ -725,6 +726,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const out=await inspectOwnerSignedExchangeReleaseProof(owner);
     res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // Isolated Kalshi PDF upstream capture/lease status only. NO issuer HTTP
+  // request, NO fee grant, NO cash/exit authorization or trade is attempted.
+  router.get("/fees/issuer-source-status",async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const status=await inspectIsolatedIssuerFeeSourceStatus();
+    res.status(status.ok?200:409).json(sanitizePublic(status));
   });
   // #165: compare all five owner release-evidence gates independently. This
   // read-only report NEVER fetches the official PDF, signs Kalshi requests,
