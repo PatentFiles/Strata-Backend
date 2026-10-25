@@ -93,6 +93,12 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
    digest:cached.digest,originalCapturedAt:cached.originalCapturedAt,effectiveDate:cached.effectiveDate,
    tradingAuthorized:false as const,ordersSubmitted:false as const};
   if(!cached.ok && cached.reason!=="v5_genuine_issuer_capture_missing")return no(cached.reason);
+  // Account-scoped persisted circuit; never a provider request during 429 backoff.
+  const circuit=await db.query("SELECT next_attempt_at FROM private.strata_railway_fee_retry_v5 WHERE execution_account_id=$1",[target(d)]);
+  if(circuit.rows.length>1)return no("v5_circuit_state_invalid");
+  const due=circuit.rows[0] ? Date.parse(timestamp(circuit.rows[0].next_attempt_at)) : 0;
+  if(circuit.rows.length && (!Number.isFinite(due)||due>now()))
+    return no("v5_issuer_circuit_open",Number.isFinite(due)?new Date(due).toISOString():null);
   const claim=await db.query(String.raw`UPDATE public.strata_official_fee_capture_throttle
     SET next_allowed_at=clock_timestamp()+interval '30 minutes'
     WHERE id=true AND next_allowed_at<=clock_timestamp() RETURNING next_allowed_at`);
@@ -112,6 +118,20 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
       next_allowed_at=CASE WHEN $1=429 THEN GREATEST(next_allowed_at,COALESCE($2::timestamptz,next_allowed_at)) ELSE next_allowed_at END
     WHERE id=true RETURNING next_allowed_at`,[res.status,retry]);
   if(status.rows.length!==1)return no("v5_upstream_status_provenance_unavailable");
+  if(res.status===429){
+   // First genuine rejection waits >=30m; subsequent authentic 429s wait
+   // 60m,120m,... up to 6h. This independent circuit cannot shorten
+   // the shared issuer-provided Retry-After deadline.
+   await db.query(String.raw`INSERT INTO private.strata_railway_fee_retry_v5
+     (execution_account_id,consecutive_429,next_attempt_at,last_http_status)
+     VALUES($1,1,GREATEST(now()+interval '30 minutes',$2::timestamptz),429)
+     ON CONFLICT(execution_account_id) DO UPDATE
+       SET consecutive_429=LEAST(6,private.strata_railway_fee_retry_v5.consecutive_429+1),
+           next_attempt_at=GREATEST(private.strata_railway_fee_retry_v5.next_attempt_at,
+             now()+make_interval(mins=>LEAST(360,30*(1<<LEAST(4,private.strata_railway_fee_retry_v5.consecutive_429)))),
+             $2::timestamptz),
+           last_http_status=429,updated_at=clock_timestamp()`,[target(d),timestamp(status.rows[0]?.next_allowed_at)]);
+  }
   if(res.status!==200)return no("v5_issuer_http_"+res.status,
     res.status===429?timestamp(status.rows[0]?.next_allowed_at):null);
   if(res.redirected||res.url!==V5_URL||res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()!=="application/pdf")
@@ -134,6 +154,14 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
     RETURNING capture_id`,[target(d),V5_VERSION,V5_URL,digest,b,b.length,
       parsed.effectiveDate,captured,new Date(capturedAt+LEASE_MS).toISOString()]);
   if(write.rows.length!==1)return no("v5_evidence_immutable_write_failed");
+  // Genuine verified publisher bytes reset only THIS account's collector circuit.
+  await db.query(String.raw`INSERT INTO private.strata_railway_fee_retry_v5
+    (execution_account_id,consecutive_429,next_attempt_at,last_http_status)
+    VALUES($1,0,now(),200)
+    ON CONFLICT(execution_account_id) DO UPDATE
+      SET consecutive_429=0,next_attempt_at=now(),
+      last_http_status=200,updated_at=clock_timestamp()`,[target(d)]);
+
   return {ok:true as const,reason:"v5_genuine_railway_issuer_capture_recorded",
     digest,originalCapturedAt:captured,effectiveDate:parsed.effectiveDate,
     tradingAuthorized:false as const,ordersSubmitted:false as const};
