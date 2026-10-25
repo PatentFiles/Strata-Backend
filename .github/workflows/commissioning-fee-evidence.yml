@@ -9,6 +9,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.ts'
       - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -42,3 +44,7 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerApiFeePolicyMigration.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerApiFeePolicyMigration.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerApiFeePolicyMigration.test.cjs
+      - name: Verify owner signed Kalshi preflight never grants financial authority
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerSignedExchangeReleaseProof.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerSignedExchangeReleaseProof.test.cjs
