@@ -68,9 +68,29 @@ export async function previewOwnerV4CommissioningRepair(ownerId:string,deps:Deps
   if(!POLICY.test(txt(a.policy_id))||!HASH.test(txt(a.policy_hash))||
     !Number.isSafeInteger(Number(a.revision)))
    return no("approved_policy_identity_invalid");
+  const sha=(deps.sha??deployedGitSha)().toLowerCase();
+  if(!SHA.test(sha))return no("runtime_deployed_sha_unverified");
+  const grants=await c.query([
+    "SELECT g.authority_id::text,g.expires_at",
+    "FROM private.strata_wallet_v4_fee_authority g",
+    "JOIN private.strata_wallet_v4_fee_evidence e ON e.evidence_id=g.evidence_id",
+    "WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2",
+    "AND g.deployed_sha=$3 AND g.policy_hash=$4 AND g.policy_version=$5",
+    "AND g.revoked_at IS NULL AND g.aal2_verified_at IS NOT NULL",
+    "AND g.confirmation='I_APPROVE_MY_WALLET_DYNAMIC_FEE_MODEL_V4'",
+    "AND 'ORDER_ENTRY'=ANY(g.authorized_stages)",
+    "AND g.expires_at>now()+interval '90 seconds'",
+    "AND e.owner_user_id=g.owner_user_id AND e.execution_account_id=g.execution_account_id",
+    "AND e.model_digest=g.model_digest AND e.deployed_sha=g.deployed_sha",
+    "AND e.revoked_at IS NULL AND e.expires_at>now()+interval '90 seconds'",
+    "LIMIT 2"].join(" "),[ownerId,a.id,sha,a.policy_hash,VERSION]);
+  if(grants.rows.length!==1||!UUID.test(txt(grants.rows[0]?.authority_id)))
+   return no("owner_v4_current_fee_grant_required");
   return {ok:true as const,reason:"owner_v4_repair_preview_only",
    expectedPolicyId:txt(a.policy_id),expectedPolicyHash:txt(a.policy_hash),
-   expectedRevision:Number(a.revision),repaired:false as const,
+   expectedRevision:Number(a.revision),authorityId:txt(grants.rows[0]?.authority_id),
+   expectedDeployedSha:sha,grantExpiresAt:String(grants.rows[0]?.expires_at),
+   repaired:false as const,
    tradingAuthorized:false as const,ordersSubmitted:false as const,killSwitchChanged:false as const};
  }catch{return no("owner_v4_repair_preview_unavailable");}
  finally{c?.release();}
