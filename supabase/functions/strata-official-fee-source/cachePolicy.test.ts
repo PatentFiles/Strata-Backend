@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   isUsableFeeCapture,parseBridgeMode,GENERAL_FEE_CAPTURE_MAX_AGE_MS,
   V4_FEE_CAPTURE_MAX_AGE_MS,STRICT_V4_QUERY,
+  feeProvenanceHeaders,V4_VERSIONED_FEE_LEASE_POLICY,
   V4_VERSIONED_LEASE_MS,VERSIONED_V4_QUERY,
 } from "./cachePolicy";
 
@@ -53,4 +54,18 @@ test("versioned official V4 source retains actual capture timestamp and hash lea
  assert.equal(isUsableFeeCapture(recorded(55*60_000),validLease,now,"v4_versioned"),false);
  assert.equal(isUsableFeeCapture(recorded(-1000),lease,now,"v4_versioned"),false);
  assert.equal(isUsableFeeCapture(recorded(30*60_000),recorded(1),now,"v4_versioned"),false);
+});
+
+test("issuer GET and verified replay are clearly attributed without asserting a new capture",()=>{
+ const original=feeProvenanceHeaders("v4_versioned","edge_issuer_get");
+ const reused=feeProvenanceHeaders("v4_versioned","immutable_verified_storage");
+ assert.equal(original["x-strata-fee-response-origin"],"edge_issuer_get");
+ assert.equal(reused["x-strata-fee-response-origin"],"immutable_verified_storage");
+ assert.equal(original["x-strata-fee-document-lease-policy"],V4_VERSIONED_FEE_LEASE_POLICY);
+ assert.equal(reused["x-strata-fee-document-lease-policy"],V4_VERSIONED_FEE_LEASE_POLICY);
+ assert.equal("x-strata-captured-at" in reused,false,
+   "provenance helper cannot fabricate or refresh a capture timestamp");
+ assert.equal("x-strata-fee-document-lease-policy" in
+   feeProvenanceHeaders("v4_strict","edge_issuer_get"),false,
+   "strict V4 never claims to use the versioned 55-minute policy");
 });
