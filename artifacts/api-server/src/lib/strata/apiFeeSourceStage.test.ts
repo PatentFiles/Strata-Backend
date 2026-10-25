@@ -56,6 +56,18 @@ test("two-person technical ADMIN and owner consent passes source-only eligibilit
   assert.match(v.identity.digest,/^[a-f0-9]{64}$/);
  }
 });
+test("reviewed API stage accepts a genuine bounded 60-minute grant, not a 60m+ grant",async()=>{
+ const issued=now-60_000;
+ const r={...row(),issued_at:new Date(issued),
+   expires_at:new Date(issued+60*60_000),
+   first_signed:new Date(issued-5_000),
+   first_expires:new Date(now+2*60*60_000)};
+ const good=await verifyReviewedApiFeeSourceStage(owner,"STEP_9",sourceUrl,undefined,deps([r]));
+ assert.equal(good.ok,true,JSON.stringify(good));
+ const bad=await verifyReviewedApiFeeSourceStage(owner,"STEP_9",sourceUrl,undefined,
+   deps([{...r,expires_at:new Date(issued+60*60_000+1)}]));
+ assert.equal(bad.ok,false);
+});
 test("every order probe must bind the exact ticker",async()=>{
  let observedMarket="";
  const data=deps();

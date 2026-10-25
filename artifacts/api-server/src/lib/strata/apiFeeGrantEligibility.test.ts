@@ -80,6 +80,19 @@ test("denies missing or altered technical reviewer, revoked roles and altered ow
   assert.equal(result.tradingAuthorized,false);
  }
 });
+test("60-minute bounded reviewed API bootstrap grant passes eligibility, without order authorization",()=>{
+ const v=fixture();
+ const issued=now-60_000;
+ v.grant!.issuedAtMs=issued;
+ v.grant!.expiresAtMs=issued+60*60_000;
+ v.reviews[0]!.expiresAtMs=now+2*60*60_000;
+ assert.equal(evaluatePdfFreeApiGrant(v).ok,true);
+ assert.equal(evaluatePdfFreeApiGrant(v).tradingAuthorized,false);
+ v.grant!.expiresAtMs=issued+60*60_000+1;
+ assert.equal(evaluatePdfFreeApiGrant(v).ok,false,"must deny >60-minute grant");
+ v.grant!.expiresAtMs=now;
+ assert.equal(evaluatePdfFreeApiGrant(v).ok,false,"must deny expired grant");
+});
 test("a fresh observation cannot silently authorize an unreviewed order-entry stage",()=>{
  const x=fixture();x.stage="ORDER_ENTRY";
  assert.equal(evaluatePdfFreeApiGrant(x).ok,true);
