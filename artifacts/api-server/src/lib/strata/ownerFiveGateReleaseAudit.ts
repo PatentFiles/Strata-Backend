@@ -94,16 +94,24 @@ export async function inspectOwnerFiveGateReleaseAudit(
   const records=await db.query(LEDGER_SQL,[owner]);
   if(records.rows.length!==1)return empty("owned_execution_account_missing_or_ambiguous");
   const a=records.rows[0]!;
-  const [api,v4]=await Promise.all([
-    (deps.reviewed??inspectApiFeeSourceReadiness)(owner,undefined,db as never),
-    (deps.v4??inspectWalletV4Readiness)(owner,{db}),
-  ]);
-  const r=empty("owner_five_gate_read_only_evidence");
-  r.ok=true;r.remaining=[];
-  r.deployedSha=v4.deployedSha;
-  r.policyPath=a.fee_policy_version==="strata_api_fee_source_signed_review_v2"
+  const policyPath=a.fee_policy_version==="strata_api_fee_source_signed_review_v2"
    ?"reviewed_api_v2":a.fee_policy_version==="strata_owner_provider_dynamic_fee_v4"
    ?"dynamic_v4":"unrecognized";
+  // An unrelated fee pathway can fail or be unavailable. Never turn a
+  // reviewed-API read outage into a missing V4 owner/commissioning/cash gate.
+  // Read V4 separately because it also carries exact-SHA exit/owner records.
+  const [v4Read,apiRead]=await Promise.allSettled([
+    (deps.v4??inspectWalletV4Readiness)(owner,{db}),
+    policyPath==="reviewed_api_v2"
+      ?(deps.reviewed??inspectApiFeeSourceReadiness)(owner,undefined,db as never)
+      :Promise.resolve(null),
+  ]);
+  const v4=v4Read.status==="fulfilled"?v4Read.value:null;
+  const api=apiRead.status==="fulfilled"?apiRead.value:null;
+  const r=empty("owner_five_gate_read_only_evidence");
+  r.ok=true;r.remaining=[];
+  r.deployedSha=v4?.deployedSha??null;
+  r.policyPath=policyPath;
   r.account.commissioned=a.commissioned===true;
   r.account.fiveDollarPolicyApproved=a.fee_policy_version==="strata_api_fee_source_signed_review_v2"
    ?reviewedApiFiveDollarSnapshot(a)
@@ -117,13 +125,13 @@ export async function inspectOwnerFiveGateReleaseAudit(
   r.cash.localExposureFlat=a.open_intents===0&&a.open_positions===0&&a.open_exits===0;
   // API readiness is an owner-scoped DB read. No live provider observation is
   // performed here; do not describe a stored review as verified market fees.
-  r.fee.independentReview=gate(api.ok===true&&Number(api.currentReviewers??0)>0);
-  r.fee.reviewedApiGrant=gate(api.ok===true&&!!api.grantId);
-  r.fee.ownerFeeConsent=gate(api.ok===true&&api.ownerConsentRecorded===true);
-  r.fee.v4Evidence=gate(v4.checks.modelEvidence);
-  r.fee.v4Authority=gate(v4.checks.feeAuthority);
-  r.exit.protectiveRelease=gate(v4.checks.protectiveExitRelease);
-  r.owner.exactShaApproval=gate(v4.checks.ownerShaApproval);
+  r.fee.independentReview=gate(api?.ok===true&&Number(api.currentReviewers??0)>0);
+  r.fee.reviewedApiGrant=gate(api?.ok===true&&!!api.grantId);
+  r.fee.ownerFeeConsent=gate(api?.ok===true&&api.ownerConsentRecorded===true);
+  r.fee.v4Evidence=gate(v4?.checks.modelEvidence===true);
+  r.fee.v4Authority=gate(v4?.checks.feeAuthority===true);
+  r.exit.protectiveRelease=gate(v4?.checks.protectiveExitRelease===true);
+  r.owner.exactShaApproval=gate(v4?.checks.ownerShaApproval===true);
   if(!r.account.commissioned||!r.account.fiveDollarPolicyApproved)
    r.remaining.push("verify_owner_commissioning_and_approved_five_dollar_policy");
   // Each source has its OWN proof chain. An owner's approved V4 policy
