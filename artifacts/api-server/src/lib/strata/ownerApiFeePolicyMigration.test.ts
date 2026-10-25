@@ -10,6 +10,10 @@ import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSour
 const OWNER="11111111-1111-4111-8111-111111111111";
 const POLICY="22222222-2222-4222-8222-222222222222";
 const HASH="a".repeat(64);
+const acceptedPreviewReadiness=async()=>({ok:true,ownerUserId:OWNER,currentReviewers:1,
+ grantId:"33333333-3333-4333-8333-333333333333",ownerConsentRecorded:true,
+ grantExpiresAt:new Date(Date.now()+10*60_000).toISOString()}) as never;
+
 const request={confirmation:OWNER_API_FEE_MIGRATION_CONFIRM,
  expectedPolicyId:POLICY,expectedPolicyHash:HASH,expectedPolicyVersion:1};
 
@@ -89,7 +93,7 @@ test("eligible owner receives read-only exact policy identity for subsequent exp
    execution_enabled:false,kill_switch:true,blocked_reason:null,
    cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
  },release(){}})};
- const result=await previewOwnedApiFeeMigration(OWNER,{db});
+ const result=await previewOwnedApiFeeMigration(OWNER,{db,readiness:acceptedPreviewReadiness});
  assert.equal(result.ok,true,JSON.stringify(result));
  if(!result.ok) return;
  assert.equal(result.policyMigrated,false);
@@ -113,7 +117,7 @@ test("owner preview permits killed and stopped account with durable eligibility 
    blocked_reason:"awaiting_account_commissioning",
    cash_precision_verified:true,reconciled_at:new Date().toISOString()}]};
  },release(){}})};
- const result=await previewOwnedApiFeeMigration(OWNER,{db});
+ const result=await previewOwnedApiFeeMigration(OWNER,{db,readiness:acceptedPreviewReadiness});
  assert.equal(result.ok,true,JSON.stringify(result));
  if(!result.ok)return;
  assert.equal(result.requiresCommissioningRepair,true);
@@ -121,6 +125,48 @@ test("owner preview permits killed and stopped account with durable eligibility 
  assert.equal(queries.some(q=>/UPDATE|INSERT|DELETE/.test(q)),false);
 });
 
+test("preview rejects missing, malformed, and future reconciliations instead of falsely showing owner eligibility",async()=>{
+ for(const time of [null,"not-a-date",new Date(Date.now()+60_000).toISOString(),
+    new Date(Date.now()-16*60_000).toISOString()]){
+  let readinessCalled=false;
+  const db={connect:async()=>({query:async()=>({rows:[{
+   policy_id:POLICY,policy_hash:HASH,version:1,state:"APPROVED",
+   commissioned:true,fee_policy_version:"strata_owner_provider_dynamic_fee_v4",
+   kill_switch:true,blocked_reason:"awaiting_account_commissioning",
+   cash_precision_verified:true,reconciled_at:time,
+  }]}),release(){}})};
+  const r=await previewOwnedApiFeeMigration(OWNER,{db,readiness:(async()=>{
+   readinessCalled=true;return {ok:true};
+  }) as never});
+  assert.equal(r.ok,false);
+  assert.equal(r.reason,"fresh_cash_reconciliation_required");
+  assert.equal(readinessCalled,false,"do not request fee status with invalid cash timestamp");
+ }
+});
+test("preview refuses approval sequence until actual independent review, grant, consent and TTL are valid",async()=>{
+ const db={connect:async()=>({query:async()=>({rows:[{
+  policy_id:POLICY,policy_hash:HASH,version:1,state:"APPROVED",
+  commissioned:true,fee_policy_version:"strata_owner_provider_dynamic_fee_v4",
+  kill_switch:true,blocked_reason:"awaiting_account_commissioning",
+  cash_precision_verified:true,reconciled_at:new Date().toISOString(),
+ }]}),release(){}})};
+ const base={ok:true,ownerUserId:OWNER,currentReviewers:1,
+  grantId:"33333333-3333-4333-8333-333333333333",ownerConsentRecorded:true,
+  grantExpiresAt:new Date(Date.now()+10*60_000).toISOString()};
+ const cases=[
+  [{...base,currentReviewers:0},"independent_api_fee_review_required"],
+  [{...base,grantId:null},"owner_reviewed_api_fee_grant_required"],
+  [{...base,ownerConsentRecorded:false},"owner_reviewed_api_fee_consent_required"],
+  [{...base,grantExpiresAt:new Date(Date.now()+10_000).toISOString()},"reviewed_api_fee_grant_expires_too_soon"],
+  [{...base,ownerUserId:"99999999-9999-4999-8999-999999999999"},"reviewed_api_fee_readiness_unavailable"],
+ ] as const;
+ for(const [response,expected] of cases){
+  const r=await previewOwnedApiFeeMigration(OWNER,{db,readiness:async()=>response as never});
+  assert.equal(r.ok,false,expected);
+  assert.equal(r.reason,expected);
+  assert.equal(r.tradingAuthorized,false);
+ }
+});
 test("legacy commissioning sentinel needs a SECOND exact owner confirmation and never silently clears",async()=>{
  const statements:string[]=[];
  const db={connect:async()=>({query:async(sql:string)=>{
