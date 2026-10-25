@@ -4,6 +4,7 @@
 // https://kalshi.com/docs/kalshi-fee-schedule.pdf; storage remains private.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { isUsableFeeCapture, parseBridgeMode } from "./cachePolicy.ts";
+import { providerRetryDeadline } from "./providerRetryPolicy.ts";
 
 const OFFICIAL_URL = "https://kalshi.com/docs/kalshi-fee-schedule.pdf";
 const BUCKET = "strata-official-fee-artifacts";
@@ -142,30 +143,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }, signal: AbortSignal.timeout(12000),
       });
     } catch { return json("canonical_source_network_unavailable", 503); }
+    // This point is reached only after the actual issuer HTTP attempt.
+    // Persist the actual provider-origin status separately from a shared
+    // cooldown response, without creating any capture/grant/order record.
     if (!response.ok) {
-      // The atomic capture lease is 30m even when the provider rejects the
-      // request. Return that window to the authenticated caller; never spin.
-      if(response.status===429){
-        // The upstream really responded 429 on this invocation, as distinct
-        // from the shared lease rejecting a request without provider contact.
-        const throttle=await client.from("strata_official_fee_capture_throttle")
-          .select("next_allowed_at").eq("id",true).maybeSingle();
-        const saved=throttle.error?NaN:Date.parse(throttle.data?.next_allowed_at??"");
-        const upstreamHeader=response.headers.get("retry-after");
-        const upstreamSeconds=upstreamHeader && /^\d{1,5}$/.test(upstreamHeader)
-          ? Number(upstreamHeader):0;
-        const maxDelay=Number.isSafeInteger(upstreamSeconds)&&upstreamSeconds<=86400
-          ? upstreamSeconds:0;
-        const deadline=Math.max(Number.isFinite(saved)?saved:0,
-          Date.now()+maxDelay*1000);
-        // No fabricated deadline if the shared lease could not be confirmed.
-        if(!Number.isFinite(saved))return json("capture_throttle_unavailable",503);
-        const seconds=Math.max(1,Math.min(86400,Math.ceil((deadline-Date.now())/1000)));
+      if (response.status===429) {
+        const retryAt=providerRetryDeadline(response.headers.get("retry-after"),Date.now());
+        const result=await client.rpc("strata_record_official_fee_provider_result",{
+          p_status:429,p_retry_at:retryAt,
+        });
+        if(result.error||typeof result.data!=="string")
+          return json("provider_result_provenance_unavailable",503);
+        const deadline=Date.parse(result.data);
+        if(!Number.isFinite(deadline))return json("provider_retry_deadline_unavailable",503);
+        const seconds=Math.max(1,Math.min(86400,
+          Math.ceil((deadline-Date.now())/1000)));
         return json("canonical_source_http_429",429,seconds,
           "provider",new Date(deadline).toISOString());
       }
-      return json(`canonical_source_http_${response.status}`, 502);
+      const recorded=await client.rpc("strata_record_official_fee_provider_result",{
+        p_status:response.status,p_retry_at:null,
+      });
+      if(recorded.error)return json("provider_result_provenance_unavailable",503);
+      return json(`canonical_source_http_${response.status}`,502);
     }
+    const recorded=await client.rpc("strata_record_official_fee_provider_result",{
+      p_status:200,p_retry_at:null,
+    });
+    if(recorded.error)return json("provider_result_provenance_unavailable",503);
     if (response.url !== OFFICIAL_URL ||
         response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()
           !== "application/pdf") return json("canonical_source_identity_invalid", 502);
