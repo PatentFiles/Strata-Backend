@@ -77,8 +77,8 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.ok=true;r.nextActions=[];
   r.emailVerified=isTrue(a.email_verified);
   r.ownedAccountUnique=isTrue(a.account_exists);
-  const roles=Array.isArray(a.active_roles)?a.active_roles.filter((v):v is string=>typeof v==="string"):[];
-  r.credentials.verifiedRoles=ROLES.filter(role=>roles.filter(x=>x===role).length===1);
+  const roles:string[]=Array.isArray(a.active_roles)?a.active_roles.filter((v:unknown):v is string=>typeof v==="string"):[];
+  r.credentials.verifiedRoles=ROLES.filter(role=>roles.filter((x:string)=>x===role).length===1);
   r.credentials.allFourRecorded=r.credentials.verifiedRoles.length===ROLES.length&&
     roles.length===ROLES.length;
   r.funding.historicalOrCompletedTransferRecorded=isTrue(a.funding_recorded);
