@@ -126,10 +126,25 @@ export async function inspectOwnerFiveGateReleaseAudit(
   r.owner.exactShaApproval=gate(v4.checks.ownerShaApproval);
   if(!r.account.commissioned||!r.account.fiveDollarPolicyApproved)
    r.remaining.push("verify_owner_commissioning_and_approved_five_dollar_policy");
-  if(!(r.fee.independentReview.recordPresent&&r.fee.reviewedApiGrant.recordPresent&&
-       r.fee.ownerFeeConsent.recordPresent)&&
-     !(r.fee.v4Evidence.recordPresent&&r.fee.v4Authority.recordPresent))
-   r.remaining.push("obtain_authentic_fee_issuer_terms_admin_review_grant_and_owner_consent");
+  // Each source has its OWN proof chain. An owner's approved V4 policy
+  // NEVER requires the alternative ADMIN-reviewed API-source pathway.
+  // An expired PDF or API transport lease cannot be mistaken for a denial
+  // of owner commissioning, signed cash or protective-exit qualification.
+  if(r.policyPath==="dynamic_v4"){
+   if(!r.fee.v4Evidence.recordPresent)
+    r.remaining.push("v4_issuer_pdf_and_market_fee_model_evidence_missing");
+   if(!r.fee.v4Authority.recordPresent)
+    r.remaining.push("v4_owner_mfa_fee_consent_missing");
+  }else if(r.policyPath==="reviewed_api_v2"){
+   if(!r.fee.independentReview.recordPresent)
+    r.remaining.push("reviewed_api_independent_fee_review_missing");
+   if(!r.fee.reviewedApiGrant.recordPresent)
+    r.remaining.push("reviewed_api_owner_specific_grant_missing");
+   if(!r.fee.ownerFeeConsent.recordPresent)
+    r.remaining.push("reviewed_api_owner_mfa_consent_missing");
+  }else{
+   r.remaining.push("unrecognized_owner_fee_policy_requires_approved_migration");
+  }
   if(!r.cash.persistedReconciliationFresh||!r.cash.localExposureFlat)
    r.remaining.push("refresh_kalshi_signed_cash_positions_orders_fills_and_exit_reservations");
   // Even current DB cash is NOT a signed exchange read performed by this audit.
