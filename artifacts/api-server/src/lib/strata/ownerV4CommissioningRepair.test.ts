@@ -48,6 +48,7 @@ function fixture(
    if(normalized.includes("JOIN public.v13_live_money_policy")&&
       normalized.includes("WHERE a.owner_user_id"))return {rows:[a]};
    if(normalized.startsWith("SELECT request FROM public.v13_production_intent"))return {rows:[]};
+   if(normalized.startsWith("SELECT g.authority_id::text,g.expires_at"))return {rows:[{authority_id:authority,expires_at:new Date(now+300_000).toISOString()}]};
    if(normalized.startsWith("SELECT e.market_ticker"))return {rows:[{
     market_ticker:ticker,model_digest:modelDigest,official_source_digest:source}]};
    if(normalized.startsWith("SELECT * FROM public.v13_production_account"))return {rows:[a]};
@@ -73,7 +74,7 @@ function fixture(
 test("preview does not require another reviewer and keeps approved V4 policy unchanged",async()=>{
  const f=fixture(),res=await previewOwnerV4CommissioningRepair(owner,f.deps);
  assert.equal(res.ok,true,JSON.stringify(res));
- if(res.ok){assert.equal(res.expectedPolicyId,base.policy_id);assert.equal(res.repaired,false);}
+ if(res.ok){assert.equal(res.expectedPolicyId,base.policy_id);assert.equal(res.authorityId,authority);assert.equal(res.expectedDeployedSha,sha);assert.equal(res.repaired,false);}
  assert.deepEqual(f.writes,[]);
 });
 test("owner input, unrelated freeze and stale cash fail closed before issuer or signer",async()=>{
