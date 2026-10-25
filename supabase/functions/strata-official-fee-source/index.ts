@@ -3,7 +3,7 @@
 // JWT required at the Supabase gateway. The only outbound provider request is
 // https://kalshi.com/docs/kalshi-fee-schedule.pdf; storage remains private.
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { isUsableFeeCapture, parseBridgeMode } from "./cachePolicy.ts";
+import { isUsableFeeCapture, parseBridgeMode, feeProvenanceHeaders, type BridgeMode, type FeeResponseOrigin } from "./cachePolicy.ts";
 import { providerRetryDeadline } from "./providerRetryPolicy.ts";
 
 const OFFICIAL_URL = "https://kalshi.com/docs/kalshi-fee-schedule.pdf";
@@ -64,7 +64,8 @@ async function boundedPdf(response: Response): Promise<Uint8Array | null> {
   for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.length; }
   return data;
 }
-function pdfResponse(bytes: Uint8Array, digest: string, capturedAt: string): Response {
+function pdfResponse(bytes: Uint8Array, digest: string, capturedAt: string,
+  mode: BridgeMode, origin: FeeResponseOrigin): Response {
   return new Response(new Uint8Array(bytes), {
     status: 200,
     headers: {
@@ -75,6 +76,7 @@ function pdfResponse(bytes: Uint8Array, digest: string, capturedAt: string): Res
       "x-strata-canonical-source": OFFICIAL_URL,
       "x-strata-source-sha256": digest,
       "x-strata-captured-at": capturedAt,
+      ...feeProvenanceHeaders(mode, origin),
     },
   });
 }
@@ -113,7 +115,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           if (validPdf(bytes) && bytes.length === saved.byte_length) {
             const digest = await fingerprint(bytes);
             if (digest === saved.content_sha256) {
-              return pdfResponse(bytes, digest, saved.captured_at);
+              return pdfResponse(bytes, digest, saved.captured_at, mode, "immutable_verified_storage");
             }
           }
         }
@@ -181,6 +183,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const bytes = await boundedPdf(response);
     if (!bytes || !validPdf(bytes)) return json("canonical_pdf_invalid", 502);
     const digest = await fingerprint(bytes);
+    // Time of the completed *actual issuer byte download*, not storage/SQL latency.
+    const capturedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.parse(capturedAt) + CACHE_MS).toISOString();
     const path = `official/${digest}.pdf`;
 
     // Creating a bucket is performed through the Storage API, never storage SQL.
@@ -201,8 +206,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
           await fingerprint(new Uint8Array(await existing.data.arrayBuffer())) !== digest)
         return json("immutable_fee_storage_error", 503);
     }
-    const capturedAt = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + CACHE_MS).toISOString();
     const entry = await client.from("strata_official_fee_captures").insert({
       canonical_url: OFFICIAL_URL,
       storage_path: path,
@@ -212,7 +215,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       expires_at: expiresAt,
     });
     if (entry.error) return json("fee_evidence_ledger_write_failed", 503);
-    return pdfResponse(bytes, digest, capturedAt);
+    return pdfResponse(bytes, digest, capturedAt, mode, "edge_issuer_get");
   } catch {
     // Never surface service-role tokens, Postgres details, or upstream headers.
     return json("canonical_fee_source_unavailable", 503);
