@@ -18,6 +18,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
  FROM v13_production_account a
  JOIN v13_live_money_policy p ON p.id=a.policy_id
    AND p.execution_account_id=a.id
+ JOIN public.strata_configured_stake s ON s.execution_account_id=a.id
  JOIN live_execution_config live ON live.id='singleton'
  JOIN private.kalshi_account_worker_lease lease
    ON lease.execution_account_id=a.id AND lease.owner_user_id=a.owner_user_id
@@ -47,7 +48,13 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    -- An entry/increase needs BOTH independently reviewed executable EXIT code
    -- and this account owner's separately authenticated exact-SHA release.
    -- Neither the checkbox nor any client-provided reduce_only flag grants it.
-   AND (NOT $8::boolean OR (a.reconciled_at<=now() AND a.reconciled_at>now()-interval '15 minutes' AND a.cash_micros>=a.reserved_micros AND
+   AND (NOT $8::boolean OR (a.reconciled_at<=now() AND a.reconciled_at>now()-interval '15 minutes' AND a.cash_micros>=a.reserved_micros
+      AND s.configured_stake_cents=p.max_entry_stake_cents
+      AND p.max_entry_stake_cents BETWEEN 500 AND 2500000
+      AND p.max_entry_all_in_cents>=p.max_entry_stake_cents
+      AND p.max_entry_all_in_cents<=p.capital_limit_cents
+      AND s.risk_capital_cents=p.capital_limit_cents
+      AND a.cash_micros-a.reserved_micros>=p.max_entry_all_in_cents::bigint*10000 AND
       EXISTS (
         SELECT 1 FROM private.strata_owner_sha_approvals oa
         WHERE oa.owner_user_id=a.owner_user_id
@@ -63,7 +70,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
           AND x.operator_approver_id<>x.independent_reviewer_id
       )
    ))
- FOR SHARE OF a,p,live,c,lease
+ FOR SHARE OF a,p,s,live,c,lease
 `;
 export function createGuardedReviewedApiFeeFetch(
  ownerUserId:string,executionAccountId:string,sourceUrl:string,transport:typeof fetch,
