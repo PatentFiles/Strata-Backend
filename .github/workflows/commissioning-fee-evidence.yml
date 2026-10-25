@@ -5,6 +5,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/commissioningFeeEvidenceDiagnostic.ts'
       - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.ts'
       - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -30,3 +32,7 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFiveGateReleaseAudit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFiveGateReleaseAudit.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerFiveGateReleaseAudit.test.cjs
+      - name: Validate all account-setup states without modifying financial records
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerAccountOnboardingReadiness.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerAccountOnboardingReadiness.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerAccountOnboardingReadiness.test.cjs

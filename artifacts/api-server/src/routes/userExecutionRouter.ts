@@ -7,6 +7,7 @@ import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule
 import {observeOfficialTariffHtml} from "../lib/strata/officialTariffHtmlObservation";
 import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
 import {inspectOwnerFiveGateReleaseAudit} from "../lib/strata/ownerFiveGateReleaseAudit";
+import {inspectOwnerAccountOnboardingReadiness} from "../lib/strata/ownerAccountOnboardingReadiness";
 import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeConsent} from "../lib/strata/walletV4OwnerConsent";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
@@ -702,6 +703,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     res.setHeader("Cache-Control","private, no-store");
     const out=await revokeWalletV4FeeConsent(owner,req.body);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // Early personal account onboarding is not Steps 12-13 or trading
+  // authorization. No exchange calls, credentials, fee PDF or mutations.
+  router.get("/onboarding/my-setup-readiness",async (_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await inspectOwnerAccountOnboardingReadiness(owner);
     res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   // #165: compare all five owner release-evidence gates independently. This
