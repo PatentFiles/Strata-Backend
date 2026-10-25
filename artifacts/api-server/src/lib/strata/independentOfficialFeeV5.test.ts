@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5,V5_URL,V5_VERSION} from "./independentOfficialFeeV5";
 const owner="d06bc1ce-718b-42d1-8e3d-2779249661f2";
 const account="strata-account-2e3180472d83df50f13ce7f9";
@@ -81,4 +82,40 @@ test("stored bytes must have original timestamp, expiry, exact digest and source
  const out=await readIndependentOfficialFeeV5({db,clock:()=>t,enabled:()=>true,target:()=>account});
  assert.equal(out.ok,false);
  assert.equal(out.reason,"v5_issuer_capture_corrupted_or_expired");
+});
+
+test("real unchanged PDF fixture is parsed and recorded only with authenticated fixed-source HTTP 200",async()=>{
+ const bytes=readFileSync("attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
+ let persisted=false;
+ const db={query:async(sql:string,args?:unknown[])=>{
+   if(sql.includes("SELECT id FROM public.v13_production_account"))return {rows:[{id:account}]};
+   if(sql.includes("FROM private.strata_railway_official_fee_capture_v5"))return {rows:[]};
+   if(sql.includes("SELECT next_attempt_at FROM private.strata_railway_fee_retry_v5"))return {rows:[]};
+   if(sql.includes("SET next_allowed_at=clock_timestamp()"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
+   if(sql.includes("last_provider_http_status=$1"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
+   if(sql.includes("INSERT INTO private.strata_railway_official_fee_capture_v5")){
+     assert.equal(args?.[0],account);
+     assert.equal(args?.[2],V5_URL);
+     assert.equal(Buffer.isBuffer(args?.[4]),true);
+     assert.equal((args?.[4] as Buffer).equals(bytes),true);
+     assert.equal(args?.[6],"2026-07-07");
+     persisted=true;
+     return {rows:[{capture_id:1}]};
+   }
+   if(sql.includes("INSERT INTO private.strata_railway_fee_retry_v5"))return {rows:[]};
+   throw Error("unexpected SQL");
+ }};
+ const resp=new Response(new Uint8Array(bytes),{status:200,headers:{
+  "content-type":"application/pdf","content-length":String(bytes.length)}});
+ Object.defineProperty(resp,"url",{value:V5_URL});
+ const out=await captureIndependentOfficialFeeV5(owner,{
+  db,clock:()=>t,enabled:()=>true,target:()=>account,
+  fetcher:(async()=>resp) as typeof fetch});
+ assert.equal(out.ok,true,JSON.stringify(out));
+ assert.equal(persisted,true);
+ if(out.ok){
+   assert.equal(out.reason,"v5_genuine_railway_issuer_capture_recorded");
+   assert.equal(out.tradingAuthorized,false);
+   assert.equal(out.ordersSubmitted,false);
+ }
 });
