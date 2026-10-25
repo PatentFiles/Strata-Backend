@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
+import {existsSync,readFileSync} from "node:fs";
 import {inspectOwnerFiveGateReleaseAudit} from "./ownerFiveGateReleaseAudit";
 const owner="11111111-1111-4111-8111-111111111111";
 const now=Date.parse("2026-10-24T23:00:00Z");
@@ -84,12 +84,14 @@ test("missing or ambiguous owner and malformed user identity fail closed",async(
  assert.equal(ambig.ok,false);
 });
 test("route is authenticated and read-only and separate from provider PDF preflight",()=>{
- const router=readFileSync(new URL("../../routes/userExecutionRouter.ts",import.meta.url),"utf8");
+ const routePath=existsSync("src/routes/userExecutionRouter.ts")?"src/routes/userExecutionRouter.ts":"artifacts/api-server/src/routes/userExecutionRouter.ts";
+ const router=readFileSync(routePath,"utf8");
  assert.match(router,/router\.get\("\/release\/five-gate-audit"/);
  assert.match(router,/const owner=subject\(res\)/);
  assert.match(router,/inspectOwnerFiveGateReleaseAudit\(owner\)/);
  assert.match(router,/Cache-Control","private, no-store"/);
- const code=readFileSync(new URL("./ownerFiveGateReleaseAudit.ts",import.meta.url),"utf8");
+ const sourcePath=existsSync("src/lib/strata/ownerFiveGateReleaseAudit.ts")?"src/lib/strata/ownerFiveGateReleaseAudit.ts":"artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.ts";
+ const code=readFileSync(sourcePath,"utf8");
  assert.doesNotMatch(code,/verifyMonetaryFeeContract|fetchTrustedFeeFromSupabaseBridge|authorizeWalletV4FeeModel/);
  assert.doesNotMatch(code,/\b(UPDATE|INSERT|DELETE)\b.*public\./);
 });
