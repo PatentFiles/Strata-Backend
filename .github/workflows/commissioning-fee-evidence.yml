@@ -15,6 +15,10 @@ on:
       - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.test.ts'
       - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.ts'
       - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts'
+      - 'lib/db/drizzle/0039_official_fee_provider_result_provenance.sql'
+      - 'supabase/functions/strata-official-fee-source/index.ts'
+      - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.ts'
+      - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -60,3 +64,10 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts --bundle --platform=node --format=cjs --outfile=dist/isolatedIssuerFeeSourceStatus.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/isolatedIssuerFeeSourceStatus.test.cjs
+      - name: Verify exact issuer Retry-After handling without provider network calls
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/providerRetryPolicy.test.ts --bundle --platform=node --format=cjs --outfile=dist/providerRetryPolicy.test.cjs
+          node artifacts/api-server/dist/providerRetryPolicy.test.cjs
+      - name: Bundle fee bridge source for Deno syntax validation
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/index.ts --bundle --platform=browser --format=esm --external:npm:* --outfile=dist/officialFeeBridge.syntax.mjs

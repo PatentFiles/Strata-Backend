@@ -55,3 +55,27 @@ test("no database access or ambiguous rows fail without grants or provider fetch
   db:{async query(){return {rows:[{},{}]}}},now:()=>now});
  assert.equal(many.ok,false);
 });
+
+test("actual provider 429 audit is distinct from a shared lease denial",async()=>{
+ const observed=now-10_000;
+ const r=await inspect({
+  last_capture_at:null,capture_expiry:null,
+  next_allowed_at:new Date(now+1_700_000),
+  last_provider_http_status:429,last_provider_at:new Date(observed)
+ },[]);
+ assert.equal(r.ok,true);
+ assert.equal(r.captureState,"never_captured");
+ assert.equal(r.retryState,"shared_lease_active");
+ assert.equal(r.lastProviderHttpStatus,429);
+ assert.equal(r.lastProviderAt,new Date(observed).toISOString());
+ assert.equal(r.rateLimitOrigin,"unknown");
+ assert.equal(r.tradingAuthorized,false);
+});
+test("missing or malformed provider status is not a fabricated issuer rejection",async()=>{
+ const r=await inspect({last_capture_at:null,capture_expiry:null,
+  next_allowed_at:new Date(now+1_000),
+  last_provider_http_status:null,last_provider_at:null},[]);
+ assert.equal(r.lastProviderHttpStatus,null);
+ assert.equal(r.lastProviderAt,null);
+ assert.equal(r.rateLimitOrigin,"unknown");
+});
