@@ -11,6 +11,37 @@ import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 type Db={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const safeInteger=(v:unknown):number|null=>{
+ if(typeof v==="number"&&Number.isSafeInteger(v))return v;
+ if(typeof v==="string"&&/^(0|[1-9]\\d*)$/.test(v)){
+  const n=Number(v);return Number.isSafeInteger(n)?n:null;
+ }
+ return null;
+};
+/** V4's signed gate deliberately rejects reviewed-API policy versions.
+ * This separate readback verifies only persisted, coherent $5 risk limits
+ * for a reviewed-API policy; it NEVER authorizes that policy or an order.
+ */
+const reviewedApiFiveDollarSnapshot=(row:Record<string,unknown>):boolean=>{
+ if(row.fee_policy_version!=="strata_api_fee_source_signed_review_v2"||
+    row.state!=="APPROVED"||
+    typeof row.policy_hash!=="string"||!/^[a-f0-9]{64}$/.test(row.policy_hash))return false;
+ const stake=safeInteger(row.configured_stake_cents);
+ const max=safeInteger(row.max_entry_stake_cents);
+ const allIn=safeInteger(row.max_entry_all_in_cents);
+ const capital=safeInteger(row.capital_limit_cents);
+ const budget=safeInteger(row.risk_capital_cents);
+ const daily=safeInteger(row.max_daily_loss_cents);
+ const total=safeInteger(row.max_total_loss_cents);
+ const revision=safeInteger(row.risk_preset_revision);
+ return stake===500&&max===500&&allIn!==null&&allIn>=500&&
+   capital!==null&&capital>=allIn&&budget===capital&&
+   daily!==null&&daily>0&&daily<=capital&&
+   total!==null&&total>0&&total<=capital&&
+   revision!==null&&revision>=1&&
+   typeof row.risk_preset_id==="string"&&row.risk_preset_id.length>0&&
+   row.risk_preset_id.length<=120;
+};
 type Gate={recordPresent:boolean;verifiedInThisRequest:false};
 type Result={
  ok:boolean;reason:string;readOnly:true;tradingAuthorized:false;ordersSubmitted:false;
@@ -74,8 +105,9 @@ export async function inspectOwnerFiveGateReleaseAudit(
    ?"reviewed_api_v2":a.fee_policy_version==="strata_owner_provider_dynamic_fee_v4"
    ?"dynamic_v4":"unrecognized";
   r.account.commissioned=a.commissioned===true;
-  r.account.fiveDollarPolicyApproved=approvedDynamicStakeSnapshot(a).ok &&
-   a.configured_stake_cents===500;
+  r.account.fiveDollarPolicyApproved=a.fee_policy_version==="strata_api_fee_source_signed_review_v2"
+   ?reviewedApiFiveDollarSnapshot(a)
+   :approvedDynamicStakeSnapshot(a).ok&&a.configured_stake_cents===500;
   r.account.killSwitchOn=a.kill_switch===true;
   const t=a.reconciled_at instanceof Date?a.reconciled_at.getTime():
     Date.parse(String(a.reconciled_at??""));
