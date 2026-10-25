@@ -172,10 +172,12 @@ export async function issueApiFeeSourceGrant(
   const distinct=new Set(reviews.rows.map(r=>String(r.reviewer_user_id)));
   if(distinct.size!==1 || reviews.rows.length!==1 || !distinct.has(adminId))
     return denied("technical_admin_rate_review_missing_or_ambiguous");
-  const now=Date.now();
-  const expiry=Math.min(now+15*60_000,
-    ...reviews.rows.map(r=>new Date(r.expires_at as string).getTime()));
-  if(!Number.isFinite(expiry)||expiry<now+60_000)return denied("rate_review_expiring");
+  // Derive issued_at and expires_at from the same PostgreSQL transaction clock.
+  // JS Date.now()+15min can exceed the SQL CHECK by milliseconds due to clock skew.
+  // The locked review query above already enforces >60 seconds of validity.
+  const reviewExpiresAt=reviews.rows[0]!.expires_at;
+  if(!Number.isFinite(new Date(reviewExpiresAt as string).getTime()))
+    return denied("rate_review_expiring");
   const id=randomUUID();
   const rows=await c.query(`
    INSERT INTO private.strata_api_fee_source_grants
@@ -183,16 +185,17 @@ export async function issueApiFeeSourceGrant(
      fee_model_version,policy_version,scope,authorized_stages,
      confirmation,issued_at,expires_at)
    VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,'KXBTC15M:INDEX2',
-     ARRAY['STEP_9','STEP_11','ORDER_ENTRY']::text[],$7,now(),$8::timestamptz)
-   RETURNING grant_id`,[
+     ARRAY['STEP_9','STEP_11','ORDER_ENTRY']::text[],$7,now(),
+     LEAST(now()+interval '15 minutes',$8::timestamptz))
+   RETURNING grant_id,expires_at`,[
     id,b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
     PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_POLICY_SIGNED_REVIEW_V1,
-    API_GRANT_CONFIRM,new Date(expiry).toISOString()
+    API_GRANT_CONFIRM,reviewExpiresAt
    ]);
   return rows.rows.length===1
-   ?recorded("reviewed_api_fee_grant_recorded_only",id,new Date(expiry).toISOString())
-   :denied("api_fee_grant_not_created");
- });
+   ?recorded("reviewed_api_fee_grant_recorded_only",id,
+      new Date(rows.rows[0]!.expires_at as string).toISOString())
+   :denied("api_fee_grant_not_created"); });
 }
 
 /** Only the authenticated execution-account owner can consent to a current

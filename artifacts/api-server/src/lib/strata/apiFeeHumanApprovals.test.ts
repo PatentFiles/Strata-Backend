@@ -21,7 +21,7 @@ const assertNoAuthority=(v:{policyApproved:boolean;commissioningApproved:boolean
  assert.equal(v.commissioningApproved,false);
  assert.equal(v.tradingAuthorized,false);
 };
-function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;activeGrant?:boolean;activeReview?:boolean}={}){
+function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;activeGrant?:boolean;activeReview?:boolean;grantExpiry?:string}={}){
  const calls:string[]=[];
  let commits=0;
  const client={
@@ -45,7 +45,7 @@ function fixture(options:{admin?:boolean;reviewers?:number;grant?:boolean;active
    if(sql.includes("INSERT INTO private.strata_api_fee_rate_reviews"))
     return {rows:[{review_id:"review",expires_at:new Date(Date.now()+60_000)}]};
    if(sql.includes("INSERT INTO private.strata_api_fee_source_grants"))
-    return {rows:[{grant_id:grant}]};
+    return {rows:[{grant_id:grant,expires_at:options.grantExpiry??new Date(Date.now()+12*60_000).toISOString()}]};
    if(sql.includes("INSERT INTO private.strata_api_fee_owner_consents"))
     return {rows:[{consent_id:"consent"}]};
    if(sql.includes("UPDATE private.strata_api_fee_owner_consents"))
@@ -130,6 +130,24 @@ test("grant requires same technical attesting admin, fresh canonical Kalshi fee 
    {ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM},
    accepted.db,(async()=>observed()) as never);
  assert.equal(good.ok,true);assert.equal(accepted.commits,1);assertNoAuthority(good);
+});
+test("grant expiry uses PostgreSQL clock and returns DB-committed timestamp",async()=>{
+ // Regression: JS Date.now()+15m can be milliseconds later than the transaction
+ // timestamp used by the grant's SQL check. Do not weaken that database CHECK.
+ const dbExpiry=new Date(Date.now()+12*60_000).toISOString();
+ const state=fixture({grantExpiry:dbExpiry});
+ const result=await issueApiFeeSourceGrant(admin,{
+  ownerUserId:owner,rateDecisionDigest:digest,confirmation:API_GRANT_CONFIRM,
+ },state.db,(async()=>observed()) as never);
+ assert.equal(result.ok,true);
+ assert.equal(result.expiresAt,dbExpiry);
+ assert.equal(state.commits,1);
+ const grantInsert=state.calls.find(sql=>sql.includes("INSERT INTO private.strata_api_fee_source_grants"));
+ assert.ok(grantInsert);
+ assert.ok(grantInsert.includes("LEAST(now()+interval '15 minutes',$8::timestamptz)"));
+ assert.ok(grantInsert.includes("RETURNING grant_id,expires_at"));
+ assert.equal(grantInsert.includes("now(),$8::timestamptz"),false);
+ assertNoAuthority(result);
 });
 test("owner consent requires authenticated grant ownership and explicit confirmation",async()=>{
  const missing=fixture({grant:false});
