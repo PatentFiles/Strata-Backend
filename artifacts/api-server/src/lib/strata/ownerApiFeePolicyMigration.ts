@@ -176,9 +176,19 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
  if(!("identity" in mapped))return fail(mapped.reason);
  const flat=migrationFlatHistoryCheck(mapped,requests);
  if(!flat.ok)return fail(flat.reason);
+ // The issuer API is checked twice around signed exchange I/O, and each
+ // fresh observation has its own verified timestamp in the candidate digest.
+ // Comparing those ephemeral hashes rejects every legitimate second probe.
+ // Instead preserve grant identity, exact market, and approved fee semantics;
+ // both calls independently validate the live Kalshi monetary fee metadata,
+ // issuer change schedule, consent, stage and unexpired grant.
  const fresh=await verify(ownerId,"STEP_9",first.identity.sourceUrl);
  if(!fresh.ok||fresh.identity.grantId!==first.identity.grantId||
-   fresh.identity.digest!==first.identity.digest)return fail("reviewed_api_fee_grant_changed");
+    fresh.identity.sourceUrl!==first.identity.sourceUrl||
+    fresh.identity.marketTicker!==first.identity.marketTicker||
+    fresh.identity.feePolicyVersion!==first.identity.feePolicyVersion||
+    fresh.identity.formulaVersion!==first.identity.formulaVersion)
+   return fail("reviewed_api_fee_grant_changed");
  try{
   tx=await db.connect();
   await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
