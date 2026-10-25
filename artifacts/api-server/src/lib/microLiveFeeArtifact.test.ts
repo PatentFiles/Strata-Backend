@@ -662,6 +662,29 @@ test("trusted Supabase bridge requires exact project, official origin, fresh has
     origin, anonJwt, () => now), null);
 });
 
+
+test("versioned V4 original issuer PDF remains hash-verified within 55m, not re-stamped",async()=>{
+ const bytes=readFileSync(resolve(process.cwd(),"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf"));
+ const now=Date.parse("2026-10-15T20:00:00Z");
+ const origin="https://wqsmfbzfbiilhtzpqbrb.supabase.co",jwt="x".repeat(100);
+ const headers=(ageMs:number)=>({
+  "content-type":"application/pdf",
+  "x-strata-canonical-source":CANONICAL_FEE_SCHEDULE_URL,
+  "x-strata-source-sha256":createHash("sha256").update(bytes).digest("hex"),
+  "x-strata-captured-at":new Date(now-ageMs).toISOString(),
+ });
+ const request=(ageMs:number)=>(async(url:string|Request|URL)=>{
+   assert.equal(String(url),origin+"/functions/v1/strata-official-fee-source?max_age_seconds=3300");
+   return new Response(new Uint8Array(bytes),{status:200,headers:headers(ageMs)});
+ }) as typeof fetch;
+ const genuine=await fetchTrustedFeeFromSupabaseBridge(request(35*60_000),origin,jwt,()=>now,55*60_000);
+ assert.equal(genuine?.status,200);
+ assert.equal(genuine?.headers.get("x-strata-captured-at"),headers(35*60_000)["x-strata-captured-at"]);
+ assert.equal(genuine?.headers.get("x-strata-source-sha256"),headers(35*60_000)["x-strata-source-sha256"]);
+ assert.equal(await fetchTrustedFeeFromSupabaseBridge(request(55*60_000),origin,jwt,()=>now,55*60_000),null);
+ assert.equal(await fetchTrustedFeeFromSupabaseBridge(request(-1000),origin,jwt,()=>now,55*60_000),null);
+});
+
 test("strict V4 official bridge cooldown never reuses stale PDF or approves fees",async()=>{
   const origin="https://wqsmfbzfbiilhtzpqbrb.supabase.co";
   const jwt="x".repeat(100);
