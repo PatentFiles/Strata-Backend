@@ -674,7 +674,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   const recorded = res.headers.get("x-strata-source-sha256") ?? "";
   const captured = Date.parse(res.headers.get("x-strata-captured-at") ?? "");
   if (!HEX_SHA256.test(recorded) || !Number.isFinite(captured) ||
-      captured > nowMs() + 10_000 || nowMs() - captured >= maxCaptureAgeMs) {
+      captured > nowMs() || nowMs() - captured >= maxCaptureAgeMs) {
     return null;
   }
   let bytes: Buffer | null;
