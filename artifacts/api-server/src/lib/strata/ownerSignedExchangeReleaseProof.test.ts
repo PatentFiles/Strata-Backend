@@ -21,7 +21,7 @@ function mock(row:Record<string,unknown>=account,readCash="25000000"){
    if(sql.includes("v13_production_account")){
     assert.deepEqual(params,[owner]);return {rows:[row]};
    }
-   if(sql.includes("v13_production_intent"))return {rows:[]};
+   if(sql.includes("v13_production_intent")){assert.deepEqual(params,[account.id]);return {rows:[]};}
    throw Error("unexpected SQL");
   }},
   now:()=>at,
@@ -36,7 +36,7 @@ function mock(row:Record<string,unknown>=account,readCash="25000000"){
 test("authenticated owner gets real empty-history read with separate non-authorizing flags",async()=>{
  const m=mock();
  const r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);
- assert.equal(r.ok,true);
+ assert.equal(r.ok,true,JSON.stringify(r));
  if(!r.ok)return;
  assert.equal(r.signedExchangeReadAttempted,true);
  assert.equal(r.authenticatedExchangeFlat,true);
@@ -54,7 +54,7 @@ test("authenticated owner gets real empty-history read with separate non-authori
 test("signed cash mismatch never becomes fee metadata authority",async()=>{
  const m=mock(account,"24000000");
  const r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);
- assert.equal(r.ok,true);
+ assert.equal(r.ok,true,JSON.stringify(r));
  if(!r.ok)return;
  assert.equal(r.exchangeCashMatchesLedger,false);
  assert.equal(r.apiMarketFeeMetadataVerified,false);
