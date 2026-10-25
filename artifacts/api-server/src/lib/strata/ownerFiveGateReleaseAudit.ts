@@ -13,7 +13,7 @@ type Db={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const safeInteger=(v:unknown):number|null=>{
  if(typeof v==="number"&&Number.isSafeInteger(v))return v;
- if(typeof v==="string"&&/^(0|[1-9]\\d*)$/.test(v)){
+ if(typeof v==="string"&&/^(0|[1-9]\d*)$/.test(v)){
   const n=Number(v);return Number.isSafeInteger(n)?n:null;
  }
  return null;
