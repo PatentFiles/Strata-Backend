@@ -7,6 +7,7 @@ import {verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FOR
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
 import type {Identity,Request,Snapshot} from "../v13-production/types";
 import {loadedMaterial,PROVISIONAL_REPAIR_CONFIRM} from "./inAppProtectiveRelease";
+import {inspectApiFeeSourceReadiness} from "./apiFeeHumanApprovals";
 
 /** Owner AAL2 route only. STOP is the kill switch ON, not the
  * durable execution eligibility bit. A killed, disarmed lease can be
@@ -23,7 +24,7 @@ type Failure={ok:false;reason:string;policyMigrated:false;tradingAuthorized:fals
 const fail=(reason:string):Failure=>({ok:false,reason,policyMigrated:false,tradingAuthorized:false});
 type Result=Failure|{ok:true;reason:string;policyMigrated:boolean;tradingAuthorized:false;
  expectedPolicyId?:string;expectedPolicyHash?:string;expectedPolicyVersion?:number;requiresCommissioningRepair?:boolean;newPolicyId?:string;newVersion?:number};
-type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof readOwnedKalshiFeeds;now?:()=>number};
+type Inputs={db?:Db;verify?:typeof verifyReviewedApiFeeSourceStage;read?:typeof readOwnedKalshiFeeds;now?:()=>number;readiness?:typeof inspectApiFeeSourceReadiness};
 const txt=(x:unknown)=>typeof x==="string"?x:"";
 const safeTime=(x:unknown)=>{const n=Date.parse(String(x??""));return Number.isFinite(n)?n:NaN;};
 
@@ -83,8 +84,28 @@ export async function previewOwnedApiFeeMigration(ownerId:string,deps:Inputs={})
   if(a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!==null&&a.blocked_reason!==undefined&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
-  if(a.cash_precision_verified!==true||Date.now()-safeTime(a.reconciled_at)>15*60_000)
+  const now=(deps.now??Date.now)();
+  const cashAt=safeTime(a.reconciled_at);
+  // NaN and future dates must never make an owner migration preview eligible.
+  if(a.cash_precision_verified!==true||!Number.isSafeInteger(now)||
+     !Number.isFinite(cashAt)||cashAt>now+10_000||now-cashAt>15*60_000)
    return fail("fresh_cash_reconciliation_required");
+  // Only stored approval metadata is inspected here. Do NOT fetch the
+  // issuer PDF or perform a market API request from a read-only UI preview.
+  // The signed confirm still independently checks the issuer and exact grant.
+  const approval=await (deps.readiness??inspectApiFeeSourceReadiness)(
+   ownerId,undefined,tx as never);
+  if(!approval.ok||approval.ownerUserId!==ownerId)
+   return fail("reviewed_api_fee_readiness_unavailable");
+  if(!Number.isSafeInteger(approval.currentReviewers)||
+     Number(approval.currentReviewers)<1)
+   return fail("independent_api_fee_review_required");
+  if(!approval.grantId)return fail("owner_reviewed_api_fee_grant_required");
+  if(approval.ownerConsentRecorded!==true)
+   return fail("owner_reviewed_api_fee_consent_required");
+  const grantUntil=Date.parse(String(approval.grantExpiresAt??""));
+  if(!Number.isFinite(grantUntil)||grantUntil<=now+90_000)
+   return fail("reviewed_api_fee_grant_expires_too_soon");
   return {ok:true,reason:"owner_fee_migration_preview_only",policyMigrated:false,tradingAuthorized:false,
    expectedPolicyId:txt(a.policy_id),expectedPolicyHash:txt(a.policy_hash),
    expectedPolicyVersion:Number(a.version),
