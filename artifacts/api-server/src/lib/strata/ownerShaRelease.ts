@@ -124,9 +124,14 @@ export async function authorizeOwnerShaRelease(
     return reject("commissioning_repair_confirmation_not_applicable");
   const global=await tx.query(`SELECT live_execution_enabled,manual_kill_switch,mode
     FROM public.live_execution_config WHERE id='singleton'`);
+  // Exact-SHA owner consent can be recorded while global trading remains killed.
+  // Final entry still requires a separate privileged global release, independent
+  // protective-exit proof, current signed cash/fees and per-order admission.
+  const globalLive=isTrue(global.rows[0]?.live_execution_enabled);
+  const globalKilled=isTrue(global.rows[0]?.manual_kill_switch);
   if(global.rows.length!==1||global.rows[0]?.mode!=="V13_PRODUCTION"||
-    !isTrue(global.rows[0]?.live_execution_enabled)||isTrue(global.rows[0]?.manual_kill_switch))
-    return reject("privileged_global_live_release_required");
+    globalLive===globalKilled)
+    return reject("global_execution_kill_state_inconsistent");
   const proof=await tx.query(`SELECT qualification_id::text,evidence_digest
     FROM private.strata_protective_release_qualification
     WHERE qualification_id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3
@@ -199,11 +204,13 @@ export async function authorizeOwnerShaRelease(
     approvalId=String(saved.rows[0]?.approval_id);
   }
   if(!isTrue(current.execution_enabled)){
+    // A stopped platform can record durable eligibility without opening the
+    // account kill. Never infer permission to trade from this owner consent.
     const enabled=await tx.query(`UPDATE public.v13_production_account
-      SET execution_enabled=true,kill_switch=false,revision=revision+1
+      SET execution_enabled=true,kill_switch=$3::boolean,revision=revision+1
       WHERE id=$1 AND owner_user_id=$2::uuid AND execution_enabled=false
         AND kill_switch=true AND commissioned=true AND blocked_reason IS NULL
-      RETURNING id`,[accountId,ownerId]);
+      RETURNING id`,[accountId,ownerId,globalKilled]);
     if(enabled.rows.length!==1)return reject("owner_account_activation_fence_failed");
    } else {
      // Already eligible but stopped: owner authorization is a recorded
