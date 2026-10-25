@@ -679,8 +679,12 @@ test("versioned V4 original issuer PDF remains hash-verified within 55m, not re-
  }) as typeof fetch;
  const genuine=await fetchTrustedFeeFromSupabaseBridge(request(35*60_000),origin,jwt,()=>now,55*60_000);
  assert.equal(genuine?.status,200);
- assert.equal(genuine?.headers.get("x-strata-captured-at"),headers(35*60_000)["x-strata-captured-at"]);
- assert.equal(genuine?.headers.get("x-strata-source-sha256"),headers(35*60_000)["x-strata-source-sha256"]);
+ // The verifier intentionally strips caller-visible attestation headers after
+ // checking original timestamp + SHA-256 and returns ONLY the validated PDF.
+ assert.equal(genuine?.headers.get("x-strata-captured-at"),null);
+ assert.equal(genuine?.headers.get("x-strata-source-sha256"),null);
+ assert.equal(createHash("sha256").update(Buffer.from(await genuine!.arrayBuffer())).digest("hex"),
+  headers(35*60_000)["x-strata-source-sha256"]);
  assert.equal(await fetchTrustedFeeFromSupabaseBridge(request(55*60_000),origin,jwt,()=>now,55*60_000),null);
  assert.equal(await fetchTrustedFeeFromSupabaseBridge(request(-1000),origin,jwt,()=>now,55*60_000),null);
 });
