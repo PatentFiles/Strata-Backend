@@ -43,9 +43,9 @@ test("five independent release gate observations do not grant trading or clear t
  assert.equal(r.cash.persistedReconciliationFresh,true);
  assert.equal(r.cash.localExposureFlat,true);
  assert.equal(r.cash.signedExchangeReconciliationPerformed,false);
- assert.equal(r.fee.independentReview.recordPresent,true);
- assert.equal(r.fee.reviewedApiGrant.recordPresent,true);
- assert.equal(r.fee.ownerFeeConsent.recordPresent,true);
+ assert.equal(r.fee.independentReview.recordPresent,false);
+ assert.equal(r.fee.reviewedApiGrant.recordPresent,false);
+ assert.equal(r.fee.ownerFeeConsent.recordPresent,false);
  assert.equal(r.fee.ownerFeeConsent.verifiedInThisRequest,false);
  assert.equal(r.fee.v4Authority.recordPresent,false);
  assert.equal(r.exit.protectiveRelease.recordPresent,true);
@@ -94,4 +94,67 @@ test("route is authenticated and read-only and separate from provider PDF prefli
  const code=readFileSync(sourcePath,"utf8");
  assert.doesNotMatch(code,/verifyMonetaryFeeContract|fetchTrustedFeeFromSupabaseBridge|authorizeWalletV4FeeModel/);
  assert.doesNotMatch(code,/\b(UPDATE|INSERT|DELETE)\b.*public\./);
+});
+
+test("owner V4 monetary fee failures do not demand reviewed API ADMIN grants or block signed cash status",async()=>{
+ const a=audit();
+ const r=await a.run();
+ assert.equal(r.policyPath,"dynamic_v4");
+ assert.ok(r.remaining.includes("v4_issuer_pdf_and_market_fee_model_evidence_missing"));
+ assert.ok(r.remaining.includes("v4_owner_mfa_fee_consent_missing"));
+ assert.ok(!r.remaining.some(x=>/admin_review|reviewed_api_/.test(x)));
+ assert.equal(r.cash.persistedReconciliationFresh,true);
+ assert.equal(r.exit.protectiveRelease.recordPresent,true);
+});
+test("only reviewed API V2 accounts receive independent reviewer steps, never a V4 PDF requirement",async()=>{
+ const a={...account,fee_policy_version:"strata_api_fee_source_signed_review_v2",
+  policy_hash:"a".repeat(64),state:"APPROVED",capital_limit_cents:2500,
+  risk_capital_cents:2500,risk_preset_id:"test-20pct",risk_preset_revision:1,
+  max_entry_all_in_cents:625,max_daily_loss_cents:1000,max_total_loss_cents:1500};
+ const result=await inspectOwnerFiveGateReleaseAudit(owner,{
+  db:{async query(){return {rows:[a]}}},
+  reviewed:async()=>({ok:true,currentReviewers:0,grantId:null,ownerConsentRecorded:false}) as never,
+  v4:async()=>({ok:true,deployedSha:"a".repeat(40),checks:{modelEvidence:false,
+   feeAuthority:false,ownerShaApproval:false,protectiveExitRelease:false}}) as never,
+  now:()=>now,
+ });
+ assert.equal(result.policyPath,"reviewed_api_v2");
+ assert.ok(result.remaining.includes("reviewed_api_independent_fee_review_missing"));
+ assert.ok(result.remaining.includes("reviewed_api_owner_specific_grant_missing"));
+ assert.ok(result.remaining.includes("reviewed_api_owner_mfa_consent_missing"));
+ assert.ok(!result.remaining.some(x=>x.includes("v4_issuer_pdf")));
+});
+
+test("broken reviewed API path cannot block V4 owner cash or exit readbacks",async()=>{
+ let reviewedCalled=false;
+ const result=await inspectOwnerFiveGateReleaseAudit(owner,{
+  db:{async query(){return {rows:[account]}}},
+  reviewed:async()=>{reviewedCalled=true;throw Error("unrelated API source outage");},
+  v4:async()=>({ok:true,deployedSha:"b".repeat(40),checks:{
+   modelEvidence:true,feeAuthority:true,ownerShaApproval:true,
+   protectiveExitRelease:true}}) as never,
+  now:()=>now,
+ });
+ assert.equal(reviewedCalled,false);
+ assert.equal(result.ok,true);
+ assert.equal(result.policyPath,"dynamic_v4");
+ assert.equal(result.cash.persistedReconciliationFresh,true);
+ assert.equal(result.exit.protectiveRelease.recordPresent,true);
+ assert.equal(result.owner.exactShaApproval.recordPresent,true);
+ assert.equal(result.fee.v4Authority.recordPresent,true);
+ assert.ok(!result.remaining.some(x=>x.includes("reviewed_api_")));
+});
+test("one failed V4 readiness query cannot erase separately persisted cash or other account evidence",async()=>{
+ const result=await inspectOwnerFiveGateReleaseAudit(owner,{
+  db:{async query(){return {rows:[account]}}},
+  reviewed:async()=>{throw Error("unrelated failure");},
+  v4:async()=>{throw Error("transient V4 read fault");},
+  now:()=>now,
+ });
+ assert.equal(result.ok,true);
+ assert.equal(result.cash.persistedReconciliationFresh,true);
+ assert.equal(result.cash.localExposureFlat,true);
+ assert.equal(result.fee.v4Authority.recordPresent,false);
+ assert.equal(result.exit.protectiveRelease.recordPresent,false);
+ assert.equal(result.tradingAuthorized,false);
 });
