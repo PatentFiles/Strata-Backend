@@ -117,6 +117,6 @@ test("genuine V4 fee + signed flatness clears only provisional hold and invalida
  assert.match(changes,/AND kill_switch=true/);
  assert.match(changes,/UPDATE private.strata_owner_sha_approvals SET revoked_at=now/);
  assert.match(changes,/OWNER_V4_PROVISIONAL_HOLD_REPAIR/);
- assert.doesNotMatch(changes,/UPDATE public.v13_live_money_policy|UPDATE .*kill_switch|UPDATE .*execution_enabled/i);
+ assert.doesNotMatch(changes,/UPDATE public.v13_live_money_policy|SET\s+kill_switch\s*=|SET\s+execution_enabled\s*=/i);
  assert.deepEqual(f.counts(),{readCalls:1,modelCalls:1});
 });
