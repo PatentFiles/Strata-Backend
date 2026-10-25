@@ -132,7 +132,7 @@ test("grant requires same technical attesting admin, fresh canonical Kalshi fee 
  assert.equal(good.ok,true);assert.equal(accepted.commits,1);assertNoAuthority(good);
 });
 test("grant expiry uses PostgreSQL clock and returns DB-committed timestamp",async()=>{
- // Regression: JS Date.now()+15m can be milliseconds later than the transaction
+ // Regression: JS Date.now()+60m can be milliseconds later than the transaction
  // timestamp used by the grant's SQL check. Do not weaken that database CHECK.
  const dbExpiry=new Date(Date.now()+12*60_000).toISOString();
  const state=fixture({grantExpiry:dbExpiry});
@@ -144,7 +144,7 @@ test("grant expiry uses PostgreSQL clock and returns DB-committed timestamp",asy
  assert.equal(state.commits,1);
  const grantInsert=state.calls.find(sql=>sql.includes("INSERT INTO private.strata_api_fee_source_grants"));
  assert.ok(grantInsert);
- assert.ok(grantInsert.includes("LEAST(now()+interval '15 minutes',$8::timestamptz)"));
+ assert.ok(grantInsert.includes("LEAST(now()+interval '60 minutes',$8::timestamptz)"));
  assert.ok(grantInsert.includes("RETURNING grant_id,expires_at"));
  assert.equal(grantInsert.includes("now(),$8::timestamptz"),false);
  assertNoAuthority(result);
