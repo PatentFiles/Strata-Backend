@@ -22,6 +22,7 @@ export type IssuerSourceStatus={
  retryState:"shared_lease_active"|"shared_lease_expired"|"unknown";
  rateLimitOrigin:"unknown";currentForV4:boolean;
  lastCaptureAt:string|null;nextAllowedAt:string|null;
+ lastProviderHttpStatus:number|null;lastProviderAt:string|null;
 };
 export const ISOLATED_ISSUER_SQL=[
  "SELECT",
@@ -30,7 +31,11 @@ export const ISOLATED_ISSUER_SQL=[
  "(SELECT expires_at FROM public.strata_official_fee_captures",
  " WHERE canonical_url=$1 ORDER BY captured_at DESC,id DESC LIMIT 1) capture_expiry,",
  "(SELECT next_allowed_at FROM public.strata_official_fee_capture_throttle",
- " WHERE id=true) next_allowed_at"
+ " WHERE id=true) next_allowed_at,",
+ "(SELECT last_provider_http_status FROM public.strata_official_fee_capture_throttle",
+ " WHERE id=true) last_provider_http_status,",
+ "(SELECT last_provider_at FROM public.strata_official_fee_capture_throttle",
+ " WHERE id=true) last_provider_at"
 ].join(" ");
 const denied=(reason:string):IssuerSourceStatus=>({
  ok:false,reason,readOnly:true,issuerRequestAttempted:false,
@@ -38,6 +43,7 @@ const denied=(reason:string):IssuerSourceStatus=>({
  source:"kalshi_official_fee_pdf",captureState:"unavailable",retryState:"unknown",
  rateLimitOrigin:"unknown",currentForV4:false,
  lastCaptureAt:null,nextAllowedAt:null,
+ lastProviderHttpStatus:null,lastProviderAt:null,
 });
 export async function inspectIsolatedIssuerFeeSourceStatus(
  deps:{db?:Db;now?:()=>number}={},
@@ -54,6 +60,13 @@ export async function inspectIsolatedIssuerFeeSourceStatus(
  const captured=timestamp(r.last_capture_at);
  const expires=timestamp(r.capture_expiry);
  const next=timestamp(r.next_allowed_at);
+ const recordedHttpStatus=Number(r.last_provider_http_status);
+ const lastProviderHttpStatus=r.last_provider_http_status!==null&&
+  Number.isSafeInteger(recordedHttpStatus)&&recordedHttpStatus>=200&&
+  recordedHttpStatus<=599?recordedHttpStatus:null;
+ const providerAt=timestamp(r.last_provider_at);
+ const lastProviderAt=lastProviderHttpStatus!==null&&Number.isFinite(providerAt)&&
+  providerAt<=now?iso(providerAt):null;
  const lastCaptureAt=Number.isFinite(captured)?iso(captured):null;
  const nextAllowedAt=Number.isFinite(next)?iso(next):null;
  const identityValid=lastCaptureAt!==null&&Number.isFinite(expires)&&
@@ -68,6 +81,6 @@ export async function inspectIsolatedIssuerFeeSourceStatus(
   captureState,retryState:nextAllowedAt===null?"unknown":
    next>now?"shared_lease_active":"shared_lease_expired",
   rateLimitOrigin:"unknown",currentForV4,
-  lastCaptureAt,nextAllowedAt,
+  lastCaptureAt,nextAllowedAt,lastProviderHttpStatus,lastProviderAt,
  };
 }
