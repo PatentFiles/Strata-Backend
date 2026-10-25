@@ -29,4 +29,4 @@ jobs:
       - name: Verify all five owner release evidence gates fail closed with no Kalshi requests or orders
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFiveGateReleaseAudit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFiveGateReleaseAudit.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
-          node artifacts/api-server/dist/ownerFiveGateReleaseAudit.test.cjs
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerFiveGateReleaseAudit.test.cjs
