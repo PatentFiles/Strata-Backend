@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -174,4 +175,13 @@ test("revocation requires authenticated owner or issuing admin and is never trad
   {grantId:grant,confirmation:API_GRANT_REVOKE,reason:"Fee evidence has changed"},
   adminDb.db);
  assert.equal(terminated.ok,true);assertNoAuthority(terminated);
+});
+
+test("bounded bootstrap grant requires audited 60m DB cap and never auto-grants trading authority",()=>{
+ const ddl=readFileSync(new URL("../../../../../lib/db/drizzle/0041_review_bounded_owner_bootstrap_fee_grant_60m.sql",import.meta.url),"utf8");
+ assert.match(ddl,/DROP CONSTRAINT IF EXISTS strata_api_fee_source_grants_check1/);
+ assert.match(ddl,/ADD CONSTRAINT strata_api_fee_source_grants_bounded_bootstrap_ttl/);
+ assert.match(ddl,/expires_at <= issued_at \+ interval '60 minutes'/);
+ assert.doesNotMatch(ddl,/INSERT INTO private\.strata_api_fee_(?:source_grants|owner_consents)/);
+ assert.doesNotMatch(ddl,/UPDATE private\.strata_api_fee_source_grants SET expires_at/);
 });
