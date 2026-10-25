@@ -73,7 +73,7 @@ test("owner kill OFF and non-provisional holds reject before retrieving signer",
 test("signed exchange 429 fails without a follow-on series probe or retries",async()=>{
  const m=mock();
  const r=await inspectOwnerSignedExchangeReleaseProof(owner,{
-  ...m.deps,read:async()=>({ok:false,reason:"kalshi_read_rate_limited"}) as never,
+  ...(m.deps as object),read:async()=>({ok:false,reason:"kalshi_read_rate_limited"}) as never,
  } as never);
  assert.equal(r.ok,false);
  assert.match(r.reason,/kalshi_read_rate_limited/);
