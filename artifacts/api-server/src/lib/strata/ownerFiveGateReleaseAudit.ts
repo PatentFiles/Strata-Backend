@@ -7,6 +7,7 @@
 import {pool} from "@workspace/db";
 import {inspectApiFeeSourceReadiness} from "./apiFeeHumanApprovals";
 import {inspectWalletV4Readiness} from "./walletV4CommissioningReadiness";
+import {approvedDynamicStakeSnapshot} from "./approvedDynamicStakeSnapshot";
 
 type Db={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -37,8 +38,9 @@ const empty=(reason:string):Result=>({
 /** SQL reads no credential, auth user identifier, or source artifact bytes. */
 const LEDGER_SQL=[
  "SELECT a.id,a.commissioned,a.kill_switch,a.cash_precision_verified,a.reconciled_at,",
- "p.fee_policy_version,p.state AS policy_state,p.max_entry_stake_cents,",
- "s.configured_stake_cents,",
+ "p.fee_policy_version,p.state,p.policy_hash,p.capital_limit_cents,",
+ "p.max_entry_stake_cents,p.max_entry_all_in_cents,p.max_daily_loss_cents,p.max_total_loss_cents,",
+ "s.configured_stake_cents,s.risk_capital_cents,s.risk_preset_id,s.risk_preset_revision,",
  "(SELECT count(*)::int FROM public.v13_production_intent i",
  " WHERE i.account_id=a.id AND i.terminal IS DISTINCT FROM TRUE) open_intents,",
  "(SELECT count(*)::int FROM public.v13_production_position pos",
@@ -72,8 +74,8 @@ export async function inspectOwnerFiveGateReleaseAudit(
    ?"reviewed_api_v2":a.fee_policy_version==="strata_owner_provider_dynamic_fee_v4"
    ?"dynamic_v4":"unrecognized";
   r.account.commissioned=a.commissioned===true;
-  r.account.fiveDollarPolicyApproved=a.policy_state==="APPROVED" &&
-   a.configured_stake_cents===500 && Number(a.max_entry_stake_cents)>=500;
+  r.account.fiveDollarPolicyApproved=approvedDynamicStakeSnapshot(a).ok &&
+   a.configured_stake_cents===500;
   r.account.killSwitchOn=a.kill_switch===true;
   const t=a.reconciled_at instanceof Date?a.reconciled_at.getTime():
     Date.parse(String(a.reconciled_at??""));
