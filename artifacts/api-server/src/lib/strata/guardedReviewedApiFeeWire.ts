@@ -47,7 +47,12 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    -- An entry/increase needs BOTH independently reviewed executable EXIT code
    -- and this account owner's separately authenticated exact-SHA release.
    -- Neither the checkbox nor any client-provided reduce_only flag grants it.
-   AND (NOT $8::boolean OR (
+   AND (NOT $8::boolean OR (a.reconciled_at<=now() AND a.reconciled_at>now()-interval '15 minutes' AND a.cash_micros>=a.reserved_micros
+      AND EXISTS (SELECT 1 FROM public.strata_configured_stake s WHERE s.execution_account_id=a.id AND s.configured_stake_cents=p.max_entry_stake_cents AND s.risk_capital_cents=p.capital_limit_cents FOR SHARE)
+      AND p.max_entry_stake_cents BETWEEN 500 AND 2500000
+      AND p.max_entry_all_in_cents>=p.max_entry_stake_cents
+      AND p.max_entry_all_in_cents<=p.capital_limit_cents
+      AND a.cash_micros-a.reserved_micros>=p.max_entry_all_in_cents::bigint*10000 AND
       EXISTS (
         SELECT 1 FROM private.strata_owner_sha_approvals oa
         WHERE oa.owner_user_id=a.owner_user_id

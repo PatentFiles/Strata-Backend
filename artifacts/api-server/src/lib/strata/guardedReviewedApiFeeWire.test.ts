@@ -386,3 +386,16 @@ test("P0: production V2 executor emits an explicit false for ENTRY and true for 
  } as never);
  assert.equal(exit.reduce_only,true);
 });
+
+test("reviewed API new entries require 15-minute cash and full fee-inclusive reserves",()=>{
+ const sql=FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL;
+ assert.ok(sql.includes("a.reconciled_at>now()-interval '15 minutes'"));
+ assert.ok(sql.includes("a.cash_micros-a.reserved_micros>=p.max_entry_all_in_cents::bigint*10000"));
+ assert.ok(sql.includes("s.configured_stake_cents=p.max_entry_stake_cents"));
+ assert.ok(sql.includes("s.risk_capital_cents=p.capital_limit_cents"));
+ assert.ok(sql.includes("p.max_entry_all_in_cents<=p.capital_limit_cents"));
+ assert.ok(sql.includes("NOT $8::boolean OR"));
+ assert.ok(sql.includes("FOR SHARE)"));
+ assert.ok(!sql.includes("JOIN public.strata_configured_stake s ON"),
+   "stale stake rows must never prevent an independently safe reduction");
+});
