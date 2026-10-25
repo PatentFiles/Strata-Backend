@@ -377,7 +377,7 @@ export async function readUnapprovedOfficialFeePublication(
    v4OfficialPdfBridgeRetryAt.set(fetchImpl,nowMs()+V4_BRIDGE_MIN_INTERVAL_MS);
    const verified=await fetchTrustedFeeFromSupabaseBridge(
      globalThis.fetch,process.env.SUPABASE_URL,
-     process.env.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,60_000);
+     process.env.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,V4_VERSIONED_ISSUER_LEASE_MS);
    if(verified?.status===200){response=verified;trustedBridge=true;}
    else if(verified?.status===429){
      response=verified; // Genuine rate-limit denial, never fee evidence.
