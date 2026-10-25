@@ -43,9 +43,9 @@ test("five independent release gate observations do not grant trading or clear t
  assert.equal(r.cash.persistedReconciliationFresh,true);
  assert.equal(r.cash.localExposureFlat,true);
  assert.equal(r.cash.signedExchangeReconciliationPerformed,false);
- assert.equal(r.fee.independentReview.recordPresent,true);
- assert.equal(r.fee.reviewedApiGrant.recordPresent,true);
- assert.equal(r.fee.ownerFeeConsent.recordPresent,true);
+ assert.equal(r.fee.independentReview.recordPresent,false);
+ assert.equal(r.fee.reviewedApiGrant.recordPresent,false);
+ assert.equal(r.fee.ownerFeeConsent.recordPresent,false);
  assert.equal(r.fee.ownerFeeConsent.verifiedInThisRequest,false);
  assert.equal(r.fee.v4Authority.recordPresent,false);
  assert.equal(r.exit.protectiveRelease.recordPresent,true);
@@ -123,4 +123,38 @@ test("only reviewed API V2 accounts receive independent reviewer steps, never a 
  assert.ok(result.remaining.includes("reviewed_api_owner_specific_grant_missing"));
  assert.ok(result.remaining.includes("reviewed_api_owner_mfa_consent_missing"));
  assert.ok(!result.remaining.some(x=>x.includes("v4_issuer_pdf")));
+});
+
+test("broken reviewed API path cannot block V4 owner cash or exit readbacks",async()=>{
+ let reviewedCalled=false;
+ const result=await inspectOwnerFiveGateReleaseAudit(owner,{
+  db:{async query(){return {rows:[account]}}},
+  reviewed:async()=>{reviewedCalled=true;throw Error("unrelated API source outage");},
+  v4:async()=>({ok:true,deployedSha:"b".repeat(40),checks:{
+   modelEvidence:true,feeAuthority:true,ownerShaApproval:true,
+   protectiveExitRelease:true}}) as never,
+  now:()=>now,
+ });
+ assert.equal(reviewedCalled,false);
+ assert.equal(result.ok,true);
+ assert.equal(result.policyPath,"dynamic_v4");
+ assert.equal(result.cash.persistedReconciliationFresh,true);
+ assert.equal(result.exit.protectiveRelease.recordPresent,true);
+ assert.equal(result.owner.exactShaApproval.recordPresent,true);
+ assert.equal(result.fee.v4Authority.recordPresent,true);
+ assert.ok(!result.remaining.some(x=>x.includes("reviewed_api_")));
+});
+test("one failed V4 readiness query cannot erase separately persisted cash or other account evidence",async()=>{
+ const result=await inspectOwnerFiveGateReleaseAudit(owner,{
+  db:{async query(){return {rows:[account]}}},
+  reviewed:async()=>{throw Error("unrelated failure");},
+  v4:async()=>{throw Error("transient V4 read fault");},
+  now:()=>now,
+ });
+ assert.equal(result.ok,true);
+ assert.equal(result.cash.persistedReconciliationFresh,true);
+ assert.equal(result.cash.localExposureFlat,true);
+ assert.equal(result.fee.v4Authority.recordPresent,false);
+ assert.equal(result.exit.protectiveRelease.recordPresent,false);
+ assert.equal(result.tradingAuthorized,false);
 });
