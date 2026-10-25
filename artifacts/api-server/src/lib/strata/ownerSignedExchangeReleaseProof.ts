@@ -19,7 +19,7 @@ type ProofDeps={
  map?:typeof personalAccountSnapshot;flat?:typeof migrationFlatHistoryCheck;
  feeProbe?:typeof probeCurrentKalshiFeeApi;v4?:typeof inspectWalletV4Readiness;
 };
-const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const digits=(x:unknown)=>typeof x==="string"&&/^(0|[1-9]\d*)$/.test(x);
 const no=(reason:string)=>({
  ok:false as const,reason,readOnly:true as const,ordersSubmitted:false as const,
