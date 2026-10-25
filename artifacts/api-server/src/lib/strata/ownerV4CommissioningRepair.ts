@@ -31,7 +31,7 @@ const txt=(v:unknown)=>typeof v==="string"?v:"";
 const ts=(v:unknown)=>v instanceof Date?v.getTime():Date.parse(String(v??""));
 const cash=(v:unknown)=>/^(0|[1-9]\d*)$/.test(String(v??""));
 const accountSql=[
- "SELECT a.*,p.state AS policy_state,p.policy_hash,p.fee_policy_version,",
+ "SELECT a.*,p.state AS state,p.policy_hash,p.fee_policy_version,",
  "p.max_entry_stake_cents,p.max_entry_all_in_cents,p.capital_limit_cents,",
  "p.max_daily_loss_cents,p.max_total_loss_cents,",
  "s.configured_stake_cents,s.risk_capital_cents,s.risk_preset_id,s.risk_preset_revision",
@@ -58,7 +58,7 @@ export async function previewOwnerV4CommissioningRepair(ownerId:string,deps:Deps
   const rs=await c.query(accountSql,[ownerId]);
   if(rs.rows.length!==1)return no("owned_policy_missing_or_ambiguous");
   const a=rs.rows[0]!;
-  if(a.commissioned!==true||a.policy_state!=="APPROVED"||
+  if(a.commissioned!==true||a.state!=="APPROVED"||
      a.fee_policy_version!==VERSION||!approvedDynamicStakeSnapshot(a).ok)
    return no("approved_owner_v4_policy_required");
   if(a.blocked_reason!=="awaiting_account_commissioning")
