@@ -41,7 +41,10 @@ export type ApiFeeGrantDecision={
  tradingAuthorized:false;
 };
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_GRANT_MS=15*60_000;
+// Must match the bounded PostgreSQL bootstrap TTL and issuance SQL (60 minutes).
+// A grant is still rejected on expiry/revocation; this cap does not extend
+// independent review, owner consent, market observations or trade authority.
+const MAX_GRANT_MS=60*60_000;
 const deny=(reason:string):ApiFeeGrantDecision=>({
  ok:false,reason,sourceKind:API_FEE_POLICY_SOURCE_V1,
  eligibleForIndependentPolicyReview:false,
