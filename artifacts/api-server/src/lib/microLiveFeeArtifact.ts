@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
+import { readIndependentOfficialFeeV5 } from "./strata/independentOfficialFeeV5";
 export { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 // Capture the real transport before any tests can monkeypatch global fetch.
@@ -318,6 +319,23 @@ export async function readUnapprovedOfficialFeePublication(
  // canonical PDF GET ahead of its atomic Supabase claim.
  const centrallyGated=fetchImpl===PRODUCTION_FEE_FETCH&&
    globalThis.fetch===PRODUCTION_FEE_FETCH;
+ // V5: a genuine independent Railway TLS capture is allowed for the
+ // configured *single* owner account, with original bytes/digest/timestamp
+ // reverified from an immutable database row. It is NOT an Edge capture.
+ // Dynamic owner authorization still makes a separate live first-party
+ // exact-market fee API observation at this AND the signed-order boundary.
+ if(centrallyGated && process.env.STRATA_V5_RAILWAY_CAPTURE_ENABLED==="true"){
+   const proof=await readIndependentOfficialFeeV5();
+   if(proof.ok)return {ok:true,digest:proof.digest,
+     normalizedText:proof.normalizedText,
+     observedAt:new Date(nowMs()).toISOString()};
+   // Missing independent evidence may use the ordinary existing Edge path.
+   // A present but corrupted or unverifiable independent artifact is a
+   // security failure, never an excuse to fall back to another origin.
+   if(proof.reason!=="v5_genuine_issuer_capture_missing")
+     return {ok:false,reason:proof.reason};
+ }
+
  const directRetryAt=v4OfficialPdfDirectRetryAt.get(fetchImpl)??0;
  const directSuppressed=directRetryAt>start;
  let response:Response|null=null;
