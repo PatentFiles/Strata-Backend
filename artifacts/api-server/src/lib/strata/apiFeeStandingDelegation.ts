@@ -17,7 +17,7 @@ export const STANDING_OWNER_CONFIRM="I_AUTHORIZE_MY_ACCOUNT_FOR_STANDING_KXBTC15
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
-const OFFICIAL=/^https:\/\/(?:help\.)?kalshi\.com\/(?:docs\/|en\/articles\/|regulatory\/)[A-Za-z0-9.\/_-]+$/;
+const OFFICIAL=/^https:\/\/(?:help\.)?kalshi\.com\/(?:docs\/|en\/articles\/|regulatory\/)[A-Za-z0-9.\/_-]+$|^https:\/\/kalshi\.com\/fee-schedule\?product=predictions$/;
 type Row=Record<string,unknown>;
 type Client={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>;release():void};
 type Db={query:Client["query"];connect():Promise<Client>};
@@ -94,6 +94,14 @@ export async function consentStandingFeeDelegation(
     !UUID.test(text(b.modelId))||!UUID.test(text(b.grantId))||
     b.confirmation!==STANDING_OWNER_CONFIRM)
   return deny("explicit_owner_standing_fee_consent_required");
+ // The reviewed migration already bound the owner to the original grant ID.
+ // Enrollment into a signed standing model is a NEW explicit owner action,
+ // not a recreation of the original expired 15-minute bootstrap grant.
+ // Check current issuer metadata before opening a transaction.
+ let observed;
+ try{observed=preparePdfFreeApiFeePolicyReview(await (deps.probe??probeCurrentKalshiFeeApi)());}
+ catch{return deny("standing_owner_live_fee_observation_unavailable");}
+ if(!observed.ok)return deny("standing_owner_live_fee_observation_unverified");
  const db=deps.db??pool;
  try{
  return await tx(db,async c=>{
@@ -107,12 +115,30 @@ export async function consentStandingFeeDelegation(
     "WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2",
     "AND p.state='APPROVED' AND p.fee_source_url='strata-api-reviewed://kxbtc15m/'||lower(g.grant_id::text)",
     "AND g.grant_id=$2::uuid AND g.revoked_at IS NULL",
-    "AND g.expires_at>now()+interval '60 seconds' AND g.policy_version=$3",
+    "AND p.fee_policy_version=$3",
+    "AND EXISTS(SELECT 1 FROM auth.users issuer",
+    " JOIN private.role_assignments issuer_role",
+    " ON lower(btrim(issuer_role.email))=lower(btrim(issuer.email))",
+    " WHERE issuer.id=g.issuer_admin_id AND issuer.email_confirmed_at IS NOT NULL",
+    " AND issuer_role.role='ADMIN')",
+    "AND g.policy_version=$3 AND g.fee_model_version=$5",
     "AND g.rate_decision_digest=$4 AND g.scope='KXBTC15M:INDEX2'",
+    "AND g.issuer_admin_id<>a.owner_user_id",
+    "AND g.confirmation='ISSUE_REVIEWED_API_FEE_POLICY_GRANT_V1'",
+    "AND con.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'",
+    "AND con.confirmed_at>=g.issued_at AND con.confirmed_at<=g.expires_at",
+    "AND g.authorized_stages @> ARRAY['STEP_11','ORDER_ENTRY']::text[]",
+    "AND EXISTS(SELECT 1 FROM private.strata_api_fee_rate_reviews original",
+    " WHERE original.owner_user_id=g.owner_user_id",
+    " AND original.reviewer_user_id=g.issuer_admin_id",
+    " AND original.rate_decision_digest=g.rate_decision_digest",
+    " AND original.fee_model_version=g.fee_model_version",
+    " AND original.revoked_at IS NULL AND original.signed_at<=g.issued_at)",
     "LIMIT 2 FOR UPDATE OF a"
-  ].join(" "),[ownerId,b.grantId,API_POLICY_SIGNED_REVIEW_V1,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
+  ].join(" "),[ownerId,b.grantId,API_POLICY_SIGNED_REVIEW_V1,
+    PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION]);
   if(locked.rows.length!==1||!DIGEST.test(text(locked.rows[0]?.policy_hash)))
-   return deny("approved_owned_policy_or_fresh_grant_required");
+   return deny("approved_owned_policy_or_original_grant_evidence_required");
   const model=await c.query([
     "SELECT m.model_id,m.reviewer_admin_id,m.valid_until",
     "FROM private.strata_api_fee_standing_models m",
