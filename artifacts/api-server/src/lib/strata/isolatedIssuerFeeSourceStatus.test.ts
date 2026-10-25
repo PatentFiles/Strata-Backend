@@ -36,12 +36,17 @@ test("active shared lease cannot be described as a provider-origin 429",async()=
  assert.equal(r.retryState,"shared_lease_active");
  assert.equal(r.rateLimitOrigin,"unknown");
 });
-test("only truly original issuer captures younger than 60 seconds qualify as fresh for V4",async()=>{
+test("only original issuer-captured PDF within versioned V4 lease is a viable source",async()=>{
  const fresh=await inspect({last_capture_at:new Date(now-35_000),
   capture_expiry:new Date(now+10_000),next_allowed_at:null},[]);
  assert.equal(fresh.currentForV4,true);assert.equal(fresh.captureState,"fresh_capture");
- const old=await inspect({last_capture_at:new Date(now-61_000),
-  capture_expiry:new Date(now+600_000),next_allowed_at:null},[]);
+ const original=await inspect({last_capture_at:new Date(now-35*60_000),
+  capture_expiry:new Date(now+60_000),next_allowed_at:null},[]);
+ assert.equal(original.currentForV4,true);
+ assert.equal(original.lastCaptureAt,new Date(now-35*60_000).toISOString());
+ assert.equal(original.grantRecorded,false);
+ const old=await inspect({last_capture_at:new Date(now-55*60_000),
+  capture_expiry:new Date(now+60_000),next_allowed_at:null},[]);
  assert.equal(old.currentForV4,false);assert.equal(old.captureState,"expired_capture");
  const future=await inspect({last_capture_at:new Date(now+1000),
   capture_expiry:new Date(now+600_000),next_allowed_at:null},[]);
