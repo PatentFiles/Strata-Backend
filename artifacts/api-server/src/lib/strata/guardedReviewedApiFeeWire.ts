@@ -47,7 +47,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    -- An entry/increase needs BOTH independently reviewed executable EXIT code
    -- and this account owner's separately authenticated exact-SHA release.
    -- Neither the checkbox nor any client-provided reduce_only flag grants it.
-   AND (NOT $8::boolean OR (
+   AND (NOT $8::boolean OR (a.reconciled_at<=now() AND a.reconciled_at>now()-interval '15 minutes' AND a.cash_micros>=a.reserved_micros AND
       EXISTS (
         SELECT 1 FROM private.strata_owner_sha_approvals oa
         WHERE oa.owner_user_id=a.owner_user_id
