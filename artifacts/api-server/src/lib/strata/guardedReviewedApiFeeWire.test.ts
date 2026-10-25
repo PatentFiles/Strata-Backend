@@ -117,7 +117,7 @@ test("final transaction refuses revoked signer, closed account or global kill be
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.fencing_token=\$6::bigint/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.holder_id=\$7/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.state=\x27owned\x27/);
- assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,s,live,c,lease/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,live,c,lease/);
  let sent=0,verified=0,rolledBack=0,released=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
  const db={query:async(sql:string)=>{
@@ -385,4 +385,17 @@ test("P0: production V2 executor emits an explicit false for ENTRY and true for 
   reduceOnly:true,
  } as never);
  assert.equal(exit.reduce_only,true);
+});
+
+test("reviewed API new entries require 15-minute cash and full fee-inclusive reserves",()=>{
+ const sql=FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL;
+ assert.ok(sql.includes("a.reconciled_at>now()-interval '15 minutes'"));
+ assert.ok(sql.includes("a.cash_micros-a.reserved_micros>=p.max_entry_all_in_cents::bigint*10000"));
+ assert.ok(sql.includes("s.configured_stake_cents=p.max_entry_stake_cents"));
+ assert.ok(sql.includes("s.risk_capital_cents=p.capital_limit_cents"));
+ assert.ok(sql.includes("p.max_entry_all_in_cents<=p.capital_limit_cents"));
+ assert.ok(sql.includes("NOT $8::boolean OR"));
+ assert.ok(sql.includes("FOR SHARE)"));
+ assert.ok(!sql.includes("JOIN public.strata_configured_stake s ON"),
+   "stale stake rows must never prevent an independently safe reduction");
 });
