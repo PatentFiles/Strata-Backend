@@ -288,9 +288,27 @@ export async function inspectStandingFeeReadiness(
  const release=(deps.sha??deployedGitSha)();
  if(!UUID.test(ownerId)||!SHA.test(release))
   return {...deny("owner_or_backend_sha_unavailable"),modelId:null,modelValidUntil:null,
-   delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+   delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
  try{
   const db=deps.db??pool;
+  // The original grant is an immutable source identifier on the ALREADY
+  // approved migrated policy, not a currently valid grant or live authority.
+  // Exposing it to its JWT owner allows explicit standing-model consent even
+  // if the original 15-minute bootstrap lease expired. The mutation later
+  // enforces original signer, consent, revocations, exact SHA and fresh issuer.
+  const policies=await db.query([
+   "SELECT p.fee_source_url FROM public.v13_production_account a",
+   "JOIN public.v13_live_money_policy p ON p.id=a.policy_id",
+   "AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text",
+   "WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2",
+   "AND p.state='APPROVED' AND p.fee_policy_version=$2 LIMIT 2"
+  ].join(" "),[ownerId,API_POLICY_SIGNED_REVIEW_V1]);
+  if(policies.rows.length>1)return {...deny("owner_reviewed_policy_ambiguous"),
+   modelId:null,modelValidUntil:null,delegationId:null,
+   delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
+  const m=/^strata-api-reviewed:\/\/kxbtc15m\/([0-9a-f-]{36})$/.exec(
+   text(policies.rows[0]?.fee_source_url));
+  const bootstrapGrantId=m&&UUID.test(m[1]??"")?m[1]:null;
   const models=await db.query([
     "SELECT m.model_id::text,m.valid_until",
     "FROM private.strata_api_fee_standing_models m",
@@ -303,7 +321,7 @@ export async function inspectStandingFeeReadiness(
     "LIMIT 2"
   ].join(" "),[release,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION]);
   if(models.rows.length>1)return {...deny("standing_fee_models_ambiguous"),
-   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
   const model=models.rows[0];
   const delegation=model?await db.query([
     "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at",
@@ -317,7 +335,7 @@ export async function inspectStandingFeeReadiness(
     "AND d.release_commit_sha=$3 LIMIT 2"
   ].join(" "),[ownerId,model.model_id,release]):{rows:[] as Row[]};
   if(delegation.rows.length>1)return {...deny("standing_fee_delegations_ambiguous"),
-   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
   const d=delegation.rows[0];
   return {
    ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
@@ -326,8 +344,8 @@ export async function inspectStandingFeeReadiness(
    delegationId:d?text(d.delegation_id):null,
    delegationValidUntil:d?.valid_until??null,
    leaseExpiresAt:d?.lease_expires_at??null,
-   grantId:d?text(d.grant_id):null,
+   grantId:d?text(d.grant_id):null,bootstrapGrantId,
   };
  }catch{return {...deny("standing_fee_readiness_unavailable"),
-  modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};}
+  modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};}
 }
