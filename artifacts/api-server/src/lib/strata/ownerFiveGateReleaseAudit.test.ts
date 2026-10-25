@@ -62,6 +62,19 @@ test("stale persisted cash and unresolved local intents are independent blockers
  assert.ok(r.remaining.includes("refresh_kalshi_signed_cash_positions_orders_fills_and_exit_reservations"));
  assert.equal(r.tradingAuthorized,false);
 });
+test("reviewed API V2 $5 approved stake is not wrongly failed by V4-only validator",async()=>{
+ const a={...account,fee_policy_version:"strata_api_fee_source_signed_review_v2",
+  policy_hash:"a".repeat(64),state:"APPROVED",capital_limit_cents:2500,
+  risk_capital_cents:2500,risk_preset_id:"test-20pct",risk_preset_revision:1,
+  max_entry_all_in_cents:625,max_daily_loss_cents:1000,max_total_loss_cents:1500};
+ const r=await audit(a).run();
+ assert.equal(r.ok,true);
+ assert.equal(r.policyPath,"reviewed_api_v2");
+ assert.equal(r.account.fiveDollarPolicyApproved,true);
+ assert.equal(r.tradingAuthorized,false);
+ const invalid=await audit({...a,policy_hash:"not-a-sha"}).run();
+ assert.equal(invalid.account.fiveDollarPolicyApproved,false);
+});
 test("missing or ambiguous owner and malformed user identity fail closed",async()=>{
  const missing=await inspectOwnerFiveGateReleaseAudit(owner,{db:{async query(){return {rows:[]};}}});
  assert.equal(missing.ok,false);
