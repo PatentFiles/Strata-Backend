@@ -9,12 +9,16 @@
 export const V4_FEE_CAPTURE_MAX_AGE_MS = 60_000;
 export const GENERAL_FEE_CAPTURE_MAX_AGE_MS = 55 * 60_000;
 export const STRICT_V4_QUERY = "?max_age_seconds=60";
+/** V5 is a *document observation* only: no grant and no restamped capture. */
+export const V5_REVIEWED_DOCUMENT_QUERY = "?document_policy=v5-reviewed-55m";
+export const V5_DOCUMENT_POLICY_VERSION = "strata_fee_document_v5_observation_only" as const;
 
-export type BridgeMode = "general" | "v4_strict";
+export type BridgeMode = "general" | "v4_strict" | "v5_document";
 
 export function parseBridgeMode(search: string): BridgeMode | null {
   if (search === "") return "general";
   if (search === STRICT_V4_QUERY) return "v4_strict";
+  if (search === V5_REVIEWED_DOCUMENT_QUERY) return "v5_document";
   return null;
 }
 
