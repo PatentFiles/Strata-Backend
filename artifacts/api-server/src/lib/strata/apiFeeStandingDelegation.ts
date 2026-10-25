@@ -335,7 +335,7 @@ export async function inspectStandingFeeReadiness(
     "AND d.release_commit_sha=$3 LIMIT 2"
   ].join(" "),[ownerId,model.model_id,release]):{rows:[] as Row[]};
   if(delegation.rows.length>1)return {...deny("standing_fee_delegations_ambiguous"),
-   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null};
+   modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
   const d=delegation.rows[0];
   return {
    ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
