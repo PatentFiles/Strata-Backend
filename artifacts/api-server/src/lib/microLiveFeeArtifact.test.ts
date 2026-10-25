@@ -923,6 +923,8 @@ test("production monetary PDF authority uses one shared provider lease and never
     source.indexOf("async function readPdfWithinLimit"));
   assert.match(edge,/if\(!directSuppressed&&!centrallyGated\)/);
   assert.match(edge,/const canBridge=centrallyGated/);
+  assert.match(edge,/process\\.env\\.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,V4_VERSIONED_ISSUER_LEASE_MS\\)/);
+  assert.doesNotMatch(edge,/process\\.env\\.STRATA_FEE_BRIDGE_ANON_JWT,nowMs,60_000\\)/);
   assert.match(edge,/response=verified; \/\/ Genuine rate-limit denial/);
   assert.doesNotMatch(edge,/recentPinnedOfficialFeeSnapshot\(/);
 });
