@@ -86,10 +86,10 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
  try{
   const owner=await db.query(String.raw`SELECT id FROM public.v13_production_account
     WHERE owner_user_id=$1::uuid AND id=$2 AND subaccount=1 AND exchange_index=2
-      AND commissioned=true AND kill_switch=true LIMIT 2`,[ownerId,target(d)]);
-  if(owner.rows.length!==1)return no("v5_exact_killed_owner_required");
+      AND commissioned=true LIMIT 2`,[ownerId,target(d)]);
+  if(owner.rows.length!==1)return no("v5_exact_commissioned_owner_required");
   const cached=await readIndependentOfficialFeeV5(d);
-  if(cached.ok)return {ok:true as const,reason:"v5_previous_real_capture_reused",
+  if(cached.ok && Date.parse(cached.originalCapturedAt)+50*60_000>now())return {ok:true as const,reason:"v5_previous_real_capture_reused",
    digest:cached.digest,originalCapturedAt:cached.originalCapturedAt,effectiveDate:cached.effectiveDate,
    tradingAuthorized:false as const,ordersSubmitted:false as const};
   if(cached.reason!=="v5_genuine_issuer_capture_missing")return no(cached.reason);
