@@ -92,7 +92,7 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
   if(cached.ok && Date.parse(cached.originalCapturedAt)+50*60_000>now())return {ok:true as const,reason:"v5_previous_real_capture_reused",
    digest:cached.digest,originalCapturedAt:cached.originalCapturedAt,effectiveDate:cached.effectiveDate,
    tradingAuthorized:false as const,ordersSubmitted:false as const};
-  if(cached.reason!=="v5_genuine_issuer_capture_missing")return no(cached.reason);
+  if(!cached.ok && cached.reason!=="v5_genuine_issuer_capture_missing")return no(cached.reason);
   const claim=await db.query(String.raw`UPDATE public.strata_official_fee_capture_throttle
     SET next_allowed_at=clock_timestamp()+interval '30 minutes'
     WHERE id=true AND next_allowed_at<=clock_timestamp() RETURNING next_allowed_at`);
