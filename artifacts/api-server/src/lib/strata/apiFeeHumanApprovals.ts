@@ -173,7 +173,7 @@ export async function issueApiFeeSourceGrant(
   if(distinct.size!==1 || reviews.rows.length!==1 || !distinct.has(adminId))
     return denied("technical_admin_rate_review_missing_or_ambiguous");
   // Derive issued_at and expires_at from the same PostgreSQL transaction clock.
-  // JS Date.now()+15min can exceed the SQL CHECK by milliseconds due to clock skew.
+  // JS Date.now()+60min can exceed the SQL CHECK by milliseconds due to clock skew.
   // The locked review query above already enforces >60 seconds of validity.
   const reviewExpiresAt=reviews.rows[0]!.expires_at;
   if(!Number.isFinite(new Date(reviewExpiresAt as string).getTime()))
@@ -186,7 +186,7 @@ export async function issueApiFeeSourceGrant(
      confirmation,issued_at,expires_at)
    VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,'KXBTC15M:INDEX2',
      ARRAY['STEP_9','STEP_11','ORDER_ENTRY']::text[],$7,now(),
-     LEAST(now()+interval '15 minutes',$8::timestamptz))
+     LEAST(now()+interval '60 minutes',$8::timestamptz))
    RETURNING grant_id,expires_at`,[
     id,b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
     PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_POLICY_SIGNED_REVIEW_V1,
