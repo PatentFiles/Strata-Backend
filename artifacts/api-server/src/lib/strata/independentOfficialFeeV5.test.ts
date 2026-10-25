@@ -16,6 +16,7 @@ test("shared issuer cooldown forbids any provider request",async()=>{
    calls.push(sql.trim().slice(0,32));
    if(sql.includes("SELECT id FROM public.v13_production_account"))return {rows:[{id:account}]};
    if(sql.includes("FROM private.strata_railway_official_fee_capture_v5"))return {rows:[]};
+   if(sql.includes("SELECT next_attempt_at FROM private.strata_railway_fee_retry_v5"))return {rows:[]};
    if(sql.includes("SET next_allowed_at=clock_timestamp()"))return {rows:[]};
    if(sql.includes("SELECT next_allowed_at"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
    throw Error("unexpected SQL");
@@ -36,8 +37,10 @@ test("a genuine provider 429 only persists issuer provenance and deadline, no ca
    calls.push(sql);
    if(sql.includes("SELECT id FROM public.v13_production_account"))return {rows:[{id:account}]};
    if(sql.includes("FROM private.strata_railway_official_fee_capture_v5"))return {rows:[]};
+   if(sql.includes("SELECT next_attempt_at FROM private.strata_railway_fee_retry_v5"))return {rows:[]};
    if(sql.includes("SET next_allowed_at=clock_timestamp()"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
    if(sql.includes("last_provider_http_status=$1"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
+   if(sql.includes("INSERT INTO private.strata_railway_fee_retry_v5"))return {rows:[]};
    throw Error("unexpected SQL");
  }};
  const outcome=await captureIndependentOfficialFeeV5(owner,{
@@ -50,14 +53,16 @@ test("a genuine provider 429 only persists issuer provenance and deadline, no ca
  assert.equal(outcome.tradingAuthorized,false);
  assert.equal(outcome.ordersSubmitted,false);
  assert.ok(calls.some(q=>q.includes("last_provider_http_status=$1")));
- assert.ok(!calls.some(q=>q.includes("INSERT INTO")));
+ assert.ok(!calls.some(q=>q.includes("INSERT INTO private.strata_railway_official_fee_capture_v5")));
 });
 test("a real HTTP 200 with redirected source cannot be represented as issuer bytes",async()=>{
  const db={query:async(sql:string)=>{
    if(sql.includes("SELECT id FROM public.v13_production_account"))return {rows:[{id:account}]};
    if(sql.includes("FROM private.strata_railway_official_fee_capture_v5"))return {rows:[]};
+   if(sql.includes("SELECT next_attempt_at FROM private.strata_railway_fee_retry_v5"))return {rows:[]};
    if(sql.includes("SET next_allowed_at=clock_timestamp()"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
    if(sql.includes("last_provider_http_status=$1"))return {rows:[{next_allowed_at:new Date(t+1800_000)}]};
+   if(sql.includes("INSERT INTO private.strata_railway_fee_retry_v5"))return {rows:[]};
    throw Error("must never insert a forged or redirected PDF");
  }};
  const response=new Response("%PDF- fake",{status:200,headers:{"content-type":"application/pdf"}});
