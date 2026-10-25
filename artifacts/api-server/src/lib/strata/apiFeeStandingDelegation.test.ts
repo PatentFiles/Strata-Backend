@@ -77,6 +77,8 @@ test("issue154: owner status is read-only, exact-SHA-scoped and never an order a
  let reads=0;
  const db={query:async(sql:string)=>{
   reads++;
+  if(sql.includes("SELECT p.fee_source_url"))return {rows:[{
+   fee_source_url:"strata-api-reviewed://kxbtc15m/"+GRANT}]};
   if(sql.includes("FROM private.strata_api_fee_standing_models m"))
    return {rows:[{model_id:MODEL,valid_until:"2026-11-20T00:00:00Z"}]};
   if(sql.includes("FROM private.strata_api_fee_standing_delegations d"))
@@ -88,11 +90,12 @@ test("issue154: owner status is read-only, exact-SHA-scoped and never an order a
  assert.equal(current.ok,true);
  assert.equal(current.modelId,MODEL);
  assert.equal(current.delegationId,GRANT);
+ assert.equal(current.bootstrapGrantId,GRANT);
  assert.equal(current.tradingAuthorized,false);
- assert.equal(reads,2);
+ assert.equal(reads,3);
  const missing=await inspectStandingFeeReadiness("invalid",{db:db as never,sha:()=>SHA});
  assert.equal(missing.ok,false);
- assert.equal(reads,2);
+ assert.equal(reads,3);
 });
 test("issue154: missing, ambiguous or unreadable technical model cannot be treated as approved",async()=>{
  for(const rows of [
@@ -100,7 +103,8 @@ test("issue154: missing, ambiguous or unreadable technical model cannot be treat
   [{model_id:MODEL},{model_id:GRANT}]
  ]){
   const q=await inspectStandingFeeReadiness(OWNER,{
-   db:{query:async()=>({rows})} as never,sha:()=>SHA});
+   db:{query:async(sql:string)=>sql.includes("SELECT p.fee_source_url")?
+      {rows:[{fee_source_url:"strata-api-reviewed://kxbtc15m/"+GRANT}]}:{rows}} as never,sha:()=>SHA});
   assert.equal(q.tradingAuthorized,false);
   assert.equal(q.delegationId,null);
   if(rows.length>1)assert.equal(q.ok,false);
@@ -179,4 +183,20 @@ test("issue165: no owner delegation if original grant, consent, policy, or stand
  },{db:{connect:async()=>client} as never,sha:()=>SHA,probe:async()=>currentOfficialMarket() as never});
  assert.equal(r.ok,false);
  assert.equal(writes,0);
+});
+
+test("issue165: standing status never exposes another owner's historical grant",async()=>{
+ const db={query:async(sql:string,args?:unknown[])=>{
+  if(sql.includes("SELECT p.fee_source_url")){
+   assert.equal(args?.[0],OWNER);
+   return {rows:[{fee_source_url:"strata-api-reviewed://kxbtc15m/"+GRANT}]};
+  }
+  if(sql.includes("FROM private.strata_api_fee_standing_models"))return {rows:[]};
+  throw Error("unscoped readiness lookup");
+ }};
+ const mine=await inspectStandingFeeReadiness(OWNER,{db:db as never,sha:()=>SHA});
+ assert.equal(mine.bootstrapGrantId,GRANT);
+ assert.equal(mine.tradingAuthorized,false);
+ const fail=await inspectStandingFeeReadiness("not-owner",{db:db as never,sha:()=>SHA});
+ assert.equal(fail.bootstrapGrantId,null);
 });
