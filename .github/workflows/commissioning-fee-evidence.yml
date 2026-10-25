@@ -13,6 +13,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.ts'
       - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.test.ts'
+      - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.ts'
+      - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -54,3 +56,7 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerV4CommissioningRepair.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerV4CommissioningRepair.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerV4CommissioningRepair.test.cjs
+      - name: Audit isolated issuer PDF source without fetching or granting trading permission
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts --bundle --platform=node --format=cjs --outfile=dist/isolatedIssuerFeeSourceStatus.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/isolatedIssuerFeeSourceStatus.test.cjs
