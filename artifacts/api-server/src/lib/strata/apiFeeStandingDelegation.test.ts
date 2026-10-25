@@ -106,3 +106,77 @@ test("issue154: missing, ambiguous or unreadable technical model cannot be treat
   if(rows.length>1)assert.equal(q.ok,false);
  }
 });
+
+const currentOfficialMarket=()=>({
+ ok:true,reason:"live_series_event_fee_metadata_verified_read_only",
+ series:"KXBTC15M",exchangeIndex:2,feeType:"quadratic",feeMultiplier:"1",
+ pdfProvenanceApproved:false,ownerPolicyApproved:false,
+ commissioningApproved:false,tradingEnabled:false,
+ marketTicker:"KXBTC15M-26OCT25T2000",eventTicker:"KXBTC15M-26OCT25T2000",
+ metadataDigest:"b".repeat(64),liveVerifiedAt:new Date().toISOString(),
+});
+
+test("issue165: migrated owner may explicitly enroll a reviewed standing model after bootstrap expiry",async()=>{
+ const calls:{sql:string;args:unknown[]}[]=[];
+ let insertCount=0,commitCount=0;
+ const client={query:async(sql:string,args:unknown[]=[])=>{
+   calls.push({sql,args});
+   if(sql.includes("SELECT a.id,p.policy_hash,g.grant_id"))return {rows:[{id:OWNER,policy_hash:"d".repeat(64),grant_id:GRANT}]};
+   if(sql.includes("SELECT m.model_id,m.reviewer_admin_id,m.valid_until"))return {rows:[{model_id:MODEL,valid_until:"2026-11-20T00:00:00.000Z"}]};
+   if(sql.includes("INSERT INTO private.strata_api_fee_standing_delegations")){insertCount++;return {rows:[{delegation_id:MODEL,valid_until:"2026-11-20T00:00:00.000Z"}]};}
+   if(sql==="COMMIT")commitCount++;
+   return {rows:[]};
+ },release(){}};
+ const db={connect:async()=>client};
+ const r=await consentStandingFeeDelegation(OWNER,{
+  modelId:MODEL,grantId:GRANT,confirmation:STANDING_OWNER_CONFIRM
+ },{db:db as never,sha:()=>SHA,probe:async()=>currentOfficialMarket() as never});
+ assert.equal(r.ok,true);
+ assert.equal(r.tradingAuthorized,false);
+ assert.equal(insertCount,1);
+ assert.equal(commitCount,1);
+ const sql=calls.find(q=>q.sql.includes("SELECT a.id,p.policy_hash,g.grant_id"))?.sql??"";
+ for(const require of [
+  "p.fee_source_url='strata-api-reviewed://kxbtc15m/'",
+  "AND g.grant_id=$2::uuid AND g.revoked_at IS NULL",
+  "con.confirmed_at<=g.expires_at","con.confirmed_at>=g.issued_at",
+  "original.signed_at<=g.issued_at","issuer_role.role='ADMIN'",
+  "issuer.email_confirmed_at IS NOT NULL","g.issuer_admin_id<>a.owner_user_id",
+  "g.authorized_stages", "p.fee_policy_version=$3",
+  "con.confirmation='CONFIRM_REVIEWED_API_FEE_SOURCE_V1'",
+ ])
+  assert.ok(sql.includes(require),"missing original signed-grant fence: "+require);
+ assert.ok(!sql.includes("g.expires_at>now()"),"expiry must not strand already-migrated owner standing consent");
+ assert.equal(calls.find(x=>x.sql.includes("SELECT a.id,p.policy_hash,g.grant_id"))?.args?.[1],GRANT);
+});
+
+test("issue165: no standing consent can be saved without a fresh official Kalshi metadata check",async()=>{
+ let began=0;
+ const db={connect:async()=>{began++;throw Error("transaction must not start")}};
+ for(const probe of [
+  async()=>{throw Error("provider unavailable");},
+  async()=>({...currentOfficialMarket(),feeType:"nonquadratic"}),
+  async()=>({...currentOfficialMarket(),liveVerifiedAt:"2020-01-01T00:00:00Z"}),
+ ]) {
+  const r=await consentStandingFeeDelegation(OWNER,{
+   modelId:MODEL,grantId:GRANT,confirmation:STANDING_OWNER_CONFIRM
+  },{db:db as never,sha:()=>SHA,probe:probe as never});
+  assert.equal(r.ok,false);
+  assert.equal(r.tradingAuthorized,false);
+ }
+ assert.equal(began,0);
+});
+
+test("issue165: no owner delegation if original grant, consent, policy, or standing model is missing",async()=>{
+ let writes=0;
+ const client={query:async(sql:string)=>{
+   if(sql.includes("SELECT a.id,p.policy_hash,g.grant_id"))return {rows:[]};
+   if(sql.includes("INSERT INTO private.strata_api_fee_standing_delegations"))writes++;
+   return {rows:[]};
+ },release(){}};
+ const r=await consentStandingFeeDelegation(OWNER,{
+  modelId:MODEL,grantId:GRANT,confirmation:STANDING_OWNER_CONFIRM
+ },{db:{connect:async()=>client} as never,sha:()=>SHA,probe:async()=>currentOfficialMarket() as never});
+ assert.equal(r.ok,false);
+ assert.equal(writes,0);
+});
