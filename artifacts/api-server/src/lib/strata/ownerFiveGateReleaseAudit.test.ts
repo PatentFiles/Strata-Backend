@@ -1,0 +1,82 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {inspectOwnerFiveGateReleaseAudit} from "./ownerFiveGateReleaseAudit";
+const owner="11111111-1111-4111-8111-111111111111";
+const now=Date.parse("2026-10-24T23:00:00Z");
+const account={id:"strata-account-test",commissioned:true,kill_switch:true,
+ cash_precision_verified:true,reconciled_at:new Date(now-10_000),
+ policy_state:"APPROVED",configured_stake_cents:500,max_entry_stake_cents:500,
+ fee_policy_version:"strata_owner_provider_dynamic_fee_v4",open_intents:0,open_positions:0,open_exits:0};
+function audit(row:Record<string,unknown>=account){
+ const queries:string[]=[];
+ const db={async query(sql:string,args?:unknown[]){
+  queries.push(sql);
+  assert.equal(args?.[0],owner);
+  assert.match(sql,/owner_user_id=\$1::uuid/);
+  assert.doesNotMatch(sql,/\b(UPDATE|INSERT|DELETE)\b/);
+  return {rows:[row]};
+ }};
+ const reviewed=async()=>({
+  ok:true,reason:"read_only",currentReviewers:1,
+  grantId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  ownerConsentRecorded:true,policyApproved:false,
+  commissioningApproved:false,tradingAuthorized:false,
+ }) as never;
+ const v4=async()=>({
+  ok:true,deployedSha:"a".repeat(40),checks:{
+   modelEvidence:false,feeAuthority:false,
+   protectiveExitRelease:true,ownerShaApproval:true,
+  },
+ }) as never;
+ return {query:queries,run:()=>inspectOwnerFiveGateReleaseAudit(owner,{
+  db,reviewed:reviewed as never,v4:v4 as never,now:()=>now,
+ })};
+}
+test("five independent release gate observations do not grant trading or clear the kill",async()=>{
+ const x=audit();
+ const r=await x.run();
+ assert.equal(r.ok,true);
+ assert.equal(r.tradingAuthorized,false);
+ assert.equal(r.ordersSubmitted,false);
+ assert.equal(r.account.killSwitchOn,true);
+ assert.equal(r.cash.persistedReconciliationFresh,true);
+ assert.equal(r.cash.localExposureFlat,true);
+ assert.equal(r.cash.signedExchangeReconciliationPerformed,false);
+ assert.equal(r.fee.independentReview.recordPresent,true);
+ assert.equal(r.fee.reviewedApiGrant.recordPresent,true);
+ assert.equal(r.fee.ownerFeeConsent.recordPresent,true);
+ assert.equal(r.fee.ownerFeeConsent.verifiedInThisRequest,false);
+ assert.equal(r.fee.v4Authority.recordPresent,false);
+ assert.equal(r.exit.protectiveRelease.recordPresent,true);
+ assert.equal(r.owner.exactShaApproval.recordPresent,true);
+ assert.ok(r.remaining.includes("retain_kill_until_independent_activation_checks_pass"));
+ assert.ok(r.remaining.includes("verify_current_signed_kalshi_exchange_evidence_in_owner_reconciliation"));
+ assert.equal(x.query.length,1);
+});
+test("stale persisted cash and unresolved local intents are independent blockers",async()=>{
+ const x=audit({...account,reconciled_at:new Date(now-16*60_000),open_intents:1});
+ const r=await x.run();
+ assert.equal(r.cash.persistedReconciliationFresh,false);
+ assert.equal(r.cash.localExposureFlat,false);
+ assert.ok(r.remaining.includes("refresh_kalshi_signed_cash_positions_orders_fills_and_exit_reservations"));
+ assert.equal(r.tradingAuthorized,false);
+});
+test("missing or ambiguous owner and malformed user identity fail closed",async()=>{
+ const missing=await inspectOwnerFiveGateReleaseAudit(owner,{db:{async query(){return {rows:[]};}}});
+ assert.equal(missing.ok,false);
+ const wrong=await inspectOwnerFiveGateReleaseAudit("not-user-id",{db:{async query(){throw Error("should never query");}}});
+ assert.equal(wrong.ok,false);
+ const ambig=await inspectOwnerFiveGateReleaseAudit(owner,{db:{async query(){return {rows:[account,account]};}}});
+ assert.equal(ambig.ok,false);
+});
+test("route is authenticated and read-only and separate from provider PDF preflight",()=>{
+ const router=readFileSync(new URL("../../routes/userExecutionRouter.ts",import.meta.url),"utf8");
+ assert.match(router,/router\.get\("\/release\/five-gate-audit"/);
+ assert.match(router,/const owner=subject\(res\)/);
+ assert.match(router,/inspectOwnerFiveGateReleaseAudit\(owner\)/);
+ assert.match(router,/Cache-Control","private, no-store"/);
+ const code=readFileSync(new URL("./ownerFiveGateReleaseAudit.ts",import.meta.url),"utf8");
+ assert.doesNotMatch(code,/verifyMonetaryFeeContract|fetchTrustedFeeFromSupabaseBridge|authorizeWalletV4FeeModel/);
+ assert.doesNotMatch(code,/\b(UPDATE|INSERT|DELETE)\b.*public\./);
+});
