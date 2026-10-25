@@ -117,7 +117,7 @@ test("final transaction refuses revoked signer, closed account or global kill be
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.fencing_token=\$6::bigint/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.holder_id=\$7/);
  assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/lease\.state=\x27owned\x27/);
- assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,live,c,lease/);
+ assert.match(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,/FOR SHARE OF a,p,s,live,c,lease/);
  let sent=0,verified=0,rolledBack=0,released=0;
  const transport=(async()=>{sent++;return new Response("{}");}) as typeof fetch;
  const db={query:async(sql:string)=>{
