@@ -49,3 +49,20 @@ export function isUsableFeeCapture(
       : GENERAL_FEE_CAPTURE_MAX_AGE_MS;
   return age < maximum;
 }
+
+/** Capture provenance describes the response transport, not fee authority.
+ * Cached bytes remain the original issuer capture; no clock is re-stamped.
+ * Only the Edge server (never its caller) chooses the provenance.
+ */
+export type FeeResponseOrigin = "edge_issuer_get" | "immutable_verified_storage";
+export const V4_VERSIONED_FEE_LEASE_POLICY = "issuer_pdf_55m_signed_api_recheck_v2";
+export function feeProvenanceHeaders(
+  mode:BridgeMode,origin:FeeResponseOrigin,
+):Record<string,string> {
+  return {
+    "x-strata-fee-response-origin": origin,
+    ...(mode==="v4_versioned" ? {
+      "x-strata-fee-document-lease-policy":V4_VERSIONED_FEE_LEASE_POLICY,
+    } : {}),
+  };
+}
