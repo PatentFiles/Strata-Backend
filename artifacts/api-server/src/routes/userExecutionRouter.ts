@@ -8,6 +8,7 @@ import {observeOfficialTariffHtml} from "../lib/strata/officialTariffHtmlObserva
 import {inspectWalletV4Readiness} from "../lib/strata/walletV4CommissioningReadiness";
 import {inspectOwnerFiveGateReleaseAudit} from "../lib/strata/ownerFiveGateReleaseAudit";
 import {inspectOwnerSignedExchangeReleaseProof} from "../lib/strata/ownerSignedExchangeReleaseProof";
+import {previewOwnerV4CommissioningRepair,repairOwnerV4CommissioningHold} from "../lib/strata/ownerV4CommissioningRepair";
 import {inspectOwnerAccountOnboardingReadiness} from "../lib/strata/ownerAccountOnboardingReadiness";
 import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeConsent} from "../lib/strata/walletV4OwnerConsent";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
@@ -1033,6 +1034,24 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });
     const result = await port.approvedPolicyFeeEvidence(userId);
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // Genuine owner-only V4 path: no reviewed-API ADMIN fee grant needed, but
+  // a *real* issuer PDF/API-backed V4 grant, signed exchange flatness and a
+  // stopped owner lease are compulsory. Does not ARM or approve exits.
+  router.get("/fees/wallets/v4/provisional-repair/preview",async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await previewOwnerV4CommissioningRepair(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/wallets/v4/provisional-repair/confirm",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await repairOwnerV4CommissioningHold(owner,req.body??{});
+    res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   // AAL2 JWT subject only; no account id or owner id accepted from a client.
   router.get("/fees/api-policy-migration/preview",async(_req,res)=>{
