@@ -269,18 +269,27 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
   positions:[],
   settlements:[{ticker:market,yes_count_fp:"1.00",no_count_fp:"0.00",
    market_result:"yes",settled_time:"2026-10-20T01:15:00Z",revenue_dollars:"1.000000"}]}) as never;
- const verify=async()=>({ok:true,identity:{
-  grantId:"33333333-3333-4333-8333-333333333333",
-  sourceUrl:"strata-api-reviewed://kxbtc15m/33333333-3333-4333-8333-333333333333",
-  digest:HASH,feePolicyVersion:API_SOURCE_POLICY_VERSION,
-  formulaVersion:API_SOURCE_FORMULA_VERSION,marketTicker:"KXBTC15M-26OCT222015",
-  verifiedAtMs:now,
- }}) as never;
+ // Each authenticated provider read has a fresh timestamp, hence a distinct
+ // observation digest. They MUST NOT be mistaken for a changed fee grant.
+ let verifyCalls=0;
+ const verify=async()=>{
+  verifyCalls++;
+  return {ok:true,identity:{
+   grantId:"33333333-3333-4333-8333-333333333333",
+   sourceUrl:"strata-api-reviewed://kxbtc15m/33333333-3333-4333-8333-333333333333",
+   digest:verifyCalls===1?HASH:"c".repeat(64),
+   feePolicyVersion:API_SOURCE_POLICY_VERSION,
+   formulaVersion:API_SOURCE_FORMULA_VERSION,
+   marketTicker:"KXBTC15M-26OCT222015",
+   verifiedAtMs:now+verifyCalls,
+  }} as never;
+ };
  const res=await migrateOwnedApiFeePolicy(OWNER,{
   confirmation:OWNER_API_FEE_MIGRATION_CONFIRM,expectedPolicyId:POLICY,
   expectedPolicyHash:old.policyHash,expectedPolicyVersion:1,
  },{db,read,verify,now:()=>now});
  assert.equal(res.ok,true,JSON.stringify(res));
+ assert.equal(verifyCalls,2,"the second live fee observation must remain mandatory");
  if(!res.ok)return;
  assert.equal(res.tradingAuthorized,false);
  assert.equal(res.newVersion,2);
