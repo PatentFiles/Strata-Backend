@@ -288,9 +288,10 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
  * Read fresh official bytes for change detection; unknown rates/documents
  * can be observed but NEVER silently made an executable fee grant.
  * Browser URLs, pinned/local snapshots and redirects remain rejected.
- * Only when the ORIGINAL production transport hits a transient provider
- * outage may the existing authenticated Supabase origin bridge supply an
- * independently hash-verified official PDF captured in the last 60 seconds.
+ * The ORIGINAL production transport uses the authenticated Supabase bridge
+ * and accepts genuine issuer bytes within the bounded V4 publication lease.
+ * This is NOT a fresh provider GET: retain the original capturedAt and digest.
+ * Current market fees still require fresh first-party API observations.
  * A missing/misconfigured bridge still fails closed; tests cannot invoke it.
  */
 // A production issuer/CDN 429 is a request-supply constraint, not a missing
@@ -304,6 +305,8 @@ const v4OfficialPdfBridgeRetryAt = new WeakMap<typeof fetch,number>();
 const V4_MIN_429_COOLDOWN_MS = 60_000;
 const V4_MAX_429_COOLDOWN_MS = 86_400_000;
 const V4_BRIDGE_MIN_INTERVAL_MS = 60_000;
+export const V4_VERSIONED_ISSUER_LEASE_MS=55*60_000;
+export const V4_VERSIONED_ISSUER_LEASE_ID="issuer_pdf_55m_signed_api_recheck_v2";
 
 export async function readUnapprovedOfficialFeePublication(
   fetchImpl:typeof fetch=globalThis.fetch,
@@ -347,7 +350,7 @@ export async function readUnapprovedOfficialFeePublication(
  // but it is probed only at its own bounded cadence.
  if(directSuppressed)response=new Response(null,{status:429});
  // Never use pinned build snapshots as V4 dynamic, provider-backed evidence.
- // Edge validates fixed URL, SHA-256, and actual captured-at <=60 seconds.
+ // Edge validates fixed URL, SHA-256, ORIGINAL capture time, and <=55m lease.
  const canBridge=centrallyGated &&
    (v4OfficialPdfBridgeRetryAt.get(fetchImpl)??0)<=nowMs();
  if((response===null||[403,429,500,502,503,504].includes(response.status))&&canBridge){
@@ -618,13 +621,16 @@ export async function fetchTrustedFeeFromSupabaseBridge(
       !Number.isSafeInteger(maxCaptureAgeMs) || maxCaptureAgeMs<=0 ||
       maxCaptureAgeMs>MAX_FEE_EDGE_CAPTURE_AGE_MS ||
       !anonJwt || anonJwt.length < 80 || anonJwt.length > 4096) return null;
-  // Only strict V4 review requests may ask the Edge function to refresh
-  // upstream when its cached PDF is older than 60 seconds. General V2/V3
-  // consumers retain the existing rate-limited publication-cache behavior.
+  // Explicit allowlisted lease selection. A historic valid capture is not
+  // re-stamped or misrepresented as an upstream response. A V4 model using
+  // the 55-minute source lease MUST recheck the live market fee API.
   const strictV4 = maxCaptureAgeMs <= 60_000;
+  const versionedV4=maxCaptureAgeMs===V4_VERSIONED_ISSUER_LEASE_MS;
   const bridgeUrl = strictV4
     ? SUPABASE_FEE_EDGE_URL + "?max_age_seconds=60"
-    : SUPABASE_FEE_EDGE_URL;
+    : versionedV4
+      ? SUPABASE_FEE_EDGE_URL + "?max_age_seconds=3300"
+      : SUPABASE_FEE_EDGE_URL;
   let res: Response;
   try {
     res = await bridgeFetch(bridgeUrl, {
@@ -668,7 +674,7 @@ export async function fetchTrustedFeeFromSupabaseBridge(
   const recorded = res.headers.get("x-strata-source-sha256") ?? "";
   const captured = Date.parse(res.headers.get("x-strata-captured-at") ?? "");
   if (!HEX_SHA256.test(recorded) || !Number.isFinite(captured) ||
-      captured > nowMs() + 10_000 || nowMs() - captured >= maxCaptureAgeMs) {
+      captured > nowMs() || nowMs() - captured >= maxCaptureAgeMs) {
     return null;
   }
   let bytes: Buffer | null;

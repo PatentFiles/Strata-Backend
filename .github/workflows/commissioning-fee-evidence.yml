@@ -19,6 +19,12 @@ on:
       - 'supabase/functions/strata-official-fee-source/index.ts'
       - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.ts'
       - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.test.ts'
+      - 'supabase/functions/strata-official-fee-source/cachePolicy.ts'
+      - 'supabase/functions/strata-official-fee-source/cachePolicy.test.ts'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact.ts'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact.test.ts'
+      - 'artifacts/api-server/src/lib/strata/dynamicOfficialFeeSchedule.ts'
+      - 'artifacts/api-server/src/lib/strata/dynamicOfficialFeeSchedule.test.ts'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/commissioning-fee-evidence.yml'
 permissions:
@@ -71,3 +77,7 @@ jobs:
       - name: Bundle fee bridge source for Deno syntax validation
         run: |
           pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/index.ts --bundle --platform=browser --format=esm --external:npm:* --outfile=dist/officialFeeBridge.syntax.mjs
+      - name: Test versioned official issuer original-capture lease invariants
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/cachePolicy.test.ts --bundle --platform=node --format=cjs --outfile=dist/officialFeeLeasePolicy.test.cjs
+          node artifacts/api-server/dist/officialFeeLeasePolicy.test.cjs

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   isUsableFeeCapture,parseBridgeMode,GENERAL_FEE_CAPTURE_MAX_AGE_MS,
   V4_FEE_CAPTURE_MAX_AGE_MS,STRICT_V4_QUERY,
+  V4_VERSIONED_LEASE_MS,VERSIONED_V4_QUERY,
 } from "./cachePolicy";
 
 const now=Date.parse("2026-10-24T13:00:00Z");
@@ -12,10 +13,12 @@ const lease=new Date(now+10*60_000).toISOString();
 test("only exact V4 strict query can force an actual fresh provider capture",()=>{
  assert.equal(parseBridgeMode(""),"general");
  assert.equal(parseBridgeMode(STRICT_V4_QUERY),"v4_strict");
+ assert.equal(parseBridgeMode(VERSIONED_V4_QUERY),"v4_versioned");
  for(const untrusted of [
   "?max_age_seconds=59","?max_age_seconds=61","?max_age_seconds=60&url=attacker",
   "?url=https://attacker.invalid","?max_age_seconds=060","?MAX_AGE_SECONDS=60",
   "?fresh=1","?max_age_seconds=60&max_age_seconds=60",
+  "?max_age_seconds=3301","?max_age_seconds=3300&source=client",
  ])assert.equal(parseBridgeMode(untrusted),null,untrusted);
 });
 
@@ -39,4 +42,15 @@ test("clock, storage lease and fabricated fresh capture fail closed in both mode
       new Date(now+61*60_000).toISOString(),now,mode),false);
    assert.equal(isUsableFeeCapture(recorded(10_000),lease,NaN,mode),false);
  }
+});
+
+test("versioned official V4 source retains actual capture timestamp and hash lease",()=>{
+ assert.equal(V4_VERSIONED_LEASE_MS,55*60_000);
+ // Real provenance expiry is bounded to capture + 1h, not test-now + 10m.
+ const validLease=new Date(now+60_000).toISOString();
+ assert.equal(isUsableFeeCapture(recorded(35*60_000),validLease,now,"v4_versioned"),true);
+ assert.equal(isUsableFeeCapture(recorded(54*60_000),validLease,now,"v4_versioned"),true);
+ assert.equal(isUsableFeeCapture(recorded(55*60_000),validLease,now,"v4_versioned"),false);
+ assert.equal(isUsableFeeCapture(recorded(-1000),lease,now,"v4_versioned"),false);
+ assert.equal(isUsableFeeCapture(recorded(30*60_000),recorded(1),now,"v4_versioned"),false);
 });

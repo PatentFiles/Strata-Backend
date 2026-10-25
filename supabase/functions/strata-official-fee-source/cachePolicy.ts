@@ -9,12 +9,19 @@
 export const V4_FEE_CAPTURE_MAX_AGE_MS = 60_000;
 export const GENERAL_FEE_CAPTURE_MAX_AGE_MS = 55 * 60_000;
 export const STRICT_V4_QUERY = "?max_age_seconds=60";
+// Versioned source lease: authentic issuer bytes are reusable only while their
+// ORIGINAL capture timestamp and immutable SHA are within the documented lease.
+// This is NOT a fresh download. Every trading action still separately requires
+// a fresh Kalshi market/event/series fee API observation and owner consent.
+export const V4_VERSIONED_LEASE_MS = 55 * 60_000;
+export const VERSIONED_V4_QUERY = "?max_age_seconds=3300";
 
-export type BridgeMode = "general" | "v4_strict";
+export type BridgeMode = "general" | "v4_strict" | "v4_versioned";
 
 export function parseBridgeMode(search: string): BridgeMode | null {
   if (search === "") return "general";
   if (search === STRICT_V4_QUERY) return "v4_strict";
+  if (search === VERSIONED_V4_QUERY) return "v4_versioned";
   return null;
 }
 
@@ -37,6 +44,8 @@ export function isUsableFeeCapture(
   if (age < 0) return false;
   const maximum = mode === "v4_strict"
     ? V4_FEE_CAPTURE_MAX_AGE_MS
-    : GENERAL_FEE_CAPTURE_MAX_AGE_MS;
+    : mode === "v4_versioned"
+      ? V4_VERSIONED_LEASE_MS
+      : GENERAL_FEE_CAPTURE_MAX_AGE_MS;
   return age < maximum;
 }

@@ -99,9 +99,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (recent.data) {
       const saved = recent.data;
       // Normal consumers may reuse a hash-verified publication for up to
-      // 55 minutes. V4 callers demand an ACTUAL upstream capture younger
-      // than 60 seconds. Never re-stamp or mislabel a cached object as new.
-      // On V4 cache miss, enter the SAME project-wide claim/cooldown path.
+      // 55 minutes. The opt-in V4 versioned-source mode may reuse the
+      // ORIGINAL issuer-origin bytes for <=55 minutes, with the ORIGINAL
+      // capture time. That is a signed, bounded publication lease, NOT a
+      // purported new issuer fetch. The backend MUST independently check
+      // Kalshi event/market fee metadata at every live order boundary.
+      // The old 60-second mode remains available for stricter checks.
+      // On any cache miss, enter the SAME shared claim/cooldown path.
       if (isUsableFeeCapture(saved.captured_at, saved.expires_at, now, mode)) {
         const fetched = await client.storage.from(BUCKET).download(saved.storage_path);
         if (!fetched.error && fetched.data) {

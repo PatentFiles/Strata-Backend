@@ -3,7 +3,7 @@
  *
  * The constants below describe a trusted SOURCE, decimal precision and
  * parse grammar; NO taker or maker percentage is approved in source code.
- * Every observation fetches the official issuer document plus exact-market
+ * Every observation validates the original issuer document lease plus exact-market
  * series/event API evidence and binds the derived model to their digests.
  *
  * This module intentionally has NO grant, policy, SQL, ARM, START, or POST.
@@ -11,7 +11,7 @@
  * V3 monetary-admission implementation. Legacy pins remain fail closed.
  */
 import {createHash} from "node:crypto";
-import {readUnapprovedOfficialFeePublication,CANONICAL_FEE_SCHEDULE_URL} from "../microLiveFeeArtifact";
+import {readUnapprovedOfficialFeePublication,CANONICAL_FEE_SCHEDULE_URL,V4_VERSIONED_ISSUER_LEASE_ID} from "../microLiveFeeArtifact";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
 import {verifyIssuerGeneralFeeTable} from "./officialFeeTableParity";
 
@@ -52,6 +52,7 @@ const deny=(reason:string):DynamicFeeResult=>({ok:false,reason,tradingAuthorized
 export function computeDynamicFeeModelDigest(model:Omit<DynamicFeeModel,
  "modelDigest"|"observedAt"|"metadataDigest"|"tradingAuthorized"|"requiresVersionedReview">):string {
  const canonical={
+   sourceEvidenceLeaseVersion:V4_VERSIONED_ISSUER_LEASE_ID,
    issuer:model.issuer,publicationDigest:model.publicationDigest,
    effectiveDate:model.effectiveDate,
    takerRatePpm:model.takerRatePpm,makerRatePpm:model.makerRatePpm,
@@ -150,14 +151,15 @@ export function estimateDynamicFeeMicros(
 
 /**
  * An exact PDF/market fetch makes the fee RATE discoverable, not approved.
- * A changed digest never reuses an old human/owner fee authorization. All
+ * V2 source lease changes the model digest, so prior owner approvals CANNOT
+ * be reused. A changed digest never reuses old authorization. All
  * failures including 429, redirect, stale provider data and fee exceptions
  * are returned as denials, with zero trading authority.
  */
 /** Maximum wall-clock for the whole official-PDF + authenticated fee-API
- * observation. A direct PDF timeout (10s) followed by verified strict bridge
+ * observation. A direct PDF timeout (10s) followed by a hash-verified bridge
  * egress (up to 18s) and fee-API read can exceed the old 15s total cap.
- * The *source* bridge is independently constrained to a real <=60s capture
+ * The *source* bridge is independently constrained to a genuine <=55m issuer capture
  * and exact-market quotes are rechecked at the signed order boundary.
  */
 export const MAX_V4_DISCOVERY_WALL_MS=45_000;

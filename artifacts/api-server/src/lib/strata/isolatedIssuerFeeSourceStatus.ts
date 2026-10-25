@@ -8,7 +8,7 @@
  * that Kalshi itself returned HTTP 429 on this invocation.
  */
 import {pool} from "@workspace/db";
-import {CANONICAL_FEE_SCHEDULE_URL} from "../microLiveFeeArtifact";
+import {CANONICAL_FEE_SCHEDULE_URL,V4_VERSIONED_ISSUER_LEASE_MS} from "../microLiveFeeArtifact";
 
 type Row=Record<string,unknown>;
 type Db={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
@@ -71,7 +71,10 @@ export async function inspectIsolatedIssuerFeeSourceStatus(
  const nextAllowedAt=Number.isFinite(next)?iso(next):null;
  const identityValid=lastCaptureAt!==null&&Number.isFinite(expires)&&
   captured<=now&&expires>captured&&expires-captured<=60*60_000;
- const currentForV4=identityValid&&now-captured<60_000&&now<expires;
+ // The source lease only indicates genuine stored issuer bytes within the V4
+ // versioned window. It NEVER verifies current market API metadata or consent.
+ const currentForV4=identityValid&&now-captured>=0&&
+  now-captured<V4_VERSIONED_ISSUER_LEASE_MS&&now<expires;
  const captureState:IssuerSourceStatus["captureState"]=
   currentForV4?"fresh_capture":lastCaptureAt===null?"never_captured":"expired_capture";
  return {
