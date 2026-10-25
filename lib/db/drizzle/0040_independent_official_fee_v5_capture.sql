@@ -44,3 +44,15 @@ REVOKE ALL ON TABLE private.strata_railway_official_fee_capture_v5 FROM PUBLIC,a
 REVOKE ALL ON SEQUENCE private.strata_railway_official_fee_capture_v5_capture_id_seq
  FROM PUBLIC,anon,authenticated;
 ALTER TABLE private.strata_railway_official_fee_capture_v5 ENABLE ROW LEVEL SECURITY;
+
+-- Per-account Railway collector circuit: separate from the shared Edge lease.
+-- Counts authentic provider failures only; no owner or trading permissions.
+CREATE TABLE IF NOT EXISTS private.strata_railway_fee_retry_v5 (
+ execution_account_id text PRIMARY KEY REFERENCES public.v13_production_account(id),
+ consecutive_429 integer NOT NULL DEFAULT 0 CHECK (consecutive_429 BETWEEN 0 AND 6),
+ next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ last_http_status integer CHECK (last_http_status BETWEEN 200 AND 599),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE ALL ON TABLE private.strata_railway_fee_retry_v5 FROM PUBLIC,anon,authenticated;
+ALTER TABLE private.strata_railway_fee_retry_v5 ENABLE ROW LEVEL SECURITY;
