@@ -333,6 +333,12 @@ export function createProductionPersonalSession(
     const state = dispatchState(input.userId, fingerprint, claimed.fencingToken);
     let feeVerifiedAt = artifact.verifiedAt;
     let feeCheckedAt = observedAt;
+    // This short-lived technical release may be renewed while the owner worker
+    // keeps reconciling. Keep its eligibility separate from the *sticky*
+    // entriesAuthorized latch used for STOP, fencing, uncertain orders,
+    // maintenance and protective-exit failures. A fresh, independently reviewed
+    // signed release can reopen this ONE transient gate, never a terminal hold.
+    let technicalReleaseEntryEligible = false;
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -340,7 +346,8 @@ export function createProductionPersonalSession(
       material,
       now,
       state,
-      entriesOpen: () => state.entriesAuthorized !== false && !state.accountKill,
+      entriesOpen: () => state.entriesAuthorized !== false &&
+        !state.accountKill && technicalReleaseEntryEligible,
       // This is the only LIVE exit producer. The source selection comes from
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
       // The signer and lease are captured from this authenticated vault session.
@@ -414,6 +421,9 @@ export function createProductionPersonalSession(
         }
       },
       readSnapshot: async () => {
+        // Fail closed throughout each snapshot; eligibility is restored only
+        // after reconciliation plus a genuine fresh exact-SHA release check.
+        technicalReleaseEntryEligible = false;
         // A protective reservation may become PREPARED/UNKNOWN while this
         // worker is already scheduled. Gate EVERY subsequent snapshot, not
         // just START, so another entry cannot race an unresolved exit.
@@ -452,11 +462,14 @@ export function createProductionPersonalSession(
         // Keep reconciling existing inventory instead of treating revocation
         // as proof that a position has disappeared.
         const activeRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
-        if(!activeRelease.ok)state.entriesAuthorized=false;
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
         const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));
         if (!("identity" in proven)) throw new Error(proven.reason);
+        // This never re-arms STOP/KILL/fenced/unknown-exit worker state.
+        // The worker also rechecks financial, fee, quote, policy and final
+        // dispatch fences before any exchange POST.
+        technicalReleaseEntryEligible = activeRelease.ok;
         return proven;
       },
       readMarket: async (market, side) => {
