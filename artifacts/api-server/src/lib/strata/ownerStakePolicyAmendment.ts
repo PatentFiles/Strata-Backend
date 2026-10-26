@@ -4,6 +4,7 @@ import { digest as v13Digest } from "../v13-production/types";
 import { STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type SharedPreset } from "./sharedPresets";
 import { resolveStrictPresetStake, type StrictPresetSelection } from "./strictPresetStake";
 import {DYNAMIC_FEE_POLICY_VERSION_V4} from "./dynamicFeeOrderRiskV4";
+import {API_POLICY_SIGNED_REVIEW_V1} from "./apiFeeGrantEligibility";
 
 /**
  * Owner-scoped, audited policy amendment when a production stake exceeds the
@@ -19,7 +20,7 @@ type Row = Record<string, unknown>;
 type Tx = { query(sql: string, args?: unknown[]): Promise<{rows: Row[];rowCount?: number | null}>; release(): void };
 type Database = { connect(): Promise<Tx> };
 export type StakeAmendmentResult =
-  | { ok: true; policyId: string; policyVersion: number; stakeRevision: number }
+  | { ok: true; policyId: string; policyVersion: number; stakeRevision: number; unchanged?: true }
   | { ok: false; reason: string };
 
 const int = (v: unknown): number | null => {
@@ -86,6 +87,44 @@ export async function amendOwnedStakePolicy(
     const a = accountRows.rows[0]!;
     if (a.commissioned !== true || a.cash_precision_verified !== true || asText(a.policy_id).length===0) {
       return reject("account_not_commissioned");
+    }
+    // An exact replay of the already-approved amount AND saved preset is a
+    // status acknowledgement, not an amendment. Serialize with the owner row
+    // and stored risk row, and validate the approved policy hash. Avoid all
+    // lease, signed-cash freshness, policy-version, and release mutations in
+    // this strict no-op. In particular, do NOT revoke exact-SHA approvals or
+    // replace a reviewed-API V2 policy with V4 just because the browser
+    // clicked Confirm & Save a second time.
+    if (presetSelection) {
+      const existing = await tx.query(`SELECT configured_stake_cents,revision,
+          risk_preset_id,risk_preset_revision,risk_capital_cents
+        FROM public.strata_configured_stake
+        WHERE execution_account_id=$1 FOR UPDATE`,[accountId]);
+      if (existing.rows.length>1) return reject("stake_row_not_unique");
+      if (existing.rows.length===1) {
+        const stored=existing.rows[0]!;
+        const storedRevision=int(stored.revision);
+        if (storedRevision!==expectedRevision)return reject("stake_revision_conflict");
+        if (int(stored.configured_stake_cents)===stakeCents &&
+            asText(stored.risk_preset_id)===presetSelection.presetId &&
+            int(stored.risk_preset_revision)===presetSelection.presetRevision &&
+            int(stored.risk_capital_cents)===presetSelection.capitalBudgetCents) {
+          const policies=await tx.query(`SELECT * FROM public.v13_live_money_policy
+            WHERE id=$1 AND execution_account_id=$2 AND created_by=$3
+              AND state='APPROVED' FOR UPDATE`,[a.policy_id,accountId,ownerId]);
+          if (policies.rows.length!==1) return reject("approved_policy_missing");
+          const policy=approvedFromRow(policies.rows[0]!);
+          if (!policy || policy.policyHash!==computeV13LiveMoneyPolicyHash(policy))
+            return reject("approved_policy_hash_invalid");
+          if (policy.maxEntryStakeCents<stakeCents ||
+              policy.maxEntryAllInCents<stakeCents)
+            return reject("saved_stake_exceeds_approved_policy");
+          await tx.query("COMMIT");
+          committed=true;
+          return {ok:true,policyId:policy.id,policyVersion:policy.version,
+            stakeRevision:storedRevision!,unchanged:true};
+        }
+      }
     }
     // execution_enabled is a durable *eligibility* permission, not an ARM
     // request. DISARM only clears the account-worker's arm_requested flag.
@@ -181,6 +220,13 @@ export async function amendOwnedStakePolicy(
     if (policies.rows.length!==1) return reject("approved_policy_missing");
     const old=approvedFromRow(policies.rows[0]!);
     if (!old || old.policyHash!==computeV13LiveMoneyPolicyHash(old)) return reject("approved_policy_hash_invalid");
+    // A genuine change to an approved reviewed-API V2 policy must use a
+    // dedicated versioned reviewed-API risk amendment with renewed owner
+    // authority. This legacy amendment path otherwise silently converts V2
+    // into V4 and invalidates existing release evidence. Fail closed rather
+    // than downgrade fees or mutate the owner's standing authorization.
+    if (old.feePolicyVersion===API_POLICY_SIGNED_REVIEW_V1)
+      return reject("reviewed_api_v2_stake_change_requires_versioned_review");
     // Existing clients may lower a stake inside an already approved policy.
     // Raising the policy limit must NEVER use the legacy preset-less path.
     // Otherwise a bare amount + confirmation could silently bypass a 6% cap.
