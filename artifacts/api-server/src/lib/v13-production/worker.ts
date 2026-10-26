@@ -6,6 +6,7 @@ export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private recoveryOnly = false;
+  private entryHoldReported = false;
   constructor(readonly executor: ProductionExecutor, readonly intervalMs = 2_500,
     readonly report: (error: unknown) => void = () => {},
     readonly entriesOpen: () => boolean = () => true,
@@ -23,7 +24,16 @@ export class ProductionWorker {
       await this.executor.reconcile(); // restart first; never replay dispatched POSTs
       if (this.recoveryOnly) return;
       await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
-      if (!this.entriesOpen()) return;
+      if (!this.entriesOpen()) {
+        // A healthy reconciliation heartbeat does not prove entries are open.
+        // Report this once per suspended interval without attempting an order.
+        if (!this.entryHoldReported) {
+          this.entryHoldReported = true;
+          this.report(new Error("production_entries_not_authorized"));
+        }
+        return;
+      }
+      this.entryHoldReported = false;
       const ids = (await this.executor.ledger.pool.query(`SELECT id FROM forward_test_evaluations
         WHERE evaluation_source='paper' AND qualifying_trigger=true AND fresh_cross=true
         AND signal IN ('SCOUT','CONFIRM') AND evaluated_at >= $1 ORDER BY evaluated_at,id LIMIT 100`,
