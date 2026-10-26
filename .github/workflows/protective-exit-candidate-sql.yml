@@ -8,6 +8,8 @@ on:
       - 'sql/strata_protective_exit_request_snapshot_private.sql'
       - 'sql/strata_in_app_protective_release_approval.sql'
       - 'sql/strata_protective_exit_release_renewable.sql'
+      - 'sql/strata_protective_release_human_review_window_20261026.sql'
+      - 'sql/tests/strata_protective_release_human_window_test.sql'
       - 'sql/tests/strata_protective_release_renewal_test.sql'
       - 'sql/tests/strata_in_app_protective_release_test.sql'
       - 'sql/tests/strata_protective_exit_candidate_test.sql'
@@ -60,9 +62,12 @@ jobs:
           psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_request_snapshot_private.sql
           psql -v ON_ERROR_STOP=1 -f sql/strata_in_app_protective_release_approval.sql
           psql -v ON_ERROR_STOP=1 -f sql/strata_protective_exit_release_renewable.sql
+          psql -v ON_ERROR_STOP=1 -f sql/strata_protective_release_human_review_window_20261026.sql
       - name: Validate immutable baselines, RLS, uniqueness and revocation
         run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_exit_candidate_test.sql
       - name: Validate two-person review separation and immutable evidence
         run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_in_app_protective_release_test.sql
+      - name: Validate eight-hour coordination and unmodified immutable signed audit
+        run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_release_human_window_test.sql
       - name: Validate renewable reviewer sign-off and strict one-active-version constraint
         run: psql -v ON_ERROR_STOP=1 -f sql/tests/strata_protective_release_renewal_test.sql
