@@ -46,7 +46,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean}={}){
+function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
  const executed:string[]=[];
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
@@ -81,6 +81,15 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
    return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   // The guarded UPDATE embeds NOT EXISTS history subqueries; match writes
   // before generic SELECT history mocks or this test would falsely refuse.
+  if(sql.includes("AS positions,")&&sql.includes("AS exits"))
+    return {rows:[{positions:input.leaseExposure?1:0,intents:0,exits:0}]};
+  if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
+    return {rows:input.leaseState?[{
+      state:input.leaseState,account_kill:input.leaseKill??(input.leaseState==="killed"),
+      arm_requested:input.leaseArmed??false,fencing_token:"3"
+    }]:[]};
+  if(sql.includes("UPDATE private.kalshi_account_worker_lease"))
+    return {rows:[{fencing_token:"4"}]};
   if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:account.id}]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
@@ -325,6 +334,33 @@ test("owner acceptance is rejected if missing distinct reviewer or authenticated
  assert.equal((await authorizeProtectiveRelease(OWNER,body,{db:h.db,sha:()=>SHA})).ok,false);
  assert.equal(h.executed.some(s=>s.includes("UPDATE public.live_execution_config")),false);
  assert.ok(h.executed.includes("ROLLBACK"));
+});
+test("independently approved owner release fences killed terminal lease without ARM or START",async()=>{
+ const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,leaseState:"killed"});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ assert.ok(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease") &&
+   x.includes("fencing_token=fencing_token+1") &&
+   x.includes("state='released'") &&
+   x.includes("account_kill=false") &&
+   x.includes("arm_requested=false")));
+ assert.ok(h.executed.some(x=>x.includes("'OWNER_RELEASE_FENCED_TERMINAL_LEASE'")));
+ assert.equal(h.executed.some(x=>/productionStart|productionArm|kalshiPost|submitOrder/.test(x)),false);
+ assert.ok(h.executed.includes("COMMIT"));
+});
+test("terminal lease transition refuses missing review, armed lease, exposure and owned worker",async()=>{
+ for(const input of [
+   {leaseState:"killed" as const,review:false},
+   {leaseState:"killed" as const,leaseArmed:true},
+   {leaseState:"killed" as const,leaseExposure:true},
+   {leaseState:"owned" as const},
+ ]){
+   const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,...input});
+   const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+   assert.equal(r.ok,false,JSON.stringify(input));
+   assert.equal(h.executed.includes("COMMIT"),false,JSON.stringify(input));
+   assert.equal(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease")),false,JSON.stringify(input));
+ }
 });
 test("owner consent inserts exact signed release then atomically enables account and global live flag",async()=>{
  const h=fakeDb();
