@@ -34,10 +34,30 @@ export class ProductionWorker {
         return;
       }
       this.entryHoldReported = false;
-      const ids = (await this.executor.ledger.pool.query(`SELECT id FROM forward_test_evaluations
-        WHERE evaluation_source='paper' AND qualifying_trigger=true AND fresh_cross=true
-        AND signal IN ('SCOUT','CONFIRM') AND evaluated_at >= $1 ORDER BY evaluated_at,id LIMIT 100`,
-      [new Date(this.executor.now() - 15_000)])).rows;
+      const observedAt = new Date(this.executor.now());
+      // The owner account's approved quote-age window, not an arbitrary
+      // 15-second replay window, determines which paper signals remain
+      // executable. Newest first: do not spend a slow Kalshi/fee fetch on an
+      // older crossing while a newer qualifying entry expires.
+      const query = this.executor.accountOwnerUserId
+        ? `SELECT e.id FROM forward_test_evaluations e
+          JOIN v13_production_account a ON a.id=$1
+          JOIN v13_live_money_policy p ON p.id=a.policy_id
+            AND p.execution_account_id=a.id AND p.state='APPROVED'
+          WHERE e.evaluation_source='paper' AND e.qualifying_trigger=true
+            AND e.fresh_cross=true AND e.signal IN ('SCOUT','CONFIRM')
+            AND e.evaluated_at BETWEEN $2::timestamptz -
+              (p.max_quote_age_ms * interval '1 millisecond') AND $2::timestamptz
+          ORDER BY e.evaluated_at DESC,e.id DESC LIMIT 100`
+        : `SELECT id FROM forward_test_evaluations
+          WHERE evaluation_source='paper' AND qualifying_trigger=true
+            AND fresh_cross=true AND signal IN ('SCOUT','CONFIRM')
+            AND evaluated_at >= $1
+          ORDER BY evaluated_at DESC,id DESC LIMIT 100`;
+      const args = this.executor.accountOwnerUserId
+        ? [this.executor.ledger.accountId, observedAt]
+        : [new Date(observedAt.getTime() - 15_000)];
+      const ids = (await this.executor.ledger.pool.query(query, args)).rows;
       for (const { id } of ids) {
         if (!this.entriesOpen()) break;
         try { const intent = await this.executor.prepareEntry(id); await this.executor.dispatch(intent); }
