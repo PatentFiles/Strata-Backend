@@ -282,10 +282,18 @@ export function openOwnedExecutionSession(input: {
   // Log only known machine-readable error codes; never log exchange payloads,
   // secrets, owner identity, or stack traces into shared Railway runtime logs.
   const reportWorkerError = (error: unknown): void => {
-    const message = error instanceof Error ? error.message : "";
+    const attempt = error && typeof error === "object" && "error" in error
+      ? error as {error: unknown; evaluationId?: unknown} : null;
+    const sourceError = attempt ? attempt.error : error;
+    const message = sourceError instanceof Error ? sourceError.message : "";
     const reason = /^[a-z][a-z0-9_]{2,120}$/.test(message)
       ? message : "production_worker_tick_failed";
-    console.warn("strata_personal_worker_tick_rejected", { reason });
+    // A persisted paper evaluation UUID links the refusal back to the exact
+    // simulated SCOUT without exposing exchange payloads or credentials.
+    const candidate = attempt?.evaluationId;
+    const evaluationId = typeof candidate === "string" &&
+      /^[a-zA-Z0-9_-]{1,70}$/.test(candidate) ? candidate : null;
+    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId });
   };
   const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
     input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit);
