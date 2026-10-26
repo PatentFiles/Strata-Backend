@@ -5,6 +5,7 @@ import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_
 import {amendOwnedStakePolicy,OWNER_STAKE_POLICY_CONFIRM} from "./ownerStakePolicyAmendment";
 import {STANDARD_PROPORTIONAL_PRESET,TEST_TWENTY_PERCENT_PRESET} from "./sharedPresets";
 import {DYNAMIC_FEE_POLICY_VERSION_V4} from "./dynamicFeeOrderRiskV4";
+import {API_POLICY_SIGNED_REVIEW_V1} from "./apiFeeGrantEligibility";
 // Run the fee-source migration transaction regressions in the existing
 // CI safety test entrypoint, not typecheck alone.
 import "./ownerApiFeePolicyMigration.test";
@@ -41,7 +42,8 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true,reconciledAt=new Date().toISOString()) {
+type Scenario={reviewedV2?:boolean;storedStakeCents?:number;leaseAccountKill?:boolean};
+function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true,reconciledAt=new Date().toISOString(),scenario:Scenario={}) {
  const sqls:string[]=[];
  const policyInsertArgs:unknown[][]=[];
  const query=async(sql:string,args:unknown[]=[])=> {
@@ -52,12 +54,34 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="
     policy_id:old.id,cash_micros:availableMicros,reserved_micros:"0",
     reconciled_at:reconciledAt,fee_artifact_digest:"a".repeat(64),commissioning_digest:"b".repeat(64),
     minimum_exit_micros:10000,execution_enabled:true,kill_switch:accountKill}]};
+  if(sql.includes("SELECT configured_stake_cents,revision,"))
+    return {rows:previousStakePresent?[{
+      configured_stake_cents:scenario.storedStakeCents??150,
+      revision:1,risk_preset_id:scenario.storedStakeCents===500?TEST_TWENTY_PERCENT_PRESET.id:STANDARD_PROPORTIONAL_PRESET.id,
+      risk_preset_revision:1,risk_capital_cents:2500
+    }]:[]};
   if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
-    return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:accountKill}]};
+    return {rows:[{state:leaseState,arm_requested:armRequested,account_kill:scenario.leaseAccountKill??accountKill}]};
   if(sql.includes("SELECT\n      (SELECT count(*)::int FROM public.v13_production_position"))
    return {rows:[{positions:0,unresolved:0,running:0}]};
   if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:previousStakePresent?[{revision:1}]:[]};
-  if(sql.includes("SELECT * FROM public.v13_live_money_policy"))return {rows:[policyRow]};
+  if(sql.includes("SELECT * FROM public.v13_live_money_policy")) {
+    if(!scenario.reviewedV2)return {rows:[policyRow]};
+    const current:V13ApprovedLiveMoneyPolicy={...old,
+      feePolicyVersion:API_POLICY_SIGNED_REVIEW_V1,
+      capitalLimitCents:2500,maxEntryStakeCents:500,maxEntryAllInCents:625,
+      maxDailyLossCents:1000,maxTotalLossCents:1500,
+      policyHash:null};
+    current.policyHash=computeV13LiveMoneyPolicyHash(current);
+    return {rows:[{...policyRow,
+      fee_policy_version:current.feePolicyVersion,
+      capital_limit_cents:current.capitalLimitCents,
+      max_entry_stake_cents:current.maxEntryStakeCents,
+      max_entry_all_in_cents:current.maxEntryAllInCents,
+      max_daily_loss_cents:current.maxDailyLossCents,
+      max_total_loss_cents:current.maxTotalLossCents,
+      policy_hash:current.policyHash}]};
+  }
   if(sql.includes("SELECT COALESCE(MAX(version)"))return {rows:[{last_version:1}]};
   if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:old.id}]};
   if(sql.includes("INSERT INTO public.v13_live_money_policy")){policyInsertArgs.push(args);return {rows:[{id:"new-policy"}]};}
@@ -270,4 +294,40 @@ test("owner V1-to-V4 upgrade rejects expired or future signed cash even with cor
   assert.equal(h.sqls.includes("COMMIT"),false);
   assert.equal(h.sqls.some(q=>/UPDATE public\.v13_live_money_policy|INSERT INTO public\.v13_live_money_policy|INSERT INTO public\.strata_configured_stake|UPDATE private\.strata_owner_sha_approvals/.test(q)),false);
  }
+});
+
+
+test("same $5 reviewed V2 preset is a strict no-op across stale killed lease and expired cash",async()=>{
+ const h=mock("25000000","killed",false,false,true,
+   new Date(Date.now()-35*60_000).toISOString(),
+   {reviewedV2:true,storedStakeCents:500,leaseAccountKill:true});
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,1,
+   OWNER_STAKE_POLICY_CONFIRM,
+   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:true,policyId:old.id,policyVersion:1,
+   stakeRevision:1,unchanged:true});
+ assert.ok(h.sqls.includes("COMMIT"));
+ assert.equal(h.sqls.some(q=>/UPDATE |INSERT INTO |DELETE FROM |kalshiPost|productionStart|productionArm/.test(q)),false);
+ assert.equal(h.sqls.some(q=>q.includes("FROM private.kalshi_account_worker_lease")),false);
+ assert.equal(h.sqls.some(q=>q.includes("OWNER_STAKE_RELEASE_INVALIDATED")),false);
+});
+test("stale owner revision is not silently accepted as an idempotent $5 save",async()=>{
+ const h=mock("25000000","killed",false,false,true,
+   new Date().toISOString(),{reviewedV2:true,storedStakeCents:500,leaseAccountKill:true});
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,500,2,
+   OWNER_STAKE_POLICY_CONFIRM,{presetId:p.id,presetRevision:p.revision,capitalBudgetCents:2500});
+ assert.deepEqual(result,{ok:false,reason:"stake_revision_conflict"});
+ assert.ok(!h.sqls.includes("COMMIT"));
+});
+test("real reviewed V2 stake increase is refused instead of silently migrating fees back to V4",async()=>{
+ const h=mock("25000000","released",false,false,true,
+   new Date().toISOString(),{reviewedV2:true,storedStakeCents:500});
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,1000,1,
+   OWNER_STAKE_POLICY_CONFIRM,{presetId:p.id,presetRevision:p.revision,capitalBudgetCents:5000});
+ assert.deepEqual(result,{ok:false,reason:"reviewed_api_v2_stake_change_requires_versioned_review"});
+ assert.ok(!h.sqls.includes("COMMIT"));
+ assert.equal(h.sqls.some(q=>/UPDATE public.v13_live_money_policy|INSERT INTO public.v13_live_money_policy|UPDATE private.strata_owner_sha_approvals/.test(q)),false);
 });
