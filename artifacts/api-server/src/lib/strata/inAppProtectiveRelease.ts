@@ -14,6 +14,10 @@ import { digest as v13Digest, type Identity, type Request } from "../v13-product
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
+// Coordinating a real human technical review must not race a two-hour countdown.
+// Remains below the current schema's 24-hour hard maximum and never overrides
+// short-lived signed exchange evidence checks at START.
+export const PROTECTIVE_REVIEWED_RELEASE_HOURS=23;
 const REVIEW_URL=/^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/;
 export const REVIEW_CONFIRM="I_INDEPENDENTLY_REVIEWED_THE_EXACT_PRODUCTION_PROTECTIVE_EXIT_RELEASE";
 export const OWNER_CONFIRM="I_AUTHORIZE_MY_OWN_ACCOUNT_AND_SHARED_LIVE_EXECUTION_AFTER_INDEPENDENT_REVIEW";
@@ -528,11 +532,16 @@ export async function authorizeProtectiveRelease(
       [prior.rows[0]?.release_id]);
     if(revoked.rows.length!==1)return deny("prior_release_revocation_failed");
   }
+  // A SHA-bound release is deliberately longer lived than the previous 2-hour
+  // coordination window, but still bounded below PostgreSQL's 24-hour ceiling.
+  // No extension is automatic: a fresh independent review + owner AAL2 consent
+  // is still required for each release. START independently rechecks fresh
+  // signed Kalshi balances, fees, positions, limits and the release SHA.
   const inserted=await client.query(`
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
  review_url,release_evidence_digest,state,expires_at)
- VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '2 hours')
+ VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '${PROTECTIVE_REVIEWED_RELEASE_HOURS} hours')
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
