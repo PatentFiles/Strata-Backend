@@ -77,12 +77,12 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
     decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
   }]};
+  if(sql.includes("AS positions,")&&sql.includes("AS exits"))
+    return {rows:[{positions:input.leaseExposure?1:0,intents:0,exits:0}]};
   if(sql.includes("AS intents,")||sql.includes(") intents,"))
    return {rows:[{intents:input.unresolved?"1":"0",events:"0",positions:"0",exit_reservations:"0"}]};
   // The guarded UPDATE embeds NOT EXISTS history subqueries; match writes
   // before generic SELECT history mocks or this test would falsely refuse.
-  if(sql.includes("AS positions,")&&sql.includes("AS exits"))
-    return {rows:[{positions:input.leaseExposure?1:0,intents:0,exits:0}]};
   if(sql.includes("FROM private.kalshi_account_worker_lease")&&sql.includes("FOR UPDATE"))
     return {rows:input.leaseState?[{
       state:input.leaseState,account_kill:input.leaseKill??(input.leaseState==="killed"),
