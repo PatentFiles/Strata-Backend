@@ -322,7 +322,7 @@ test("stale owner revision is not silently accepted as an idempotent $5 save",as
  assert.ok(!h.sqls.includes("COMMIT"));
 });
 test("real reviewed V2 stake increase is refused instead of silently migrating fees back to V4",async()=>{
- const h=mock("25000000","released",false,false,true,
+ const h=mock("50000000","released",false,false,true,
    new Date().toISOString(),{reviewedV2:true,storedStakeCents:500});
  const p=TEST_TWENTY_PERCENT_PRESET;
  const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,1000,1,
