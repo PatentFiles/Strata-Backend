@@ -21,3 +21,46 @@ test("failed protective history cannot be silently bypassed by normal reconcile"
  assert.equal(reconcileCalls,0);
  assert.equal(reports,1);
 });
+
+test("owner production worker polls newest qualifying paper crosses within APPROVED quote age",async()=>{
+ const now=Date.parse("2026-10-26T20:42:39.000Z");
+ const queries:string[]=[];const sends:string[]=[];
+ const executor={
+  accountOwnerUserId:"11111111-1111-4111-8111-111111111111",
+  now:()=>now,
+  ledger:{accountId:"acct-test",pool:{query:async(sql:string,params:unknown[])=>{
+   queries.push(sql);
+   if(sql.includes("FROM v13_production_position"))return {rows:[]};
+   assert.match(sql,/JOIN v13_live_money_policy p/);
+   assert.match(sql,/p\.max_quote_age_ms/);
+   assert.match(sql,/ORDER BY e\.evaluated_at DESC,e\.id DESC/);
+   assert.deepEqual(params,["acct-test",new Date(now)]);
+   return {rows:[{id:"fresh-scout"},{id:"older-scout"}]};
+  }}},
+  reconcile:async()=>{},
+  prepareEntry:async(id:string)=>id,
+  dispatch:async(id:string)=>{sends.push(id);},
+ };
+ const worker=new ProductionWorker(executor as never,2_500,()=>{throw Error("unexpected")},
+  ()=>true);
+ await worker.tick();
+ assert.deepEqual(sends,["fresh-scout","older-scout"]);
+ assert.equal(queries.length,2);
+});
+test("closed entry gate continues reconciliation and never selects or submits a SCOUT",async()=>{
+ const reasons:string[]=[];let reconciled=0,entriesQueried=0;
+ const executor={
+  ledger:{accountId:"acct-test",pool:{query:async(sql:string)=>{
+   if(sql.includes("FROM v13_production_position"))return {rows:[]};
+   entriesQueried++;return {rows:[{id:"scout"}]};
+  }}},
+  reconcile:async()=>{reconciled++;},
+ };
+ const worker=new ProductionWorker(executor as never,2_500,(error)=>{
+  reasons.push((error as Error).message);
+ },()=>false);
+ await worker.tick();await worker.tick();
+ assert.equal(reconciled,2);
+ assert.equal(entriesQueried,0);
+ assert.deepEqual(reasons,["production_entries_not_authorized"]);
+});
