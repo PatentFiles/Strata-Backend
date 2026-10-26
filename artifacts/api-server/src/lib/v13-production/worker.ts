@@ -61,7 +61,7 @@ export class ProductionWorker {
       for (const { id } of ids) {
         if (!this.entriesOpen()) break;
         try { const intent = await this.executor.prepareEntry(id); await this.executor.dispatch(intent); }
-        catch (error) { this.report(error); }
+        catch (error) { this.report({error, evaluationId: id}); }
       }
     } finally { this.running = false; }
   }
