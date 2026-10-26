@@ -104,6 +104,7 @@ export class AccountScopedExchange implements Exchange {
     readonly fetchImpl: typeof fetch | null = null,
     readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
     readonly readMarket: ((market: string, side: "YES" | "NO") => Promise<MarketEvidence>) | null = null,
+    readonly entriesOpen: (() => boolean) | null = null,
   ) {}
   readonly #spent = new WeakSet<() => Promise<void>>();
   async market(market: string, side: "YES" | "NO"): Promise<MarketEvidence> {
@@ -125,12 +126,13 @@ export class AccountScopedExchange implements Exchange {
     return snapshot;
   }
   async submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }> {
-    if (!request.reduceOnly && this.state.entriesAuthorized === false) {
+    if (!request.reduceOnly && (this.state.entriesAuthorized === false ||
+      (this.entriesOpen !== null && !this.entriesOpen()))) {
       this.submitAttempts += 1;
       throw new Error("entries_stopped");
     }
     this.refuseBeforeWire();
-    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck);
+    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck, !request.reduceOnly);
     return {};
   }
   async cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void> {
@@ -148,11 +150,18 @@ export class AccountScopedExchange implements Exchange {
     const decision = accountDispatchDecision(this.state);
     if (!decision.allowed) throw new Error(decision.reason);
   }
-  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>): Promise<void> {
+  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>, entryAttempt = false): Promise<void> {
     if (!ProductionExecutor.isFinalFence(finalCheck) || this.#spent.has(finalCheck)) {
       throw new Error("production_opaque_fence_required");
     }
     await finalCheck();
+    // A final exchange snapshot can discover expiration/revocation of the
+    // independently signed release. Recheck immediately AFTER that async
+    // snapshot and BEFORE signing/sending the irreversible entry order.
+    // Exit/cancel transport never inherits this entry-only technical gate.
+    if (entryAttempt && this.entriesOpen !== null && !this.entriesOpen()) {
+      throw new Error("production_entry_release_not_current");
+    }
     this.#spent.add(finalCheck);
     if (!this.fetchImpl || this.fetchImpl === fetch) throw new Error("personal_submission_not_authorized");
     if (!this.material) throw new Error("credential_unavailable");
@@ -274,11 +283,29 @@ export function openOwnedExecutionSession(input: {
     input.fetchImpl ?? null,
     null,
     input.readMarket ?? null,
+    input.entriesOpen ?? null,
   );
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
-  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {},
+  // Preserve the worker's fail-closed behavior, but make rejected attempts observable.
+  // Log only known machine-readable error codes; never log exchange payloads,
+  // secrets, owner identity, or stack traces into shared Railway runtime logs.
+  const reportWorkerError = (error: unknown): void => {
+    const attempt = error && typeof error === "object" && "error" in error
+      ? error as {error: unknown; evaluationId?: unknown} : null;
+    const sourceError = attempt ? attempt.error : error;
+    const message = sourceError instanceof Error ? sourceError.message : "";
+    const reason = /^[a-z][a-z0-9_]{2,120}$/.test(message)
+      ? message : "production_worker_tick_failed";
+    // A persisted paper evaluation UUID links the refusal back to the exact
+    // simulated SCOUT without exposing exchange payloads or credentials.
+    const candidate = attempt?.evaluationId;
+    const evaluationId = typeof candidate === "string" &&
+      /^[a-zA-Z0-9_-]{1,70}$/.test(candidate) ? candidate : null;
+    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId });
+  };
+  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
     input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }

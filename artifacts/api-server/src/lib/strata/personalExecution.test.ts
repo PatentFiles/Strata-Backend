@@ -851,3 +851,27 @@ test("STOP fails closed when position or order evidence is absent, invalid or un
    {positions:"0",orders:0.5,unresolved:"0"},
  ])assert.deepEqual(classifyStopExposureRow(row),{ok:false,reason:"stop_exposure_unverified"});
 });
+
+test("a currently closed signed technical entry gate refuses before order transport or signer access", async () => {
+ const fingerprint="a".repeat(64);
+ const state:AccountDispatchState={
+  leaseState:"owned",armRequested:true,accountKill:false,globalKill:false,
+  fencingToken:1,presentedToken:1,workerActuallyScheduled:true,
+  authenticatedUserId:USER,ownerUserId:USER,
+  credentialFingerprint:fingerprint,presentedFingerprint:fingerprint,
+  uncertainOrderCount:0,duplicateClientOrder:false,
+  liveExecutionEnabled:true,entriesAuthorized:true,
+ };
+ const exchange=new AccountScopedExchange(state,null,null,null,null,null,()=>false);
+ let finalCalls=0;
+ await assert.rejects(exchange.submit({reduceOnly:false} as Request,async()=>{finalCalls++;}),
+   /entries_stopped/);
+ assert.equal(finalCalls,0);
+ assert.equal(exchange.fetchCalls,0);
+ // A renewed release must not override a persisted STOP even if technically valid.
+ const restored=new AccountScopedExchange({...state,entriesAuthorized:false},
+  null,null,null,null,null,()=>true);
+ await assert.rejects(restored.submit({reduceOnly:false} as Request,async()=>{finalCalls++;}),
+   /entries_stopped/);
+ assert.equal(finalCalls,0);
+});
