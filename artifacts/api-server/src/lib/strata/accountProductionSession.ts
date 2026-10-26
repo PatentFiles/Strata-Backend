@@ -278,7 +278,16 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
-  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, () => {},
+  // Preserve the worker's fail-closed behavior, but make rejected attempts observable.
+  // Log only known machine-readable error codes; never log exchange payloads,
+  // secrets, owner identity, or stack traces into shared Railway runtime logs.
+  const reportWorkerError = (error: unknown): void => {
+    const message = error instanceof Error ? error.message : "";
+    const reason = /^[a-z][a-z0-9_]{2,120}$/.test(message)
+      ? message : "production_worker_tick_failed";
+    console.warn("strata_personal_worker_tick_rejected", { reason });
+  };
+  const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
     input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit);
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }
