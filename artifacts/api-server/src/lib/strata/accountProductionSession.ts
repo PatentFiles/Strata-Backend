@@ -104,6 +104,7 @@ export class AccountScopedExchange implements Exchange {
     readonly fetchImpl: typeof fetch | null = null,
     readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
     readonly readMarket: ((market: string, side: "YES" | "NO") => Promise<MarketEvidence>) | null = null,
+    readonly entriesOpen: (() => boolean) | null = null,
   ) {}
   readonly #spent = new WeakSet<() => Promise<void>>();
   async market(market: string, side: "YES" | "NO"): Promise<MarketEvidence> {
@@ -125,12 +126,13 @@ export class AccountScopedExchange implements Exchange {
     return snapshot;
   }
   async submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }> {
-    if (!request.reduceOnly && this.state.entriesAuthorized === false) {
+    if (!request.reduceOnly && (this.state.entriesAuthorized === false ||
+      (this.entriesOpen !== null && !this.entriesOpen()))) {
       this.submitAttempts += 1;
       throw new Error("entries_stopped");
     }
     this.refuseBeforeWire();
-    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck);
+    await this.mutate("POST", ORDER_PATH, JSON.stringify(encodeProductionOrder(request)), finalCheck, !request.reduceOnly);
     return {};
   }
   async cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void> {
@@ -148,11 +150,18 @@ export class AccountScopedExchange implements Exchange {
     const decision = accountDispatchDecision(this.state);
     if (!decision.allowed) throw new Error(decision.reason);
   }
-  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>): Promise<void> {
+  private async mutate(method: "POST" | "DELETE", path: string, body: string | undefined, finalCheck: () => Promise<void>, entryAttempt = false): Promise<void> {
     if (!ProductionExecutor.isFinalFence(finalCheck) || this.#spent.has(finalCheck)) {
       throw new Error("production_opaque_fence_required");
     }
     await finalCheck();
+    // A final exchange snapshot can discover expiration/revocation of the
+    // independently signed release. Recheck immediately AFTER that async
+    // snapshot and BEFORE signing/sending the irreversible entry order.
+    // Exit/cancel transport never inherits this entry-only technical gate.
+    if (entryAttempt && this.entriesOpen !== null && !this.entriesOpen()) {
+      throw new Error("production_entry_release_not_current");
+    }
     this.#spent.add(finalCheck);
     if (!this.fetchImpl || this.fetchImpl === fetch) throw new Error("personal_submission_not_authorized");
     if (!this.material) throw new Error("credential_unavailable");
@@ -274,6 +283,7 @@ export function openOwnedExecutionSession(input: {
     input.fetchImpl ?? null,
     null,
     input.readMarket ?? null,
+    input.entriesOpen ?? null,
   );
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
