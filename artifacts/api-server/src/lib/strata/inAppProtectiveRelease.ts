@@ -528,11 +528,16 @@ export async function authorizeProtectiveRelease(
       [prior.rows[0]?.release_id]);
     if(revoked.rows.length!==1)return deny("prior_release_revocation_failed");
   }
+  // A SHA-bound release is deliberately longer lived than the previous 2-hour
+  // coordination window, but still bounded below PostgreSQL's 24-hour ceiling.
+  // No extension is automatic: a fresh independent review + owner AAL2 consent
+  // is still required for each release. START independently rechecks fresh
+  // signed Kalshi balances, fees, positions, limits and the release SHA.
   const inserted=await client.query(`
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
  review_url,release_evidence_digest,state,expires_at)
- VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '2 hours')
+ VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '23 hours')
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
