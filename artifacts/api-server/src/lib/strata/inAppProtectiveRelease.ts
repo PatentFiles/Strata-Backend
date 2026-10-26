@@ -580,6 +580,73 @@ export async function authorizeProtectiveRelease(
  AND live_execution_enabled=false AND manual_kill_switch=true RETURNING id`);
     if(master.rows.length!==1)return deny("shared_live_enable_failed");
   }
+  // The final authenticated release must also reconcile a TERMINAL killed
+  // worker lease. Without this, the account becomes live-eligible while ARM
+  // permanently rejects the old lease's account_kill=true. Never recover a
+  // worker-owned or uncertain lease here: those require a separate signed
+  // stale-worker recovery and cannot be made executable by this approval.
+  const leases=await client.query(`
+ SELECT state,account_kill,arm_requested,fencing_token::text AS fencing_token
+ FROM private.kalshi_account_worker_lease
+ WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,
+    [accountId,ownerId]);
+  if(leases.rows.length>1)return deny("release_worker_lease_not_unique");
+  if(leases.rows.length===1){
+    const lease=leases.rows[0]!;
+    if(lease.state==="killed"){
+      if(lease.account_kill!==true||lease.arm_requested!==false)
+        return deny("release_killed_lease_state_inconsistent");
+      // Re-check complete absence of persisted financial or exit exposure
+      // under the same transaction before fencing an old terminated worker.
+      const flat=await client.query(`
+ SELECT
+   (SELECT count(*)::int FROM public.v13_production_position
+      WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
+   (SELECT count(*)::int FROM public.v13_production_intent
+      WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) AS intents,
+   (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[accountId]);
+      if(flat.rows.length!==1 ||
+         Number(flat.rows[0]?.positions)!==0 ||
+         Number(flat.rows[0]?.intents)!==0 ||
+         Number(flat.rows[0]?.exits)!==0)
+        return deny("release_killed_lease_exposure_unverified");
+      const fenced=await client.query(`
+ UPDATE private.kalshi_account_worker_lease
+ SET state='released',account_kill=false,arm_requested=false,
+     fencing_token=fencing_token+1,heartbeat_at=now(),released_at=now()
+ WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
+   AND state='killed' AND account_kill=true AND arm_requested=false
+   AND fencing_token=$3::bigint
+   AND EXISTS(SELECT 1 FROM public.v13_production_account a
+     WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.commissioned=true
+       AND a.execution_enabled=true AND a.kill_switch=false AND a.blocked_reason IS NULL)
+   AND NOT EXISTS(SELECT 1 FROM public.v13_production_position
+     WHERE account_id=$1 AND quantity_hundredths<>0)
+   AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent
+     WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED'))
+   AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations
+     WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+ RETURNING fencing_token::text AS fencing_token`,
+        [accountId,ownerId,lease.fencing_token]);
+      if(fenced.rows.length!==1)return deny("release_killed_lease_fence_failed");
+      const evidence={ownerId,accountId,sha,reviewId:String(b.reviewId),
+        oldFencingToken:String(lease.fencing_token),
+        nextFencingToken:String(fenced.rows[0]?.fencing_token),
+        state:"released",accountKill:false,armRequested:false};
+      await client.query(`
+ INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+ VALUES($1,$2,'OWNER_RELEASE_FENCED_TERMINAL_LEASE',$3::jsonb,$4)`,
+        [randomUUID(),accountId,JSON.stringify(evidence),v13Digest(evidence)]);
+    } else if(lease.state==="released"){
+      if(lease.account_kill!==false)
+        return deny("release_released_lease_kill_state_inconsistent");
+    } else if(lease.state==="owned"){
+      // An already-enabled account may renew technical evidence without
+      // changing a running worker. A newly released account must be idle.
+      if(accountNeedsEnable)return deny("release_owned_worker_requires_recovery");
+    } else return deny("release_worker_lease_state_unverified");
+  }
   await client.query("COMMIT");committed=true;
   return {ok:true,reason:"owner_approved_release_account_and_shared_live_enabled",
    releaseId:inserted.rows[0]?.id,expiresAt:inserted.rows[0]?.expires_at,
