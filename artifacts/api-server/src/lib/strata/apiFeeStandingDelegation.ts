@@ -320,7 +320,7 @@ export async function inspectStandingFeeReadiness(
    text(policies.rows[0]?.fee_source_url));
   const bootstrapGrantId=m&&UUID.test(m[1]??"")?m[1]:null;
   const models=await db.query([
-    "SELECT m.model_id::text,m.valid_until",
+    "SELECT m.model_id::text,m.valid_until,m.standing_until_revoked",
     "FROM private.strata_api_fee_standing_models m",
     "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
     "JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))",
@@ -334,7 +334,7 @@ export async function inspectStandingFeeReadiness(
    modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
   const model=models.rows[0];
   const delegation=model?await db.query([
-    "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at",
+    "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at,d.standing_until_revoked",
     "FROM private.strata_api_fee_standing_delegations d",
     "JOIN public.v13_production_account a ON a.owner_user_id=d.owner_user_id",
     "AND a.subaccount=1 AND a.exchange_index=2",
@@ -351,8 +351,10 @@ export async function inspectStandingFeeReadiness(
    ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
    ok:true as const,modelId:model?text(model.model_id):null,
    modelValidUntil:model?.valid_until??null,
+   modelStandingUntilRevoked:model?.standing_until_revoked===true,
    delegationId:d?text(d.delegation_id):null,
    delegationValidUntil:d?.valid_until??null,
+   delegationStandingUntilRevoked:d?.standing_until_revoked===true,
    leaseExpiresAt:d?.lease_expires_at??null,
    grantId:d?text(d.grant_id):null,bootstrapGrantId,
   };
