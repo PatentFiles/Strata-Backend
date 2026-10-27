@@ -54,8 +54,8 @@ test("issue155: stale owner lease is atomically token-fenced, signed twice and l
   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("JOIN private.kalshi_account_worker_lease")) {
    // The transaction revalidates these account safety gates: they MUST be
    // explicitly selected in the initial snapshot (not merely mocked fields).
-   assert.match(sql,/a\\.execution_enabled/);
-   assert.match(sql,/a\\.kill_switch/);
+   assert.match(sql,/a\.execution_enabled/);
+   assert.match(sql,/a\.kill_switch/);
    return {rows:[{id:account,owner_user_id:owner,kalshi_connection_id:GRANT_ID,
      key_fingerprint:fp,credential_fingerprint:fp,cash_micros:"25000000",
      reserved_micros:"0",revision:3,blocked_reason:"awaiting_account_commissioning",
