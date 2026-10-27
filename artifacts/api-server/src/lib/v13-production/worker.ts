@@ -2,6 +2,15 @@ import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 
 /** Explicit lifecycle only. API startup neither constructs nor starts this worker. */
+/** Rate-limit sequential reconciliation cycles while avoiding an extra full
+ * poll interval AFTER each slow signed exchange reconciliation. The 250ms
+ * minimum prevents a back-to-back hot loop on a delayed provider response.
+ * This does not extend source ages or loosen order admission limits.
+ */
+export function nextSequentialPollDelayMs(intervalMs:number,elapsedMs:number):number {
+  return Math.max(250,Math.ceil(intervalMs - Math.max(0,elapsedMs)));
+}
+
 export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
@@ -83,12 +92,16 @@ export class ProductionWorker {
   }
   private schedule(): void {
     const loop = async () => {
+      const tickStartedAt = Date.now();
       try { await this.tick(); } catch (error) {
         this.report(error);
         if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
-      if (this.timer) this.timer = setTimeout(loop, this.intervalMs);
+      // Schedule by tick START time rather than sleeping a full interval
+      // AFTER the signed exchange read. Tick itself serializes all actions.
+      if (this.timer) this.timer = setTimeout(loop,
+        nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
     };
     this.timer = setTimeout(loop, 0);
   }
