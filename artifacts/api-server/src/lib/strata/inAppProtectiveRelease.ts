@@ -14,6 +14,10 @@ import { digest as v13Digest, type Identity, type Request } from "../v13-product
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
+// Bounded coordination horizon for fresh independent review plus owner AAL2 approval.
+// Never renew silently; does not change per-order fee/quote/exit safety checks.
+// Current PostgreSQL CHECK caps releases below 24 hours.
+export const PROTECTIVE_REVIEWED_RELEASE_HOURS=23;
 const REVIEW_URL=/^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/;
 export const REVIEW_CONFIRM="I_INDEPENDENTLY_REVIEWED_THE_EXACT_PRODUCTION_PROTECTIVE_EXIT_RELEASE";
 export const OWNER_CONFIRM="I_AUTHORIZE_MY_OWN_ACCOUNT_AND_SHARED_LIVE_EXECUTION_AFTER_INDEPENDENT_REVIEW";
@@ -532,7 +536,7 @@ export async function authorizeProtectiveRelease(
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
  review_url,release_evidence_digest,state,expires_at)
- VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '2 hours')
+ VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '${PROTECTIVE_REVIEWED_RELEASE_HOURS} hours')
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
