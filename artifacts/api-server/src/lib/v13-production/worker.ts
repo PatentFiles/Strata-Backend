@@ -2,6 +2,12 @@ import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 
 /** Explicit lifecycle only. API startup neither constructs nor starts this worker. */
+/** Target start-to-start cadence, never overlapping prior signed exchange IO.
+ * A long Kalshi request cannot create a busy retry loop.
+ */
+export function sequentialPollDelayMs(intervalMs:number,elapsedMs:number):number {
+ return Math.max(250,Math.ceil(intervalMs-Math.max(0,elapsedMs)));
+}
 export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
@@ -83,12 +89,14 @@ export class ProductionWorker {
   }
   private schedule(): void {
     const loop = async () => {
+      const startedAt=Date.now();
       try { await this.tick(); } catch (error) {
         this.report(error);
         if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
-      if (this.timer) this.timer = setTimeout(loop, this.intervalMs);
+      if (this.timer) this.timer=setTimeout(loop,
+        sequentialPollDelayMs(this.intervalMs,Date.now()-startedAt));
     };
     this.timer = setTimeout(loop, 0);
   }
