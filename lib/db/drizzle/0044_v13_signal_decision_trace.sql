@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS private.strata_v13_signal_decisions (
  phase text NOT NULL CHECK (phase IN (
   'QUALIFYING_SEEN','PREPARE_REJECTED','ENTRY_PREPARED',
   'DISPATCH_COMPLETED','DISPATCH_REJECTED','STALE_AT_WORKER','UNSEEN_IN_WINDOW')),
- source_age_ms integer,
+ source_age_ms integer CHECK (source_age_ms IS NULL OR source_age_ms >= 0),
  reason text CHECK (reason IS NULL OR length(reason) <= 128),
  release_commit_sha text NOT NULL CHECK (release_commit_sha ~ '^[a-f0-9]{40}$'),
  UNIQUE(execution_account_id,evaluation_id,phase)
@@ -19,4 +19,7 @@ CREATE INDEX IF NOT EXISTS strata_v13_decisions_account_idx
 ALTER TABLE private.strata_v13_signal_decisions ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.strata_v13_signal_decisions FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON SEQUENCE private.strata_v13_signal_decisions_decision_id_seq FROM PUBLIC,anon,authenticated,service_role;
+CREATE TRIGGER strata_v13_signal_decisions_immutable
+ BEFORE UPDATE OR DELETE ON private.strata_v13_signal_decisions
+ FOR EACH ROW EXECUTE FUNCTION private.strata_protective_approval_audit_immutable();
 COMMIT;

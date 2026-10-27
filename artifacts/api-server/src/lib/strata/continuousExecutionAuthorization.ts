@@ -129,6 +129,9 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
  FROM private.strata_continuous_execution_grants g
  JOIN private.strata_continuous_execution_technical_lease l
    ON l.grant_id=g.grant_id AND l.execution_account_id=g.execution_account_id
+ JOIN private.kalshi_account_worker_lease w
+   ON w.execution_account_id=g.execution_account_id AND w.owner_user_id=g.owner_user_id
+     AND w.fencing_token=l.fencing_token
  JOIN private.strata_protective_exit_release r
    ON r.release_id=g.reviewed_release_id
  JOIN public.v13_production_account a
@@ -143,11 +146,15 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
    AND r.release_commit_sha=g.release_commit_sha AND r.state='approved'
+   AND r.revoked_at IS NULL
+   AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
    AND a.kill_switch=false AND a.blocked_reason IS NULL
-   AND l.expires_at>now()+interval '20 seconds'
+   AND w.state='owned' AND w.arm_requested=true AND w.account_kill=false
+   AND w.heartbeat_at>now()-interval '15 seconds'
+   AND l.observed_at<=now() AND l.expires_at>now()+interval '20 seconds'
  LIMIT 2`;
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
@@ -174,7 +181,9 @@ export const CONTINUOUS_STARTUP_GRANT_SQL=`
  WHERE g.owner_user_id=$1::uuid AND g.release_commit_sha=$2
    AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
-   AND r.release_commit_sha=g.release_commit_sha
+   AND r.release_commit_sha=g.release_commit_sha AND r.state='approved'
+   AND r.revoked_at IS NULL
+   AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
@@ -201,10 +210,10 @@ export async function renewContinuousTechnicalLease(input:{
   !DIGEST.test(input.policyHash)||!Number.isSafeInteger(input.observedAtMs)||
   input.authenticated!==true||input.complete!==true||
   input.unexplainedCashActivity!==false||
-  !/^\d+$/.test(input.cashMicros)||!/^\d+$/.test(input.fencingToken))
+  !/^\d+$/.test(input.cashMicros)||!/^[1-9]\d*$/.test(input.fencingToken))
   return denied("standing_signed_exchange_proof_invalid");
  const now=(deps.now??Date.now)();
- if(input.observedAtMs>now+2000||now-input.observedAtMs>15_000)
+ if(input.observedAtMs>now||now-input.observedAtMs>15_000)
   return denied("standing_signed_exchange_proof_stale");
  const db=deps.db??pool;let c:Conn|null=null,committed=false;
  try{
@@ -220,10 +229,19 @@ export async function renewContinuousTechnicalLease(input:{
    JOIN public.v13_live_money_policy p
      ON p.id=a.policy_id AND p.execution_account_id=a.id
    JOIN private.kalshi_account_worker_lease w
-     ON w.execution_account_id=a.id
+     ON w.execution_account_id=a.id AND w.owner_user_id=g.owner_user_id
+   JOIN private.strata_protective_exit_release r ON r.release_id=g.reviewed_release_id
+   JOIN private.strata_owner_sha_approvals oa
+     ON oa.owner_user_id=g.owner_user_id AND oa.execution_account_id=a.id
+       AND oa.release_commit_sha=g.release_commit_sha
    WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2
      AND g.release_commit_sha=$3 AND g.policy_hash=$4
-     AND g.revoked_at IS NULL
+     AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
+     AND r.state='approved' AND r.revoked_at IS NULL
+     AND r.release_commit_sha=g.release_commit_sha
+     AND r.independent_reviewer_id=g.independent_reviewer_id
+     AND r.independent_reviewer_id<>g.owner_user_id
+     AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
      AND a.commissioned=true AND a.execution_enabled=true
      AND a.kill_switch=false AND a.blocked_reason IS NULL
      AND p.policy_hash=g.policy_hash AND p.state='APPROVED'
@@ -245,10 +263,11 @@ export async function renewContinuousTechnicalLease(input:{
   // Avoid a write on each 2.5-second heartbeat. Rotate only as the
   // five-minute signed technical lease approaches its two-minute margin.
   const existing=await c.query(`
-   SELECT expires_at FROM private.strata_continuous_execution_technical_lease
+   SELECT expires_at,fencing_token::text AS fencing_token FROM private.strata_continuous_execution_technical_lease
    WHERE grant_id=$1 FOR UPDATE`,[v.grant_id]);
   if(existing.rows.length>1)return denied("standing_duplicate_technical_lease");
   if(existing.rows.length===1&&
+     String(existing.rows[0]?.fencing_token)===input.fencingToken&&
      Date.parse(String(existing.rows[0]?.expires_at))>now+120_000){
     await c.query("COMMIT");committed=true;
     return {ok:true as const,reason:"standing_short_technical_lease_current",
@@ -259,13 +278,13 @@ export async function renewContinuousTechnicalLease(input:{
    token:input.fencingToken,provider:input.providerEvidence});
   const lease=await c.query(`
    INSERT INTO private.strata_continuous_execution_technical_lease
-    (grant_id,execution_account_id,observed_at,expires_at,evidence_digest,generation)
-   VALUES($1,$2,$3::timestamptz,$3::timestamptz+interval '5 minutes',$4,1)
+    (grant_id,execution_account_id,observed_at,expires_at,evidence_digest,fencing_token,generation)
+   VALUES($1,$2,$3::timestamptz,$3::timestamptz+interval '5 minutes',$4,$5::bigint,1)
    ON CONFLICT(grant_id) DO UPDATE SET
      observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
-     evidence_digest=EXCLUDED.evidence_digest,
+     evidence_digest=EXCLUDED.evidence_digest,fencing_token=EXCLUDED.fencing_token,
      generation=private.strata_continuous_execution_technical_lease.generation+1
-   RETURNING grant_id`,[v.grant_id,input.accountId,new Date(input.observedAtMs),dg]);
+   RETURNING grant_id`,[v.grant_id,input.accountId,new Date(input.observedAtMs),dg,input.fencingToken]);
   if(lease.rows.length!==1)return denied("standing_lease_not_committed");
   await c.query(`
    INSERT INTO private.strata_continuous_execution_audit

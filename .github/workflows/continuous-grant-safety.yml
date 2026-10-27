@@ -1,0 +1,67 @@
+name: Continuous grant candidate safety
+on:
+  push:
+    branches: [fix/continuous-grant-revocation-fences-20261027]
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/continuousExecutionAuthorization*'
+      - 'lib/db/drizzle/0043_strata_continuous_execution_grants.sql'
+      - 'lib/db/drizzle/0044_v13_signal_decision_trace.sql'
+      - '.github/workflows/continuous-grant-safety.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-grant-and-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install isolated embedded PostgreSQL test engine
+        run: npm install --prefix "$RUNNER_TEMP/strata-test-deps" --ignore-scripts @electric-sql/pglite@0.5.12
+      - name: Grant SQL and worker recovery regressions (no exchange credentials)
+        working-directory: artifacts/api-server
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          NODE_ENV: test
+        run: |
+          pnpm exec esbuild src/lib/strata/continuousExecutionAuthorization.postgres.test.ts src/lib/strata/continuousExecutionAuthorization.test.ts src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outdir=dist/standing-tests --out-extension:.js=.cjs --external:pg-native --external:@electric-sql/pglite
+          NODE_PATH="$RUNNER_TEMP/strata-test-deps/node_modules" node --test dist/standing-tests/strata/*.cjs dist/standing-tests/v13-production/*.cjs
+      - name: Protective exit failure and restart tests
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          NODE_ENV: test
+        run: |
+          cd artifacts/api-server
+          pnpm exec esbuild src/lib/strata/ownerFeeEmergencyExit*.test.ts src/lib/strata/technicalReleaseEntryGate.test.ts src/lib/strata/protectiveExitStartupRelease.test.ts src/lib/strata/personalExchangeProtectiveSnapshot.test.ts --bundle --platform=node --format=cjs --outdir=dist/recovery-review --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          cd ../..
+          node --test artifacts/api-server/dist/recovery-review/*.cjs
+  full-disposable-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install local disposable PostgreSQL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Complete existing safety suite in a new credential-isolated local cluster
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --full-suite

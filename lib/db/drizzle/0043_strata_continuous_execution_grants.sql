@@ -15,11 +15,31 @@ CREATE TABLE IF NOT EXISTS private.strata_continuous_execution_grants (
  consented_at timestamptz NOT NULL DEFAULT now(),
  revoked_at timestamptz,
  revocation_reason text,
- CHECK (revoked_at IS NULL OR revoked_at >= consented_at)
+ CHECK (independent_reviewer_id <> owner_user_id),
+ CHECK ((revoked_at IS NULL AND revocation_reason IS NULL) OR
+   (revoked_at IS NOT NULL AND revoked_at >= consented_at AND
+    revocation_reason IS NOT NULL AND length(trim(revocation_reason)) > 0))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS strata_continuous_grants_unrevoked_unique
  ON private.strata_continuous_execution_grants(owner_user_id,execution_account_id,release_commit_sha)
  WHERE revoked_at IS NULL;
+-- Scope is append-only; the only legal mutation is one-way revocation.
+CREATE OR REPLACE FUNCTION private.strata_continuous_grant_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'standing_grant_delete_forbidden'; END IF;
+ IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL OR
+   (to_jsonb(NEW)-'revoked_at'-'revocation_reason') IS DISTINCT FROM
+   (to_jsonb(OLD)-'revoked_at'-'revocation_reason') THEN
+   RAISE EXCEPTION 'standing_grant_scope_immutable';
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER strata_continuous_grant_guard
+ BEFORE UPDATE OR DELETE ON private.strata_continuous_execution_grants
+ FOR EACH ROW EXECUTE FUNCTION private.strata_continuous_grant_guard();
+REVOKE ALL ON FUNCTION private.strata_continuous_grant_guard()
+ FROM PUBLIC,anon,authenticated,service_role;
 -- Worker-managed rolling technical evidence. NOT a second human signature.
 CREATE TABLE IF NOT EXISTS private.strata_continuous_execution_technical_lease (
  grant_id uuid PRIMARY KEY REFERENCES private.strata_continuous_execution_grants(grant_id),
@@ -27,6 +47,7 @@ CREATE TABLE IF NOT EXISTS private.strata_continuous_execution_technical_lease (
  observed_at timestamptz NOT NULL,
  expires_at timestamptz NOT NULL,
  evidence_digest text NOT NULL CHECK (evidence_digest ~ '^[0-9a-f]{64}$'),
+ fencing_token bigint NOT NULL CHECK (fencing_token > 0),
  generation bigint NOT NULL DEFAULT 1 CHECK (generation >= 1),
  CHECK (expires_at > observed_at AND expires_at <= observed_at + interval '5 minutes')
 );
