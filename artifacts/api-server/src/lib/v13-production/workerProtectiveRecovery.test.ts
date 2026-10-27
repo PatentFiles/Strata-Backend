@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ProductionWorker} from "./worker";
+import {ProductionWorker,nextSequentialPollDelayMs} from "./worker";
+test("worker poll cadence overlaps neither signed reconciliation nor entry and preserves quote-age checks",()=>{
+  // Starts are targeted every 2.5 seconds even if the preceding signed
+  // exchange reconciliation takes 1.8s (old worker waited an EXTRA 2.5s).
+  assert.equal(nextSequentialPollDelayMs(2500,1800),700);
+  assert.equal(nextSequentialPollDelayMs(2500,0),2500);
+  // A provider stall never creates a zero-delay hammer loop.
+  assert.equal(nextSequentialPollDelayMs(2500,4000),250);
+});
 test("recovery-only owned worker invokes protective UNKNOWN audit before normal reconciliation",async()=>{
  const phases:string[]=[];
  const executor={
