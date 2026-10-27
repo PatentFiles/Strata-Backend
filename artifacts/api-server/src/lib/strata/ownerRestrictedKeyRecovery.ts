@@ -126,6 +126,19 @@ const SAVE_RESPONSE = `
   WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='attempted'
   RETURNING id
 `;
+const MARK_VERIFIED = `
+  -- owner-key-recovery:mark-verified
+  UPDATE private.kalshi_connection_credentials c
+  SET verified_at=now(),verification_reason='credential_verified',updated_at=now()
+  FROM private.kalshi_restricted_key_recovery r
+  WHERE r.id=$1::uuid AND r.owner_user_id=$2::uuid
+    AND r.state='response_received' AND r.target_fingerprint=$3
+    AND c.id=r.target_credential_id AND c.owner_user_id=r.owner_user_id
+    AND c.provider_connection_id=r.provider_connection_id
+    AND c.key_fingerprint=$3 AND c.role='restricted_execution'
+    AND c.revoked_at IS NULL AND c.verified_at IS NULL
+  RETURNING c.id
+`;
 const FINISH = `
   -- owner-key-recovery:finish
   UPDATE private.kalshi_restricted_key_recovery
@@ -193,6 +206,7 @@ export async function executeFrozenKeyRecovery(db:CredentialDatabase,input:{
   attemptId:string;
   confirmation:unknown;
   transport:RestrictedKeyGenerationTransport;
+  setupMaterial:{keyId:string;privateKey:string};
   verify:(key:{keyId:string;privateKey:string},fingerprint:string)=>Promise<{ok:boolean;reason:string}>;
 }):Promise<RecoveryResult> {
   const {identity:i,attemptId:id}=input;
@@ -217,7 +231,7 @@ export async function executeFrozenKeyRecovery(db:CredentialDatabase,input:{
   }catch{return outcome(false,"recovery_claim_failed",id);}
   if(!claimed)return outcome(false,"recovery_preconditions_changed_or_already_attempted",id);
   let response:Awaited<ReturnType<RestrictedKeyGenerationTransport>>;
-  try { response=await input.transport({keyId:"",privateKey:""}); }
+  try { response=await input.transport(input.setupMaterial); }
   catch {response="uncertain";}
   // Transport credential is supplied by trusted caller via the closure, never
   // exposed to the HTTP request or logs.
@@ -276,8 +290,11 @@ export async function executeFrozenKeyRecovery(db:CredentialDatabase,input:{
   }
   try{
     const complete=await db.transaction(async client=>{
-      const row=await client.query(FINISH,[id,i.owner,fingerprint]);
-      return row.rows.length===1;
+      const row=await client.query(MARK_VERIFIED,[id,i.owner,fingerprint]);
+      if(row.rows.length!==1)return false;
+      const finished=await client.query(FINISH,[id,i.owner,fingerprint]);
+      if(finished.rows.length!==1)throw Error("recovery_completion_not_recorded");
+      return true;
     });
     return complete?outcome(true,"restricted_key_recovered_verified",id,"completed",true):
       outcome(false,"recovery_completion_unconfirmed",id,"response_received",true);
