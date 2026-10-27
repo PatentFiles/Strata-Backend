@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ProductionWorker} from "./worker";
+import {ProductionWorker,sequentialPollDelayMs} from "./worker";
+test("sequential poll reduces post-reconcile latency without a zero-delay loop",()=>{
+ assert.equal(sequentialPollDelayMs(2500,1700),800);
+ assert.equal(sequentialPollDelayMs(2500,0),2500);
+ assert.equal(sequentialPollDelayMs(2500,4800),250);
+});
 test("recovery-only owned worker invokes protective UNKNOWN audit before normal reconciliation",async()=>{
  const phases:string[]=[];
  const executor={
