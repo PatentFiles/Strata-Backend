@@ -260,7 +260,7 @@ export async function renewContinuousTechnicalLease(input:{
   const lease=await c.query(`
    INSERT INTO private.strata_continuous_execution_technical_lease
     (grant_id,execution_account_id,observed_at,expires_at,evidence_digest,generation)
-   VALUES($1,$2,$3::timestamptz,now()+interval '5 minutes',$4,1)
+   VALUES($1,$2,$3::timestamptz,$3::timestamptz+interval '5 minutes',$4,1)
    ON CONFLICT(grant_id) DO UPDATE SET
      observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
      evidence_digest=EXCLUDED.evidence_digest,
