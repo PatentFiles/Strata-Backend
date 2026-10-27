@@ -2,6 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {verifyProtectiveExitStartupRelease,PROTECTIVE_STARTUP_RELEASE_SQL,OWNER_SHA_STARTUP_RELEASE_SQL} from "./protectiveExitStartupRelease";
 
+test("standing release SQL rejects SHA and owner drift and changed policy or stake",()=>{
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/v\.expires_at <> 'infinity'::timestamptz/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/v\.standing_execution_account_id/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/p\.policy_hash=v\.standing_policy_hash/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/stake\.configured_stake_cents=v\.standing_stake_cents/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/v\.revoked_at IS NULL/);
+});
 const owner="11111111-1111-4111-8111-111111111111";
 const releaseId="22222222-2222-4222-8222-222222222222";
 const sha="a".repeat(40);
