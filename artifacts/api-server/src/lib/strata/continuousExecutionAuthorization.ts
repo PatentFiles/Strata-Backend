@@ -213,6 +213,18 @@ export async function renewContinuousTechnicalLease(input:{
    WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')
    LIMIT 1`,[input.accountId]);
   if(hold.rows.length)return denied("standing_unresolved_protective_exit");
+  // Avoid a write on each 2.5-second heartbeat. Rotate only as the
+  // five-minute signed technical lease approaches its two-minute margin.
+  const existing=await c.query(`
+   SELECT expires_at FROM private.strata_continuous_execution_technical_lease
+   WHERE grant_id=$1 FOR UPDATE`,[v.grant_id]);
+  if(existing.rows.length>1)return denied("standing_duplicate_technical_lease");
+  if(existing.rows.length===1&&
+     Date.parse(String(existing.rows[0]?.expires_at))>now+120_000){
+    await c.query("COMMIT");committed=true;
+    return {ok:true as const,reason:"standing_short_technical_lease_current",
+     ordersSubmitted:false as const,workerStarted:false as const};
+  }
   const dg=hash({owner:input.ownerId,account:input.accountId,sha:input.releaseSha,
    policy:input.policyHash,observedAtMs:input.observedAtMs,cash:input.cashMicros,
    token:input.fencingToken,provider:input.providerEvidence});
