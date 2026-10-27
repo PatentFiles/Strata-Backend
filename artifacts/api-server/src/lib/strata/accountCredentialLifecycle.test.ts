@@ -47,7 +47,12 @@ function keyMaterial() {
 function harness(failInsert = false) {
   const secrets: Array<{ id: string; payload: string }> = [];
   const bindings: Binding[] = [];
-  const executionAccounts: Array<{ ownerUserId: string; financialAccountId: string }> = [];
+  const executionAccounts: Array<{
+    ownerUserId: string;
+    financialAccountId: string;
+    keyFingerprint?: string | null;
+    frozenEligible?: boolean;
+  }> = [];
   let sequence = 0;
   let fail = failInsert;
   let turn = Promise.resolve();
@@ -74,6 +79,30 @@ function harness(failInsert = false) {
       const used = bindings.find((item) => item.vaultSecretId === params[0]) ||
         connections.find((item) => item.vaultSecretId === params[0]);
       return { rows: used ? [{ id: "used" }] : [] };
+    }
+    if (text.includes("account-credential:frozen-recovery")) {
+      return { rows: executionAccounts.filter(item =>
+        item.ownerUserId === params[0] && item.financialAccountId === params[1]
+      ).map(item => ({
+        execution_account_id: "strata-account-existing",
+        previous_fingerprint: item.keyFingerprint,
+        permitted: item.frozenEligible === true,
+      })) };
+    }
+    if (text.includes("account-credential:lock-active-for-frozen-revoke")) {
+      return { rows: bindings.filter(item =>
+        item.ownerUserId === params[0] && item.providerConnectionId === params[1] &&
+        item.role === "restricted_execution" && !item.revokedAt
+      ).map(item => ({key_fingerprint: item.keyFingerprint})) };
+    }
+    if (text.includes("credential-replacement:rebind-frozen-execution")) {
+      const item=executionAccounts.find(e =>
+        e.ownerUserId === params[1] && e.financialAccountId === params[2] &&
+        e.keyFingerprint === params[4] && e.frozenEligible === true
+      );
+      if (!item) return {rows:[]};
+      item.keyFingerprint = String(params[3]);
+      return {rows:[{id:params[0]}]};
     }
     if (text.includes("credential-replacement:execution-account") ||
         text.includes("account-credential:execution-account-before-revoke")) {
@@ -187,11 +216,13 @@ function harness(failInsert = false) {
       await previous;
       const savedSecrets = secrets.map((item) => ({ ...item }));
       const savedBindings = structuredClone(bindings);
+      const savedExecutions = structuredClone(executionAccounts);
       try {
         return await work({ query });
       } catch (error) {
         secrets.splice(0, secrets.length, ...savedSecrets);
         bindings.splice(0, bindings.length, ...savedBindings);
+        executionAccounts.splice(0, executionAccounts.length, ...savedExecutions);
         throw error;
       } finally {
         release();
@@ -258,13 +289,14 @@ test("two users register, rotate, and revoke only their own credential roles", a
 });
 
 test("provisioned execution account blocks restricted credential rotation and revocation", async () => {
-  const { db, ports } = harness();
+  const { db, ports, executionAccounts } = harness();
   const active = await registerAccountCredential(db, ports, {
     authenticatedUserId: USER_A,
     role: "restricted_execution",
     ...keyMaterial(),
   });
   assert.equal(active.ok, true);
+  executionAccounts.push({ownerUserId: USER_A, financialAccountId: FINANCIAL_A});
   ports.readExecutionTarget = async (userId, providerConnectionId) =>
     userId === USER_A && providerConnectionId === CONNECTION_A
       ? {
@@ -325,6 +357,83 @@ test("transactional recheck closes credential rotation and revoke races with pro
   assert.equal(db.bindings.filter((item) =>
     item.ownerUserId === USER_A && item.role === "restricted_execution" &&
     !item.revokedAt).length, 1);
+});
+
+
+test("deleted external restricted key can be revoked and safely rebound without trading", async () => {
+  const {db, ports, executionAccounts} = harness();
+  const original = keyMaterial();
+  const registered = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "restricted_execution", ...original,
+  });
+  assert.equal(registered.ok,true);
+  executionAccounts.push({
+    ownerUserId: USER_A,
+    financialAccountId: FINANCIAL_A,
+    keyFingerprint: registered.fingerprint,
+    frozenEligible: true,
+  });
+  ports.readExecutionTarget = async (owner, provider) =>
+    owner===USER_A && provider===CONNECTION_A ? {
+      ownerUserId: owner, providerConnectionId: provider,
+      executionAccountId: "strata-account-existing",
+      subaccount: 1, exchangeIndex: 2,
+      keyFingerprint: executionAccounts[0]!.keyFingerprint,
+    } : null;
+
+  // A new key cannot overwrite an active execution binding without a deliberate revoke.
+  const attempted = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "restricted_execution", ...keyMaterial(),
+  });
+  assert.equal(attempted.reason, "restricted_execution_rebinding_required");
+
+  const revoked = await revokeAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "restricted_execution",
+  });
+  assert.equal(revoked.ok, true);
+  const old = db.bindings.find(x=>x.ownerUserId===USER_A && x.role==="restricted_execution");
+  assert.ok(old?.revokedAt);
+  assert.equal(executionAccounts[0]?.keyFingerprint, registered.fingerprint);
+
+  const replacement = keyMaterial();
+  const rebound = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "restricted_execution", ...replacement,
+  });
+  assert.equal(rebound.ok,true);
+  assert.equal(executionAccounts[0]?.keyFingerprint, rebound.fingerprint);
+  const newest = db.bindings.filter(x => x.ownerUserId===USER_A && x.role==="restricted_execution" && !x.revokedAt);
+  assert.equal(newest.length,1);
+  assert.equal(newest[0]?.verifiedAt,null);
+
+  const verified = await verifyAccountCredential(db, ports, {
+    authenticatedUserId: USER_A,
+    role: "restricted_execution",
+    confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+    async readSecret() {return {keyId:replacement.apiKeyId,privateKey:replacement.privateKey};},
+    async probe() {return {ok:true,reason:"credential_verified"};},
+  });
+  assert.equal(verified.ok,true);
+  assert.equal(newest[0]?.verifiedAt !== null,true);
+  assert.equal(db.bindings.filter(x=>x.ownerUserId===USER_B && x.role==="restricted_execution").length,0);
+});
+
+test("frozen-key recovery remains blocked when account eligibility fails", async () => {
+  const {db, ports, executionAccounts}=harness();
+  const initial=await registerAccountCredential(db,ports,{
+    authenticatedUserId:USER_A,role:"restricted_execution",...keyMaterial(),
+  });
+  executionAccounts.push({
+    ownerUserId:USER_A,financialAccountId:FINANCIAL_A,keyFingerprint:initial.fingerprint,
+    frozenEligible:false,
+  });
+  ports.readExecutionTarget=async (owner,provider)=>owner===USER_A && provider===CONNECTION_A ? {
+    ownerUserId:owner,providerConnectionId:provider,
+    executionAccountId:"strata-account-existing",subaccount:1,exchangeIndex:2,
+    keyFingerprint:initial.fingerprint,
+  } : null;
+  const refused=await revokeAccountCredential(db,ports,{authenticatedUserId:USER_A,role:"restricted_execution"});
+  assert.equal(refused.reason,"restricted_execution_rebinding_required");
+  assert.equal(db.bindings.filter(x=>x.ownerUserId===USER_A && x.role==="restricted_execution" && !x.revokedAt).length,1);
 });
 
 test("a failed binding rolls the new Vault secret back", async () => {
