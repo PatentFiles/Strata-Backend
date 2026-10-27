@@ -224,7 +224,10 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
    feeEvidenceFingerprint:"verified",fullDepthProven:true};
  assert.deepEqual(evaluateV13LiveMoneyRisk(riskInput),{ok:true,plannedAllInCents:625});
  assert.equal(evaluateV13LiveMoneyRisk({...riskInput,reservedExitFeeCents:26}).ok,false);
- assert.equal(evaluateV13LiveMoneyRisk({...riskInput,plannedGrossCents:499}).ok,false);
+ // The $5 approved stake remains the ceiling; fractional gross usage from
+ // whole-contract IOC sizing is legitimate when all fees fit that ceiling.
+ assert.deepEqual(evaluateV13LiveMoneyRisk({...riskInput,plannedGrossCents:499}),
+   {ok:true,plannedAllInCents:624});
  assert.ok(statements.some(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals")));
  assert.ok(statements.some(x=>x.sql.includes("OWNER_V3_FEE_POLICY_MIGRATION")));
  assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);
