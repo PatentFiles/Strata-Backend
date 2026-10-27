@@ -6,7 +6,8 @@ import {
 } from "@workspace/v13-strategy";
 
 export const V13_MAX_ENTRY_STAKE_CENTS = 2_500_000;
-/** Hard floor for NEW V13 entry orders; historical $1.50 policies remain auditable but cannot open exposure. */
+/** Minimum APPROVED/CONFIGURED stake ceiling for new V13 exposure (not an order-fill minimum).
+ * Whole-contract IOC execution may legitimately consume less than this budget. */
 export const V13_MIN_ENTRY_STAKE_CENTS = 500;
 
 export type V13ApprovedLiveMoneyPolicy = {
@@ -209,9 +210,12 @@ export function evaluateV13LiveMoneyRisk(
     return { ok: false, reason: "live_money_loss_limit_reached" };
   }
 
-  // This evaluator admits exposure-increasing entries only. Protective exits use
-  // their separate reduce-only path and must remain possible below this floor.
-  if (input.plannedGrossCents < V13_MIN_ENTRY_STAKE_CENTS) {
+  // The $5 onboarding floor applies to the APPROVED STAKE CEILING, not the
+  // exchange-executable gross of a whole-contract IOC. An approved $5 budget
+  // may produce $4.60 gross (10 contracts at 46 cents) and must not be
+  // spuriously rejected. Historical $1.50 approval ceilings remain blocked.
+  // Protective reduce-only exits do not call this entry-only evaluator.
+  if (p.maxEntryStakeCents < V13_MIN_ENTRY_STAKE_CENTS) {
     return { ok: false, reason: "live_money_entry_below_minimum_stake" };
   }
 
