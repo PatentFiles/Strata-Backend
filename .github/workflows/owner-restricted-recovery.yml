@@ -1,0 +1,41 @@
+name: Owner restricted key recovery
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "artifacts/api-server/src/lib/strata/ownerRestrictedKeyRecovery*"
+      - "artifacts/api-server/src/lib/strata/accountCredentialControls.ts"
+      - "artifacts/api-server/src/routes/userExecutionRouter.ts"
+      - "lib/db/drizzle/0043_owner_restricted_key_recovery.sql"
+      - ".github/workflows/owner-restricted-recovery.yml"
+  push:
+    branches: [fix/owner-scoped-kalshi-key-recovery-20261026]
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+      - name: Owner key recovery one-shot and isolation tests
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerRestrictedKeyRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerRestrictedKeyRecovery.test.cjs
+          node --test dist/ownerRestrictedKeyRecovery.test.cjs
+          pnpm exec esbuild src/lib/strata/ownerRestrictedKeyRecovery.success.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerRestrictedKeyRecovery.success.test.cjs
+          node --test dist/ownerRestrictedKeyRecovery.success.test.cjs
+      - name: Existing credential recovery regressions
+        working-directory: artifacts/api-server
+        run: pnpm run test:account-credential-lifecycle

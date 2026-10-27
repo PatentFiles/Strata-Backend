@@ -136,6 +136,8 @@ export interface UserScopePort {
     view: UserExecutionView;
   }>;
   credentialStatus(userId: string): Promise<{ ok: boolean; reason: string; executable: false; roles: unknown[] }>;
+  prepareRestrictedKeyRecovery(userId:string):Promise<{ok:boolean;reason:string;executable:false}>;
+  executeRestrictedKeyRecovery(userId:string,body:unknown):Promise<{ok:boolean;reason:string;executable:false}>;
   registerCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   revokeCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
@@ -220,6 +222,8 @@ export function closedUserScopePort(): UserScopePort {
     control: async (userId) => refused(userId),
     safetyControl: async (userId) => ({ ...await refused(userId), executable: false, workerStarted: false, executionActive: false }),
     credentialStatus: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false, roles: [] }),
+    prepareRestrictedKeyRecovery: async()=>({ok:false,reason:"user_scope_not_migrated",executable:false as const}),
+    executeRestrictedKeyRecovery: async()=>({ok:false,reason:"user_scope_not_migrated",executable:false as const}),
     registerCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     revokeCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
     verifyCredential: async () => ({ ok: false, reason: "user_scope_not_migrated", executable: false }),
@@ -372,6 +376,24 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     ignoreForeignOwner(req.body);
     const result = await port.registerCredential(userId, req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
+  });
+  // Requires the signed-in owner and MFA already enforced by requireUser.
+  // No user ID, private key, or external URL is accepted in the body.
+  router.post("/credentials/recover-restricted/prepare", async (_req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    if(!await migrated(res))return;
+    const result=await port.prepareRestrictedKeyRecovery(userId);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post("/credentials/recover-restricted/execute", async (req,res)=>{
+    const userId=subject(res);
+    if(!userId)return void res.status(401).json({error:"Unauthorized"});
+    if(!await migrated(res))return;
+    const body=req.body&&typeof req.body==="object"&&!Array.isArray(req.body)
+      ? {attemptId:req.body.attemptId,confirmation:req.body.confirmation}:{};
+    const result=await port.executeRestrictedKeyRecovery(userId,body);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
   });
   router.post("/credentials/revoke", async (req, res) => {
     const userId = subject(res);

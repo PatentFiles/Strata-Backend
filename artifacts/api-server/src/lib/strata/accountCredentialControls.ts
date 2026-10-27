@@ -28,6 +28,11 @@ import {
 } from "./accountCredentialLifecycle";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import {
+  prepareFrozenKeyRecovery,
+  executeFrozenKeyRecovery,
+  type RecoveryIdentity,
+} from "./ownerRestrictedKeyRecovery";
+import {
   inspectAccountSetupExecutionCredential,
   inspectProvisioningCredential,
   inspectRestrictedKeyMetadata,
@@ -530,6 +535,40 @@ export function accountCredentialControls(
         },
       });
     },
+
+    /**
+     * Generates a replacement Subaccount 1 RSA key using the already-verified,
+     * encrypted account setup signer. No private material in the HTTP body.
+     * Only the owner can call this route; neither phase ever starts trading.
+     */
+    async prepareRestrictedKeyRecovery(userId:string) {
+      const proof=await recoveryKeyContext(db,database,options.kalshiGet,userId);
+      if(!proof.ok)return {ok:false,reason:proof.reason,executable:false as const,exchangePostAttempted:false as const};
+      return prepareFrozenKeyRecovery(database,proof.identity);
+    },
+    async executeRestrictedKeyRecovery(userId:string,body:unknown) {
+      const b=body&&typeof body==="object"&&!Array.isArray(body)?body as Record<string,unknown>:{};
+      if(typeof b.attemptId!=="string"||typeof b.confirmation!=="string")
+        return {ok:false,reason:"recovery_confirmation_missing",executable:false as const,exchangePostAttempted:false as const};
+      if(!options.kalshiGenerateRestrictedKey)
+        return {ok:false,reason:"recovery_generation_transport_unavailable",executable:false as const,exchangePostAttempted:false as const};
+      const proof=await recoveryKeyContext(db,database,options.kalshiGet,userId);
+      if(!proof.ok)return {ok:false,reason:proof.reason,executable:false as const,exchangePostAttempted:false as const};
+      const get=options.kalshiGet!;
+      return executeFrozenKeyRecovery(database,{
+        identity:proof.identity,attemptId:b.attemptId,confirmation:b.confirmation,
+        transport:options.kalshiGenerateRestrictedKey,
+        setupMaterial:proof.setup.authority.material,
+        async verify(material,fingerprint){
+          const current=await readVerifiedRoleAuthority(db,userId,proof.identity.connection,"verification");
+          if(!sameAuthority(proof.verification,current))return {ok:false,reason:"verification_credential_rotated"};
+          const currentSetup=await readVerifiedRoleAuthority(db,userId,proof.identity.connection,"account_setup_execution");
+          if(!sameAuthority(proof.setup,currentSetup))return {ok:false,reason:"account_setup_execution_credential_rotated"};
+          const evidence=await probeAccountCredential("restricted_execution",fingerprint,material,get,proof.verification.authority);
+          return {ok:evidence.ok,reason:evidence.reason};
+        }
+      });
+    },
     async ownerShardAllocationStatus(userId: string): Promise<ShardAllocationView> {
       return ownerShardAllocationStatus(db, userId);
     },
@@ -806,15 +845,97 @@ export function accountCredentialControls(
         policyDraft,
         subaccountCreationExecutionRoleAvailable: creationExecutionRoleAvailable,
         operationPreparations,
-        nextAuthorizedAction: nextAuthorizedSetupAction(
-          setup,
-          operationPreparationAvailable,
-          creationExecutionRoleAvailable,
-          operationPreparations,
-        ),
+        nextAuthorizedAction:
+          // Initial generation is permanently completed for this owner;
+          // do not send them back to the old one-shot Step 3 operation.
+          setup.executionAccountExists &&
+          replaceableRestrictedKeyReason(setup.setupReason)
+            ? {
+              action: "prepare_frozen_restricted_key_recovery",
+              operation: null,
+              endpoint: "/api/strata/me/credentials/recover-restricted/prepare",
+              requiredConfirmation: null,
+              effect: "review_new_scoped_rsa_key_for_existing_subaccount_1_no_trading",
+              attemptId: null,
+            }
+            : nextAuthorizedSetupAction(
+              setup,
+              operationPreparationAvailable,
+              creationExecutionRoleAvailable,
+              operationPreparations,
+            ),
       };
     },
   };
+}
+
+
+/**
+ * Owner-only signed preflight. An empty Strata ledger alone is not proof of
+ * absent external orders/positions. Unknown response shapes fail closed.
+ */
+async function recoveryKeyContext(
+  db:UserScopeQuery,
+  database:CredentialDatabase,
+  get:((key:{keyId:string;privateKey:string},path:string,query?:string)=>Promise<unknown>)|undefined,
+  userId:string,
+):Promise<
+  |{ok:true;identity:RecoveryIdentity;setup:Extract<VerifiedAuthorityResult,{ok:true}>;verification:Extract<VerifiedAuthorityResult,{ok:true}>}
+  |{ok:false;reason:string}
+>{
+  if(!get)return {ok:false,reason:"kalshi_signed_read_unavailable"};
+  const resolved=await resolveAccountCommissioningContext(userId,createDatabaseAccountCommissioningPorts(database));
+  if(!resolved.ok)return {ok:false,reason:resolved.reason};
+  const ctx=resolved.context;
+  if(!ctx.executionAccountId || !ctx.executionKeyFingerprint ||
+      ctx.subaccount!==1 || ctx.exchangeIndex!==2)
+    return {ok:false,reason:"recovery_execution_pair_unavailable"};
+  const restricted=ctx.credentials.find(x=>x.role==="restricted_execution");
+  if(!restricted || !restricted.keyFingerprint ||
+      restricted.keyFingerprint!==ctx.executionKeyFingerprint)
+    return {ok:false,reason:"recovery_active_credential_binding_mismatch"};
+  const verification=await readVerifiedRoleAuthority(db,userId,ctx.providerConnectionId,"verification");
+  if(!verification.ok)return {ok:false,reason:verification.reason};
+  const setup=await readVerifiedRoleAuthority(db,userId,ctx.providerConnectionId,"account_setup_execution");
+  if(!setup.ok)return {ok:false,reason:setup.reason};
+  if(!credentialIsIndependent(setup.authority.expectedFingerprint,setup.authority.material.keyId,verification.authority))
+    return {ok:false,reason:"recovery_setup_and_verification_not_independent"};
+  const meta=await inspectAccountSetupExecutionCredential(
+    setup.authority.material.keyId,verification.authority,get
+  );
+  if(!meta.ok)return {ok:false,reason:meta.reason};
+  const sub=await inspectSubaccount1(verification.authority,get);
+  if(!sub.ok||sub.exists!==true||sub.exchangeIndex2Exists!==true)
+    return {ok:false,reason:sub.reason};
+  const existing=await readOwnedSecret(db,userId,restricted.vaultSecretId);
+  if(!existing||dedicatedSignerFingerprint(existing.keyId,existing.privateKey)!==restricted.keyFingerprint)
+    return {ok:false,reason:"recovery_restricted_secret_unavailable"};
+  const old=await inspectRestrictedKeyMetadata(existing.keyId,verification.authority,get);
+  if(old.ok)return {ok:false,reason:"recovery_restricted_key_already_correct"};
+  if(!replaceableRestrictedKeyReason(old.reason))return {ok:false,reason:old.reason};
+
+  // Signed, owner-filtered Kalshi reads; no transfer/order POST. Refuse any
+  // position, resting order, nonempty cursor or malformed inventory.
+  try{
+    const [orders,positions]=await Promise.all([
+      get(verification.authority.material,"/trade-api/v2/portfolio/orders","subaccount=1&status=resting&limit=200"),
+      get(verification.authority.material,"/trade-api/v2/portfolio/positions","subaccount=1&limit=200"),
+    ]);
+    const o=orders&&typeof orders==="object"&&!Array.isArray(orders)?orders as Record<string,unknown>:{};
+    const p=positions&&typeof positions==="object"&&!Array.isArray(positions)?positions as Record<string,unknown>:{};
+    if(!Array.isArray(o.orders) || !Array.isArray(p.market_positions) ||
+       !Array.isArray(p.event_positions) || o.orders.length!==0 ||
+       p.market_positions.length!==0 || p.event_positions.length!==0 ||
+       Boolean(o.cursor) || Boolean(p.cursor))
+      return {ok:false,reason:"recovery_exchange_exposure_or_pagination_unresolved"};
+  }catch{return {ok:false,reason:"recovery_signed_exchange_exposure_unavailable"};}
+  return {ok:true,setup,verification,identity:{
+    owner:userId,financial:ctx.financialAccountId,connection:ctx.providerConnectionId,
+    execution:ctx.executionAccountId,previous:ctx.executionKeyFingerprint,
+    setupId:setup.credentialId,setupFingerprint:setup.authority.expectedFingerprint,
+    verificationId:verification.credentialId,
+    verificationFingerprint:verification.authority.expectedFingerprint
+  }};
 }
 
 function executionDatabase(db: UserScopeQuery): CredentialDatabase {
