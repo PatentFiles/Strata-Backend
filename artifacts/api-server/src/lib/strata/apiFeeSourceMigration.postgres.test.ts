@@ -60,6 +60,10 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   const standingMigration=readFileSync("../../lib/db/drizzle/0034_strata_standing_api_fee_delegation.sql","utf8")
     .replace("BEGIN;","").replace("COMMIT;","");
   await db.query(replaceSchemas(standingMigration));
+  // Staged migration is applied ONLY inside this disposable CI transaction.
+  const lifetimeMigration=readFileSync("../../sql/strata_standing_fee_until_revoked.sql","utf8")
+    .replace("BEGIN;","").replace("COMMIT;","");
+  await db.query(replaceSchemas(lifetimeMigration));
   const modelId="77777777-7777-4777-8777-777777777777";
   const delegationId="88888888-8888-4888-8888-888888888888";
   const sha="b".repeat(40), policyHash="f".repeat(64);
@@ -74,6 +78,12 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   const renewArgs=[owner,gid,sha,"ORDER_ENTRY","strata_api_fee_source_signed_review_v2",model,digest];
   assert.equal((await db.query(continuation,renewArgs)).rows.length,1,
     "fresh official fee observation must be able to renew the bounded standing technical lease");
+  // Opted-in V2 reviewer and owner scope: no calendar expiry, but provider
+  // lease is still a short independent technical observation and revoke-able.
+  await db.query("UPDATE "+privateSchema+".strata_api_fee_standing_models SET standing_until_revoked=true,valid_until='infinity'::timestamptz WHERE model_id=$1",[modelId]);
+  await db.query("UPDATE "+privateSchema+".strata_api_fee_standing_delegations SET standing_until_revoked=true,confirmation='I_AUTHORIZE_MY_ACCOUNT_FOR_CURRENT_REVIEWED_KXBTC15M_FEE_MODEL_UNTIL_REVOKED_V2',valid_until='infinity'::timestamptz WHERE delegation_id=$1",[delegationId]);
+  assert.equal((await db.query(continuation,renewArgs)).rows.length,1,
+    "genuine provider evidence permits V2 standing consent without human renewal");
   // The old 15m bootstrap grant may expire: no person is silently re-signed,
   // and only the separately signed unrevoked standing delegation can continue.
   await db.query("UPDATE "+privateSchema+".strata_api_fee_source_grants SET expires_at=now()-interval '1 second' WHERE grant_id=$1",[gid]);
