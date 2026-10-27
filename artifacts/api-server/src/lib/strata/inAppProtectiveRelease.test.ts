@@ -40,7 +40,7 @@ const emptySignedFeed=(override:Record<string,unknown>={})=>({
 const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
  provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
 const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
-  policy_hash:"e".repeat(64),configured_stake_cents:500,
+  policy_hash:"e".repeat(64),
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
  cash_micros:"25000000",key_fingerprint:"c".repeat(64),
