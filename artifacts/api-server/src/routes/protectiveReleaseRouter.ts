@@ -29,10 +29,11 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
    ?req.query.ownerUserId:actor.subject;
   const state=await protectiveReleaseStatus(actor.subject,target);
   // Only authenticated users can inspect the owner-selected release scope.
-  const standingGrantActive=state.ok&&typeof state.sha==="string"
-    ?await checkContinuousBootstrap({query:(q,params)=>pool.query(q,params)},target,state.sha):false;
-  const standingTechnicalLeaseCurrent=standingGrantActive&&state.ok&&typeof state.sha==="string"
-    ?await checkContinuousEligibility({query:(q,params)=>pool.query(q,params)},target,state.sha):false;
+  const statusSha=state.ok&&"sha" in state&&typeof state.sha==="string"?state.sha:null;
+  const standingGrantActive=statusSha!==null
+    ?await checkContinuousBootstrap({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
+  const standingTechnicalLeaseCurrent=standingGrantActive&&statusSha!==null
+    ?await checkContinuousEligibility({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
   let pendingOwners:string[]=[];
   if(isOperator(actor.role))try{pendingOwners=await pendingReleaseOwners()}catch{}
   res.status(state.ok?200:409).json(sanitizePublic({...state,
