@@ -8,8 +8,14 @@ import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
-  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
+  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,PROTECTIVE_REVIEWED_RELEASE_HOURS,
 } from "./inAppProtectiveRelease";
+test("freshly reviewed same-SHA release uses bounded 23-hour owner authorization",()=>{
+  // Does not renew existing authority: expiry remains tied to a new independent
+  // review and authenticated owner authorization for the exact deployment.
+  assert.equal(PROTECTIVE_REVIEWED_RELEASE_HOURS,23);
+  assert.ok(PROTECTIVE_REVIEWED_RELEASE_HOURS<=24);
+});
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
 const SHA="a".repeat(40);
