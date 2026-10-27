@@ -116,6 +116,18 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  AND expires_at>now()+interval '20 minutes'
  AND independent_reviewer_id<>$2::uuid
  AND operator_approver_id<>independent_reviewer_id
+ AND (expires_at <> 'infinity'::timestamptz OR EXISTS (
+  SELECT 1 FROM public.v13_production_account a
+   JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+     AND p.execution_account_id=a.id AND p.state='APPROVED'
+   JOIN public.strata_configured_stake stake ON stake.execution_account_id=a.id
+  WHERE a.id=strata_protective_exit_release.standing_execution_account_id
+   AND a.owner_user_id=$2::uuid AND a.commissioned=true
+   AND a.execution_enabled=true AND a.kill_switch=false
+   AND a.blocked_reason IS NULL
+   AND p.policy_hash=strata_protective_exit_release.standing_policy_hash
+   AND stake.configured_stake_cents=strata_protective_exit_release.standing_stake_cents
+ ))
  LIMIT 2`,[sha,ownerId]);
   // New owner SHA releases are account-specific and durable until revoked.
   // Missing staged schema retains the legacy status without granting authority.
