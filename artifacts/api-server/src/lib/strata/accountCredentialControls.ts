@@ -32,6 +32,7 @@ import {
   executeFrozenKeyRecovery,
   type RecoveryIdentity,
 } from "./ownerRestrictedKeyRecovery";
+import { inspectSignedRestrictedRecoveryExposure } from "./ownerRestrictedKeyExposure";
 import {
   inspectAccountSetupExecutionCredential,
   inspectProvisioningCredential,
@@ -914,21 +915,10 @@ async function recoveryKeyContext(
   if(old.ok)return {ok:false,reason:"recovery_restricted_key_already_correct"};
   if(!replaceableRestrictedKeyReason(old.reason))return {ok:false,reason:old.reason};
 
-  // Signed, owner-filtered Kalshi reads; no transfer/order POST. Refuse any
-  // position, resting order, nonempty cursor or malformed inventory.
-  try{
-    const [orders,positions]=await Promise.all([
-      get(verification.authority.material,"/trade-api/v2/portfolio/orders","subaccount=1&status=resting&limit=200"),
-      get(verification.authority.material,"/trade-api/v2/portfolio/positions","subaccount=1&limit=200"),
-    ]);
-    const o=orders&&typeof orders==="object"&&!Array.isArray(orders)?orders as Record<string,unknown>:{};
-    const p=positions&&typeof positions==="object"&&!Array.isArray(positions)?positions as Record<string,unknown>:{};
-    if(!Array.isArray(o.orders) || !Array.isArray(p.market_positions) ||
-       !Array.isArray(p.event_positions) || o.orders.length!==0 ||
-       p.market_positions.length!==0 || p.event_positions.length!==0 ||
-       Boolean(o.cursor) || Boolean(p.cursor))
-      return {ok:false,reason:"recovery_exchange_exposure_or_pagination_unresolved"};
-  }catch{return {ok:false,reason:"recovery_signed_exchange_exposure_unavailable"};}
+  // The signed GET wrapper appends query strings verbatim. The centralized
+  // probe uses ?subaccount=1 queries and refuses any live/paginated exposure.
+  const exposure=await inspectSignedRestrictedRecoveryExposure(get,verification.authority.material);
+  if(!exposure.ok)return {ok:false,reason:exposure.reason};
   return {ok:true,setup,verification,identity:{
     owner:userId,financial:ctx.financialAccountId,connection:ctx.providerConnectionId,
     execution:ctx.executionAccountId,previous:ctx.executionKeyFingerprint,
