@@ -24,7 +24,7 @@ function fixture(){
     credential_id:"55555555-5555-4555-8555-555555555555",
     key_fingerprint:fingerprint,decrypted_secret:JSON.stringify({api_key_id:cred.keyId,private_key:cred.privateKey}),
     subaccount:1,exchange_index:2,kill_switch:true,execution_enabled:false,
-    commissioned:false,manual_kill_switch:true,live_execution_enabled:false,
+    commissioned:false,manual_kill_switch:false,live_execution_enabled:true,
     reserved_micros:"0",positions:0,intents:0,workers:0};
   const query=async(sql:string,params:unknown[]=[]):Promise<{rows:Record<string,unknown>[]}>=>{
     if(["BEGIN","ROLLBACK","COMMIT"].includes(sql))return {rows:[]};
@@ -52,7 +52,16 @@ function fixture(){
         destination_before_cents:0,bot_before_cents:0,prepared_ms:preparedAt,
       }]:[]};
     if(sql.includes("shard-allocation:claim-once")){
-      if(state!=="prepared"||params[0]!==attempt||params[1]!==USER)return {rows:[]};
+      // The durable DB claim must recheck OWNER exposure, not global trading.
+      assert.doesNotMatch(sql,/live_execution_config|manual_kill_switch|live_execution_enabled/);
+      for(const condition of [
+        "a.commissioned=false","a.execution_enabled=false","a.kill_switch=true",
+        "a.reserved_micros=0","NOT EXISTS","l.state='owned'",
+      ])assert.ok(sql.includes(condition),condition);
+      if(state!=="prepared"||params[0]!==attempt||params[1]!==USER ||
+         !owner.kill_switch||owner.commissioned||owner.execution_enabled ||
+         owner.reserved_micros!=="0"||owner.positions!==0||
+         owner.intents!==0||owner.workers!==0)return {rows:[]};
       state="attempted";return {rows:[{id:attempt}]};
     }
     if(sql.includes("shard-allocation:outcome")){
@@ -95,6 +104,8 @@ function fixture(){
   };
   return {db,read,post,posts:()=>posts,setUnsafe:()=>{owner.kill_switch=false;},
     setDestination:(n:number)=>{cash2=n;},setSource:(n:number)=>{cash0=n;},
+    setOwnerField:(field:keyof typeof owner,value:unknown)=>{(owner as Record<string,unknown>)[field]=value;},
+    ownerFlags:()=>({manual_kill_switch:owner.manual_kill_switch,live_execution_enabled:owner.live_execution_enabled}),
     setReceiptStatus:(v:string)=>{receiptStatus=v;},
     setReceiptAmount:(v:string)=>{receiptAmount=v;},
     setReceiptDestinationShard:(v:number)=>{receiptDestinationShard=v;},
@@ -114,7 +125,7 @@ test("read-only prepare verifies shard0 3450, shard2 zero and bot zero; no POST"
   assert.equal((await ownerShardAllocationStatus(f.db,OTHER)).state,"unavailable");
   assert.equal((await prepareOwnerShardAllocation(f.db,USER,{read:f.read})).state,"prepared");
 });
-test("wrong money shard, owner, or global safety gate rejects preparation",async()=>{
+test("wrong money shard, owner, or account-specific safety gate rejects preparation",async()=>{
   const f=fixture();
   f.setSource(2000);assert.equal((await prepareOwnerShardAllocation(f.db,USER,{read:f.read})).reason,"shard0_primary_cash_insufficient");
   f.setSource(3450);f.setDestination(25);
@@ -379,4 +390,51 @@ test("completed $25 receipt reconciles exact fractional source remainder without
   assert.equal(received.sourceCents,950);
   assert.equal(received.destinationCents,2500);
   assert.equal(f.posts(),1);
+});
+
+test("globally live service permits owner-frozen shard funding, without changing global switches",async()=>{
+  const f=fixture();
+  assert.deepEqual(f.ownerFlags(),{manual_kill_switch:false,live_execution_enabled:true});
+  const p=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
+  assert.equal(p.state,"prepared");
+  assert.equal(f.posts(),0);
+  const x=await executeOwnerShardAllocation(f.db,USER,{
+    attemptId:p.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION,
+  },{read:f.read,post:f.post,enableTestPost:true});
+  assert.equal(x.state,"uncertain");
+  assert.equal(f.posts(),1);
+  assert.equal((await reconcileOwnerShardAllocation(f.db,USER,{read:f.read})).state,"completed");
+  assert.deepEqual(f.ownerFlags(),{manual_kill_switch:false,live_execution_enabled:true});
+});
+
+test("frozen owner invariants still block shard preparation even when other owners trade live",async()=>{
+  const cases:Array<[string,unknown]>=[
+    ["commissioned",true],["execution_enabled",true],["kill_switch",false],
+    ["reserved_micros","10000"],["positions",1],["intents",1],["workers",1],
+    ["subaccount",0],["exchange_index",0],
+  ];
+  for(const [field,value] of cases){
+    const f=fixture();f.setOwnerField(field as Parameters<typeof f.setOwnerField>[0],value);
+    const p=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
+    assert.equal(p.ok,false,field);
+    assert.equal(p.reason,"owner_shard_authority_or_safety_unproven",field);
+    assert.equal(f.posts(),0,field);
+  }
+});
+
+test("owner becomes active after preparation: one-shot claim and Kalshi POST both blocked",async()=>{
+  for(const [field,value] of [
+    ["commissioned",true],["execution_enabled",true],["kill_switch",false],
+    ["reserved_micros","10000"],["positions",1],["intents",1],["workers",1],
+  ] as const){
+    const f=fixture();
+    const plan=await prepareOwnerShardAllocation(f.db,USER,{read:f.read});
+    assert.equal(plan.ok,true,field);
+    f.setOwnerField(field,value);
+    const result=await executeOwnerShardAllocation(f.db,USER,{
+      attemptId:plan.attemptId,confirmation:SHARD_ALLOCATION_CONFIRMATION,
+    },{read:f.read,post:f.post,enableTestPost:true});
+    assert.equal(result.ok,false,field);
+    assert.equal(f.posts(),0,field);
+  }
 });

@@ -28,7 +28,7 @@ function fixture() {
     credential_id:"55555555-5555-4555-8555-555555555555",
     key_fingerprint:fingerprint,decrypted_secret:JSON.stringify({api_key_id:creds.keyId,private_key:creds.privateKey}),
     subaccount:1,exchange_index:2,kill_switch:true,execution_enabled:false,
-    commissioned:false,manual_kill_switch:true,live_execution_enabled:false,reserved_micros:"0",
+    commissioned:false,manual_kill_switch:false,live_execution_enabled:true,reserved_micros:"0",
     open_positions:0,unresolved_orders:0,active_workers:0,
   };
   const query=async (sql:string,params?:unknown[])=>{
@@ -74,7 +74,16 @@ function fixture() {
           primary_before_cents:3450,bot_before_cents:0,prepared_ms:Date.now()}]:[]};
     }
     if(sql.includes("pilot-transfer:claim-once")){
-      if(state!=="prepared"||params?.[0]!==transferId||params?.[1]!==OWNER)return {rows:[]};
+      // The SQL guard must scope the authorization to the frozen owner only.
+      assert.doesNotMatch(sql,/live_execution_config|manual_kill_switch|live_execution_enabled/);
+      for(const condition of [
+        "a.commissioned=false","a.execution_enabled=false","a.kill_switch=true",
+        "a.reserved_micros=0","NOT EXISTS","l.state='owned'",
+      ])assert.ok(sql.includes(condition),condition);
+      if(state!=="prepared"||params?.[0]!==transferId||params?.[1]!==OWNER||
+         !ownerRow.kill_switch||ownerRow.commissioned||ownerRow.execution_enabled||
+         ownerRow.reserved_micros!=="0"||ownerRow.open_positions!==0||
+         ownerRow.unresolved_orders!==0||ownerRow.active_workers!==0)return {rows:[]};
       state="attempted";return {rows:[{id:transferId}]};
     }
     if(sql.includes("pilot-transfer:resolve")){
@@ -101,6 +110,8 @@ function fixture() {
   };
   return {db,get,post,getPosts:()=>posts,setUnsafe:()=>{ownerRow.kill_switch=false;},
     setBalances:(p:number,b:number)=>{primary=p;bot=b;},
+    setOwnerField:(field:keyof typeof ownerRow,value:unknown)=>{(ownerRow as Record<string,unknown>)[field]=value;},
+    ownerFlags:()=>({manual_kill_switch:ownerRow.manual_kill_switch,live_execution_enabled:ownerRow.live_execution_enabled}),
     setHistory:(rows:Record<string,unknown>[])=>{exchangeRows=rows;},
     setHistoryError:(v:boolean)=>{historyError=v;},
     attemptTime:()=>attemptedSeconds,
@@ -287,4 +298,49 @@ test("historical verification rejects duplicate unique-latest-time receipts",asy
   const result=await verifyOwnedHistoricalFunding(f.db,OWNER,{get:f.get});
   assert.equal(result.reason,"historical_transfer_history_ambiguous");
   assert.equal(f.getPosts(),0);
+});
+
+test("globally active trading stays enabled while a frozen owner completes isolated $25 pilot funding",async()=>{
+  const f=fixture();
+  assert.deepEqual(f.ownerFlags(),{manual_kill_switch:false,live_execution_enabled:true});
+  const p=await prepareOwnedPilotTransfer(f.db,OWNER,{get:f.get});
+  assert.equal(p.state,"prepared");
+  const result=await executeOwnedPilotTransfer(f.db,OWNER,{
+    attemptId:p.attemptId,confirmation:OWNER_PILOT_TRANSFER_CONFIRMATION,
+  },{get:f.get,post:f.post,allowTestTransport:true});
+  assert.equal(result.state,"completed");
+  assert.equal(f.getPosts(),1);
+  assert.deepEqual(f.ownerFlags(),{manual_kill_switch:false,live_execution_enabled:true});
+});
+
+test("pilot funding refuses any unsafe owner account even if other owners are trading",async()=>{
+  for(const [field,value] of [
+    ["commissioned",true],["execution_enabled",true],["kill_switch",false],
+    ["reserved_micros","10000"],["open_positions",1],["unresolved_orders",1],
+    ["active_workers",1],["subaccount",0],["exchange_index",0],
+  ] as const){
+    const f=fixture();f.setOwnerField(field,value);
+    const p=await prepareOwnedPilotTransfer(f.db,OWNER,{get:f.get});
+    assert.equal(p.ok,false,field);
+    assert.equal(p.reason,"owner_transfer_authority_or_safety_unproven",field);
+    assert.equal(f.getPosts(),0,field);
+  }
+});
+
+test("pilot funding cannot submit POST if owner safety changes after preparation",async()=>{
+  for(const [field,value] of [
+    ["commissioned",true],["execution_enabled",true],["kill_switch",false],
+    ["reserved_micros","10000"],["open_positions",1],["unresolved_orders",1],
+    ["active_workers",1],
+  ] as const){
+    const f=fixture();
+    const p=await prepareOwnedPilotTransfer(f.db,OWNER,{get:f.get});
+    assert.equal(p.ok,true,field);
+    f.setOwnerField(field,value);
+    const result=await executeOwnedPilotTransfer(f.db,OWNER,{
+      attemptId:p.attemptId,confirmation:OWNER_PILOT_TRANSFER_CONFIRMATION,
+    },{get:f.get,post:f.post,allowTestTransport:true});
+    assert.equal(result.ok,false,field);
+    assert.equal(f.getPosts(),0,field);
+  }
 });
