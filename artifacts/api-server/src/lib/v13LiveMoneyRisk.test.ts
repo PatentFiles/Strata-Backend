@@ -164,7 +164,7 @@ function launchInput(plannedGrossCents: number, reservedEntryFeeCents: number, r
   };
 }
 
-test("new entries below $5 gross fail even under an approved legacy $1.50 policy", () => {
+test("$5 minimum stays on approved entry stake, never on partial whole-contract gross", () => {
   const legacy = launchPolicy();
   legacy.maxEntryStakeCents = 150;
   legacy.maxEntryAllInCents = 200;
@@ -173,11 +173,29 @@ test("new entries below $5 gross fail even under an approved legacy $1.50 policy
     ok: false, reason: "live_money_entry_below_minimum_stake",
   });
   assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(499, 0, 0)), {
-    ok: false, reason: "live_money_entry_below_minimum_stake",
+    ok: true, plannedAllInCents: 499,
   });
   assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(500, 0, 0)), {
     ok: true, plannedAllInCents: 500,
   });
+  // 10 whole 46-cent contracts: the expected gross is $4.60, not $5.00.
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(460, 20, 20)), {
+    ok: true, plannedAllInCents: 500,
+  });
+  // The fee-inclusive approval is still a strict limit; partial sizing is
+  // not authority to consume extra capital or bypass risk.
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(460, 46, 45)), {
+    ok: false, reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  });
+  assert.deepEqual(evaluateV13LiveMoneyRisk(launchInput(501, 0, 0)), {
+    ok: false, reason: "live_money_entry_exceeds_capital_or_stake_limit",
+  });
+  const depleted = launchInput(460, 20, 20);
+  depleted.realizedDailyLossCents = 301;
+  assert.deepEqual(evaluateV13LiveMoneyRisk(depleted), {
+    ok: false, reason: "live_money_entry_exceeds_remaining_loss_budget",
+  });
+  assert.equal(evaluateV13LiveMoneyRisk(launchInput(0, 0, 0)).ok, false);
 });
 
 test("$5 launch all-in includes both reserved fees and enforces the $5.50 ceiling", () => {

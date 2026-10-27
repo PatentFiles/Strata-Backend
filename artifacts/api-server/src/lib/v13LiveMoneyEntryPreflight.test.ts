@@ -116,6 +116,41 @@ test("preflight sizes down instead of forcing 5000 dollars through shallow depth
   assert.ok(result.plannedAllInCents < 500_000);
 });
 
+test("approved $5 SCOUT executes 10 whole 46-cent contracts at $4.60 gross, not a $5 minimum", () => {
+  const input = base();
+  input.policy.maxEntryStakeCents = 500;
+  input.policy.maxEntryAllInCents = 625;
+  input.policy.capitalLimitCents = 2500;
+  input.policy.maxDailyLossCents = 1000;
+  input.policy.maxTotalLossCents = 1500;
+  input.policy.policyHash = computeV13LiveMoneyPolicyHash(input.policy);
+  input.referenceOffer = 0.46;
+  input.bestAskDollars = "0.4600";
+  input.askLevels = [{priceDollars:"0.4600",availableContracts:"10"}];
+  input.availableCashCents = 2500;
+  input.capitalRemainingCents = 2500;
+  input.feeEvidence.contracts = 10;
+  input.feeEvidence.limitPrice = 0.46;
+  input.feeEvidence.reservedEntryFeeCents = 20;
+  input.feeEvidence.reservedExitFeeCents = 20;
+  const good = preflightV13LiveMoneyEntry({...input,configuredStakeCents:500});
+  assert.equal(good.ok,true);
+  if(!good.ok)return;
+  assert.equal(good.plan.contracts,10);
+  assert.equal(good.plan.worstCaseGrossCents,460);
+  assert.equal(good.plannedAllInCents,500);
+  assert.ok(good.plannedAllInCents<=625);
+  // A legacy or tampered sub-$5 *configured* stake remains rejected.
+  assert.deepEqual(preflightV13LiveMoneyEntry({...input,configuredStakeCents:150}),{
+    ok:false,reason:"live_money_configured_stake_invalid",
+  });
+  // A fee-evidence mismatch must not become executable on the partial path.
+  input.feeEvidence.contracts=11;
+  assert.deepEqual(preflightV13LiveMoneyEntry({...input,configuredStakeCents:500}),{
+    ok:false,reason:"live_money_fee_evidence_invalid_or_stale",
+  });
+});
+
 test("fee quote for a different size or price cannot authorize the planned order", () => {
   const wrongCount = base();
   wrongCount.feeEvidence.contracts = 9_999;
