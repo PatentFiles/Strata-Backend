@@ -1,5 +1,6 @@
 import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
+import {recordLiveSignalDecision,auditUnseenExpiredSignals,sanitizedDecisionReason} from "./signalDecisionTrace";
 
 /** Explicit lifecycle only. API startup neither constructs nor starts this worker. */
 /** Rate-limit sequential reconciliation cycles while avoiding an extra full
@@ -16,6 +17,8 @@ export class ProductionWorker {
   private running = false;
   private recoveryOnly = false;
   private entryHoldReported = false;
+  private lastTraceSweepAt = 0;
+  private readonly tracedEvaluations = new Set<string>();
   constructor(readonly executor: ProductionExecutor, readonly intervalMs = 2_500,
     readonly report: (error: unknown) => void = () => {},
     readonly entriesOpen: () => boolean = () => true,
@@ -49,7 +52,7 @@ export class ProductionWorker {
       // executable. Newest first: do not spend a slow Kalshi/fee fetch on an
       // older crossing while a newer qualifying entry expires.
       const query = this.executor.accountOwnerUserId
-        ? `SELECT e.id FROM forward_test_evaluations e
+        ? `SELECT e.id,e.evaluated_at FROM forward_test_evaluations e
           JOIN v13_production_account a ON a.id=$1
           JOIN v13_live_money_policy p ON p.id=a.policy_id
             AND p.execution_account_id=a.id AND p.state='APPROVED'
@@ -58,7 +61,7 @@ export class ProductionWorker {
             AND e.evaluated_at BETWEEN $2::timestamptz -
               (p.max_quote_age_ms * interval '1 millisecond') AND $2::timestamptz
           ORDER BY e.evaluated_at DESC,e.id DESC LIMIT 100`
-        : `SELECT id FROM forward_test_evaluations
+        : `SELECT id,evaluated_at FROM forward_test_evaluations
           WHERE evaluation_source='paper' AND qualifying_trigger=true
             AND fresh_cross=true AND signal IN ('SCOUT','CONFIRM')
             AND evaluated_at >= $1
@@ -67,10 +70,40 @@ export class ProductionWorker {
         ? [this.executor.ledger.accountId, observedAt]
         : [new Date(observedAt.getTime() - 15_000)];
       const ids = (await this.executor.ledger.pool.query(query, args)).rows;
-      for (const { id } of ids) {
+      for (const { id, evaluated_at } of ids) {
         if (!this.entriesOpen()) break;
-        try { const intent = await this.executor.prepareEntry(id); await this.executor.dispatch(intent); }
-        catch (error) { this.report({error, evaluationId: id}); }
+        const sourceMs=evaluated_at?Date.parse(String(evaluated_at)):NaN;
+        const ageMs=Number.isFinite(sourceMs)?Math.max(0,observedAt.getTime()-sourceMs):null;
+        if (!this.tracedEvaluations.has(String(id))) {
+          this.tracedEvaluations.add(String(id));
+          if(this.tracedEvaluations.size>500){
+            const oldest=this.tracedEvaluations.values().next().value;
+            if(oldest)this.tracedEvaluations.delete(oldest);
+          }
+          void recordLiveSignalDecision({accountId:this.executor.ledger.accountId,
+            evaluationId:String(id),phase:"QUALIFYING_SEEN",sourceAgeMs:ageMs});
+        }
+        let prepared=false;
+        try {
+          const intent=await this.executor.prepareEntry(id);
+          prepared=true;
+          void recordLiveSignalDecision({accountId:this.executor.ledger.accountId,
+            evaluationId:String(id),phase:"ENTRY_PREPARED",sourceAgeMs:ageMs});
+          await this.executor.dispatch(intent);
+          void recordLiveSignalDecision({accountId:this.executor.ledger.accountId,
+            evaluationId:String(id),phase:"DISPATCH_COMPLETED",sourceAgeMs:ageMs});
+        }catch(error){
+          void recordLiveSignalDecision({accountId:this.executor.ledger.accountId,
+            evaluationId:String(id),phase:prepared?"DISPATCH_REJECTED":"PREPARE_REJECTED",
+            sourceAgeMs:ageMs,reason:sanitizedDecisionReason(error)});
+          this.report({error,evaluationId:id});
+        }
+      }
+      // Backfill signals never observed while fresh. This private read-only
+      // comparison never changes orders, policy, or the current entry gate.
+      if(observedAt.getTime()-this.lastTraceSweepAt>=30_000){
+        this.lastTraceSweepAt=observedAt.getTime();
+        void auditUnseenExpiredSignals(this.executor.ledger.accountId);
       }
     } finally { this.running = false; }
   }
