@@ -51,12 +51,17 @@ test("issue155: stale owner lease is atomically token-fenced, signed twice and l
  const q=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
   calls.push(sql);
   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
-  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("JOIN private.kalshi_account_worker_lease"))
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("JOIN private.kalshi_account_worker_lease")) {
+   // The transaction revalidates these account safety gates: they MUST be
+   // explicitly selected in the initial snapshot (not merely mocked fields).
+   assert.match(sql,/a\.execution_enabled/);
+   assert.match(sql,/a\.kill_switch/);
    return {rows:[{id:account,owner_user_id:owner,kalshi_connection_id:GRANT_ID,
      key_fingerprint:fp,credential_fingerprint:fp,cash_micros:"25000000",
      reserved_micros:"0",revision:3,blocked_reason:"awaiting_account_commissioning",
      execution_enabled:true,kill_switch:false,state:"owned",holder_id:"old-process",
      fencing_token:"2",heartbeat_at:hb,arm_requested:true,account_kill:false}]};
+  }
   if(sql.includes("FROM public.v13_production_intent WHERE account_id=")&&sql.includes("ORDER BY"))
    return {rows:[]};
   if(sql.includes("FROM private.kalshi_connection_credentials c"))

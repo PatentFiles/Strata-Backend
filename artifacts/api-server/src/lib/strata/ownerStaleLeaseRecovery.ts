@@ -53,6 +53,7 @@ export function eligibleStaleLeaseRecovery(x: {
 const ACCOUNT = [
  "SELECT a.id,a.owner_user_id::text,a.kalshi_connection_id,a.key_fingerprint,",
  "a.cash_micros::text,a.reserved_micros::text,a.revision,a.blocked_reason,",
+ "a.execution_enabled,a.kill_switch,",
  "l.state,l.holder_id,l.fencing_token::text,l.heartbeat_at,l.arm_requested,",
  "l.account_kill,l.credential_fingerprint",
  "FROM public.v13_production_account a",
