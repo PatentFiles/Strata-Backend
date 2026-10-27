@@ -498,7 +498,10 @@ test("the credential migration is private, additive, and has a rollback path", (
   assert.match(store, /credential-replacement:revoke/);
   assert.match(store, /credential-replacement:insert/);
   assert.match(store, /FOR UPDATE OF pc/);
-  assert.equal(wallet.includes("kalshi_connection_credentials"), false);
+  // Wallet now legitimately reads owner-scoped credential metadata for
+  // account setup status, but must not expose another user's binding.
+  assert.match(wallet, /c\.owner_user_id = fa\.user_id/);
+  assert.match(wallet, /c\.financial_account_id = fa\.id/);
   assert.match(wallet, /legacy_unassigned_not_startable|user_execution_account_not_commissioned/);
 });
 
