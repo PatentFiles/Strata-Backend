@@ -155,7 +155,7 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND w.state='owned' AND w.arm_requested=true AND w.account_kill=false
    AND w.heartbeat_at>now()-interval '15 seconds'
    AND l.observed_at<=now() AND l.expires_at>now()+interval '20 seconds'
- LIMIT 2 FOR SHARE OF g,oa`;
+ LIMIT 2 FOR SHARE OF g,oa,r,w,l,p`;
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
@@ -296,4 +296,15 @@ export async function renewContinuousTechnicalLease(input:{
    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return denied("standing_lease_renewal_unavailable")}
  finally{if(c){if(!committed)try{await c.query("ROLLBACK")}catch{};c.release()}}
+}
+
+/** An opt-in (including a revoked opt-in) selects standing authority for this
+ * scope. It must never fall back to a still-current legacy release. Missing
+ * schema or database failure is unknown authority, not "no grant".
+ */
+export async function hasContinuousGrantHistory(db:Pick<Db,"query">,ownerId:string,sha:string){
+ if(!UUID.test(ownerId)||!SHA.test(sha))throw new Error("standing_scope_invalid");
+ const rows=await db.query(`SELECT grant_id FROM private.strata_continuous_execution_grants
+   WHERE owner_user_id=$1::uuid AND release_commit_sha=$2 FOR SHARE`,[ownerId,sha]);
+ return rows.rows.length>0;
 }

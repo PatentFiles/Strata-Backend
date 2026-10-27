@@ -34,7 +34,7 @@ jobs:
           DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
           NODE_ENV: test
         run: |
-          pnpm exec esbuild src/lib/strata/continuousExecutionAuthorization.postgres.test.ts src/lib/strata/continuousExecutionAuthorization.test.ts src/lib/v13-production/workerProtectiveRecovery.test.ts --bundle --platform=node --format=cjs --outdir=dist/standing-tests --out-extension:.js=.cjs --external:pg-native --external:@electric-sql/pglite
+          pnpm exec esbuild src/lib/strata/continuousExecutionAuthorization.postgres.test.ts src/lib/strata/continuousExecutionAuthorization.test.ts src/lib/v13-production/workerProtectiveRecovery.test.ts src/lib/v13-production/signalDecisionTrace.test.ts --bundle --platform=node --format=cjs --outdir=dist/standing-tests --out-extension:.js=.cjs --external:pg-native --external:@electric-sql/pglite
           NODE_PATH="$RUNNER_TEMP/strata-test-deps/node_modules" node --test dist/standing-tests/strata/*.cjs dist/standing-tests/v13-production/*.cjs
       - name: Protective exit failure and restart tests
         env:
@@ -42,7 +42,7 @@ jobs:
           NODE_ENV: test
         run: |
           cd artifacts/api-server
-          pnpm exec esbuild src/lib/strata/ownerFeeEmergencyExit*.test.ts src/lib/strata/technicalReleaseEntryGate.test.ts src/lib/strata/protectiveExitStartupRelease.test.ts src/lib/strata/personalExchangeProtectiveSnapshot.test.ts --bundle --platform=node --format=cjs --outdir=dist/recovery-review --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          pnpm exec esbuild src/lib/strata/ownerFeeEmergencyExit*.test.ts src/lib/strata/technicalReleaseEntryGate.test.ts src/lib/strata/protectiveExitStartupRelease.test.ts src/lib/strata/personalExchangeProtectiveSnapshot.test.ts src/lib/strata/personalExecution.test.ts --bundle --platform=node --format=cjs --outdir=dist/recovery-review --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
           cd ../..
           node --test artifacts/api-server/dist/recovery-review/*.cjs
   full-disposable-safety:

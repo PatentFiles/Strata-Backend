@@ -4,7 +4,7 @@ export type LiveSignalPhase =
  "QUALIFYING_SEEN"|"PREPARE_REJECTED"|"ENTRY_PREPARED"|
  "DISPATCH_COMPLETED"|"DISPATCH_REJECTED"|"STALE_AT_WORKER"|
  "UNSEEN_IN_WINDOW";
-const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
 const PHASES=new Set<LiveSignalPhase>([
  "QUALIFYING_SEEN","PREPARE_REJECTED","ENTRY_PREPARED",
@@ -20,8 +20,7 @@ export function sanitizedDecisionReason(error:unknown):string {
 export async function recordLiveSignalDecision(input:{
  accountId:string;evaluationId:string;phase:LiveSignalPhase;
  sourceAgeMs?:number|null;reason?:string;
-},db:Queryable=pool):Promise<boolean> {
- const sha=deployedGitSha();
+},db:Queryable=pool,sha=deployedGitSha()):Promise<boolean> {
  if(!input.accountId||!UUID.test(input.evaluationId)||!SHA.test(sha)||
    !PHASES.has(input.phase))return false;
  const age=input.sourceAgeMs;
@@ -35,7 +34,8 @@ export async function recordLiveSignalDecision(input:{
    ON CONFLICT(execution_account_id,evaluation_id,phase) DO NOTHING
    RETURNING decision_id`,
    [input.accountId,input.evaluationId,input.phase,age??null,why,sha]);
-  return out.rows.length===1;
+  // A duplicate phase is already durable; idempotent retries are success.
+  return out.rows.length<=1;
  }catch{return false}
 }
 /** Low-priority observability scan: qualifying paper signals that were NEVER

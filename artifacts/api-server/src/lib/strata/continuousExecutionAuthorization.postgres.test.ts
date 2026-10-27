@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {resolve} from 'node:path';
-import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease} from './continuousExecutionAuthorization';
+import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from './continuousExecutionAuthorization';
 
 // Embedded disposable PostgreSQL only. Never uses a connected DATABASE_URL.
 const {PGlite}=createRequire(resolve('package.json'))('@electric-sql/pglite');
@@ -110,6 +110,7 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
   });
   await t.test('owner revocation is irreversible and blocks every permission path',async()=>{
    await pg.exec("UPDATE private.strata_continuous_execution_grants SET revoked_at=now(),revocation_reason='owner_revoked'");
+   assert.equal(await hasContinuousGrantHistory(db,owner,sha),true,'revocation retains standing mode; no legacy fallback');
    assert.equal(await checkContinuousBootstrap(db,owner,sha),false);
    assert.equal(await checkContinuousEligibility(db,owner,sha),false);
    assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,false);

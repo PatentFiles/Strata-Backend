@@ -17,7 +17,7 @@ import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIn
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
-import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease} from "./continuousExecutionAuthorization";
+import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
 import {deployedGitSha} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
@@ -260,8 +260,16 @@ export function createProductionPersonalSession(
     const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
     // A standing grant can bootstrap START, but cannot admit ANY entry
     // until a new signed exchange snapshot renews its short technical lease.
-    if(!exitRelease.ok && !(await checkContinuousBootstrap(db,input.userId,deployedGitSha())))
-      return {ok:false,reason:exitRelease.reason};
+    const startupSha=deployedGitSha();
+    let standingMode=false;
+    if(/^[a-f0-9]{40}$/.test(startupSha)){
+      try {standingMode=await hasContinuousGrantHistory(db,input.userId,startupSha);}
+      catch {return {ok:false,reason:"standing_authority_unavailable"};}
+    }
+    if(standingMode ? !(await checkContinuousBootstrap(db,input.userId,startupSha)) : !exitRelease.ok)
+      return {ok:false,reason:standingMode?"standing_grant_not_current":exitRelease.reason};
+    if(standingMode && process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true")
+      return {ok:false,reason:"protective_exit_release_disabled"};
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);
@@ -462,36 +470,12 @@ export function createProductionPersonalSession(
             if(maintenance.rows.length)state.entriesAuthorized=false;
           }catch{state.entriesAuthorized=false;}
         }
-        // Approvals are short-lived. Check on EVERY worker snapshot; no new
-        // inventory when the last approved exit window nears expiry.
-        // Keep reconciling existing inventory instead of treating revocation
-        // as proof that a position has disappeared.
-        const activeRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
         const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));
         if (!("identity" in proven)) throw new Error(proven.reason);
-        // This never re-arms STOP/KILL/fenced/unknown-exit worker state.
-        // The worker also rechecks financial, fee, quote, policy and final
-        // dispatch fences before any exchange POST.
-        // The human independent review is immutable. The worker renews only
-        // short technical eligibility after this fully authenticated Kalshi
-        // snapshot and a current fencing token. Never extend a human signature.
-        let standingEligible=false;
-        if(await checkContinuousBootstrap(db,input.userId,deployedGitSha())){
-          const renewed=await renewContinuousTechnicalLease({
-            ownerId:input.userId,accountId:input.accountId,
-            releaseSha:deployedGitSha(),policyHash,
-            observedAtMs:latest.observedAtMs,cashMicros:latest.cashMicros,
-            fencingToken:String(state.fencingToken),authenticated:true,
-            complete:true,unexplainedCashActivity:false,
-            providerEvidence:{observedAtMs:latest.observedAtMs,
-              orders:latest.orders,fills:latest.fills,
-              positions:latest.positions,settlements:latest.settlements},
-          });
-          if(renewed.ok)standingEligible=await checkContinuousEligibility(db,input.userId,deployedGitSha());
-        }
-        technicalRelease.completeReconciliation(activeRelease.ok||standingEligible);
+        // Authority remains closed here. Only committed ledger reconciliation
+        // or the final transactional account proof can reopen it.
         return proven;
       },
       readMarket: async (market, side) => {
@@ -555,6 +539,34 @@ export function createProductionPersonalSession(
           fingerprint,claimed.fencingToken,holderId,digest,
         ) : personalProductionFetch,
     });
+    session.executor.afterReconcile=async snapshot=>{
+      const sha=deployedGitSha();
+      const scoped=/^[a-f0-9]{40}$/.test(sha);
+      const hasGrant=scoped?await hasContinuousGrantHistory(db,input.userId,sha):false;
+      let eligible=false;
+      if(hasGrant){
+        if(!("connect" in db))throw new Error("standing_transactional_database_required");
+        const renewed=await renewContinuousTechnicalLease({
+          ownerId:input.userId,accountId:input.accountId,releaseSha:sha,policyHash,
+          observedAtMs:snapshot.observedAtMs,cashMicros:snapshot.cashMicros,
+          fencingToken:String(state.fencingToken),authenticated:snapshot.authenticated,
+          complete:snapshot.complete,unexplainedCashActivity:snapshot.unexplainedCashActivity,
+          providerEvidence:snapshot,
+        },{db,now});
+        eligible=renewed.ok&&await checkContinuousEligibility(db,input.userId,sha);
+      }else eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;
+      technicalRelease.completeReconciliation(eligible);
+    };
+    session.executor.authorizeFinalEntry=async tx=>{
+      const sha=deployedGitSha();
+      const hasGrant=/^[a-f0-9]{40}$/.test(sha)
+        ?await hasContinuousGrantHistory(tx,input.userId,sha):false;
+      const eligible=hasGrant
+        ?await checkContinuousEligibility(tx,input.userId,sha)
+        :(await verifyProtectiveExitStartupRelease(tx,input.userId)).ok;
+      technicalRelease.completeReconciliation(eligible);
+      if(!eligible)throw new Error("production_entry_release_not_current");
+    };
     const unresolved = await readUnresolvedIntentMode(
       (sql, params) => db.query(sql, params), input.accountId,
     );
