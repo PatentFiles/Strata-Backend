@@ -143,12 +143,13 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
    AND r.release_commit_sha=g.release_commit_sha AND r.state='approved'
+   AND r.revoked_at IS NULL
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
    AND a.kill_switch=false AND a.blocked_reason IS NULL
    AND l.expires_at>now()+interval '20 seconds'
- LIMIT 2`;
+ LIMIT 2 FOR SHARE OF g,oa`;
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
@@ -174,7 +175,7 @@ export const CONTINUOUS_STARTUP_GRANT_SQL=`
  WHERE g.owner_user_id=$1::uuid AND g.release_commit_sha=$2
    AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
-   AND r.release_commit_sha=g.release_commit_sha
+   AND r.release_commit_sha=g.release_commit_sha AND r.revoked_at IS NULL
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
