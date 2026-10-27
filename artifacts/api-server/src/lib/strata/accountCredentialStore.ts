@@ -1,4 +1,5 @@
 import { emptySnapshot, type CommissioningSnapshot } from "./commissioning";
+import { lockFrozenRestrictedRecovery } from "./frozenRestrictedCredentialRecovery";
 import {
   AccountCommissioningRefusal,
   KNOWN_CREDENTIAL_ROLES,
@@ -140,6 +141,23 @@ const OWNED_EXECUTION_ACCOUNT_SQL = `
   WHERE owner_user_id = $1::uuid
     AND kalshi_connection_id = $2::uuid
   LIMIT 1
+`;
+
+const REBIND_FROZEN_EXECUTION_SQL = `
+  -- credential-replacement:rebind-frozen-execution
+  UPDATE public.v13_production_account
+  SET key_fingerprint = $4
+  WHERE id = $1
+    AND owner_user_id = $2::uuid
+    AND kalshi_connection_id = $3::uuid
+    AND key_fingerprint = $5
+    AND commissioned = false
+    AND execution_enabled = false
+    AND kill_switch = true
+    AND policy_id IS NULL
+    AND cash_micros = 0
+    AND reserved_micros = 0
+  RETURNING id
 `;
 
 const REVOKE_ACTIVE_BINDING_SQL = `
@@ -288,6 +306,8 @@ export async function replaceOwnedCredentialBinding(
     role: string;
     vaultSecretId: string;
     keyFingerprint: string | null;
+    /** Only the authenticated wallet registration path can opt into recovery. */
+    frozenRestrictedRecovery?: boolean;
   },
 ): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
   if (!(KNOWN_CREDENTIAL_ROLES as readonly string[]).includes(input.role)) {
@@ -316,6 +336,7 @@ export async function replaceOwnedCredentialInTransaction(
     role: string;
     vaultSecretId: string;
     keyFingerprint: string | null;
+    frozenRestrictedRecovery?: boolean;
   },
 ): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
   if (!(KNOWN_CREDENTIAL_ROLES as readonly string[]).includes(input.role)) {
@@ -336,6 +357,7 @@ async function replaceCredentialInTransaction(
     role: string;
     vaultSecretId: string;
     keyFingerprint: string | null;
+    frozenRestrictedRecovery?: boolean;
   },
 ): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
   const locked = await client.query(LOCK_OWNED_CONNECTION_SQL, [
@@ -350,13 +372,23 @@ async function replaceCredentialInTransaction(
     return { ok: false, reason: "credential_not_owned" };
   }
   const financialAccountId = requiredText(owned.financial_account_id, "credential_not_owned");
+  let frozenRecovery: Awaited<ReturnType<typeof lockFrozenRestrictedRecovery>> = null;
   if (input.role === "restricted_execution") {
     const executionAccount = await client.query(OWNED_EXECUTION_ACCOUNT_SQL, [
       input.authenticatedUserId,
       financialAccountId,
     ]);
     if (executionAccount.rows.length > 0) {
-      return { ok: false, reason: "restricted_execution_rebinding_required" };
+      if (!input.frozenRestrictedRecovery || input.keyFingerprint === null ||
+          executionAccount.rows.length !== 1) {
+        return { ok: false, reason: "restricted_execution_rebinding_required" };
+      }
+      frozenRecovery = await lockFrozenRestrictedRecovery(
+        client, input.authenticatedUserId, financialAccountId,
+      );
+      if (!frozenRecovery) {
+        return { ok: false, reason: "restricted_execution_rebinding_required" };
+      }
     }
   }
   if (text(owned.connection_vault_secret_id) === input.vaultSecretId) {
@@ -372,6 +404,11 @@ async function replaceCredentialInTransaction(
   ]);
   if (active.rows.length > 1) return { ok: false, reason: "ambiguous_credential_role" };
   const previousId = text(active.rows[0]?.id);
+  // Recovery is explicitly two-stage: revoke the stale role first. No silent
+  // automatic rotation while an execution account is bound to the old key.
+  if (frozenRecovery && previousId) {
+    return { ok: false, reason: "restricted_execution_rebinding_required" };
+  }
   if (previousId) {
     const revoked = await client.query(REVOKE_ACTIVE_BINDING_SQL, [
       previousId,
@@ -400,6 +437,16 @@ async function replaceCredentialInTransaction(
       input.providerConnectionId,
     ]);
     if (linked.rows.length !== 1) throw bindingRejected("credential_binding_rejected");
+  }
+  if (frozenRecovery) {
+    const rebound = await client.query(REBIND_FROZEN_EXECUTION_SQL, [
+      frozenRecovery.executionAccountId,
+      input.authenticatedUserId,
+      financialAccountId,
+      input.keyFingerprint,
+      frozenRecovery.previousFingerprint,
+    ]);
+    if (rebound.rows.length !== 1) throw bindingRejected("restricted_execution_rebinding_required");
   }
   return { ok: true, credentialId };
 }
