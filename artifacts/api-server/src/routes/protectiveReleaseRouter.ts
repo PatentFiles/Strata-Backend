@@ -5,6 +5,7 @@ import {
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease} from "../lib/strata/ownerShaRelease";
 import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
+import {enrollContinuousGrant,revokeContinuousGrant} from "../lib/strata/continuousExecutionAuthorization";
 import {personalTradingSession} from "../lib/strata/sharedPersonalTradingControls";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
 
@@ -61,6 +62,23 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const result=await recoverOwnerStaleLease(actor.subject,req.body?.confirmation,{isScheduled:(ownerId,accountId)=>personalTradingSession.isScheduled(ownerId,accountId)});
   res.setHeader("Cache-Control","private, no-store");
   res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // Explicit owner opt-in for continuous technical renewal. No orders or
+ // releases are created from this endpoint; it requires an existing reviewed
+ // exact-SHA release and durable owner approval.
+ router.post("/continuous-owner-authorize",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const outcome=await enrollContinuousGrant(actor.subject,req.body);
+  res.setHeader("Cache-Control","private, no-store");
+  res.status(outcome.ok?200:409).json(sanitizePublic(outcome));
+ });
+ router.post("/continuous-owner-revoke",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const outcome=await revokeContinuousGrant(actor.subject,req.body);
+  res.setHeader("Cache-Control","private, no-store");
+  res.status(outcome.ok?200:409).json(sanitizePublic(outcome));
  });
  // Owner-only AAL2 routes: owner identity comes from the signed JWT, never
  // from a submitted account selector, and cannot clear shared safety gates.
