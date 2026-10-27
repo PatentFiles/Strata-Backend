@@ -23,4 +23,27 @@ ALTER TABLE private.strata_protective_exit_release
   );
 COMMENT ON COLUMN private.strata_protective_exit_release.standing_policy_hash
 IS 'Present only after fresh independently reviewed exact-SHA release and explicit AAL2 opt-in; revocation, SHA/policy/stake change fail closed on every signed snapshot.';
+-- These new columns are part of the immutable approval identity. The legacy
+-- release_guard trigger predates these columns, so protect them explicitly.
+CREATE OR REPLACE FUNCTION private.strata_standing_release_scope_immutable()
+RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $fn$
+BEGIN
+ IF ROW(NEW.standing_execution_account_id,NEW.standing_policy_hash,NEW.standing_stake_cents)
+    IS DISTINCT FROM
+    ROW(OLD.standing_execution_account_id,OLD.standing_policy_hash,OLD.standing_stake_cents)
+ THEN
+  RAISE EXCEPTION 'standing release scope is immutable; revoke instead'
+    USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END $fn$;
+DROP TRIGGER IF EXISTS strata_standing_release_scope_guard
+ ON private.strata_protective_exit_release;
+CREATE TRIGGER strata_standing_release_scope_guard
+ BEFORE UPDATE OF standing_execution_account_id,standing_policy_hash,standing_stake_cents
+ ON private.strata_protective_exit_release FOR EACH ROW
+ EXECUTE FUNCTION private.strata_standing_release_scope_immutable();
+REVOKE ALL ON FUNCTION private.strata_standing_release_scope_immutable()
+ FROM PUBLIC,anon,authenticated;
+
 COMMIT;
