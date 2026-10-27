@@ -289,7 +289,7 @@ test("two users register, rotate, and revoke only their own credential roles", a
 });
 
 test("provisioned execution account blocks restricted credential rotation and revocation", async () => {
-  const { db, ports } = harness();
+  const { db, ports, executionAccounts } = harness();
   const active = await registerAccountCredential(db, ports, {
     authenticatedUserId: USER_A,
     role: "restricted_execution",
