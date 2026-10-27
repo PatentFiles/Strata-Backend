@@ -155,7 +155,7 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND w.state='owned' AND w.arm_requested=true AND w.account_kill=false
    AND w.heartbeat_at>now()-interval '15 seconds'
    AND l.observed_at<=now() AND l.expires_at>now()+interval '20 seconds'
- LIMIT 2`;
+ LIMIT 2 FOR SHARE OF g,oa`;
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
