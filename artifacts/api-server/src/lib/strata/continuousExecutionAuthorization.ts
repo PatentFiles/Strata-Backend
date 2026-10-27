@@ -157,6 +157,35 @@ export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:str
  }catch{return false}
 }
 
+/** START bootstrap checks durable owner consent and independently reviewed SHA
+ * but deliberately does not grant ENTRY eligibility: signed refresh is still
+ * required before the worker can submit a new position.
+ */
+export const CONTINUOUS_STARTUP_GRANT_SQL=`
+ SELECT g.grant_id FROM private.strata_continuous_execution_grants g
+ JOIN private.strata_protective_exit_release r ON r.release_id=g.reviewed_release_id
+ JOIN public.v13_production_account a ON a.id=g.execution_account_id
+   AND a.owner_user_id=g.owner_user_id
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+   AND p.execution_account_id=a.id
+ JOIN private.strata_owner_sha_approvals oa
+   ON oa.owner_user_id=g.owner_user_id AND oa.execution_account_id=a.id
+   AND oa.release_commit_sha=g.release_commit_sha
+ WHERE g.owner_user_id=$1::uuid AND g.release_commit_sha=$2
+   AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
+   AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
+   AND r.release_commit_sha=g.release_commit_sha
+   AND r.independent_reviewer_id=g.independent_reviewer_id
+   AND g.independent_reviewer_id<>g.owner_user_id
+   AND a.commissioned=true AND a.execution_enabled=true
+   AND a.kill_switch=false AND a.blocked_reason IS NULL
+ LIMIT 2`;
+export async function checkContinuousBootstrap(db:Pick<Db,"query">,ownerId:string,sha:string){
+ if(!UUID.test(ownerId)||!SHA.test(sha))return false;
+ try {const r=await db.query(CONTINUOUS_STARTUP_GRANT_SQL,[ownerId,sha]);
+  return r.rows.length===1;}catch{return false}
+}
+
 /** Must be invoked ONLY by the server AFTER its signed/complete account
  * exchange read and reconciliation, with a current fenced worker token.
  * Human approvals are immutable; the worker only renews short technical
