@@ -11,6 +11,7 @@ import {
 } from "./v13ExecutionPlanner";
 import {
   evaluateV13LiveMoneyRisk,
+  V13_MIN_ENTRY_STAKE_CENTS,
   type V13ApprovedLiveMoneyPolicy,
 } from "./v13LiveMoneyRisk";
 
@@ -93,7 +94,8 @@ export function preflightV13LiveMoneyEntry(
   }
   const configured = input.configuredStakeCents;
   if (configured !== undefined && (
-    !Number.isSafeInteger(configured) || configured < 1 ||
+    !Number.isSafeInteger(configured) ||
+    configured < V13_MIN_ENTRY_STAKE_CENTS ||
     configured > input.policy.maxEntryStakeCents
   )) {
     return { ok: false, reason: "live_money_configured_stake_invalid" };
