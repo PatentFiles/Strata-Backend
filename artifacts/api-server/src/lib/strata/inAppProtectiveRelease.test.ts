@@ -555,7 +555,7 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
       if(sql.includes("FROM private.strata_protective_release_reviews v")){
         return {rows:[]};
       }
-      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+      if(sql.includes("SELECT release_id::text,expires_at,(expires_at='infinity'::timestamptz) AS standing FROM private.strata_protective_exit_release")){
         technicalSql=sql;
         return {rows:[]};
       }
@@ -591,7 +591,7 @@ test("OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent 
       if(sql.includes("FROM private.strata_protective_release_reviews v")){
         return {rows:[]};
       }
-      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+      if(sql.includes("SELECT release_id::text,expires_at,(expires_at='infinity'::timestamptz) AS standing FROM private.strata_protective_exit_release")){
         return {rows:Array.from({length:scenario.technical},()=>({
           release_id:RID,expires_at:new Date(Date.now()+60*60_000).toISOString(),
         }))};
