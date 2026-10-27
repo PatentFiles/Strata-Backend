@@ -845,12 +845,25 @@ export function accountCredentialControls(
         policyDraft,
         subaccountCreationExecutionRoleAvailable: creationExecutionRoleAvailable,
         operationPreparations,
-        nextAuthorizedAction: nextAuthorizedSetupAction(
-          setup,
-          operationPreparationAvailable,
-          creationExecutionRoleAvailable,
-          operationPreparations,
-        ),
+        nextAuthorizedAction:
+          // Initial generation is permanently completed for this owner;
+          // do not send them back to the old one-shot Step 3 operation.
+          setup.executionAccountExists &&
+          replaceableRestrictedKeyReason(setup.setupReason)
+            ? {
+              action: "prepare_frozen_restricted_key_recovery",
+              operation: null,
+              endpoint: "/api/strata/me/credentials/recover-restricted/prepare",
+              requiredConfirmation: null,
+              effect: "review_new_scoped_rsa_key_for_existing_subaccount_1_no_trading",
+              attemptId: null,
+            }
+            : nextAuthorizedSetupAction(
+              setup,
+              operationPreparationAvailable,
+              creationExecutionRoleAvailable,
+              operationPreparations,
+            ),
       };
     },
   };
