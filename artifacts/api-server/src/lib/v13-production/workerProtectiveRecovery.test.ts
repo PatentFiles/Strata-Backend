@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ProductionWorker} from "./worker";
+import {ProductionWorker,nextSequentialPollDelayMs} from "./worker";
+test("bounded sequential polling targets the start interval and never busy spins",()=>{
+  assert.equal(nextSequentialPollDelayMs(2500,1800),700);
+  assert.equal(nextSequentialPollDelayMs(2500,0),2500);
+  assert.equal(nextSequentialPollDelayMs(2500,4000),250);
+});
 test("recovery-only owned worker invokes protective UNKNOWN audit before normal reconciliation",async()=>{
  const phases:string[]=[];
  const executor={
