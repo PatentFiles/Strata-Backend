@@ -17,6 +17,8 @@ import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIn
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
+import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease} from "./continuousExecutionAuthorization";
+import {deployedGitSha} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -256,7 +258,10 @@ export function createProductionPersonalSession(
     // implementation only checked this when the EXIT itself was attempted,
     // which was too late for an already-opened position.
     const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
-    if(!exitRelease.ok)return {ok:false,reason:exitRelease.reason};
+    // A standing grant can bootstrap START, but cannot admit ANY entry
+    // until a new signed exchange snapshot renews its short technical lease.
+    if(!exitRelease.ok && !(await checkContinuousBootstrap(db,input.userId,deployedGitSha())))
+      return {ok:false,reason:exitRelease.reason};
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);
@@ -469,7 +474,24 @@ export function createProductionPersonalSession(
         // This never re-arms STOP/KILL/fenced/unknown-exit worker state.
         // The worker also rechecks financial, fee, quote, policy and final
         // dispatch fences before any exchange POST.
-        technicalRelease.completeReconciliation(activeRelease.ok);
+        // The human independent review is immutable. The worker renews only
+        // short technical eligibility after this fully authenticated Kalshi
+        // snapshot and a current fencing token. Never extend a human signature.
+        let standingEligible=false;
+        if(await checkContinuousBootstrap(db,input.userId,deployedGitSha())){
+          const renewed=await renewContinuousTechnicalLease({
+            ownerId:input.userId,accountId:input.accountId,
+            releaseSha:deployedGitSha(),policyHash,
+            observedAtMs:latest.observedAtMs,cashMicros:latest.cashMicros,
+            fencingToken:String(state.fencingToken),authenticated:true,
+            complete:true,unexplainedCashActivity:false,
+            providerEvidence:{observedAtMs:latest.observedAtMs,
+              orders:latest.orders,fills:latest.fills,
+              positions:latest.positions,settlements:latest.settlements},
+          });
+          if(renewed.ok)standingEligible=await checkContinuousEligibility(db,input.userId,deployedGitSha());
+        }
+        technicalRelease.completeReconciliation(activeRelease.ok||standingEligible);
         return proven;
       },
       readMarket: async (market, side) => {
