@@ -10,6 +10,7 @@ import {
   type AccountCommissioningPorts,
 } from "./accountCommissioningContext";
 import type { AccountSetupNextRequirement } from "./accountCredentialProbe";
+import { lockFrozenRestrictedRecovery } from "./frozenRestrictedCredentialRecovery";
 import {
   knownCredentialRole,
   replaceOwnedCredentialInTransaction,
@@ -79,6 +80,17 @@ const REVOKE_EXECUTION_ACCOUNT_SQL = `
   LIMIT 1
 `;
 
+const LOCK_ACTIVE_REVOKE_SQL = `
+  -- account-credential:lock-active-for-frozen-revoke
+  SELECT key_fingerprint
+  FROM private.kalshi_connection_credentials
+  WHERE owner_user_id = $1::uuid
+    AND provider_connection_id = $2::uuid
+    AND role = 'restricted_execution'
+    AND revoked_at IS NULL
+  FOR UPDATE
+`;
+
 const LIST_ROLE_SQL = `
   -- account-credential:list
   SELECT role,
@@ -138,7 +150,8 @@ export async function registerAccountCredential(
     owner_user_id: "ignored",
   });
   if (!resolved.ok) return registration(false, resolved.reason, input.role);
-  if (input.role === "restricted_execution" && resolved.context.executionAccountId) {
+  if (input.role === "restricted_execution" && resolved.context.executionAccountId &&
+      resolved.context.credentials.some((credential) => credential.role === "restricted_execution")) {
     return registration(false, "restricted_execution_rebinding_required", input.role);
   }
   const payload = JSON.stringify({
@@ -157,6 +170,8 @@ export async function registerAccountCredential(
         role: input.role,
         vaultSecretId,
         keyFingerprint: fingerprint,
+        frozenRestrictedRecovery: input.role === "restricted_execution" &&
+          resolved.context.executionAccountId !== null,
       });
       if (!replaced.ok) throw Object.assign(new Error(replaced.reason), { code: "23503" });
       return { vaultSecretId, fingerprint };
@@ -188,9 +203,6 @@ export async function revokeAccountCredential(
   if (!knownCredentialRole(input.role)) return registration(false, "credential_role_rejected", input.role);
   const resolved = await resolveAccountCommissioningContext(input.authenticatedUserId, ports);
   if (!resolved.ok) return registration(false, resolved.reason, input.role);
-  if (input.role === "restricted_execution" && resolved.context.executionAccountId) {
-    return registration(false, "restricted_execution_rebinding_required", input.role);
-  }
   try {
     return await db.transaction(async (client) => {
       const locked = await client.query(LOCK_REVOKE_CONNECTION_SQL, [
@@ -207,7 +219,22 @@ export async function revokeAccountCredential(
           financialAccountId,
         ]);
         if (executionAccount.rows.length > 0) {
-          return registration(false, "restricted_execution_rebinding_required", input.role);
+          if (executionAccount.rows.length !== 1) {
+            return registration(false, "restricted_execution_rebinding_required", input.role);
+          }
+          const frozen = await lockFrozenRestrictedRecovery(
+            client, input.authenticatedUserId, financialAccountId,
+          );
+          if (!frozen) {
+            return registration(false, "restricted_execution_rebinding_required", input.role);
+          }
+          const current = await client.query(LOCK_ACTIVE_REVOKE_SQL, [
+            input.authenticatedUserId, resolved.context.providerConnectionId,
+          ]);
+          if (current.rows.length !== 1 ||
+              current.rows[0]?.key_fingerprint !== frozen.previousFingerprint) {
+            return registration(false, "restricted_execution_rebinding_required", input.role);
+          }
         }
       }
       const revoked = await client.query(REVOKE_ROLE_SQL, [
