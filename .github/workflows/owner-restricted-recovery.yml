@@ -32,6 +32,11 @@ jobs:
         run: pnpm run typecheck
       - name: Owner key recovery one-shot and isolation tests
         working-directory: artifacts/api-server
+        # kalshiAccountClient imports the shared DB module, which validates
+        # DATABASE_URL at module-load. Tests use injected fetch, never connect.
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://recovery_test:recovery_test@127.0.0.1:5432/nonexistent_test_db
         run: |
           pnpm exec esbuild src/lib/strata/ownerRestrictedKeyRecovery.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerRestrictedKeyRecovery.test.cjs
           node --test dist/ownerRestrictedKeyRecovery.test.cjs
