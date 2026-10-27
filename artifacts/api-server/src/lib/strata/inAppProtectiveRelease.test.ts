@@ -8,7 +8,7 @@ import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
-  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
+  REVIEW_CONFIRM,OWNER_CONFIRM,OWNER_STANDING_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
@@ -40,6 +40,7 @@ const emptySignedFeed=(override:Record<string,unknown>={})=>({
 const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
  provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
 const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
+  policy_hash:"e".repeat(64),configured_stake_cents:500,
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
  cash_micros:"25000000",key_fingerprint:"c".repeat(64),
@@ -361,6 +362,17 @@ test("terminal lease transition refuses missing review, armed lease, exposure an
    assert.equal(h.executed.includes("COMMIT"),false,JSON.stringify(input));
    assert.equal(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease")),false,JSON.stringify(input));
  }
+});
+test("standing release requires a distinct owner confirmation and retains immutable policy scope",async()=>{
+ const h=fakeDb();
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_STANDING_CONFIRM},
+  {db:h.db,sha:()=>SHA});
+ assert.equal(r.ok,true,JSON.stringify(r));
+ const q=h.executed.find(sql=>sql.includes("INSERT INTO private.strata_protective_exit_release"));
+ assert.ok(q?.includes("'infinity'::timestamptz"));
+ assert.ok(q?.includes("standing_policy_hash"));
+ assert.ok(q?.includes("standing_execution_account_id"));
+ assert.equal(h.executed.filter(sql=>sql.includes("INSERT INTO private.strata_protective_exit_release")).length,1);
 });
 test("owner consent inserts exact signed release then atomically enables account and global live flag",async()=>{
  const h=fakeDb();
