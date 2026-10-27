@@ -14,6 +14,8 @@ import {API_POLICY_SIGNED_REVIEW_V1} from "./apiFeeGrantEligibility";
  */
 export const STANDING_MODEL_CONFIRM="I_INDEPENDENTLY_ATTEST_VERSIONED_KXBTC15M_STANDING_FEE_MODEL_V1";
 export const STANDING_OWNER_CONFIRM="I_AUTHORIZE_MY_ACCOUNT_FOR_STANDING_KXBTC15M_FEE_MODEL_V1";
+export const STANDING_MODEL_FOREVER_CONFIRM="I_INDEPENDENTLY_ATTEST_REVIEWED_KXBTC15M_FEE_MODEL_UNTIL_REVOKED_V2";
+export const STANDING_OWNER_FOREVER_CONFIRM="I_AUTHORIZE_MY_ACCOUNT_FOR_CURRENT_REVIEWED_KXBTC15M_FEE_MODEL_UNTIL_REVOKED_V2";
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;
 const DIGEST=/^[a-f0-9]{64}$/;
@@ -48,7 +50,7 @@ export async function signStandingFeeModel(
 ){
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  const release=(deps.sha??deployedGitSha)();
- if(!UUID.test(reviewerId)||!SHA.test(release)||b.confirmation!==STANDING_MODEL_CONFIRM||
+ if(!UUID.test(reviewerId)||!SHA.test(release)||![STANDING_MODEL_CONFIRM,STANDING_MODEL_FOREVER_CONFIRM].includes(String(b.confirmation))||
     b.rateDecisionDigest!==PDF_FREE_API_RATE_REVIEW_DECISION_SHA256||
     !OFFICIAL.test(text(b.evidenceUrl))||!DIGEST.test(text(b.evidenceSha256))||
     typeof b.note!=="string"||String(b.note).trim().length<120||String(b.note).trim().length>1800)
@@ -70,11 +72,13 @@ export async function signStandingFeeModel(
   const r=await c.query([
    "INSERT INTO private.strata_api_fee_standing_models",
    "(model_id,reviewer_admin_id,rate_decision_digest,fee_model_version,scope,",
-   "release_commit_sha,evidence_url,evidence_sha256,evidence_note,signed_at,valid_until)",
-   "VALUES($1::uuid,$2::uuid,$3,$4,'KXBTC15M:INDEX2',$5,$6,$7,$8,now(),now()+interval '30 days')",
+   "release_commit_sha,evidence_url,evidence_sha256,evidence_note,signed_at,valid_until,standing_until_revoked)",
+   "VALUES($1::uuid,$2::uuid,$3,$4,'KXBTC15M:INDEX2',$5,$6,$7,$8,now(),",
+   "CASE WHEN $9::boolean THEN 'infinity'::timestamptz ELSE now()+interval '30 days' END,$9::boolean)",
    "RETURNING model_id::text,valid_until"
   ].join(" "),[id,reviewerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
-    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,release,b.evidenceUrl,b.evidenceSha256,String(b.note).trim()]);
+    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,release,b.evidenceUrl,b.evidenceSha256,String(b.note).trim(),
+    b.confirmation===STANDING_MODEL_FOREVER_CONFIRM]);
   return r.rows.length===1?{...deny("standing_model_signed_only"),ok:true as const,
    modelId:id,validUntil:r.rows[0]?.valid_until}:deny("model_review_not_saved");
  });
@@ -92,7 +96,7 @@ export async function consentStandingFeeDelegation(
  const release=(deps.sha??deployedGitSha)();
  if(!UUID.test(ownerId)||!SHA.test(release)||
     !UUID.test(text(b.modelId))||!UUID.test(text(b.grantId))||
-    b.confirmation!==STANDING_OWNER_CONFIRM)
+    ![STANDING_OWNER_CONFIRM,STANDING_OWNER_FOREVER_CONFIRM].includes(String(b.confirmation)))
   return deny("explicit_owner_standing_fee_consent_required");
  // The reviewed migration already bound the owner to the original grant ID.
  // Enrollment into a signed standing model is a NEW explicit owner action,
@@ -140,7 +144,7 @@ export async function consentStandingFeeDelegation(
   if(locked.rows.length!==1||!DIGEST.test(text(locked.rows[0]?.policy_hash)))
    return deny("approved_owned_policy_or_original_grant_evidence_required");
   const model=await c.query([
-    "SELECT m.model_id,m.reviewer_admin_id,m.valid_until",
+    "SELECT m.model_id,m.reviewer_admin_id,m.valid_until,m.standing_until_revoked",
     "FROM private.strata_api_fee_standing_models m",
     "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
     "JOIN private.role_assignments role ON lower(btrim(role.email))=lower(btrim(u.email))",
@@ -152,16 +156,20 @@ export async function consentStandingFeeDelegation(
     "LIMIT 2 FOR SHARE OF m"
   ].join(" "),[b.modelId,ownerId,release,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION]);
   if(model.rows.length!==1)return deny("independent_standing_fee_model_missing_or_expired");
+  const durable=b.confirmation===STANDING_OWNER_FOREVER_CONFIRM;
+  if(durable!==(model.rows[0]?.standing_until_revoked===true))
+   return deny("standing_fee_consent_scope_must_match_independent_review");
   const fresh=await c.query([
    "INSERT INTO private.strata_api_fee_standing_delegations",
    "(delegation_id,owner_user_id,model_id,grant_id,policy_hash,release_commit_sha,",
-   "confirmation,granted_at,valid_until,lease_expires_at)",
+   "confirmation,granted_at,valid_until,lease_expires_at,standing_until_revoked)",
    "VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,now(),",
-   "LEAST($8::timestamptz,now()+interval '30 days'),",
-   "LEAST($8::timestamptz,now()+interval '15 minutes'))",
+   "CASE WHEN $9::boolean THEN 'infinity'::timestamptz ELSE LEAST($8::timestamptz,now()+interval '30 days') END,",
+   "LEAST($8::timestamptz,now()+interval '15 minutes'),$9::boolean)",
    "ON CONFLICT DO NOTHING RETURNING delegation_id::text,valid_until"
   ].join(" "),[randomUUID(),ownerId,b.modelId,b.grantId,text(locked.rows[0]?.policy_hash),
-     release,STANDING_OWNER_CONFIRM,model.rows[0]?.valid_until]);
+     release,b.confirmation,model.rows[0]?.valid_until,
+     b.confirmation===STANDING_OWNER_FOREVER_CONFIRM]);
   return fresh.rows.length===1?{...deny("owner_standing_fee_delegation_recorded_only"),
    ok:true as const,delegationId:fresh.rows[0]?.delegation_id,
    validUntil:fresh.rows[0]?.valid_until}:deny("standing_fee_delegation_already_exists");
@@ -204,7 +212,9 @@ export const CONTINUE_SQL = [
  "AND m.release_commit_sha=$3 AND d.release_commit_sha=$3",
  "AND d.revoked_at IS NULL AND d.valid_until>now()+interval '12 seconds'",
  "AND d.owner_user_id=$1::uuid AND d.grant_id=$2::uuid",
- "AND d.confirmation='I_AUTHORIZE_MY_ACCOUNT_FOR_STANDING_KXBTC15M_FEE_MODEL_V1'",
+ "AND d.confirmation IN ('I_AUTHORIZE_MY_ACCOUNT_FOR_STANDING_KXBTC15M_FEE_MODEL_V1',",
+  "'I_AUTHORIZE_MY_ACCOUNT_FOR_CURRENT_REVIEWED_KXBTC15M_FEE_MODEL_UNTIL_REVOKED_V2')",
+  "AND d.standing_until_revoked=m.standing_until_revoked",
  "AND a.owner_user_id=d.owner_user_id AND a.subaccount=1 AND a.exchange_index=2",
  "AND p.id=a.policy_id AND p.execution_account_id=a.id AND p.state='APPROVED'",
  "AND p.policy_hash=d.policy_hash",
@@ -310,7 +320,7 @@ export async function inspectStandingFeeReadiness(
    text(policies.rows[0]?.fee_source_url));
   const bootstrapGrantId=m&&UUID.test(m[1]??"")?m[1]:null;
   const models=await db.query([
-    "SELECT m.model_id::text,m.valid_until",
+    "SELECT m.model_id::text,m.valid_until,m.standing_until_revoked",
     "FROM private.strata_api_fee_standing_models m",
     "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
     "JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))",
@@ -324,7 +334,7 @@ export async function inspectStandingFeeReadiness(
    modelId:null,modelValidUntil:null,delegationId:null,delegationValidUntil:null,leaseExpiresAt:null,grantId:null,bootstrapGrantId:null};
   const model=models.rows[0];
   const delegation=model?await db.query([
-    "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at",
+    "SELECT d.delegation_id::text,d.grant_id::text,d.valid_until,d.lease_expires_at,d.standing_until_revoked",
     "FROM private.strata_api_fee_standing_delegations d",
     "JOIN public.v13_production_account a ON a.owner_user_id=d.owner_user_id",
     "AND a.subaccount=1 AND a.exchange_index=2",
@@ -341,8 +351,10 @@ export async function inspectStandingFeeReadiness(
    ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
    ok:true as const,modelId:model?text(model.model_id):null,
    modelValidUntil:model?.valid_until??null,
+   modelStandingUntilRevoked:model?.standing_until_revoked===true,
    delegationId:d?text(d.delegation_id):null,
    delegationValidUntil:d?.valid_until??null,
+   delegationStandingUntilRevoked:d?.standing_until_revoked===true,
    leaseExpiresAt:d?.lease_expires_at??null,
    grantId:d?text(d.grant_id):null,bootstrapGrantId,
   };

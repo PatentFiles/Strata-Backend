@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {pool} from "@workspace/db";
 import {CONTINUE_SQL} from "./apiFeeStandingDelegation";
+import {PROTECTIVE_STARTUP_RELEASE_SQL} from "./protectiveExitStartupRelease";
 test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and revocation fails closed",async()=>{
  const urlText=process.env.DATABASE_URL;
  assert.equal(process.env.CI,"true");
@@ -60,6 +61,10 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   const standingMigration=readFileSync("../../lib/db/drizzle/0034_strata_standing_api_fee_delegation.sql","utf8")
     .replace("BEGIN;","").replace("COMMIT;","");
   await db.query(replaceSchemas(standingMigration));
+  // Staged migration is applied ONLY inside this disposable CI transaction.
+  const lifetimeMigration=readFileSync("../../sql/strata_standing_fee_until_revoked.sql","utf8")
+    .replace("BEGIN;","").replace("COMMIT;","");
+  await db.query(replaceSchemas(lifetimeMigration));
   const modelId="77777777-7777-4777-8777-777777777777";
   const delegationId="88888888-8888-4888-8888-888888888888";
   const sha="b".repeat(40), policyHash="f".repeat(64);
@@ -74,6 +79,12 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   const renewArgs=[owner,gid,sha,"ORDER_ENTRY","strata_api_fee_source_signed_review_v2",model,digest];
   assert.equal((await db.query(continuation,renewArgs)).rows.length,1,
     "fresh official fee observation must be able to renew the bounded standing technical lease");
+  // Opted-in V2 reviewer and owner scope: no calendar expiry, but provider
+  // lease is still a short independent technical observation and revoke-able.
+  await db.query("UPDATE "+privateSchema+".strata_api_fee_standing_models SET standing_until_revoked=true,valid_until='infinity'::timestamptz WHERE model_id=$1",[modelId]);
+  await db.query("UPDATE "+privateSchema+".strata_api_fee_standing_delegations SET standing_until_revoked=true,confirmation='I_AUTHORIZE_MY_ACCOUNT_FOR_CURRENT_REVIEWED_KXBTC15M_FEE_MODEL_UNTIL_REVOKED_V2',valid_until='infinity'::timestamptz WHERE delegation_id=$1",[delegationId]);
+  assert.equal((await db.query(continuation,renewArgs)).rows.length,1,
+    "genuine provider evidence permits V2 standing consent without human renewal");
   // The old 15m bootstrap grant may expire: no person is silently re-signed,
   // and only the separately signed unrevoked standing delegation can continue.
   await db.query("UPDATE "+privateSchema+".strata_api_fee_source_grants SET expires_at=now()-interval '1 second' WHERE grant_id=$1",[gid]);
@@ -86,6 +97,34 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
   await db.query("UPDATE "+scopedPublic+".v13_live_money_policy SET policy_hash=$1 WHERE id='policy'",[policyHash]);
   await db.query("UPDATE "+privateSchema+".strata_api_fee_owner_consents SET revoked_at=now() WHERE grant_id=$1",[gid]);
   assert.equal((await db.query(continuation,renewArgs)).rows.length,0,"owner revocation must immediately forbid renewal");
+  // Exercise the real standing protective migration in the same disposable
+  // PostgreSQL test transaction; never touch a production account.
+  await db.query("ALTER TABLE "+scopedPublic+".v13_production_account ADD COLUMN commissioned boolean DEFAULT true, ADD COLUMN execution_enabled boolean DEFAULT true, ADD COLUMN kill_switch boolean DEFAULT false, ADD COLUMN blocked_reason text");
+  await db.query("CREATE TABLE "+scopedPublic+".strata_configured_stake (execution_account_id text PRIMARY KEY,configured_stake_cents integer NOT NULL)");
+  await db.query("INSERT INTO "+scopedPublic+".strata_configured_stake VALUES ('cash-account',500)");
+  await db.query("CREATE TABLE "+privateSchema+".strata_protective_exit_release (release_id uuid PRIMARY KEY,release_commit_sha text,independent_reviewer_id uuid,operator_approver_id uuid,review_url text,release_evidence_digest text,state text,created_at timestamptz NOT NULL DEFAULT now(),expires_at timestamptz NOT NULL,revoked_at timestamptz, CONSTRAINT protective_exit_bounded_release CHECK(expires_at>created_at AND expires_at<=created_at+interval '24 hours'))");
+  const protectiveMigration=readFileSync("../../sql/strata_protective_exact_sha_standing_release.sql","utf8")
+    .replace("BEGIN;","").replace("COMMIT;","");
+  await db.query(replaceSchemas(protectiveMigration).split("public.").join(scopedPublic+"."));
+  const standingRelease="99999999-9999-4999-8999-999999999999";
+  await db.query("INSERT INTO "+privateSchema+".strata_protective_exit_release (release_id,release_commit_sha,independent_reviewer_id,operator_approver_id,review_url,release_evidence_digest,state,expires_at,standing_execution_account_id,standing_policy_hash,standing_stake_cents) VALUES ($1,$2,$3,$4,$5,$6,'approved','infinity'::timestamptz,'cash-account',$7,500)",
+    [standingRelease,sha,admin,owner,"https://github.com/PatentFiles/Strata-Backend/pull/243","a".repeat(64),policyHash]);
+  const protectiveSql=replaceSchemas(PROTECTIVE_STARTUP_RELEASE_SQL).split("public.").join(scopedPublic+".");
+  assert.equal((await db.query(protectiveSql,[sha,owner])).rows.length,1,
+    "standing protective release is eligible only for reviewed current SHA, owner and policy");
+  await db.query("UPDATE "+scopedPublic+".strata_configured_stake SET configured_stake_cents=600 WHERE execution_account_id='cash-account'");
+  assert.equal((await db.query(protectiveSql,[sha,owner])).rows.length,0,
+    "stake change immediately invalidates the release");
+  await db.query("UPDATE "+scopedPublic+".strata_configured_stake SET configured_stake_cents=500 WHERE execution_account_id='cash-account'");
+  await db.query("SAVEPOINT immutability_test");
+  await assert.rejects(
+    db.query("UPDATE "+privateSchema+".strata_protective_exit_release SET standing_stake_cents=600 WHERE release_id=$1",[standingRelease]),
+    /scope is immutable/);
+  await db.query("ROLLBACK TO SAVEPOINT immutability_test");
+  await db.query("RELEASE SAVEPOINT immutability_test");
+  await db.query("UPDATE "+privateSchema+".strata_protective_exit_release SET revoked_at=now() WHERE release_id=$1",[standingRelease]);
+  assert.equal((await db.query(protectiveSql,[sha,owner])).rows.length,0,
+    "owner or admin revocation prevents future entry eligibility");
   // The original legacy stage remains fail-closed even after bootstrap expiry.
 await db.query("UPDATE "+privateSchema+".strata_api_fee_owner_consents SET revoked_at=now() WHERE grant_id=$1",[gid]);
   assert.equal((await db.query(sql,args)).rows.length,0);

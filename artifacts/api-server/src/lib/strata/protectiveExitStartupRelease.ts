@@ -15,6 +15,21 @@ export const PROTECTIVE_STARTUP_RELEASE_SQL = `
    AND v.created_at<=now() AND v.expires_at>now()+interval '20 minutes'
    AND v.independent_reviewer_id <> $2::uuid
    AND v.operator_approver_id <> v.independent_reviewer_id
+   -- A perpetual release exists ONLY with one-time genuine owner+ADMIN
+   -- consent, and stays bound to unchanged account/policy/stake. This is
+   -- checked on every signed worker snapshot and at every START.
+   AND (v.expires_at <> 'infinity'::timestamptz OR EXISTS (
+     SELECT 1 FROM public.v13_production_account a
+       JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+         AND p.execution_account_id=a.id AND p.state='APPROVED'
+       JOIN public.strata_configured_stake stake ON stake.execution_account_id=a.id
+     WHERE a.id=v.standing_execution_account_id
+       AND a.owner_user_id=$2::uuid AND a.commissioned=true
+       AND a.execution_enabled=true AND a.kill_switch=false
+       AND a.blocked_reason IS NULL
+       AND p.policy_hash=v.standing_policy_hash
+       AND stake.configured_stake_cents=v.standing_stake_cents
+   ))
  LIMIT 2`;
 /** Owner-scoped durable code approval for the exact deployed commit. */
 export const OWNER_SHA_STARTUP_RELEASE_SQL = `

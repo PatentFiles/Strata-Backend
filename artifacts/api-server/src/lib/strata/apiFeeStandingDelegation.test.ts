@@ -3,9 +3,19 @@ import assert from "node:assert/strict";
 import {
  signStandingFeeModel,consentStandingFeeDelegation,
  renewStandingFeeObservationLease,revokeStandingFeeDelegation,
- inspectStandingFeeReadiness,STANDING_MODEL_CONFIRM,STANDING_OWNER_CONFIRM
+ inspectStandingFeeReadiness,CONTINUE_SQL,STANDING_MODEL_CONFIRM,STANDING_OWNER_CONFIRM,
+ STANDING_MODEL_FOREVER_CONFIRM,STANDING_OWNER_FOREVER_CONFIRM
 } from "./apiFeeStandingDelegation";
 
+test("standing fee V2 requires separate administrator and owner attestations and preserves live fee fencing",()=>{
+ assert.notEqual(STANDING_MODEL_FOREVER_CONFIRM,STANDING_MODEL_CONFIRM);
+ assert.notEqual(STANDING_OWNER_FOREVER_CONFIRM,STANDING_OWNER_CONFIRM);
+ assert.match(CONTINUE_SQL,/d\.standing_until_revoked=m\.standing_until_revoked/);
+ assert.match(CONTINUE_SQL,/d\.release_commit_sha=\$3/);
+ assert.match(CONTINUE_SQL,/p\.policy_hash=d\.policy_hash/);
+ assert.match(CONTINUE_SQL,/d\.revoked_at IS NULL/);
+ assert.match(CONTINUE_SQL,/lease_expires_at=LEAST\(d\.valid_until,now\(\)\+interval '15 minutes'\)/);
+});
 const OWNER="11111111-1111-4111-8111-111111111111";
 const GRANT="22222222-2222-4222-8222-222222222222";
 const MODEL="33333333-3333-4333-8333-333333333333";

@@ -17,6 +17,8 @@ const SHA=/^[a-f0-9]{40}$/;
 const REVIEW_URL=/^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/;
 export const REVIEW_CONFIRM="I_INDEPENDENTLY_REVIEWED_THE_EXACT_PRODUCTION_PROTECTIVE_EXIT_RELEASE";
 export const OWNER_CONFIRM="I_AUTHORIZE_MY_OWN_ACCOUNT_AND_SHARED_LIVE_EXECUTION_AFTER_INDEPENDENT_REVIEW";
+// Distinct AAL2 confirmation: unchanged-SHA, unchanged-policy/stake standing scope.
+export const OWNER_STANDING_CONFIRM="I_AUTHORIZE_THIS_REVIEWED_EXACT_SHA_RELEASE_UNTIL_REVOKED_OR_ACCOUNT_CHANGED";
 export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STALE_COMMISSIONING_BLOCKER";
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
@@ -109,11 +111,23 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.expires_at>now()
  AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
   const active=await db.query(`
- SELECT release_id::text,expires_at FROM private.strata_protective_exit_release
+ SELECT release_id::text,expires_at,(expires_at='infinity'::timestamptz) AS standing FROM private.strata_protective_exit_release
  WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL
  AND expires_at>now()+interval '20 minutes'
  AND independent_reviewer_id<>$2::uuid
  AND operator_approver_id<>independent_reviewer_id
+ AND (expires_at <> 'infinity'::timestamptz OR EXISTS (
+  SELECT 1 FROM public.v13_production_account a
+   JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+     AND p.execution_account_id=a.id AND p.state='APPROVED'
+   JOIN public.strata_configured_stake stake ON stake.execution_account_id=a.id
+  WHERE a.id=strata_protective_exit_release.standing_execution_account_id
+   AND a.owner_user_id=$2::uuid AND a.commissioned=true
+   AND a.execution_enabled=true AND a.kill_switch=false
+   AND a.blocked_reason IS NULL
+   AND p.policy_hash=strata_protective_exit_release.standing_policy_hash
+   AND stake.configured_stake_cents=strata_protective_exit_release.standing_stake_cents
+ ))
  LIMIT 2`,[sha,ownerId]);
   // New owner SHA releases are account-specific and durable until revoked.
   // Missing staged schema retains the legacy status without granting authority.
@@ -156,7 +170,8 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
     // must require BOTH owner exact-SHA consent and independent technical exit
     // release, matching START. Legacy mode retains its technical release gate.
     releaseActive:active.rows.length===1&&(!ownerMode||ownerApproved),
-   releaseExpiresAt:active.rows[0]?.expires_at??null,
+   releaseExpiresAt:active.rows[0]?.standing===true?null:active.rows[0]?.expires_at??null,
+   releaseStanding:active.rows.length===1&&active.rows[0]?.standing===true,
    accountReady:owner.ok,
     // Read-only evidence: approved policy does not prove live fee eligibility.
     feeSourceMode,
@@ -391,8 +406,9 @@ export async function authorizeProtectiveRelease(
 ){
  const db=deps.db??pool,sha=(deps.sha??deployedGitSha)();
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as DbRow:{};
- if(!valid(ownerId)||!valid(b.reviewId)||b.confirmation!==OWNER_CONFIRM||!SHA.test(sha))
+ if(!valid(ownerId)||!valid(b.reviewId)||![OWNER_CONFIRM,OWNER_STANDING_CONFIRM].includes(String(b.confirmation))||!SHA.test(sha))
    return deny("explicit_authenticated_owner_release_confirmation_required");
+ const standing=b.confirmation===OWNER_STANDING_CONFIRM;
  const repairing=b.provisionalRepairConfirmation===PROVISIONAL_REPAIR_CONFIRM;
  if(b.provisionalRepairConfirmation!==undefined&&!repairing)
    return deny("explicit_commissioning_repair_confirmation_invalid");
@@ -528,13 +544,26 @@ export async function authorizeProtectiveRelease(
       [prior.rows[0]?.release_id]);
     if(revoked.rows.length!==1)return deny("prior_release_revocation_failed");
   }
-  const inserted=await client.query(`
+  const policyHash=String(a.policy_hash??"");
+ const authorizedStake=Number(a.configured_stake_cents);
+ if(standing&&(!/^[0-9a-f]{64}$/.test(policyHash)||
+     !Number.isSafeInteger(authorizedStake)||authorizedStake<1))
+   return deny("standing_release_policy_or_stake_unverified");
+ // A genuine independent review plus a distinct authenticated owner choice
+ // persists until revocation or SHA/policy/stake change. Never auto-sign.
+ const inserted=await client.query(`
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
- review_url,release_evidence_digest,state,expires_at)
- VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '2 hours')
+ review_url,release_evidence_digest,state,expires_at,
+ standing_execution_account_id,standing_policy_hash,standing_stake_cents)
+ VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',
+  CASE WHEN $6::boolean THEN 'infinity'::timestamptz ELSE now()+interval '2 hours' END,
+  CASE WHEN $6::boolean THEN $7::text ELSE NULL END,
+  CASE WHEN $6::boolean THEN $8::text ELSE NULL END,
+  CASE WHEN $6::boolean THEN $9::integer ELSE NULL END)
  RETURNING release_id::text AS id,expires_at`,
- [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
+ [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest,
+  standing,accountId,policyHash,authorizedStake]);
   if(inserted.rows.length!==1)return deny("release_not_recorded");
   if(repairing){
     const clear=await client.query(`
