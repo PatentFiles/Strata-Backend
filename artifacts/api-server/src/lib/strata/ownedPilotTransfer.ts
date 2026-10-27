@@ -43,7 +43,6 @@ const ACCOUNT_SQL = `
           AND x.state NOT IN ('TERMINAL','BLOCKED')) AS unresolved_orders,
         (SELECT count(*)::int FROM private.kalshi_account_worker_lease x
           WHERE x.execution_account_id=a.id AND x.state='owned') AS active_workers,
-        gate.manual_kill_switch, gate.live_execution_enabled,
         c.id::text AS credential_id,c.key_fingerprint,
         s.decrypted_secret
  FROM v13_production_account a
@@ -54,9 +53,7 @@ const ACCOUNT_SQL = `
    AND c.role='account_setup_execution' AND c.revoked_at IS NULL
    AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
  JOIN vault.decrypted_secrets s ON s.id=c.vault_secret_id
- CROSS JOIN live_execution_config gate
  WHERE a.owner_user_id=$1::uuid AND a.owner_user_id IS NOT NULL
-   AND gate.id='singleton'
 `;
 const RECONCILE_READ_SQL = `
  -- pilot-transfer:reconcile-read
@@ -113,6 +110,7 @@ const READ_ATTEMPT_SQL = `
         (extract(epoch FROM prepared_at)*1000)::bigint AS prepared_ms
  FROM private.kalshi_owner_pilot_transfers WHERE owner_user_id=$1::uuid AND id=$2::uuid
 `;
+// Durable one-shot claim revalidates frozen owner state, not shared live flags.
 const CLAIM_SQL = `
  -- pilot-transfer:claim-once
  UPDATE private.kalshi_owner_pilot_transfers
@@ -122,12 +120,10 @@ const CLAIM_SQL = `
  AND authority_credential_id=$3::uuid AND authority_fingerprint=$4
  AND EXISTS (
    SELECT 1 FROM v13_production_account a
-   JOIN live_execution_config g ON g.id='singleton'
    WHERE a.id=execution_account_id AND a.owner_user_id=$2::uuid
      AND a.subaccount=1 AND a.exchange_index=2
      AND a.commissioned=false AND a.execution_enabled=false
-     AND a.kill_switch=true AND g.manual_kill_switch=true
-     AND g.live_execution_enabled=false AND a.reserved_micros=0
+     AND a.kill_switch=true AND a.reserved_micros=0
      AND NOT EXISTS(SELECT 1 FROM v13_production_position p
        WHERE p.account_id=a.id AND p.quantity_hundredths>0)
      AND NOT EXISTS(SELECT 1 FROM v13_production_intent i
@@ -146,11 +142,11 @@ const RESOLVE_SQL = `
  RETURNING id
 `;
 
+/** Only the owner account must be frozen; other users may trade globally. */
 function validOwner(row:Row):boolean {
   return Number(row.subaccount)===1 && Number(row.exchange_index)===2 &&
     row.kill_switch===true && row.execution_enabled===false &&
-    row.commissioned===false && row.manual_kill_switch===true &&
-    row.live_execution_enabled===false && row.reserved_micros==="0" &&
+    row.commissioned===false && row.reserved_micros==="0" &&
     Number(row.open_positions)===0 && Number(row.unresolved_orders)===0 &&
     Number(row.active_workers)===0;
 }
