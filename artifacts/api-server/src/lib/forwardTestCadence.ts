@@ -11,3 +11,23 @@ export class OptionalResearchLane {
  }
  async drain():Promise<void>{await this.pending;}
 }
+
+/** Faster discovery only after an empty current-market listing. No successful
+ * strategy evaluation is accelerated. At most three retries per 15m clock window;
+ * other feed errors retain normal backoff and no requests overlap.
+ */
+export class BoundaryDiscoveryRecovery {
+ private window:number|null=null;
+ private attempts=0;
+ periodMs(error:string|null,nowMs=Date.now()):number {
+  if(!Number.isFinite(nowMs)||nowMs<0)return 5000;
+  const window=Math.floor(nowMs/900000);
+  if(this.window===null||window>this.window){this.window=window;this.attempts=0;}
+  // A wall-clock regression must not reset the provider request budget.
+  if(window!==this.window)return 5000;
+  if(error==="Kalshi returned no current market"&&this.attempts<3){
+   this.attempts++;return 1000;
+  }
+  return 5000;
+ }
+}

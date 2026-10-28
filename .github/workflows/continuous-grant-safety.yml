@@ -8,6 +8,8 @@ on:
       - 'lib/db/drizzle/0043_strata_continuous_execution_grants.sql'
       - 'lib/db/drizzle/0044_v13_signal_decision_trace.sql'
       - '.github/workflows/continuous-grant-safety.yml'
+      - 'artifacts/api-server/src/lib/forwardTestCadence*'
+      - 'artifacts/api-server/src/lib/forwardTestWorker.ts'
       - 'docs/reviews/maintenance-hardening-20261028.sql'
   workflow_dispatch:
 permissions:
