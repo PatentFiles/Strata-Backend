@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {inspectOwnerAccountOnboardingReadiness,OWNER_ONBOARDING_READ_SQL} from "./ownerAccountOnboardingReadiness";
+import {inspectOwnerAccountOnboardingReadiness,publicOwnerAccountOnboardingReadiness,OWNER_ONBOARDING_READ_SQL} from "./ownerAccountOnboardingReadiness";
 const owner="11111111-1111-4111-8111-111111111111";
 const roles=["account_setup_execution","provisioning","restricted_execution","verification"];
 const base={
@@ -67,4 +67,27 @@ test("SQL reads the owner's exact execution pair and credential metadata but no 
  assert.match(OWNER_ONBOARDING_READ_SQL,/c.vault_secret_id IS NOT NULL/);
  assert.doesNotMatch(OWNER_ONBOARDING_READ_SQL,/SELECT\s+(?:\*|c\.vault_secret_id)/i);
  assert.doesNotMatch(OWNER_ONBOARDING_READ_SQL,/\b(?:UPDATE|INSERT|DELETE|CALL)\b/i);
+});
+
+test("owner onboarding response retains only allowlisted non-secret role readiness",async()=>{
+ const original=await read([base]).run();
+ const malicious={...original,credentials:{
+  ...original.credentials,privateKey:"MUST_NEVER_APPEAR",apiKey:"MUST_NEVER_APPEAR",
+  verifiedRoles:[...original.credentials.verifiedRoles,"untrusted_role"],
+ }} as typeof original;
+ const safe=publicOwnerAccountOnboardingReadiness(malicious);
+ assert.equal(safe.ok,true);
+ assert.equal(safe.credentials.allFourRecorded,true);
+ assert.deepEqual(safe.credentials.verifiedRoles,roles);
+ assert.equal(safe.account.commissioned,true);
+ assert.equal(safe.tradingAuthorized,false);
+ assert.equal(safe.ordersSubmitted,false);
+ assert.doesNotMatch(JSON.stringify(safe),/MUST_NEVER_APPEAR|untrusted_role|privateKey|apiKey/);
+});
+test("onboarding response never manufactures missing role approval",async()=>{
+ const original=await read([{...base,active_roles:["verification"]}]).run();
+ const safe=publicOwnerAccountOnboardingReadiness(original);
+ assert.equal(safe.credentials.allFourRecorded,false);
+ assert.deepEqual(safe.credentials.verifiedRoles,["verification"]);
+ assert.equal(safe.tradingAuthorized,false);
 });
