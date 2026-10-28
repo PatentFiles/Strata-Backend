@@ -8,6 +8,7 @@ on:
       - 'lib/db/drizzle/0043_strata_continuous_execution_grants.sql'
       - 'lib/db/drizzle/0044_v13_signal_decision_trace.sql'
       - '.github/workflows/continuous-grant-safety.yml'
+      - 'docs/reviews/maintenance-hardening-20261028.sql'
   workflow_dispatch:
 permissions:
   contents: read

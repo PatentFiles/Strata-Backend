@@ -1,0 +1,31 @@
+name: Held exchange diagnostics safety
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/heldExchangeLatencyProbe*'
+      - 'artifacts/api-server/src/index.ts'
+      - '.github/workflows/held-exchange-probe.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  no-order-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/lib/strata/heldExchangeLatencyProbe.test.ts --bundle --platform=node --format=cjs --outfile=dist/held-probe.cjs --external:pg-native --external:pino --external:pino-pretty
+          node --test dist/held-probe.cjs
