@@ -173,6 +173,10 @@ async function recordCycleError(identity: WorkerIdentity, reason: string) {
       updatedAt: new Date(),
     }).where(eq(forwardTestEngineTable.id, identity.engineId ?? FORWARD_TEST_ENGINE_ID));
   }, identity.engineId);
+  // Preserve failed attempts after the engine status is cleared by recovery.
+  // This is diagnostic only; no evaluation or entry authority is created.
+  logger.warn({event:"forward_test_cycle_rejected",engineId:identity.engineId??FORWARD_TEST_ENGINE_ID,
+    epoch:identity.epoch,reason:reason.slice(0,500)}, "Paper producer cycle rejected");
 }
 
 export async function runForwardTestCycle(options: CycleOptions): Promise<CycleResult> {
@@ -274,11 +278,22 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         crossingAt: now,
       }).where(eq(forwardTestWindowTable.ticker, market.ticker));
     }
+    const crossAvailable = entryCrossAvailable(persistedWindow.entryPolicyVersion, persistedWindow, decision.freshCross);
     const actionable = !openPosition &&
-      entryCrossAvailable(persistedWindow.entryPolicyVersion, persistedWindow, decision.freshCross) &&
+      crossAvailable &&
       decision.qualifyingTrigger &&
       decision.entrySideOffer !== null && validOffer(market.yesAsk) && validOffer(market.noAsk) &&
       (decision.signal === "SCOUT" || decision.signal === "CONFIRM");
+    // Strategy labels alone do not mean a new window entry is eligible.
+    // Persist the actual admission explanation instead of suggesting a missed trade.
+    const candidateSignal = decision.signal === "SCOUT" || decision.signal === "CONFIRM";
+    const admissionBlock = !candidateSignal || actionable ? null
+      : openPosition ? "paper position already open"
+      : !crossAvailable ? "window crossing consumed or unavailable"
+      : !decision.qualifyingTrigger ? "strategy trigger not qualifying"
+      : "required executable side offer missing";
+    const evaluationReason = admissionBlock
+      ? `${decision.reason} — ENTRY INELIGIBLE: ${admissionBlock}` : decision.reason;
     const evaluationId = randomUUID();
     await tx.insert(forwardTestEvaluationTable).values({
       id: evaluationId, evaluatedAt: now, strategyVersion: "V1.3",
@@ -303,7 +318,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       crossingConsumed: persistedWindow.crossingConsumed || actionable,
       crossingKey: persistedWindow.crossingKey ?? (firstCross ? crossingKey : null),
       signal: decision.signal, direction: decision.direction,
-      qualifyingTrigger: actionable, reason: decision.reason,
+      qualifyingTrigger: actionable, reason: evaluationReason,
       entryOffer: actionable ? decision.entrySideOffer : null,
       positionWasOpen: Boolean(openPosition),
     });
@@ -319,7 +334,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       ? paperClose(openPosition, market, decision.buffer, decision.positionExitReason, now)
       : null;
     let currentSignal = decision.signal;
-    let reason = decision.reason;
+    let reason = evaluationReason;
     if (close && openPosition) {
       const [settled] = await tx.update(forwardTestPositionTable).set({
         ...close, updatedAt: now,
