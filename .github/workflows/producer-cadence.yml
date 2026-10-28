@@ -1,7 +1,7 @@
 name: Producer cadence candidate
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
+    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
 permissions:
   contents: read
 jobs:
@@ -18,4 +18,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: node --experimental-strip-types --test artifacts/api-server/src/lib/forwardTestCadence.test.mjs
+      - name: Verify committed-signal wake, burst coalescing and STOP
+        working-directory: artifacts/api-server
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          NODE_ENV: test
+        run: |
+          pnpm exec esbuild src/lib/v13-production/workerSignalWake.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerSignalWake.cjs --external:pg-native
+          node --test dist/workerSignalWake.cjs
       - run: pnpm --filter @workspace/api-server run build
