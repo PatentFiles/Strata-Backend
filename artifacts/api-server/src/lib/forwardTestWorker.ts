@@ -1,5 +1,5 @@
 import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
-import {producerDelayMs,OptionalResearchLane} from "./forwardTestCadence";
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
@@ -471,6 +471,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   let lease: Awaited<ReturnType<typeof acquireWorkerLease>> = null;
   let lastAutolearnDay: string | null = null;
   const researchLane=new OptionalResearchLane();
+  const discoveryRecovery=new BoundaryDiscoveryRecovery();
   const pause = (delayMs:number) => new Promise<void>((resolve) => {
     const onAbort = () => {
       clearTimeout(timer);
@@ -486,6 +487,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   const task = (async () => {
     while (!stopped) {
       const cycleStarted=performance.now();
+      let periodMs=FORWARD_TEST_CADENCE_MS;
       try {
         if (!lease) {
           // The explicit production flag is the authorization to enable the
@@ -507,6 +509,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
           const cycle = await runForwardTestCycle({
             owner, epoch: lease.leaseEpoch, feeds, signal: controller.signal,
           });
+          periodMs=discoveryRecovery.periodMs(cycle.error);
           if (!stopped && cycle.evaluationId) {
             try {
               await processMicroLiveForwardTestCycle(cycle.evaluationId);
@@ -542,7 +545,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
           logger.error({ err: error }, "Server paper forward-test cycle failed");
         }
       }
-      if (!stopped) await pause(producerDelayMs(FORWARD_TEST_CADENCE_MS,performance.now()-cycleStarted));
+      if (!stopped) await pause(producerDelayMs(periodMs,performance.now()-cycleStarted));
     }
     await researchLane.drain();
     registerMicroLiveWorkerLeaseOwner(null);
