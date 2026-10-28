@@ -11,7 +11,7 @@ import {inspectIsolatedIssuerFeeSourceStatus} from "../lib/strata/isolatedIssuer
 import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5} from "../lib/strata/independentOfficialFeeV5";
 import {inspectOwnerSignedExchangeReleaseProof} from "../lib/strata/ownerSignedExchangeReleaseProof";
 import {previewOwnerV4CommissioningRepair,repairOwnerV4CommissioningHold} from "../lib/strata/ownerV4CommissioningRepair";
-import {inspectOwnerAccountOnboardingReadiness} from "../lib/strata/ownerAccountOnboardingReadiness";
+import {inspectOwnerAccountOnboardingReadiness,publicOwnerAccountOnboardingReadiness} from "../lib/strata/ownerAccountOnboardingReadiness";
 import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeConsent} from "../lib/strata/walletV4OwnerConsent";
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
@@ -738,7 +738,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if(!owner)return void res.status(401).json({error:"Unauthorized"});
     res.setHeader("Cache-Control","private, no-store");
     const out=await inspectOwnerAccountOnboardingReadiness(owner);
-    res.status(out.ok?200:409).json(sanitizePublic(out));
+    res.status(out.ok?200:409).json(publicOwnerAccountOnboardingReadiness(out));
   });
   // Explicit owner-initiated SIGNED Kalshi READ verification, not a stale
   // dashboard record, monetary grant or execution permission. No request body,
