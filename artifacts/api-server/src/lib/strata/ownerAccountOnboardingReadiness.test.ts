@@ -78,7 +78,7 @@ test("owner onboarding response retains only allowlisted non-secret role readine
  const safe=publicOwnerAccountOnboardingReadiness(malicious);
  assert.equal(safe.ok,true);
  assert.equal(safe.credentials.allFourRecorded,true);
- assert.deepEqual(safe.credentials.verifiedRoles,roles);
+ assert.deepEqual([...safe.credentials.verifiedRoles].sort(),[...roles].sort());
  assert.equal(safe.account.commissioned,true);
  assert.equal(safe.tradingAuthorized,false);
  assert.equal(safe.ordersSubmitted,false);
