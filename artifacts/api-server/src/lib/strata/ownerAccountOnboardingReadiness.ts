@@ -5,6 +5,7 @@
  * exchange evidence and never clear commission/fee/kill or risk blockers.
  */
 import {pool} from "@workspace/db";
+import {sanitizePublic} from "../v13-production/sanitize";
 
 type Row=Record<string,unknown>;
 type Db={query(sql:string,params?:unknown[]):Promise<{rows:Row[]}>};
@@ -126,4 +127,25 @@ export async function inspectOwnerAccountOnboardingReadiness(
    r.nextActions.push("investigate_account_kill_switch_off_before_release");
   return r;
  }catch{return empty("onboarding_read_only_database_unavailable");}
+}
+
+
+/**
+ * The generic sanitizer intentionally removes any key named "credentials".
+ * This owner-only onboarding response contains no credentials or secrets:
+ * just verification role names and a boolean. Restore ONLY that explicitly
+ * allowlisted read-only metadata after sanitizing the rest of the response.
+ * Never loosen the shared sanitizer or expose credential records/key material.
+ */
+export function publicOwnerAccountOnboardingReadiness(
+ snapshot:OwnerOnboardingReadiness,
+):OwnerOnboardingReadiness{
+ const redacted=sanitizePublic(snapshot);
+ return {
+  ...redacted,
+  credentials:{
+   verifiedRoles:ROLES.filter(role=>snapshot.credentials.verifiedRoles.includes(role)),
+   allFourRecorded:snapshot.credentials.allFourRecorded===true,
+  },
+ };
 }
