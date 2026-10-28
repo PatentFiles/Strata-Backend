@@ -44,6 +44,10 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    INSERT INTO private.kalshi_account_worker_lease VALUES('acct','${owner}','owned',true,false,7,now());
   `);
   await pg.exec(readFileSync(resolve('../../lib/db/drizzle/0043_strata_continuous_execution_grants.sql'),'utf8'));
+  await pg.exec(readFileSync(resolve('../../docs/reviews/maintenance-hardening-20261028.sql'),'utf8'));
+  const guard=(await pg.query("SELECT proconfig FROM pg_proc WHERE proname='strata_continuous_grant_guard'")).rows[0] as {proconfig:string[]};
+  assert.ok(guard.proconfig.some(x=>x==='search_path=\"\"'));
+
   await pg.query(`INSERT INTO private.strata_standing_execution_reviews
    (release_id,owner_user_id,execution_account_id,release_commit_sha,policy_hash,independent_reviewer_id,
    qualification_id,evidence_digest,review_url,review_note,confirmation)

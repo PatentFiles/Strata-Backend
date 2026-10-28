@@ -1,3 +1,4 @@
+import {startHeldExchangeLatencyProbe} from "./lib/strata/heldExchangeLatencyProbe";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
@@ -76,6 +77,8 @@ app.listen(port, "0.0.0.0", (err) => {
   startShadowObserver();
   // Paper processing does not depend on the separately gated live recovery.
   startServerForwardTestWorker();
+  // Opt-in, bounded signed GET diagnostics; requires a released account.
+  startHeldExchangeLatencyProbe();
   // GET-only reference monitor, default OFF; no order capability or live gate.
   startKalshiBrtiShadowFeed();
   // Research-only market-data sockets: default OFF; no trade/order authority.
