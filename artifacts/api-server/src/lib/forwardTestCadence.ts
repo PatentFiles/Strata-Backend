@@ -19,14 +19,22 @@ export class OptionalResearchLane {
 export class BoundaryDiscoveryRecovery {
  private window:number|null=null;
  private attempts=0;
+ private firstFailureAt:number|null=null;
  periodMs(error:string|null,nowMs=Date.now()):number {
   if(!Number.isFinite(nowMs)||nowMs<0)return 5000;
   const window=Math.floor(nowMs/900000);
-  if(this.window===null||window>this.window){this.window=window;this.attempts=0;}
+  if(this.window===null||window>this.window){this.window=window;this.attempts=0;this.firstFailureAt=null;}
   // A wall-clock regression must not reset the provider request budget.
   if(window!==this.window)return 5000;
-  if(error==="Kalshi returned no current market"&&this.attempts<3){
-   this.attempts++;return 1000;
+  if(error==="Kalshi returned no current market"){
+   if(this.attempts<3){
+    if(this.attempts===0)this.firstFailureAt=nowMs;
+    this.attempts++;return 1000;
+   }
+   // Fast retries are inserted BEFORE the original next regular poll.
+   // Do not shift that poll from t+5s to t+8s after retries at +1,+2,+3.
+   const remaining=(this.firstFailureAt??nowMs)+5000-nowMs;
+   return remaining>0?Math.max(250,remaining):5000;
   }
   return 5000;
  }
