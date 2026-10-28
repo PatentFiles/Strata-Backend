@@ -8,7 +8,7 @@ import {verifyWalletV4FinalSignedAdmission} from "../strata/walletV4FinalSignedA
 import {DYNAMIC_FEE_POLICY_VERSION_V4} from "../strata/dynamicFeeOrderRiskV4";
 import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
-import { canonical, cents, digest, money, requireProof, type Exchange, type MarketEvidence, type Request } from "./types";
+import { canonical, cents, digest, money, requireProof, type Exchange, type MarketEvidence, type Request, type Snapshot } from "./types";
 
 /** Only a previously saved, verified integer revision can be signed. */
 function stakeRevisionFromDecision(decision:unknown):number {
@@ -28,6 +28,9 @@ export class ProductionExecutor {
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
   /** Set only for an owned user account. The legacy singleton leaves this null. */
   accountOwnerUserId: string | null = null;
+  /** Server-owned hooks; snapshot acquisition alone must never renew authority. */
+  afterReconcile: ((snapshot: Snapshot) => Promise<void>) | null = null;
+  authorizeFinalEntry: ((tx: PoolClient) => Promise<void>) | null = null;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
     market_ticker: string; target: number; crossing_key: string;
@@ -116,6 +119,7 @@ export class ProductionExecutor {
     const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
     const snapshot = await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());
     await this.ledger.reconcile(snapshot, a.revision, this.now());
+    if (this.afterReconcile) await this.afterReconcile(snapshot);
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
@@ -381,6 +385,9 @@ export class ProductionExecutor {
               });
               requireProof(result.ok,result.ok?"wallet_v4_final_guard_unexpected":result.reason);
             }
+            // Run after every asynchronous quote/account proof, on the SAME
+            // transaction held through signing and sending. No cached grant.
+            if (this.authorizeFinalEntry) await this.authorizeFinalEntry(tx);
           }
         };
         await final();

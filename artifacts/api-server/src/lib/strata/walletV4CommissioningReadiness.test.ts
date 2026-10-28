@@ -29,7 +29,7 @@ test("Wallets owner readiness checks actual saved preset and all current authori
  assert.equal(result.tradingAuthorized,false);
  assert.equal(result.ordersSubmitted,false);
  assert.ok(result.blockers.includes("wallet_v4_signedPostAuthority_required"));
- assert.equal(queries.length,2);
+ assert.equal(queries.length,4);
  assert.match(queries[0]!,/a.owner_user_id=\$1::uuid/);
  assert.match(queries[1]!,/g.owner_user_id=\$1::uuid/);
  assert.match(queries[0]!,/a.execution_enabled,a.kill_switch,a.blocked_reason/);
@@ -109,7 +109,7 @@ test("Wallets V4 signed POST readiness remains false during account kill, disarm
    getSha:()=>sha,now:()=>now,
    featureState:()=>({signedPost:true,protectiveExit:true}),
   });
-  assert.equal(reads,2);
+  assert.equal(reads,4);
   assert.equal(result.ok,true);
   assert.equal(result.checks.feeAuthority,true);
   assert.equal(result.checks.protectiveExitRelease,true);

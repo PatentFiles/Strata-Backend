@@ -1,3 +1,4 @@
+import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 /**
  * #165: final V4 order-admission component for the EXISTING V13 executor.
  * This never submits an order, issues a release, or bypasses the owner or
@@ -117,7 +118,14 @@ export async function verifyWalletV4FinalSignedAdmission(
  if(cash===null||reserved===null||reserved>cash)
   return deny("wallet_v4_final_cash_invalid");
  let rows:Row[];
- try{rows=(await tx.query(FINAL_V4_ADMISSION_SQL,
+ try{
+  const standing=await hasContinuousGrantHistory(tx,ctx.ownerId,sha);
+  if(standing&&!await checkContinuousEligibility(tx,ctx.ownerId,sha))return deny('standing_v4_entry_authority_closed');
+  const sql=standing?FINAL_V4_ADMISSION_SQL
+   .replace('private.strata_protective_exit_release x','private.strata_standing_execution_reviews x')
+   .replace(" AND x.expires_at>now()+interval '20 minutes'",' AND x.execution_account_id=a.id AND x.owner_user_id=a.owner_user_id AND x.policy_hash=p.policy_hash')
+   .replace(' AND x.operator_approver_id<>x.independent_reviewer_id',''):FINAL_V4_ADMISSION_SQL;
+  rows=(await tx.query(sql,
     [ctx.accountId,ctx.ownerId,ctx.policyHash,ctx.stakeRevision,sha,r.market])).rows;}
  catch{return deny("wallet_v4_final_sql_fence_unavailable");}
  if(rows.length!==1)return deny("wallet_v4_final_owner_fee_exit_or_lease_closed");

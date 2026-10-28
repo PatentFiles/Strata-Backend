@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ProductionWorker} from "./worker";
+import {ProductionWorker,nextSequentialPollDelayMs} from "./worker";
+test("bounded sequential polling targets the start interval and never busy spins",()=>{
+  assert.equal(nextSequentialPollDelayMs(2500,1800),700);
+  assert.equal(nextSequentialPollDelayMs(2500,0),2500);
+  assert.equal(nextSequentialPollDelayMs(2500,4000),250);
+});
 test("recovery-only owned worker invokes protective UNKNOWN audit before normal reconciliation",async()=>{
  const phases:string[]=[];
  const executor={
@@ -63,4 +68,31 @@ test("closed entry gate continues reconciliation and never selects or submits a 
  assert.equal(reconciled,2);
  assert.equal(entriesQueried,0);
  assert.deepEqual(reasons,["production_entries_not_authorized"]);
+});
+
+test("failed seen-trace is retried and cannot silently permit an entry",async()=>{
+ let writes=0,entries=0,sweeps=0;
+ const id='11111111-1111-4111-8111-111111111111';
+ const executor={accountOwnerUserId:'owner',now:()=>100000,
+  ledger:{accountId:'acct',pool:{query:async(sql:string)=>({rows:sql.includes('FROM v13_production_position')?[]:[{id}]})}},
+  reconcile:async()=>{},prepareEntry:async()=>{entries++;return 'intent';},dispatch:async()=>{},
+ };
+ const trace={record:async()=>{writes++;return writes>1;},sweep:async()=>{sweeps++;return 0;}};
+ const worker=new ProductionWorker(executor as never,2500,()=>{},()=>true,async()=>{},undefined,trace);
+ await assert.rejects(worker.tick(),/production_signal_trace_unavailable/);
+ assert.equal(entries,0);
+ await worker.tick();
+ assert.equal(entries,1);
+ assert.equal(writes,4,'seen failure is not cached; all three phases are retried/persisted');
+ assert.equal(sweeps,1);
+});
+
+test("held entries still audit unseen signals without attempting orders",async()=>{
+ let sweeps=0,entries=0;
+ const executor={now:()=>100000,ledger:{accountId:'acct',pool:{query:async()=>({rows:[]})}},
+  reconcile:async()=>{},prepareEntry:async()=>{entries++;},dispatch:async()=>{entries++;}};
+ const worker=new ProductionWorker(executor as never,2500,()=>{},()=>false,async()=>{},undefined,
+  {record:async()=>true,sweep:async()=>{sweeps++;return 0;}});
+ await worker.tick();
+ assert.equal(sweeps,1);assert.equal(entries,0);
 });

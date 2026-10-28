@@ -5,6 +5,7 @@ import { ProductionExecutor } from "../v13-production/executor";
 import { decodePolicy, ProductionLedger, type Account } from "../v13-production/ledger";
 import { encodeProductionOrder } from "../v13-production/transport";
 import { canonical, requireProof, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
+import {recordLiveSignalDecision,auditUnseenExpiredSignals} from "../v13-production/signalDecisionTrace";
 import { ProductionWorker } from "../v13-production/worker";
 import type { ProtectiveExitDispatch } from "../v13-production/consumer";
 import { dedicatedSignerFingerprint, PRODUCTION_EXCHANGE_INDEX, PRODUCTION_SUBACCOUNT } from "./commissioning";
@@ -306,7 +307,10 @@ export function openOwnedExecutionSession(input: {
     console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId });
   };
   const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
-    input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit);
+    input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit, {
+      record:decision=>recordLiveSignalDecision(decision,input.pool),
+      sweep:accountId=>auditUnseenExpiredSignals(accountId,input.pool),
+    });
   return { executor, worker, exchange, workerStarted: false, executionActive: PHASE5_EXECUTABLE };
 }
 

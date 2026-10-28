@@ -41,6 +41,8 @@ export class ProductionLedger {
     const client = this.context.getStore() ?? this.pool;
     return Reflect.apply(client.query, client, args);
   }) as Pool["query"];
+  /** Trusted transport may borrow the current final fence, never commit it. */
+  currentTransaction(): PoolClient|null {return this.context.getStore()??null;}
   async readAccount(): Promise<Account> {
     const { rows } = await this.query<Account>("SELECT * FROM v13_production_account WHERE id=$1", [this.accountId]);
     requireProof(rows.length === 1, "production_account_missing");

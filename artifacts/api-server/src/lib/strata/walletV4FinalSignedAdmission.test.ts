@@ -53,6 +53,7 @@ const testPorts={
 const tx=(rows:Record<string,unknown>[]=[row])=>({
  calls:[] as {sql:string;args?:unknown[]}[],
  async query(sql:string,args?:unknown[]){
+  if(sql.includes("SELECT grant_id FROM private.strata_continuous_execution_grants"))return {rows:[]};
   this.calls.push({sql,args});
   assert.equal(sql,FINAL_V4_ADMISSION_SQL);
   assert.deepEqual(args,[account,owner,policyHash,9,sha,market]);

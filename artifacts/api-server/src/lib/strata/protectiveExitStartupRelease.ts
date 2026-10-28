@@ -15,7 +15,7 @@ export const PROTECTIVE_STARTUP_RELEASE_SQL = `
    AND v.created_at<=now() AND v.expires_at>now()+interval '20 minutes'
    AND v.independent_reviewer_id <> $2::uuid
    AND v.operator_approver_id <> v.independent_reviewer_id
- LIMIT 2`;
+ LIMIT 2 FOR SHARE OF v`;
 /** Owner-scoped durable code approval for the exact deployed commit. */
 export const OWNER_SHA_STARTUP_RELEASE_SQL = `
  SELECT oa.approval_id::text AS release_id
@@ -26,7 +26,7 @@ export const OWNER_SHA_STARTUP_RELEASE_SQL = `
   AND oa.revoked_at IS NULL AND a.commissioned=true
   AND a.blocked_reason IS NULL
   AND a.execution_enabled=true AND a.kill_switch=false
- LIMIT 2
+ LIMIT 2 FOR SHARE OF oa
 `;
 const SHA=/^[a-f0-9]{40}$/;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;

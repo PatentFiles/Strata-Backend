@@ -547,3 +547,35 @@ test("configured stake above the approved maximum cannot enter", async () => {
   await assert.rejects(f.executor.prepareEntry(await f.source()), /configured_stake_above_approved_maximum/);
   assert.equal(f.exchange.posts.length, 0);
 });
+
+test("technical renewal runs only after a successful committed reconciliation",async()=>{
+ const f=await fixture();
+ let renewals=0;
+ f.executor.afterReconcile=async snapshot=>{
+  const account=await f.ledger.readAccount();
+  assert.equal(account.cash_micros,snapshot.cashMicros);
+  assert.equal(account.reconciled_at?.getTime(),snapshot.observedAtMs);
+  renewals++;
+ };
+ await f.executor.reconcile();
+ assert.equal(renewals,1);
+ f.exchange.evidence.cashMicros='1';
+ await assert.rejects(f.executor.reconcile(),/production_external_cash_mismatch/);
+ assert.equal(renewals,1,"a signed but unreconciled snapshot must not renew authority");
+});
+
+test("final authorization is rechecked after the transport's last asynchronous boundary",async()=>{
+ const f=await fixture();
+ let authorized=true,checks=0;
+ f.executor.authorizeFinalEntry=async tx=>{
+  checks++;
+  // Same transaction sees the durable precommitted intent.
+  assert.equal((await tx.query("SELECT state FROM v13_production_intent")).rows[0].state,'DISPATCHED');
+  if(!authorized)throw new Error('production_entry_release_not_current');
+ };
+ const id=await f.executor.prepareEntry(await f.source());
+ f.exchange.beforePost=async()=>{authorized=false;};
+ await assert.rejects(f.executor.dispatch(id),/production_entry_release_not_current/);
+ assert.equal(checks,2);
+ assert.equal(f.exchange.posts.length,0);
+});

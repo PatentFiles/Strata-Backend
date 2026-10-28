@@ -303,7 +303,7 @@ test("P0: independent exit + exact-SHA owner approval bound at SQL fence for any
  const db={async query(sql:string,params?:unknown[]){
   calls.push(sql==="BEGIN"?"BEGIN":sql==="COMMIT"?"COMMIT":sql.startsWith("ROLLBACK")?"ROLLBACK":"SQL");
   if(sql.includes("SELECT a.id")){
-    assert.deepEqual(params?.slice(-2),[true,"a".repeat(40)]);
+    assert.deepEqual(params?.slice(-3),[true,"a".repeat(40),false]);
     return {rows:[{id:account}]};
   }
   return {rows:[]};
@@ -398,4 +398,22 @@ test("reviewed API new entries require 15-minute cash and full fee-inclusive res
  assert.ok(sql.includes("FOR SHARE)"));
  assert.ok(!sql.includes("JOIN public.strata_configured_stake s ON"),
    "stale stake rows must never prevent an independently safe reduction");
+});
+
+test('executor-owned final transaction is borrowed without opening or committing a second account lock',async()=>{
+ const sqls:string[]=[];let sends=0;
+ const borrowed={query:async(sql:string)=>{sqls.push(sql);return {rows:sql.includes('SELECT a.id')?[{id:account}]:[]};}};
+ const verify=async()=>({ok:true,reason:'reviewed_api_fee_source_stage_current',identity:{
+  grantId:grant,sourceUrl:source,digest:'a'.repeat(64),feePolicyVersion:API_SOURCE_POLICY_VERSION,
+  formulaVersion:API_SOURCE_FORMULA_VERSION,marketTicker:ticker,verifiedAtMs:Date.now()}});
+ const make=(current:typeof borrowed|null)=>createGuardedReviewedApiFeeFetch(owner,account,source,
+  (async()=>{sends++;return new Response('{}',{status:201});}) as typeof fetch,
+  policyHash,signer,token,leaseHolder,{borrowTransaction:()=>current as never,
+   connect:async()=>{throw Error('second_connection_forbidden');},verify:verify as never});
+ await make(borrowed)(url,{method:'POST',body:JSON.stringify(order)});
+ assert.equal(sends,1);
+ assert.ok(sqls.some(sql=>sql.includes('FOR SHARE OF a,p,live,c,lease')));
+ assert.ok(sqls.every(sql=>!['BEGIN','COMMIT','ROLLBACK'].includes(sql)));
+ await assert.rejects(make(null)(url,{method:'POST',body:JSON.stringify(order)}),/executor_transaction_required/);
+ assert.equal(sends,1);
 });

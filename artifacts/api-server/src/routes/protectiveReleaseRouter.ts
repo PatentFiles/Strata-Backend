@@ -1,3 +1,4 @@
+import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   authorizeProtectiveRelease,attestProtectiveReleaseReview,
@@ -5,8 +6,10 @@ import {
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease} from "../lib/strata/ownerShaRelease";
 import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
+import {enrollContinuousGrant,revokeContinuousGrant,checkContinuousBootstrap,checkContinuousEligibility,hasContinuousGrantHistory} from "../lib/strata/continuousExecutionAuthorization";
 import {personalTradingSession} from "../lib/strata/sharedPersonalTradingControls";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
+import {pool} from "@workspace/db";
 
 type Identity={subject:string;role:string|null};
 const identify=(locals:Record<string,unknown>):Identity|null=>{
@@ -26,9 +29,19 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const target=isOperator(actor.role)&&typeof req.query.ownerUserId==="string"
    ?req.query.ownerUserId:actor.subject;
   const state=await protectiveReleaseStatus(actor.subject,target);
+  // Only authenticated users can inspect the owner-selected release scope.
+  const statusSha=state.ok&&"sha" in state&&typeof state.sha==="string"?state.sha:null;
+  const standingGrantActive=statusSha!==null
+    ?await checkContinuousBootstrap({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
+  const standingTechnicalLeaseCurrent=standingGrantActive&&statusSha!==null
+    ?await checkContinuousEligibility({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
+  let standingHistory=false;
+  if(statusSha)try{standingHistory=await hasContinuousGrantHistory(pool,target,statusSha);}catch{standingHistory=true;}
   let pendingOwners:string[]=[];
   if(isOperator(actor.role))try{pendingOwners=await pendingReleaseOwners()}catch{}
   res.status(state.ok?200:409).json(sanitizePublic({...state,
+    standingGrantActive,standingTechnicalLeaseCurrent,
+    ...(standingHistory?{releaseMode:'STANDING_V1',releaseActive:standingGrantActive,releaseExpiresAt:null}:{}),
     pendingOwners,viewerIsOperator:isOperator(actor.role),
     viewerIsOwner:target===actor.subject}));
  });
@@ -61,6 +74,47 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const result=await recoverOwnerStaleLease(actor.subject,req.body?.confirmation,{isScheduled:(ownerId,accountId)=>personalTradingSession.isScheduled(ownerId,accountId)});
   res.setHeader("Cache-Control","private, no-store");
   res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // Explicit owner opt-in for continuous technical renewal. No orders or
+ // releases are created from this endpoint; it requires an existing reviewed
+ // exact-SHA release and durable owner approval.
+ router.get('/continuous-status',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const owner=isOperator(actor.role)&&typeof req.query.ownerUserId==='string'?req.query.ownerUserId:actor.subject;
+  const result=await standingExecutionStatus(owner);
+  const eligible=result.ok?await checkContinuousEligibility(pool,owner,result.sha):false;
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic({...result,technicalLeaseCurrent:eligible,
+    viewerIsOwner:owner===actor.subject,viewerIsOperator:isOperator(actor.role)}));
+ });
+ router.post('/standing-review',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
+  const result=await recordStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/standing-review-revoke',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
+  const result=await revokeStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post("/continuous-owner-authorize",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const outcome=await enrollContinuousGrant(actor.subject,req.body);
+  res.setHeader("Cache-Control","private, no-store");
+  res.status(outcome.ok?200:409).json(sanitizePublic(outcome));
+ });
+ router.post("/continuous-owner-revoke",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:"unauthorized"});
+  const outcome=await revokeContinuousGrant(actor.subject,req.body);
+  res.setHeader("Cache-Control","private, no-store");
+  res.status(outcome.ok?200:409).json(sanitizePublic(outcome));
  });
  // Owner-only AAL2 routes: owner identity comes from the signed JWT, never
  // from a submitted account selector, and cannot clear shared safety gates.
