@@ -1,3 +1,5 @@
+import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
+import {producerDelayMs,OptionalResearchLane} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
@@ -417,6 +419,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
+  if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM"))
+    notifyCommittedForwardSignal();
   // The paper action is ALREADY committed. This public REST GET cannot affect
   // a signal, position or account, and is labelled POST_ACTION, never a
   // simultaneous or fill-confirmed snapshot. Mock feeds omit book entirely.
@@ -451,7 +455,8 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   let stopped = false;
   let lease: Awaited<ReturnType<typeof acquireWorkerLease>> = null;
   let lastAutolearnDay: string | null = null;
-  const pause = () => new Promise<void>((resolve) => {
+  const researchLane=new OptionalResearchLane();
+  const pause = (delayMs:number) => new Promise<void>((resolve) => {
     const onAbort = () => {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", onAbort);
@@ -460,11 +465,12 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
     const timer = setTimeout(() => {
       controller.signal.removeEventListener("abort", onAbort);
       resolve();
-    }, FORWARD_TEST_CADENCE_MS);
+    }, delayMs);
     controller.signal.addEventListener("abort", onAbort, { once: true });
   });
   const task = (async () => {
     while (!stopped) {
+      const cycleStarted=performance.now();
       try {
         if (!lease) {
           // The explicit production flag is the authorization to enable the
@@ -492,12 +498,10 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
             } catch (error) {
               logger.error({ err: error }, "Gated micro-live cycle failed");
             }
-            try {
-              await recordV13ShadowOpportunities(cycle.evaluationId);
-            } catch (error) {
-              // Research must never block or alter champion/micro-live behavior.
-              logger.warn({ err: error }, "V13 shadow opportunity evaluation failed");
-            }
+            const evaluationId=cycle.evaluationId;
+            researchLane.submit(()=>recordV13ShadowOpportunities(evaluationId),error=>{
+              logger.warn({err:error},"V13 shadow opportunity evaluation failed");
+            });
             // New daily candidates are trained only AFTER the champion's
             // committed cycle, on a separate non-blocking research promise.
             // The runtime flag is opt-in; no automatic promotion or trades.
@@ -523,8 +527,9 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
           logger.error({ err: error }, "Server paper forward-test cycle failed");
         }
       }
-      if (!stopped) await pause();
+      if (!stopped) await pause(producerDelayMs(FORWARD_TEST_CADENCE_MS,performance.now()-cycleStarted));
     }
+    await researchLane.drain();
     registerMicroLiveWorkerLeaseOwner(null);
     if (lease) await releaseWorkerLease(owner, lease.leaseEpoch);
   })();

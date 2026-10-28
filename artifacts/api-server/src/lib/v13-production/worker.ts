@@ -1,3 +1,4 @@
+import {onCommittedForwardSignal} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
@@ -21,6 +22,7 @@ export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private recoveryOnly = false;
+  private detachWake:(()=>void)|null=null;
   private entryHoldReported = false;
   private lastTraceSweepAt = 0;
   private readonly tracedEvaluations = new Set<string>();
@@ -145,7 +147,9 @@ export class ProductionWorker {
     this.schedule();
   }
   private schedule(): void {
+    let active=false,pending=false;
     const loop = async () => {
+      active=true;
       const tickStartedAt = Date.now();
       try { await this.tick(); } catch (error) {
         this.report(error);
@@ -154,12 +158,19 @@ export class ProductionWorker {
       }
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
+      active=false;
       if (this.timer) this.timer = setTimeout(loop,
-        nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
+        pending?250:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
+      pending=false;
     };
+    this.detachWake=onCommittedForwardSignal(()=>{
+      if(!this.timer||this.recoveryOnly)return;
+      if(active){pending=true;return;}
+      clearTimeout(this.timer);this.timer=setTimeout(loop,0);
+    });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void { this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }
