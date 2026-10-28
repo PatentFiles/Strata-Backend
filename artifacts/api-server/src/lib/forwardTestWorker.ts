@@ -1,3 +1,4 @@
+import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
 import {producerDelayMs,OptionalResearchLane} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
@@ -418,6 +419,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
+  if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM"))
+    notifyCommittedForwardSignal();
   // The paper action is ALREADY committed. This public REST GET cannot affect
   // a signal, position or account, and is labelled POST_ACTION, never a
   // simultaneous or fill-confirmed snapshot. Mock feeds omit book entirely.
