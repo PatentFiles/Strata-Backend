@@ -1,5 +1,5 @@
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
-import { pool } from "@workspace/db";
+import { pool,type PoolClient } from "@workspace/db";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import {
  parseReviewedApiSource, verifyReviewedApiFeeSourceStage, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION
@@ -77,6 +77,7 @@ export function createGuardedReviewedApiFeeFetch(
  expectedPolicyHash:string,expectedSignerFingerprint:string,
  expectedFencingToken:number,expectedLeaseHolderId:string,
  deps:{connect?:()=>ReturnType<typeof pool.connect>;
+   borrowTransaction?:()=>Pick<PoolClient,"query">|null;
    verify?:typeof verifyReviewedApiFeeSourceStage;
    verifyMonetary?:typeof verifyMonetaryFeeContract}={},
 ):typeof fetch {
@@ -155,12 +156,17 @@ export function createGuardedReviewedApiFeeFetch(
      typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price) ||
      Number(order.price)<=0)
     throw new Error("api_fee_order_shape_unverified");
-  const client=await(deps.connect?.()??pool.connect());
+  const borrowed=deps.borrowTransaction?.()??null;
+  if(deps.borrowTransaction&&!borrowed)throw new Error('api_fee_final_executor_transaction_required');
+  const connection=borrowed?null:await(deps.connect?.()??pool.connect());
+  const client=borrowed??connection!;
   let committed=false;
   try{
-   await client.query("BEGIN");
-   await client.query("SET LOCAL lock_timeout='1000ms'");
-   await client.query("SET LOCAL statement_timeout='15000ms'");
+   if(connection){
+    await client.query("BEGIN");
+    await client.query("SET LOCAL lock_timeout='1000ms'");
+    await client.query("SET LOCAL statement_timeout='15000ms'");
+   }
    const standingMode=isEntry&&await hasContinuousGrantHistory(client,ownerUserId,deployedSha!);
    const standingAllowed=standingMode&&await checkContinuousEligibility(client,ownerUserId,deployedSha!);
    if(standingMode&&!standingAllowed)throw new Error('standing_final_fee_wire_authority_closed');
@@ -191,11 +197,11 @@ export function createGuardedReviewedApiFeeFetch(
       !/^[a-f0-9]{64}$/.test(checked.identity.digest))
     throw new Error("api_fee_final_order_grant_or_market_closed");
    const response=await transport(request,init);
-   await client.query("COMMIT");committed=true;
+   if(connection)await client.query("COMMIT");committed=true;
    return response;
   }finally{
-   if(!committed){try{await client.query("ROLLBACK");}catch{}}
-   client.release();
+   if(connection){if(!committed){try{await connection.query("ROLLBACK");}catch{}}
+    connection.release();}
   }
  };
 }

@@ -6,7 +6,7 @@ import {
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease} from "../lib/strata/ownerShaRelease";
 import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
-import {enrollContinuousGrant,revokeContinuousGrant,checkContinuousBootstrap,checkContinuousEligibility} from "../lib/strata/continuousExecutionAuthorization";
+import {enrollContinuousGrant,revokeContinuousGrant,checkContinuousBootstrap,checkContinuousEligibility,hasContinuousGrantHistory} from "../lib/strata/continuousExecutionAuthorization";
 import {personalTradingSession} from "../lib/strata/sharedPersonalTradingControls";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
 import {pool} from "@workspace/db";
@@ -35,10 +35,13 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
     ?await checkContinuousBootstrap({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
   const standingTechnicalLeaseCurrent=standingGrantActive&&statusSha!==null
     ?await checkContinuousEligibility({query:(q,params)=>pool.query(q,params)},target,statusSha):false;
+  let standingHistory=false;
+  if(statusSha)try{standingHistory=await hasContinuousGrantHistory(pool,target,statusSha);}catch{standingHistory=true;}
   let pendingOwners:string[]=[];
   if(isOperator(actor.role))try{pendingOwners=await pendingReleaseOwners()}catch{}
   res.status(state.ok?200:409).json(sanitizePublic({...state,
     standingGrantActive,standingTechnicalLeaseCurrent,
+    ...(standingHistory?{releaseMode:'STANDING_V1',releaseActive:standingGrantActive,releaseExpiresAt:null}:{}),
     pendingOwners,viewerIsOperator:isOperator(actor.role),
     viewerIsOwner:target===actor.subject}));
  });

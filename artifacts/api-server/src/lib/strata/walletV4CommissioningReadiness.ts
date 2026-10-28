@@ -1,3 +1,4 @@
+import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 /**
  * Issue #165: Wallets-only, authenticated owner-scoped V4 release diagnostics.
  * READ-ONLY. Zero grant issuance, account mutation, policy amendment or orders.
@@ -115,6 +116,8 @@ export async function inspectWalletV4Readiness(
     checks.protectiveExitRelease=proof.rows[0]!.protective_exit_release===true;
    }
   }
+  if(deployedSha&&await hasStandingReviewHistory(db,ownerId,accountId,deployedSha))
+   checks.protectiveExitRelease=await checkStandingExitReview(db,ownerId,accountId,deployedSha);
   // Installed V4 final-POST checks are NOT an owner approval. Report the
   // runtime opt-ins only when every other checked prerequisite is current.
   // Never infer signed-post readiness from a code commit or an env var alone.

@@ -82,10 +82,10 @@ export class ProductionWorker {
       for (const { id, evaluated_at } of ids) {
         if (!this.entriesOpen()) break;
         const sourceMs=evaluated_at?Date.parse(String(evaluated_at)):NaN;
-        const ageMs=Number.isFinite(sourceMs)?Math.max(0,observedAt.getTime()-sourceMs):null;
+        const ageMs=()=>Number.isFinite(sourceMs)?Math.max(0,this.executor.now()-sourceMs):null;
         if (!this.tracedEvaluations.has(String(id))) {
           const recorded=await this.recordDecision({accountId:this.executor.ledger.accountId,
-            evaluationId:String(id),phase:"QUALIFYING_SEEN",sourceAgeMs:ageMs});
+            evaluationId:String(id),phase:"QUALIFYING_SEEN",sourceAgeMs:ageMs()});
           if(!recorded)throw new Error("production_signal_trace_unavailable");
           this.tracedEvaluations.add(String(id));
           if(this.tracedEvaluations.size>500){
@@ -98,11 +98,11 @@ export class ProductionWorker {
           const intent=await this.executor.prepareEntry(id);
           prepared=true;
           if(!await this.recordDecision({accountId:this.executor.ledger.accountId,
-            evaluationId:String(id),phase:"ENTRY_PREPARED",sourceAgeMs:ageMs}))
+            evaluationId:String(id),phase:"ENTRY_PREPARED",sourceAgeMs:ageMs()}))
             throw new Error("production_signal_trace_unavailable");
           await this.executor.dispatch(intent);
           if(!await this.recordDecision({accountId:this.executor.ledger.accountId,
-            evaluationId:String(id),phase:"DISPATCH_COMPLETED",sourceAgeMs:ageMs})){
+            evaluationId:String(id),phase:"DISPATCH_COMPLETED",sourceAgeMs:ageMs()})){
             // A missing audit receipt does not mean the order was rejected.
             // Leave order recovery to the durable intent/UNKNOWN ledger.
             this.report(new Error("production_dispatch_trace_unavailable"));
@@ -111,7 +111,7 @@ export class ProductionWorker {
         }catch(error){
           const recorded=await this.recordDecision({accountId:this.executor.ledger.accountId,
             evaluationId:String(id),phase:prepared?"DISPATCH_REJECTED":"PREPARE_REJECTED",
-            sourceAgeMs:ageMs,reason:sanitizedDecisionReason(error)});
+            sourceAgeMs:ageMs(),reason:sanitizedDecisionReason(error)});
           if(!recorded)this.report(new Error("production_rejection_trace_unavailable"));
           this.report({error,evaluationId:id});
         }

@@ -102,16 +102,18 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
   const reviews=await db.query(`SELECT release_id,independent_reviewer_id FROM private.strata_standing_execution_reviews
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
    AND policy_hash=$4 AND revoked_at IS NULL AND created_at<=now()`,[owner,account.id,sha,account.policy_hash]);
-  const grants=await db.query(`SELECT grant_id,revoked_at,policy_hash FROM private.strata_continuous_execution_grants
+  const grants=await db.query(`SELECT grant_id,revoked_at,policy_hash,reviewed_release_id FROM private.strata_continuous_execution_grants
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
-   ORDER BY consented_at DESC LIMIT 1`,[owner,account.id,sha]);
+   ORDER BY consented_at DESC,grant_id DESC LIMIT 1`,[owner,account.id,sha]);
   const q=await db.query(`SELECT qualification_id FROM private.strata_protective_release_qualification
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
    AND expires_at>now()+interval '60 seconds' ORDER BY observed_at DESC LIMIT 1`,[owner,account.id,sha]);
   return {ok:true as const,reason:'standing_status',sha,ownerId:owner,accountId:account.id,policyHash:account.policy_hash,
    reviewId:reviews.rows.length===1?reviews.rows[0]?.release_id:null,
    reviewerId:reviews.rows.length===1?reviews.rows[0]?.independent_reviewer_id:null,
-   grantActive:grants.rows.length===1&&grants.rows[0]?.revoked_at===null&&grants.rows[0]?.policy_hash===account.policy_hash,
+   grantExists:grants.rows.length===1&&grants.rows[0]?.revoked_at===null,
+   grantActive:grants.rows.length===1&&grants.rows[0]?.revoked_at===null&&grants.rows[0]?.policy_hash===account.policy_hash&&
+    reviews.rows.length===1&&grants.rows[0]?.reviewed_release_id===reviews.rows[0]?.release_id,
    grantRevoked:grants.rows.length===1&&grants.rows[0]?.revoked_at!==null,
    qualificationId:q.rows[0]?.qualification_id??null,ordersSubmitted:false as const};
  }catch{return deny('standing_status_unavailable')}

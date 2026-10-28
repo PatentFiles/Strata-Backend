@@ -225,6 +225,9 @@ export async function renewContinuousTechnicalLease(input:{
   c=await db.connect();await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='1000ms'");
   await c.query("SET LOCAL statement_timeout='5000ms'");
+  // Use the same account-first lock order as final entry dispatch.
+  await c.query('SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',
+   [input.accountId,input.ownerId]);
   const r=await c.query(`
    SELECT g.grant_id,a.cash_micros::text AS cash_micros,
      w.state,w.arm_requested,w.account_kill,w.fencing_token::text AS fencing_token

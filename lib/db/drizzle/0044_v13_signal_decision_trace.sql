@@ -29,6 +29,15 @@ CREATE TABLE private.strata_v13_signal_trace_scope (
 );
 INSERT INTO private.strata_v13_signal_trace_scope(execution_account_id)
  SELECT id FROM public.v13_production_account;
+CREATE FUNCTION private.strata_v13_begin_trace_scope() RETURNS trigger
+ LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+BEGIN
+ INSERT INTO private.strata_v13_signal_trace_scope(execution_account_id) VALUES(NEW.id);
+ RETURN NEW;
+END $$;
+CREATE TRIGGER strata_v13_begin_trace_scope AFTER INSERT ON public.v13_production_account
+ FOR EACH ROW EXECUTE FUNCTION private.strata_v13_begin_trace_scope();
+REVOKE ALL ON FUNCTION private.strata_v13_begin_trace_scope() FROM PUBLIC,anon,authenticated,service_role;
 -- Transactional outbox: the trace commits or rolls back with the intent/fill.
 -- Never use these rows as authorization to replay an exchange POST.
 CREATE TABLE private.strata_v13_execution_trace (
@@ -37,7 +46,7 @@ CREATE TABLE private.strata_v13_execution_trace (
  evaluation_id text,
  intent_id text NOT NULL,
  client_order_id text NOT NULL,
- kind text NOT NULL CHECK(kind IN ('INTENT_STATE','EXCHANGE_EVENT')),
+ kind text NOT NULL CHECK(kind IN ('INTENT_STATE','EXCHANGE_EVENT','TRANSPORT_OBSERVATION')),
  recorded_at timestamptz NOT NULL DEFAULT now(),
  details jsonb NOT NULL
 );
@@ -81,6 +90,25 @@ BEGIN
  'occurredAt',NEW.occurred_at));
  RETURN NEW;
 END $$;
+CREATE FUNCTION private.strata_v13_capture_transport() RETURNS trigger
+ LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+DECLARE i public.v13_production_intent; source_id text;
+BEGIN
+ IF NEW.kind NOT IN ('POST_ATTEMPT','POST_UNCERTAIN','PROVEN_NOT_POSTED','CANCEL_ATTEMPT') THEN RETURN NEW; END IF;
+ SELECT * INTO STRICT i FROM public.v13_production_intent
+  WHERE id=NEW.payload->>'id' AND account_id=NEW.account_id;
+ source_id:=i.evaluation_id;
+ IF source_id IS NULL THEN SELECT evaluation_id INTO source_id
+  FROM public.v13_production_intent WHERE id=i.parent_id AND account_id=i.account_id; END IF;
+ INSERT INTO private.strata_v13_execution_trace
+ (execution_account_id,evaluation_id,intent_id,client_order_id,kind,details)
+ VALUES(NEW.account_id,source_id,i.id,i.client_order_id,'TRANSPORT_OBSERVATION',
+ jsonb_build_object('observationId',NEW.id,'observationKind',NEW.kind,'digest',NEW.digest,
+ 'outcome',NEW.payload->>'outcome'));
+ RETURN NEW;
+END $$;
+CREATE TRIGGER strata_v13_capture_transport AFTER INSERT ON public.v13_production_observation
+ FOR EACH ROW EXECUTE FUNCTION private.strata_v13_capture_transport();
 CREATE TRIGGER strata_v13_capture_intent AFTER INSERT OR UPDATE ON public.v13_production_intent
  FOR EACH ROW EXECUTE FUNCTION private.strata_v13_capture_intent();
 CREATE TRIGGER strata_v13_capture_event AFTER INSERT ON public.v13_production_event
@@ -94,7 +122,7 @@ ALTER TABLE private.strata_v13_signal_trace_scope ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.strata_v13_execution_trace,private.strata_v13_signal_trace_scope
  FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON SEQUENCE private.strata_v13_execution_trace_trace_id_seq FROM PUBLIC,anon,authenticated,service_role;
-REVOKE ALL ON FUNCTION private.strata_v13_capture_intent(),private.strata_v13_capture_event()
+REVOKE ALL ON FUNCTION private.strata_v13_capture_intent(),private.strata_v13_capture_event(),private.strata_v13_capture_transport()
  FROM PUBLIC,anon,authenticated,service_role;
 CREATE INDEX IF NOT EXISTS forward_test_live_crosses ON public.forward_test_evaluations(evaluated_at,id)
  WHERE evaluation_source='paper' AND qualifying_trigger=true AND fresh_cross=true AND signal IN ('SCOUT','CONFIRM');

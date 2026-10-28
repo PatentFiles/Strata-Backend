@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pool} from '@workspace/db';
-import {recordStandingExecutionReview,STANDING_REVIEW_CONFIRM,checkStandingExitReview} from './standingExecutionReview';
+import {recordStandingExecutionReview,STANDING_REVIEW_CONFIRM,checkStandingExitReview,standingExecutionStatus} from './standingExecutionReview';
 import {enrollContinuousGrant,CONTINUOUS_OWNER_CONFIRM,renewContinuousTechnicalLease,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import {auditUnseenExpiredSignals} from '../v13-production/signalDecisionTrace';
 const url=new URL(process.env.DATABASE_URL!);
@@ -38,6 +38,7 @@ test('standing authorization, transactional crash traces and concurrent revocati
  CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text);
  CREATE TABLE forward_test_evaluations(id text PRIMARY KEY,evaluated_at timestamptz,evaluation_source text,qualifying_trigger boolean,fresh_cross boolean,signal text);
  CREATE TABLE v13_production_intent(id text PRIMARY KEY,account_id text,evaluation_id text,parent_id text,client_order_id text,kind text,state text,exchange_order_id text,filled_hundredths bigint,terminal boolean,cancel_attempted boolean,policy_hash text,dispatch_at timestamptz);
+ CREATE TABLE v13_production_observation(id text,account_id text,kind text,payload jsonb,digest text);
  CREATE TABLE v13_production_event(account_id text,event_id text PRIMARY KEY,intent_id text,kind text,digest text,cash_delta_micros bigint,pnl_micros bigint,occurred_at timestamptz);
  CREATE FUNCTION private.strata_protective_approval_audit_immutable() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'immutable'; END$$;
  INSERT INTO auth.users VALUES('${owner}'),('${reviewer}');
@@ -62,6 +63,8 @@ test('standing authorization, transactional crash traces and concurrent revocati
   assert.equal(await checkContinuousEligibility(pool,owner,sha),false);
   assert.equal((await renewContinuousTechnicalLease(proof(),{db:pool})).ok,true);
   assert.equal(await checkContinuousEligibility(pool,owner,sha),true);
+  const status=await standingExecutionStatus(owner,{db:pool,sha:()=>sha});
+  assert.equal(status.ok,true);assert.ok('grantActive' in status&&status.grantActive);
  });
  await t.test('local authorization latency budget is measured without widening the 5s signal gate',async()=>{
   const samples:number[]=[];
@@ -91,6 +94,8 @@ test('standing authorization, transactional crash traces and concurrent revocati
    pending=revoker.query("UPDATE private.strata_standing_execution_reviews SET revoked_at=now(),revocation_reason='reviewer_revoked'");
    await waitForLock(pid);await reader.query('COMMIT');await pending;
    assert.equal(await checkStandingExitReview(pool,owner,'acct',sha),false);
+   const status=await standingExecutionStatus(owner,{db:pool,sha:()=>sha});
+   assert.ok('grantActive' in status&&!status.grantActive);
   }finally{await reader.query('ROLLBACK');await pending;reader.release();revoker.release();}
  });
  await t.test('intent and fill traces are atomic, durable across connections and immutable',async()=>{
@@ -107,12 +112,26 @@ test('standing authorization, transactional crash traces and concurrent revocati
   const trace=(await pool.query('SELECT * FROM private.strata_v13_execution_trace ORDER BY trace_id')).rows;
   assert.equal(trace.length,5);assert.ok(trace.every(r=>r.evaluation_id==='signal'&&r.client_order_id==='client'));
   assert.equal(trace[3].kind,'EXCHANGE_EVENT');assert.equal(trace[4].details.filledHundredths,'100');
+  await pool.query(`INSERT INTO v13_production_observation VALUES('obs','acct','POST_UNCERTAIN','{"id":"intent"}','${policy}')`);
+  assert.equal((await pool.query("SELECT evaluation_id FROM private.strata_v13_execution_trace WHERE kind='TRANSPORT_OBSERVATION'")).rows[0].evaluation_id,'signal');
+  await pool.query("ALTER TABLE private.strata_v13_execution_trace ADD CONSTRAINT test_trace_failure CHECK(intent_id<>'blocked') NOT VALID");
+  await assert.rejects(pool.query(insert.replace("'intent'","'blocked'")));
+  assert.equal((await pool.query("SELECT id FROM v13_production_intent WHERE id='blocked'")).rows.length,0);
+  await pool.query('ALTER TABLE private.strata_v13_execution_trace DROP CONSTRAINT test_trace_failure');
   await assert.rejects(pool.query('DELETE FROM private.strata_v13_execution_trace'));
+  const restricted=await pool.connect();
+  try{
+   await restricted.query('SET ROLE authenticated');
+   await assert.rejects(restricted.query('SELECT * FROM private.strata_v13_execution_trace'));
+  }finally{await restricted.query('RESET ROLE');restricted.release();}
  });
  await t.test('unseen audit catches downtime longer than fifteen minutes in bounded idempotent batches',async()=>{
   await pool.query(`INSERT INTO v13_production_account SELECT 'catchup',owner_user_id,'p2',1,2,true,true,false,NULL,cash_micros FROM v13_production_account LIMIT 1;
    INSERT INTO v13_live_money_policy VALUES('p2','catchup','${policy}','APPROVED',5000);
-   INSERT INTO private.strata_v13_signal_trace_scope VALUES('catchup',now()-interval '1 day');
+   -- Isolated fixture clock: represent an account that existed before downtime.
+   ALTER TABLE private.strata_v13_signal_trace_scope DISABLE TRIGGER strata_v13_trace_scope_immutable;
+   UPDATE private.strata_v13_signal_trace_scope SET started_at=now()-interval '1 day' WHERE execution_account_id='catchup';
+   ALTER TABLE private.strata_v13_signal_trace_scope ENABLE TRIGGER strata_v13_trace_scope_immutable;
    INSERT INTO forward_test_evaluations SELECT md5(n::text),now()-interval '20 minutes','paper',true,true,'SCOUT' FROM generate_series(1,125)n;`);
   assert.equal(await auditUnseenExpiredSignals('catchup',pool),100);
   assert.equal(await auditUnseenExpiredSignals('catchup',pool),25);

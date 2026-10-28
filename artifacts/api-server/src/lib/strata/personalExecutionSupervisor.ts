@@ -353,6 +353,7 @@ export function createProductionPersonalSession(
     // maintenance and protective-exit failures. A fresh, independently reviewed
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
+    let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -532,13 +533,14 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed.fencingToken,holderId) :
+      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
         alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) :
         !options.verifyFee ? createGuardedMonetaryFeeFetch(
           input.userId,input.accountId,personalProductionFetch,policyHash,
-          fingerprint,claimed.fencingToken,holderId,digest,
+          fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null},
         ) : personalProductionFetch,
     });
+    finalLedger=session.executor.ledger;
     session.executor.afterReconcile=async snapshot=>{
       const sha=deployedGitSha();
       const scoped=/^[a-f0-9]{40}$/.test(sha);

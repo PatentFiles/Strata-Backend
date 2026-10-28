@@ -48,7 +48,7 @@ export function createGuardedMonetaryFeeFetch(
  expectedPolicyHash:string,expectedSignerFingerprint:string,
  expectedFencingToken:number,expectedLeaseHolderId:string,
  expectedFeeDigest:string,
- deps:{connect?:DbConnector;verify?:typeof verifyMonetaryFeeContract}={},
+ deps:{connect?:DbConnector;borrowTransaction?:()=>Pick<DbClient,"query">|null;verify?:typeof verifyMonetaryFeeContract}={},
 ):typeof fetch{
  if(!ownerUserId||!executionAccountId||!HEX.test(expectedPolicyHash)||
     !HEX.test(expectedSignerFingerprint)||!HEX.test(expectedFeeDigest)||
@@ -86,12 +86,17 @@ export function createGuardedMonetaryFeeFetch(
      !/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(order.client_order_id))
     throw Error("monetary_fee_exit_order_shape_invalid");
   const connector:DbConnector=deps.connect??(()=>pool.connect() as unknown as Promise<DbClient>);
-  const client=await connector();
+  const borrowed=deps.borrowTransaction?.()??null;
+  if(deps.borrowTransaction&&!borrowed)throw Error('monetary_fee_executor_transaction_required');
+  const connection=borrowed?null:await connector();
+  const client=borrowed??connection!;
   let committed=false;
   try{
-   await client.query("BEGIN");
-   await client.query("SET LOCAL lock_timeout='1000ms'");
-   await client.query("SET LOCAL statement_timeout='15000ms'");
+   if(connection){
+    await client.query("BEGIN");
+    await client.query("SET LOCAL lock_timeout='1000ms'");
+    await client.query("SET LOCAL statement_timeout='15000ms'");
+   }
    const match=await client.query(FINAL_MONETARY_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,
     CANONICAL_FEE_SCHEDULE_URL,expectedFencingToken,expectedLeaseHolderId,
@@ -103,11 +108,11 @@ export function createGuardedMonetaryFeeFetch(
       proof.sourceDigest!==expectedFeeDigest)
      throw Error("monetary_fee_final_order_source_unverified");
    const response=await transport(request,init);
-   await client.query("COMMIT");committed=true;
+   if(connection)await client.query("COMMIT");committed=true;
    return response;
   }finally{
-   if(!committed){try{await client.query("ROLLBACK");}catch{}}
-   client.release();
+   if(connection){if(!committed){try{await connection.query("ROLLBACK");}catch{}}
+    connection.release();}
   }
  };
 }
