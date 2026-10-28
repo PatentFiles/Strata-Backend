@@ -2,13 +2,39 @@
 -- SHA-bound worker owns the production lease.
 -- Independent human review + authenticated owner grant remain separate events.
 BEGIN;
+-- A distinct explicit review; no old finite release is converted or extended.
+CREATE TABLE private.strata_standing_execution_reviews (
+ release_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ owner_user_id uuid NOT NULL REFERENCES auth.users(id),
+ execution_account_id text NOT NULL REFERENCES public.v13_production_account(id),
+ release_commit_sha text NOT NULL CHECK (release_commit_sha ~ '^[0-9a-f]{40}$'),
+ policy_hash text NOT NULL CHECK (policy_hash ~ '^[0-9a-f]{64}$'),
+ independent_reviewer_id uuid NOT NULL REFERENCES auth.users(id),
+ qualification_id uuid NOT NULL,
+ evidence_digest text NOT NULL CHECK (evidence_digest ~ '^[0-9a-f]{64}$'),
+ review_url text NOT NULL,
+ review_note text NOT NULL CHECK (length(review_note) BETWEEN 120 AND 2500),
+ confirmation text NOT NULL CHECK (confirmation = 'I_INDEPENDENTLY_APPROVE_STANDING_ENTRIES_AND_REDUCE_ONLY_EXITS_FOR_THIS_EXACT_SHA_ACCOUNT_POLICY_V1'),
+ state text NOT NULL DEFAULT 'approved' CHECK (state='approved'),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ revoked_at timestamptz,
+ revocation_reason text,
+ CHECK (independent_reviewer_id <> owner_user_id),
+ CHECK ((revoked_at IS NULL AND revocation_reason IS NULL) OR
+   (revoked_at IS NOT NULL AND revoked_at >= created_at AND revocation_reason IS NOT NULL AND length(trim(revocation_reason)) > 0))
+);
+CREATE UNIQUE INDEX strata_standing_review_current ON private.strata_standing_execution_reviews
+ (owner_user_id,execution_account_id,release_commit_sha,policy_hash) WHERE revoked_at IS NULL;
+ALTER TABLE private.strata_standing_execution_reviews ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.strata_standing_execution_reviews FROM PUBLIC,anon,authenticated,service_role;
+
 CREATE TABLE IF NOT EXISTS private.strata_continuous_execution_grants (
  grant_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  owner_user_id uuid NOT NULL REFERENCES auth.users(id),
  execution_account_id text NOT NULL REFERENCES public.v13_production_account(id),
  release_commit_sha text NOT NULL CHECK (release_commit_sha ~ '^[0-9a-f]{40}$'),
  policy_hash text NOT NULL CHECK (policy_hash ~ '^[0-9a-f]{64}$'),
- reviewed_release_id uuid NOT NULL REFERENCES private.strata_protective_exit_release(release_id),
+ reviewed_release_id uuid NOT NULL REFERENCES private.strata_standing_execution_reviews(release_id),
  independent_reviewer_id uuid NOT NULL REFERENCES auth.users(id),
  owner_confirmation text NOT NULL CHECK (
   owner_confirmation = 'I_AUTHORIZE_REVOCABLE_CONTINUOUS_EXECUTION_FOR_MY_REVIEWED_EXACT_SHA_V1'),
@@ -37,6 +63,9 @@ BEGIN
 END $$;
 CREATE TRIGGER strata_continuous_grant_guard
  BEFORE UPDATE OR DELETE ON private.strata_continuous_execution_grants
+ FOR EACH ROW EXECUTE FUNCTION private.strata_continuous_grant_guard();
+CREATE TRIGGER strata_standing_review_guard
+ BEFORE UPDATE OR DELETE ON private.strata_standing_execution_reviews
  FOR EACH ROW EXECUTE FUNCTION private.strata_continuous_grant_guard();
 REVOKE ALL ON FUNCTION private.strata_continuous_grant_guard()
  FROM PUBLIC,anon,authenticated,service_role;

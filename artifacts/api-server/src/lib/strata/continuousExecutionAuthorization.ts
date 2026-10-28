@@ -25,7 +25,7 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
  deps:{db?:Db;sha?:()=>string}={}){
  const d=raw&&typeof raw==="object"?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)();
- if(!UUID.test(ownerId)||!SHA.test(sha)||d.confirmation!==CONTINUOUS_OWNER_CONFIRM)
+ if(!UUID.test(ownerId)||!SHA.test(sha)||d.confirmation!==CONTINUOUS_OWNER_CONFIRM||d.expectedSha!==sha)
    return denied("explicit_authenticated_standing_owner_consent_required");
  const db=deps.db??pool;
  let c:Conn|null=null,committed=false;
@@ -47,6 +47,7 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
     a.blocked_reason!==null||a.policy_state!=="APPROVED"||
     !DIGEST.test(String(a.policy_hash)))
     return denied("standing_owner_account_policy_not_ready");
+  if(d.accountId!==a.id||d.policyHash!==a.policy_hash)return denied("standing_owner_scope_changed");
   const authorized=await c.query(`
    SELECT oa.approval_id FROM private.strata_owner_sha_approvals oa
    WHERE oa.owner_user_id=$1::uuid AND oa.execution_account_id=$2
@@ -55,12 +56,12 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
   if(authorized.rows.length!==1)return denied("standing_owner_exact_sha_approval_missing");
   const technical=await c.query(`
    SELECT r.release_id,r.independent_reviewer_id
-   FROM private.strata_protective_exit_release r
+   FROM private.strata_standing_execution_reviews r
    WHERE r.release_commit_sha=$1 AND r.state='approved'
-     AND r.revoked_at IS NULL AND r.expires_at>now()+interval '20 minutes'
+     AND r.revoked_at IS NULL AND r.created_at<=now()
      AND r.independent_reviewer_id<>$2::uuid
-     AND r.operator_approver_id=$2::uuid
-   ORDER BY r.created_at DESC LIMIT 2 FOR SHARE`,[sha,ownerId]);
+     AND r.owner_user_id=$2::uuid AND r.execution_account_id=$3 AND r.policy_hash=$4
+   ORDER BY r.created_at DESC LIMIT 2 FOR SHARE`,[sha,ownerId,a.id,a.policy_hash]);
   if(technical.rows.length!==1)return denied("standing_independent_release_not_current");
   const reviewer=String(technical.rows[0]?.independent_reviewer_id);
   if(!UUID.test(reviewer))return denied("standing_independent_reviewer_identity_invalid");
@@ -96,7 +97,7 @@ export async function revokeContinuousGrant(ownerId:string,raw:unknown,
  deps:{db?:Db;sha?:()=>string}={}){
  const d=raw&&typeof raw==="object"?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)();
- if(!UUID.test(ownerId)||!SHA.test(sha)||d.confirmation!==CONTINUOUS_OWNER_REVOKE)
+ if(!UUID.test(ownerId)||!SHA.test(sha)||d.confirmation!==CONTINUOUS_OWNER_REVOKE||d.expectedSha!==sha)
   return denied("explicit_authenticated_standing_revocation_required");
  const db=deps.db??pool;let c:Conn|null=null,committed=false;
  try{
@@ -132,7 +133,7 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
  JOIN private.kalshi_account_worker_lease w
    ON w.execution_account_id=g.execution_account_id AND w.owner_user_id=g.owner_user_id
      AND w.fencing_token=l.fencing_token
- JOIN private.strata_protective_exit_release r
+ JOIN private.strata_standing_execution_reviews r
    ON r.release_id=g.reviewed_release_id
  JOIN public.v13_production_account a
    ON a.id=g.execution_account_id AND a.owner_user_id=g.owner_user_id
@@ -147,7 +148,9 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
    AND r.release_commit_sha=g.release_commit_sha AND r.state='approved'
    AND r.revoked_at IS NULL
-   AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
+   AND r.created_at<=now()
+   AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
+   AND r.policy_hash=g.policy_hash
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
@@ -170,7 +173,7 @@ export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:str
  */
 export const CONTINUOUS_STARTUP_GRANT_SQL=`
  SELECT g.grant_id FROM private.strata_continuous_execution_grants g
- JOIN private.strata_protective_exit_release r ON r.release_id=g.reviewed_release_id
+ JOIN private.strata_standing_execution_reviews r ON r.release_id=g.reviewed_release_id
  JOIN public.v13_production_account a ON a.id=g.execution_account_id
    AND a.owner_user_id=g.owner_user_id
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id
@@ -183,7 +186,9 @@ export const CONTINUOUS_STARTUP_GRANT_SQL=`
    AND g.policy_hash=p.policy_hash AND p.state='APPROVED'
    AND r.release_commit_sha=g.release_commit_sha AND r.state='approved'
    AND r.revoked_at IS NULL
-   AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
+   AND r.created_at<=now()
+   AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
+   AND r.policy_hash=g.policy_hash
    AND r.independent_reviewer_id=g.independent_reviewer_id
    AND g.independent_reviewer_id<>g.owner_user_id
    AND a.commissioned=true AND a.execution_enabled=true
@@ -230,7 +235,7 @@ export async function renewContinuousTechnicalLease(input:{
      ON p.id=a.policy_id AND p.execution_account_id=a.id
    JOIN private.kalshi_account_worker_lease w
      ON w.execution_account_id=a.id AND w.owner_user_id=g.owner_user_id
-   JOIN private.strata_protective_exit_release r ON r.release_id=g.reviewed_release_id
+   JOIN private.strata_standing_execution_reviews r ON r.release_id=g.reviewed_release_id
    JOIN private.strata_owner_sha_approvals oa
      ON oa.owner_user_id=g.owner_user_id AND oa.execution_account_id=a.id
        AND oa.release_commit_sha=g.release_commit_sha
@@ -241,13 +246,15 @@ export async function renewContinuousTechnicalLease(input:{
      AND r.release_commit_sha=g.release_commit_sha
      AND r.independent_reviewer_id=g.independent_reviewer_id
      AND r.independent_reviewer_id<>g.owner_user_id
-     AND r.created_at<=now() AND r.expires_at>now()+interval '20 minutes'
+     AND r.created_at<=now()
+   AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
+   AND r.policy_hash=g.policy_hash
      AND a.commissioned=true AND a.execution_enabled=true
      AND a.kill_switch=false AND a.blocked_reason IS NULL
      AND p.policy_hash=g.policy_hash AND p.state='APPROVED'
      AND w.state='owned' AND w.arm_requested=true
      AND w.account_kill=false AND w.heartbeat_at>now()-interval '15 seconds'
-   FOR UPDATE OF g,w`,
+   FOR UPDATE OF g,w FOR SHARE OF r,oa,p,a`,
    [input.ownerId,input.accountId,input.releaseSha,input.policyHash]);
   const v=r.rows[0];
   if(r.rows.length!==1||!v||

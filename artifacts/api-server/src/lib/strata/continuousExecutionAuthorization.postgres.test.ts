@@ -44,6 +44,12 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    INSERT INTO private.kalshi_account_worker_lease VALUES('acct','${owner}','owned',true,false,7,now());
   `);
   await pg.exec(readFileSync(resolve('../../lib/db/drizzle/0043_strata_continuous_execution_grants.sql'),'utf8'));
+  await pg.query(`INSERT INTO private.strata_standing_execution_reviews
+   (release_id,owner_user_id,execution_account_id,release_commit_sha,policy_hash,independent_reviewer_id,
+   qualification_id,evidence_digest,review_url,review_note,confirmation)
+   VALUES($1,$2,'acct',$3,$4,$5,$1,$4,'https://github.com/PatentFiles/Strata-Backend/pull/246',repeat('review ',30),
+   'I_INDEPENDENTLY_APPROVE_STANDING_ENTRIES_AND_REDUCE_ONLY_EXITS_FOR_THIS_EXACT_SHA_ACCOUNT_POLICY_V1')`,
+   [release,owner,sha,policy,reviewer]);
   await pg.query(`INSERT INTO private.strata_continuous_execution_grants
     (grant_id,owner_user_id,execution_account_id,release_commit_sha,policy_hash,reviewed_release_id,
      independent_reviewer_id,owner_confirmation) VALUES($1,$2,'acct',$3,$4,$5,$6,
@@ -59,9 +65,6 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    assert.equal(await checkContinuousEligibility(db,owner,sha),true);
   });
   for(const [label,hold,restore] of [
-   ['review revoked',"UPDATE private.strata_protective_exit_release SET revoked_at=now()","UPDATE private.strata_protective_exit_release SET revoked_at=NULL"],
-   ['review withdrawn',"UPDATE private.strata_protective_exit_release SET state='revoked'","UPDATE private.strata_protective_exit_release SET state='approved'"],
-   ['exit release expired',"UPDATE private.strata_protective_exit_release SET expires_at=now()-interval '1 second'","UPDATE private.strata_protective_exit_release SET expires_at=now()+interval '2 hours'"],
    ['owner approval revoked',"UPDATE private.strata_owner_sha_approvals SET revoked_at=now()","UPDATE private.strata_owner_sha_approvals SET revoked_at=NULL"],
    ['policy changed',"UPDATE public.v13_live_money_policy SET policy_hash=repeat('c',64)",`UPDATE public.v13_live_money_policy SET policy_hash='${policy}'`],
    ['account killed',"UPDATE public.v13_production_account SET kill_switch=true","UPDATE public.v13_production_account SET kill_switch=false"],
@@ -71,6 +74,11 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    assert.equal(await checkContinuousEligibility(db,owner,sha),false);
    assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,false);
    await pg.exec(restore);
+  });
+  await t.test('finite legacy review expiry does not expire a separately signed standing review',async()=>{
+   await pg.exec("UPDATE private.strata_protective_exit_release SET expires_at=now()-interval '1 day'");
+   assert.equal(await checkContinuousBootstrap(db,owner,sha),true);
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,true);
   });
   await t.test('wrong owner and changed SHA cannot borrow a grant',async()=>{
    for(const [who,version] of [[reviewer,sha],[owner,'c'.repeat(40)]]){
@@ -107,6 +115,13 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    await assert.rejects(pg.exec('DELETE FROM private.strata_continuous_execution_grants'));
    await assert.rejects(pg.exec('DELETE FROM private.strata_continuous_execution_audit'));
    await assert.rejects(pg.exec('UPDATE private.strata_continuous_execution_grants SET revoked_at=now()'));
+  });
+  await t.test('standing review scope is immutable and explicit revocation blocks entries',async()=>{
+   await assert.rejects(pg.exec("UPDATE private.strata_standing_execution_reviews SET policy_hash=repeat('c',64)"));
+   await pg.exec("UPDATE private.strata_standing_execution_reviews SET revoked_at=now(),revocation_reason='reviewer_revoked'");
+   assert.equal(await checkContinuousBootstrap(db,owner,sha),false);
+   assert.equal(await checkContinuousEligibility(db,owner,sha),false);
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,false);
   });
   await t.test('owner revocation is irreversible and blocks every permission path',async()=>{
    await pg.exec("UPDATE private.strata_continuous_execution_grants SET revoked_at=now(),revocation_reason='owner_revoked'");

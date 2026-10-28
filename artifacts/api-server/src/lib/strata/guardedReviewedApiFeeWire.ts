@@ -1,3 +1,4 @@
+import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import { pool } from "@workspace/db";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import {
@@ -59,14 +60,15 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
           AND oa.execution_account_id=a.id
           AND oa.release_commit_sha=$9 AND oa.revoked_at IS NULL
       )
-      AND EXISTS (
+      AND ($10::boolean OR EXISTS (
         SELECT 1 FROM private.strata_protective_exit_release x
         WHERE x.release_commit_sha=$9 AND x.state='approved'
           AND x.revoked_at IS NULL AND x.created_at<=now()
           AND x.expires_at>now()+interval '20 minutes'
           AND x.independent_reviewer_id<>a.owner_user_id
           AND x.operator_approver_id<>x.independent_reviewer_id
-      )
+        FOR SHARE OF x
+      ))
    ))
  FOR SHARE OF a,p,live,c,lease
 `;
@@ -159,10 +161,13 @@ export function createGuardedReviewedApiFeeFetch(
    await client.query("BEGIN");
    await client.query("SET LOCAL lock_timeout='1000ms'");
    await client.query("SET LOCAL statement_timeout='15000ms'");
+   const standingMode=isEntry&&await hasContinuousGrantHistory(client,ownerUserId,deployedSha!);
+   const standingAllowed=standingMode&&await checkContinuousEligibility(client,ownerUserId,deployedSha!);
+   if(standingMode&&!standingAllowed)throw new Error('standing_final_fee_wire_authority_closed');
    const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
     expectedFencingToken,expectedLeaseHolderId,isEntry,
-    isEntry?deployedSha:null,
+    isEntry?deployedSha:null,standingAllowed,
    ]);
    if(finalAccount.rows.length!==1)
     throw new Error(isEntry?

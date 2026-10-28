@@ -303,7 +303,7 @@ test("P0: independent exit + exact-SHA owner approval bound at SQL fence for any
  const db={async query(sql:string,params?:unknown[]){
   calls.push(sql==="BEGIN"?"BEGIN":sql==="COMMIT"?"COMMIT":sql.startsWith("ROLLBACK")?"ROLLBACK":"SQL");
   if(sql.includes("SELECT a.id")){
-    assert.deepEqual(params?.slice(-2),[true,"a".repeat(40)]);
+    assert.deepEqual(params?.slice(-3),[true,"a".repeat(40),false]);
     return {rows:[{id:account}]};
   }
   return {rows:[]};

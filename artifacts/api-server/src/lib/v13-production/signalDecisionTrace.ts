@@ -30,7 +30,7 @@ export async function recordLiveSignalDecision(input:{
   const out=await db.query(`
    INSERT INTO private.strata_v13_signal_decisions
     (execution_account_id,evaluation_id,phase,source_age_ms,reason,release_commit_sha)
-   VALUES($1,$2::uuid,$3,$4,$5,$6)
+   VALUES($1,$2,$3,$4,$5,$6)
    ON CONFLICT(execution_account_id,evaluation_id,phase) DO NOTHING
    RETURNING decision_id`,
    [input.accountId,input.evaluationId,input.phase,age??null,why,sha]);
@@ -47,27 +47,30 @@ export async function auditUnseenExpiredSignals(accountId:string,
  const sha=deployedGitSha();
  if(!accountId||!SHA.test(sha))return 0;
  try {
+  await db.query(`INSERT INTO private.strata_v13_signal_trace_scope(execution_account_id)
+    VALUES($1) ON CONFLICT DO NOTHING`,[accountId]);
   const r=await db.query(`
    WITH candidates AS (
     SELECT e.id,e.evaluated_at,p.max_quote_age_ms
     FROM public.forward_test_evaluations e
     JOIN public.v13_production_account a ON a.id=$1
+    JOIN private.strata_v13_signal_trace_scope scope ON scope.execution_account_id=a.id
     JOIN public.v13_live_money_policy p ON p.id=a.policy_id
      AND p.execution_account_id=a.id AND p.state='APPROVED'
     WHERE e.evaluation_source='paper' AND e.qualifying_trigger=true
      AND e.fresh_cross=true AND e.signal IN ('SCOUT','CONFIRM')
-     AND e.evaluated_at BETWEEN now()-interval '15 minutes'
+     AND e.evaluated_at BETWEEN scope.started_at
                           AND now()-(p.max_quote_age_ms*interval '1 millisecond')
      AND NOT EXISTS(
        SELECT 1 FROM private.strata_v13_signal_decisions d
        WHERE d.execution_account_id=$1 AND d.evaluation_id=e.id
      )
-    ORDER BY e.evaluated_at DESC LIMIT 100
+    ORDER BY e.evaluated_at ASC,e.id ASC LIMIT 100
    )
    INSERT INTO private.strata_v13_signal_decisions
     (execution_account_id,evaluation_id,phase,source_age_ms,reason,release_commit_sha)
    SELECT $1,c.id,'UNSEEN_IN_WINDOW',
-     GREATEST(0,EXTRACT(EPOCH FROM(now()-c.evaluated_at))*1000)::integer,
+     LEAST(2147483647,GREATEST(0,EXTRACT(EPOCH FROM(now()-c.evaluated_at))*1000))::integer,
      'not_observed_during_live_entry_window',$2
    FROM candidates c
    ON CONFLICT(execution_account_id,evaluation_id,phase) DO NOTHING

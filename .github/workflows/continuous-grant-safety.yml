@@ -65,3 +65,34 @@ jobs:
           sudo systemctl stop postgresql
       - name: Complete existing safety suite in a new credential-isolated local cluster
         run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --full-suite
+  standing-transactions-and-latency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: isolated_test_only
+          POSTGRES_DB: standing_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Real PostgreSQL races, crash tracing and local latency budget
+        working-directory: artifacts/api-server
+        env:
+          DATABASE_URL: postgresql://postgres:isolated_test_only@127.0.0.1:5432/standing_ci
+          STRATA_ISOLATED_STANDING_TEST: 'true'
+          NODE_ENV: test
+        run: |
+          pnpm exec esbuild src/lib/strata/standingExecutionConcurrency.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/standing-concurrency.cjs --external:pg-native
+          node --test dist/standing-concurrency.cjs

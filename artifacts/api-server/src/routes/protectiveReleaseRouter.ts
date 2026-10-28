@@ -1,3 +1,4 @@
+import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   authorizeProtectiveRelease,attestProtectiveReleaseReview,
@@ -74,6 +75,30 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
  // Explicit owner opt-in for continuous technical renewal. No orders or
  // releases are created from this endpoint; it requires an existing reviewed
  // exact-SHA release and durable owner approval.
+ router.get('/continuous-status',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const owner=isOperator(actor.role)&&typeof req.query.ownerUserId==='string'?req.query.ownerUserId:actor.subject;
+  const result=await standingExecutionStatus(owner);
+  const eligible=result.ok?await checkContinuousEligibility(pool,owner,result.sha):false;
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic({...result,technicalLeaseCurrent:eligible,
+    viewerIsOwner:owner===actor.subject,viewerIsOperator:isOperator(actor.role)}));
+ });
+ router.post('/standing-review',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
+  const result=await recordStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/standing-review-revoke',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
+  const result=await revokeStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
  router.post("/continuous-owner-authorize",async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:"unauthorized"});

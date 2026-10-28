@@ -1,3 +1,4 @@
+import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
@@ -115,6 +116,9 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
   const fingerprint=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
   const digest=createHash("sha256").update(JSON.stringify(input.order)).digest("hex");
   if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))return {attempted:false,receipt:null};
+  const standingMode=await hasStandingReviewHistory(c,input.ownerId,input.accountId,sha);
+  const standingAllowed=standingMode&&await checkStandingExitReview(c,input.ownerId,input.accountId,sha);
+  if(standingMode&&!standingAllowed)return {attempted:false,receipt:null};
   const sql=`SELECT r.reservation_id FROM private.strata_emergency_exit_reservations r
  JOIN public.v13_production_account a ON a.id=r.execution_account_id AND a.owner_user_id=r.owner_user_id
  JOIN public.live_execution_config g ON g.id='singleton'
@@ -126,13 +130,14 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  -- technical release, including after a durable owner-SHA authorization.
  JOIN LATERAL (
    SELECT 1 AS code_authorized
-   WHERE EXISTS (
+   WHERE $14::boolean OR EXISTS (
      SELECT 1 FROM private.strata_protective_exit_release v
      WHERE v.release_commit_sha=$1 AND v.state='approved'
        AND v.created_at<=now() AND v.expires_at>now()
        AND v.revoked_at IS NULL
        AND v.independent_reviewer_id<>a.owner_user_id
        AND v.operator_approver_id<>v.independent_reviewer_id
+     FOR SHARE OF v
    )
  ) code_release ON TRUE
  WHERE r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
@@ -164,7 +169,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:()=>Promise<Re
  FOR SHARE OF r,a,g,w,pos`;
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
-    input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint]);
+    input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed]);
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return {attempted:false,receipt:null};
   // The PREPARED -> UNKNOWN marker is already committed. This final
