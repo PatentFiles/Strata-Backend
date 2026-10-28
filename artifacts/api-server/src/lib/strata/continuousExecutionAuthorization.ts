@@ -159,6 +159,16 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND w.heartbeat_at>now()-interval '15 seconds'
    AND l.observed_at<=now() AND l.expires_at>now()+interval '20 seconds'
  LIMIT 2 FOR SHARE OF g,oa,r,w,l,p`;
+/** Read-only preliminary reuse; no human/technical expiry is extended. */
+export const CONTINUOUS_CURRENT_LEASE_SQL=CONTINUOUS_ENTRY_AUTHORIZATION_SQL.replace(
+ "LIMIT 2 FOR SHARE OF g,oa,r,w,l,p",
+ `AND g.execution_account_id=$3 AND g.policy_hash=$4
+  AND a.cash_micros=$5::bigint AND w.fencing_token=$6::bigint
+  AND l.expires_at>now()+interval '120 seconds'
+  AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations ex
+    WHERE ex.execution_account_id=g.execution_account_id
+      AND ex.state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+  LIMIT 2`);
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
@@ -222,6 +232,16 @@ export async function renewContinuousTechnicalLease(input:{
   return denied("standing_signed_exchange_proof_stale");
  const db=deps.db??pool;let c:Conn|null=null,committed=false;
  try{
+  // Reconciliation has already committed fresh signed account evidence. While
+  // its existing lease has ample time left, revalidate all scope/revocation,
+  // cash, fence and exit-hold predicates in one read instead of opening the
+  // multi-round-trip renewal transaction on every worker tick. This preliminary
+  // result never replaces the locked final entry/exit authorization.
+  const current=await db.query(CONTINUOUS_CURRENT_LEASE_SQL,
+    [input.ownerId,input.releaseSha,input.accountId,input.policyHash,input.cashMicros,input.fencingToken]);
+  if(current.rows.length===1)return {ok:true as const,reason:"standing_short_technical_lease_current",
+    ordersSubmitted:false as const,workerStarted:false as const};
+  if(current.rows.length>1)return denied("standing_duplicate_technical_lease");
   c=await db.connect();await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='1000ms'");
   await c.query("SET LOCAL statement_timeout='5000ms'");

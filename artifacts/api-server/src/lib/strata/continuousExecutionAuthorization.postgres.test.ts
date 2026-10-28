@@ -64,6 +64,23 @@ test('standing grant SQL fails closed across revocation, restart, scope drift an
    assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,true);
    assert.equal(await checkContinuousEligibility(db,owner,sha),true);
   });
+  await t.test('current lease reuses one database read without opening a renewal transaction',async()=>{
+   let reads=0;
+   const readOnly={query:async(sql:string,args?:unknown[])=>{reads++;return pg.query(sql,args)},
+     connect:async()=>{throw new Error('unexpected renewal transaction')}};
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db:readOnly})).ok,true);
+   assert.equal(reads,1);
+   for(const change of [{cashMicros:'1'},{fencingToken:'8'},{policyHash:'c'.repeat(64)},
+       {accountId:'foreign'},{authenticated:false},{complete:false},{unexplainedCashActivity:true}]){
+    assert.equal((await renewContinuousTechnicalLease({...proof(),...change},{db:readOnly})).ok,false);
+   }
+   await pg.exec("INSERT INTO private.strata_emergency_exit_reservations VALUES('acct','UNKNOWN')");
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db:readOnly})).ok,false);
+   await pg.exec('DELETE FROM private.strata_emergency_exit_reservations');
+   await pg.exec("UPDATE private.strata_continuous_execution_technical_lease SET expires_at=now()+interval '60 seconds'");
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db:readOnly})).ok,false);
+   assert.equal((await renewContinuousTechnicalLease(proof(),{db})).ok,true,'approaching expiry still runs full signed renewal');
+  });
   for(const [label,hold,restore] of [
    ['owner approval revoked',"UPDATE private.strata_owner_sha_approvals SET revoked_at=now()","UPDATE private.strata_owner_sha_approvals SET revoked_at=NULL"],
    ['policy changed',"UPDATE public.v13_live_money_policy SET policy_hash=repeat('c',64)",`UPDATE public.v13_live_money_policy SET policy_hash='${policy}'`],
