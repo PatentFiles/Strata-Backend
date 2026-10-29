@@ -13,7 +13,7 @@ export function createWalletDisplayReads<T>(options:{
   for(const [k,v]of entries)if(v.done&&(t<v.started||t-v.started>=ttl))entries.delete(k);
   // Never evict an in-flight read and create duplicate exchange work.
   if(entries.size>=cap)return structuredClone(await load());
-  const entry={started:t,promise:Promise.resolve(null as T),done:false};
+  const entry:{started:number;promise:Promise<T>;done:boolean}={started:t,promise:Promise.resolve(null as T),done:false};
   entry.promise=Promise.resolve().then(load);
   entries.set(key,entry);
   try{
