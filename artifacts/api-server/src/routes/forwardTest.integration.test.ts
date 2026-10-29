@@ -9,7 +9,7 @@ import {
 import type { ForwardTestPosition } from "@workspace/db";
 import { evaluateV13Strategy } from "@workspace/v13-strategy";
 import {
-  aggregateForwardTestStatistics, appendStrategyEvaluation,
+  aggregateForwardTestStatistics, appendStrategyEvaluation, FORWARD_TEST_ENGINE_ID,
   claimMarketCrossing, createPaperPositionSafely, ForwardTestConflictError, getEngineStatus,
   getOpenPaperPosition, getOrCreateMarketWindow, getRecentStrategyEvaluations,
   settlePaperPositionSafely, updateMarketWindowCrossing, upsertEngineStatus,
@@ -267,7 +267,8 @@ test("persistent V1.3 state survives reconnect and actions are idempotent", asyn
   const cachedStatus = await readForwardTestStatus();
   assert.equal(cachedStatus.evaluationCount, stats.evaluationCount);
   assert.equal(cachedStatus.triggerCount, stats.triggerCount);
-  assert.equal(cachedStatus.completedPaperForwardTests, stats.completedPaperForwardTests);
-  assert.equal(cachedStatus.cumulativePaperPnl, stats.cumulativePaperPnl);
+  const scopedStats = await aggregateForwardTestStatistics(FORWARD_TEST_ENGINE_ID);
+  assert.equal(cachedStatus.completedPaperForwardTests, scopedStats.completedPaperForwardTests);
+  assert.equal(cachedStatus.cumulativePaperPnl, scopedStats.cumulativePaperPnl);
   assert.deepEqual(evaluateV13Strategy(input), before);
 });
