@@ -518,9 +518,15 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
               logger.error({ err: error }, "Gated micro-live cycle failed");
             }
             const evaluationId=cycle.evaluationId;
-            researchLane.submit(()=>recordV13ShadowOpportunities(evaluationId),error=>{
-              logger.warn({err:error},"V13 shadow opportunity evaluation failed");
-            });
+            // Optional research recording must never be required for the
+            // champion paper signal or the separately gated live executor.
+            // During database write pressure, operations may pause only this
+            // non-authoritative shadow lane without weakening any entry/exit gate.
+            if (process.env.STRATA_SHADOW_EVALUATION_WRITES_ENABLED !== "false") {
+              researchLane.submit(()=>recordV13ShadowOpportunities(evaluationId),error=>{
+                logger.warn({err:error},"V13 shadow opportunity evaluation failed");
+              });
+            }
             // New daily candidates are trained only AFTER the champion's
             // committed cycle, on a separate non-blocking research promise.
             // The runtime flag is opt-in; no automatic promotion or trades.
