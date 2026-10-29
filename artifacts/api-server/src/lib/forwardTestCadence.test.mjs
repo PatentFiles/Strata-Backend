@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from './forwardTestCadence.ts';
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery,shadowOpportunityRecordingEnabled} from './forwardTestCadence.ts';
+import {configuredPoolMax} from '../../../../lib/db/src/poolSizing.ts';
 test('start-to-start delay removes processing overhead and prevents overrun hot loops',()=>{
  for(const [elapsed,expected] of [[0,5000],[2300,2700],[4750,250],[6000,250]])
   assert.equal(producerDelayMs(5000,elapsed),expected);
@@ -44,4 +45,15 @@ test('inserted discovery retries preserve the original five-second poll deadline
   const actual=starts.find(t=>t-starts[0]>=availableAt)-starts[0];
   assert.ok(actual<=5000,'fast discovery cannot postpone the original +5s poll');
  }
+});
+
+test('zero-authority shadow recording can be shed without changing defaults',()=>{
+ assert.equal(shadowOpportunityRecordingEnabled({}),true);
+ assert.equal(shadowOpportunityRecordingEnabled({STRATA_V13_SHADOW_OPPORTUNITY_RECORDING_ENABLED:'false'}),false);
+ assert.equal(shadowOpportunityRecordingEnabled({STRATA_V13_SHADOW_OPPORTUNITY_RECORDING_ENABLED:'true'}),true);
+});
+test('application pool override is bounded and preserves ten-connection default',()=>{
+ assert.equal(configuredPoolMax(undefined),10);
+ assert.equal(configuredPoolMax('4'),4);
+ for(const invalid of ['0','1','11','40','4.5','NaN',''])assert.equal(configuredPoolMax(invalid),10);
 });
