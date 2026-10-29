@@ -14,7 +14,16 @@ import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
 import { readForwardTestBrtiReference } from "./forwardTest";
 import { readTriangulatedMarketStatus } from "../lib/strataResearchMarketObserver";
 import { getV13AdaptiveResearchRecommendation } from "../lib/v13StrategyResearch";
+import { createSingleFlightAnalyticsCache } from "../lib/readOnlyAnalyticsCache";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET } from "@workspace/v13-strategy";
+
+// Shadow ranking can scan hundreds of thousands of research rows. It is never
+// an execution gate, so coalesce repeated dashboard reads and preserve
+// a hard failure (not stale success) when its database refresh fails.
+const readCachedShadowResearch = createSingleFlightAnalyticsCache(
+  () => getV13AdaptiveResearchRecommendation(),
+  120_000,
+);
 
 export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   forwardTestStatus: () => Promise<unknown>;
@@ -197,7 +206,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     res.setHeader("Cache-Control","no-store");
     try{
       const result=await (deps.adaptiveShadowResearch ??
-        (()=>getV13AdaptiveResearchRecommendation()))();
+        readCachedShadowResearch)();
       res.json({
         mode:"PAPER_ONLY_SHADOW_RESEARCH",executionAuthority:false,
         automaticPromotion:false,liveStrategyUnchanged:true,
