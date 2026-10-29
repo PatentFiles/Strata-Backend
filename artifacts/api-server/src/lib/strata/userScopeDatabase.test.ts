@@ -677,3 +677,18 @@ test("START reports running only after the session schedules a worker, and produ
   assert.equal(refused.view.workerRunning, false);
   assert.equal(posts, 0);
 });
+
+test("wallet display coalesces repeated reads per authenticated owner without sharing cash",async()=>{
+ const {db}=database(true);let calls=0;
+ const port=createDatabaseUserScopePort(db,{kalshiGet:async(creds,path)=>{
+  calls++;
+  if(path.endsWith("/account/limits"))return {usage_tier:"advanced"};
+  if(path.endsWith("/portfolio/balance"))return {balance:creds.keyId==="key-a"?2500:800,portfolio_value:0};
+  return {orders:[],fills:[],settlements:[],transfers:[],market_positions:[]};
+ }});
+ const [a,b]=await Promise.all([port.wallet(USER_A),port.wallet(USER_A)]);
+ assert.equal(calls,8);assert.equal(a.primary.cashCents,2500);assert.equal(b.primary.cashCents,2500);
+ a.primary.cashCents=999;
+ assert.equal((await port.wallet(USER_A)).primary.cashCents,2500);assert.equal(calls,8);
+ assert.equal((await port.wallet(USER_B)).primary.cashCents,800);assert.equal(calls,16);
+});

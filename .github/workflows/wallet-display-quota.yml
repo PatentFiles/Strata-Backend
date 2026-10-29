@@ -1,0 +1,32 @@
+name: Wallet display quota isolation
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/walletDisplayReads*'
+      - 'artifacts/api-server/src/lib/strata/userScopeDatabase*'
+      - '.github/workflows/wallet-display-quota.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  display-coalescing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/walletDisplayReads.test.ts --bundle --platform=node --format=cjs --outfile=dist/wallet-display.cjs
+          node --test dist/wallet-display.cjs
+      - name: Adapter owner isolation and ARM versus START regression
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/userScopeDatabase.test.ts --bundle --platform=node --format=cjs --outfile=dist/userScopeDatabase.test.cjs --external:express --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable NODE_ENV=test pnpm --filter @workspace/api-server exec node --test dist/userScopeDatabase.test.cjs
