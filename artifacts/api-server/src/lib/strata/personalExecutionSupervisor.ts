@@ -1,3 +1,4 @@
+import {createEntryWireClockFetch} from "./entryWireClock";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "@workspace/db";
@@ -354,6 +355,10 @@ export function createProductionPersonalSession(
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    const clockCheckedTransport=createEntryWireClockFetch(()=>{
+      if(!finalLedger)throw new Error("production_final_wire_clock_missing");
+      finalLedger.assertFinalWireClock();
+    },personalProductionFetch);
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -533,12 +538,12 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
-        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,personalProductionFetch) :
+      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
+        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
         !options.verifyFee ? createGuardedMonetaryFeeFetch(
-          input.userId,input.accountId,personalProductionFetch,policyHash,
+          input.userId,input.accountId,clockCheckedTransport,policyHash,
           fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null},
-        ) : personalProductionFetch,
+        ) : clockCheckedTransport,
     });
     finalLedger=session.executor.ledger;
     session.executor.afterReconcile=async snapshot=>{

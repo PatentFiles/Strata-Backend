@@ -1,0 +1,30 @@
+name: Final entry wire clock safety
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/entryWireClock*'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
+      - 'artifacts/api-server/src/lib/v13-production/executor.ts'
+      - '.github/workflows/entry-wire-clock.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  late-fee-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/entryWireClock.test.ts --bundle --platform=node --format=cjs --outfile=dist/entry-wire-clock.cjs
+          node --test dist/entry-wire-clock.cjs

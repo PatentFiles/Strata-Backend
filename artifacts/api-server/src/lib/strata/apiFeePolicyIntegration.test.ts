@@ -51,7 +51,9 @@ test("worker rechecks reviewed source for every exact-market read and every fina
  const fence=read("guardedReviewedApiFeeWire.ts");
  assert.match(worker,/verifyReviewedApiFeeSourceStage\(input\.userId,"ORDER_ENTRY",/);
  assert.match(worker,/sourceUrl,market\)/);
-  assert.ok(worker.includes("createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,personalProductionFetch,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null})"),"reviewed fee transport must borrow the active final-ledger transaction to avoid an account-lock deadlock");
+  assert.ok(worker.includes("const clockCheckedTransport=createEntryWireClockFetch"),"all entry transports must enforce their pinned clock after fee verification");
+  assert.ok(worker.includes("finalLedger.assertFinalWireClock()"),"wire clock must come from the current ledger transaction");
+  assert.ok(worker.includes("createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null})"),"reviewed fee transport must borrow the active final-ledger transaction to avoid an account-lock deadlock");
  assert.match(fence,/FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL/);
  assert.match(fence,/live\.manual_kill_switch=false/);
  assert.match(fence,/c\.revoked_at IS NULL/);
