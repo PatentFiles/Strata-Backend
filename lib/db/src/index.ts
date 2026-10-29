@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./schema";
+import { configuredPoolMax } from "./poolSizing";
 
 const { Pool } = pg;
 
@@ -16,7 +17,7 @@ export function poolConfig(connectionString: string): pg.PoolConfig {
   const sslmode = url.searchParams.get("sslmode");
   const config: pg.PoolConfig = {
     connectionString,
-    max: 10,
+    max: configuredPoolMax(process.env.STRATA_DB_POOL_MAX),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
   };
