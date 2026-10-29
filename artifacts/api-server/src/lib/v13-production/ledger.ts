@@ -34,6 +34,7 @@ export function decodePolicy(row: Record<string, unknown>): V13ApprovedLiveMoney
 
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
+  private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null}>();
   constructor(readonly pool: Pool, readonly accountId: string) {}
   // Read providers invoked inside a final fence MUST use its existing client,
   // not open another transaction/connection behind the held account lock.
@@ -43,6 +44,19 @@ export class ProductionLedger {
   }) as Pool["query"];
   /** Trusted transport may borrow the current final fence, never commit it. */
   currentTransaction(): PoolClient|null {return this.context.getStore()??null;}
+  /** Synchronous freshness check for the LAST HTTP boundary, after fee reads.
+   * Evidence is pinned by this transaction, not reusable authority or a lease.
+   */
+  setFinalWireClock(check:()=>void):void {
+    const scope=this.wireContext.getStore();
+    requireProof(this.currentTransaction()&&scope?.active,"production_wire_transaction_required");
+    scope.check=check;
+  }
+  assertFinalWireClock():void {
+    const scope=this.wireContext.getStore();
+    requireProof(this.currentTransaction()&&scope?.active&&scope.check,"production_final_wire_clock_missing");
+    scope.check();
+  }
   async readAccount(): Promise<Account> {
     const { rows } = await this.query<Account>("SELECT * FROM v13_production_account WHERE id=$1", [this.accountId]);
     requireProof(rows.length === 1, "production_account_missing");
@@ -50,15 +64,16 @@ export class ProductionLedger {
   }
   async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>): Promise<T> {
     const tx = await this.pool.connect();
+    const wireScope={active:true,check:null as (()=>void)|null};
     try {
       await tx.query("BEGIN");
       const { rows } = await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId]);
       requireProof(rows.length === 1, "production_account_missing");
-      const result = await this.context.run(tx, () => body(tx, rows[0]!));
+      const result = await this.context.run(tx, () => this.wireContext.run(wireScope,()=>body(tx, rows[0]!)));
       await tx.query("COMMIT");
       return result;
     } catch (error) { await tx.query("ROLLBACK"); throw error; }
-    finally { tx.release(); }
+    finally { wireScope.active=false;wireScope.check=null;tx.release(); }
   }
   async policy(tx: PoolClient, a: Account): Promise<V13ApprovedLiveMoneyPolicy> {
     // Lock the immutable approval row through the final network fence. Never

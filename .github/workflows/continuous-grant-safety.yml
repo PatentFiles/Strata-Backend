@@ -12,6 +12,9 @@ on:
       - 'artifacts/api-server/src/lib/forwardTestWorker.ts'
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'artifacts/api-server/src/lib/v13-production/executor.ts'
+      - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/strata/entryWireClock*'
       - 'artifacts/api-server/src/lib/v13-production/acceptance.test.ts'
       - 'docs/reviews/maintenance-hardening-20261028.sql'
   workflow_dispatch:

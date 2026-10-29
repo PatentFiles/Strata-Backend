@@ -1,3 +1,4 @@
+import {createEntryWireClockFetch} from "../strata/entryWireClock";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
@@ -33,7 +34,7 @@ function policy(): V13ApprovedLiveMoneyPolicy {
 class SimulatedExchange implements Exchange {
   readonly mode = "SIMULATION" as const;
   posts: Request[] = []; cancels: string[] = [];
-  throwPost = false; throwCancel = false; beforePost: (() => Promise<void>) | null = null;
+  throwPost = false; throwCancel = false; afterFinalBeforePost:(()=>Promise<void>)|null=null; beforePost: (() => Promise<void>) | null = null;
   now = Date.now();
   book: MarketEvidence = {
     observedAtMs: this.now, bestAskDollars: "0.5000", asks: [{ priceDollars: "0.5000", availableContracts: "10" }],
@@ -53,6 +54,7 @@ class SimulatedExchange implements Exchange {
   async submit(request: Request, finalCheck: () => Promise<void>) {
     if (this.beforePost) await this.beforePost();
     await finalCheck();
+    if(this.afterFinalBeforePost)await this.afterFinalBeforePost();
     this.posts.push(structuredClone(request));
     if (this.throwPost) throw new Error("simulated_timeout_after_acceptance");
     return { orderId: `order-${request.clientOrderId}` };
@@ -599,5 +601,55 @@ test("transport-boundary refusal is proven not posted and releases its reservati
  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
  const intent=(await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0];
  assert.equal(intent.state,"BLOCKED");
+ await invariant(f.ledger);
+});
+
+test("late transport fee verification cannot send an entry after its pinned source expires",async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ f.exchange.afterFinalBeforePost=async()=>{
+  f.exchange.now+=16001;
+  const wire=createEntryWireClockFetch(()=>f.ledger.assertFinalWireClock(),async()=>{throw Error("must_not_send")});
+  await wire("https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",{
+   method:"POST",body:JSON.stringify({reduce_only:false,client_order_id:"v13p-"+id})
+  });
+ };
+ await assert.rejects(f.executor.dispatch(id),/production_final_wire_source_expired/);
+ assert.equal(f.exchange.posts.length,0);
+ assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0].state,"BLOCKED");
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+ await invariant(f.ledger);
+});
+test("wire-clock proof cannot escape its transaction or survive pool-client reuse",async()=>{
+ const f=await fixture();
+ assert.throws(()=>f.ledger.assertFinalWireClock(),/production_final_wire_clock_missing/);
+ await f.ledger.transaction(async()=>{
+  f.ledger.setFinalWireClock(()=>{});f.ledger.assertFinalWireClock();
+ });
+ assert.throws(()=>f.ledger.assertFinalWireClock(),/production_final_wire_clock_missing/);
+ await f.ledger.transaction(async()=>{
+  assert.throws(()=>f.ledger.assertFinalWireClock(),/production_final_wire_clock_missing/);
+ });
+});
+
+test("a delayed continuation cannot borrow a later transaction's wire proof",async()=>{
+ const f=await fixture();let release!:()=>void,late!:Promise<void>;
+ await f.ledger.transaction(async()=>{
+  f.ledger.setFinalWireClock(()=>{});
+  const wait=new Promise<void>(resolve=>{release=resolve});
+  late=wait.then(()=>f.ledger.assertFinalWireClock());
+ });
+ await f.ledger.transaction(async()=>{
+  f.ledger.setFinalWireClock(()=>{});
+  const denied=assert.rejects(late,/production_final_wire_clock_missing/);
+  release();await denied;
+ });
+});
+
+test("a lookalike provider error after the final fence cannot claim a local clock refusal",async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ f.exchange.afterFinalBeforePost=async()=>{throw Error("production_final_wire_source_expired")};
+ await assert.rejects(f.executor.dispatch(id));
+ assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0].state,"UNKNOWN");
+ assert.ok(BigInt((await f.ledger.readAccount()).reserved_micros)>0n);
  await invariant(f.ledger);
 });

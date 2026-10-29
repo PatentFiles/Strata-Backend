@@ -1,3 +1,4 @@
+import {isEntryWireClockRefusal} from "../strata/entryWireClock";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION,
@@ -400,6 +401,20 @@ export class ProductionExecutor {
             // Run after every asynchronous quote/account proof, on the SAME
             // transaction held through signing and sending. No cached grant.
             if (this.authorizeFinalEntry) await this.authorizeFinalEntry(tx);
+            // Fee transports perform additional asynchronous verification.
+            // Recheck the already pinned evidence synchronously at the actual
+            // HTTP send, without repeating network proof or extending its age.
+            this.ledger.setFinalWireClock(()=>{
+              const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
+              requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
+                ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
+                  typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),
+                "production_final_wire_source_expired");
+              requireProof(now-book.observedAtMs>=0&&now-book.observedAtMs<=p.maxQuoteAgeMs&&
+                now-book.fee.verifiedAtMs>=0&&now-book.fee.verifiedAtMs<=p.maxFeeEvidenceAgeMs&&
+                a.reconciled_at&&now-a.reconciled_at.getTime()>=0&&now-a.reconciled_at.getTime()<=15000,
+                "production_final_wire_evidence_expired");
+            });
           }
           // Trusted transports cannot send before this callback succeeds.
           // Earlier local failures therefore prove that no POST was attempted;
@@ -418,8 +433,9 @@ export class ProductionExecutor {
     } catch (error) {
       // Even a rejected/timeout response is not terminal account evidence.
       await this.ledger.transaction(async (tx, a) => {
-        if (!invoked) {
-          const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+        const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+        if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id)) {
+          const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");
           a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
           await tx.query("UPDATE v13_production_intent SET state='BLOCKED',terminal=true,reserved_micros=0 WHERE id=$1", [id]);
