@@ -1,5 +1,5 @@
 import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
-import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery,shadowOpportunityRecordingEnabled} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
@@ -518,9 +518,13 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
               logger.error({ err: error }, "Gated micro-live cycle failed");
             }
             const evaluationId=cycle.evaluationId;
-            researchLane.submit(()=>recordV13ShadowOpportunities(evaluationId),error=>{
-              logger.warn({err:error},"V13 shadow opportunity evaluation failed");
-            });
+            // Zero-authority research can be suspended during database distress.
+            // Champion paper processing, signal wakes and live safety remain active.
+            if (shadowOpportunityRecordingEnabled(process.env)) {
+              researchLane.submit(()=>recordV13ShadowOpportunities(evaluationId),error=>{
+                logger.warn({err:error},"V13 shadow opportunity evaluation failed");
+              });
+            }
             // New daily candidates are trained only AFTER the champion's
             // committed cycle, on a separate non-blocking research promise.
             // The runtime flag is opt-in; no automatic promotion or trades.

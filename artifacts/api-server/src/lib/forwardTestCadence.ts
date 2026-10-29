@@ -12,6 +12,14 @@ export class OptionalResearchLane {
  async drain():Promise<void>{await this.pending;}
 }
 
+/** Emergency load shed for zero-authority shadow-research WRITES only.
+ * Champion paper evaluations and every real-money guard run regardless.
+ * Default preserves existing research behavior; only literal false opts out.
+ */
+export function shadowOpportunityRecordingEnabled(env: Record<string,string|undefined>): boolean {
+ return env.STRATA_V13_SHADOW_OPPORTUNITY_RECORDING_ENABLED !== "false";
+}
+
 /** Faster discovery only after an empty current-market listing. No successful
  * strategy evaluation is accelerated. At most three retries per 15m clock window;
  * other feed errors retain normal backoff and no requests overlap.
