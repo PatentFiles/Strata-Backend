@@ -4,6 +4,8 @@ on:
     branches: [fix/continuous-grant-revocation-fences-20261027]
   pull_request:
     paths:
+      - 'artifacts/api-server/src/lib/strata/userScopeDatabase*'
+      - 'artifacts/api-server/src/lib/strata/walletDisplayReads*'
       - 'artifacts/api-server/src/lib/strata/continuousExecutionAuthorization*'
       - 'lib/db/drizzle/0043_strata_continuous_execution_grants.sql'
       - 'lib/db/drizzle/0044_v13_signal_decision_trace.sql'
