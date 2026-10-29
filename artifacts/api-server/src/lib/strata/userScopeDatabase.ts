@@ -1,3 +1,4 @@
+import {createWalletDisplayReads} from "./walletDisplayReads";
 import { randomUUID } from "node:crypto";
 import {
   createScopedKalshiSubaccountOne,
@@ -395,6 +396,12 @@ export function createDatabaseUserScopePort(
     session?: PersonalSessionControl;
   } = {},
 ): UserScopePort {
+  // Per adapter, keyed below by authenticated owner, connection and signer.
+  // Never shared with production exchange reads or authorization code.
+  const displayCacheable=new WeakSet<object>();
+  const displayReads=createWalletDisplayReads<KalshiUserRead>({
+    cacheable:x=>displayCacheable.has(x),
+  });
   const kalshiGet = options.kalshiGet ?? ((creds, path, query) => getScopedKalshiJson(creds, path, query ?? ""));
   const kalshiCreateSubaccount = options.kalshiCreateSubaccount ??
     ((creds) => createScopedKalshiSubaccountOne(creds));
@@ -490,6 +497,8 @@ export function createDatabaseUserScopePort(
       }
       const creds = parseVaultSecret(secretRow.rows[0]?.decrypted_secret);
       if (!creds) return unverified("VAULT_SECRET_FORMAT_INVALID");
+      return displayReads(JSON.stringify([userId,text(linked[0]?.provider_connection_id),text(linked[0]?.financial_account_id),vaultId,creds.keyId]),async()=>{
+      const displayObservedAtMs=Date.now();
       const read = async (path: string, query = "") => kalshiGet(creds, path, query);
       const settled = async (path: string, query = "") => {
         try {
@@ -545,7 +554,12 @@ export function createDatabaseUserScopePort(
         assembled.verificationReason = "API_TIER_UNAVAILABLE";
       }
       if (assembled.apiUsageTier === null) assembled.botEligible = false;
-      return assembled;
+      const result={...assembled,displayObservedAtMs};
+      if(assembled.credentialVerified&&assembled.botEligible&&assembled.verificationReason===null&&
+        [limits,bot,positions,orders,fills,settlements,transfers].every(x=>x!==null))
+        displayCacheable.add(result);
+      return result;
+      });
     },
     async control(userId, action: ControlAction) {
       if (!await migrationReady()) return refused(userId, "user_scope_not_migrated");
