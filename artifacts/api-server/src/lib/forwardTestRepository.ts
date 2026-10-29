@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
 import {
   db,
   forwardTestEngineTable,
@@ -313,13 +313,17 @@ export async function settlePaperPositionSafely(id: string, settlement: Settleme
 }
 
 export async function aggregateForwardTestStatistics(engineId?: string) {
-  const [[evaluations], [windows], [triggers], [positions]] = await Promise.all([
-    db.select({ value: count() }).from(forwardTestEvaluationTable),
+  // Count the evaluation ledger once, instead of issuing separate full scans
+  // for total, qualifying, SCOUT and CONFIRM dashboard statistics. This
+  // operation is read-only and never participates in entry authorization.
+  const [[evaluations], [windows], [positions]] = await Promise.all([
+    db.select({
+      total: sql<number>`count(*)::integer`,
+      triggers: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal IN ('SCOUT', 'CONFIRM'))::integer`,
+      scout: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'SCOUT')::integer`,
+      confirm: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'CONFIRM')::integer`,
+    }).from(forwardTestEvaluationTable),
     db.select({ value: count() }).from(forwardTestWindowTable),
-    db.select({ value: count() }).from(forwardTestEvaluationTable).where(and(
-      eq(forwardTestEvaluationTable.qualifyingTrigger, true),
-      inArray(forwardTestEvaluationTable.signal, ["SCOUT", "CONFIRM"]),
-    )),
     db.select({
       open: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} = 'OPEN')::integer`,
       completed: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED'))::integer`,
@@ -328,9 +332,11 @@ export async function aggregateForwardTestStatistics(engineId?: string) {
       .where(engineId ? eq(forwardTestPositionTable.engineId, engineId) : undefined),
   ]);
   return {
-    evaluationCount: evaluations.value,
+    evaluationCount: evaluations.total,
     windowsObserved: windows.value,
-    triggerCount: triggers.value,
+    triggerCount: evaluations.triggers,
+    scoutTriggers: evaluations.scout,
+    confirmTriggers: evaluations.confirm,
     openPaperPositionCount: positions.open,
     completedPaperForwardTests: positions.completed,
     cumulativePaperPnl: positions.pnl,

@@ -3,8 +3,9 @@ import {
   GetForwardTestHistoryResponse,
   GetForwardTestStatusResponse,
 } from "@workspace/api-zod";
-import { db, forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable } from "@workspace/db";
+import { db, forwardTestPositionTable, forwardTestWindowTable } from "@workspace/db";
 import { readKalshiBrtiShadowStatus } from "../lib/kalshiBrtiShadowStream";
+import { createSingleFlightAnalyticsCache } from "../lib/readOnlyAnalyticsCache";
 import {readPaperBookCaptureCoverage} from "../lib/forwardTestBookCapture";
 import { auditHistoricalPaperExecution } from "../lib/forwardTestExecutionAudit";
 import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
@@ -18,6 +19,13 @@ import {
 
 const router: IRouter = Router();
 
+// Historical summary numbers may lag by up to one minute. Execution eligibility,
+// leases, worker heartbeat, quote freshness and financial state MUST stay live.
+const readCachedPaperStats = createSingleFlightAnalyticsCache(
+  () => aggregateForwardTestStatistics(FORWARD_TEST_ENGINE_ID),
+  60_000,
+);
+
 const requireUser: RequestHandler = (req, res, next) => {
   if (!getAuth(req).userId) {
     res.status(401).json({ error: "Unauthorized" });
@@ -29,9 +37,11 @@ const requireUser: RequestHandler = (req, res, next) => {
 router.use("/forward-test", requireUser);
 
 export async function readForwardTestStatus() {
-  const [engine, statistics, [openPosition], [lastSettlement], [breakdown], [triggers]] = await Promise.all([
+  const [engine, statistics, [openPosition], [lastSettlement], [breakdown]] = await Promise.all([
     getEngineStatus(),
-    aggregateForwardTestStatistics(FORWARD_TEST_ENGINE_ID),
+    process.env.NODE_ENV === "production"
+      ? readCachedPaperStats()
+      : aggregateForwardTestStatistics(FORWARD_TEST_ENGINE_ID),
     db.select().from(forwardTestPositionTable)
       .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
         eq(forwardTestPositionTable.status, "OPEN"))).limit(1),
@@ -44,10 +54,6 @@ export async function readForwardTestStatus() {
       losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED', 'CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
     }).from(forwardTestPositionTable)
       .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID)),
-    db.select({
-      scoutTriggers: sql<number>`count(*) FILTER (WHERE ${forwardTestEvaluationTable.qualifyingTrigger} = true AND ${forwardTestEvaluationTable.signal} = 'SCOUT')::integer`,
-      confirmTriggers: sql<number>`count(*) FILTER (WHERE ${forwardTestEvaluationTable.qualifyingTrigger} = true AND ${forwardTestEvaluationTable.signal} = 'CONFIRM')::integer`,
-    }).from(forwardTestEvaluationTable),
   ]);
   const [window] = engine?.marketTicker
     ? await db.select().from(forwardTestWindowTable)
@@ -109,7 +115,6 @@ export async function readForwardTestStatus() {
     databaseConnectionStatus: "CONNECTED",
     ...statistics,
     ...breakdown,
-    ...triggers,
   });
 }
 
