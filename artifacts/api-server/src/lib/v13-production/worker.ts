@@ -156,11 +156,14 @@ export class ProductionWorker {
         if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
+      // A committed qualifying signal already waited for this serialized tick;
+      // dispatch its coalesced wake immediately. Ordinary polling retains the
+      // minimum delay and every recovery/reconciliation/entry gate is unchanged.
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
       active=false;
       if (this.timer) this.timer = setTimeout(loop,
-        pending?250:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
+        pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
     this.detachWake=onCommittedForwardSignal(()=>{

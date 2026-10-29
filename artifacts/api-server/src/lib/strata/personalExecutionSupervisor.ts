@@ -37,6 +37,7 @@ import {
   RELEASE_LEASE_SQL,
 } from "./accountScopedExecution";
 import { dedicatedSignerFingerprint } from "./commissioning";
+import { gatherReadOnlyMarketEvidence } from "./gatherReadOnlyMarketEvidence";
 import {
   emptySnapshot,
   ownedMarketEvidence,
@@ -486,40 +487,45 @@ export function createProductionPersonalSession(
       },
       readMarket: async (market, side) => {
         const clock = now();
-        if(apiSource){
-          const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
-            sourceUrl,market);
-          if(!checked.ok||checked.identity.marketTicker!==market)
-            throw new Error("api_fee_exact_market_source_unavailable");
-          feeVerifiedAt=checked.identity.verifiedAtMs;
-          feeCheckedAt=clock;
-        }else if(alternate){
-          const checked=await verifyOwnerFeeSourceStage(input.userId,"ORDER_ENTRY",
-            sourceUrl,market);
-          if(!checked.ok || checked.identity.digest!==digest)
-            throw new Error("owner_operator_fee_source_unavailable");
-          feeVerifiedAt=checked.identity.verifiedAtMs;
-          feeCheckedAt=clock;
-        }else if(!options.verifyFee){
-          const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
-          if(!monetary.ok||!monetary.monetaryFeeAuthorized||
-             monetary.marketTicker!==market||monetary.sourceDigest!==digest)
-            throw Error("monetary_fee_exact_market_unverified");
-          feeVerifiedAt=Date.parse(monetary.verifiedAt??"");
-          feeCheckedAt=clock;
-        }else if (clock - feeCheckedAt > 10_000) {
-          const refreshed = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
-          if (!refreshed.valid || refreshed.digest !== digest || !refreshed.verifiedAt) {
-            throw new Error("fee_evidence_missing");
-          }
-          feeVerifiedAt = refreshed.verifiedAt;
-          feeCheckedAt = clock;
-        }
-        const [bookPayload, seriesPayload, marketPayload] = await Promise.all([
-          get(material, `/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`, "?depth=100"),
-          publicKalshiObject(`/series/KXBTC15M`),
-          publicKalshiObject(`/markets/${encodeURIComponent(market)}`),
-        ]);
+        // Fee authorization is mandatory; overlap its read-only verification
+        // with immutable market metadata and the signed orderbook GET.
+        // Nothing becomes a verified book until every branch completes.
+        const {bookPayload,seriesPayload,marketPayload} =
+          await gatherReadOnlyMarketEvidence({
+            verifyFee: async () => {
+              if(apiSource){
+                const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market);
+                if(!checked.ok||checked.identity.marketTicker!==market)
+                  throw new Error("api_fee_exact_market_source_unavailable");
+                feeVerifiedAt=checked.identity.verifiedAtMs;
+                feeCheckedAt=clock;
+              }else if(alternate){
+                const checked=await verifyOwnerFeeSourceStage(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market);
+                if(!checked.ok || checked.identity.digest!==digest)
+                  throw new Error("owner_operator_fee_source_unavailable");
+                feeVerifiedAt=checked.identity.verifiedAtMs;
+                feeCheckedAt=clock;
+              }else if(!options.verifyFee){
+                const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
+                if(!monetary.ok||!monetary.monetaryFeeAuthorized||
+                   monetary.marketTicker!==market||monetary.sourceDigest!==digest)
+                  throw Error("monetary_fee_exact_market_unverified");
+                feeVerifiedAt=Date.parse(monetary.verifiedAt??"");
+                feeCheckedAt=clock;
+              }else if (clock - feeCheckedAt > 10_000) {
+                const refreshed = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
+                if (!refreshed.valid || refreshed.digest !== digest || !refreshed.verifiedAt)
+                  throw new Error("fee_evidence_missing");
+                feeVerifiedAt = refreshed.verifiedAt;
+                feeCheckedAt = clock;
+              }
+            },
+            readBook: () => get(material, `/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`, "?depth=100"),
+            readSeries: () => publicKalshiObject("/series/KXBTC15M"),
+            readMarket: () => publicKalshiObject(`/markets/${encodeURIComponent(market)}`),
+          });
         const eventTicker = (marketPayload as { market?: { event_ticker?: unknown } })?.market?.event_ticker;
         if (typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker))
           throw new Error("production_event_fee_evidence_unverified");
