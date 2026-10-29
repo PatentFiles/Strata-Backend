@@ -8,7 +8,7 @@ test("bounded sequential polling targets the start interval and never busy spins
 });
 test("recovery-only owned worker invokes protective UNKNOWN audit before normal reconciliation",async()=>{
  const phases:string[]=[];
- const executor={
+ const executor={startTiming:()=>()=>{},
   ledger:{readAccount:async()=>{phases.push("read-account");}},
   reconcile:async()=>{phases.push("reconcile");},
  };
@@ -19,7 +19,7 @@ test("recovery-only owned worker invokes protective UNKNOWN audit before normal 
 });
 test("failed protective history cannot be silently bypassed by normal reconcile",async()=>{
  let reconcileCalls=0,reports=0;
- const executor={ledger:{readAccount:async()=>{}},reconcile:async()=>{reconcileCalls++;}};
+ const executor={startTiming:()=>()=>{},ledger:{readAccount:async()=>{}},reconcile:async()=>{reconcileCalls++;}};
  const worker=new ProductionWorker(executor as never,60000,()=>{reports++;},
   ()=>true,async()=>{throw Error("exchange_history_unavailable");});
  await worker.startRecovery();worker.stop();
@@ -30,7 +30,7 @@ test("failed protective history cannot be silently bypassed by normal reconcile"
 test("owner production worker polls newest qualifying paper crosses within APPROVED quote age",async()=>{
  const now=Date.parse("2026-10-26T20:42:39.000Z");
  const queries:string[]=[];const sends:string[]=[];
- const executor={
+ const executor={startTiming:()=>()=>{},
   accountOwnerUserId:"11111111-1111-4111-8111-111111111111",
   now:()=>now,
   ledger:{accountId:"acct-test",pool:{query:async(sql:string,params:unknown[])=>{
@@ -54,7 +54,7 @@ test("owner production worker polls newest qualifying paper crosses within APPRO
 });
 test("closed entry gate continues reconciliation and never selects or submits a SCOUT",async()=>{
  const reasons:string[]=[];let reconciled=0,entriesQueried=0;
- const executor={
+ const executor={startTiming:()=>()=>{},
   ledger:{accountId:"acct-test",pool:{query:async(sql:string)=>{
    if(sql.includes("FROM v13_production_position"))return {rows:[]};
    entriesQueried++;return {rows:[{id:"scout"}]};
@@ -73,7 +73,7 @@ test("closed entry gate continues reconciliation and never selects or submits a 
 test("failed seen-trace is retried and cannot silently permit an entry",async()=>{
  let writes=0,entries=0,sweeps=0;
  const id='11111111-1111-4111-8111-111111111111';
- const executor={accountOwnerUserId:'owner',now:()=>100000,
+ const executor={startTiming:()=>()=>{},accountOwnerUserId:'owner',now:()=>100000,
   ledger:{accountId:'acct',pool:{query:async(sql:string)=>({rows:sql.includes('FROM v13_production_position')?[]:[{id}]})}},
   reconcile:async()=>{},prepareEntry:async()=>{entries++;return 'intent';},dispatch:async()=>{},
  };
@@ -89,7 +89,7 @@ test("failed seen-trace is retried and cannot silently permit an entry",async()=
 
 test("held entries still audit unseen signals without attempting orders",async()=>{
  let sweeps=0,entries=0;
- const executor={now:()=>100000,ledger:{accountId:'acct',pool:{query:async()=>({rows:[]})}},
+ const executor={startTiming:()=>()=>{},now:()=>100000,ledger:{accountId:'acct',pool:{query:async()=>({rows:[]})}},
   reconcile:async()=>{},prepareEntry:async()=>{entries++;},dispatch:async()=>{entries++;}};
  const worker=new ProductionWorker(executor as never,2500,()=>{},()=>false,async()=>{},undefined,
   {record:async()=>true,sweep:async()=>{sweeps++;return 0;}});

@@ -1,3 +1,5 @@
+import {logger} from "../logger";
+import type {TimingObserver} from "../v13-production/stageTiming";
 import { recoverPreparedOwnedExitIntents } from "./preparedProtectiveExitRecovery";
 import { constants, createPrivateKey, createSign } from "node:crypto";
 import type { Pool, PoolClient } from "@workspace/db";
@@ -275,6 +277,7 @@ export function openOwnedExecutionSession(input: {
   entriesOpen?: () => boolean;
   recoverProtectiveExits?: () => Promise<void>;
   dispatchProtectiveExit?: ProtectiveExitDispatch;
+  timingObserver?: TimingObserver;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -294,6 +297,7 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
+  executor.timingObserver=input.timingObserver??(event=>logger.info({event:"strata_execution_stage",...event}));
   // Preserve the worker's fail-closed behavior, but make rejected attempts observable.
   // Log only known machine-readable error codes; never log exchange payloads,
   // secrets, owner identity, or stack traces into shared Railway runtime logs.

@@ -1,3 +1,5 @@
+import {beginExecutionStage,timedFinalFetch,type TimingObserver} from "../v13-production/stageTiming";
+import {logger} from "../logger";
 import {createEntryWireClockFetch} from "./entryWireClock";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
 import { randomUUID } from "node:crypto";
@@ -356,10 +358,18 @@ export function createProductionPersonalSession(
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    const timingObserver:TimingObserver=event=>logger.info({event:"strata_execution_stage",...event});
+    const timingContext={accountId:input.accountId,mode:"LIVE" as const};
+    const measuredFetch=timedFinalFetch(raw=>{
     const clockCheckedTransport=createEntryWireClockFetch(()=>{
       if(!finalLedger)throw new Error("production_final_wire_clock_missing");
       finalLedger.assertFinalWireClock();
-    },personalProductionFetch);
+    },raw);
+    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
+      alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
+      !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
+        fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
+    },personalProductionFetch,timingObserver,timingContext);
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -367,6 +377,7 @@ export function createProductionPersonalSession(
       material,
       now,
       state,
+      timingObserver,
       entriesOpen: () => technicalRelease.mayEnter(state.entriesAuthorized, state.accountKill),
       // This is the only LIVE exit producer. The source selection comes from
       // the unchanged strategy and owned PostgreSQL position, NOT a browser.
@@ -502,6 +513,8 @@ export function createProductionPersonalSession(
         const {bookPayload,seriesPayload,marketPayload} =
           await gatherReadOnlyMarketEvidence({
             verifyFee: async () => {
+              const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
+              try {
               if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
                   sourceUrl,market);
@@ -530,6 +543,8 @@ export function createProductionPersonalSession(
                 feeVerifiedAt = refreshed.verifiedAt;
                 feeCheckedAt = clock;
               }
+              feeTiming("completed");
+              }catch(error){feeTiming("rejected",{error});throw error;}
             },
             readBook: () => get(material, `/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`, "?depth=100"),
             readSeries: () => publicKalshiObject("/series/KXBTC15M"),
@@ -553,12 +568,7 @@ export function createProductionPersonalSession(
           verifiedAtMs: feeVerifiedAt,
         });
       },
-      fetchImpl: apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
-        alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
-        !options.verifyFee ? createGuardedMonetaryFeeFetch(
-          input.userId,input.accountId,clockCheckedTransport,policyHash,
-          fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null},
-        ) : clockCheckedTransport,
+      fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
     session.executor.afterReconcile=async snapshot=>{

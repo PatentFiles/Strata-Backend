@@ -78,11 +78,18 @@ export class ProductionLedger {
     requireProof(rows.length === 1, "production_account_missing");
     return rows[0]!;
   }
-  async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>): Promise<T> {
+  async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>,
+    options: { lockTimeoutMs?: number } = {}): Promise<T> {
     const tx = await this.pool.connect();
     const wireScope={active:true,check:null as (()=>void)|null};
     try {
       await tx.query("BEGIN");
+      if (options.lockTimeoutMs !== undefined) {
+        requireProof(Number.isSafeInteger(options.lockTimeoutMs) && options.lockTimeoutMs > 0 &&
+          options.lockTimeoutMs <= 5000, "production_lock_timeout_invalid");
+        // Recovery must bound the FIRST account lock, not just later queries.
+        await tx.query("SELECT set_config('lock_timeout',$1,true)", [`${options.lockTimeoutMs}ms`]);
+      }
       const { rows } = await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId]);
       requireProof(rows.length === 1, "production_account_missing");
       const result = await this.context.run(tx, () => this.wireContext.run(wireScope,()=>body(tx, rows[0]!)));
