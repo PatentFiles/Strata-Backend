@@ -204,6 +204,15 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   });
   router.get("/forward-test/adaptive-shadow-research", access.requireUser, async (_req, res) => {
     res.setHeader("Cache-Control","no-store");
+    // A maintenance pause of prospective shadow recording must not keep
+    // running historical multi-table ranking scans against a saturated pool.
+    // Read-only analytics are unavailable; live execution controls are
+    // unaffected. Test-injected research is handled separately.
+    if (process.env.STRATA_SHADOW_EVALUATION_WRITES_ENABLED === "false" &&
+        !deps.adaptiveShadowResearch) {
+      res.status(503).json({error:"Shadow research paused for database maintenance"});
+      return;
+    }
     try{
       const result=await (deps.adaptiveShadowResearch ??
         readCachedShadowResearch)();
