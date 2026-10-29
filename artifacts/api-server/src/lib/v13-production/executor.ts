@@ -290,6 +290,18 @@ export class ProductionExecutor {
     try {
       await this.ledger.transaction(async (tx, a) => {
         const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+        // Lock and recheck the durable capability/authorization before entering
+        // the transport. Network quote/account proof belongs at its final
+        // pre-sign boundary; doing it here as well duplicates signed reads.
+        await this.gate(tx, a, i.kind === "EXIT", id);
+        const lockedPolicy = await this.ledger.policy(tx, a);
+        requireProof(lockedPolicy.policyHash === i.policy_hash &&
+          canonical(identity(a)) === canonical(i.decision.identity) &&
+          i.capability_digest === digest({ id: i.id, request: i.request,
+            decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
+          "production_capability_or_policy_changed");
+        if (i.kind === "ENTRY" && this.authorizeFinalEntry)
+          await this.authorizeFinalEntry(tx);
         const final = async () => {
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
@@ -389,12 +401,14 @@ export class ProductionExecutor {
             // transaction held through signing and sending. No cached grant.
             if (this.authorizeFinalEntry) await this.authorizeFinalEntry(tx);
           }
+          // Trusted transports cannot send before this callback succeeds.
+          // Earlier local failures therefore prove that no POST was attempted;
+          // failures after success remain UNKNOWN and are never replayed.
+          invoked = true;
         };
-        await final();
         ProductionExecutor.#fences.add(final);
-        // Transport calls final again immediately before signing/sending. Locks
-        // remain held; policy/gate revocation cannot commit during this fence.
-        invoked = true;
+        // One full fresh proof at the transport's last asynchronous boundary.
+        // Durable authorization locks remain held through signing and sending.
         await this.exchange.submit(i.request, final);
         this.fault("after_post_before_commit");
         await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1", [id]);

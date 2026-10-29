@@ -579,3 +579,25 @@ test("final authorization is rechecked after the transport's last asynchronous b
  assert.equal(checks,2);
  assert.equal(f.exchange.posts.length,0);
 });
+
+test("dispatch makes one full network proof at the final transport boundary",async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ let snapshots=0,markets=0;
+ const snapshot=f.exchange.snapshot.bind(f.exchange),market=f.exchange.market.bind(f.exchange);
+ f.exchange.snapshot=async identity=>{snapshots++;return snapshot(identity)};
+ f.exchange.market=async()=>{markets++;return market()};
+ await f.executor.dispatch(id);
+ assert.equal(snapshots,1);assert.equal(markets,1);
+ assert.equal(f.exchange.posts.length,1);
+ await invariant(f.ledger);
+});
+test("transport-boundary refusal is proven not posted and releases its reservation",async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ f.exchange.beforePost=async()=>{f.exchange.now+=16001};
+ await assert.rejects(f.executor.dispatch(id));
+ assert.equal(f.exchange.posts.length,0);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+ const intent=(await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+ assert.equal(intent.state,"BLOCKED");
+ await invariant(f.ledger);
+});
