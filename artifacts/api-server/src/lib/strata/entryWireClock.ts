@@ -7,7 +7,7 @@ const localRefusals=new WeakMap<Error,string>();
  * A provider error or lookalike message cannot release another reservation.
  */
 export function isEntryWireClockRefusal(error:unknown,clientOrderId:string):boolean {
- return error instanceof Error&&localRefusals.get(error)===clientOrderId;
+ return typeof clientOrderId==='string'&&error instanceof Error&&localRefusals.has(error)&&localRefusals.get(error)===clientOrderId;
 }
 export function createEntryWireClockFetch(check:()=>void,transport:typeof fetch):typeof fetch {
  return (request,init)=>{

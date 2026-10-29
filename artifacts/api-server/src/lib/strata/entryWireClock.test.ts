@@ -14,6 +14,7 @@ test('late asynchronous fee work cannot send an expired entry',async()=>{
   assert.equal(isEntryWireClockRefusal(error,clientOrderId),true);
   assert.equal(isEntryWireClockRefusal(error,'other'),false);
   assert.equal(isEntryWireClockRefusal(new Error('expired'),clientOrderId),false);
+  assert.equal(isEntryWireClockRefusal(new Error('expired'),undefined as unknown as string),false);
   return error instanceof Error&&error.message==='expired';
  });
  assert.equal(checks,1);assert.equal(sends,0);
