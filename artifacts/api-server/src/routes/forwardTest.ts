@@ -11,7 +11,6 @@ import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
-  aggregateForwardTestStatistics,
   FORWARD_TEST_ENGINE_ID,
   getEngineStatus,
 } from "../lib/forwardTestRepository";
@@ -28,26 +27,69 @@ const requireUser: RequestHandler = (req, res, next) => {
 
 router.use("/forward-test", requireUser);
 
-export async function readForwardTestStatus() {
-  const [engine, statistics, [openPosition], [lastSettlement], [breakdown], [triggers]] = await Promise.all([
-    getEngineStatus(),
-    aggregateForwardTestStatistics(FORWARD_TEST_ENGINE_ID),
-    db.select().from(forwardTestPositionTable)
-      .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
-        eq(forwardTestPositionTable.status, "OPEN"))).limit(1),
-    db.select().from(forwardTestPositionTable)
-      .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
-        eq(forwardTestPositionTable.status, "SETTLED")))
-      .orderBy(desc(forwardTestPositionTable.closedAt)).limit(1),
+// Display-only aggregates are not part of live execution qualification.
+// The 30s TTL avoids three full evaluation scans on every 5s dashboard poll.
+// Live heartbeat, paper position and lease fields below are always read fresh.
+const PAPER_COUNTER_CACHE_MS = 30_000;
+type PaperStatusCounts = {
+  evaluationCount: number; windowsObserved: number; triggerCount: number;
+  openPaperPositionCount: number; completedPaperForwardTests: number;
+  cumulativePaperPnl: number; wins: number; losses: number;
+  scoutTriggers: number; confirmTriggers: number;
+};
+let paperCountersCache: { value: PaperStatusCounts; fetchedAt: number } | null = null;
+let paperCountersInFlight: Promise<PaperStatusCounts> | null = null;
+
+async function loadPaperStatusCounts(): Promise<PaperStatusCounts> {
+  const [[evaluations], [windows], [positions]] = await Promise.all([
     db.select({
-      wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED', 'CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
-      losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED', 'CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
-    }).from(forwardTestPositionTable)
-      .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID)),
-    db.select({
+      evaluationCount: sql<number>`count(*)::integer`,
+      triggerCount: sql<number>`count(*) FILTER (WHERE ${forwardTestEvaluationTable.qualifyingTrigger} = true AND ${forwardTestEvaluationTable.signal} IN ('SCOUT', 'CONFIRM'))::integer`,
       scoutTriggers: sql<number>`count(*) FILTER (WHERE ${forwardTestEvaluationTable.qualifyingTrigger} = true AND ${forwardTestEvaluationTable.signal} = 'SCOUT')::integer`,
       confirmTriggers: sql<number>`count(*) FILTER (WHERE ${forwardTestEvaluationTable.qualifyingTrigger} = true AND ${forwardTestEvaluationTable.signal} = 'CONFIRM')::integer`,
     }).from(forwardTestEvaluationTable),
+    db.select({ windowsObserved: sql<number>`count(*)::integer` }).from(forwardTestWindowTable),
+    db.select({
+      openPaperPositionCount: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} = 'OPEN')::integer`,
+      completedPaperForwardTests: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED'))::integer`,
+      cumulativePaperPnl: sql<number>`coalesce(sum(${forwardTestPositionTable.pnl}) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED')), 0)::double precision`,
+      wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
+      losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
+    }).from(forwardTestPositionTable)
+      .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID)),
+  ]);
+  if (!evaluations || !windows || !positions) throw new Error('Paper status aggregate unavailable');
+  return { ...evaluations, ...windows, ...positions };
+}
+
+async function cachedPaperStatusCounts(): Promise<PaperStatusCounts> {
+  const current = Date.now();
+  if (paperCountersCache && current >= paperCountersCache.fetchedAt &&
+      current - paperCountersCache.fetchedAt < PAPER_COUNTER_CACHE_MS)
+    return paperCountersCache.value;
+  if (paperCountersInFlight) return paperCountersInFlight;
+  const request = loadPaperStatusCounts();
+  paperCountersInFlight = request;
+  try {
+    const value = await request;
+    paperCountersCache = { value, fetchedAt: Date.now() };
+    return value;
+  } finally {
+    if (paperCountersInFlight === request) paperCountersInFlight = null;
+  }
+}
+
+export async function readForwardTestStatus() {
+  const [engine, counters, [openPosition], [lastSettlement]] = await Promise.all([
+    getEngineStatus(),
+    cachedPaperStatusCounts(),
+    db.select().from(forwardTestPositionTable)
+      .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
+        eq(forwardTestPositionTable.status, 'OPEN'))).limit(1),
+    db.select().from(forwardTestPositionTable)
+      .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
+        eq(forwardTestPositionTable.status, 'SETTLED')))
+      .orderBy(desc(forwardTestPositionTable.closedAt)).limit(1),
   ]);
   const [window] = engine?.marketTicker
     ? await db.select().from(forwardTestWindowTable)
@@ -107,9 +149,7 @@ export async function readForwardTestStatus() {
     } : null,
     lastError: engine?.lastError ?? null,
     databaseConnectionStatus: "CONNECTED",
-    ...statistics,
-    ...breakdown,
-    ...triggers,
+    ...counters,
   });
 }
 
