@@ -33,6 +33,7 @@ export async function verifySupabaseAccessToken(
   const { payload } = await jwtVerify(token, options.keys, {
     issuer,
     audience: "authenticated",
+    requiredClaims: ["exp"],
   });
   if (typeof payload.sub !== "string" || !UUID.test(payload.sub)) {
     throw new Error("invalid subject");

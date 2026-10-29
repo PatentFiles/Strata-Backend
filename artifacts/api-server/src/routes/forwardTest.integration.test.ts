@@ -261,5 +261,15 @@ test("persistent V1.3 state survives reconnect and actions are idempotent", asyn
   assert.ok(stats.evaluationCount >= 2);
   assert.ok(stats.triggerCount >= 2);
   assert.ok(stats.completedPaperForwardTests >= 2);
+  // Outcome counts are historical analytics, scoped with the same position
+  // predicate as P&L. Unrelated engines must not bleed into a dashboard.
+  const scoped = await aggregateForwardTestStatistics(engineId);
+  assert.equal(scoped.wins, 1);
+  assert.equal(scoped.losses, 1);
+  assert.equal(scoped.completedPaperForwardTests, 2);
+  const unrelated = await aggregateForwardTestStatistics(`EMPTY-${suffix}`);
+  assert.equal(unrelated.wins, 0);
+  assert.equal(unrelated.losses, 0);
+  assert.equal(unrelated.completedPaperForwardTests, 0);
   assert.deepEqual(evaluateV13Strategy(input), before);
 });

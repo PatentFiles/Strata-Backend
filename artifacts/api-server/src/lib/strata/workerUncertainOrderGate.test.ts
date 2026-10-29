@@ -35,14 +35,14 @@ test("Read helper requires exact account-scoped count before selecting a mode", 
   assert.match(sql,/execution_account_id = \$1/);
   assert.match(sql,/state IN \('PREPARED','DISPATCHED','UNKNOWN'\)/);
   assert.match(sql,/i\.n::bigint \+ p\.n::bigint/);
-  assert.deepEqual(params,["account-7"]);
+  assert.deepEqual(params,["account-7",null]);
 });
 
 test("Protective-exit UNKNOWN and PREPARED belong to the same fail-closed recovery count",async()=>{
   for(const [normal,protective] of [[0,1],[1,0],[2,3]]){
     const mode=await readUnresolvedIntentMode(async(sql,params)=>{
       assert.match(sql,/unresolved_exits/);
-      assert.deepEqual(params,["account-8"]);
+      assert.deepEqual(params,["account-8",null]);
       // The mock emulates SQL's atomic sum of the two account-scoped counts.
       return {rows:[{n:String(normal+protective)}]};
     },"account-8");

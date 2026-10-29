@@ -36,6 +36,7 @@ function mock(opts:{advisory?:boolean;lock?:boolean;update?:boolean;failAt?:"loc
       if(sql==="COMMIT"&&opts.failAt==="commit")throw new Error("uncertain_commit");
       return {rows:[]};
     }
+    if(sql.startsWith("SELECT id FROM public.v13_production_account"))return {rows:[{id:ACCOUNT}]};
     if(sql.includes("FOR UPDATE OF r,a,w,pos")){
       events.push("LOCK");
       assert.match(sql,/r\.owner_user_id=\$2::uuid/);

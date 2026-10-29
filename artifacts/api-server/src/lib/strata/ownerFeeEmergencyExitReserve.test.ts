@@ -33,6 +33,7 @@ function h(options:{ready?:boolean;lock?:boolean;insert?:boolean}={}){
       if(sql==="BEGIN"||sql.startsWith("SET LOCAL"))return {rows:[]};
       if(sql==="COMMIT"){commit++;return {rows:[]};}
       if(sql==="ROLLBACK"){rollback++;return {rows:[]};}
+      if(sql.startsWith("SELECT id FROM public.v13_production_account"))return {rows:[{id:ACCOUNT}]};
       if(sql.includes("FOR UPDATE OF a,w,pos")){
         assert.match(sql,/a\.id=\$1::text/);
         assert.match(sql,/i\.account_id=a\.id/);

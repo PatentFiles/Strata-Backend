@@ -325,6 +325,8 @@ export async function aggregateForwardTestStatistics(engineId?: string) {
     }).from(forwardTestEvaluationTable),
     db.select({ value: count() }).from(forwardTestWindowTable),
     db.select({
+      wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
+      losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
       open: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} = 'OPEN')::integer`,
       completed: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED'))::integer`,
       pnl: sql<number>`coalesce(sum(${forwardTestPositionTable.pnl}) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED')), 0)::double precision`,
@@ -332,6 +334,8 @@ export async function aggregateForwardTestStatistics(engineId?: string) {
       .where(engineId ? eq(forwardTestPositionTable.engineId, engineId) : undefined),
   ]);
   return {
+    wins: positions.wins,
+    losses: positions.losses,
     evaluationCount: evaluations.total,
     windowsObserved: windows.value,
     triggerCount: evaluations.triggers,

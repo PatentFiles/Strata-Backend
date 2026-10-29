@@ -88,6 +88,10 @@ export async function reserveOwnedEmergencyExitProof(
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout='750ms'");
     await client.query("SET LOCAL statement_timeout='5000ms'");
+    // Match ledger reconciliation/dispatch lock order. A stale preparation
+    // callback must not create a private marker after financial cleanup.
+    const accountLock=await client.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[accountId,ownerId]);
+    if(accountLock.rows.length!==1)return deny("emergency_exit_worker_or_position_lock_unavailable");
     // The active, freshly heartbeating worker lease and existing position
     // are locked together before any reservation can be prepared.
     const locked=await client.query(
@@ -96,6 +100,14 @@ export async function reserveOwnedEmergencyExitProof(
       "ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id " +
       "JOIN public.v13_production_position pos " +
       "ON pos.account_id=a.id AND pos.market=$3::text AND pos.side=$4::text " +
+      "JOIN public.v13_production_intent fi ON fi.account_id=a.id AND fi.parent_id=pos.id " +
+      "AND fi.client_order_id=$9::text AND fi.kind='EXIT' AND fi.state='PREPARED' " +
+      "AND fi.terminal=false AND fi.dispatch_at IS NULL AND fi.exchange_order_id IS NULL " +
+      "AND fi.filled_hundredths=0 AND fi.request->>'action'='SELL' AND fi.request->>'reduceOnly'='true' " +
+      "AND fi.request->>'timeInForce'='IOC' AND fi.request->>'market'=$3::text " +
+      "AND fi.request->>'side'=$4::text AND fi.request->>'clientOrderId'=$9::text " +
+      "AND (fi.request->>'contracts')::integer*100=$6::bigint " +
+      "AND (fi.request->>'limitMicros')::integer=$10::integer " +
       "JOIN public.live_execution_config g ON g.id='singleton' " +
       "WHERE a.id=$1::text AND a.owner_user_id=$2::uuid " +
       "AND a.subaccount=1 AND a.exchange_index=2 " +
@@ -111,9 +123,10 @@ export async function reserveOwnedEmergencyExitProof(
       "WHERE i.account_id=a.id AND " +
       "(i.state IN ('DISPATCHED','UNKNOWN') OR " +
       "(i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
-      "FOR UPDATE OF a,w,pos",
+      "FOR UPDATE OF a,w,pos,fi",
       [accountId,ownerId,order.ticker,side,fingerprint,quantity.toString(),
-       lease.holderId,lease.fencingToken],
+       lease.holderId,lease.fencingToken,order.client_order_id,
+       order.side==="ask"?Number(String(order.price).slice(2))*100:1_000_000-Number(String(order.price).slice(2))*100],
     );
     if(locked.rows.length!==1)return deny("emergency_exit_worker_or_position_lock_unavailable");
     // UNIQUE(client_order_id) and partial UNIQUE(account,market) prohibit

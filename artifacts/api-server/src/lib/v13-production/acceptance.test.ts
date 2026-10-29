@@ -653,3 +653,128 @@ test("a lookalike provider error after the final fence cannot claim a local cloc
  assert.ok(BigInt((await f.ledger.readAccount()).reserved_micros)>0n);
  await invariant(f.ledger);
 });
+
+function advanceRecoveryClock(f: Awaited<ReturnType<typeof fixture>>, ms = 15_001): void {
+  f.exchange.now += ms;
+  f.exchange.evidence.observedAtMs = f.exchange.now;
+  f.exchange.book.observedAtMs = f.exchange.now;
+  f.exchange.book.fee.verifiedAtMs = f.exchange.now;
+}
+
+test("signed reconciliation expires a never-dispatched PREPARED entry without reopening its crossing", async () => {
+  const f = await fixture();
+  const evaluation = await f.source();
+  const id = await f.executor.prepareEntry(evaluation);
+  const reserved = (await f.ledger.readAccount()).reserved_micros;
+  assert.ok(BigInt(reserved) > 0n);
+  advanceRecoveryClock(f,15_000);
+  await f.executor.reconcile(); // exact inclusive age limit: no early release
+  assert.equal((await f.ledger.readAccount()).reserved_micros, reserved);
+  advanceRecoveryClock(f,1);
+  await f.executor.reconcile();
+  const intent = (await pool.query("SELECT * FROM v13_production_intent WHERE id=$1", [id])).rows[0];
+  assert.equal(intent.state, "BLOCKED");assert.equal(intent.terminal, true);
+  assert.equal(intent.reserved_micros, "0");
+  assert.equal((await f.ledger.readAccount()).reserved_micros, "0");
+  await f.executor.dispatch(id);
+  assert.equal(await f.executor.prepareEntry(evaluation), id);
+  assert.equal(f.exchange.posts.length, 0);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_observation WHERE kind='PROVEN_NOT_POSTED' AND payload->>'reason'='production_prepared_entry_expired'")).rows[0].n, 1);
+  await f.executor.reconcile(); // idempotent: no second release or receipt
+  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_observation WHERE kind='PROVEN_NOT_POSTED' AND payload->>'reason'='production_prepared_entry_expired'")).rows[0].n, 1);
+  await f.executor.prepareEntry(await f.source(randomUUID(), "next-cross"));
+});
+
+test("aged DISPATCHED and UNKNOWN entries never receive PREPARED expiry clearance", async () => {
+  const f = await fixture(stage => { if (stage === "after_dispatch_commit") throw Error("crash"); });
+  const id = await f.executor.prepareEntry(await f.source());
+  await assert.rejects(f.executor.dispatch(id), /crash/);
+  const reserved = (await f.ledger.readAccount()).reserved_micros;
+  advanceRecoveryClock(f);
+  await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1", [id])).rows[0].state, "DISPATCHED");
+  assert.equal((await f.ledger.readAccount()).reserved_micros, reserved);
+  await pool.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1",[id]);
+  await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1", [id])).rows[0].state, "UNKNOWN");
+  assert.equal((await f.ledger.readAccount()).reserved_micros, reserved);
+  assert.equal(f.exchange.posts.length, 0);
+});
+
+test("incomplete recovery or changed expiry evidence cannot release a PREPARED entry", async () => {
+  const f = await fixture();
+  const id = await f.executor.prepareEntry(await f.source());
+  const reserved = (await f.ledger.readAccount()).reserved_micros;
+  advanceRecoveryClock(f);
+  f.exchange.evidence.complete = false;
+  await assert.rejects(f.executor.reconcile(), /history_incomplete/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros, reserved);
+  f.exchange.evidence.complete = true;
+  await pool.query("UPDATE v13_production_intent SET decision=jsonb_set(decision,'{policy,maxQuoteAgeMs}','1') WHERE id=$1",[id]);
+  await assert.rejects(f.executor.reconcile(), /prepared_expiry_evidence_invalid/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros, reserved);
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1", [id])).rows[0].state, "PREPARED");
+});
+
+test("an exchange order attributed to PREPARED is rejected rather than cleared by expiry", async () => {
+  const f = await fixture();
+  const id = await f.executor.prepareEntry(await f.source());
+  const request = (await pool.query("SELECT request FROM v13_production_intent WHERE id=$1", [id])).rows[0].request;
+  const reserved = (await f.ledger.readAccount()).reserved_micros;
+  f.exchange.evidence.orders.push({orderId:"unexpected-order",request,terminal:true,filledHundredths:"0"});
+  advanceRecoveryClock(f);
+  await assert.rejects(f.executor.reconcile(), /production_unattributed_order/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+  assert.equal(f.exchange.posts.length,0);
+});
+
+test("PREPARED exit intent remains untouched when its entry source ages", async () => {
+  const f=await fixture();
+  const id=await f.executor.prepareEntry(await f.source());
+  await f.executor.dispatch(id);f.exchange.fill(f.exchange.posts[0]!);
+  await f.executor.reconcile();await f.exitFeed();
+  const exit=await f.executor.prepareExit(id,.4);
+  advanceRecoveryClock(f);await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[exit])).rows[0].state,"PREPARED");
+  assert.equal(f.exchange.posts.length,1);
+});
+
+
+test("expired preparation cleanup racing dispatch cannot send or double-release",async()=>{
+  const f=await fixture();
+  const id=await f.executor.prepareEntry(await f.source());
+  advanceRecoveryClock(f);
+  await Promise.allSettled([f.executor.reconcile(),f.executor.dispatch(id)]);
+  await f.executor.reconcile();
+  assert.equal(f.exchange.posts.length,0);
+  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+  const row=(await pool.query("SELECT state,reserved_micros FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+  assert.equal(row.state,"BLOCKED");assert.equal(row.reserved_micros,"0");
+});
+
+test("missing PREPARED position proof cannot release its reservation",async()=>{
+  const f=await fixture();
+  const id=await f.executor.prepareEntry(await f.source());
+  const reserved=(await f.ledger.readAccount()).reserved_micros;
+  await pool.query("DELETE FROM v13_production_position WHERE id=$1",[id]);
+  advanceRecoveryClock(f);
+  await assert.rejects(f.executor.reconcile(),/production_prepared_expiry_not_proven_unsent/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0].state,"PREPARED");
+});
+
+test("failed expiry audit receipt rolls back both terminal state and released funds",async()=>{
+  const f=await fixture();
+  const id=await f.executor.prepareEntry(await f.source());
+  const reserved=(await f.ledger.readAccount()).reserved_micros;
+  const observe=f.ledger.observe.bind(f.ledger);
+  f.ledger.observe=async(tx,kind,value)=>{
+    if(kind==="PROVEN_NOT_POSTED")throw Error("audit_write_failed");
+    await observe(tx,kind,value);
+  };
+  advanceRecoveryClock(f);
+  await assert.rejects(f.executor.reconcile(),/audit_write_failed/);
+  assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+  const row=(await pool.query("SELECT state,reserved_micros FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+  assert.equal(row.state,"PREPARED");assert.equal(row.reserved_micros,reserved);
+});

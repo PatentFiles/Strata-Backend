@@ -1,8 +1,9 @@
+import { recoverPreparedOwnedExitIntents } from "./preparedProtectiveExitRecovery";
 import { constants, createPrivateKey, createSign } from "node:crypto";
 import type { Pool, PoolClient } from "@workspace/db";
 import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { ProductionExecutor } from "../v13-production/executor";
-import { decodePolicy, ProductionLedger, type Account } from "../v13-production/ledger";
+import { decodePolicy, ProductionLedger, type Account, type Intent } from "../v13-production/ledger";
 import { encodeProductionOrder } from "../v13-production/transport";
 import { canonical, requireProof, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import {recordLiveSignalDecision,auditUnseenExpiredSignals} from "../v13-production/signalDecisionTrace";
@@ -77,6 +78,10 @@ export function accountOrderTransmission(
 class OwnedAccountLedger extends ProductionLedger {
   constructor(pool: Pool, accountId: string, readonly ownerUserId: string) {
     super(pool, accountId);
+  }
+  protected override async recoverPreparedExits(tx:PoolClient,account:Account,intents:Intent[],snapshot:Snapshot):Promise<void> {
+    await recoverPreparedOwnedExitIntents(tx,{ownerId:this.ownerUserId,account,intents,snapshot,
+      observe:(kind,value)=>this.observe(tx,kind,value)});
   }
   override async policy(tx: PoolClient, account: Account) {
     const { rows } = await tx.query(

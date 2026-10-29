@@ -354,7 +354,9 @@ export class ProductionExecutor {
             "production_final_owned_feed_changed_or_stale");
           }
           const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-          await this.ledger.finalAccountProof(tx, a, await this.exchange.snapshot(identity(a), new Date(oldest).getTime()), this.now());
+          const snapshot = await this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
+            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime()));
+          await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
           requireProof(this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&

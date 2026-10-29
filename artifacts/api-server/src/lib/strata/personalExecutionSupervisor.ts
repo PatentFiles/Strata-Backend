@@ -447,15 +447,24 @@ export function createProductionPersonalSession(
         // A protective reservation may become PREPARED/UNKNOWN while this
         // worker is already scheduled. Gate EVERY subsequent snapshot, not
         // just START, so another entry cannot race an unresolved exit.
+        // Dispatch has already committed its one-use claim. During ONLY its
+        // locked final account proof, that exact DISPATCHED ENTRY is expected,
+        // not a different uncertain order. UNKNOWN and protective exits never
+        // receive this exemption; ordinary snapshots still count everything.
+        const currentEntry=finalLedger?.currentFinalSnapshotEntry()??null;
+        const proofTx=finalLedger?.currentTransaction()??null;
+        const snapshotDb: { query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}> } = {
+          query:(sql,params)=>proofTx?proofTx.query(sql,params):db.query(sql,params),
+        };
         const unresolvedNow=await readUnresolvedIntentMode(
-          (sql,params)=>db.query(sql,params),input.accountId,
+          (sql,params)=>snapshotDb.query(sql,params),input.accountId,currentEntry,
         );
         if(!unresolvedNow.ok){
           state.entriesAuthorized=false;
           throw new Error("unresolved_intent_count_unverified");
         }
         if(unresolvedNow.mode==="recovery")state.entriesAuthorized=false;
-        const beat = await heartbeatLease(db, {
+        const beat = await heartbeatLease(snapshotDb, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
         });
@@ -470,7 +479,7 @@ export function createProductionPersonalSession(
         // Protective reduce-only exit management is left to the worker.
         if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
           try {
-            const maintenance=await db.query(
+            const maintenance=await snapshotDb.query(
               "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
               [input.userId,input.accountId],
             );
@@ -479,7 +488,7 @@ export function createProductionPersonalSession(
         }
         const latest = await readOwnedKalshiFeeds(material, now(), get);
         if (!latest.ok) throw new Error(latest.reason);
-        const proven = emptySnapshot(identity, latest, await loadRequests(db, input.accountId));
+        const proven = emptySnapshot(identity, latest, await loadRequests(snapshotDb, input.accountId));
         if (!("identity" in proven)) throw new Error(proven.reason);
         // Authority remains closed here. Only committed ledger reconciliation
         // or the final transactional account proof can reopen it.
@@ -764,7 +773,7 @@ async function claimWorkerLease(
   }
 }
 
-async function heartbeatLease(
+export async function heartbeatLease(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
     executionAccountId: string; ownerUserId: string; holderId: string;

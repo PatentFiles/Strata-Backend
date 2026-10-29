@@ -54,10 +54,10 @@ const feeds: ForwardTestFeeds = {
     return market(ticker ?? currentTicker);
   },
 };
-const cycle = async (owner = "worker-A", epoch = lease.leaseEpoch) => {
+const cycle = async (owner = "worker-A", epoch = lease.leaseEpoch, cycleFeeds = feeds) => {
   index += 1;
   now = new Date(base.getTime() + index * 5000);
-  return runForwardTestCycle({ owner, epoch, engineId, feeds, now });
+  return runForwardTestCycle({ owner, epoch, engineId, feeds: cycleFeeds, now });
 };
 const countEvaluations = async () => (await db.select().from(forwardTestEvaluationTable)
   .where(like(forwardTestEvaluationTable.marketTicker, `KXBTC15M-TEST-${suffix}%`))).length;
@@ -112,12 +112,20 @@ test("disabled worker cannot lease; competing owners are fenced by database time
   assert.ok(lease);
 });
 
-test("first tick warms up without crossing; fresh crossing is identical to shared V1.3", async () => {
+test("first tick warms up without crossing; fresh crossing is identical to shared V1.3", {timeout:10_000}, async () => {
   const first = await cycle();
   assert.equal(first.signal, "PASS");
   assert.equal(first.positionId, null);
   price = 84010;
-  const second = await cycle();
+  // A book provider that never resolves must not be awaited by the committed
+  // strategy cycle. The scheduler's bounded optional lane owns capture.
+  let bookCalls=0;
+  const second = await cycle("worker-A",lease.leaseEpoch,{
+    ...feeds,book:async()=>{bookCalls++;return new Promise(()=>{});},
+  });
+  assert.equal(bookCalls,0);
+  assert.equal(second.researchEvent?.phase,"ENTRY");
+  assert.equal(second.researchEvent?.eventAt.getTime(),now.getTime());
   const [evaluation] = await db.select().from(forwardTestEvaluationTable)
     .where(eq(forwardTestEvaluationTable.id, second.evaluationId!));
   const decision = evaluateV13Strategy({
