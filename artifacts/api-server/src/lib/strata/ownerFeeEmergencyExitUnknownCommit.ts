@@ -107,6 +107,10 @@ export async function markOwnedEmergencyExitUnknownForReview(
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout='750ms'");
     await client.query("SET LOCAL statement_timeout='5000ms'");
+    // Same account-first order as reservation and reconciler cleanup. If
+    // this marker wins, both rows become attempted and can never be expired.
+    const accountLock=await client.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[accountId,ownerId]);
+    if(accountLock.rows.length!==1)return deny("emergency_exit_unknown_position_or_fence_unavailable");
     // All identities, kills, worker fence and live position are checked under
     // the SAME transaction as the PREPARED -> UNKNOWN transition.
     const eligible=await client.query(

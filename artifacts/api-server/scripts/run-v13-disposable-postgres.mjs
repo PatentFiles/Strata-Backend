@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 // Never read ambient DATABASE_URL, Kalshi secrets, or runtime account settings.
 // A new cluster/database and credential-stripped child exist only for this run.
 const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const recovery = process.argv[2] === "--recovery";
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
 const candidates = [...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
@@ -29,7 +30,7 @@ const server = createServer();
 await new Promise((resolve, reject) => { server.once("error", reject); server.listen(fullSuite ? 5432 : 0, "127.0.0.1", resolve); });
 const port = server.address().port;
 await new Promise(resolve => server.close(resolve));
-const db = fullSuite ? "v13_ci" : `v13_disposable_${Date.now()}`;
+const db = fullSuite ? "v13_ci" : `${recovery ? "recovery" : "v13"}_disposable_${Date.now()}`;
 const url = `postgresql://${user}@127.0.0.1:${port}/${db}`;
 const fence = join(root, "offline-network-fence.cjs");
 writeFileSync(fence, `
@@ -57,7 +58,8 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
   PGOPTIONS: "-c statement_timeout=30000 -c lock_timeout=10000",
   MICRO_LIVE_TEST_TIMEOUT_MS: "45000",
   NODE_PATH: join(api, "node_modules"),
-  DATABASE_URL: url, V13_DISPOSABLE_DATABASE_URL: url };
+  DATABASE_URL: url, V13_DISPOSABLE_DATABASE_URL: url,
+  ...(recovery ? {V13_RECOVERY_DISPOSABLE_URL:url} : {}) };
 // Exercise the existing CI destination pin, never weaken it. Full-suite mode
 // exclusively owns a NEW local postgres/v13_ci cluster on 5432, or fails.
 if (fullSuite) { env.GITHUB_ACTIONS = "true"; env.CI = "true"; }
@@ -78,17 +80,19 @@ try {
   run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
     "--set=shared_buffers=16MB"]);
   run(executable(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
-    `-h 127.0.0.1 -p ${port} -k ${root}`, "-w", "start"]);
+    // Every test client is pinned to loopback TCP. Do not also require a Unix
+    // socket, which restricted test containers may not permit creating.
+    `-h 127.0.0.1 -p ${port} -c unix_socket_directories=''`, "-w", "start"]);
   started = true;
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  if (!recovery) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
     ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
   if (process.argv[2] === "--full-suite") {
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
   } else {
-    const testFile = process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
+    const testFile = recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",

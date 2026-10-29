@@ -165,6 +165,8 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
     cashReconciliationStale,
     cashReconciledAt:account?.reconciled_at??null,
     approvedStakeCents:account?Number(account.configured_stake_cents):null,
+   // Discovery hint only; endpoint rechecks ownership, lease, policy and signed proof.
+   transientDatabaseFreezeDetected:actorId===ownerId&&account?.blocked_reason==="timeout exceeded when trying to connect",
    provisionalFreezeDetected:owner.ok&&owner.account.blocked_reason==="awaiting_account_commissioning",
    accountExecutionEnabled:account?truth(account.execution_enabled):false,
    globalExecutionEnabled:truth(global.rows[0]?.live_execution_enabled),

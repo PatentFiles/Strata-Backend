@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { createIsolatedLedgerTestDatabase, isolatedLedgerTestUrl } from "./isolatedLedgerTestDatabase";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("private pilot transfer ledger isolates owners and rejects duplicate or modified transfer identity",async(t)=>{
-  let PGlite: new()=>{exec(sql:string):Promise<unknown>;query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>;close():Promise<void>};
-  try{
-    PGlite=(createRequire(process.cwd()+"/package.json")("@electric-sql/pglite") as {PGlite:typeof PGlite}).PGlite;
-  }catch{t.skip("disposable Postgres package absent");return;}
-  const db=new PGlite();
+test("private pilot transfer ledger isolates owners and rejects duplicate or modified transfer identity",async()=>{
+  const db=await createIsolatedLedgerTestDatabase();
   const owner="11111111-1111-4111-8111-111111111111";
   const foreign="22222222-2222-4222-8222-222222222222";
   const a="33333333-3333-4333-8333-333333333333";
@@ -50,4 +46,21 @@ test("private pilot transfer ledger isolates owners and rejects duplicate or mod
       SET state='attempted',attempted_at=now() WHERE id=$1 AND state='prepared' RETURNING id`,[x]);
     assert.equal(retry.rows.length,0);
   }finally{await db.close();}
+});
+
+
+test("isolated ledger database fence rejects ambient/non-test destinations before connecting",()=>{
+  const ci={NODE_ENV:"test",CI:"true",GITHUB_ACTIONS:"true",DATABASE_URL:"postgresql://postgres:test@127.0.0.1:5432/v13_ci"};
+  assert.equal(isolatedLedgerTestUrl(ci).pathname,"/v13_ci");
+  assert.equal(isolatedLedgerTestUrl({NODE_ENV:"test",V13_DISPOSABLE_DATABASE_URL:"postgresql://v13_test@127.0.0.1:5555/v13_disposable_123"}).pathname,"/v13_disposable_123");
+  for(const change of [
+    {NODE_ENV:"production"},{CI:"false"},{GITHUB_ACTIONS:"false"},
+    {DATABASE_URL:"postgresql://postgres@test.example:5432/v13_ci"},
+    {DATABASE_URL:"postgresql://postgres@127.0.0.1:5433/v13_ci"},
+    {DATABASE_URL:"postgresql://postgres@127.0.0.1:5432/production"},
+    {DATABASE_URL:"postgresql://other@127.0.0.1:5432/v13_ci"},
+    {DATABASE_URL:"postgresql://postgres@127.0.0.1:5432/v13_ci?host=remote"},
+    {V13_DISPOSABLE_DATABASE_URL:"postgresql://v13_test@remote:5555/v13_disposable_123"},
+  ]) assert.throws(()=>isolatedLedgerTestUrl({...ci,...change}));
+  assert.throws(()=>isolatedLedgerTestUrl({DATABASE_URL:ci.DATABASE_URL}));
 });

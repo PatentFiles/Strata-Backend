@@ -436,13 +436,9 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   }, engineId, LEASE_SECONDS);
   if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM"))
     notifyCommittedForwardSignal();
-  // The paper action is ALREADY committed. This public REST GET cannot affect
-  // a signal, position or account, and is labelled POST_ACTION, never a
-  // simultaneous or fill-confirmed snapshot. Mock feeds omit book entirely.
-  if(result.researchEvent && feeds.book){
-    try{await savePostActionPaperBook(result.researchEvent,feeds.book)}
-    catch{/* Research instrumentation may not change paper worker decisions. */}
-  }
+  // Return the committed action immediately. The scheduler owns optional
+  // post-action capture; a slow public book or receipt INSERT cannot hold the
+  // next strategy cycle or the separately gated micro-live consumer.
   return result;
   } catch (error) {
     if (error instanceof WorkerLeaseLostError) throw error;
@@ -471,6 +467,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   let lease: Awaited<ReturnType<typeof acquireWorkerLease>> = null;
   let lastAutolearnDay: string | null = null;
   const researchLane=new OptionalResearchLane();
+  const bookCaptureLane=new OptionalResearchLane();
   const discoveryRecovery=new BoundaryDiscoveryRecovery();
   const pause = (delayMs:number) => new Promise<void>((resolve) => {
     const onAbort = () => {
@@ -511,6 +508,18 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
             owner, epoch: lease.leaseEpoch, feeds, signal: controller.signal,
           });
           periodMs=discoveryRecovery.periodMs(cycle.error,cycleClock);
+          if (!stopped && cycle.researchEvent && feeds.book) {
+            const event=cycle.researchEvent,book=feeds.book;
+            // One in flight, no backlog. Receipts retain the original committed
+            // eventAt and remain explicitly POST_ACTION, never fill evidence.
+            const queued=bookCaptureLane.submit(async()=>{
+              const receipt=await savePostActionPaperBook(event,book);
+              if(!receipt)logger.warn({positionId:event.positionId,phase:event.phase},
+                "Post-action paper book receipt unavailable");
+            },error=>logger.warn({err:error},"Post-action paper book capture failed"));
+            if(!queued)logger.warn({positionId:event.positionId,phase:event.phase},
+              "Post-action paper book capture skipped: previous capture still pending");
+          }
           if (!stopped && cycle.evaluationId) {
             try {
               await processMicroLiveForwardTestCycle(cycle.evaluationId);

@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
+import { markOwnedEmergencyExitUnknownForReview } from "./ownerFeeEmergencyExitUnknownCommit";
+import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
@@ -9,6 +13,7 @@ import type { Fill, MarketEvidence, Request, Snapshot } from "../v13-production/
 import { openOwnedExecutionSession, type AccountDispatchState } from "./accountProductionSession";
 import { personalAccountSnapshot } from "./personalExchangeRead";
 import { dedicatedSignerFingerprint } from "./commissioning";
+import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { UPSERT_STAKE_SQL } from "./userScopeDatabase";
 import { reportOwnedActivation, readOwnedApprovedFeeEvidence } from "./personalAccountActivation";
 
@@ -357,12 +362,13 @@ async function tradingSession(
   posts: string[],
   cashMicros = 60_000_000_000,
   fault?: (stage: string) => void,
+  guardSnapshotUncertainty = false,
 ) {
   await reset();
   await pool.query(`UPDATE live_execution_config
     SET mode = 'V13_PRODUCTION', live_execution_enabled = true, manual_kill_switch = false
     WHERE id = 'singleton'`);
-  const now = Date.now();
+  let now = Date.now();
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const material = { keyId: "personal-key", privateKey: pair.privateKey.export({ type: "pkcs1", format: "pem" }).toString() };
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
@@ -379,26 +385,47 @@ async function tradingSession(
   [ACCOUNT, USER, approved.id, fingerprint, "d".repeat(64), String(cashMicros), new Date(now)]);
   await pool.query(`INSERT INTO strata_configured_stake(id,execution_account_id,configured_stake_cents,revision,updated_at)
     VALUES($1,$1,$2,1,$3)`, [ACCOUNT, stakeCents, new Date(now)]);
+  if (guardSnapshotUncertainty) {
+    await pool.query("CREATE SCHEMA IF NOT EXISTS private");
+    await pool.query(`CREATE TABLE IF NOT EXISTS private.strata_emergency_exit_reservations (
+      execution_account_id text, state text
+    )`);
+    await pool.query("TRUNCATE private.strata_emergency_exit_reservations");
+  }
   const evidence = snapshot(fingerprint!, now, cashMicros);
   let currentBook = book(stakeCents, now);
   const session = openOwnedExecutionSession({
     pool,
     ownerUserId: USER,
     executionAccountId: ACCOUNT,
-    state: dispatchState(fingerprint!),
+    state: { ...dispatchState(fingerprint!), entriesAuthorized: true },
     material,
     now: () => now,
     intervalMs: 60_000,
     fault,
+    entriesOpen: guardSnapshotUncertainty ? () => session.exchange.state.entriesAuthorized === true : undefined,
     readMarket: async () => structuredClone(currentBook),
-    readSnapshot: async () => structuredClone(evidence),
+    readSnapshot: async () => {
+      if (guardSnapshotUncertainty) {
+        const ledger = session.executor.ledger;
+        const currentEntry = ledger.currentFinalSnapshotEntry();
+        const tx = currentEntry ? ledger.currentTransaction() : null;
+        const unresolved = await readUnresolvedIntentMode(
+          (sql, params) => (tx ?? pool).query(sql, params), ACCOUNT, currentEntry,
+        );
+        if (!unresolved.ok || unresolved.mode === "recovery") session.exchange.state.entriesAuthorized = false;
+      }
+      return structuredClone(evidence);
+    },
     fetchImpl: async (_url, init) => {
       posts.push(String(init?.body ?? ""));
       return new Response("{}", { status: 200 });
     },
   });
   await session.executor.reconcile();
-  return { ...session, now, evidence, posts, get book() { return currentBook; }, set book(value: MarketEvidence) { currentBook = value; } };
+  return { ...session, get now() { return now; }, material, evidence, posts,
+    advance(ms:number) { now+=ms; evidence.observedAtMs=now;currentBook.observedAtMs=now;currentBook.fee.verifiedAtMs=now; },
+    get book() { return currentBook; }, set book(value: MarketEvidence) { currentBook = value; } };
 }
 
 function policy(): V13ApprovedLiveMoneyPolicy {
@@ -512,3 +539,171 @@ function fill(evidence: Snapshot, request: Request, quantity: string): void {
   evidence.cashMicros = String(BigInt(evidence.cashMicros) - BigInt(gross) - 10_000n);
   evidence.positions.push({ market: request.market, side: request.side, quantityHundredths: quantity });
 }
+
+
+test("final signed account proof does not classify its own locked DISPATCHED entry as a foreign uncertainty", async () => {
+  const session = await tradingSession(500, [], 60_000_000_000, undefined, true);
+  const id = await session.executor.prepareEntry(await source(session.now));
+  assert.equal(session.executor.ledger.currentFinalSnapshotEntry(), null);
+  await session.executor.dispatch(id);
+  assert.equal(session.posts.length, 1);
+  assert.equal(session.exchange.state.entriesAuthorized, true);
+  assert.equal(session.executor.ledger.currentFinalSnapshotEntry(), null);
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1", [id])).rows[0].state, "UNKNOWN");
+  // A later ordinary reconciliation gets no exemption: the UNKNOWN holds
+  // entry authority, despite complete empty exchange evidence.
+  await session.executor.reconcile();
+  assert.equal(session.exchange.state.entriesAuthorized, false);
+  assert.equal(session.posts.length, 1);
+});
+
+async function protectiveFixture(withMarker:boolean) {
+  const s=await tradingSession(500,[]);
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS private; CREATE SCHEMA IF NOT EXISTS auth;
+    CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY);
+    INSERT INTO auth.users VALUES('${USER}') ON CONFLICT DO NOTHING;
+    DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='anon') THEN CREATE ROLE anon; END IF;
+    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated; END IF; END $$;
+    DROP TABLE IF EXISTS private.strata_emergency_exit_reservations CASCADE;
+    DROP TABLE IF EXISTS private.kalshi_account_worker_lease CASCADE;`);
+  for(const file of ["strata_emergency_exit_reservation_private.sql","strata_emergency_exit_baseline_private.sql","strata_protective_exit_request_snapshot_private.sql"])
+    await pool.query(readFileSync(`../../sql/${file}`,"utf8"));
+  await pool.query(`CREATE TABLE private.kalshi_account_worker_lease(
+    execution_account_id text PRIMARY KEY,owner_user_id uuid,holder_id text,fencing_token bigint,
+    state text,account_kill boolean,arm_requested boolean,credential_fingerprint text,heartbeat_at timestamptz);
+    INSERT INTO private.kalshi_account_worker_lease VALUES('${ACCOUNT}','${USER}','worker',3,'owned',false,true,'${s.evidence.identity.keyFingerprint}',now())`);
+  const parent=await s.executor.prepareEntry(await source(s.now));
+  await s.executor.dispatch(parent);fill(s.evidence,await requestOf(parent),"200");
+  await s.executor.reconcile();
+  async function exitFeed() {
+    s.advance(1);const evaluation=await source(s.now);
+    await pool.query(`UPDATE forward_test_evaluations SET btc_price=99999,signed_buffer=-1,absolute_buffer=1,
+      velocity=-1,signal='EXIT',direction='UP',qualifying_trigger=false,fresh_cross=false WHERE id=$1`,[evaluation]);
+  }
+  await exitFeed();
+  const exit=await s.executor.prepareExit(parent,.4);
+  const order=sealedFinancialProtectiveExitOrder({positionId:parent,market:"KXBTC15M-TEST",side:"YES",quantityHundredths:"200",minimumExitMicros:400000},await requestOf(exit),s.book);
+  const inspect: typeof import("./ownerFeeEmergencyExitRead").inspectOwnedEmergencyExitRead = async()=>({
+    ok:false,reason:"test",tradingAuthorized:false,diagnosticEligible:true,needsIndependentApproval:true,
+    verifiedPositionFp:"2.00",verifiedPositionObservedAtMs:s.now,
+  });
+  const lease={holderId:"worker",fencingToken:3};
+  const reserve=()=>reserveOwnedEmergencyExitProof(USER,ACCOUNT,s.material,order,lease,{db:pool,inspect,now:()=>s.now});
+  let reservationId:string|null=null;
+  if(withMarker){const r=await reserve();assert.equal(r.reservationPrepared,true,r.reason);reservationId=r.reservationId!;}
+  const mark=()=>markOwnedEmergencyExitUnknownForReview(USER,ACCOUNT,reservationId!,s.material,order,lease,{db:pool,inspect,now:()=>s.now});
+  return {...s,parent,exit,order,exitFeed,reserve,mark,reservationId, get now(){return s.now;}};
+}
+
+test("owned stale PREPARED EXIT with absent marker is blocked without reducing exposure, and late reserve cannot create orphan",async()=>{
+  const f=await protectiveFixture(false);
+  const before=await f.executor.ledger.readAccount();
+  const position=(await pool.query("SELECT * FROM v13_production_position WHERE id=$1",[f.parent])).rows[0];
+  f.advance(15_001);await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"BLOCKED");
+  assert.equal((await f.executor.ledger.readAccount()).reserved_micros,before.reserved_micros);
+  assert.equal((await f.executor.ledger.readAccount()).cash_micros,before.cash_micros);
+  assert.deepEqual((await pool.query("SELECT * FROM v13_production_position WHERE id=$1",[f.parent])).rows[0],position);
+  assert.equal((await f.reserve()).reservationPrepared,false);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM private.strata_emergency_exit_reservations")).rows[0].n,0);
+  await f.exitFeed();const next=await f.executor.prepareExit(f.parent,.4);
+  assert.notEqual(next,f.exit);assert.equal(f.posts.length,1); // only original entry
+});
+
+test("owned coupled PREPARED EXIT and marker expire atomically to BLOCKED and VOID, never replaying old order",async()=>{
+  const f=await protectiveFixture(true);const before=await f.executor.ledger.readAccount();
+  f.advance(15_001);await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"VOID");
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"BLOCKED");
+  assert.equal((await f.executor.ledger.readAccount()).reserved_micros,before.reserved_micros);
+  assert.equal((await f.mark()).unknownRecorded,false);
+  await f.executor.dispatch(f.exit);assert.equal(f.posts.length,1);
+});
+
+test("protective marker winning before cleanup retains financial DISPATCHED/private UNKNOWN and inventory",async()=>{
+  const f=await protectiveFixture(true);
+  const marked=await f.mark();assert.equal(marked.unknownRecorded,true,marked.reason);
+  f.advance(15_001);await f.executor.reconcile();
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"UNKNOWN");
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"DISPATCHED");
+  assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[f.parent])).rows[0].quantity_hundredths,"200");
+  assert.equal(f.posts.length,1);
+});
+
+test("coupled EXIT cleanup audit failure rolls back VOID and BLOCKED while retaining all exposure",async()=>{
+  const f=await protectiveFixture(true);
+  const observe=f.executor.ledger.observe.bind(f.executor.ledger);
+  f.executor.ledger.observe=async(tx,kind,payload)=>{
+    if(kind==="PROVEN_NOT_POSTED")throw Error("audit_write_failed");await observe(tx,kind,payload);
+  };
+  f.advance(15_001);await assert.rejects(f.executor.reconcile(),/audit_write_failed/);
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"PREPARED");
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"PREPARED");
+  assert.equal(f.posts.length,1);
+});
+
+test("private UNKNOWN paired with PREPARED financial inconsistency blocks cleanup",async()=>{
+  const f=await protectiveFixture(true);
+  await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN',updated_at=now()");
+  f.advance(15_001);await assert.rejects(f.executor.reconcile(),/protective_prepared_expiry_marker_not_proven_unsent/);
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"UNKNOWN");
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"PREPARED");
+});
+
+test("concurrent protective marker and cleanup serialize without replay or deleting exposure",async()=>{
+  for(let n=0;n<3;n++){
+    const f=await protectiveFixture(true);f.advance(15_001);
+    const [reconciled,marked]=await Promise.allSettled([f.executor.reconcile(),f.mark()]);
+    assert.equal(marked.status,"fulfilled");
+    const marker=(await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state;
+    const financial=(await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state;
+    if(marked.status==="fulfilled"&&marked.value.unknownRecorded){
+      assert.equal(marker,"UNKNOWN");assert.equal(financial,"DISPATCHED");
+    }else{
+      assert.equal(reconciled.status,"fulfilled");assert.equal(marker,"VOID");assert.equal(financial,"BLOCKED");
+    }
+    assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[f.parent])).rows[0].quantity_hundredths,"200");
+    assert.equal(f.posts.length,1);
+  }
+});
+
+test("zero and partial attempted protective outcomes are never mistaken for stale preparation",async()=>{
+  for(const qty of ["0","100"]){
+    const f=await protectiveFixture(true);
+    assert.equal((await f.mark()).unknownRecorded,true);
+    const request=await requestOf(f.exit),orderId=`exit-${f.exit}`;
+    f.advance(15_001);
+    f.evidence.orders.push({orderId,request,terminal:true,filledHundredths:qty});
+    if(qty!=="0"){
+      const gross=BigInt(qty)*BigInt(request.limitMicros)/100n;
+      f.evidence.fills.push({id:randomUUID(),orderId,clientOrderId:request.clientOrderId,
+        market:request.market,side:request.side,action:"SELL",quantityHundredths:qty,
+        priceMicros:request.limitMicros,grossMicros:String(gross),feeMicros:"0",occurredAtMs:f.now});
+      f.evidence.cashMicros=String(BigInt(f.evidence.cashMicros)+gross);
+      f.evidence.positions[0]!.quantityHundredths=String(200n-BigInt(qty));
+    }
+    await f.executor.reconcile();
+    assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"TERMINAL");
+    assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"UNKNOWN");
+    assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[f.parent])).rows[0].quantity_hundredths,String(200n-BigInt(qty)));
+    assert.equal(f.posts.length,1);
+  }
+});
+
+
+test("mismatched immutable protective marker body blocks financial cleanup",async()=>{
+  const f=await protectiveFixture(false);
+  const raw=JSON.stringify({...f.order,count:"1.00"});
+  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations(
+    reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,
+    quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,initial_position_fp,
+    position_observed_at_ms,order_request_json)
+    VALUES($1,$2,$3,$4,$5,'YES',200,$6,3,'worker','2.00',$7,$8)`,
+    [randomUUID(),USER,ACCOUNT,f.order.ticker,f.order.client_order_id,
+      createHash("sha256").update(raw).digest("hex"),f.now,raw]);
+  f.advance(15_001);
+  await assert.rejects(f.executor.reconcile(),/protective_prepared_expiry_marker_not_proven_unsent/);
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"PREPARED");
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"PREPARED");
+  assert.equal(f.posts.length,1);
+});

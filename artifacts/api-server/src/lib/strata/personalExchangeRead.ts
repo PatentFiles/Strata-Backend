@@ -48,6 +48,8 @@ export function classifyOwnedKalshiReadFailure(error:unknown):string{
 }
 
 export interface OwnedKalshiRead {
+  /** Explicit archival coverage; absent is UNKNOWN for administrative recovery. */
+  historicalCoverageComplete?: boolean;
   ok: true;
   observedAtMs: number;
   cashMicros: string;
@@ -110,6 +112,7 @@ export async function readOwnedKalshiFeeds(
     ok: true,
     observedAtMs: nowMs,
     cashMicros: cash.cashMicros,
+    historicalCoverageComplete: !archivedOrders.unavailable && !archivedFills.unavailable,
     orders: mergedOrders,
     fills: mergedFills,
     positions: positions.rows,

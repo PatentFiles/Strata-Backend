@@ -80,7 +80,10 @@ export class ProductionWorker {
       const args = this.executor.accountOwnerUserId
         ? [this.executor.ledger.accountId, observedAt]
         : [new Date(observedAt.getTime() - 15_000)];
-      const ids = (await this.executor.ledger.pool.query(query, args)).rows;
+      const discovery=this.executor.startTiming("signal_discovery");
+      let ids;
+      try{ids=(await this.executor.ledger.pool.query(query,args)).rows;discovery("completed");}
+      catch(error){discovery("rejected",{error});throw error;}
       for (const { id, evaluated_at } of ids) {
         if (!this.entriesOpen()) break;
         const sourceMs=evaluated_at?Date.parse(String(evaluated_at)):NaN;

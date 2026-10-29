@@ -5,7 +5,7 @@ import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "
 import { canonical, digest, money, requireProof, type Identity, type Snapshot, type Request } from "./types";
 
 export type Account = {
-  id: string; policy_id: string; subaccount: string; exchange_index: string;
+  id: string; policy_id: string; subaccount: string; exchange_index: string; owner_user_id?: string | null;
   key_fingerprint: string; commissioning_digest: string | null;
   kill_switch: boolean; execution_enabled: boolean; commissioned: boolean;
   minimum_exit_micros: number | null;
@@ -19,7 +19,7 @@ export type Intent = {
   request: Request; decision: Record<string, unknown>; policy_hash: string; fee_fingerprint: string;
   capability_digest: string; client_order_id: string; exchange_order_id: string | null;
   reserved_micros: string; exit_fee_micros: string; filled_hundredths: string;
-  terminal: boolean; cancel_attempted: boolean; created_at: Date;
+  terminal: boolean; cancel_attempted: boolean; created_at: Date; dispatch_at: Date | null;
 };
 export const identity = (a: Account): Identity => ({
   subaccount: Number(a.subaccount), exchangeIndex: Number(a.exchange_index), keyFingerprint: a.key_fingerprint,
@@ -34,6 +34,7 @@ export function decodePolicy(row: Record<string, unknown>): V13ApprovedLiveMoney
 
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
+  private readonly finalSnapshotIntent = new AsyncLocalStorage<{ active: boolean; entryIntentId: string | null }>();
   private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null}>();
   constructor(readonly pool: Pool, readonly accountId: string) {}
   // Read providers invoked inside a final fence MUST use its existing client,
@@ -57,16 +58,38 @@ export class ProductionLedger {
     requireProof(this.currentTransaction()&&scope?.active&&scope.check,"production_final_wire_clock_missing");
     scope.check();
   }
+  /** Only the currently locked ENTRY may be discounted from its own final
+   * snapshot uncertainty check. This context never survives the callback and
+   * never applies to ordinary reconciliation or restarted workers. */
+  async withFinalAccountSnapshot<T>(entryIntentId: string | null, read: () => Promise<T>): Promise<T> {
+    requireProof(this.currentTransaction() && this.wireContext.getStore()?.active,
+      "production_final_snapshot_transaction_required");
+    const scope = { active: true, entryIntentId };
+    try { return await this.finalSnapshotIntent.run(scope, read); }
+    finally { scope.active = false; }
+  }
+  currentFinalSnapshotEntry(): string | null {
+    const scope = this.finalSnapshotIntent.getStore();
+    return this.currentTransaction() && this.wireContext.getStore()?.active && scope?.active
+      ? scope.entryIntentId : null;
+  }
   async readAccount(): Promise<Account> {
     const { rows } = await this.query<Account>("SELECT * FROM v13_production_account WHERE id=$1", [this.accountId]);
     requireProof(rows.length === 1, "production_account_missing");
     return rows[0]!;
   }
-  async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>): Promise<T> {
+  async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>,
+    options: { lockTimeoutMs?: number } = {}): Promise<T> {
     const tx = await this.pool.connect();
     const wireScope={active:true,check:null as (()=>void)|null};
     try {
       await tx.query("BEGIN");
+      if (options.lockTimeoutMs !== undefined) {
+        requireProof(Number.isSafeInteger(options.lockTimeoutMs) && options.lockTimeoutMs > 0 &&
+          options.lockTimeoutMs <= 5000, "production_lock_timeout_invalid");
+        // Recovery must bound the FIRST account lock, not just later queries.
+        await tx.query("SELECT set_config('lock_timeout',$1,true)", [`${options.lockTimeoutMs}ms`]);
+      }
       const { rows } = await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId]);
       requireProof(rows.length === 1, "production_account_missing");
       const result = await this.context.run(tx, () => this.wireContext.run(wireScope,()=>body(tx, rows[0]!)));
@@ -146,6 +169,11 @@ export class ProductionLedger {
       .sort((x, y) => x.market.localeCompare(y.market) || x.side.localeCompare(y.side));
     requireProof(canonical(pos) === canonical(actual), "production_final_position_changed");
   }
+
+  /** Owned-account subclasses may recover coupled never-sent EXIT markers.
+   * Legacy ledgers have no private reservation authority. */
+  protected async recoverPreparedExits(_tx: PoolClient, _account: Account,
+    _intents: Intent[], _snapshot: Snapshot): Promise<void> {}
 
   async reconcile(snapshot: Snapshot, expectedRevision: string, nowMs: number): Promise<void> {
     try {
@@ -263,9 +291,6 @@ export class ProductionLedger {
           } else a.reserved_micros = String(money(a.reserved_micros) - (money(i.reserved_micros) - retain));
           i.reserved_micros = String(retain);
         }
-        for (const i of intents) await tx.query(`UPDATE v13_production_intent SET state=$2,exchange_order_id=$3,
-          filled_hundredths=$4,reserved_micros=$5,terminal=$6 WHERE id=$1`,
-        [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
         const positions = (await tx.query(`SELECT market,side,quantity_hundredths FROM v13_production_position
           WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY market,side`, [a.id])).rows;
         if (positions.length > 1) a.blocked_reason = "overlap_ownership_after_late_fill";
@@ -274,6 +299,34 @@ export class ProductionLedger {
           .sort((x, y) => x.market.localeCompare(y.market) || x.side.localeCompare(y.side));
         requireProof(canonical(positions) === canonical(actualPositions), "production_external_position_mismatch");
         requireProof(money(snapshot.cashMicros) === money(a.cash_micros), "production_external_cash_mismatch");
+        // A crash (or failed audit receipt) between reservation and dispatch
+        // can leave a PREPARED entry outside the worker's fresh-signal window.
+        // Only complete signed recovery evidence plus the original immutable
+        // expired source can prove this never-dispatched reservation releasable.
+        // The intent and crossing remain consumed; nothing is replayed.
+        for (const i of intents.filter(i => i.kind === "ENTRY" && i.state === "PREPARED")) {
+          const source = i.decision.source as { evaluated_at?: unknown } | undefined;
+          const policy = i.decision.policy as { maxQuoteAgeMs?: unknown } | undefined;
+          const sourceAt = typeof source?.evaluated_at === "string" ? Date.parse(source.evaluated_at) : NaN;
+          const lifetime = policy?.maxQuoteAgeMs;
+          requireProof(Number.isSafeInteger(sourceAt) && typeof lifetime === "number" &&
+            Number.isSafeInteger(lifetime) && lifetime >= 1 && lifetime <= 15_000 &&
+            i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision,
+              policyHash: i.policy_hash, fee: i.fee_fingerprint }), "production_prepared_expiry_evidence_invalid");
+          if (snapshot.observedAtMs <= sourceAt + lifetime) continue;
+          const pos = (await tx.query("SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.id])).rows[0];
+          requireProof(i.dispatch_at === null && i.exchange_order_id === null && !i.terminal &&
+            money(i.filled_hundredths) === 0n && pos && money(pos.quantity_hundredths) === 0n &&
+            money(pos.basis_micros) === 0n, "production_prepared_expiry_not_proven_unsent");
+          a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
+          i.reserved_micros = "0"; i.state = "BLOCKED"; i.terminal = true;
+          await this.observe(tx, "PROVEN_NOT_POSTED", { id: i.id, reason: "production_prepared_entry_expired",
+            sourceAtMs: sourceAt, maxQuoteAgeMs: lifetime, evidenceObservedAtMs: snapshot.observedAtMs });
+        }
+        await this.recoverPreparedExits(tx, a, intents, snapshot);
+        for (const i of intents) await tx.query(`UPDATE v13_production_intent SET state=$2,exchange_order_id=$3,
+          filled_hundredths=$4,reserved_micros=$5,terminal=$6 WHERE id=$1`,
+        [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
         await this.assertConservation(tx, a);
         await this.observe(tx, "RECONCILIATION", snapshot);
         await this.persist(tx, a);

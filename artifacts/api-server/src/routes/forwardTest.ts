@@ -9,7 +9,7 @@ import { createSingleFlightAnalyticsCache } from "../lib/readOnlyAnalyticsCache"
 import {readPaperBookCaptureCoverage} from "../lib/forwardTestBookCapture";
 import { auditHistoricalPaperExecution } from "../lib/forwardTestExecutionAudit";
 import { compareBrtiToKalshiStrike } from "../lib/cfBenchmarksSettlement";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   aggregateForwardTestStatistics,
@@ -37,7 +37,7 @@ const requireUser: RequestHandler = (req, res, next) => {
 router.use("/forward-test", requireUser);
 
 export async function readForwardTestStatus() {
-  const [engine, statistics, [openPosition], [lastSettlement], [breakdown]] = await Promise.all([
+  const [engine, statistics, [openPosition], [lastSettlement]] = await Promise.all([
     getEngineStatus(),
     process.env.NODE_ENV === "production"
       ? readCachedPaperStats()
@@ -49,11 +49,7 @@ export async function readForwardTestStatus() {
       .where(and(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID),
         eq(forwardTestPositionTable.status, "SETTLED")))
       .orderBy(desc(forwardTestPositionTable.closedAt)).limit(1),
-    db.select({
-      wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED', 'CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
-      losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED', 'CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
-    }).from(forwardTestPositionTable)
-      .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID)),
+
   ]);
   const [window] = engine?.marketTicker
     ? await db.select().from(forwardTestWindowTable)
@@ -114,7 +110,6 @@ export async function readForwardTestStatus() {
     lastError: engine?.lastError ?? null,
     databaseConnectionStatus: "CONNECTED",
     ...statistics,
-    ...breakdown,
   });
 }
 

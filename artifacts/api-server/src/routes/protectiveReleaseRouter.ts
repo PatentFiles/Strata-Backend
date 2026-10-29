@@ -1,3 +1,4 @@
+import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
@@ -73,6 +74,14 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   if(!actor)return void res.status(401).json({reason:"unauthorized"});
   const result=await recoverOwnerStaleLease(actor.subject,req.body?.confirmation,{isScheduled:(ownerId,accountId)=>personalTradingSession.isScheduled(ownerId,accountId)});
   res.setHeader("Cache-Control","private, no-store");
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/owner-transient-freeze-recover',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await recoverOwnerTransientFreeze(actor.subject,req.body?.confirmation,
+   {isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)});
+  res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
  // Explicit owner opt-in for continuous technical renewal. No orders or

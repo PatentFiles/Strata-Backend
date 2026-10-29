@@ -6,8 +6,8 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.readiness.json --noEmit",
-    "test:readiness": "tsx --test ./verify-live-readiness.test.ts",
-    "test:operator-observations": "tsx --test ../artifacts/btc-paper-dashboard/src/lib/operator-observations.test.ts"
+    "test:readiness": "node --import tsx --test ./verify-live-readiness.test.ts",
+    "test:operator-observations": "node --import tsx --test ../artifacts/btc-paper-dashboard/src/lib/operator-observations.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

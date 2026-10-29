@@ -1,8 +1,11 @@
+import {logger} from "../logger";
+import type {TimingObserver} from "../v13-production/stageTiming";
+import { recoverPreparedOwnedExitIntents } from "./preparedProtectiveExitRecovery";
 import { constants, createPrivateKey, createSign } from "node:crypto";
 import type { Pool, PoolClient } from "@workspace/db";
 import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { ProductionExecutor } from "../v13-production/executor";
-import { decodePolicy, ProductionLedger, type Account } from "../v13-production/ledger";
+import { decodePolicy, ProductionLedger, type Account, type Intent } from "../v13-production/ledger";
 import { encodeProductionOrder } from "../v13-production/transport";
 import { canonical, requireProof, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import {recordLiveSignalDecision,auditUnseenExpiredSignals} from "../v13-production/signalDecisionTrace";
@@ -77,6 +80,10 @@ export function accountOrderTransmission(
 class OwnedAccountLedger extends ProductionLedger {
   constructor(pool: Pool, accountId: string, readonly ownerUserId: string) {
     super(pool, accountId);
+  }
+  protected override async recoverPreparedExits(tx:PoolClient,account:Account,intents:Intent[],snapshot:Snapshot):Promise<void> {
+    await recoverPreparedOwnedExitIntents(tx,{ownerId:this.ownerUserId,account,intents,snapshot,
+      observe:(kind,value)=>this.observe(tx,kind,value)});
   }
   override async policy(tx: PoolClient, account: Account) {
     const { rows } = await tx.query(
@@ -270,6 +277,7 @@ export function openOwnedExecutionSession(input: {
   entriesOpen?: () => boolean;
   recoverProtectiveExits?: () => Promise<void>;
   dispatchProtectiveExit?: ProtectiveExitDispatch;
+  timingObserver?: TimingObserver;
 }): {
   executor: ProductionExecutor;
   worker: ProductionWorker;
@@ -289,6 +297,7 @@ export function openOwnedExecutionSession(input: {
   const ledger = new OwnedAccountLedger(input.pool, input.executionAccountId, input.ownerUserId);
   const executor = new ProductionExecutor(ledger, exchange, input.now, input.fault);
   executor.accountOwnerUserId = input.ownerUserId;
+  executor.timingObserver=input.timingObserver??(event=>logger.info({event:"strata_execution_stage",...event}));
   // Preserve the worker's fail-closed behavior, but make rejected attempts observable.
   // Log only known machine-readable error codes; never log exchange payloads,
   // secrets, owner identity, or stack traces into shared Railway runtime logs.

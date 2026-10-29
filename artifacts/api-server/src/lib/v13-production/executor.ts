@@ -1,3 +1,4 @@
+import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
@@ -29,6 +30,12 @@ export class ProductionExecutor {
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
   /** Set only for an owned user account. The legacy singleton leaves this null. */
   accountOwnerUserId: string | null = null;
+  timingObserver: TimingObserver | null = null;
+  startTiming(stage:ExecutionStage,context:Partial<StageContext>={}) {
+    return beginExecutionStage(this.timingObserver,stage,{...context,
+      accountId:this.ledger.accountId,mode:this.exchange.mode});
+  }
+
   /** Server-owned hooks; snapshot acquisition alone must never renew authority. */
   afterReconcile: ((snapshot: Snapshot) => Promise<void>) | null = null;
   authorizeFinalEntry: ((tx: PoolClient) => Promise<void>) | null = null;
@@ -116,14 +123,32 @@ export class ProductionExecutor {
   }
 
   async reconcile(): Promise<void> {
-    const a = await this.ledger.readAccount();
-    const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-    const snapshot = await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());
-    await this.ledger.reconcile(snapshot, a.revision, this.now());
-    if (this.afterReconcile) await this.afterReconcile(snapshot);
+    const done=this.startTiming("reconciliation");
+    try {
+      const a = await this.ledger.readAccount();
+      const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+      const signed=this.startTiming("signed_snapshot");
+      let snapshot:Snapshot;
+      try {snapshot=await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());signed("completed");}
+      catch(error){signed("rejected",{error});throw error;}
+      const commit=this.startTiming("ledger_reconcile_commit");
+      try {await this.ledger.reconcile(snapshot,a.revision,this.now());commit("completed");}
+      catch(error){commit("rejected",{error});throw error;}
+      if(this.afterReconcile){
+        const after=this.startTiming("after_reconcile");
+        try{await this.afterReconcile(snapshot);after("completed");}
+        catch(error){after("rejected",{error});throw error;}
+      }
+      done("completed");
+    }catch(error){done("rejected",{error});throw error;}
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
+    const done=this.startTiming("prepare_entry",{evaluationId});
+    try{const id=await this.prepareEntryMeasured(evaluationId);done("completed");return id;}
+    catch(error){done("rejected",{error});throw error;}
+  }
+  private async prepareEntryMeasured(evaluationId: string): Promise<string> {
     const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
     requireProof(source && source.evaluation_source === "paper" &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -152,7 +177,11 @@ export class ProductionExecutor {
         await this.assertEntryPolicyWindow(tx, source);
       }
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
-      requireProof(sourceAge >= 0 && sourceAge <= p.maxQuoteAgeMs, "production_evaluation_stale");
+      const admission=this.startTiming("evaluation_age_admission",{evaluationId});
+      const sourceCurrent=sourceAge >= 0 && sourceAge <= p.maxQuoteAgeMs;
+      admission(sourceCurrent?"eligible":"rejected",{sourceAgeMs:sourceAge,
+        ...(sourceCurrent?{}:{error:"production_evaluation_stale"})});
+      requireProof(sourceCurrent, "production_evaluation_stale");
       const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
       requireProof(canonical(pinnedSource) === canonical(source) &&
         ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
@@ -287,6 +316,7 @@ export class ProductionExecutor {
     });
     if (!claimed) return;
     this.fault("after_dispatch_commit");
+    const dispatchTiming=this.startTiming("dispatch",{intentId:id});
     let invoked = false;
     try {
       await this.ledger.transaction(async (tx, a) => {
@@ -304,6 +334,8 @@ export class ProductionExecutor {
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
         const final = async () => {
+          const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
+          try {
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");
@@ -354,7 +386,12 @@ export class ProductionExecutor {
             "production_final_owned_feed_changed_or_stale");
           }
           const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-          await this.ledger.finalAccountProof(tx, a, await this.exchange.snapshot(identity(a), new Date(oldest).getTime()), this.now());
+          const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id});
+          let snapshot:Snapshot;
+          try{snapshot=await this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
+            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime()));snapshotTiming("completed");}
+          catch(error){snapshotTiming("rejected",{error});throw error;}
+          await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
           requireProof(this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
@@ -406,6 +443,8 @@ export class ProductionExecutor {
             // HTTP send, without repeating network proof or extending its age.
             this.ledger.setFinalWireClock(()=>{
               const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
+              const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
+              try {
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
                   typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),
@@ -414,12 +453,18 @@ export class ProductionExecutor {
                 now-book.fee.verifiedAtMs>=0&&now-book.fee.verifiedAtMs<=p.maxFeeEvidenceAgeMs&&
                 a.reconciled_at&&now-a.reconciled_at.getTime()>=0&&now-a.reconciled_at.getTime()<=15000,
                 "production_final_wire_evidence_expired");
+              wireAdmission("eligible",{sourceAgeMs:age,sourceToDecisionAgeMs:
+                Math.max(...["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].map(k=>source[k]+age))});
+              }catch(error){wireAdmission("rejected",{error,sourceAgeMs:age,sourceToDecisionAgeMs:
+                Math.max(...["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].map(k=>source[k]+age))});throw error;}
             });
           }
           // Trusted transports cannot send before this callback succeeds.
           // Earlier local failures therefore prove that no POST was attempted;
           // failures after success remain UNKNOWN and are never replayed.
           invoked = true;
+          finalTiming("completed");
+          }catch(error){finalTiming("rejected",{error});throw error;}
         };
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.
@@ -430,17 +475,20 @@ export class ProductionExecutor {
         await this.ledger.observe(tx, "POST_ATTEMPT", { id, clientOrderId: i.client_order_id, outcome: "GET_RECONCILIATION_REQUIRED" });
         await this.ledger.persist(tx, a);
       });
+      dispatchTiming("reconciliation_required");
     } catch (error) {
       // Even a rejected/timeout response is not terminal account evidence.
       await this.ledger.transaction(async (tx, a) => {
         const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
         if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id)) {
+          dispatchTiming("proven_not_posted",{error});
           const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");
           a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
           await tx.query("UPDATE v13_production_intent SET state='BLOCKED',terminal=true,reserved_micros=0 WHERE id=$1", [id]);
           await this.ledger.observe(tx, "PROVEN_NOT_POSTED", { id, reason: (error as Error).message });
         } else {
+          dispatchTiming("post_uncertain",{error});
           await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1 AND state='DISPATCHED'", [id]);
           await this.ledger.observe(tx, "POST_UNCERTAIN", { id, reason: (error as Error).message });
         }

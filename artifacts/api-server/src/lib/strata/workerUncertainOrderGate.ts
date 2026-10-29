@@ -26,12 +26,15 @@ export function verifiedUnresolvedIntentMode(rows: unknown):
 export async function readUnresolvedIntentMode(
   query: (sql: string, params: unknown[]) => Promise<{rows:unknown}>,
   accountId: string,
+  /** Server-only current final-fence claim; never supplied by an HTTP request. */
+  currentEntryIntentId: string | null = null,
 ): Promise<ReturnType<typeof verifiedUnresolvedIntentMode>> {
   try {
     const result = await query(
       `WITH unresolved_intents AS (
          SELECT count(*)::text AS n FROM v13_production_intent
          WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')
+           AND ($2::text IS NULL OR id <> $2 OR kind <> 'ENTRY' OR state <> 'DISPATCHED')
        ), unresolved_exits AS (
          SELECT count(*)::text AS n FROM private.strata_emergency_exit_reservations
          WHERE execution_account_id = $1
@@ -39,7 +42,7 @@ export async function readUnresolvedIntentMode(
        )
        SELECT (i.n::bigint + p.n::bigint)::text AS n
        FROM unresolved_intents i CROSS JOIN unresolved_exits p`,
-      [accountId],
+      [accountId, currentEntryIntentId],
     );
     return verifiedUnresolvedIntentMode(result?.rows);
   } catch {

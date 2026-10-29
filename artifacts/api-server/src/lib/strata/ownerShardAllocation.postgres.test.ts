@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { createIsolatedLedgerTestDatabase } from "./isolatedLedgerTestDatabase";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("owner shard allocation ledger fences one intent and rejects cross-account FK, wrong amount and replay",async(t)=>{
-  let PGlite: new()=>{exec(sql:string):Promise<unknown>;query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>;close():Promise<void>};
-  try{
-    PGlite=(createRequire(process.cwd()+"/package.json")("@electric-sql/pglite") as {PGlite:typeof PGlite}).PGlite;
-  }catch{t.skip("pglite missing");return;}
-  const db=new PGlite();
+test("owner shard allocation ledger fences one intent and rejects cross-account FK, wrong amount and replay",async()=>{
+  const db=await createIsolatedLedgerTestDatabase();
   const owner="11111111-1111-4111-8111-111111111111";
   const foreign="22222222-2222-4222-8222-222222222222";
   const id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
