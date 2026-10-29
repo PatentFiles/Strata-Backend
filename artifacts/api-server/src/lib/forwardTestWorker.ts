@@ -487,6 +487,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   const task = (async () => {
     while (!stopped) {
       const cycleStarted=performance.now();
+      const cycleClock=Date.now();
       let periodMs=FORWARD_TEST_CADENCE_MS;
       try {
         if (!lease) {
@@ -509,7 +510,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
           const cycle = await runForwardTestCycle({
             owner, epoch: lease.leaseEpoch, feeds, signal: controller.signal,
           });
-          periodMs=discoveryRecovery.periodMs(cycle.error);
+          periodMs=discoveryRecovery.periodMs(cycle.error,cycleClock);
           if (!stopped && cycle.evaluationId) {
             try {
               await processMicroLiveForwardTestCycle(cycle.evaluationId);

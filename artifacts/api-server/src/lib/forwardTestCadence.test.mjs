@@ -30,3 +30,18 @@ test('empty-listing recovery is bounded without accelerating valid evaluations o
  assert.equal(retry.periodMs("Kalshi returned no current market",t+900000),1000,'next market window gets a bounded discovery budget');
  assert.equal(producerDelayMs(1000,1500),250,'slow discovery stays sequential with an overrun floor');
 });
+
+test('inserted discovery retries preserve the original five-second poll deadline',()=>{
+ const retry=new BoundaryDiscoveryRecovery();let clock=900000;
+ const starts=[clock];
+ for(let i=0;i<6;i++){
+  const period=retry.periodMs("Kalshi returned no current market",clock);
+  const processingMs=150;
+  clock+=processingMs+producerDelayMs(period,processingMs);starts.push(clock);
+ }
+ assert.deepEqual(starts.map(x=>x-starts[0]),[0,1000,2000,3000,5000,10000,15000]);
+ for(const availableAt of [500,1500,2500,3500,4500]){
+  const actual=starts.find(t=>t-starts[0]>=availableAt)-starts[0];
+  assert.ok(actual<=5000,'fast discovery cannot postpone the original +5s poll');
+ }
+});
