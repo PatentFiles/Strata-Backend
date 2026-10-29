@@ -42,6 +42,11 @@ export async function reserveKalshiBalanceReadSlot(
      VALUES ($1,clock_timestamp()+interval '1200 milliseconds')
      ON CONFLICT (budget_key) DO UPDATE SET
        next_slot_at=greatest(private.strata_kalshi_balance_read_slots.next_slot_at,clock_timestamp())+interval '1200 milliseconds'
+     -- An already saturated queue must NOT reserve more slots on a rejected
+     -- request. The predicate runs atomically under the conflicting-row lock.
+     -- Preserve the conservative 1.2s spacing and fail closed with no result.
+     WHERE private.strata_kalshi_balance_read_slots.next_slot_at
+           <= clock_timestamp()+interval '13800 milliseconds'
      RETURNING extract(epoch FROM ((next_slot_at-interval '1200 milliseconds')-clock_timestamp()))*1000 AS wait_ms`,
     [digest],
   );
