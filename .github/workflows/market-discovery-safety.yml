@@ -1,0 +1,31 @@
+name: Exact market discovery safety
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/forwardTestFeeds*'
+      - 'research/discovery-boundary-20261029/**'
+      - '.github/workflows/market-discovery-safety.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discovery-and-recorded-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/lib/forwardTestFeeds.test.ts --bundle --platform=node --format=cjs --outfile=dist/market-discovery.cjs --external:pg-native
+          node --test dist/market-discovery.cjs

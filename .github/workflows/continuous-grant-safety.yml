@@ -10,6 +10,7 @@ on:
       - '.github/workflows/continuous-grant-safety.yml'
       - 'artifacts/api-server/src/lib/forwardTestCadence*'
       - 'artifacts/api-server/src/lib/forwardTestWorker.ts'
+      - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'docs/reviews/maintenance-hardening-20261028.sql'
   workflow_dispatch:
 permissions:

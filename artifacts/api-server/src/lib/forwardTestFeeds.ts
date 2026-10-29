@@ -109,8 +109,8 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
   };
 }
 
-async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch(url, {
+async function getJson(url: string, signal?: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<unknown> {
+  const response = await fetchImpl(url, {
     signal,
     cache: "no-store",
     redirect: "error",
@@ -121,10 +121,14 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   return response.json() as Promise<unknown>;
 }
 
-export const publicForwardTestFeeds: ForwardTestFeeds = {
+/** Lists route discovery only. Their cached quotes/status are never promoted
+ * into a current snapshot; refresh the selected exact contract every cycle.
+ */
+export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date()):ForwardTestFeeds {
+return {
   book: fetchKalshiPublicBook,
   async btc(signal) {
-    const raw = await getJson(COINBASE, signal);
+    const raw = await getJson(COINBASE, signal, fetchImpl);
     if (!raw || typeof raw !== "object") throw new Error("Coinbase returned malformed BTC data");
     const payload = raw as Record<string, unknown>;
     const price = numeric(payload.price);
@@ -132,25 +136,48 @@ export const publicForwardTestFeeds: ForwardTestFeeds = {
     if (price === null || price <= 0 || !providerAt) {
       throw new Error("Coinbase BTC price or timestamp is unavailable");
     }
-    return { price, providerAt, receivedAt: new Date() };
+    return { price, providerAt, receivedAt: clock() };
   },
   async market(ticker, signal) {
+    const started=clock();
+    const windowStart=Math.floor(started.getTime()/900_000)*900;
+    // Kalshi documents close-time bounds with NO status filter. status=open
+    // returned the expired previous contract for ~25s after exact detail was
+    // already executable in the recorded rollover comparison.
     const url = ticker
       ? `${KALSHI}/${encodeURIComponent(ticker)}`
-      : `${KALSHI}?series_ticker=KXBTC15M&status=open&limit=100`;
-    const raw = await getJson(url, signal);
+      : `${KALSHI}?series_ticker=KXBTC15M&min_close_ts=${windowStart+1}&max_close_ts=${windowStart+1800}&limit=100`;
+    const raw = await getJson(url, signal, fetchImpl);
     if (!raw || typeof raw !== "object") throw new Error("Kalshi returned malformed market data");
     const payload = raw as { market?: unknown; markets?: unknown[] };
-    const fetchedAt = new Date();
+    const fetchedAt = clock();
     const markets = (payload.market ? [payload.market] : payload.markets ?? [])
       .map((value) => normalizeMarket(value, fetchedAt))
       .filter((value): value is MarketObservation => value !== null);
     const selected = ticker
       ? markets.find((value) => value.ticker === ticker)
-      : markets.filter((value) => (value.status === "open" || value.status === "active") &&
+      : markets.filter((value) => /^KXBTC15M-[A-Z0-9-]+$/.test(value.ticker) &&
+        value.startsAt && value.startsAt.getTime()<=fetchedAt.getTime() &&
         value.endsAt && value.endsAt.getTime() > fetchedAt.getTime())
         .sort((a, b) => a.endsAt!.getTime() - b.endsAt!.getTime())[0];
     if (!selected) throw new Error(`Kalshi returned no current market${ticker ? ` for ${ticker}` : ""}`);
-    return selected;
+    // Explicit reads also manage expired positions/settlement, so their
+    // established inactive-market behavior must remain available.
+    if(ticker)return selected;
+    const detailRaw=await getJson(`${KALSHI}/${encodeURIComponent(selected.ticker)}`,signal,fetchImpl);
+    const detailAt=clock();
+    const detail=detailRaw&&typeof detailRaw==='object'
+      ?normalizeMarket((detailRaw as {market?:unknown}).market,detailAt):null;
+    if(!detail||detail.ticker!==selected.ticker)
+      throw new Error('Kalshi exact market detail mismatch');
+    if(!detail.startsAt||detail.startsAt.getTime()>detailAt.getTime()||
+       !detail.endsAt||detail.endsAt.getTime()<=detailAt.getTime()||
+       (detail.status!=='open'&&detail.status!=='active'))
+      throw new Error('Kalshi returned no current market');
+    // Strike/offer validity remains enforced by the producer feed gate.
+    // Never infer a strike or reuse list prices when the detail is incomplete.
+    return detail;
   },
 };
+}
+export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds();
