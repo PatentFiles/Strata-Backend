@@ -1,4 +1,3 @@
-import { earlySourceFreshnessRejection } from "../strata/earlySourceFreshnessRejection";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
@@ -133,24 +132,6 @@ export class ProductionExecutor {
       source.crossing_key && source.feed_freshness === "current" &&
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
-    // Avoid expensive official fee/book requests for a paper event that the
-    // approved policy already proves is too old. This is only an early refusal;
-    // the real transaction and final wire-time source checks remain intact.
-    const earlyPolicy = await this.ledger.pool.query(
-      "SELECT p.max_quote_age_ms FROM v13_production_account a "+
-      "JOIN v13_live_money_policy p ON p.id=a.policy_id "+
-      "AND p.execution_account_id=a.id AND p.state='APPROVED' WHERE a.id=$1",
-      [this.ledger.accountId],
-    );
-    const earlyMax = Number(earlyPolicy.rows[0]?.max_quote_age_ms);
-    const earlyReason = earlySourceFreshnessRejection({
-      evaluatedAtMs: new Date(source.evaluated_at).getTime(),
-      observedAtMs: this.now(), maxQuoteAgeMs: earlyMax,
-      btcProviderAgeMs: source.btc_provider_age_ms,
-      btcReceiveAgeMs: source.btc_receive_age_ms,
-      marketAgeMs: source.market_age_ms,
-    });
-    requireProof(earlyReason === null, earlyReason ?? "production_evaluation_stale");
     const side = source.direction === "UP" ? "YES" : "NO";
     const book = await this.exchange.market(source.market_ticker, side);
     return this.ledger.transaction(async (tx, a) => {
