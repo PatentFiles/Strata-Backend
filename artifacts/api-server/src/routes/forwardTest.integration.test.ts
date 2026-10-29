@@ -261,5 +261,13 @@ test("persistent V1.3 state survives reconnect and actions are idempotent", asyn
   assert.ok(stats.evaluationCount >= 2);
   assert.ok(stats.triggerCount >= 2);
   assert.ok(stats.completedPaperForwardTests >= 2);
+  // Display aggregates must preserve the original producer statistics while
+  // the status route coalesces expensive reads; they grant no live authority.
+  const { readForwardTestStatus } = await import("./forwardTest");
+  const cachedStatus = await readForwardTestStatus();
+  assert.equal(cachedStatus.evaluationCount, stats.evaluationCount);
+  assert.equal(cachedStatus.triggerCount, stats.triggerCount);
+  assert.equal(cachedStatus.completedPaperForwardTests, stats.completedPaperForwardTests);
+  assert.equal(cachedStatus.cumulativePaperPnl, stats.cumulativePaperPnl);
   assert.deepEqual(evaluateV13Strategy(input), before);
 });
