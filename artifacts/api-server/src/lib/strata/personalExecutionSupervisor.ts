@@ -2,6 +2,7 @@ import {beginExecutionStage,timedFinalFetch,type TimingObserver} from "../v13-pr
 import {logger} from "../logger";
 import {createEntryWireClockFetch} from "./entryWireClock";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
+import {reconciledFlatEntryEvidence} from "./reconciledFlatEntryEvidence";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "@workspace/db";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
@@ -395,7 +396,9 @@ export function createProductionPersonalSession(
           // Fresh entries are halted as soon as an outbound EXIT intent is
           // prepared. Never initiate a second entry when exit evidence is
           // uncertain or the exchange account is being reduced.
-          state.entriesAuthorized = false;
+          technicalRelease.beginReconciliation();
+          // A normal exit is a transient exposure hold, not an owner STOP.
+          // Only committed, fully flat reconciliation can reopen eligibility.
           // Financial preparation commits an accountable V13 SELL intent but
           // DOES NOT send an order. It independently rechecks position,
           // strategy, approved policy/fees, book, stake and exit floor.
@@ -474,7 +477,15 @@ export function createProductionPersonalSession(
           state.entriesAuthorized=false;
           throw new Error("unresolved_intent_count_unverified");
         }
-        if(unresolvedNow.mode==="recovery")state.entriesAuthorized=false;
+        // Normal acknowledged dispatch is durably UNKNOWN until signed GET
+        // reconciliation. Keep this transient gate closed, without poisoning
+        // the sticky STOP/fence/failure latch for the rest of the session.
+        if(unresolvedNow.mode==="recovery"){
+          technicalRelease.beginReconciliation();
+          // Final authority refresh must never override a different unresolved
+          // intent or protective reservation observed at this wire boundary.
+          if(currentEntry)throw new Error("production_other_uncertain_order");
+        }
         const beat = await heartbeatLease(snapshotDb, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
@@ -587,7 +598,10 @@ export function createProductionPersonalSession(
         },{db,now});
         eligible=renewed.ok&&await checkContinuousEligibility(db,input.userId,sha);
       }else eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;
-      technicalRelease.completeReconciliation(eligible);
+      const flat=await reconciledFlatEntryEvidence(db,{
+        accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),
+      });
+      technicalRelease.completeReconciliation(eligible&&flat);
     };
     session.executor.authorizeFinalEntry=async tx=>{
       const sha=deployedGitSha();

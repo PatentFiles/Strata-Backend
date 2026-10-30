@@ -14,6 +14,8 @@ import { openOwnedExecutionSession, type AccountDispatchState } from "./accountP
 import { personalAccountSnapshot } from "./personalExchangeRead";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
+import {reconciledFlatEntryEvidence} from "./reconciledFlatEntryEvidence";
 import { UPSERT_STAKE_SQL } from "./userScopeDatabase";
 import { reportOwnedActivation, readOwnedApprovedFeeEvidence } from "./personalAccountActivation";
 
@@ -392,6 +394,7 @@ async function tradingSession(
     )`);
     await pool.query("TRUNCATE private.strata_emergency_exit_reservations");
   }
+  const entryGate=new TechnicalReleaseEntryGate();
   const evidence = snapshot(fingerprint!, now, cashMicros);
   let currentBook = book(stakeCents, now);
   const session = openOwnedExecutionSession({
@@ -403,17 +406,22 @@ async function tradingSession(
     now: () => now,
     intervalMs: 60_000,
     fault,
-    entriesOpen: guardSnapshotUncertainty ? () => session.exchange.state.entriesAuthorized === true : undefined,
+    entriesOpen: guardSnapshotUncertainty ? () => entryGate.mayEnter(session.exchange.state.entriesAuthorized,false) : undefined,
     readMarket: async () => structuredClone(currentBook),
     readSnapshot: async () => {
       if (guardSnapshotUncertainty) {
+        entryGate.beginReconciliation();
         const ledger = session.executor.ledger;
         const currentEntry = ledger.currentFinalSnapshotEntry();
         const tx = currentEntry ? ledger.currentTransaction() : null;
         const unresolved = await readUnresolvedIntentMode(
           (sql, params) => (tx ?? pool).query(sql, params), ACCOUNT, currentEntry,
         );
-        if (!unresolved.ok || unresolved.mode === "recovery") session.exchange.state.entriesAuthorized = false;
+        if (!unresolved.ok) session.exchange.state.entriesAuthorized = false;
+        if (unresolved.ok && unresolved.mode === "recovery") {
+          entryGate.beginReconciliation();
+          if(currentEntry)throw new Error("production_other_uncertain_order");
+        }
       }
       return structuredClone(evidence);
     },
@@ -422,8 +430,13 @@ async function tradingSession(
       return new Response("{}", { status: 200 });
     },
   });
+  // Test-only stand-in for the production exact-SHA final authority check.
+  if(guardSnapshotUncertainty)session.executor.authorizeFinalEntry=async()=>entryGate.completeReconciliation(true);
+  if(guardSnapshotUncertainty)session.executor.afterReconcile=async signed=>{
+    entryGate.completeReconciliation(await reconciledFlatEntryEvidence(pool,{accountId:ACCOUNT,ownerId:USER,snapshot:signed,nowMs:now}));
+  };
   await session.executor.reconcile();
-  return { ...session, get now() { return now; }, material, evidence, posts,
+  return { ...session, entryGate, get now() { return now; }, material, evidence, posts,
     advance(ms:number) { now+=ms; evidence.observedAtMs=now;currentBook.observedAtMs=now;currentBook.fee.verifiedAtMs=now; },
     get book() { return currentBook; }, set book(value: MarketEvidence) { currentBook = value; } };
 }
@@ -553,12 +566,54 @@ test("final signed account proof does not classify its own locked DISPATCHED ent
   // A later ordinary reconciliation gets no exemption: the UNKNOWN holds
   // entry authority, despite complete empty exchange evidence.
   await session.executor.reconcile();
-  assert.equal(session.exchange.state.entriesAuthorized, false);
+  assert.equal(session.exchange.state.entriesAuthorized, true, "reconciliation is not an owner STOP");
+  assert.equal(session.entryGate.mayEnter(true,false), false, "UNKNOWN remains held");
   assert.equal(session.posts.length, 1);
 });
 
-async function protectiveFixture(withMarker:boolean) {
-  const s=await tradingSession(500,[]);
+test("terminal zero-fill signed reconciliation permits a later entry without resetting STOP", async()=>{
+  const s=await tradingSession(500,[],60_000_000_000,undefined,true);
+  const first=await s.executor.prepareEntry(await source(s.now));
+  await s.executor.dispatch(first);
+  await s.executor.reconcile();
+  assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),false);
+  const request=await requestOf(first);
+  s.evidence.orders.push({orderId:"zero-fill",request,filledHundredths:"0",terminal:true});
+  s.advance(1);
+  await s.executor.reconcile();
+  assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),true);
+  const second=await s.executor.prepareEntry(await source(s.now));
+  await s.executor.dispatch(second);
+  assert.equal(s.posts.length,2);
+  s.exchange.state.entriesAuthorized=false;
+  s.evidence.orders.push({orderId:"zero-fill-2",request:await requestOf(second),filledHundredths:"0",terminal:true});
+  s.advance(1);await s.executor.reconcile();
+  assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),false,"flat proof never clears STOP");
+  assert.equal(s.posts.length,2,"reconciliation never posts");
+});
+
+test("open filled exposure holds entries until terminal settlement is independently reconciled",async()=>{
+  const s=await tradingSession(500,[],60_000_000_000,undefined,true);
+  const id=await s.executor.prepareEntry(await source(s.now));
+  await s.executor.dispatch(id);
+  const request=await requestOf(id),quantity=String(request.contracts*100);
+  fill(s.evidence,request,quantity);
+  s.advance(1);await s.executor.reconcile();
+  assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),false,"open exposure held");
+  assert.equal(s.exchange.state.entriesAuthorized,true,"normal fill does not latch STOP");
+  const payout=String(BigInt(quantity)*10000n);
+  s.advance(1);
+  s.evidence.settlements.push({id:"settle",market:request.market,side:request.side,result:"YES",
+    quantityHundredths:quantity,payoutMicros:payout,feeMicros:"0",occurredAtMs:s.now});
+  s.evidence.positions=[];
+  s.evidence.cashMicros=String(BigInt(s.evidence.cashMicros)+BigInt(payout));
+  await s.executor.reconcile();
+  assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),true);
+  assert.equal(s.posts.length,1,"settlement reconciliation is GET-only");
+});
+
+async function protectiveFixture(withMarker:boolean,guardSnapshotUncertainty=false) {
+  const s=await tradingSession(500,[],60_000_000_000,undefined,guardSnapshotUncertainty);
   await pool.query(`CREATE SCHEMA IF NOT EXISTS private; CREATE SCHEMA IF NOT EXISTS auth;
     CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY);
     INSERT INTO auth.users VALUES('${USER}') ON CONFLICT DO NOTHING;
@@ -667,9 +722,11 @@ test("concurrent protective marker and cleanup serialize without replay or delet
   }
 });
 
-test("zero and partial attempted protective outcomes are never mistaken for stale preparation",async()=>{
-  for(const qty of ["0","100"]){
-    const f=await protectiveFixture(true);
+test("zero partial and full protective outcomes require terminal flat proof before continuation",async()=>{
+  for(const qty of ["0","100","200"]){
+    const f=await protectiveFixture(true,true);
+    const gate=f.entryGate;
+    gate.beginReconciliation();
     assert.equal((await f.mark()).unknownRecorded,true);
     const request=await requestOf(f.exit),orderId=`exit-${f.exit}`;
     f.advance(15_001);
@@ -687,6 +744,23 @@ test("zero and partial attempted protective outcomes are never mistaken for stal
     assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"UNKNOWN");
     assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[f.parent])).rows[0].quantity_hundredths,String(200n-BigInt(qty)));
     assert.equal(f.posts.length,1);
+    assert.equal(gate.mayEnter(f.exchange.state.entriesAuthorized,false),false,"private UNKNOWN is always held");
+    // Disposable fixture for a successful independent private GET recovery.
+    // This changes only the test marker after exact terminal exchange evidence;
+    // production uses its existing authenticated recovery implementation.
+    await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='RECONCILED',updated_at=now()");
+    await f.executor.reconcile();
+    assert.equal(gate.mayEnter(f.exchange.state.entriesAuthorized,false),qty==="200",
+      "zero/partial exits retain exposure; only full flat reconciled exit resumes");
+    if(qty==="200"){
+      f.advance(1);
+      const next=await f.executor.prepareEntry(await source(f.now));
+      await f.executor.dispatch(next);
+      assert.equal(f.posts.length,2,"next entry is separate, never exit replay");
+      f.exchange.state.entriesAuthorized=false;
+      gate.completeReconciliation(true);
+      assert.equal(gate.mayEnter(f.exchange.state.entriesAuthorized,false),false,"STOP remains sticky");
+    }
   }
 });
 
@@ -706,4 +780,17 @@ test("mismatched immutable protective marker body blocks financial cleanup",asyn
   assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"PREPARED");
   assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.exit])).rows[0].state,"PREPARED");
   assert.equal(f.posts.length,1);
+});
+
+
+test("final authority refresh cannot override a concurrent protective reservation",async()=>{
+  // Only this disposable test fixture: isolate the read-gate table shape from
+  // the preceding full reservation-transition tests, which enforce creation.
+  await pool.query("DROP TABLE IF EXISTS private.strata_emergency_exit_reservations CASCADE");
+  const s=await tradingSession(500,[],60_000_000_000,undefined,true);
+  const id=await s.executor.prepareEntry(await source(s.now));
+  await pool.query("INSERT INTO private.strata_emergency_exit_reservations(execution_account_id,state) VALUES($1,'UNKNOWN')",[ACCOUNT]);
+  await assert.rejects(s.executor.dispatch(id),/production_other_uncertain_order/);
+  assert.equal(s.posts.length,0);
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0].state,"BLOCKED");
 });
