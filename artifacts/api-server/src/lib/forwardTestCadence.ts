@@ -12,7 +12,7 @@ export class OptionalResearchLane {
  async drain():Promise<void>{await this.pending;}
 }
 
-/** Faster discovery only after an empty current-market listing. No successful
+/** Faster discovery after an empty listing or an unpublished exact strike at rollover. No successful
  * strategy evaluation is accelerated. At most three retries per 15m clock window;
  * other feed errors retain normal backoff and no requests overlap.
  */
@@ -26,7 +26,8 @@ export class BoundaryDiscoveryRecovery {
   if(this.window===null||window>this.window){this.window=window;this.attempts=0;this.firstFailureAt=null;}
   // A wall-clock regression must not reset the provider request budget.
   if(window!==this.window)return 5000;
-  if(error==="Kalshi returned no current market"){
+  const missingRolloverStrike=error==="Kalshi exact market strike is missing or invalid" && nowMs%900000<30000;
+  if(error==="Kalshi returned no current market" || missingRolloverStrike){
    if(this.attempts<3){
     if(this.attempts===0)this.firstFailureAt=nowMs;
     this.attempts++;return 1000;

@@ -53,3 +53,22 @@ test('recorded public rollover replay shows discovery availability, not invented
  const legacy=rows.find(x=>x.source==='legacy'&&x.markets?.some((m:Record<string,unknown>)=>m.ticker===TICKER&&m.status==='active'&&m.floor_strike!==null));
  assert.ok(first!==null&&legacy);assert.ok(legacy.finished-first>20);
 });
+
+test('fixed-point dollar prices take precedence over rounded legacy cent fields',async()=>{
+ const row=market({yes_bid:1,yes_bid_dollars:'0.0125',yes_ask:2,yes_ask_dollars:'0.0250',
+  no_bid:97,no_bid_dollars:'0.9750',no_ask:99,no_ask_dollars:'0.9875'});
+ const m=await feeds([row],row).api.market();
+ assert.equal(m.yesBid,.0125);assert.equal(m.yesAsk,.025);assert.equal(m.noBid,.975);assert.equal(m.noAsk,.9875);
+});
+test('legacy integer prices retain their cent unit including one cent and one dollar',async()=>{
+ const {yes_ask_dollars:_yes,no_ask_dollars:_no,...row}=market({yes_bid:1,yes_ask:100,no_bid:0,no_ask:99});
+ const m=await feeds([row],row).api.market();
+ assert.equal(m.yesBid,.01);assert.equal(m.yesAsk,1);assert.equal(m.noBid,0);assert.equal(m.noAsk,.99);
+});
+test('malformed present dollar prices never fall back to legacy values or rescale as cents',async()=>{
+ for(const value of ['5','1.01','-0.01','1e-2','',null,1]){
+  const row=market({yes_bid:52,yes_bid_dollars:value,yes_ask:53,yes_ask_dollars:value});
+  const m=await feeds([row],row).api.market();
+  assert.equal(m.yesBid,null,JSON.stringify(value));assert.equal(m.yesAsk,null,JSON.stringify(value));
+ }
+});

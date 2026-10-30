@@ -8,12 +8,13 @@
  * A reconnect, ticker rollover, clock regression or seq gap invalidates
  * liquidity until a new exchange book snapshot is verified.
  */
+import {performance} from "node:perf_hooks";
 import {createPrivateKey,createSign,constants} from "node:crypto";
 import {getEngineStatus} from "./forwardTestRepository";
 import {readKalshiBrtiShadowStatus} from "./kalshiBrtiShadowStream";
 import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,
  marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat,
- evaluateTriangulatedMarket,type CoinbaseTicker} from "./strataResearchMarketStreams";
+ evaluateTriangulatedMarket,researchDiagnosticSummary,createResearchDiagnosticReporter,type CoinbaseTicker} from "./strataResearchMarketStreams";
 
 const WS="wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 const COINBASE="wss://ws-feed.exchange.coinbase.com";
@@ -306,11 +307,16 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
   cbRetry.unref?.();
  };
  let checking=false;
+ let lastMarketLookupMs:number|null=null;
+ const report=createResearchDiagnosticReporter(summary=>console.info(JSON.stringify(summary)));
  const refreshMarket=async()=>{
   if(halted||checking)return;
   checking=true;
+  const lookupStarted=performance.now();
+  let lookupFinished=false;
   try{
    const engine=await getEngineStatus();
+   lastMarketLookupMs=Math.max(0,performance.now()-lookupStarted);lookupFinished=true;
    // Only follow PAPER_ONLY market identification. No live account reads.
    const next=engine?.enabled&&typeof engine.marketTicker==="string"&&
       tickPattern.test(engine.marketTicker)?engine.marketTicker:null;
@@ -323,12 +329,19 @@ export function startTriangulatedMarketObserver(env:NodeJS.ProcessEnv=process.en
       scheduleBookRetry(next);
    }
   }catch{lastDepthError="paper_market_lookup_unavailable";}
-  finally{checking=false;}
+  finally{
+   if(!lookupFinished)lastMarketLookupMs=Math.max(0,performance.now()-lookupStarted);
+   checking=false;
+  }
  };
  connectCoinbase();
  if(!enabledSigner){depthState="UNAVAILABLE";lastDepthError="restricted_read_signer_missing";}
  else{void refreshMarket();}
- monitor=setInterval(()=>{if(!halted&&enabledSigner)void refreshMarket();},5000);
+ monitor=setInterval(()=>{
+  if(halted)return;
+  report(performance.now(),()=>researchDiagnosticSummary(readTriangulatedMarketStatus(),lastMarketLookupMs));
+  if(enabledSigner)void refreshMarket();
+ },5000);
  monitor.unref?.();
  return {stop:()=>{
   halted=true;running=false;

@@ -72,3 +72,17 @@ test('worker wires optional post-action capture only after commit and outside cy
  assert.ok(scheduler.includes('Post-action paper book capture skipped: previous capture still pending'));
  assert.ok(!scheduler.includes('await bookCaptureLane.drain()'));
 });
+
+test('missing exact strike at rollover shares bounded discovery retries without weakening feed gates',()=>{
+ const retry=new BoundaryDiscoveryRecovery(),t=900000;
+ const missing='Kalshi exact market strike is missing or invalid';
+ assert.equal(retry.periodMs(missing,t),1000);
+ assert.equal(retry.periodMs('Kalshi returned no current market',t+1000),1000);
+ assert.equal(retry.periodMs(missing,t+2000),1000);
+ assert.equal(retry.periodMs(missing,t+3000),2000);
+ assert.equal(retry.periodMs(missing,t+5000),5000);
+ assert.equal(new BoundaryDiscoveryRecovery().periodMs(missing,t+30000),5000);
+ for(const reason of ['Kalshi market snapshot is missing or stale','Kalshi market ticker is invalid',
+ 'Kalshi market end time is missing or invalid','Coinbase BTC feed is missing, malformed, or stale',null])
+  assert.equal(new BoundaryDiscoveryRecovery().periodMs(reason,t),5000);
+});
