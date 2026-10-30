@@ -1,6 +1,7 @@
+import { ShadowEventCapture } from "./shadowEventCapture";
 import { createHash } from "node:crypto";
 import {assessNearExpiryCapShadow, NEAR_EXPIRY_CAP_RESEARCH_ID, NEAR_EXPIRY_CAP_RESEARCH_VERSION} from "./v13NearExpiryCapShadow";
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte } from "drizzle-orm";
 import {
   db,
   forwardTestEvaluationTable,
@@ -382,6 +383,8 @@ export function buildV13ShadowOpportunity(
  * This runs outside the champion transaction. Callers must catch errors; a
  * research failure must never alter champion execution authority.
  */
+const shadowEventCapture = new ShadowEventCapture();
+
 export async function recordV13ShadowOpportunities(
   sourceEvaluationId: string,
 ): Promise<{ recorded: number; activeParameterSets: number }> {
@@ -407,6 +410,11 @@ export async function recordV13ShadowOpportunities(
     .where(and(
       eq(v13StrategyParameterSetTable.state, "SHADOW"),
       eq(v13StrategyParameterSetTable.executionAuthority, false),
+      // The optional lane may run after a concurrent daily training job.
+      // Only models already created AND activated at source event time may
+      // label that event as prospective evidence. Null activation fails closed.
+      lte(v13StrategyParameterSetTable.createdAt, source.evaluatedAt),
+      lte(v13StrategyParameterSetTable.activatedAt, source.evaluatedAt),
     ));
 
   let recorded = 0;
@@ -442,6 +450,16 @@ export async function recordV13ShadowOpportunities(
       parameterSet,
     );
 
+    const capture = shadowEventCapture.plan({
+      model: parameterSet.id + ":" + parameterSet.parameterHash,
+      market: source.marketTicker, atMs: source.evaluatedAt.getTime(),
+      baselineSignal: source.signal, baselineDirection: source.direction,
+      baselineQualifying: source.qualifyingTrigger, positionWasOpen: source.positionWasOpen,
+      freshCross: source.freshCross, signal: opportunity.signal, direction: opportunity.direction,
+      qualifying: opportunity.qualifyingTrigger, wouldEnter: opportunity.wouldEnter,
+    });
+    if (!capture.retain) { capture.commit(); continue; }
+
     const id = "shadow-" + createHash("sha256")
       .update([source.id, parameterSet.id, parameterSet.parameterHash].join("\u001f"))
       .digest("hex");
@@ -471,10 +489,13 @@ export async function recordV13ShadowOpportunities(
       qualifyingTrigger: opportunity.qualifyingTrigger,
       wouldEnter: opportunity.wouldEnter,
       entryOffer: opportunity.entryOffer,
-      reason: opportunity.reason,
+      reason: opportunity.reason + "|" + capture.reason,
       executionAuthority: false,
     }).onConflictDoNothing().returning({ id: v13StrategyShadowEvaluationTable.id });
 
+    // A conflict is already-durable evidence for this exact source/model.
+    // A thrown/uncertain insert does NOT advance the capture state.
+    capture.commit();
     if (inserted.length === 1) recorded += 1;
   }
 
