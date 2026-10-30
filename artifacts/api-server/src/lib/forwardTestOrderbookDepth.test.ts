@@ -47,3 +47,36 @@ test("malformed, missing, duplicate, stale and nonfixedpoint evidence fail close
  assert.throws(()=>parseKalshiResearchOrderbook({orderbook_fp:{yes_dollars:[],no_dollars:[]}},"NOT-BTC",start,start));
  assert.throws(()=>simulateBookCapacity(book(),"yes","buy",0,10000));
 });
+
+test("research book reports provider429 and suppresses later public requests without stale fallback",async()=>{
+ const {fetchKalshiPublicBook}=await import("./forwardTestOrderbookDepth");
+ const original=globalThis.fetch;let sent=0;
+ const originalWarn=console.warn;const logs:string[]=[];console.warn=(line)=>{logs.push(String(line));};
+ globalThis.fetch=(async (input)=>{
+  sent++;
+  const response=new Response("{}",{status:429,headers:{"Retry-After":"60"}});
+  Object.defineProperty(response,"url",{value:String(input)});
+  return response;
+ }) as typeof fetch;
+ try{
+  await assert.rejects(fetchKalshiPublicBook(ticker),/provider=kalshi endpoint=research_orderbook HTTP 429 retryAfterMs=60000/);
+  await assert.rejects(fetchKalshiPublicBook(ticker),/provider=kalshi endpoint=research_orderbook cooldown/);
+  assert.equal(sent,1);
+  assert.equal(logs.length,2);
+  const rows=logs.map(line=>JSON.parse(line));
+  assert.deepEqual(rows.map(r=>r.occurrence),["provider_response","local_cooldown"]);
+  assert.ok(rows.every(r=>r.endpoint==="research_orderbook"));
+  const {db}=await import("@workspace/db");
+  const {savePostActionPaperBook}=await import("./forwardTestBookCapture");
+  const oldInsert=db.insert;let saved:any;
+  (db as any).insert=()=>({values:(row:any)=>{saved=row;return {onConflictDoNothing:()=>({returning:async()=>[{id:row.id}]})};}});
+  try{
+    const receipt=await savePostActionPaperBook({positionId:"test",engineId:"test",marketTicker:ticker,
+      phase:"ENTRY",direction:"UP",contracts:1,quotePrice:0.5,eventAt:new Date()});
+    assert.equal(receipt?.status,"UNAVAILABLE");
+    assert.equal(saved.errorCode,"research_book_unavailable");
+    assert.equal(JSON.parse(logs.at(-1)!).occurrence,"local_cooldown");
+    assert.equal(sent,1);
+  }finally{db.insert=oldInsert;}
+ }finally{globalThis.fetch=original;console.warn=originalWarn;}
+});

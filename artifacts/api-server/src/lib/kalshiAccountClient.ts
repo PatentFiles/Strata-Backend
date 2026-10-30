@@ -1,3 +1,4 @@
+import { createReadOnlyRateLimit, emitReadRateLimitDiagnostic, type ReadRateLimitDetails } from "./readOnlyRateLimit";
 import {
   constants as cryptoConstants,
   createPrivateKey,
@@ -319,8 +320,9 @@ export class KalshiApiError extends Error {
     readonly type: "NOT_CONFIGURED" | "INVALID_CREDENTIALS" | "NETWORK_ERROR" |
       "HTTP_ERROR" | "INVALID_JSON" | "INVALID_RESPONSE",
     readonly status?: number,
+    readonly rateLimit?: ReadRateLimitDetails,
   ) {
-    super(status === undefined
+    super(rateLimit ? `Kalshi GET provider=kalshi endpoint=${rateLimit.endpoint} ${rateLimit.responseReceived ? "HTTP 429" : "cooldown"} remainingMs=${rateLimit.remainingMs} retryAfterMs=${rateLimit.retryAfterMs ?? "unavailable"}` : status === undefined
       ? `Kalshi request failed (${type})`
       : `Kalshi request failed (${type}, HTTP ${status})`);
     this.name = "KalshiApiError";
@@ -420,6 +422,13 @@ function isAllowedGetPath(path: string): boolean {
 
 const SCOPED_GET_ORDER_PATH = /^\/trade-api\/v2\/portfolio\/orders\/[A-Za-z0-9_-]{1,128}$/;
 
+// Isolate injected transports; production callers share one local read gate.
+const scopedReadLimits = new WeakMap<typeof fetch, ReturnType<typeof createReadOnlyRateLimit>>();
+function scopedReadLimit(fetchImpl: typeof fetch) {
+  let value = scopedReadLimits.get(fetchImpl);
+  if (!value) { value = createReadOnlyRateLimit(); scopedReadLimits.set(fetchImpl, value); }
+  return value;
+}
 export async function getScopedKalshiJson(
   creds: { keyId: string; privateKey: string },
   path: string,
@@ -432,6 +441,17 @@ export async function getScopedKalshiJson(
   if (host !== "https://external-api.kalshi.com" && host !== "https://external-api.demo.kalshi.co") {
     throw new KalshiApiError("INVALID_CREDENTIALS");
   }
+  // Fixed path labels exclude queries, cursor values, order IDs, and credentials.
+  const endpoint = path.replace(/\/orders\/[^/]+$/, "/orders/:id")
+    .replace(/\/markets\/[^/]+/, "/markets/:ticker")
+    .replace(/\/intra_exchange_instance_transfers\/[^/]+$/, "/intra_exchange_instance_transfers/:id");
+  const readKey = createHash("sha256").update(host).update("\0").update(creds.keyId)
+    .update("\0").update(endpoint).digest("hex");
+  let attempt = scopedReadLimit(fetchImpl).begin(readKey, endpoint);
+  if (attempt.blocked) {
+    emitReadRateLimitDiagnostic(attempt.blocked);
+    throw new KalshiApiError("HTTP_ERROR", 429, attempt.blocked);
+  }
   // Timestamp and signature must be created AFTER the quota wait, otherwise
   // queued requests carry stale signatures. Injected test transports never
   // consume production quota.
@@ -440,6 +460,11 @@ export async function getScopedKalshiJson(
       process.env.NODE_ENV === "production" && fetchImpl === fetch) {
     await reserveKalshiBalanceReadSlot(creds.keyId, rateLimitOwnerId, undefined,
       dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+  }
+  attempt = scopedReadLimit(fetchImpl).begin(readKey, endpoint);
+  if (attempt.blocked) {
+    emitReadRateLimitDiagnostic(attempt.blocked);
+    throw new KalshiApiError("HTTP_ERROR", 429, attempt.blocked);
   }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
@@ -462,8 +487,14 @@ export async function getScopedKalshiJson(
     // Preserve only a typed nonsecret error at the portfolio read boundary.
     throw new KalshiApiError("NETWORK_ERROR");
   }
-  if (!response.ok) throw new KalshiApiError("HTTP_ERROR", response.status);
-  return await response.json() as unknown;
+  if (!response.ok) {
+    const details = response.status === 429 ? attempt.limited!(response.headers.get("retry-after")) : undefined;
+    if (details) emitReadRateLimitDiagnostic(details);
+    throw new KalshiApiError("HTTP_ERROR", response.status, details);
+  }
+  const result = await response.json() as unknown;
+  attempt.success!();
+  return result;
 }
 
 const QUALIFICATION_ORDER_PATH = `${API_PREFIX}/portfolio/events/orders`;
