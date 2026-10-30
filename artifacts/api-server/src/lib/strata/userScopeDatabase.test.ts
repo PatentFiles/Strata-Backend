@@ -1,3 +1,4 @@
+import "./primaryDisplayMoney.test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -708,4 +709,33 @@ test("wallet cached display cannot survive a missing authenticated connection",a
  disconnected=true;
  const refused=await port.wallet(USER_A);
  assert.equal(refused.credentialVerified,false);assert.equal(refused.primary.cashCents,null);assert.equal(calls,8);
+});
+
+test("owner wallet projects both subcent displays while shared financial parser remains strict", async()=>{
+ const {db,calls}=database(true);
+ const port=createDatabaseUserScopePort(db,{kalshiGet:async(_creds,path,query="")=>{
+  if(path.endsWith("/portfolio/balance")) return query==="?subaccount=0"
+    ?{balance_dollars:"100.0001",portfolio_value:0}:{balance_dollars:"24.4825",portfolio_value:0};
+  if(path.endsWith("/account/limits"))return {usage_tier:"advanced"};
+  return {};
+ }});
+ const wallet=await port.wallet(USER_A);
+ assert.equal(wallet.primary.cashCents,10000);
+ assert.equal((wallet.primary as unknown as Record<string,unknown>).cashMicrosExact,"100000100");
+ assert.equal(wallet.botSubaccount?.cashCents,2448);
+ assert.equal((wallet.botSubaccount as unknown as Record<string,unknown>).cashMicrosExact,"24482500");
+ assert.equal((wallet.botSubaccount as unknown as Record<string,unknown>).cashDisplayRoundedDown,true);
+ assert.equal(calls.some(c=>/UPDATE|INSERT|DELETE/i.test(c.text)),false);
+});
+
+test("current account read model retains subcent cash without hiding reserved micro amounts",async()=>{
+ const base=database(true);
+ const db:UserScopeQuery={query:async(sql,params)=>{
+   if(sql.includes("WHERE a.owner_user_id"))return {rows:[{...account(USER_A,"acct-a",true,"24482500"),reserved_micros:"2501"}]};
+   return base.db.query(sql,params);
+ }};
+ const settings=await createDatabaseUserScopePort(db).settings(USER_A);
+ assert.equal(settings.botCashCents,2448);
+ assert.equal(settings.reservedBotCashCents,1);
+ assert.equal(settings.capitalRemainingCents,2447);
 });

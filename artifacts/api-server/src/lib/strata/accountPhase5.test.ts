@@ -544,3 +544,22 @@ function fundingDb(): CredentialDatabase & { rows: Array<{ owner: string; author
     async transaction(work) { return work({ query }); },
   };
 }
+
+test("credential role probes preserve fractional-cent cash and retain pair and metadata guards",async()=>{
+ const key=keyMaterial("subcent-restricted"), verifier=keyMaterial("subcent-verifier");
+ const material={keyId:key.apiKeyId,privateKey:key.privateKey};
+ const verification={keyId:verifier.apiKeyId,privateKey:verifier.privateKey};
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
+ const authority={expectedFingerprint:dedicatedSignerFingerprint(verification.keyId,verification.privateKey)!,material:verification};
+ for(const role of ["restricted_execution","verification_read"]){
+   for(const [pair,expected] of [[{subaccount:1,exchange_index:2},true],[{subaccount:0,exchange_index:2},false],[{subaccount:1,exchange_index:1},false]] as const){
+     const result=await probeAccountCredential(role,fingerprint,material,async(_creds,path)=>{
+       if(path.endsWith("/api_keys"))return {api_keys:[{api_key_id:material.keyId,subaccount:1,scopes:["read","write::trade"]},{api_key_id:verification.keyId,subaccount:null,scopes:["read"]}]};
+       if(path.endsWith("/subaccounts/balances"))return {subaccount_balances:[{subaccount_number:1,exchange_index:2,balance:"24.4825",updated_ts:1}]};
+       return {...pair,balance_dollars:"24.4825",balance:2448};
+     },authority);
+     assert.equal(result.ok,expected,JSON.stringify(result));
+     if(expected)assert.equal(result.evidenceMicros,"24482500");else assert.equal(result.reason,"account_target_pair_mismatch");
+   }
+ }
+});

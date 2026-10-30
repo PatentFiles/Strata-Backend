@@ -1,3 +1,4 @@
+import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
@@ -777,4 +778,46 @@ test("failed expiry audit receipt rolls back both terminal state and released fu
   assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
   const row=(await pool.query("SELECT state,reserved_micros FROM v13_production_intent WHERE id=$1",[id])).rows[0];
   assert.equal(row.state,"PREPARED");assert.equal(row.reserved_micros,reserved);
+});
+
+
+test("fractional-cent cash survives entry fees, owned-position exit and next-entry reconciliation", async () => {
+  const f = await fixture();
+  await pool.query("UPDATE v13_production_account SET cash_micros=25000000,initial_cash_micros=25000000");
+  f.exchange.evidence.cashMicros="25000000";
+  let committedRenewals=0;
+  f.executor.afterReconcile=async snapshot=>{
+    assert.equal((await f.ledger.readAccount()).cash_micros,snapshot.cashMicros);
+    committedRenewals++;
+  };
+  // Route every final/account snapshot through the exact production cash adapter.
+  f.exchange.snapshot=async()=>{
+    const micros=BigInt(f.exchange.evidence.cashMicros);
+    const dollars=`${micros/1000000n}.${String(micros%1000000n).padStart(6,"0")}`;
+    const cash=readSubaccountSpendableCash({subaccount:1,exchangeIndex:2,observedAtMs:f.exchange.now,
+      nowMs:f.exchange.now,maxAgeMs:15000,subaccountBalance:{balance_dollars:dollars},primaryBalance:{}});
+    assert.equal(cash.ok,true);
+    return {...structuredClone(f.exchange.evidence),cashMicros:cash.cashMicros};
+  };
+  const entry=await f.executor.prepareEntry(await f.source());await f.executor.dispatch(entry);
+  f.exchange.fill(f.exchange.posts[0]!,"100",true,"17500");
+  assert.equal(f.exchange.evidence.cashMicros,"24482500"); // $25 - $.50 - $.0175
+  await f.executor.reconcile();
+  assert.equal((await f.ledger.readAccount()).cash_micros,"24482500");
+  await f.exitFeed();
+  await new ProductionWorker(f.executor,2500,()=>{},()=>false).tick();
+  assert.equal(f.exchange.posts.length,2);assert.equal(f.exchange.posts[1]!.action,"SELL");
+  assert.equal(f.exchange.posts[1]!.reduceOnly,true);
+  f.exchange.fill(f.exchange.posts[1]!,"100",true,"17325");
+  await f.executor.reconcile();await invariant(f.ledger);
+  const account=await f.ledger.readAccount();
+  assert.equal(account.cash_micros,f.exchange.evidence.cashMicros);
+  assert.equal(account.reserved_micros,"0");
+  assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"0");
+  const next=await f.executor.prepareEntry(await f.source(randomUUID(),"next-after-subcent-exit"));
+  assert.ok(next);assert.ok(committedRenewals>=3);
+  await f.executor.dispatch(next);
+  assert.equal(f.exchange.posts.length,3);assert.equal(f.exchange.posts[2]!.action,"BUY");
+  assert.ok(BigInt((await f.ledger.readAccount()).reserved_micros)>0n);
+  await invariant(f.ledger);
 });

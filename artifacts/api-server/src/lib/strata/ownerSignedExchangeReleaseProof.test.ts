@@ -88,3 +88,13 @@ test("owner SQL strictly scoped and no authority writes",()=>{
  assert.match(OWNER_SIGNED_PROOF_INTENTS_SQL,/WHERE account_id=\$1/);
  assert.doesNotMatch(OWNER_SIGNED_PROOF_ACCOUNT_SQL+" "+OWNER_SIGNED_PROOF_INTENTS_SQL,/\b(UPDATE|DELETE|INSERT)\b/);
 });
+
+test("signed release proof compares exact subcent cash without inventing authority",async()=>{
+ const m=mock({...account,cash_micros:"24482500"},"24482500");
+ const r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);
+ assert.equal(r.ok,true);if(!r.ok)return;
+ assert.equal(r.exchangeCashMatchesLedger,true);
+ assert.equal(r.tradingAuthorized,false);assert.equal(r.liveEligible,false);
+ const mismatch=await inspectOwnerSignedExchangeReleaseProof(owner,mock({...account,cash_micros:"24482500"},"24482501").deps);
+ assert.equal(mismatch.ok,true);if(mismatch.ok)assert.equal(mismatch.exchangeCashMatchesLedger,false);
+});
