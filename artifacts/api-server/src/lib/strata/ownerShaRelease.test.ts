@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {digest as v13Digest} from "../v13-production/types";
 import {
-  authorizeOwnerShaRelease,ownerShaApprovalStatus,revokeOwnerShaRelease,
+  authorizeOwnerShaRelease,ownerShaApprovalStatus,revokeOwnerShaRelease,ownerRestoreStatus,
   OWNER_SHA_RELEASE_CONFIRM,OWNER_SHA_REVOKE_CONFIRM,
 } from "./ownerShaRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -295,4 +295,141 @@ test("global STOP permits separately signed SHA owner consent, without lifting a
  assert.equal(calls.some(x=>x.includes("SET execution_enabled=true")),false);
  assert.equal(calls.some(x=>x.includes("kill_switch=false")),false);
  assert.equal(result.ordersSubmitted,false);
+});
+
+test("post-recovery owner reauthorization reuses exact-SHA approval and preserves global kill",async()=>{
+ for(const globalKilled of [false,true]){
+  const calls:{sql:string;params?:unknown[]}[]=[];
+  const query=async(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>=>{
+   calls.push({sql,params});
+   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
+   if(sql.includes("FROM public.v13_production_account a"))return {rows:[{
+    id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,kill_switch:true,
+    cash_precision_verified:true,minimum_exit_micros:10000,cash_micros:"5000000",reserved_micros:"0",
+    fee_artifact_digest:feeDigest,policy_state:"APPROVED",policy_id:policyId,
+    commissioning_digest:cDigest,configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500}]};
+   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{digest:evidence}]};
+   if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE"))return {rows:[{
+    id:ACCOUNT,commissioned:true,cash_precision_verified:true,execution_enabled:false,kill_switch:true,
+    blocked_reason:null,cash_micros:"5000000",reserved_micros:"0"}]};
+   if(sql.includes("FROM public.live_execution_config"))return {rows:[{
+    mode:"V13_PRODUCTION",live_execution_enabled:!globalKilled,manual_kill_switch:globalKilled}]};
+   if(sql.includes("FROM private.strata_protective_release_qualification")){
+    assert.deepEqual(params,[QID,OWNER,ACCOUNT,SHA]);
+    assert.match(sql,/expires_at>now\(\)\+interval '60 seconds'/);
+    return {rows:[{qualification_id:QID,evidence_digest:feeDigest}]};
+   }
+   if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
+   if(sql.includes("SELECT approval_id::text FROM private.strata_owner_sha_approvals")){
+    assert.deepEqual(params,[OWNER,ACCOUNT,SHA]);return {rows:[{approval_id:QID}]};
+   }
+   if(sql.includes("UPDATE public.v13_production_account")){
+    assert.deepEqual(params,[ACCOUNT,OWNER,globalKilled]);
+    assert.match(sql,/blocked_reason IS NULL/);return {rows:[{id:ACCOUNT}]};
+   }
+   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
+   throw Error("Unexpected SQL: "+sql);
+  };
+  const db={query,connect:async()=>({query,release(){}})};
+  const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA});
+  assert.equal(result.ok,true);assert.equal('approvalId' in result?result.approvalId:null,QID);
+  assert.equal(result.ordersSubmitted,false);
+  assert.equal(calls.some(c=>c.sql.includes("INSERT INTO private.strata_owner_sha_approvals")),false);
+  assert.equal(calls.some(c=>c.sql.includes("UPDATE public.live_execution_config")),false);
+  assert.ok(calls.some(c=>c.sql==="COMMIT"));
+ }
+});
+
+test("explicit restore only reuses current consent and rejects revoked, changed, active or exposed scope",async()=>{
+ for(const scenario of ["valid","global_kill","no_history","review_without_grant","no_approval","revoked_standing","revoked_review","wrong_scope","wrong_sha","running","armed","position","prepared","cash_changed","locked_policy_changed","revision_changed","stale","freeze","stale_qualification","duplicate_approval","missing_worker","final_cas"]){
+  const calls:{sql:string;params?:unknown[]}[]=[];
+  const fingerprint="f".repeat(64),now=1_800_000_000_000;
+  let clock=now;
+  const account={id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,kill_switch:true,
+   blocked_reason:null,cash_precision_verified:true,minimum_exit_micros:10000,cash_micros:"5000000",reserved_micros:"0",
+   fee_artifact_digest:feeDigest,policy_state:"APPROVED",policy_id:policyId,policy_hash:feeDigest,
+   commissioning_digest:cDigest,configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500,
+   revision:1,key_fingerprint:fingerprint,kalshi_connection_id:QID};
+  const query=async(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>=>{
+   calls.push({sql,params});
+   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
+   if(sql.includes("FROM public.v13_production_account a"))return {rows:[account]};
+   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{digest:evidence}]};
+   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{decrypted_secret:JSON.stringify({api_key_id:"offline-key-id",private_key:"offline-only"})}]};
+   if(sql.startsWith("SELECT request FROM public.v13_production_intent"))return {rows:[]};
+   if(sql.includes("FROM public.v13_production_account WHERE id=")&&sql.includes("FOR UPDATE")){
+    if(scenario==="stale")clock+=5001;
+    return {rows:[{...account,policy_id:scenario==="locked_policy_changed"?"other-policy":policyId,revision:scenario==="revision_changed"?2:1,
+     cash_micros:scenario==="cash_changed"?"6000000":"5000000",
+     blocked_reason:scenario==="freeze"?"risk_freeze":null}]};
+   }
+   if(sql.includes("FROM public.live_execution_config"))return {rows:[{mode:"V13_PRODUCTION",
+    live_execution_enabled:scenario!=="global_kill",manual_kill_switch:scenario==="global_kill"}]};
+   if(sql.includes("FROM private.strata_protective_release_qualification")){
+    assert.match(sql,/observed_at>now\(\)-interval '60 seconds'/);return {rows:scenario==="stale_qualification"?[]:[{qualification_id:QID,evidence_digest:feeDigest}]};
+   }
+   if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
+   if(sql.includes("FROM private.kalshi_account_worker_lease"))return {rows:scenario==="missing_worker"?[]:[{state:scenario==="running"?"owned":"released",
+    arm_requested:scenario==="armed",credential_fingerprint:fingerprint}]};
+   if(sql.includes("quantity_hundredths<>0"))return {rows:[{intents:scenario==="prepared"?"1":"0",positions:scenario==="position"?"1":"0",exits:"0"}]};
+   if(sql.includes("SELECT policy_hash FROM public.v13_live_money_policy"))return {rows:[{policy_hash:feeDigest}]};
+   if(sql.includes("AS created_current FROM private.strata_standing_execution_reviews"))return {rows:scenario==="no_history"?[]:[{state:"approved",revoked_at:scenario==="revoked_review"?"now":null,policy_hash:feeDigest,created_current:true,independent_reviewer_id:QID}]};
+   if(sql.includes("SELECT grant_id FROM private.strata_continuous_execution_grants"))return {rows:["no_history","review_without_grant","revoked_review"].includes(scenario)?[]:[{grant_id:"existing-grant"}]};
+   if(sql.includes("SELECT g.grant_id")){
+    assert.match(sql,/a.execution_enabled=false/);assert.match(sql,/a.kill_switch=true/);
+    assert.match(sql,/FOR SHARE OF g,r,p,oa/);return {rows:scenario==="revoked_standing"?[]:[{grant_id:"existing-grant"}]};
+   }
+   if(sql.includes("SELECT approval_id::text FROM private.strata_owner_sha_approvals"))return {rows:scenario==="no_approval"?[]:scenario==="duplicate_approval"?[{approval_id:QID},{approval_id:QID}]:[{approval_id:QID}]};
+   if(sql.includes("UPDATE public.v13_production_account")){
+    assert.deepEqual(params,[ACCOUNT,OWNER,scenario==="global_kill",now]);
+    assert.match(sql,/clock_timestamp\(\) BETWEEN/);return {rows:scenario==="final_cas"?[]:[{id:ACCOUNT}]};
+   }
+   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
+   throw Error("Unexpected SQL: "+sql);
+  };
+  const db={query,connect:async()=>({query,release(){}})};
+  const result=await authorizeOwnerShaRelease(OWNER,{...confirmation,restoreExistingApproval:true,
+   expectedSha:scenario==="wrong_sha"?"b".repeat(40):SHA,
+   expectedAccountId:scenario==="wrong_scope"?"foreign-account":ACCOUNT,
+   expectedPolicyId:policyId,expectedPolicyHash:feeDigest},{db:db as never,sha:()=>SHA,now:()=>clock,
+   readFeeds:(async(_material:unknown,observedAtMs:number)=>({ok:true,observedAtMs,cashMicros:"5000000",
+    historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never});
+  const success=["valid","global_kill","no_history","review_without_grant","revoked_standing"].includes(scenario);
+  assert.equal(result.ok,success,scenario+": "+JSON.stringify(result));
+  if(success)assert.equal('approvalId' in result?result.approvalId:null,QID);
+  assert.equal(calls.some(c=>/INSERT INTO private\.strata_(owner_sha_approvals|continuous_execution_grants|standing_execution_reviews)/.test(c.sql)),false,scenario);
+  assert.equal(calls.some(c=>c.sql.includes("UPDATE public.live_execution_config")),false,scenario);
+  assert.equal(calls.some(c=>c.sql==="COMMIT"),success,scenario);
+ }
+});
+
+test("restore-only stale SHA is rejected before any database or signer access",async()=>{
+ let calls=0;
+ const db={query:async()=>{calls++;throw Error("must not access");},connect:async()=>{calls++;throw Error("must not access");}};
+ const result=await authorizeOwnerShaRelease(OWNER,{...confirmation,restoreExistingApproval:true,
+  expectedSha:"b".repeat(40),expectedAccountId:ACCOUNT,expectedPolicyId:policyId,expectedPolicyHash:feeDigest},
+  {db:db as never,sha:()=>SHA});
+ assert.equal(result.ok,false);assert.equal(result.reason,"owner_restore_exact_sha_required");assert.equal(calls,0);
+});
+
+test("restore status distinguishes durable authority from account admission and retains scope after restore",async()=>{
+ for(const scenario of ["eligible","enabled","missing_approval","revoked_review","revoked_grant","unavailable"]){
+  const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
+   if(scenario==="unavailable")throw Error("offline");
+   if(sql.includes("FROM public.v13_production_account a"))return {rows:[{id:ACCOUNT,owner_id:OWNER,
+    commissioned:true,execution_enabled:scenario==="enabled",kill_switch:scenario!=="enabled",blocked_reason:null,
+    cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:feeDigest,
+    policy_state:"APPROVED",policy_id:policyId,policy_hash:feeDigest,configured_stake_cents:stake,commissioning_digest:cDigest}]};
+   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{digest:evidence}]};
+   if(sql.includes("SELECT approval_id FROM"))return {rows:scenario==="missing_approval"?[]:[{approval_id:QID}]};
+   if(sql.includes("AS created_current FROM"))return {rows:[{
+    state:"approved",revoked_at:scenario==="revoked_review"?"now":null,policy_hash:feeDigest,created_current:true,independent_reviewer_id:QID}]};
+   if(sql.includes("SELECT grant_id FROM"))return {rows:[{grant_id:"existing"}]};
+   if(sql.includes("SELECT g.grant_id"))return {rows:scenario==="revoked_grant"?[]:[{grant_id:"existing"}]};
+   throw Error("Unexpected projection write/read: "+sql);
+  };
+  const result=await ownerRestoreStatus(OWNER,SHA,{query});
+  assert.equal(result.available,["eligible","revoked_grant"].includes(scenario),scenario);
+  if(scenario!=="unavailable")assert.equal('accountId' in result?result.accountId:null,ACCOUNT);
+ }
 });

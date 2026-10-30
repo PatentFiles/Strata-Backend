@@ -20,33 +20,62 @@ test('optional research has one task and no backlog, failures release the lane',
  assert.equal(lane.submit(async()=>{calls++;},()=>reports++),true);await lane.drain();assert.equal(calls,2);
 });
 
-test('empty-listing recovery is bounded without accelerating valid evaluations or other errors',()=>{
+test('rollover discovery has one shared ten-retry budget and resets only next quarter',()=>{
  const retry=new BoundaryDiscoveryRecovery(),t=900000;
- assert.equal(retry.periodMs(null,t),5000);
- assert.equal(retry.periodMs("Public market feed returned HTTP 429",t),5000);
- for(let i=0;i<3;i++)assert.equal(retry.periodMs("Kalshi returned no current market",t+i*1000),1000);
- assert.equal(retry.periodMs(null,t+4000),5000);
- for(let i=0;i<20;i++)assert.equal(retry.periodMs("Kalshi returned no current market",t+5000+i*5000),5000);
- assert.equal(retry.periodMs("Kalshi returned no current market",t-1),5000,'clock regression cannot refresh budget');
- assert.equal(retry.periodMs("Kalshi returned no current market",t+900000),1000,'next market window gets a bounded discovery budget');
- assert.equal(producerDelayMs(1000,1500),250,'slow discovery stays sequential with an overrun floor');
+ for(let i=0;i<10;i++)assert.equal(retry.periodMs(i%2?
+   'Kalshi returned no current market':'Kalshi exact market strike is missing or invalid',t+i*1000),1000);
+ for(let i=10;i<40;i++)assert.equal(retry.periodMs('Kalshi returned no current market',t+i*1000),5000);
+ assert.equal(retry.periodMs('Kalshi returned no current market',t-1),5000);
+ assert.equal(retry.periodMs('Kalshi returned no current market',t+900000),1000);
+ assert.equal(retry.periodMs('Kalshi returned no current market',t+899999),5000);
+ assert.equal(producerDelayMs(1000,1500),250,'slow cycles stay sequential with an overrun pause');
 });
 
-test('inserted discovery retries preserve the original five-second poll deadline',()=>{
+test('ten fast discovery retries preserve original regular poll and cover observed late strike',()=>{
  const retry=new BoundaryDiscoveryRecovery();let clock=900000;
  const starts=[clock];
- for(let i=0;i<6;i++){
-  const period=retry.periodMs("Kalshi returned no current market",clock);
+ for(let i=0;i<13;i++){
+  const period=retry.periodMs('Kalshi exact market strike is missing or invalid',clock);
   const processingMs=150;
   clock+=processingMs+producerDelayMs(period,processingMs);starts.push(clock);
  }
- assert.deepEqual(starts.map(x=>x-starts[0]),[0,1000,2000,3000,5000,10000,15000]);
- for(const availableAt of [500,1500,2500,3500,4500]){
-  const actual=starts.find(t=>t-starts[0]>=availableAt)-starts[0];
-  assert.ok(actual<=5000,'fast discovery cannot postpone the original +5s poll');
+ assert.deepEqual(starts.map(x=>x-starts[0]),[0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,15000,20000,25000]);
+ // Scenario replay: a valid response known observable by +7.940s. This is
+ // not a claim that the provider first published it at that exact instant.
+ const firstAfterObservedValid=starts.find(t=>t-starts[0]>=7940)-starts[0];
+ assert.equal(firstAfterObservedValid,8000);
+ assert.ok(starts.includes(starts[0]+5000),'do not postpone original +5s poll');
+});
+
+test('success, throttling, unrelated failures and elapsed boundary close fast lane',()=>{
+ const t=900000,missing='Kalshi exact market strike is missing or invalid';
+ for(const reason of [null,'Public market feed returned HTTP 429','Public market feed returned HTTP 503',
+   'Kalshi market snapshot is missing or stale','Kalshi market ticker is invalid',
+   'Kalshi market end time is missing or invalid','Coinbase BTC feed is missing, malformed, or stale']){
+  const retry=new BoundaryDiscoveryRecovery();
+  assert.equal(retry.periodMs(missing,t),1000);
+  assert.equal(retry.periodMs(reason,t+1000),5000);
+  assert.equal(retry.periodMs(missing,t+2000),5000,'no fast restart after refusal/success');
+  assert.equal(retry.periodMs(missing,t+900000),1000);
+ }
+ for(const reason of [missing,'Kalshi returned no current market']){
+  assert.equal(new BoundaryDiscoveryRecovery().periodMs(reason,t+30000),5000);
+  const retry=new BoundaryDiscoveryRecovery();
+  assert.equal(retry.periodMs(reason,t+29999),1000);
+  assert.equal(retry.periodMs(reason,t+30000),5000);
  }
 });
 
+test('clock regression or invalid clock closes fast retries including coincident throttles',()=>{
+ const t=900000,missing='Kalshi returned no current market';
+ for(const bad of [t,NaN,Infinity,-1,t+1000.5])for(const error of [missing,null,'Public market feed returned HTTP 429']){
+  const retry=new BoundaryDiscoveryRecovery();
+  assert.equal(retry.periodMs(missing,t+1000),1000);
+  assert.equal(retry.periodMs(error,bad),5000);
+  assert.equal(retry.periodMs(missing,t+2000),5000,'same window remains closed');
+  assert.equal(retry.periodMs(missing,t+900000),1000,'only next valid window resets');
+ }
+});
 
 test('held optional book capture never blocks another cycle and never builds a backlog',async()=>{
  const lane=new OptionalResearchLane();let release,captures=0,cycles=0,skips=0;
@@ -73,16 +102,13 @@ test('worker wires optional post-action capture only after commit and outside cy
  assert.ok(!scheduler.includes('await bookCaptureLane.drain()'));
 });
 
-test('missing exact strike at rollover shares bounded discovery retries without weakening feed gates',()=>{
- const retry=new BoundaryDiscoveryRecovery(),t=900000;
- const missing='Kalshi exact market strike is missing or invalid';
- assert.equal(retry.periodMs(missing,t),1000);
- assert.equal(retry.periodMs('Kalshi returned no current market',t+1000),1000);
- assert.equal(retry.periodMs(missing,t+2000),1000);
- assert.equal(retry.periodMs(missing,t+3000),2000);
- assert.equal(retry.periodMs(missing,t+5000),5000);
- assert.equal(new BoundaryDiscoveryRecovery().periodMs(missing,t+30000),5000);
- for(const reason of ['Kalshi market snapshot is missing or stale','Kalshi market ticker is invalid',
- 'Kalshi market end time is missing or invalid','Coinbase BTC feed is missing, malformed, or stale',null])
-  assert.equal(new BoundaryDiscoveryRecovery().periodMs(reason,t),5000);
+test('worker remains one awaited cycle with ordinary five-second successful cadence',()=>{
+ const source=readFileSync(new URL('./forwardTestWorker.ts',import.meta.url),'utf8');
+ const scheduler=source.slice(source.indexOf('export function startServerForwardTestWorker'));
+ assert.ok(scheduler.includes('while (!stopped)'));
+ assert.ok(scheduler.includes('const cycle = await runForwardTestCycle('));
+ assert.ok(scheduler.includes('periodMs=discoveryRecovery.periodMs(cycle.error,cycleClock)'));
+ assert.ok(scheduler.includes('await pause('));
+ const retry=new BoundaryDiscoveryRecovery();
+ for(let i=0;i<20;i++)assert.equal(retry.periodMs(null,900000+i*5000),5000);
 });
