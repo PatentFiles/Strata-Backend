@@ -212,6 +212,10 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/kalshiAccountClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiAccountClient.test.cjs
           node --test dist/kalshiAccountClient.test.cjs
+          pnpm exec esbuild src/lib/readOnlyRateLimit.test.ts --bundle --platform=node --format=cjs --outfile=dist/readOnlyRateLimit.test.cjs
+          pnpm exec esbuild src/lib/kalshiReadRateLimit.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiReadRateLimit.test.cjs
+          pnpm exec esbuild src/lib/forwardTestOrderbookDepth.test.ts --bundle --platform=node --format=cjs --outfile=dist/forwardTestOrderbookDepth.test.cjs
+          node --test dist/readOnlyRateLimit.test.cjs dist/kalshiReadRateLimit.test.cjs dist/forwardTestOrderbookDepth.test.cjs
           pnpm exec esbuild src/lib/kalshiTradingClient.test.ts             --bundle --platform=node --format=cjs             --outfile=dist/kalshiTradingClient.test.cjs             --external:pg-native --external:drizzle-orm --external:drizzle-orm/*
           node --test dist/kalshiTradingClient.test.cjs
       - name: Test owner-only DEMO IOC with one-shot UNKNOWN and independent reconciliation (offline only)

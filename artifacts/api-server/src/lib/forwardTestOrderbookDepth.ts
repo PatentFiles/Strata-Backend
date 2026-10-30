@@ -1,3 +1,4 @@
+import { createReadOnlyRateLimit, emitReadRateLimitDiagnostic } from "./readOnlyRateLimit";
 /**
  * Read-only Kalshi KXBTC15M market-depth research. No order or account authority.
  *
@@ -121,22 +122,38 @@ export function simulateBookCapacity(
    interpretation:"BOOK_CAPACITY_ONLY_NOT_EXECUTION"};
 }
 export type OrderbookRead=(ticker:string,signal?:AbortSignal)=>Promise<ReadonlyResearchBook>;
+const researchBookReadLimit = createReadOnlyRateLimit();
 export async function fetchKalshiPublicBook(ticker:string,signal?:AbortSignal):Promise<ReadonlyResearchBook>{
  if(!/^KXBTC15M-[A-Z0-9-]{5,90}$/.test(ticker))throw Error("invalid_research_ticker");
  const origin="https://external-api.kalshi.com";
  const uri=origin+"/trade-api/v2/markets/"+encodeURIComponent(ticker)+"/orderbook";
+ const attempt=researchBookReadLimit.begin("public_book","research_orderbook");
+ if(attempt.blocked){
+   emitReadRateLimitDiagnostic(attempt.blocked);
+   throw Error(`book provider=kalshi endpoint=research_orderbook cooldown remainingMs=${attempt.blocked.remainingMs}`);
+ }
  const started=Date.now();
  const timeout=AbortSignal.timeout(1900);
  const combined=signal?AbortSignal.any([signal,timeout]):timeout;
  const resp=await fetch(uri,{method:"GET",cache:"no-store",redirect:"error",
     headers:{Accept:"application/json"},signal:combined});
  const received=Date.now();
- if(!resp.ok||resp.url!==uri)throw Error("book_http_or_origin_invalid");
+ if(resp.url!==uri)throw Error("book_origin_invalid");
+ if(!resp.ok){
+   if(resp.status===429){
+     const details=attempt.limited!(resp.headers.get("retry-after"));
+     emitReadRateLimitDiagnostic(details);
+     throw Error(`book provider=kalshi endpoint=research_orderbook HTTP 429 retryAfterMs=${details.retryAfterMs??"unavailable"} cooldownMs=${details.remainingMs}`);
+   }
+   throw Error(`book provider=kalshi endpoint=research_orderbook HTTP ${resp.status}`);
+ }
  const size=resp.headers.get("content-length");
  if(size&&Number(size)>320_000)throw Error("book_payload_too_large");
  const text=await resp.text();
  if(text.length>320_000)throw Error("book_payload_too_large");
  let raw:unknown;
  try{raw=JSON.parse(text)}catch{throw Error("book_response_malformed")}
- return parseKalshiResearchOrderbook(raw,ticker,started,received);
+ const parsed=parseKalshiResearchOrderbook(raw,ticker,started,received);
+ attempt.success!();
+ return parsed;
 }
