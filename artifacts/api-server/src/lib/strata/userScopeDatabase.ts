@@ -1,3 +1,5 @@
+import { normalizePrimaryDisplayMoney, normalizeWalletDisplayMoney } from "./primaryDisplayMoney";
+import { ownedCashProjection } from "./ownedCashPrecision";
 import {createWalletDisplayReads} from "./walletDisplayReads";
 import { randomUUID } from "node:crypto";
 import {
@@ -14,7 +16,6 @@ import {
   BOT_EXCHANGE_INDEX,
   BOT_SUBACCOUNT,
   emptyKalshiUserRead,
-  normalizeKalshiMoney,
   type KalshiUserRead,
 } from "./kalshiUserRead";
 import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
@@ -224,15 +225,6 @@ function flag(value: unknown): boolean {
   return value === true || value === "t" || value === "true";
 }
 
-function microsToCents(value: unknown): number | null {
-  const raw = text(value);
-  if (raw === null || !/^-?\d+$/.test(raw)) return null;
-  const micros = BigInt(raw);
-  if (micros % 10000n !== 0n) return null;
-  const cents = micros / 10000n;
-  if (cents > BigInt(Number.MAX_SAFE_INTEGER) || cents < -BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(cents);
-}
 
 function rowsOf(payload: unknown, keys: string[]): unknown[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
@@ -270,8 +262,7 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
   const id = text(row.id);
   const owner = text(row.owner_user_id);
   if (!id || owner !== userId) return null;
-  const cash = microsToCents(row.cash_micros);
-  const reserved = microsToCents(row.reserved_micros);
+  const cash = ownedCashProjection(row.cash_micros, row.reserved_micros);
   return {
     id,
     ownerUserId: owner,
@@ -284,9 +275,7 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
       ?null:flag(row.worker_arm_requested),
     workerLeaseState: text(row.worker_lease_state),
     killSwitch: row.kill_switch === null || row.kill_switch === undefined ? true : flag(row.kill_switch),
-    cashCents: cash,
-    reservedCents: reserved,
-    capitalRemainingCents: cash !== null && reserved !== null ? cash - reserved : null,
+    ...cash,
     configuredStakeCents: integer(row.configured_stake_cents),
     stakeRevision: integer(row.stake_revision),
     riskPresetId: text(row.risk_preset_id),
@@ -519,9 +508,9 @@ export function createDatabaseUserScopePort(
       );
       if (!primaryOutcome.ok) return unverified(primaryFailureReason(primaryOutcome.error));
       const primary = balanceRecord(primaryOutcome.value);
-      const money = normalizeKalshiMoney(primary);
+      const money = normalizePrimaryDisplayMoney(primary);
       if (money.cashCents === null && money.portfolioValueCents === null) {
-        return unverified("PRIMARY_BALANCE_INVALID_RESPONSE");
+        return { ...unverified("PRIMARY_BALANCE_INVALID_RESPONSE"), primary: money, displayObservedAtMs };
       }
       const [limits, bot, positions, orders, fills, settlements, transfers] = await Promise.all([
         settled("/trade-api/v2/account/limits"),
@@ -547,6 +536,9 @@ export function createDatabaseUserScopePort(
         },
       });
       assembled.primary = money;
+      // Wallet presentation only: retain fractional-cent bot cash without
+      // weakening any execution, transfer or reconciliation parser.
+      assembled.botSubaccount = bot === null ? null : normalizeWalletDisplayMoney(balanceRecord(bot));
       if (limits === null) {
         assembled.apiUsageTier = null;
         assembled.botEligible = false;

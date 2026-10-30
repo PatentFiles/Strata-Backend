@@ -6,7 +6,7 @@ import {
   subaccountIdentitiesFromBalancePayload,
   summarizeSubaccountInventory,
 } from "./commissioning";
-import { normalizeKalshiMoney } from "./kalshiUserRead";
+import { ownedBalanceMicros } from "./ownedCashPrecision";
 
 export interface CredentialProbeMaterial {
   keyId: string;
@@ -471,7 +471,7 @@ function pairEvidence(payload: unknown): { ok: true; evidenceMicros: string } | 
   if (exchangeIndex !== undefined && exchangeIndex !== null && exchangeIndex !== PRODUCTION_EXCHANGE_INDEX) {
     return { ok: false, reason: "account_target_pair_mismatch" };
   }
-  const money = normalizeKalshiMoney(nested);
-  if (money.cashCents === null) return { ok: false, reason: "credential_balance_unproven" };
-  return { ok: true, evidenceMicros: String(money.cashCents * 10_000) };
+  const evidenceMicros = ownedBalanceMicros(nested);
+  if (evidenceMicros === null) return { ok: false, reason: "credential_balance_unproven" };
+  return { ok: true, evidenceMicros };
 }

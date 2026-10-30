@@ -1,3 +1,4 @@
+import "./ownedCashPrecision.test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
@@ -874,4 +875,12 @@ test("a currently closed signed technical entry gate refuses before order transp
  await assert.rejects(restored.submit({reduceOnly:false} as Request,async()=>{finalCalls++;}),
    /entries_stopped/);
  assert.equal(finalCalls,0);
+});
+
+test("START compares fractional-cent cash exactly and retains freshness and reserve gates",()=>{
+ const proof={ledgerMicros:"24482500",exchangeMicros:"24482500",reservedMicros:"1",reconciledAt:new Date(NOW),observedAtMs:NOW};
+ assert.deepEqual(verifiedStartCash(proof),{ok:true});
+ assert.deepEqual(verifiedStartCash({...proof,exchangeMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
+ assert.deepEqual(verifiedStartCash({...proof,reservedMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
+ assert.deepEqual(verifiedStartCash({...proof,observedAtMs:NOW+900001}),{ok:false,reason:"fresh_cash_reconciliation_required"});
 });

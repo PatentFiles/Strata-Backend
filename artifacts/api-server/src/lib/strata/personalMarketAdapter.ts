@@ -1,3 +1,5 @@
+import { ownedBalanceMicros } from "./ownedCashPrecision";
+import { cents } from "../v13-production/types";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
 import type { V13DepthLevel } from "../v13ExecutionPlanner";
 import type { V13VerifiedFeeEvidence } from "../v13LiveMoneyEntryPreflight";
@@ -98,13 +100,14 @@ export function readSubaccountSpendableCash(input: {
   }
   const bot = normalizeKalshiMoney(input.subaccountBalance);
   const primary = normalizeKalshiMoney(input.primaryBalance);
-  if (bot.cashCents === null || !Number.isSafeInteger(bot.cashCents) || bot.cashCents < 0) {
+  const cashMicros = ownedBalanceMicros(input.subaccountBalance);
+  if (cashMicros === null) {
     return { ok: false, reason: "cash_unproven" };
   }
   return {
     ok: true,
-    cashCents: bot.cashCents,
-    cashMicros: String(bot.cashCents * 10_000),
+    cashCents: cents(BigInt(cashMicros)),
+    cashMicros,
     portfolioValueCents: bot.portfolioValueCents,
     primaryCashCents: primary.cashCents,
   };
