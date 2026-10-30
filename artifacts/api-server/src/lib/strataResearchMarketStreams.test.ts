@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket,marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat} from "./strataResearchMarketStreams";
+import {researchDiagnosticSummary,createResearchDiagnosticReporter,MarketEventAgeWindow,SequencedKalshiBook,parseCoinbaseRealtimeTicker,evaluateTriangulatedMarket,marketStreamStalled,marketBookNeedsRefresh,validCoinbaseHeartbeat} from "./strataResearchMarketStreams";
 const ticker="KXBTC15M-26OCT221530-30";
 const marketId="9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1";
 const now=Date.parse("2026-10-22T15:20:05.000Z");
@@ -109,4 +109,76 @@ test("stalled subscribe/heartbeat and quiet books require recovery without claim
  assert.equal(marketBookNeedsRefresh(now,now+14000,now+15001),false);
  assert.equal(marketBookNeedsRefresh(now,now+15001,now+26000),true);
  assert.equal(marketBookNeedsRefresh(now,now+15001,now+25000),false);
+});
+
+test("three-source alignment includes exchange book time, not just two spot clocks",()=>{
+ const b=new SequencedKalshiBook(ticker);b.ingest(snap(),now);
+ const cb=parseCoinbaseRealtimeTicker({type:"ticker",product_id:"BTC-USD",
+   sequence:10,time:new Date(now-200).toISOString(),price:"68501.50",
+   best_bid:"68501.00",best_ask:"68502.00"},now)!;
+ const index={indexUsd:"68500.50",sourceAtMs:now-150};
+ const book=b.get(now);
+ const oldBook={...book,exchangeSendingAtMs:now-4000};
+ const separate=evaluateTriangulatedMarket(index,cb,oldBook,now);
+ assert.equal(separate.sequencedKalshiBookFresh,true);
+ assert.equal(separate.sourcesFreshAndAligned,false);
+ assert.equal(separate.reason,"KALSHI_BOOK_TIME_NOT_ALIGNED");
+ assert.equal(separate.allSourceSkewMs,3850);
+ assert.equal(separate.spotBasisUsd,1); // Two-source basis is still valid.
+ assert.equal(evaluateTriangulatedMarket(index,cb,{...book,
+   exchangeSendingAtMs:now-1350},now).sourcesFreshAndAligned,true);
+ assert.equal(evaluateTriangulatedMarket(index,cb,{...book,
+   exchangeSendingAtMs:now-1351},now).sourcesFreshAndAligned,false);
+ for(const exchangeSendingAtMs of [null,NaN,Infinity,now+1,now-5001]){
+   const result=evaluateTriangulatedMarket(index,cb,{...book,exchangeSendingAtMs},now);
+   assert.equal(result.sourcesFreshAndAligned,false);
+   assert.equal(result.sequencedKalshiBookFresh,false);
+ }
+ assert.equal(evaluateTriangulatedMarket(index,cb,{...book,receivedAtMs:now-2501},now)
+   .sourcesFreshAndAligned,false);
+ for(const indexUsd of ["Infinity","NaN","-1","0"]){
+   const result=evaluateTriangulatedMarket({...index,indexUsd},cb,book,now);
+   assert.equal(result.referenceFresh,false);
+   assert.equal(result.sourcesFreshAndAligned,false);
+ }
+ assert.equal(separate.tradingAuthority,false);
+ assert.equal(separate.exchangeFillVerified,false);
+ assert.equal(separate.settlementVerified,false);
+});
+
+test("research summary explicitly whitelists operational fields without market/account data",()=>{
+ const source={state:{coinbase:"CONNECTED",kalshiOrderbook:"CONNECTED",
+   brtiSettlement:"BRTI_CONFIRMED",brtiInstant5Hz:"DISABLED"},
+  health:{referenceFresh:true,coinbaseFresh:true,sequencedKalshiBookFresh:true,
+    sourcesFreshAndAligned:true,allSourceSkewMs:123},
+  diagnostics:{cbInvalid:0,cbSequenceRegressions:0,kalshiReconnects:0,bookGaps:0,bookInvalid:0,
+   ageDiagnostics:{coinbaseTickerEvent:{samples:256,p95Ms:150},kalshiOrderbookUpdate:{samples:3,p95Ms:200}}},
+  ticker:"SECRET_MARKET",accountId:"SECRET_ACCOUNT",sources:{price:999999},
+  headers:{Authorization:"SECRET_HEADER"},lastError:"SECRET_ERROR"};
+ const result=researchDiagnosticSummary(source,1.23456);
+ assert.deepEqual(Object.keys(result),["event","mode","tradingAuthority","coinbaseState","bookState",
+  "brtiState","brti5HzState","referenceFresh","coinbaseFresh","bookFresh","sourcesFreshAndAligned",
+  "allSourceSkewMs","coinbaseAgeSamples","coinbaseEventAgeP95Ms","bookAgeSamples","bookEventAgeP95Ms",
+  "cbInvalid","cbSequenceRegressions","kalshiReconnects","bookGaps","bookInvalid","lastMarketLookupMs","ageAuthority"]);
+ assert.equal(JSON.stringify(result).includes("SECRET"),false);
+ assert.equal(result.lastMarketLookupMs,1.235);
+ assert.equal(result.tradingAuthority,false);
+ const bad=researchDiagnosticSummary({...source,state:{...source.state,coinbase:"SECRET_ERROR"},
+   health:{...source.health,allSourceSkewMs:Infinity}},NaN);
+ assert.equal(bad.coinbaseState,"UNAVAILABLE");
+ assert.equal(bad.allSourceSkewMs,null);assert.equal(bad.lastMarketLookupMs,null);
+});
+
+test("research reporter is lazy, at most once per60s, and contains read/write failures",()=>{
+ let reads=0,writes=0;
+ const read=()=>{reads++;return {} as ReturnType<typeof researchDiagnosticSummary>};
+ const report=createResearchDiagnosticReporter(()=>{writes++;throw Error("sink failed")});
+ for(const t of [NaN,Infinity,-1])report(t,read);
+ assert.equal(reads,0);
+ report(0,read);report(1,read);report(59999,read);
+ assert.equal(reads,1);assert.equal(writes,1);
+ report(60000,read);assert.equal(writes,2);
+ report(120000,()=>{reads++;throw Error("status failed")});
+ report(120001,read);assert.equal(reads,3);assert.equal(writes,2);
+ report(119999,read);assert.equal(reads,3); // Regressed clock cannot flood.
 });

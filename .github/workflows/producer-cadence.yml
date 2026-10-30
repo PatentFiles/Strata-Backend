@@ -1,7 +1,7 @@
 name: Producer cadence candidate
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
+    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
 permissions:
   contents: read
 jobs:
@@ -17,7 +17,7 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
-      - run: node --experimental-strip-types --test artifacts/api-server/src/lib/forwardTestCadence.test.mjs
+      - run: node --experimental-strip-types --test artifacts/api-server/src/lib/forwardTestCadence.test.mjs artifacts/api-server/src/lib/forwardTestFeedValidation.test.mjs
       - name: Verify committed-signal wake, burst coalescing and STOP
         working-directory: artifacts/api-server
         env:

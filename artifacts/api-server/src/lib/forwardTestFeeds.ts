@@ -65,8 +65,29 @@ function date(value: unknown) {
   return Number.isFinite(parsed) ? new Date(parsed) : null;
 }
 
-function offer(value: number | null) {
-  return value === null ? null : value > 1 ? value / 100 : value;
+/** Provider units come from the field, never from a value threshold. A present
+ * fixed-point dollar field is authoritative, including when malformed; do not
+ * silently substitute a rounded legacy cent field or invent a plausible quote.
+ */
+function marketPrice(source:Record<string,unknown>,dollars:string,legacyCents:string,aliases:string[]):number|null {
+  if(Object.prototype.hasOwnProperty.call(source,dollars)) {
+    const value=source[dollars];
+    if(typeof value!=="string"||!/^\d+(?:\.\d{1,6})?$/.test(value))return null;
+    const parsed=Number(value);
+    return Number.isFinite(parsed)&&parsed>=0&&parsed<=1?parsed:null;
+  }
+  if(Object.prototype.hasOwnProperty.call(source,legacyCents)) {
+    const value=source[legacyCents];
+    if((typeof value!=="number"&&typeof value!=="string")||!/^\d+$/.test(String(value)))return null;
+    const parsed=Number(value);
+    return Number.isSafeInteger(parsed)&&parsed>=0&&parsed<=100?parsed/100:null;
+  }
+  // Historical non-provider aliases retain their existing convention only when
+  // neither authoritative provider field exists.
+  const value=firstNumber(source,aliases);
+  if(value===null)return null;
+  const parsed=value>1?value/100:value;
+  return parsed>=0&&parsed<=1?parsed:null;
 }
 
 function targetOf(market: Record<string, unknown>) {
@@ -82,11 +103,11 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
   const market = value as Record<string, unknown>;
   const ticker = firstString(market, ["ticker", "market_ticker"]);
   if (!ticker) return null;
-  const yesBid = offer(firstNumber(market, ["yes_bid", "yes_bid_dollars", "yesBid", "best_yes_bid"]));
-  const yesAsk = offer(firstNumber(market, ["yes_ask", "yes_ask_dollars", "yesAsk", "best_yes_ask"]));
-  const noBid = offer(firstNumber(market, ["no_bid", "no_bid_dollars", "noBid", "best_no_bid"]));
-  const noAsk = offer(firstNumber(market, ["no_ask", "no_ask_dollars", "noAsk", "best_no_ask"]));
-  const last = offer(firstNumber(market, ["last_price", "last_price_dollars", "lastPrice", "yes_price"]));
+  const yesBid = marketPrice(market, "yes_bid_dollars", "yes_bid", ["yesBid", "best_yes_bid"]);
+  const yesAsk = marketPrice(market, "yes_ask_dollars", "yes_ask", ["yesAsk", "best_yes_ask"]);
+  const noBid = marketPrice(market, "no_bid_dollars", "no_bid", ["noBid", "best_no_bid"]);
+  const noAsk = marketPrice(market, "no_ask_dollars", "no_ask", ["noAsk", "best_no_ask"]);
+  const last = marketPrice(market, "last_price_dollars", "last_price", ["lastPrice", "yes_price"]);
   const yesPrice = yesBid !== null && yesAsk !== null
     ? (yesBid + yesAsk) / 2 : yesAsk ?? yesBid ?? last;
   const noPrice = noBid !== null && noAsk !== null

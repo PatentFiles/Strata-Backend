@@ -193,21 +193,89 @@ export function evaluateTriangulatedMarket(
  brti:{indexUsd:string;sourceAtMs:number}|null,
  coinbase:CoinbaseTicker|null,book:MarketDepthState|null,nowMs:number,
 ){
- const b=brti&&Number(brti.indexUsd);
- const aligned=Boolean(b&&Number.isFinite(b)&&b>0&&coinbase&&
-   Math.abs(coinbase.sourceAtMs-brti!.sourceAtMs)<=1200&&
-   nowMs-brti!.sourceAtMs>=0&&nowMs-brti!.sourceAtMs<=3000&&
-   nowMs-coinbase.sourceAtMs>=0&&nowMs-coinbase.sourceAtMs<=3000);
- const hasBook=Boolean(book?.ready);
+ const b=brti?Number(brti.indexUsd):NaN;
+ const freshTime=(stamp:number|null|undefined,maxAgeMs:number)=>
+   Number.isSafeInteger(nowMs)&&Number.isSafeInteger(stamp)&&
+   nowMs-stamp!>=0&&nowMs-stamp!<=maxAgeMs;
+ const referenceFresh=Boolean(Number.isFinite(b)&&b>0&&
+   freshTime(brti?.sourceAtMs,3000));
+ const coinbaseFresh=Boolean(coinbase&&freshTime(coinbase.sourceAtMs,3000));
+ const aligned=Boolean(referenceFresh&&coinbaseFresh&&
+   Math.abs(coinbase!.sourceAtMs-brti!.sourceAtMs)<=1200);
+ // Freshness and simultaneity are different claims. A valid sequenced book
+ // may be up to five seconds old; that does not make it aligned with the
+ // two current spot references. Use the exchange sending timestamp, never
+ // receipt time or the exchange's opaque sequence/clock counters.
+ const hasBook=Boolean(book?.ready&&
+   freshTime(book.exchangeSendingAtMs,5000)&&freshTime(book.receivedAtMs,2500));
+ const allSourceSkewMs=aligned&&hasBook?
+   Math.max(brti!.sourceAtMs,coinbase!.sourceAtMs,book!.exchangeSendingAtMs!)-
+   Math.min(brti!.sourceAtMs,coinbase!.sourceAtMs,book!.exchangeSendingAtMs!):null;
+ const allAligned=allSourceSkewMs!==null&&allSourceSkewMs<=1200;
  return {mode:"RESEARCH_ONLY" as const,tradingAuthority:false as const,
    settlementVerified:false as const,exchangeFillVerified:false as const,
-   referenceFresh:Boolean(b&&nowMs-brti!.sourceAtMs>=0&&nowMs-brti!.sourceAtMs<=3000),
-   coinbaseFresh:Boolean(coinbase&&nowMs-coinbase.sourceAtMs>=0&&nowMs-coinbase.sourceAtMs<=3000),
+   referenceFresh,coinbaseFresh,
    sequencedKalshiBookFresh:hasBook,
-   sourcesFreshAndAligned:Boolean(aligned&&hasBook),
+   sourcesFreshAndAligned:allAligned,
    publisherSkewMs:aligned?Math.abs(coinbase!.sourceAtMs-brti!.sourceAtMs):null,
-   spotBasisUsd:aligned?Math.round((coinbase!.priceUsd-b!)*100)/100:null,
+   allSourceSkewMs,
+   spotBasisUsd:aligned?Math.round((coinbase!.priceUsd-b)*100)/100:null,
    reason:!aligned?"UNVERIFIED_SOURCE_TIME_ALIGNMENT":!hasBook?"KALSHI_BOOK_UNAVAILABLE":
+    !allAligned?"KALSHI_BOOK_TIME_NOT_ALIGNED":
     "REFERENCE_TRIANGULATION_OBSERVED_NOT_EXECUTABLE",
    warning:"Book depth is displayed, not guaranteed IOC fills. BRTI instantaneous ticks are not final-minute settlement. No trade authorization."};
+}
+
+/** Whitelisted, low-frequency operational evidence. Never log a raw source
+ * frame/status object: it also contains prices, market IDs and error text. */
+type ResearchAgeSummary={samples:number;p95Ms:number|null};
+type ResearchDiagnosticInput={
+ state:{coinbase:string;kalshiOrderbook:string;brtiSettlement:string;brtiInstant5Hz:string};
+ health:{referenceFresh:boolean;coinbaseFresh:boolean;sequencedKalshiBookFresh:boolean;
+   sourcesFreshAndAligned:boolean;allSourceSkewMs:number|null};
+ diagnostics:{cbInvalid:number;cbSequenceRegressions:number;kalshiReconnects:number;
+   bookGaps:number;bookInvalid:number;
+   ageDiagnostics:{coinbaseTickerEvent:ResearchAgeSummary;kalshiOrderbookUpdate:ResearchAgeSummary}};
+};
+const diagnosticStates=new Set(["DISABLED","CONNECTING","UNAVAILABLE","CONNECTED",
+ "AWAITING_SNAPSHOT","CONFIG_MISSING","BRTI_CONFIRMED","NO_ENTITLEMENT",
+ "DISCONNECTED","SUBSCRIBING","CONFIRMED","DEGRADED"]);
+export function researchDiagnosticSummary(input:ResearchDiagnosticInput,
+ lastMarketLookupMs:number|null){
+ const count=(x:number)=>Number.isSafeInteger(x)&&x>=0?x:null;
+ const age=(x:number|null)=>x!==null&&Number.isFinite(x)&&x>=0?
+   Math.round(x*1000)/1000:null;
+ const state=(x:string)=>diagnosticStates.has(x)?x:"UNAVAILABLE";
+ return {event:"strata_market_research_summary",mode:"RESEARCH_ONLY",
+  tradingAuthority:false,
+  coinbaseState:state(input.state.coinbase),bookState:state(input.state.kalshiOrderbook),
+  brtiState:state(input.state.brtiSettlement),brti5HzState:state(input.state.brtiInstant5Hz),
+  referenceFresh:input.health.referenceFresh===true,
+  coinbaseFresh:input.health.coinbaseFresh===true,
+  bookFresh:input.health.sequencedKalshiBookFresh===true,
+  sourcesFreshAndAligned:input.health.sourcesFreshAndAligned===true,
+  allSourceSkewMs:age(input.health.allSourceSkewMs),
+  coinbaseAgeSamples:count(input.diagnostics.ageDiagnostics.coinbaseTickerEvent.samples),
+  coinbaseEventAgeP95Ms:age(input.diagnostics.ageDiagnostics.coinbaseTickerEvent.p95Ms),
+  bookAgeSamples:count(input.diagnostics.ageDiagnostics.kalshiOrderbookUpdate.samples),
+  bookEventAgeP95Ms:age(input.diagnostics.ageDiagnostics.kalshiOrderbookUpdate.p95Ms),
+  cbInvalid:count(input.diagnostics.cbInvalid),
+  cbSequenceRegressions:count(input.diagnostics.cbSequenceRegressions),
+  kalshiReconnects:count(input.diagnostics.kalshiReconnects),
+  bookGaps:count(input.diagnostics.bookGaps),bookInvalid:count(input.diagnostics.bookInvalid),
+  lastMarketLookupMs:age(lastMarketLookupMs),
+  ageAuthority:"LOCAL_RECEIPT_MINUS_SOURCE_EVENT_CLOCK_NOT_RTT"};
+}
+/** Called by the existing observer monitor only. No timer, I/O, or DB work
+ * is created here. Advance before the sink so failure cannot cause flooding. */
+export function createResearchDiagnosticReporter(
+ write:(summary:ReturnType<typeof researchDiagnosticSummary>)=>void,
+){
+ let lastAttempt:number|null=null;
+ return (monotonicNowMs:number,read:()=>ReturnType<typeof researchDiagnosticSummary>)=>{
+  if(!Number.isFinite(monotonicNowMs)||monotonicNowMs<0)return;
+  if(lastAttempt!==null&&monotonicNowMs-lastAttempt<60_000)return;
+  lastAttempt=monotonicNowMs;
+  try{write(read());}catch{/* Optional diagnostics never control processing. */}
+ };
 }

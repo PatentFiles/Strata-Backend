@@ -11,6 +11,7 @@ on:
       - 'lib/db/drizzle/0044_v13_signal_decision_trace.sql'
       - '.github/workflows/continuous-grant-safety.yml'
       - 'artifacts/api-server/src/lib/forwardTestCadence*'
+      - 'artifacts/api-server/src/lib/forwardTestFeedValidation*'
       - 'artifacts/api-server/src/lib/forwardTestWorker.ts'
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'artifacts/api-server/src/lib/v13-production/executor.ts'

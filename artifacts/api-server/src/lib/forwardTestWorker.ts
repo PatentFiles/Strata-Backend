@@ -1,3 +1,4 @@
+import {forwardTestFeedError} from "./forwardTestFeedValidation";
 import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
 import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
@@ -32,7 +33,6 @@ import { autonomousShadowLearningConfigured, runAutonomousShadowResearch } from 
 
 export const FORWARD_TEST_CADENCE_MS = 5_000;
 const LEASE_SECONDS = 20;
-const FRESHNESS_MS = 15_000;
 const POINT_HISTORY_MS = 120_000;
 const PAPER_STAKE = 5;
 
@@ -70,51 +70,6 @@ function sideOf(buffer: number) {
   return buffer > 0 ? "UP" : buffer < 0 ? "DOWN" : "AT";
 }
 
-function feedError(
-  btc: BtcObservation,
-  market: MarketObservation,
-  now: Date,
-  hasOpenPosition: boolean,
-) {
-  const age = (value: Date) => now.getTime() - value.getTime();
-  if (!Number.isFinite(btc.price) || btc.price <= 0 ||
-      !Number.isFinite(btc.receivedAt.getTime()) ||
-      !Number.isFinite(btc.providerAt.getTime()) ||
-      age(btc.providerAt) < -FRESHNESS_MS || age(btc.providerAt) > FRESHNESS_MS ||
-      age(btc.receivedAt) < -FRESHNESS_MS || age(btc.receivedAt) > FRESHNESS_MS) {
-    return "Coinbase BTC feed is missing, malformed, or stale";
-  }
-  if (!market.ticker.startsWith("KXBTC15M") ||
-      !Number.isFinite(market.fetchedAt.getTime()) ||
-      age(market.fetchedAt) < -FRESHNESS_MS || age(market.fetchedAt) > FRESHNESS_MS ||
-      market.target === null || !Number.isFinite(market.target) || market.target <= 0 ||
-      market.endsAt === null || !Number.isFinite(market.endsAt.getTime())) {
-    return "Kalshi market ticker, target, end time, or snapshot is missing or stale";
-  }
-  if (!hasOpenPosition && (
-    market.startsAt === null || !Number.isFinite(market.startsAt.getTime()) ||
-    market.startsAt.getTime() > now.getTime() ||
-    market.startsAt.getTime() >= market.endsAt.getTime() ||
-    (market.status !== "open" && market.status !== "active") ||
-    market.endsAt.getTime() <= now.getTime() ||
-    !validOffer(market.yesAsk) || !validOffer(market.noAsk)
-  )) return "Kalshi market is closed or a required side offer is missing";
-  if (hasOpenPosition && market.result === null &&
-      market.endsAt.getTime() > now.getTime() &&
-      market.status !== "open" && market.status !== "active") {
-    return "Open paper position's Kalshi market is no longer active without settlement";
-  }
-  if (hasOpenPosition && market.result === null &&
-      market.endsAt.getTime() > now.getTime() &&
-      (!validOffer(market.yesPrice) || !validOffer(market.noPrice) ||
-       !validOffer(market.yesBid) || !validOffer(market.noBid))) {
-    return "Open paper position cannot be marked or exited with a missing executable bid";
-  }
-  // An already-open position can settle only from an explicit Kalshi result.
-  // Expiry alone is not settlement evidence, and a missing quote never
-  // authorizes a new entry.
-  return null;
-}
 
 function velocityOf(points: { price: number; time: number }[]) {
   if (points.length < 2) return null;
@@ -213,7 +168,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     await recordCycleError({ owner, epoch, engineId }, reason);
     return { evaluationId: null, signal: "PASS", marketTicker: null, positionId: null, error: reason };
   }
-  const invalid = feedError(btc, market, now, Boolean(priorPosition));
+  const invalid = forwardTestFeedError(btc, market, now, Boolean(priorPosition));
   if (invalid) {
     await recordCycleError({ owner, epoch, engineId }, invalid);
     return { evaluationId: null, signal: "PASS", marketTicker: market.ticker,
