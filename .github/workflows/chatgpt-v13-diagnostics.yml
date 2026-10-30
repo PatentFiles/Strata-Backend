@@ -1,13 +1,42 @@
 name: ChatGPT V13 diagnostics
 
+# Preserve full security/typecheck/Postgres suite for code and dependency changes.
+# Do not spend runner minutes for docs, research notes or screenshots.
 on:
   push:
     branches:
       - main
+    paths:
+      - 'artifacts/**'
+      - 'lib/**'
+      - 'scripts/**'
+      - 'sql/**'
+      - 'supabase/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig*.json'
+      - '.github/workflows/chatgpt-v13-diagnostics.yml'
   pull_request:
     branches:
       - main
+    paths:
+      - 'artifacts/**'
+      - 'lib/**'
+      - 'scripts/**'
+      - 'sql/**'
+      - 'supabase/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig*.json'
+      - '.github/workflows/chatgpt-v13-diagnostics.yml'
   workflow_dispatch:
+
+# Cancel superseded PR checks; never cancel an in-progress mainline safety run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

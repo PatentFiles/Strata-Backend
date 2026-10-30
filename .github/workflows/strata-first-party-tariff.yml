@@ -1,11 +1,29 @@
 name: First-party Kalshi tariff evidence parser
 
+# Tariff parser tests remain automatic for the actual parser and dependencies.
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'artifacts/api-server/src/lib/strata/officialTariffHtmlObservation*'
+      - 'artifacts/api-server/package.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/strata-first-party-tariff.yml'
   push:
     branches: [main]
+    paths:
+      - 'artifacts/api-server/src/lib/strata/officialTariffHtmlObservation*'
+      - 'artifacts/api-server/package.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/strata-first-party-tariff.yml'
   workflow_dispatch:
+
+# Cancel superseded PR checks; never cancel an in-progress mainline safety run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

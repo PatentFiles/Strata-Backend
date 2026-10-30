@@ -13,7 +13,21 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedReadOnly*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoAuthenticatedProbe*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoSignedIoc*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocLedger*'
+      - 'artifacts/api-server/src/lib/strata/kalshiDemoIocQualification*'
+      - 'sql/strata_demo_ioc_private.sql'
+      - 'artifacts/api-server/src/scripts/runKalshiDemoAuthenticatedGet.ts'
+      - '.github/workflows/kalshi-demo-signed-readonly.yml'
   workflow_dispatch:
+# Cancel superseded PR checks; never cancel an in-progress mainline safety run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 jobs:

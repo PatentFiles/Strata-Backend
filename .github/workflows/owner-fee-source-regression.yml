@@ -2,6 +2,30 @@ name: Operator fee-source authorization and final-order regression
 on:
   push:
     branches: [main]
+    paths:
+      - 'artifacts/api-server/src/lib/strata/operatorFee*'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact*'
+      - 'artifacts/api-server/src/lib/strata/monetaryFeeContract*'
+      - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/apiFeeRateReference*'
+      - 'artifacts/api-server/src/lib/strata/ownerFee*'
+      - 'artifacts/api-server/src/lib/strata/legacyOfficialFeeCaptureGate*'
+      - 'artifacts/api-server/src/lib/strata/commissioningStore.ts'
+      - 'artifacts/api-server/src/lib/strata/guardedOwnerFeeWire*'
+      - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
+      - 'artifacts/api-server/src/lib/strata/personalPolicyApproval.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/strata/inAppProtectiveRelease*'
+      - 'artifacts/api-server/src/lib/v13-production/sanitize*'
+      - 'artifacts/api-server/src/lib/strata/protectiveReleaseFeePreflight*'
+      - 'artifacts/api-server/src/lib/strata/verifiedOfficialFeeSnapshotLease.ts'
+      - 'artifacts/api-server/src/routes/protectiveReleaseRouter.ts'
+      - 'artifacts/api-server/src/lib/strata/protectiveExitStartupRelease*'
+      - 'artifacts/api-server/src/lib/strata/workerUncertainOrderGate*'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
+      - 'sql/strata_fee_source_policy_independent_reviews.sql'
+      - 'sql/strata_emergency_exit_reservation_private.sql'
+      - '.github/workflows/owner-fee-source-regression.yml'
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
@@ -27,6 +51,11 @@ on:
       - 'sql/strata_fee_source_policy_independent_reviews.sql'
       - 'sql/strata_emergency_exit_reservation_private.sql'
       - '.github/workflows/owner-fee-source-regression.yml'
+# Cancel superseded PR checks; never cancel an in-progress mainline safety run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 jobs:
