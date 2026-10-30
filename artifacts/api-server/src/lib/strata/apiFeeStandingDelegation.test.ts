@@ -200,3 +200,52 @@ test("issue165: standing status never exposes another owner's historical grant",
  const fail=await inspectStandingFeeReadiness("not-owner",{db:db as never,sha:()=>SHA});
  assert.equal(fail.bootstrapGrantId,null);
 });
+
+test("noncommissioned reviewer receives global canonical model digest and exact release without account authority",async()=>{
+ const {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256:digest}=await import('./apiFeeRateReference');
+ const queries:string[]=[];
+ const result=await inspectStandingFeeReadiness(OWNER,{sha:()=>SHA,db:{query:async(sql:string)=>{
+  queries.push(sql);return {rows:[]};
+ }} as never});
+ assert.equal(result.ok,true);
+ assert.equal('rateDecisionDigest' in result?result.rateDecisionDigest:null,digest);
+ assert.equal('sha' in result?result.sha:null,SHA);
+ assert.equal(result.modelId,null);assert.equal(result.bootstrapGrantId,null);
+ assert.equal(result.tradingAuthorized,false);assert.equal(result.policyApproved,false);
+ assert.ok(queries.every(sql=>sql.startsWith('SELECT')));
+});
+
+test("standing model review rejects wrong digest or stale displayed release before provider/database access",async()=>{
+ const {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256:digest}=await import('./apiFeeRateReference');
+ let calls=0;
+ const deps={sha:()=>SHA,db:{query:async()=>{calls++;throw Error('unexpected');},connect:async()=>{calls++;throw Error('unexpected');}} as never,
+  probe:async()=>{calls++;return currentOfficialMarket() as never;}};
+ const input={confirmation:STANDING_MODEL_CONFIRM,rateDecisionDigest:digest,expectedSha:SHA,
+  evidenceUrl:'https://kalshi.com/docs/kalshi-fee-schedule.pdf',evidenceSha256:'c'.repeat(64),note:'Independent offline test evidence. '.repeat(6)};
+ for(const change of [{rateDecisionDigest:'0'.repeat(64)},{expectedSha:'b'.repeat(40)},{expectedSha:''}]){
+  const result=await signStandingFeeModel(OWNER,{...input,...change},deps);
+  assert.equal(result.ok,false,JSON.stringify(change));
+ }
+ assert.equal(calls,0);
+});
+
+test("global digest availability cannot grant reviewer privileges; verified ADMIN needs no own trading account",async()=>{
+ const {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256:digest}=await import('./apiFeeRateReference');
+ for(const authorized of [false,true]){
+  const calls:string[]=[];
+  const query=async(sql:string)=>{
+   calls.push(sql);
+   if(sql.includes('FROM auth.users u JOIN private.role_assignments'))return {rows:authorized?[{one:1}]:[]};
+   if(sql.startsWith('INSERT INTO private.strata_api_fee_standing_models'))return {rows:[{model_id:MODEL,valid_until:'2026-12-01T00:00:00Z'}]};
+   if(sql.includes('public.v13_production_account'))throw Error('reviewer own account must not be required');
+   return {rows:[]};
+  };
+  const result=await signStandingFeeModel(OWNER,{confirmation:STANDING_MODEL_CONFIRM,rateDecisionDigest:digest,expectedSha:SHA,
+   evidenceUrl:'https://kalshi.com/docs/kalshi-fee-schedule.pdf',evidenceSha256:'c'.repeat(64),note:'Independent offline test evidence. '.repeat(6)},
+  {sha:()=>SHA,db:{query,connect:async()=>({query,release(){}})} as never,probe:async()=>currentOfficialMarket() as never});
+  assert.equal(result.ok,authorized,JSON.stringify(result));assert.equal(result.tradingAuthorized,false);
+  assert.equal(calls.some(sql=>sql.startsWith('INSERT')),authorized);
+  assert.equal(calls.includes('COMMIT'),authorized);
+  assert.equal(calls.some(sql=>sql.includes('standing_delegations')||sql.includes('continuous_execution_grants')),false);
+ }
+});
