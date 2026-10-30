@@ -29,6 +29,7 @@ import { forwardTestStartupDecision } from "./forwardTestStartupGate";
 export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
 import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
 import { ensureV13BuiltInResearchChallengers, recordV13ShadowOpportunities } from "./v13StrategyResearch";
+import { AutonomousShadowSchedule } from "./autonomousShadowSchedule";
 import { autonomousShadowLearningConfigured, runAutonomousShadowResearch } from "./v13AutonomousShadowLearning";
 
 export const FORWARD_TEST_CADENCE_MS = 5_000;
@@ -420,7 +421,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   const controller = new AbortController();
   let stopped = false;
   let lease: Awaited<ReturnType<typeof acquireWorkerLease>> = null;
-  let lastAutolearnDay: string | null = null;
+  const autonomousResearch=new AutonomousShadowSchedule();
   const researchLane=new OptionalResearchLane();
   const bookCaptureLane=new OptionalResearchLane();
   const discoveryRecovery=new BoundaryDiscoveryRecovery();
@@ -495,16 +496,13 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
             // committed cycle, on a separate non-blocking research promise.
             // The runtime flag is opt-in; no automatic promotion or trades.
             if (autonomousShadowLearningConfigured() && !controller.signal.aborted) {
-              const today = new Date().toISOString().slice(0,10);
-              if (today !== lastAutolearnDay) {
-                lastAutolearnDay = today;
-                void runAutonomousShadowResearch(new Date(),controller.signal)
-                  .then(result => logger.info({status:result.status,
-                    reason:result.reason,candidateId:result.candidateId??null},
-                    "Autonomous shadow-only learning cycle"))
-                  .catch(error => logger.warn({err:error},
-                    "Autonomous shadow research failed; champion unchanged"));
-              }
+              autonomousResearch.submit(Date.now(),
+                at=>runAutonomousShadowResearch(at,controller.signal),
+                result=>logger.info({status:result.status,
+                  reason:result.reason,candidateId:result.candidateId??null},
+                  "Autonomous shadow-only learning cycle"),
+                error=>logger.warn({err:error},
+                  "Autonomous shadow research failed; daily retries bounded, champion unchanged"));
             }
           }
         }
@@ -529,6 +527,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
     running: true,
     stop: async () => {
       stopped = true;
+      autonomousResearch.stop();
       controller.abort();
       await task;
     },
