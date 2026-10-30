@@ -1,3 +1,4 @@
+import {createPublicFeedJsonReader} from "./publicFeedJson";
 import { fetchKalshiPublicBook, type OrderbookRead } from "./forwardTestOrderbookDepth";
 // Public market data only. This module never authenticates with a trading
 // account and contains no order endpoint or trading capability.
@@ -130,26 +131,15 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
   };
 }
 
-async function getJson(url: string, signal?: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<unknown> {
-  const response = await fetchImpl(url, {
-    signal,
-    cache: "no-store",
-    redirect: "error",
-    credentials: "omit",
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) throw new Error(`Public market feed returned HTTP ${response.status}`);
-  return response.json() as Promise<unknown>;
-}
-
 /** Lists route discovery only. Their cached quotes/status are never promoted
  * into a current snapshot; refresh the selected exact contract every cycle.
  */
-export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date()):ForwardTestFeeds {
+export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now()):ForwardTestFeeds {
+const getJson=createPublicFeedJsonReader(fetchImpl,()=>clock().getTime(),monotonicClock);
 return {
   book: fetchKalshiPublicBook,
   async btc(signal) {
-    const raw = await getJson(COINBASE, signal, fetchImpl);
+    const raw = await getJson("coinbase","btc_ticker",COINBASE,signal);
     if (!raw || typeof raw !== "object") throw new Error("Coinbase returned malformed BTC data");
     const payload = raw as Record<string, unknown>;
     const price = numeric(payload.price);
@@ -168,7 +158,7 @@ return {
     const url = ticker
       ? `${KALSHI}/${encodeURIComponent(ticker)}`
       : `${KALSHI}?series_ticker=KXBTC15M&min_close_ts=${windowStart+1}&max_close_ts=${windowStart+1800}&limit=100`;
-    const raw = await getJson(url, signal, fetchImpl);
+    const raw = await getJson("kalshi",ticker?"market_detail":"market_discovery",url,signal);
     if (!raw || typeof raw !== "object") throw new Error("Kalshi returned malformed market data");
     const payload = raw as { market?: unknown; markets?: unknown[] };
     const fetchedAt = clock();
@@ -185,7 +175,7 @@ return {
     // Explicit reads also manage expired positions/settlement, so their
     // established inactive-market behavior must remain available.
     if(ticker)return selected;
-    const detailRaw=await getJson(`${KALSHI}/${encodeURIComponent(selected.ticker)}`,signal,fetchImpl);
+    const detailRaw=await getJson("kalshi","market_detail",`${KALSHI}/${encodeURIComponent(selected.ticker)}`,signal);
     const detailAt=clock();
     const detail=detailRaw&&typeof detailRaw==='object'
       ?normalizeMarket((detailRaw as {market?:unknown}).market,detailAt):null;
