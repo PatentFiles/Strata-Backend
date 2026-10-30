@@ -72,3 +72,12 @@ test('malformed present dollar prices never fall back to legacy values or rescal
   assert.equal(m.yesBid,null,JSON.stringify(value));assert.equal(m.yesAsk,null,JSON.stringify(value));
  }
 });
+
+test('public 429 identifies provider and suppresses repeated requests without fabricating fresh data',async()=>{
+ let requests=0,wall=NOW,mono=100;
+ const api=createPublicForwardTestFeeds(async()=>{requests++;return new Response('',{status:429,headers:{'Retry-After':'60'}})},()=>new Date(wall),()=>mono);
+ await assert.rejects(api.btc(),/provider=coinbase.*HTTP 429.*retryAfterMs=60000/);
+ wall+=60_000;mono+=5000;
+ await assert.rejects(api.btc(),/provider=coinbase.*cooldown.*remainingMs=55000/);
+ assert.equal(requests,1);
+});
