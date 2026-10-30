@@ -50,6 +50,7 @@ export async function signStandingFeeModel(
  const release=(deps.sha??deployedGitSha)();
  if(!UUID.test(reviewerId)||!SHA.test(release)||b.confirmation!==STANDING_MODEL_CONFIRM||
     b.rateDecisionDigest!==PDF_FREE_API_RATE_REVIEW_DECISION_SHA256||
+    (b.expectedSha!==undefined&&b.expectedSha!==release)||
     !OFFICIAL.test(text(b.evidenceUrl))||!DIGEST.test(text(b.evidenceSha256))||
     typeof b.note!=="string"||String(b.note).trim().length<120||String(b.note).trim().length>1800)
    return deny("independent_official_model_review_evidence_required");
@@ -339,7 +340,10 @@ export async function inspectStandingFeeReadiness(
   const d=delegation.rows[0];
   return {
    ...deny(model?"standing_fee_model_reviewed_read_only":"independent_standing_fee_model_not_recorded"),
-   ok:true as const,modelId:model?text(model.model_id):null,
+   // Global, versioned rate-model identity, NOT an account/probe digest or
+   // an approval. Independent ADMIN reviewers need no funded trading account.
+   ok:true as const,sha:release,rateDecisionDigest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
+   modelId:model?text(model.model_id):null,
    modelValidUntil:model?.valid_until??null,
    delegationId:d?text(d.delegation_id):null,
    delegationValidUntil:d?.valid_until??null,
