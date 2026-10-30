@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 // A new cluster/database and credential-stripped child exist only for this run.
 const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const recovery = process.argv[2] === "--recovery";
+const restore = process.argv[2] === "--restore";
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
 const candidates = [...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
@@ -30,7 +31,7 @@ const server = createServer();
 await new Promise((resolve, reject) => { server.once("error", reject); server.listen(fullSuite ? 5432 : 0, "127.0.0.1", resolve); });
 const port = server.address().port;
 await new Promise(resolve => server.close(resolve));
-const db = fullSuite ? "v13_ci" : `${recovery ? "recovery" : "v13"}_disposable_${Date.now()}`;
+const db = fullSuite ? "v13_ci" : `${restore ? "restore" : recovery ? "recovery" : "v13"}_disposable_${Date.now()}`;
 const url = `postgresql://${user}@127.0.0.1:${port}/${db}`;
 const fence = join(root, "offline-network-fence.cjs");
 writeFileSync(fence, `
@@ -59,7 +60,8 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
   MICRO_LIVE_TEST_TIMEOUT_MS: "45000",
   NODE_PATH: join(api, "node_modules"),
   DATABASE_URL: url, V13_DISPOSABLE_DATABASE_URL: url,
-  ...(recovery ? {V13_RECOVERY_DISPOSABLE_URL:url} : {}) };
+  ...(recovery ? {V13_RECOVERY_DISPOSABLE_URL:url} : {}),
+  ...(restore ? {V13_RESTORE_DISPOSABLE_URL:url} : {}) };
 // Exercise the existing CI destination pin, never weaken it. Full-suite mode
 // exclusively owns a NEW local postgres/v13_ci cluster on 5432, or fails.
 if (fullSuite) { env.GITHUB_ACTIONS = "true"; env.CI = "true"; }
@@ -87,12 +89,12 @@ try {
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  if (!recovery) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  if (!recovery && !restore) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
     ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
   if (process.argv[2] === "--full-suite") {
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
   } else {
-    const testFile = recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
+    const testFile = restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",

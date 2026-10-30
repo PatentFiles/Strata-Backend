@@ -1,3 +1,4 @@
+import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
@@ -42,11 +43,50 @@ export async function ownerShaApprovalStatus(ownerId:string,sha:string,db:Query=
  }catch{return {available:false,active:false,approvalId:null};}
 }
 
+// This projection never grants entry authority. Only the explicit restore POST
+// may reuse existing consent after fresh signed proof and locked revalidation.
+async function restoreReviewCurrent(db:Query,owner:string,account:string,sha:string,policyHash:unknown,lock=false,required=false){
+ const reviews=await db.query(`SELECT release_id,state,revoked_at,policy_hash,independent_reviewer_id,
+  (created_at<=now()) AS created_current FROM private.strata_standing_execution_reviews
+  WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
+  ${lock?"FOR SHARE":""}`,[owner,account,sha]);
+ if(!reviews.rows.length)return !required;
+ return reviews.rows.filter(r=>r.state==="approved"&&r.revoked_at===null&&r.policy_hash===policyHash&&
+  r.created_current===true&&UUID.test(String(r.independent_reviewer_id))&&r.independent_reviewer_id!==owner).length===1;
+}
+export async function ownerRestoreStatus(ownerId:string,sha:string,db:Query=pool){
+ let scope:Record<string,string>={sha};
+ const no=(reason:string)=>({available:false,reason,...scope});
+ if(!UUID.test(ownerId)||!SHA.test(sha))return no("owner_restore_identity_invalid");
+ try{
+  const owner=await readReleaseOwner(db,ownerId);
+  if(!owner.ok)return no(owner.reason);
+  const a=owner.account;
+  scope={sha,accountId:String(a.id),policyId:String(a.policy_id),policyHash:String(a.policy_hash)};
+  if(isTrue(a.execution_enabled)||!isTrue(a.kill_switch)||a.blocked_reason!=null)
+   return no("owner_restore_requires_disabled_unfrozen_account");
+  const approvals=await db.query(`SELECT approval_id FROM private.strata_owner_sha_approvals
+   WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
+   AND revoked_at IS NULL`,[ownerId,a.id,sha]);
+  if(approvals.rows.length!==1)return no("owner_restore_existing_sha_approval_required");
+  const history=await db.query(`SELECT grant_id FROM private.strata_continuous_execution_grants
+   WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3`,[ownerId,a.id,sha]);
+  if(!await restoreReviewCurrent(db,ownerId,String(a.id),sha,a.policy_hash,false,history.rows.length>0))
+   return no("owner_restore_current_standing_review_required");
+  return {available:true,reason:"owner_restore_explicit_consent_and_fresh_proof_required",sha,
+   accountId:String(a.id),policyId:String(a.policy_id),policyHash:String(a.policy_hash)};
+ }catch{return no("owner_restore_status_unavailable");}
+}
+
 export async function authorizeOwnerShaRelease(
  ownerId:string,raw:unknown,deps:Dependencies={}
 ) {
  const args=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)(),db=deps.db??pool;
+ const restoring=args.restoreExistingApproval===true;
+ if(args.restoreExistingApproval!==undefined&&args.restoreExistingApproval!==true)
+  return reject("owner_restore_mode_invalid");
+ if(restoring&&args.expectedSha!==sha)return reject("owner_restore_exact_sha_required");
  if(!UUID.test(ownerId)||!SHA.test(sha)||args.qualificationId==null||
     !UUID.test(String(args.qualificationId))||args.confirmation!==OWNER_SHA_RELEASE_CONFIRM)
    return reject("owner_identity_sha_qualification_or_confirmation_invalid");
@@ -60,6 +100,8 @@ export async function authorizeOwnerShaRelease(
   const visible=await readReleaseOwner(db,ownerId);
   if(!visible.ok)return reject(visible.reason);
   const a=visible.account;
+  if(restoring&&(args.expectedAccountId!==a.id||args.expectedPolicyId!==a.policy_id||
+    args.expectedPolicyHash!==a.policy_hash))return reject("owner_restore_account_policy_scope_changed");
   const repair=a.blocked_reason==="awaiting_account_commissioning";
   const alreadyEnabled=isTrue(a.execution_enabled)&&!isTrue(a.kill_switch);
   // A provisioned account may have durable eligibility but be stopped.
@@ -69,7 +111,8 @@ export async function authorizeOwnerShaRelease(
     return reject("explicit_owner_commissioning_repair_confirmation_required");
   if(!repair&&args.provisionalRepairConfirmation!==undefined)
     return reject("commissioning_repair_confirmation_not_applicable");
-  if(repair||alreadyEnabled||stagedStopped){
+  if(restoring&&(repair||alreadyEnabled||stagedStopped))return reject("owner_restore_requires_disabled_unfrozen_account");
+  if(restoring||repair||alreadyEnabled||stagedStopped){
     const material=await loadedMaterial(db,a);
     if(!material)return reject("account_restricted_signer_unavailable");
     const observedAtMs=(deps.now??Date.now)();
@@ -77,12 +120,14 @@ export async function authorizeOwnerShaRelease(
     if(!feeds.ok||feeds.observedAtMs!==observedAtMs||
        (deps.now??Date.now)()-observedAtMs>15_000||
        String(feeds.cashMicros)!==String(a.cash_micros)||
-       feeds.orders.length!==0||feeds.fills.length!==0||feeds.settlements.length!==0)
+       (!restoring&&(feeds.orders.length!==0||feeds.fills.length!==0||feeds.settlements.length!==0)))
       return reject("fresh_exchange_zero_exposure_unverified");
     const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
-    const snapshot=personalAccountSnapshot(identity,feeds,[]);
-    if(!("identity" in snapshot)||snapshot.orders.length||snapshot.fills.length||
-       snapshot.positions.length||snapshot.settlements.length)
+    const history=restoring?(await db.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[a.id])).rows.map(r=>typeof r.request==="string"?JSON.parse(r.request):r.request):[];
+    const snapshot=personalAccountSnapshot(identity,feeds,history);
+    if(!("identity" in snapshot)||(restoring
+      ? feeds.historicalCoverageComplete!==true||!migrationFlatHistoryCheck(snapshot,history).ok
+      : snapshot.orders.length||snapshot.fills.length||snapshot.positions.length||snapshot.settlements.length))
       return reject("owner_release_snapshot_mismatch");
     preflight={accountId:String(a.id),policyId:String(a.policy_id),
       fingerprint:String(a.key_fingerprint),cashMicros:String(a.cash_micros),
@@ -99,9 +144,11 @@ export async function authorizeOwnerShaRelease(
   if(!owner.ok)return reject(owner.reason);
   const a=owner.account;
   const accountId=String(a.id);
+  if(restoring&&(args.expectedAccountId!==a.id||args.expectedPolicyId!==a.policy_id||
+    args.expectedPolicyHash!==a.policy_hash))return reject("owner_restore_account_policy_scope_changed");
   const account=await tx.query(`SELECT id,owner_user_id,commissioned,execution_enabled,kill_switch,
     blocked_reason,cash_precision_verified,cash_micros::text,reserved_micros::text,
-    reconciled_at,minimum_exit_micros,key_fingerprint,revision
+    reconciled_at,minimum_exit_micros,key_fingerprint,revision,policy_id
     FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid
     FOR UPDATE`,[accountId,ownerId]);
   if(account.rows.length!==1)return reject("owned_execution_account_unavailable");
@@ -123,7 +170,7 @@ export async function authorizeOwnerShaRelease(
   if(!repairing && args.provisionalRepairConfirmation!==undefined)
     return reject("commissioning_repair_confirmation_not_applicable");
   const global=await tx.query(`SELECT live_execution_enabled,manual_kill_switch,mode
-    FROM public.live_execution_config WHERE id='singleton'`);
+    FROM public.live_execution_config WHERE id='singleton' ${restoring?"FOR SHARE":""}`);
   // Exact-SHA owner consent can be recorded while global trading remains killed.
   // Final entry still requires a separate privileged global release, independent
   // protective-exit proof, current signed cash/fees and per-order admission.
@@ -136,6 +183,7 @@ export async function authorizeOwnerShaRelease(
     FROM private.strata_protective_release_qualification
     WHERE qualification_id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3
       AND release_commit_sha=$4 AND expires_at>now()+interval '60 seconds'
+      ${restoring?"AND observed_at<=now() AND observed_at>now()-interval '60 seconds'":""}
     FOR SHARE`,[args.qualificationId,ownerId,accountId,sha]);
   if(proof.rows.length!==1)return reject("fresh_authenticated_production_qualification_required");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>tx!.query(sql,p),accountId);
@@ -190,11 +238,47 @@ export async function authorizeOwnerShaRelease(
       [randomUUID(),accountId,JSON.stringify(audit),v13Digest(audit)]);
      }
    }
+   if(restoring){
+    if(current.policy_id!==args.expectedPolicyId)return reject("owner_restore_account_policy_scope_changed");
+    if(isTrue(current.execution_enabled)||!isTrue(current.kill_switch)||current.blocked_reason!=null||
+       reserved!==0n||!preflight||preflight.accountId!==accountId||
+       preflight.policyId!==String(a.policy_id)||preflight.fingerprint!==String(current.key_fingerprint)||
+       preflight.cashMicros!==String(current.cash_micros)||preflight.revision!==String(current.revision)||
+       (deps.now??Date.now)()<preflight.observedAtMs||(deps.now??Date.now)()-preflight.observedAtMs>5000)
+      return reject("owner_restore_fresh_flat_account_proof_required");
+    const lease=await tx.query(`SELECT state,arm_requested,credential_fingerprint
+      FROM private.kalshi_account_worker_lease
+      WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[accountId,ownerId]);
+    if(lease.rows.length!==1||lease.rows[0]?.state!=="released"||lease.rows[0]?.arm_requested!==false||
+       lease.rows[0]?.credential_fingerprint!==current.key_fingerprint)
+      return reject("owner_restore_worker_must_be_released_and_disarmed");
+    const flat=await tx.query(`SELECT
+      (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1 AND
+       (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) intents,
+      (SELECT count(*)::text FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
+      (SELECT count(*)::text FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
+        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[accountId]);
+    if(flat.rows.length!==1||!["intents","positions","exits"].every(k=>flat.rows[0]?.[k]==="0"))
+      return reject("owner_restore_local_exposure_or_uncertainty");
+    // Standing history is sticky: revoked or missing standing scope cannot
+    // fall back to the initial owner-only approval path.
+    const policy=await tx.query(`SELECT policy_hash FROM public.v13_live_money_policy
+      WHERE id=$1 AND execution_account_id=$2 AND state='APPROVED' FOR SHARE`,[a.policy_id,accountId]);
+    if(policy.rows.length!==1||policy.rows[0]?.policy_hash!==args.expectedPolicyHash)
+      return reject("owner_restore_account_policy_scope_changed");
+    const history=await tx.query(`SELECT grant_id FROM private.strata_continuous_execution_grants
+      WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3 FOR UPDATE`,[ownerId,accountId,sha]);
+    // Restore readiness, never standing financial authority. A revoked grant
+    // stays revoked; START still requires a separately consented active grant.
+    if(!await restoreReviewCurrent(tx,ownerId,accountId,sha,a.policy_hash,true,history.rows.length>0))
+      return reject("owner_restore_current_standing_review_required");
+   }
    const existing=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
     AND revoked_at IS NULL FOR UPDATE`,[ownerId,accountId,sha]);
   if(existing.rows.length>1)return reject("duplicate_owner_sha_approval");
   let approvalId=existing.rows.length===1?String(existing.rows[0]?.approval_id):null;
+  if(restoring&&!approvalId)return reject("owner_restore_existing_sha_approval_required");
   if(!approvalId){
     const saved=await tx.query(`INSERT INTO private.strata_owner_sha_approvals
       (owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
@@ -209,8 +293,9 @@ export async function authorizeOwnerShaRelease(
     const enabled=await tx.query(`UPDATE public.v13_production_account
       SET execution_enabled=true,kill_switch=$3::boolean,revision=revision+1
       WHERE id=$1 AND owner_user_id=$2::uuid AND execution_enabled=false
+        ${restoring?"AND clock_timestamp() BETWEEN to_timestamp($4::double precision/1000) AND to_timestamp($4::double precision/1000)+interval '5 seconds'":""}
         AND kill_switch=true AND commissioned=true AND blocked_reason IS NULL
-      RETURNING id`,[accountId,ownerId,globalKilled]);
+      RETURNING id`,restoring?[accountId,ownerId,globalKilled,preflight!.observedAtMs]:[accountId,ownerId,globalKilled]);
     if(enabled.rows.length!==1)return reject("owner_account_activation_fence_failed");
    } else {
      // Already eligible but stopped: owner authorization is a recorded
@@ -224,7 +309,7 @@ export async function authorizeOwnerShaRelease(
        [accountId,ownerId,stagedStopped]);
      if(stillEnabled.rows.length!==1)return reject("preenabled_account_fence_failed");
    }
-   const record={ownerId,accountId,sha,approvalId,qualificationId:String(args.qualificationId)};
+   const record={ownerId,accountId,sha,approvalId,qualificationId:String(args.qualificationId),restoreExistingApproval:restoring};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
     VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION',$3::jsonb,$4)`,
     [randomUUID(),accountId,JSON.stringify(record),v13Digest(record)]);
