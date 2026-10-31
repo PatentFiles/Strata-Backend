@@ -1,3 +1,4 @@
+import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
 import assert from "node:assert/strict";
@@ -820,4 +821,80 @@ test("fractional-cent cash survives entry fees, owned-position exit and next-ent
   assert.equal(f.exchange.posts.length,3);assert.equal(f.exchange.posts[2]!.action,"BUY");
   assert.ok(BigInt((await f.ledger.readAccount()).reserved_micros)>0n);
   await invariant(f.ledger);
+});
+
+async function sourceReferenceFixture(side:"UP"|"DOWN",signal:"SCOUT"|"CONFIRM") {
+  const f=await fixture(),id=await f.source(randomUUID(),"TEST-MARKET:first");
+  const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+  p.policyHash=computeV13LiveMoneyPolicyHash(p);
+  await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,policy_hash=$2,max_quote_age_ms=5000",[p.entryPolicyVersion,p.policyHash]);
+  const buffer=(signal==="SCOUT"?10:25)*(side==="UP"?1:-1);
+  await pool.query(`UPDATE forward_test_evaluations SET entry_policy_version=$2,signal=$3,direction=$4,
+    btc_price=$5,signed_buffer=$6,absolute_buffer=$7,velocity=$8,previous_side=$9 WHERE id=$1`,
+    [id,p.entryPolicyVersion,signal,side,100000+buffer,buffer,Math.abs(buffer),Math.sign(buffer),side==="UP"?"DOWN":"UP"]);
+  await pool.query(`INSERT INTO forward_test_windows(ticker,target,entry_policy_version,crossing_key,crossing_consumed,starts_at,ends_at)
+    VALUES('TEST-MARKET',100000,$1,'TEST-MARKET:first',true,$2,$3)`,
+    [p.entryPolicyVersion,new Date(f.exchange.now-1000),new Date(f.exchange.now+900000)]);
+  return {...f,id};
+}
+test("champion reference guard rejects inconsistent/invalid source before reservation for both sides and signals",async()=>{
+  for(const side of ["UP","DOWN"] as const)for(const signal of ["SCOUT","CONFIRM"] as const){
+    for(const reference of [0.59,0.49,null,NaN]){
+      const f=await sourceReferenceFixture(side,signal);
+      await pool.query("UPDATE forward_test_evaluations SET entry_offer=$2 WHERE id=$1",[f.id,reference]);
+      f.exchange.book.bestAskDollars="0.5800";
+      f.exchange.book.asks=[{priceDollars:"0.5800",availableContracts:"100"}];
+      f.exchange.book.fee.contracts=8;f.exchange.book.fee.limitPrice=.58;
+      let reads=0;const market=f.exchange.market.bind(f.exchange);
+      f.exchange.market=async()=>{reads++;return market();};
+      await assert.rejects(f.executor.prepareEntry(f.id),/production_source_reference_mismatch/);
+      assert.equal(reads,0);assert.equal(f.exchange.posts.length,0);
+      assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+      assert.equal((await pool.query("SELECT count(*) FROM v13_production_intent")).rows[0].count,"0");
+    }
+  }
+});
+test("canonical champion source still dispatches with five-second policy, both sides and signals",async()=>{
+  for(const side of ["UP","DOWN"] as const)for(const signal of ["SCOUT","CONFIRM"] as const){
+    const f=await sourceReferenceFixture(side,signal);
+    const intent=await f.executor.prepareEntry(f.id);await f.executor.dispatch(intent);
+    assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.limitMicros,500000);
+    assert.equal(f.exchange.posts[0]!.side,side==="UP"?"YES":"NO");
+  }
+});
+test("source mutation between prepare and dispatch fails closed and releases reservation",async()=>{
+  const f=await sourceReferenceFixture("DOWN","SCOUT");
+  const intent=await f.executor.prepareEntry(f.id);
+  await pool.query("UPDATE forward_test_evaluations SET entry_offer=.59 WHERE id=$1",[f.id]);
+  await assert.rejects(f.executor.dispatch(intent),/production_final_source_changed_or_expired/);
+  assert.equal(f.exchange.posts.length,0);
+  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+});
+
+test("legacy prepared capability with inconsistent pinned reference is refused before final authority or provider reads",async()=>{
+ const f=await sourceReferenceFixture("DOWN","CONFIRM");
+ const id=await f.executor.prepareEntry(f.id);
+ const i=(await pool.query("SELECT * FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+ // Model a previously persisted internally consistent capability from the old executor.
+ i.decision.source.entry_offer=.59;
+ const cap=digest({id:i.id,request:i.request,decision:i.decision,policyHash:i.policy_hash,fee:i.fee_fingerprint});
+ await pool.query("UPDATE v13_production_intent SET decision=$2,capability_digest=$3 WHERE id=$1",[id,JSON.stringify(i.decision),cap]);
+ await pool.query("UPDATE forward_test_evaluations SET entry_offer=.59 WHERE id=$1",[f.id]);
+ let reads=0,authorizations=0;const market=f.exchange.market.bind(f.exchange);
+ f.exchange.market=async()=>{reads++;return market();};
+ f.executor.authorizeFinalEntry=async()=>{authorizations++;};
+ await assert.rejects(f.executor.dispatch(id),/production_source_reference_mismatch/);
+ assert.equal(reads,0);assert.equal(authorizations,0);assert.equal(f.exchange.posts.length,0);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+});
+test("approved champion boundary prices remain executable with consistent reference and depth",async()=>{
+ for(const side of ["UP","DOWN"] as const)for(const signal of ["SCOUT","CONFIRM"] as const){
+  const f=await sourceReferenceFixture(side,signal),price=signal==="SCOUT"?.52:.53;
+  await pool.query("UPDATE forward_test_evaluations SET entry_offer=$2,up_offer=$2,down_offer=$2 WHERE id=$1",[f.id,price]);
+  f.exchange.book.bestAskDollars=price.toFixed(4);
+  f.exchange.book.asks=[{priceDollars:price.toFixed(4),availableContracts:"100"}];
+  f.exchange.book.fee.contracts=9;f.exchange.book.fee.limitPrice=price;
+  const id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+  assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.limitMicros,Math.round(price*1e6));
+ }
 });

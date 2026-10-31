@@ -1,3 +1,5 @@
+import {assertChampionSourceReference} from "./sourceReference";
+import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
 import { randomUUID } from "node:crypto";
@@ -145,10 +147,11 @@ export class ProductionExecutor {
 
   async prepareEntry(evaluationId: string): Promise<string> {
     const done=this.startTiming("prepare_entry",{evaluationId});
-    try{const id=await this.prepareEntryMeasured(evaluationId);done("completed");return id;}
-    catch(error){done("rejected",{error});throw error;}
+    const diagnostics: {price?: EntryPriceDiagnostics} = {};
+    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price});return id;}
+    catch(error){done("rejected",{error,entryPrice:diagnostics.price});throw error;}
   }
-  private async prepareEntryMeasured(evaluationId: string): Promise<string> {
+  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics}): Promise<string> {
     const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
     requireProof(source && source.evaluation_source === "paper" &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -157,8 +160,11 @@ export class ProductionExecutor {
       source.crossing_key && source.feed_freshness === "current" &&
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
+    assertChampionSourceReference(source);
     const side = source.direction === "UP" ? "YES" : "NO";
     const book = await this.exchange.market(source.market_ticker, side);
+    // Diagnostics are bounded, best-effort, and never feed admission or sizing.
+    diagnostics.price = captureEntryPriceDiagnostics(source, book);
     return this.ledger.transaction(async (tx, a) => {
       const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
       if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
@@ -197,6 +203,7 @@ export class ProductionExecutor {
         classified.qualifyingTrigger && classified.freshCross &&
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
+      assertChampionSourceReference(source);
       const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
       requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
       const balances = await tx.query(`SELECT
@@ -331,6 +338,7 @@ export class ProductionExecutor {
           i.capability_digest === digest({ id: i.id, request: i.request,
             decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
+        if (i.kind === "ENTRY") assertChampionSourceReference(i.decision.source);
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
         const final = async () => {
@@ -404,6 +412,7 @@ export class ProductionExecutor {
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
                 source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
             "production_final_source_changed_or_expired");
+            assertChampionSourceReference(source);
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
               await this.assertEntryPolicyWindow(tx, source);
             }
@@ -445,6 +454,7 @@ export class ProductionExecutor {
               const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
               const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
               try {
+              assertChampionSourceReference(source);
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
                   typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),

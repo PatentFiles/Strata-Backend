@@ -30,3 +30,24 @@ test('STOP during an active tick cancels pending wake and scheduling',async()=>{
  await wait(300);notifyCommittedForwardSignal();await wait(30);
  assert.equal(ticks,1);assert.equal(w.isScheduled(),false);
 });
+
+// Trace precision does not change discovery SQL, executor admission or wire gates.
+import {signalTraceSourceAgeMs} from './signalTraceSourceAge';
+test('trace retains pg Date milliseconds and matches ISO source timestamps',()=>{
+ const iso='2026-10-31T04:47:52.373Z';
+ const now=Date.parse('2026-10-31T04:47:55.125Z');
+ assert.equal(signalTraceSourceAgeMs(new Date(iso),now),2752);
+ assert.equal(signalTraceSourceAgeMs(iso,now),2752);
+ assert.equal(signalTraceSourceAgeMs('2026-10-30T23:47:52.373-05:00',now),2752);
+ assert.equal(now-Date.parse(String(new Date(iso))),3125);
+ assert.equal(signalTraceSourceAgeMs(new Date(now),now),0);
+});
+test('trace reports invalid, missing and future source ages honestly as unknown',()=>{
+ const now=Date.parse('2026-10-31T04:47:55.125Z');
+ for(const value of [null,undefined,0,{},new Date(NaN),'not a date',
+  '2026-02-30T00:00:00Z','2026-10-31T04:47:52.373',
+  '2026-10-31T24:00:00Z','2026-10-31T04:47:52.373+24:00',
+  new Date(now+1),new Date(now+1).toISOString()])assert.equal(signalTraceSourceAgeMs(value,now),null);
+ for(const invalidNow of [NaN,Infinity,-1,now+.5])assert.equal(signalTraceSourceAgeMs(new Date(now),invalidNow),null);
+ assert.equal(signalTraceSourceAgeMs({toString(){throw Error('not touched')}},now),null);
+});

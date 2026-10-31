@@ -17,7 +17,7 @@ const iso = (x: unknown): number | null => {
 };
 function scheduledClear(response: unknown, key: string, lifecycleEnd: number): boolean {
   const r = obj(response);
-  if (!r || (r.cursor !== undefined && r.cursor !== "") ||
+  if (!r || (key === "event_fee_changes" ? r.cursor !== "" : (r.cursor !== undefined && r.cursor !== "")) ||
       !Array.isArray(r[key]) || r[key].length > 100) return false;
   return r[key].every((value: unknown) => {
     const row=obj(value);

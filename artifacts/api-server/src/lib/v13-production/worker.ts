@@ -1,3 +1,4 @@
+import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
@@ -86,8 +87,8 @@ export class ProductionWorker {
       catch(error){discovery("rejected",{error});throw error;}
       for (const { id, evaluated_at } of ids) {
         if (!this.entriesOpen()) break;
-        const sourceMs=evaluated_at?Date.parse(String(evaluated_at)):NaN;
-        const ageMs=()=>Number.isFinite(sourceMs)?Math.max(0,this.executor.now()-sourceMs):null;
+        // Trace only: preserve pg Date milliseconds; unknown/future ages are not zero.
+        const ageMs=()=>signalTraceSourceAgeMs(evaluated_at,this.executor.now());
         if (!this.tracedEvaluations.has(String(id))) {
           const recorded=await this.recordDecision({accountId:this.executor.ledger.accountId,
             evaluationId:String(id),phase:"QUALIFYING_SEEN",sourceAgeMs:ageMs()});

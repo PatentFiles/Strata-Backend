@@ -1,3 +1,4 @@
+import {beginPublicMetadataRead} from "./publicMetadataReadRateLimit";
 /**
  * Commissioning DIAGNOSTIC ONLY: independent Kalshi API market-fee evidence.
  *
@@ -56,14 +57,17 @@ const canonicalTime = (value: unknown): number | null =>
 
 /** Read ONLY fixed Kalshi URLs; fail closed on redirect, malformed types or size. */
 async function getJson(path: string, fetchImpl: typeof fetch): Promise<JsonObject> {
+  const attempt=beginPublicMetadataRead(fetchImpl,path);
   const url = KALSHI_API_ORIGIN + path;
   const response = await fetchImpl(url, {
     method: "GET", redirect: "error", cache: "no-store",
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
+  attempt.response(response);
   if (response.status !== 200 || response.url && response.url !== url ||
       response.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
+    void response.body?.cancel().catch(()=>{});
     throw Error("official_api_source_unavailable");
   }
   const size = Number(response.headers.get("content-length") ?? "0");
@@ -72,6 +76,7 @@ async function getJson(path: string, fetchImpl: typeof fetch): Promise<JsonObjec
   if (bytes.length < 2 || bytes.length > MAX_BYTES) throw Error("official_api_response_invalid");
   const result = plain(JSON.parse(new TextDecoder().decode(bytes)));
   if (!result) throw Error("official_api_response_invalid");
+  attempt.success();
   return result;
 }
 function exactStandard(type: unknown, multiplier: unknown): boolean {
@@ -87,7 +92,7 @@ function noOverrides(event: JsonObject): boolean {
 function safeChanges(data: JsonObject, key: string, windowEnd: number): boolean {
   // Do not silently ignore cursors, malformed rows, or scheduled fee changes
   // before the target market closes. Changes after that are checked at order time.
-  if (data.cursor !== undefined && data.cursor !== "" || !Array.isArray(data[key]) ||
+  if ((key === "event_fee_changes" ? data.cursor !== "" : (data.cursor !== undefined && data.cursor !== "")) || !Array.isArray(data[key]) ||
       data[key].length > 100) return false;
   return data[key].every((value: unknown) => {
     const row = plain(value);
@@ -140,6 +145,7 @@ export async function probeCurrentKalshiFeeApi(
   fetchImpl: typeof fetch = globalThis.fetch,
   clock: () => number = Date.now,
   expectedMarketTicker?: string,
+  readMetadata?: (path:string)=>Promise<JsonObject>,
 ): Promise<KalshiMarketFeeReadOnly> {
   // Order-time calls MUST bind evidence to the exact order market.
   // An ambiguous/absent ticker cannot fall back to another open market.
@@ -170,19 +176,25 @@ export async function probeCurrentKalshiFeeApi(
     if (typeof eventTicker !== "string" || !tickerPattern.test(eventTicker))
       return fail("market_event_identity_invalid");
 
-    const [m,e,s,sc,ec] = await Promise.all([
-      getJson("/markets/" + encodeURIComponent(ticker), fetchImpl),
-      getJson("/events/" + encodeURIComponent(eventTicker), fetchImpl),
-      getJson("/series/KXBTC15M", fetchImpl),
+    const metadata=readMetadata??((path:string)=>getJson(path,fetchImpl));
+    const reads = [
+      metadata("/markets/" + encodeURIComponent(ticker)),
+      metadata("/events/" + encodeURIComponent(eventTicker)),
+      metadata("/series/KXBTC15M"),
       // Kalshi's documented getSeriesFeeChanges takes series_ticker and
       // show_historical; it does NOT declare a limit argument. The event
       // counterpart accepts event_ticker/limit/cursor, NOT show_historical.
       // Unsupported query parameters can make the entire V4 evidence path
       // fail at HTTP 400 even when the series has the standard fee.
-      getJson("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false", fetchImpl),
-      getJson("/events/fee_changes?event_ticker=" + encodeURIComponent(eventTicker) +
-        "&limit=100", fetchImpl),
-    ]);
+      metadata("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"),
+      metadata("/events/fee_changes?event_ticker=" + encodeURIComponent(eventTicker) +
+        "&limit=100"),
+    ] as const;
+    // Every started evidence read settles before this attempt returns, including
+    // event waiters on an invocation-local market snapshot after another failure.
+    const [m,e,s,sc,ec]=await Promise.all(reads).catch(async error=>{
+      await Promise.allSettled(reads);throw error;
+    });
     const market = plain(m.market), event = plain(e.event), series = plain(s.series);
     if (!market || !event || !series || market.ticker !== ticker ||
         market.event_ticker !== eventTicker || market.close_time !== target.close_time ||

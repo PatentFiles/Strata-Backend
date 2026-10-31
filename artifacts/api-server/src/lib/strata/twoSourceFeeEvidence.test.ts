@@ -228,3 +228,14 @@ test("exact market fee probe never substitutes a different open BTC contract", a
   assert.equal(valid.marketTicker,ticker);
   assert.equal((await probeCurrentKalshiFeeApi(transport(responses()),()=>now,"ABC")).ok,false);
 });
+
+test("event changes require explicit empty cursor, while series cursor is optional",async()=>{
+ for(const cursor of [undefined,null,42,"more"]){
+  const pages=responses();
+  pages["/events/fee_changes?event_ticker="+eventTicker+"&limit=100"].cursor=cursor;
+  assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,false);
+ }
+ const pages=responses();
+ delete pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"].cursor;
+ assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,true);
+});

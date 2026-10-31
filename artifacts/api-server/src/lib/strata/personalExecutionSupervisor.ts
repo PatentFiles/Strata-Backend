@@ -1,3 +1,6 @@
+import { createEntryMetadataSnapshot } from "./entryMetadataSnapshot";
+import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
+import { attachMarketEvidenceReadTiming, getMarketEvidenceReadTiming } from "./marketEvidenceReadTiming";
 import {beginExecutionStage,timedFinalFetch,type TimingObserver} from "../v13-production/stageTiming";
 import {logger} from "../logger";
 import {createEntryWireClockFetch} from "./entryWireClock";
@@ -40,7 +43,7 @@ import {
   RELEASE_LEASE_SQL,
 } from "./accountScopedExecution";
 import { dedicatedSignerFingerprint } from "./commissioning";
-import { gatherReadOnlyMarketEvidence } from "./gatherReadOnlyMarketEvidence";
+import { gatherCompleteReadOnlyMarketEvidence } from "./gatherReadOnlyMarketEvidence";
 import {
   emptySnapshot,
   ownedMarketEvidence,
@@ -518,17 +521,20 @@ export function createProductionPersonalSession(
       },
       readMarket: async (market, side) => {
         const clock = now();
+        // Fresh per prepare/final invocation; only reviewed public API metadata is shared.
+        const metadataSnapshot=apiSource?createEntryMetadataSnapshot(market):undefined;
         // Fee authorization is mandatory; overlap its read-only verification
         // with immutable market metadata and the signed orderbook GET.
         // Nothing becomes a verified book until every branch completes.
-        const {bookPayload,seriesPayload,marketPayload} =
-          await gatherReadOnlyMarketEvidence({
+        const gathered = await gatherCompleteReadOnlyMarketEvidence({
+            market,
             verifyFee: async () => {
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               try {
               if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
-                  sourceUrl,market);
+                  sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
+                    probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,metadataSnapshot!.read)});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw new Error("api_fee_exact_market_source_unavailable");
                 feeVerifiedAt=checked.identity.verifiedAtMs;
@@ -558,26 +564,18 @@ export function createProductionPersonalSession(
               }catch(error){feeTiming("rejected",{error});throw error;}
             },
             readBook: () => get(material, `/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`, "?depth=100"),
-            readSeries: () => publicKalshiObject("/series/KXBTC15M"),
-            readMarket: () => publicKalshiObject(`/markets/${encodeURIComponent(market)}`),
+            readPublic: metadataSnapshot?.read??publicKalshiObject,
           });
-        const eventTicker = (marketPayload as { market?: { event_ticker?: unknown } })?.market?.event_ticker;
-        if (typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker))
-          throw new Error("production_event_fee_evidence_unverified");
-        // Repeat these reads when executor re-invokes readMarket immediately
-        // before POST. Missing, paginated or changed fee metadata fails closed.
-        const [eventPayload, seriesChangesPayload, eventChangesPayload] = await Promise.all([
-          publicKalshiObject(`/events/${encodeURIComponent(eventTicker)}`),
-          publicKalshiObject("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100"),
-          publicKalshiObject(`/events/fee_changes?event_ticker=${encodeURIComponent(eventTicker)}&show_historical=false&limit=100`),
-        ]);
-        return ownedMarketEvidence({
+        // All reads are mandatory and repeated on final dispatch. Missing,
+        // paginated or changed fee metadata still fails closed below.
+        const {bookPayload,seriesPayload,marketPayload,eventPayload,seriesChangesPayload,eventChangesPayload} = gathered;
+        return attachMarketEvidenceReadTiming(ownedMarketEvidence({
           market, side, bookPayload, seriesPayload, marketPayload,
           eventPayload, seriesChangesPayload, eventChangesPayload,
           observedAtMs: clock, nowMs: now(), configuredStakeCents: configuredStake,
           policyVersion, sourceUrl, formulaVersion, artifactDigest: digest, policyHash,
           verifiedAtMs: feeVerifiedAt,
-        });
+        }), getMarketEvidenceReadTiming(gathered));
       },
       fetchImpl: measuredFetch,
     });
