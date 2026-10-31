@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 /**
  * PDF-free KXBTC15M fee-policy REVIEW CANDIDATE (not an approval).
  *
@@ -30,10 +31,10 @@ export type ApiFeePolicyReviewResult =
  | {ok:false;reason:string;policyApproved:false;
     commissioningApproved:false;tradingAuthorized:false};
 
-const deny=(reason:string):ApiFeePolicyReviewResult=>({
+const deny=(reason:string,source?:unknown):ApiFeePolicyReviewResult=>annotateFeeFailure({
   ok:false,reason,policyApproved:false,commissioningApproved:false,
   tradingAuthorized:false,
-});
+},{phase:"candidate_validation",reason},source);
 
 export function preparePdfFreeApiFeePolicyReview(
   market:KalshiMarketFeeReadOnly, nowMs:number=Date.now(),
@@ -49,7 +50,7 @@ export function preparePdfFreeApiFeePolicyReview(
      market.ownerPolicyApproved!==false ||
      market.commissioningApproved!==false ||
      market.tradingEnabled!==false)
-    return deny("live_api_fee_source_not_verified");
+    return deny("live_api_fee_source_not_verified",market);
 
   if(!market.marketTicker || !TICKER.test(market.marketTicker) ||
      !market.eventTicker || !TICKER.test(market.eventTicker) ||

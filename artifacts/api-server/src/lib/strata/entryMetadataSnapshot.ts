@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import {beginPublicMetadataRead} from "./publicMetadataReadRateLimit";
 import {KALSHI_API_ORIGIN} from "./twoSourceFeeEvidence";
 
@@ -32,6 +33,8 @@ export function createEntryMetadataSnapshot(market:string,fetchImpl:typeof fetch
   const started=performance.now();
   const controller=new AbortController();
   let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
+  let httpStatus:number|undefined;
+  let failureReason="provider_request_failed";
   let timer:ReturnType<typeof setTimeout>|undefined;
   const unavailable=()=>Error("production_market_metadata_unavailable");
   const cancel=()=>{controller.abort();try{void reader?.cancel().catch(()=>{});}catch{}};
@@ -41,6 +44,8 @@ export function createEntryMetadataSnapshot(market:string,fetchImpl:typeof fetch
     const url=KALSHI_API_ORIGIN+path;
     const response=await fetchImpl(url,{method:"GET",redirect:"error",cache:"no-store",credentials:"omit",
      headers:{Accept:"application/json"},signal:controller.signal});
+    httpStatus=response.status;
+    failureReason=response.status!==200?"provider_http_rejected":"provider_response_invalid";
     attempt.response(response);
     if(controller.signal.aborted){void response.body?.cancel().catch(()=>{});throw unavailable();}
     const length=Number(response.headers.get("content-length")??"0");
@@ -63,7 +68,8 @@ export function createEntryMetadataSnapshot(market:string,fetchImpl:typeof fetch
     attempt.success();
     return parsed;
    })()]);
-  }catch{cancel();throw unavailable();}
+  }catch(error){const timedOut=controller.signal.aborted;cancel();throw annotateFeeFailure(unavailable(),
+    {phase:"provider_transport",reason:timedOut?"provider_read_timeout":failureReason,path,httpStatus},error);}
   finally{if(timer)clearTimeout(timer);try{reader?.releaseLock();}catch{}}
  }
  function memo(path:string):Promise<JsonObject>{

@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 /**
  * Real, service-owned API fee policy source stage check.
  * No browser field is accepted as a reviewer, consent or fee approval.
@@ -40,7 +41,8 @@ export type VerifiedApiSourceStage =
     formulaVersion:typeof API_SOURCE_FORMULA_VERSION;
     marketTicker:string;verifiedAtMs:number}}
  | {ok:false;reason:string};
-const no=(reason:string):VerifiedApiSourceStage=>({ok:false,reason});
+const no=(reason:string,source?:unknown):VerifiedApiSourceStage=>annotateFeeFailure({ok:false as const,reason},
+ {phase:["api_fee_database_review_unavailable","standing_fee_lease_unavailable"].includes(reason)?"database":"authorization",reason},source);
 const ms=(v:unknown):number=>v instanceof Date?v.getTime():Date.parse(String(v??""));
 const txt=(v:unknown):string=>typeof v==="string"?v:"";
 
@@ -100,7 +102,7 @@ export async function verifyReviewedApiFeeSourceStage(
  const observation=await (deps.probe??probeCurrentKalshiFeeApi)(
    globalThis.fetch,deps.now??Date.now,exactOrderMarket);
  const candidate=preparePdfFreeApiFeePolicyReview(observation,(deps.now??Date.now)());
- if(!candidate.ok) return no(candidate.reason);
+ if(!candidate.ok) return no(candidate.reason,candidate);
  if(exactOrderMarket && candidate.marketTicker!==exactOrderMarket)
    return no("api_fee_order_market_mismatch");
  let records:Record<string,unknown>[];

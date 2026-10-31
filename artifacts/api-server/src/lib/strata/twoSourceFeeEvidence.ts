@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import {beginPublicMetadataRead} from "./publicMetadataReadRateLimit";
 /**
  * Commissioning DIAGNOSTIC ONLY: independent Kalshi API market-fee evidence.
@@ -37,6 +38,7 @@ export type KalshiMarketFeeReadOnly = {
   feeType?: "quadratic";
   feeMultiplier?: "1";
   metadataDigest?: string;
+  selectionMode?: "exact_market_detail"|"complete_open_inventory";
   pdfProvenanceApproved: false;
   ownerPolicyApproved: false;
   commissioningApproved: false;
@@ -45,26 +47,31 @@ export type KalshiMarketFeeReadOnly = {
 const plain = (value: unknown): JsonObject | null =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as JsonObject : null;
-const fail = (reason: string): KalshiMarketFeeReadOnly => ({
+const fail = (reason: string,source?:unknown): KalshiMarketFeeReadOnly => annotateFeeFailure({
   ok: false, reason, series: SERIES, exchangeIndex: 2,
   referenceDigest: REVIEWED_REFERENCE_PDF_SHA256,
   pdfProvenanceApproved: false, ownerPolicyApproved: false,
   commissioningApproved: false, tradingEnabled: false,
-});
+},{phase:"provider_validation",reason},source);
 const canonicalTime = (value: unknown): number | null =>
   typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
     ? (Number.isFinite(Date.parse(value)) ? Date.parse(value) : null) : null;
 
 /** Read ONLY fixed Kalshi URLs; fail closed on redirect, malformed types or size. */
 async function getJson(path: string, fetchImpl: typeof fetch): Promise<JsonObject> {
+  let response:Response|undefined;
+  let failureReason="provider_request_failed";
+  const signal=AbortSignal.timeout(TIMEOUT_MS);
+  try {
   const attempt=beginPublicMetadataRead(fetchImpl,path);
   const url = KALSHI_API_ORIGIN + path;
-  const response = await fetchImpl(url, {
+  response = await fetchImpl(url, {
     method: "GET", redirect: "error", cache: "no-store",
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal,
   });
   attempt.response(response);
+  failureReason=response.status!==200?"provider_http_rejected":"provider_response_invalid";
   if (response.status !== 200 || response.url && response.url !== url ||
       response.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
     void response.body?.cancel().catch(()=>{});
@@ -78,6 +85,10 @@ async function getJson(path: string, fetchImpl: typeof fetch): Promise<JsonObjec
   if (!result) throw Error("official_api_response_invalid");
   attempt.success();
   return result;
+  }catch(error){
+    try{void response?.body?.cancel().catch(()=>{});}catch{}
+    throw annotateFeeFailure(new Error("official_api_source_unavailable"),
+    {phase:"provider_transport",reason:signal.aborted?"provider_read_timeout":failureReason,path,httpStatus:response?.status},error);}
 }
 function exactStandard(type: unknown, multiplier: unknown): boolean {
   // Do not coerce unrecognized numbers, alternative fee types or zero fees.
@@ -153,32 +164,36 @@ export async function probeCurrentKalshiFeeApi(
     return fail("exact_market_identity_invalid");
   const started = clock();
   try {
-    const listing = await completeOpenMarketListing(fetchImpl);
-    if(!listing.ok)return fail(listing.reason);
-    const now = clock();
-    const open = listing.markets.filter((m): m is JsonObject =>
-      (m.status === "open" || m.status === "active") &&
-      canonicalTime(m.close_time) !== null &&
-      canonicalTime(m.close_time)! > now &&
-      (m.exchange_index === undefined || m.exchange_index === 2) &&
-      tickerPattern.test(String(m.ticker ?? ""))).sort((a, b) =>
-        canonicalTime(a.close_time)! - canonicalTime(b.close_time)!);
-    const matches=expectedMarketTicker===undefined ? [] :
-      open.filter(m=>m.ticker===expectedMarketTicker);
-    const target=expectedMarketTicker===undefined ? open[0] : matches[0];
-    if (!target || expectedMarketTicker!==undefined && matches.length!==1 ||
-        expectedMarketTicker===undefined && open[1] &&
-          target.close_time===open[1].close_time)
-      return fail(expectedMarketTicker!==undefined ?
-        "exact_market_not_in_complete_open_listing" : "market_target_ambiguous");
-    const ticker = String(target.ticker);
-    const eventTicker = target.event_ticker;
-    if (typeof eventTicker !== "string" || !tickerPattern.test(eventTicker))
-      return fail("market_event_identity_invalid");
-
     const metadata=readMetadata??((path:string)=>getJson(path,fetchImpl));
+    let target:JsonObject;
+    let exactPayload:JsonObject|undefined;
+    if(expectedMarketTicker!==undefined){
+      // ORDER_ENTRY already has an exact source identity. Inventory pagination
+      // is discovery, not proof of that specific contract's current eligibility.
+      exactPayload=await metadata("/markets/"+encodeURIComponent(expectedMarketTicker));
+      const detail=plain(exactPayload.market);
+      const now=clock(),openAt=canonicalTime(detail?.open_time),closeAt=canonicalTime(detail?.close_time);
+      if(!detail||detail.ticker!==expectedMarketTicker||detail.exchange_index!==2||
+         (detail.series_ticker!==undefined&&detail.series_ticker!==SERIES)||
+         (detail.status!=="active"&&detail.status!=="open")||
+         openAt===null||closeAt===null||openAt>now||closeAt<=now||openAt>=closeAt)
+        return fail("exact_market_detail_not_current");
+      target=detail;
+    }else{
+      const listing=await completeOpenMarketListing(fetchImpl);
+      if(!listing.ok)return fail(listing.reason);
+      const now=clock();
+      const open=listing.markets.filter((m):m is JsonObject=>
+        (m.status==="open"||m.status==="active")&&canonicalTime(m.close_time)!==null&&
+        canonicalTime(m.close_time)!>now&&(m.exchange_index===undefined||m.exchange_index===2)&&
+        tickerPattern.test(String(m.ticker??""))).sort((a,b)=>canonicalTime(a.close_time)!-canonicalTime(b.close_time)!);
+      if(!open[0]||(open[1]&&open[0].close_time===open[1].close_time))return fail("market_target_ambiguous");
+      target=open[0];
+    }
+    const ticker=String(target.ticker),eventTicker=target.event_ticker;
+    if(typeof eventTicker!=="string"||!tickerPattern.test(eventTicker))return fail("market_event_identity_invalid");
     const reads = [
-      metadata("/markets/" + encodeURIComponent(ticker)),
+      exactPayload?Promise.resolve(exactPayload):metadata("/markets/" + encodeURIComponent(ticker)),
       metadata("/events/" + encodeURIComponent(eventTicker)),
       metadata("/series/KXBTC15M"),
       // Kalshi's documented getSeriesFeeChanges takes series_ticker and
@@ -239,12 +254,13 @@ export async function probeCurrentKalshiFeeApi(
       ok: true, reason: "live_series_event_fee_metadata_verified_read_only",
       series: SERIES, exchangeIndex: 2, referenceDigest: REVIEWED_REFERENCE_PDF_SHA256,
       liveVerifiedAt: new Date(verifiedAt).toISOString(),
+      selectionMode:expectedMarketTicker===undefined?"complete_open_inventory":"exact_market_detail",
       marketTicker: ticker, eventTicker, feeType: "quadratic", feeMultiplier: "1",
       metadataDigest: createHash("sha256").update(facts).digest("hex"),
       pdfProvenanceApproved: false, ownerPolicyApproved: false,
       commissioningApproved: false, tradingEnabled: false,
     };
-  } catch {
-    return fail("official_api_metadata_unavailable");
+  } catch(error) {
+    return fail("official_api_metadata_unavailable",error);
   }
 }

@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import {createReadOnlyRateLimit,emitReadRateLimitDiagnostic} from "../readOnlyRateLimit";
 const origin="https://external-api.kalshi.com";
 function endpoint(path:string):string {
@@ -13,7 +14,7 @@ export function createPublicMetadataReadLimiter(wallNow=Date.now,monotonicNow=()
  const limiter=createReadOnlyRateLimit(wallNow,monotonicNow);
  return (path:string)=>{
   const label=endpoint(path),attempt=limiter.begin(origin+label,label);
-  if(attempt.blocked){emitReadRateLimitDiagnostic(attempt.blocked);throw Error("public_metadata_read_cooldown");}
+  if(attempt.blocked){emitReadRateLimitDiagnostic(attempt.blocked);throw annotateFeeFailure(Error("public_metadata_read_cooldown"),{phase:"provider_transport",reason:"provider_cooldown",path});}
   return {
    response(response:Response){if(response.status===429)emitReadRateLimitDiagnostic(attempt.limited(response.headers.get("retry-after")));},
    success:attempt.success,

@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/feeFailureDiagnostics*'
+      - 'artifacts/api-server/src/lib/strata/apiFeePolicyReviewCandidate*'
+      - 'artifacts/api-server/src/lib/strata/apiFeeSourceStage*'
+      - 'artifacts/api-server/src/lib/v13-production/stageTiming*'
       - 'artifacts/api-server/src/lib/strata/gatherReadOnlyMarketEvidence*'
       - 'artifacts/api-server/src/lib/strata/marketEvidenceReadTiming*'
       - 'artifacts/api-server/src/lib/strata/entryMetadataSnapshot*'
@@ -18,6 +22,10 @@ on:
     branches: [main]
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/feeFailureDiagnostics*'
+      - 'artifacts/api-server/src/lib/strata/apiFeePolicyReviewCandidate*'
+      - 'artifacts/api-server/src/lib/strata/apiFeeSourceStage*'
+      - 'artifacts/api-server/src/lib/v13-production/stageTiming*'
       - 'artifacts/api-server/src/lib/strata/gatherReadOnlyMarketEvidence*'
       - 'artifacts/api-server/src/lib/strata/marketEvidenceReadTiming*'
       - 'artifacts/api-server/src/lib/strata/entryMetadataSnapshot*'
@@ -65,7 +73,7 @@ jobs:
         run: node --test artifacts/api-server/dist/step6ApiFeeObservation.test.cjs
       - name: Bundle dependency scheduling and exact-market metadata tests
         run: |
-          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/gatherReadOnlyMarketEvidence.test.ts src/lib/strata/ownedMarketFeeMetadata.test.ts src/lib/strata/marketEvidenceReadTiming.test.ts src/lib/strata/entryMetadataSnapshot.test.ts src/lib/strata/publicMetadataReadRateLimit.test.ts \
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/gatherReadOnlyMarketEvidence.test.ts src/lib/strata/ownedMarketFeeMetadata.test.ts src/lib/strata/marketEvidenceReadTiming.test.ts src/lib/strata/entryMetadataSnapshot.test.ts src/lib/strata/publicMetadataReadRateLimit.test.ts src/lib/strata/feeFailureDiagnostics.test.ts \
             --bundle --platform=node --format=cjs --outdir=dist/evidence-dag --out-extension:.js=.cjs
       - name: Verify bounded fresh reads, fail-closed identity and pagination
         run: node --test artifacts/api-server/dist/evidence-dag/*.cjs
