@@ -1,6 +1,9 @@
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
+import {createGuardedReviewedApiFeeFetch} from "../strata/guardedReviewedApiFeeWire";
+import {annotateFeeFailure} from "../strata/feeFailureDiagnostics";
+import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "../strata/apiFeeSourceStage";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
@@ -621,6 +624,105 @@ test("late transport fee verification cannot send an entry after its pinned sour
  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
  await invariant(f.ledger);
 });
+type ReviewedFeeFailure="fee403"|"db_denial"|"transport_before_accept"|"transport_after_accept"|"normal";
+/** The durable executor/ledger use the disposable database; only the last fee
+ * guard's policy query, fee reads, and raw HTTP transport are substituted. */
+async function reviewedFeeDispatchFixture(mode:ReviewedFeeFailure){
+ const f=await fixture(),evaluation=await f.source(),market="KXBTC15M-26OCT18T0325";
+ await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE id=$2",[market,evaluation]);
+ const id=await f.executor.prepareEntry(evaluation);
+ let rawInvocations=0;
+ const source="strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555";
+ const wireFor=(transport:typeof fetch,forceDenial=false)=>createGuardedReviewedApiFeeFetch(
+  "11111111-1111-4111-8111-111111111111","test-account",source,transport,"b".repeat(64),"c".repeat(64),7,"test-holder",{
+   borrowTransaction:()=>({query:async(sql:string)=>({rows:sql.includes("SELECT a.id")&&mode!=="db_denial"?[{id:"test-account"}]:[]})}) as never,
+   verify:(async()=>mode==="fee403"||forceDenial
+    ?annotateFeeFailure({ok:false,reason:"official_api_metadata_unavailable"},{phase:"provider_transport",
+      reason:"provider_http_rejected",path:"/series/KXBTC15M",httpStatus:403})
+    :{ok:true,identity:{marketTicker:market,sourceUrl:source,digest:"d".repeat(64),
+      feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION}}) as never,
+  });
+ f.exchange.submit=async(request,final)=>{
+  await final();
+  const wire=wireFor((async()=>{
+   rawInvocations++;
+   if(mode!=="transport_before_accept")f.exchange.posts.push(structuredClone(request));
+   if(mode.startsWith("transport_"))throw Error("api_fee_final_order_grant_or_market_closed");
+   return new Response("{}");
+  }) as typeof fetch);
+  const before={NODE_ENV:process.env.NODE_ENV,RAILWAY_GIT_COMMIT_SHA:process.env.RAILWAY_GIT_COMMIT_SHA,
+   STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+  Object.assign(process.env,{NODE_ENV:"production",RAILWAY_GIT_COMMIT_SHA:"e".repeat(40),STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:"true"});
+  try{await wire("https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",{
+   method:"POST",body:JSON.stringify(encodeProductionOrder(request))});}
+  finally{for(const [key,value] of Object.entries(before)){
+   if(value===undefined)delete process.env[key];else process.env[key]=value;
+  }}
+  return {orderId:`order-${request.clientOrderId}`};
+ };
+ return {...f,id,wireFor,rawInvocations:()=>rawInvocations};
+}
+
+test("exact local fee HTTP 403 and DB denial become BLOCKED with released reserves and no HTTP",async()=>{
+ for(const mode of ["fee403","db_denial"] as const){
+  const f=await reviewedFeeDispatchFixture(mode);
+  await assert.rejects(f.executor.dispatch(f.id),/api_fee_final_/);
+  const intent=(await pool.query("SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1",[f.id])).rows[0];
+  assert.deepEqual(intent,{state:"BLOCKED",terminal:true,reserved_micros:"0"});
+  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+  assert.equal(f.rawInvocations(),0);assert.equal(f.exchange.posts.length,0);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM v13_production_observation WHERE kind='PROVEN_NOT_POSTED'")).rows[0].n,1);
+  await f.executor.dispatch(f.id);assert.equal(f.rawInvocations(),0);
+  await invariant(f.ledger);
+ }
+});
+
+test("underlying fetch throws before or after simulated acceptance retain UNKNOWN and reserves without replay",async()=>{
+ for(const mode of ["transport_before_accept","transport_after_accept"] as const){
+  const f=await reviewedFeeDispatchFixture(mode),reserved=(await f.ledger.readAccount()).reserved_micros;
+  await assert.rejects(f.executor.dispatch(f.id),/api_fee_final_order_grant_or_market_closed/);
+  const intent=(await pool.query("SELECT state,terminal FROM v13_production_intent WHERE id=$1",[f.id])).rows[0];
+  assert.deepEqual(intent,{state:"UNKNOWN",terminal:false});
+  assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+  assert.equal(f.rawInvocations(),1);assert.equal(f.exchange.posts.length,mode==="transport_after_accept"?1:0);
+  await f.executor.dispatch(f.id);assert.equal(f.rawInvocations(),1);
+  await invariant(f.ledger);
+ }
+});
+
+test("forged, copied, string and wrong-client-ID fee refusals cannot release an uncertain intent",async()=>{
+ for(const kind of ["forged","cloned","string","wrong_id"] as const){
+  const f=await reviewedFeeDispatchFixture("normal"),reserved=(await f.ledger.readAccount()).reserved_micros;
+  const request=(await pool.query("SELECT request FROM v13_production_intent WHERE id=$1",[f.id])).rows[0].request as Request;
+  let refusal:unknown;
+  const body={...encodeProductionOrder(request),reduce_only:true,
+   ...(kind==="wrong_id"?{client_order_id:"v13p-99999999-9999-4999-8999-999999999999"}:{})};
+  try{await f.wireFor((async()=>{throw Error("must_not_send")}) as typeof fetch,true)(
+   "https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",{method:"POST",body:JSON.stringify(body)});
+   assert.fail("local guard must refuse");
+  }catch(error){refusal=error;}
+  if(kind==="cloned")refusal=structuredClone(refusal);
+  if(kind==="string")refusal=(refusal as Error).message;
+  if(kind==="forged")refusal=Object.assign(new Error((refusal as Error).message),{
+   clientOrderId:request.clientOrderId,provenNotPosted:true,transportInvoked:false});
+  f.exchange.submit=async(_request,final)=>{await final();throw refusal;};
+  await assert.rejects(f.executor.dispatch(f.id));
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.id])).rows[0].state,"UNKNOWN");
+  assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+  assert.equal(f.rawInvocations(),0);await invariant(f.ledger);
+ }
+});
+
+test("normal reviewed-fee order still submits once and awaits authenticated reconciliation",async()=>{
+ const f=await reviewedFeeDispatchFixture("normal"),reserved=(await f.ledger.readAccount()).reserved_micros;
+ await f.executor.dispatch(f.id);
+ assert.equal(f.rawInvocations(),1);assert.equal(f.exchange.posts.length,1);
+ assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[f.id])).rows[0].state,"UNKNOWN");
+ assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+ await f.executor.dispatch(f.id);assert.equal(f.rawInvocations(),1);
+ await invariant(f.ledger);
+});
+
 test("wire-clock proof cannot escape its transaction or survive pool-client reuse",async()=>{
  const f=await fixture();
  assert.throws(()=>f.ledger.assertFinalWireClock(),/production_final_wire_clock_missing/);
@@ -897,4 +999,122 @@ test("approved champion boundary prices remain executable with consistent refere
   const id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
   assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.limitMicros,Math.round(price*1e6));
  }
+});
+
+import {readFileSync} from "node:fs";
+import {dispatchReviewedProtectiveExitOnce} from "../strata/ownerFeeEmergencyExitSignedDispatch";
+import {dedicatedSignerFingerprint} from "../strata/commissioning";
+test("owned no-send finalizer atomically preserves exposure, forbids audit forgery and permits fresh exit identity",async()=>{
+ const f=await fixture(),ticker="KXBTC15M-26OCT311315-15",owner="11111111-1111-4111-8111-111111111111";
+ const source=await f.source();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE id=$2",[ticker,source]);
+ const parent=await f.executor.prepareEntry(source);await f.executor.dispatch(parent);
+ f.exchange.fill(f.exchange.posts[0]!);await f.executor.reconcile();await f.exitFeed();
+ await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE signal='EXIT'",[ticker]);
+ const exit=await f.executor.prepareExit(parent,.4);
+ const financial=(await pool.query("SELECT request FROM v13_production_intent WHERE id=$1",[exit])).rows[0].request;
+ const order=encodeProductionOrder(financial) as never;
+ const material={keyId:"local-fixture-key",privateKey:generateKeyPairSync("rsa",{modulusLength:2048}).privateKey.export({type:"pkcs8",format:"pem"}).toString()};
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey);assert.ok(fingerprint);
+ await pool.query(`CREATE SCHEMA IF NOT EXISTS auth; CREATE SCHEMA IF NOT EXISTS private;
+  CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY);
+  DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='anon')THEN CREATE ROLE anon;END IF;
+   IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='authenticated')THEN CREATE ROLE authenticated;END IF;END $$;
+  CREATE TABLE IF NOT EXISTS private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY,owner_user_id uuid,
+   holder_id text,fencing_token bigint,state text,credential_fingerprint text);`);
+ await pool.query("INSERT INTO auth.users(id)VALUES($1) ON CONFLICT DO NOTHING",[owner]);
+ await pool.query("UPDATE v13_production_account SET owner_user_id=$1,key_fingerprint=$2 WHERE id='test-account'",[owner,fingerprint]);
+ await pool.query("INSERT INTO private.kalshi_account_worker_lease VALUES('test-account',$1,'worker-local',7,'owned',$2)",[owner,fingerprint]);
+ await pool.query(readFileSync("../../sql/strata_emergency_exit_reservation_private.sql","utf8"));
+ await pool.query(readFileSync("../../sql/strata_protective_exit_local_no_send.sql","utf8"));
+ const rid=randomUUID(),body=order as unknown as Record<string,unknown>,orderDigest=createHash("sha256").update(JSON.stringify(order)).digest("hex");
+ await pool.query(`INSERT INTO private.strata_emergency_exit_reservations
+  (reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_holder_id,worker_fencing_token)
+  VALUES($1,$2,'test-account',$3,$4,'YES',200,$5,'worker-local',7)`,[rid,owner,ticker,body.client_order_id,orderDigest]);
+ // Privileged fixture probes the SQL guard independently of the runtime:
+ // even a syntactically valid audit cannot terminalize a changed request.
+ for(const mutation of [{market:"KXBTC15M-OTHER"},{side:"NO"},{contracts:3},{limitMicros:1},{timeInForce:"GTC"},{reduceOnly:false},{action:"BUY"}]){
+  const c=await pool.connect();try{await c.query("BEGIN");
+   await c.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[rid]);
+   await c.query("UPDATE v13_production_intent SET state='DISPATCHED',request=request || $2::jsonb WHERE id=$1",[exit,JSON.stringify(mutation)]);
+   await assert.rejects(c.query(`INSERT INTO private.strata_protective_exit_local_no_send
+    (reservation_id,owner_user_id,execution_account_id,client_order_id,order_digest,worker_holder_id,worker_fencing_token,reason,evidence_sha256,signer_fingerprint,market_ticker,reducing_side,quantity_hundredths,limit_micros)
+    VALUES($1,$2,'test-account',$3,$4,'worker-local',7,'final_evidence_expired',$5,$6,$7,'YES',200,450000)`,[rid,owner,body.client_order_id,orderDigest,"a".repeat(64),fingerprint,ticker]),{code:"23514"});
+  }finally{await c.query("ROLLBACK");c.release();}
+ }
+ for(const variant of ["wrong_digest","wrong_signer","proof_without_blocked"]){
+  const c=await pool.connect();try{await c.query("BEGIN");
+   await c.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[rid]);
+   await c.query("UPDATE v13_production_intent SET state='DISPATCHED' WHERE id=$1",[exit]);
+   const insert=()=>c.query(`INSERT INTO private.strata_protective_exit_local_no_send
+    (reservation_id,owner_user_id,execution_account_id,client_order_id,order_digest,worker_holder_id,worker_fencing_token,reason,evidence_sha256,signer_fingerprint,market_ticker,reducing_side,quantity_hundredths,limit_micros)
+    VALUES($1,$2,'test-account',$3,$4,'worker-local',7,'final_evidence_expired',$5,$6,$7,'YES',200,450000)`,[rid,owner,body.client_order_id,variant==="wrong_digest"?"f".repeat(64):orderDigest,"a".repeat(64),variant==="wrong_signer"?"f".repeat(64):fingerprint,ticker]);
+   if(variant==="proof_without_blocked"){
+    await insert();await assert.rejects(c.query("UPDATE private.strata_emergency_exit_reservations SET state='VOID' WHERE reservation_id=$1",[rid]),{code:"23514"});
+   }else await assert.rejects(insert(),{code:"23514"});
+  }finally{await c.query("ROLLBACK");c.release();}
+ }
+ let mono=0,connections=0,posts=0,consumed=false;
+ const db={connect:async()=>{const c=await pool.connect(),isFence=++connections===1;
+  return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
+   if(isFence&&sql.startsWith("SELECT r.reservation_id"))return {rows:[{reservation_id:rid,reservation_age_ms:0,heartbeat_age_ms:0}]};
+   if(isFence&&sql.startsWith("SELECT"))return {rows:[]};
+   const r=await c.query(sql,args);
+   if(!isFence&&sql.startsWith("SELECT execution_account_id FROM private.kalshi_account_worker_lease")){
+    await assert.rejects(pool.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id='test-account' FOR UPDATE NOWAIT"),{code:"55P03"});
+   }
+   if(isFence&&sql==="COMMIT")mono=6000;return r;
+  }};
+ }};
+ const run=()=>dispatchReviewedProtectiveExitOnce({ownerId:owner,accountId:"test-account",reservationId:rid,material,order,
+  lease:{holderId:"worker-local",fencingToken:7}},{db,monotonicNow:()=>mono,
+  mark:(async()=>{if(consumed)return {unknownRecorded:false};consumed=true;
+   await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN',updated_at=now() WHERE reservation_id=$1",[rid]);
+   await pool.query("UPDATE v13_production_intent SET state='DISPATCHED' WHERE id=$1",[exit]);
+   return {unknownRecorded:true,clientOrderId:body.client_order_id,mayRetry:false,transportAuthorized:false};}) as never,
+  verifyFee:(async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:ticker})) as never,
+  post:async()=>{posts++;throw Error("must not send");}});
+ const before=(await f.ledger.readAccount()).reserved_micros;
+ const result=await run();assert.equal(result.reason,"protective_exit_proven_not_posted_refresh_required");assert.equal(result.postAttempted,false);
+ assert.equal(posts,0);assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[rid])).rows[0].state,"VOID");
+ assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[exit])).rows[0].state,"BLOCKED");
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[parent])).rows[0].quantity_hundredths,"200");
+ assert.equal((await f.ledger.readAccount()).reserved_micros,before);
+ await assert.rejects(pool.query("UPDATE private.strata_protective_exit_local_no_send SET reason='final_fee_rejected' WHERE reservation_id=$1",[rid]));
+ await assert.rejects(pool.query("DELETE FROM private.strata_protective_exit_local_no_send WHERE reservation_id=$1",[rid]));
+ await assert.rejects(pool.query("UPDATE private.strata_emergency_exit_reservations SET state='PREPARED' WHERE reservation_id=$1",[rid]));
+ for(const name of ["anon","authenticated"]){const role=await pool.connect();try{await role.query("SET ROLE "+name);await assert.rejects(role.query("SELECT * FROM private.strata_protective_exit_local_no_send"),{code:"42501"});await assert.rejects(role.query("INSERT INTO private.strata_protective_exit_local_no_send DEFAULT VALUES"),{code:"42501"});}finally{await role.query("RESET ROLE");role.release();}}
+ await run();assert.equal(posts,0);
+ // A new signed reconciliation, not the local proof, re-establishes current
+ // ownership/cash. A fresh exit receives a NEW client identity; old one is terminal.
+ f.exchange.evidence.identity.keyFingerprint=fingerprint;await f.executor.reconcile();
+ await f.exitFeed();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE signal='EXIT'",[ticker]);
+ const fresh=await f.executor.prepareExit(parent,.4);assert.notEqual(fresh,exit);
+ // Lost acknowledgement AFTER actual finalizer COMMIT must not trigger retry.
+ // Independent database read can nevertheless observe terminal local proof.
+ const request2=(await pool.query("SELECT request FROM v13_production_intent WHERE id=$1",[fresh])).rows[0].request;
+ const order2=encodeProductionOrder(request2) as never,body2=order2 as unknown as Record<string,unknown>,rid2=randomUUID();
+ await pool.query(`INSERT INTO private.strata_emergency_exit_reservations
+  (reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_holder_id,worker_fencing_token)
+  VALUES($1,$2,'test-account',$3,$4,'YES',200,$5,'worker-local',7)`,[rid2,owner,ticker,body2.client_order_id,createHash("sha256").update(JSON.stringify(order2)).digest("hex")]);
+ let conn2=0,mono2=0,marked2=false;
+ const db2={connect:async()=>{const c=await pool.connect(),fence=++conn2===1;return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
+  if(fence&&sql.startsWith("SELECT r.reservation_id"))return {rows:[{reservation_id:rid2,reservation_age_ms:0,heartbeat_age_ms:0}]};
+  if(fence&&sql.startsWith("SELECT"))return {rows:[]};
+  const r=await c.query(sql,args);if(sql==="COMMIT"){if(fence)mono2=6000;else throw Error("lost acknowledgement after commit");}return r;
+ }};}};
+ const run2=()=>dispatchReviewedProtectiveExitOnce({ownerId:owner,accountId:"test-account",reservationId:rid2,material,order:order2,lease:{holderId:"worker-local",fencingToken:7}},
+ {db:db2,monotonicNow:()=>mono2,verifyFee:(async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:ticker})) as never,
+ mark:(async()=>{if(marked2)return {unknownRecorded:false};marked2=true;
+  await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN',updated_at=now() WHERE reservation_id=$1",[rid2]);
+  await assert.rejects(pool.query("UPDATE private.strata_emergency_exit_reservations SET state='VOID' WHERE reservation_id=$1",[rid2]),{code:"23514"});
+  await pool.query("UPDATE v13_production_intent SET state='DISPATCHED' WHERE id=$1",[fresh]);
+  return {unknownRecorded:true,clientOrderId:body2.client_order_id,mayRetry:false,transportAuthorized:false};}) as never,
+ post:async()=>{posts++;throw Error("must not send");}});
+ const lost=await run2();assert.equal(lost.state,"UNKNOWN");assert.equal(lost.postAttempted,false);
+ assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[rid2])).rows[0].state,"VOID");
+ assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[fresh])).rows[0].state,"BLOCKED");
+ await run2();assert.equal(posts,0);
+ await f.executor.reconcile();await f.exitFeed();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE signal='EXIT'",[ticker]);
+ assert.notEqual(await f.executor.prepareExit(parent,.4),fresh);
+ await invariant(f.ledger);
 });

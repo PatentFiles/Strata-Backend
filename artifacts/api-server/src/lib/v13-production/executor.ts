@@ -2,6 +2,7 @@ import {assertChampionSourceReference} from "./sourceReference";
 import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
+import {isReviewedApiFeeWireRefusal} from "../strata/guardedReviewedApiFeeWire";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET, V13_ENTRY_POLICY_VERSION,
@@ -471,7 +472,8 @@ export class ProductionExecutor {
           }
           // Trusted transports cannot send before this callback succeeds.
           // Earlier local failures therefore prove that no POST was attempted;
-          // failures after success remain UNKNOWN and are never replayed.
+          // failures after success remain UNKNOWN unless an exact, private
+          // downstream refusal proves its transport was never invoked.
           invoked = true;
           finalTiming("completed");
           }catch(error){finalTiming("rejected",{error});throw error;}
@@ -490,7 +492,8 @@ export class ProductionExecutor {
       // Even a rejected/timeout response is not terminal account evidence.
       await this.ledger.transaction(async (tx, a) => {
         const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
-        if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id)) {
+        if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id) ||
+            isReviewedApiFeeWireRefusal(error,failed.client_order_id)) {
           dispatchTiming("proven_not_posted",{error});
           const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");

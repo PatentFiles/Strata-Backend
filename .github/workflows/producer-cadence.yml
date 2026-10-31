@@ -1,7 +1,7 @@
 name: Producer cadence candidate
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/v13-production/signalTraceSourceAge*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
+    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/v13-production/signalTraceSourceAge*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', 'artifacts/api-server/src/lib/sourceQuoteProvenance*', 'artifacts/api-server/src/lib/forwardTestFeeds*', 'artifacts/api-server/src/lib/forwardFeedReadScope*', 'artifacts/api-server/src/lib/btcFeedDiagnostics*', 'artifacts/api-server/src/lib/publicFeedJson*', 'artifacts/api-server/package.json', '.github/workflows/producer-cadence.yml']
 permissions:
   contents: read
 jobs:
@@ -26,4 +26,15 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/v13-production/workerSignalWake.test.ts --bundle --platform=node --format=cjs --outfile=dist/workerSignalWake.cjs --external:pg-native
           node --test dist/workerSignalWake.cjs
+      - name: Verify bounded quote provenance and unchanged source reads
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/sourceQuoteProvenance.test.ts --bundle --platform=node --format=cjs --outfile=dist/sourceQuoteProvenance.cjs
+          node --test dist/sourceQuoteProvenance.cjs
       - run: pnpm --filter @workspace/api-server run build
+      - name: Verify serialized feed cancellation and sibling settlement
+        working-directory: artifacts/api-server
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+          NODE_ENV: test
+        run: pnpm run test:feed-read-recovery

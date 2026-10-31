@@ -1,3 +1,5 @@
+import {beginSourceQuoteRead} from "./sourceQuoteProvenance";
+import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
 import {publishHeldRolloverDiagnostics} from './rolloverStrikeDiagnostics';
 import {marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from "./rolloverStrikeDiagnostics";
 import {createPublicFeedJsonReader,type PublicFeedReadEvidence} from "./publicFeedJson";
@@ -132,9 +134,10 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
 /** Lists route discovery only. Their cached quotes/status are never promoted
  * into a current snapshot; refresh the selected exact contract every cycle.
  */
-export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void):ForwardTestFeeds {
+export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void,observeBtc?:(event:BtcFeedDiagnostic)=>void):ForwardTestFeeds {
 const getJson=createPublicFeedJsonReader(fetchImpl,()=>clock().getTime(),monotonicClock);
 const diagnostics=new RolloverStrikeDiagnostics(observe);
+const btcDiagnostics=new BtcFeedDiagnostics(observeBtc,monotonicClock);
 // Cache routing identity only, never observations. Canonical 15-minute metadata
 // bounds this hint to one window; every use still performs a fresh exact GET.
 let route: {ticker:string; window:number} | null = null;
@@ -142,7 +145,10 @@ let lastCurrentReadAt = -Infinity;
 return {
   book: fetchKalshiPublicBook,
   async btc(signal) {
-    const raw = await getJson("coinbase","btc_ticker",COINBASE,signal);
+    const attempt=btcDiagnostics.begin();
+    let evidence:PublicFeedReadEvidence|null=null;
+    try {
+    const raw = await getJson("coinbase","btc_ticker",COINBASE,signal,event=>{evidence=event;});
     if (!raw || typeof raw !== "object") throw new Error("Coinbase returned malformed BTC data");
     const payload = raw as Record<string, unknown>;
     const price = numeric(payload.price);
@@ -150,7 +156,9 @@ return {
     if (price === null || price <= 0 || !providerAt) {
       throw new Error("Coinbase BTC price or timestamp is unavailable");
     }
+    btcDiagnostics.finish(attempt,true,evidence);
     return { price, providerAt, receivedAt: clock() };
+    }catch(error){btcDiagnostics.finish(attempt,false,evidence);throw error;}
   },
   async market(ticker, signal) {
     const started=clock();
@@ -181,6 +189,7 @@ return {
       if(!selected)throw new Error('Kalshi returned no current market');
       selectedTicker=selected.ticker;
     }
+    const captureQuoteRead=beginSourceQuoteRead(()=>clock().getTime(),monotonicClock);
     let transport:PublicFeedReadEvidence|null=null;
     let detailRaw:unknown;
     try{detailRaw=await getJson("kalshi","market_detail",`${KALSHI}/${encodeURIComponent(selectedTicker)}`,signal,event=>{transport=event;});}
@@ -195,6 +204,7 @@ return {
       if(!ticker)route=null;
       throw new Error('Kalshi exact market detail mismatch');
     }
+    captureQuoteRead(detail,detailAt.getTime(),transport);
     // Explicit reads also serve expired positions/settlement and never populate
     // or replace the current-market route.
     if(ticker)return detail;
@@ -225,4 +235,4 @@ return {
   },
 };
 }
-export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{console.info(JSON.stringify(event));publishHeldRolloverDiagnostics(event);});
+export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{console.info(JSON.stringify(event));publishHeldRolloverDiagnostics(event);},event=>{console.info(JSON.stringify(event));});

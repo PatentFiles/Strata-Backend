@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from "./guardedReviewedApiFeeWire";
+import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,isReviewedApiFeeWireRefusal} from "./guardedReviewedApiFeeWire";
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+import {annotateFeeFailure,getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {encodeProductionOrder} from "../v13-production/transport";
 const owner="11111111-1111-4111-8111-111111111111";
 const grant="55555555-5555-4555-8555-555555555555";
@@ -416,4 +417,87 @@ test('executor-owned final transaction is borrowed without opening or committing
  assert.ok(sqls.every(sql=>!['BEGIN','COMMIT','ROLLBACK'].includes(sql)));
  await assert.rejects(make(null)(url,{method:'POST',body:JSON.stringify(order)}),/executor_transaction_required/);
  assert.equal(sends,1);
+});
+
+
+function refusalFixture(options:{failure?:unknown;denyAccount?:boolean;transport?:typeof fetch;
+ connectFailure?:unknown;commitFailure?:unknown}={}){
+ let calls=0;
+ const db={query:async(sql:string)=>{
+  if(sql==="COMMIT"&&options.commitFailure)throw options.commitFailure;
+  return {rows:sql.includes("SELECT a.id")&&!options.denyAccount?[{id:account}]:[]};
+ },release:()=>{}};
+ const wire=createGuardedReviewedApiFeeFetch(owner,account,source,((...args:Parameters<typeof fetch>)=>{
+  calls++;return (options.transport??(async()=>new Response("{}")))(...args);
+ }) as typeof fetch,policyHash,signer,token,leaseHolder,{
+  connect:(async()=>{if(options.connectFailure)throw options.connectFailure;return db;}) as never,
+  verify:(async()=>{
+   if(options.failure!==undefined)throw options.failure;
+   return {ok:true,identity:{marketTicker:ticker,sourceUrl:source,
+    feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION,digest:"d".repeat(64)}};
+  }) as never,
+ });
+ return {wire,calls:()=>calls,send:()=>wire(url,{method:"POST",body:JSON.stringify(order)})};
+}
+async function caughtFailure(send:()=>Promise<unknown>):Promise<unknown>{
+ try{await send();assert.fail("expected refusal");}catch(error){return error;}
+}
+test("only a local pre-send fee failure carries exact object-and-order non-submission provenance",async()=>{
+ const failure=annotateFeeFailure(new Error("api_fee_final_order_grant_or_market_closed"),{
+  phase:"provider_transport",reason:"provider_http_rejected",path:"/series/KXBTC15M",httpStatus:403});
+ const f=refusalFixture({failure}),error=await caughtFailure(f.send);
+ assert.equal(f.calls(),0);
+ assert.notEqual(error,failure,"the dependency's reusable error is not itself branded");
+ assert.equal(isReviewedApiFeeWireRefusal(error,order.client_order_id),true);
+ assert.equal(isReviewedApiFeeWireRefusal(failure,order.client_order_id),false);
+ assert.equal(isReviewedApiFeeWireRefusal(error,"v13p-99999999-9999-4999-8999-999999999999"),false);
+ assert.equal(isReviewedApiFeeWireRefusal(new Error((error as Error).message),order.client_order_id),false);
+ assert.equal(isReviewedApiFeeWireRefusal(structuredClone(error),order.client_order_id),false);
+ assert.equal(isReviewedApiFeeWireRefusal(Object.assign(new Error((error as Error).message),{
+  clientOrderId:order.client_order_id,provenNotPosted:true,transportInvoked:false}),order.client_order_id),false);
+ assert.equal(isReviewedApiFeeWireRefusal((error as Error).message,order.client_order_id),false);
+ assert.deepEqual(getFeeFailureDiagnostics(error),getFeeFailureDiagnostics(failure));
+});
+test("local account-query denial and connection refusal are proven pre-transport",async()=>{
+ for(const options of [{denyAccount:true},{connectFailure:new Error("local_database_unavailable")}]){
+  const f=refusalFixture(options),error=await caughtFailure(f.send);
+  assert.equal(f.calls(),0);
+  assert.equal(isReviewedApiFeeWireRefusal(error,order.client_order_id),true);
+ }
+});
+test("a pre-send thrown string is never granted error-object provenance",async()=>{
+ const f=refusalFixture({failure:"api_fee_final_order_grant_or_market_closed"});
+ const error=await caughtFailure(f.send);
+ assert.equal(f.calls(),0);assert.equal(typeof error,"string");
+ assert.equal(isReviewedApiFeeWireRefusal(error,order.client_order_id),false);
+});
+test("synchronous and asynchronous transport failures before or after acceptance stay unproven",async()=>{
+ for(const synchronous of [false,true])for(const accepted of [false,true]){
+  let acceptedCount=0;
+  const failure=new Error("api_fee_final_order_grant_or_market_closed");
+  const transport=(()=>{
+   if(accepted)acceptedCount++;
+   if(synchronous)throw failure;
+   return Promise.reject(failure);
+  }) as typeof fetch;
+  const f=refusalFixture({transport}),error=await caughtFailure(f.send);
+  assert.equal(f.calls(),1);assert.equal(acceptedCount,Number(accepted));
+  assert.equal(error,failure);
+  assert.equal(isReviewedApiFeeWireRefusal(error,order.client_order_id),false);
+ }
+});
+test("transport cannot replay an earlier local fee refusal as non-submission proof",async()=>{
+ const first=refusalFixture({failure:new Error("local_fee_refusal")});
+ const prior=await caughtFailure(first.send);
+ assert.equal(isReviewedApiFeeWireRefusal(prior,order.client_order_id),true);
+ const next=refusalFixture({transport:(()=>{throw prior;}) as typeof fetch});
+ assert.equal(await caughtFailure(next.send),prior);
+ assert.equal(next.calls(),1);
+ assert.equal(isReviewedApiFeeWireRefusal(prior,order.client_order_id),false);
+});
+test("commit failure after transport remains ambiguous, while a normal order is unchanged",async()=>{
+ const failed=refusalFixture({commitFailure:new Error("local_commit_failed_after_send")});
+ const error=await caughtFailure(failed.send);
+ assert.equal(failed.calls(),1);assert.equal(isReviewedApiFeeWireRefusal(error,order.client_order_id),false);
+ const normal=refusalFixture();assert.equal((await normal.send()).status,200);assert.equal(normal.calls(),1);
 });
