@@ -15,7 +15,7 @@ function responses() {
         status: "open" }], cursor: "",
     },
     ["/markets/" + ticker]: {
-      market: { ticker, event_ticker: eventTicker, close_time: future, status: "open",
+      market: { ticker, event_ticker: eventTicker, close_time: future, status: "open", exchange_index:2, open_time:"2026-10-15T21:59:00Z",
         expiration_time: done, latest_expiration_time: done, expected_expiration_time: done },
     },
     ["/events/" + eventTicker]: {
@@ -222,7 +222,7 @@ test("exact market fee probe never substitutes a different open BTC contract", a
   const wrong="KXBTC15M-26OCT15T2215";
   const missing=await probeCurrentKalshiFeeApi(transport(responses()),()=>now,wrong);
   assert.equal(missing.ok,false);
-  assert.equal(missing.reason,"exact_market_not_in_complete_open_listing");
+  assert.equal(missing.reason,"exact_market_detail_not_current");
   const valid=await probeCurrentKalshiFeeApi(transport(responses()),()=>now,ticker);
   assert.equal(valid.ok,true);
   assert.equal(valid.marketTicker,ticker);
@@ -238,4 +238,37 @@ test("event changes require explicit empty cursor, while series cursor is option
  const pages=responses();
  delete pages["/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"].cursor;
  assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker)).ok,true);
+});
+
+test("exact ORDER_ENTRY target bypasses lagging inventory but not direct active-window proof",async()=>{
+ const pages=responses();pages["/markets?series_ticker=KXBTC15M&status=open&limit=100"]={markets:[],cursor:""};
+ const calls:string[]=[];const base=transport(pages);
+ const fetchImpl=(async(input,init)=>{calls.push(String(input));return base(input,init);}) as typeof fetch;
+ const exact=await probeCurrentKalshiFeeApi(fetchImpl,()=>now,ticker);
+ assert.equal(exact.ok,true);assert.equal(exact.selectionMode,"exact_market_detail");assert.equal(calls.length,5);
+ assert.ok(calls.every(url=>!url.includes("/markets?")));
+ assert.equal((await probeCurrentKalshiFeeApi(transport(pages),()=>now)).ok,false,"discovery still needs complete inventory");
+});
+test("exact detail must be correct family/index/identity, active and open now",async()=>{
+ for(const patch of [
+  {ticker:"KXBTC15M-OTHER"},{exchange_index:undefined},{exchange_index:1},{series_ticker:"OTHER"},
+  {status:"closed"},{status:"settled"},{status:"initialized"},{status:undefined},
+  {open_time:undefined},{open_time:"bad"},{open_time:"2026-10-15T22:01:00Z"},
+  {close_time:"2026-10-15T22:00:00Z"},{latest_expiration_time:undefined},{event_ticker:"OTHER"},
+ ]){
+  const pages=responses();Object.assign(pages["/markets/"+ticker].market as object,patch);
+  const result=await probeCurrentKalshiFeeApi(transport(pages),()=>now,ticker);
+  assert.equal(result.ok,false,JSON.stringify(patch));
+ }
+});
+
+test("exact evidence rejects lifecycle expiry, rollback and15s budget breach while child reads run",async()=>{
+ for(const after of [Date.parse(future),now-1000,now+15_001]){
+  let time=now;const base=transport(responses());
+  const fetchImpl=(async(input,init)=>{const response=await base(input,init);if(String(input).includes("/events/"))time=after;return response;}) as typeof fetch;
+  const result=await probeCurrentKalshiFeeApi(fetchImpl,()=>time,ticker);
+  assert.equal(result.ok,false,String(after));
+ }
+ const discovery=await probeCurrentKalshiFeeApi(transport(responses()),()=>now);
+ assert.equal(discovery.ok,true);assert.equal(discovery.selectionMode,"complete_open_inventory");
 });

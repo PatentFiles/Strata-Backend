@@ -1,3 +1,4 @@
+import {getFeeFailureDiagnostics,type FeeFailureDiagnostics} from "../strata/feeFailureDiagnostics";
 import {isEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {AsyncLocalStorage} from "node:async_hooks";
 import {performance} from "node:perf_hooks";
@@ -11,7 +12,7 @@ export type StageOutcome = "completed" | "rejected" | "eligible" | "proven_not_p
  "post_uncertain" | "reconciliation_required" | "http_response" | "network_error";
 export type StageContext = {accountId:string;mode:"LIVE"|"SIMULATION";evaluationId?:string|null;intentId?:string|null};
 export type StageTiming = StageContext & {stage:ExecutionStage;durationMs:number;outcome:StageOutcome;
- releaseCommitSha:string;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
+ releaseCommitSha:string;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
 export type TimingObserver = (event:Readonly<StageTiming>)=>void|Promise<void>;
 const safeId=(value:unknown)=>typeof value==="string"&&/^[a-zA-Z0-9:_-]{1,128}$/.test(value)?value:undefined;
 const reasonCode=(error:unknown)=>{
@@ -39,7 +40,8 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
    if(intentId)event.intentId=intentId;
    if(Number.isFinite(extra.sourceAgeMs))event.sourceAgeMs=extra.sourceAgeMs;
    if(Number.isFinite(extra.sourceToDecisionAgeMs))event.sourceToDecisionAgeMs=extra.sourceToDecisionAgeMs;
-   if(extra.error!==undefined)event.reason=reasonCode(extra.error);
+   if(extra.error!==undefined){event.reason=reasonCode(extra.error);
+    const feeFailure=getFeeFailureDiagnostics(extra.error);if(feeFailure)event.feeFailure=feeFailure;}
    if(Number.isInteger(extra.httpStatus)&&extra.httpStatus!>=100&&extra.httpStatus!<=599)event.httpStatus=extra.httpStatus;
    if(stage==="prepare_entry" && isEntryPriceDiagnostics(extra.entryPrice))event.entryPrice=extra.entryPrice;
    const captured=Object.freeze(event);

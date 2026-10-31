@@ -14,8 +14,8 @@ test("endpoint holds survive fresh snapshots and are scoped to stable public fet
 });
 test("unshared listing honors its own observed429 across probe invocations",async()=>{
  let calls=0;const transport=(async()=>{calls++;return new Response("{}",{status:429,headers:{"retry-after":"60","content-type":"application/json"}});}) as typeof fetch;
- assert.equal((await probeCurrentKalshiFeeApi(transport,()=>0,market)).ok,false);
- assert.equal((await probeCurrentKalshiFeeApi(transport,()=>0,market)).ok,false);assert.equal(calls,1);
+ assert.equal((await probeCurrentKalshiFeeApi(transport,()=>0)).ok,false);
+ assert.equal((await probeCurrentKalshiFeeApi(transport,()=>0)).ok,false);assert.equal(calls,1);
 });
 test("clock regression cannot expire hold; old success cannot erase concurrent429",()=>{
  let clock=10;const begin=createPublicMetadataReadLimiter(()=>0,()=>clock);

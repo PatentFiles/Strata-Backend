@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import { createEntryMetadataSnapshot } from "./entryMetadataSnapshot";
 import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
 import { attachMarketEvidenceReadTiming, getMarketEvidenceReadTiming } from "./marketEvidenceReadTiming";
@@ -536,7 +537,8 @@ export function createProductionPersonalSession(
                   sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
                     probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,metadataSnapshot!.read)});
                 if(!checked.ok||checked.identity.marketTicker!==market)
-                  throw new Error("api_fee_exact_market_source_unavailable");
+                  throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
+                    {phase:"authorization",reason:"api_fee_order_market_mismatch"},checked);
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
               }else if(alternate){

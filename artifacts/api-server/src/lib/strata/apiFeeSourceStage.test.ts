@@ -152,3 +152,28 @@ test("issue154: Kalshi 429 or changed event model never renews standing DB lease
  assert.equal(unavailable.ok,false);
  assert.equal(queries,0);
 });
+
+import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
+import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
+test("provider reason survives candidate and stage without reaching DB or changing public rejection",async()=>{
+ let queries=0;
+ const fetchImpl=(async()=>new Response("SECRET",{status:403,headers:{"content-type":"application/json"}})) as typeof fetch;
+ const v=await verifyReviewedApiFeeSourceStage(owner,"ORDER_ENTRY",sourceUrl,ticker,{
+  ...deps(),db:{query:async()=>{queries++;return {rows:[]};}},
+  probe:async()=>probeCurrentKalshiFeeApi(fetchImpl,()=>now,ticker),
+ });
+ assert.equal(v.ok,false);assert.equal(v.reason,"live_api_fee_source_not_verified");assert.equal(queries,0);
+ assert.deepEqual(getFeeFailureDiagnostics(v),{version:1,phase:"provider_transport",reason:"provider_http_rejected",endpoint:"market_detail",httpStatus:403});
+ assert.ok(!JSON.stringify(v).includes("SECRET"));
+});
+test("DB and standing renewal failures remain distinguishable safe diagnostics",async()=>{
+ const failedDb=await verifyReviewedApiFeeSourceStage(owner,"ORDER_ENTRY",sourceUrl,ticker,{
+  ...deps(),db:{query:async()=>{throw Error("SECRET database hostname");}},
+ });
+ assert.equal(getFeeFailureDiagnostics(failedDb)?.phase,"database");
+ assert.equal(getFeeFailureDiagnostics(failedDb)?.reason,"api_fee_database_review_unavailable");
+ const missing=await verifyReviewedApiFeeSourceStage(owner,"ORDER_ENTRY",sourceUrl,ticker,{...deps([]),sha:()=>"a".repeat(40)});
+ assert.equal(missing.ok,false);
+ assert.equal(getFeeFailureDiagnostics(missing)?.reason,"standing_model_consent_or_live_policy_missing");
+ assert.equal(getFeeFailureDiagnostics(missing)?.phase,"authorization");
+});

@@ -1,3 +1,4 @@
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import { pool,type PoolClient } from "@workspace/db";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
@@ -195,7 +196,8 @@ export function createGuardedReviewedApiFeeFetch(
       checked.identity.feePolicyVersion!==API_SOURCE_POLICY_VERSION ||
       checked.identity.formulaVersion!==API_SOURCE_FORMULA_VERSION ||
       !/^[a-f0-9]{64}$/.test(checked.identity.digest))
-    throw new Error("api_fee_final_order_grant_or_market_closed");
+    throw annotateFeeFailure(new Error("api_fee_final_order_grant_or_market_closed"),
+      {phase:"authorization",reason:"api_fee_source_identity_mismatch"},checked);
    const response=await transport(request,init);
    if(connection)await client.query("COMMIT");committed=true;
    return response;

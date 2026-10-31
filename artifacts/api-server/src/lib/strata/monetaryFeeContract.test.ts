@@ -47,7 +47,7 @@ function feeApiPages(){
   "/markets?series_ticker=KXBTC15M&status=open&limit=100":{
    markets:[{ticker:marketTicker,event_ticker:marketTicker,close_time:close,status:"open"}],cursor:""},
   ["/markets/"+marketTicker]:{
-   market:{ticker:marketTicker,event_ticker:marketTicker,close_time:close,status:"open",
+   market:{ticker:marketTicker,event_ticker:marketTicker,close_time:close,status:"open",exchange_index:2,open_time:"2026-10-15T21:59:00Z",
    expiration_time:expiration,latest_expiration_time:expiration,expected_expiration_time:expiration}},
   ["/events/"+marketTicker]:{event:{event_ticker:marketTicker,series_ticker:"KXBTC15M",
    fee_type_override:null,fee_multiplier_override:null}},

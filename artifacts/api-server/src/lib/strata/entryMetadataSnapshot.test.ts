@@ -12,7 +12,7 @@ const ec=`/events/fee_changes?event_ticker=${event}&limit=100`;
 const listing="/markets?series_ticker=KXBTC15M&status=open&limit=100";
 function fixture():Record<string,any>{return {
  [listing]:{markets:[{ticker:market,event_ticker:event,status:"active",close_time:end,exchange_index:2}],cursor:""},
- [mp]:{market:{ticker:market,event_ticker:event,exchange_index:2,status:"active",close_time:end,expiration_time:end,latest_expiration_time:end,expected_expiration_time:end}},
+ [mp]:{market:{ticker:market,event_ticker:event,exchange_index:2,status:"active",open_time:"2026-10-31T04:45:00Z",close_time:end,expiration_time:end,latest_expiration_time:end,expected_expiration_time:end}},
  [ep]:{event:{event_ticker:event,series_ticker:"KXBTC15M",exchange_index:2,fee_type_override:null,fee_multiplier_override:null}},
  [sp]:{series:{ticker:"KXBTC15M",exchange_index:2,fee_type:"quadratic",fee_multiplier:1}},
  [sc]:{series_fee_change_arr:[]},[ec]:{event_fee_changes:[],cursor:""},
@@ -35,12 +35,12 @@ async function bundle(shared:boolean,pages=fixture()){
  const proof=verifyOwnedFeeMetadata({marketTicker:market,...result,observedAtMs:at,nowMs:at+100});
  return {calls,result,proof};
 }
-test("actual fee probe and outer validator share five snapshots:12 to7 GETs, identical proof",async()=>{
+test("actual fee probe and outer validator share five snapshots:11 to6 GETs without discovery listing, identical proof",async()=>{
  const old=await bundle(false),next=await bundle(true);
- assert.equal(old.calls.length,12);assert.equal(next.calls.length,7);
+ assert.equal(old.calls.length,11);assert.equal(next.calls.length,6);
  assert.deepEqual(next.result,old.result);assert.deepEqual(next.proof,old.proof);assert.equal(next.proof.ok,true);
  for(const path of [mp,ep,sp,sc,ec])assert.equal(next.calls.filter(c=>c===path).length,1);
- assert.equal(next.calls.filter(c=>c===listing).length,1);
+ assert.equal(next.calls.filter(c=>c===listing).length,0);
 });
 test("both validators still reject changed fees and incomplete event cursors",async()=>{
  for(const mutate of [(p:any)=>p[sp].series.fee_multiplier=2,(p:any)=>p[ec].cursor="more",(p:any)=>delete p[ec].cursor]){
@@ -124,9 +124,9 @@ test("shared series failure fences fee-probe event waiters behind delayed market
  assert.equal(calls.length,count);assert.ok(!calls.includes(ep));assert.ok(!calls.includes(ec));
 });
 
-test("listing pagination stays unshared and bounded:two-page fixture uses8 GETs, not7",async()=>{
+test("exact-target snapshots ignore unrelated stale/paginated discovery inventory",async()=>{
  const pages=fixture();pages[listing].cursor="next-page";
  pages[listing+"&cursor=next-page"]={markets:[],cursor:""};
- const next=await bundle(true,pages);assert.equal(next.proof.ok,true);assert.equal(next.calls.length,8);
- assert.equal(next.calls.filter(p=>p.startsWith("/markets?")).length,2);
+ const next=await bundle(true,pages);assert.equal(next.proof.ok,true);assert.equal(next.calls.length,6);
+ assert.equal(next.calls.filter(p=>p.startsWith("/markets?")).length,0);
 });
