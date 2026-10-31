@@ -105,7 +105,7 @@ test("wrong SHA, other owner, low stake, non-IOC, exits, overexposure fail close
   {...ctx,stakeRevision:10},
   {...ctx,availableCashMicros:"100000"},
   {...ctx,reservedCashMicros:"26000000"},
-  {...ctx,request:{...ctx.request,contracts:9}},
+  {...ctx,request:{...ctx.request,contracts:9,quantityVersion:undefined,quantityHundredths:undefined}},
   {...ctx,request:{...ctx.request,reduceOnly:true}},
   {...ctx,request:{...ctx.request,action:"SELL"}},
   {...ctx,request:{...ctx.request,timeInForce:"GTC" as "IOC"}},

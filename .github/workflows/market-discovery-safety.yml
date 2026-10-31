@@ -3,6 +3,13 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
+      - 'artifacts/api-server/src/lib/forwardEntryBookQuote*'
+      - 'artifacts/api-server/src/lib/forwardTestWorker*'
+      - 'artifacts/api-server/src/lib/forwardTestBookCapture*'
+      - 'artifacts/api-server/src/lib/forwardTestOrderbookDepth*'
+      - 'lib/v13-strategy/**'
+      - 'lib/db/src/schema/forwardTestEvaluation.ts'
+      - 'sql/strata_forward_entry_book_quote.sql'
       - 'artifacts/api-server/src/lib/publicFeedJson*'
       - 'artifacts/api-server/src/lib/rolloverStrikeDiagnostics*'
       - 'artifacts/api-server/src/lib/rolloverReadShapeEvidence*'

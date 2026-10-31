@@ -1,3 +1,4 @@
+import {planCashBoundEntry} from "../v13EntryCashRisk";
 import "./ownedCashPrecision.test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
@@ -716,6 +717,19 @@ test("owned market evidence uses the configured stake and rejects an unproven fe
     artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
   });
   assert.equal(tapered.fee.contracts, evidence.fee.contracts);
+  // Actual verified reader -> cash-sized plan: only the affordable top three
+  // contracts are needed, and deeper/higher-priced liquidity is not invented.
+  for(const quantity of ["3.00","3.99","100.00"]){
+    const actual=ownedMarketEvidence({market:"KXBTC15M-TEST",side:"YES",
+      bookPayload:{orderbook_fp:{yes_dollars:[["0.5100","100"]],no_dollars:[["0.4800",quantity],["0.4700","100"]]}},
+      seriesPayload:series,marketPayload:market,eventPayload,seriesChangesPayload,eventChangesPayload,
+      observedAtMs:NOW,nowMs:NOW,configuredStakeCents:500,policyVersion:"standing",sourceUrl:"https://kalshi.com/fees",
+      formulaVersion:"quadratic",artifactDigest:"ab".repeat(32),policyHash:"cd".repeat(32),verifiedAtMs:NOW});
+    const planned=planCashBoundEntry({signal:"SCOUT",direction:"UP",referenceOffer:.52,maxStakeCents:500,
+      bestAskDollars:actual.bestAskDollars,askLevels:actual.asks,fee:actual.fee,budgetCents:625});
+    assert.ok(planned.ok);assert.equal(planned.plan.contracts,3);assert.equal(planned.plan.limitPrice,.52);
+    assert.equal(planned.cashRisk.plannedAllInCents,600);
+  }
   assert.throws(() => ownedMarketEvidence({
     market: "KXBTC15M-TEST", side: "YES", bookPayload: book,
     seriesPayload: { series: { ticker: "OTHER", fee_type: "quadratic", fee_multiplier: "1" } },

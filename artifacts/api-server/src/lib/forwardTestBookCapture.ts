@@ -1,5 +1,7 @@
+import type {EntryBookQuote} from "./forwardEntryBookQuote";
 /**
- * Research-only post-event Kalshi REST depth receipts.
+ * Research-only Kalshi REST depth receipts, persisted after the paper action.
+ * ENTRY may reuse an explicitly labeled prequalification observation.
  * ALWAYS called after a successfully committed PAPER_ONLY position transition.
  * Nonblocking failures never rewrite paper history or cause a retry/duplicate
  * trade. No live order endpoints, signatures or account credentials here.
@@ -13,9 +15,11 @@ export type PaperBookCaptureEvent={
  positionId:string;engineId:string;marketTicker:string;
  phase:"ENTRY"|"EXIT";direction:"UP"|"DOWN";
  contracts:number;quotePrice:number;eventAt:Date;
+ prequalification?:{quote:EntryBookQuote;evaluationId:string};
 };
 export type PaperDepthReceipt={
  id:string;phase:"ENTRY"|"EXIT";
+ observationPhase:"PRE_QUALIFICATION"|"POST_ACTION";
  status:"CAPTURED"|"UNAVAILABLE";
  eventAt:string;startedAt:string;receivedAt:string|null;
  captureLagMs:number|null;
@@ -59,6 +63,22 @@ export async function savePostActionPaperBook(
  }catch(error){
   reason=codeOf(error);book=null;capacity=null;
  }
+ return persistPaperBook(event,book,capacity,reason,started);
+}
+/** Reuse the ORIGINAL prequalification response, never an extra GET or a restamp.
+ * The event is committed, but observationPhase distinguishes when acquisition occurred. */
+export async function savePrequalificationPaperBook(event:PaperBookCaptureEvent):Promise<PaperDepthReceipt|null>{
+ const proof=event.prequalification;
+ if(!proof||event.phase!=="ENTRY"||proof.quote.book.ticker!==event.marketTicker||
+    proof.quote.evidence.marketTicker!==event.marketTicker||!proof.evaluationId||
+    priceTicks(event.quotePrice)!==(event.direction==='UP'?proof.quote.evidence.yesAskTicks:proof.quote.evidence.noAskTicks))return null;
+ const book=proof.quote.book;
+ const capacity=simulateBookCapacity(book,event.direction==='UP'?'yes':'no','buy',event.contracts,
+   priceTicks(event.quotePrice)!,BigInt(proof.quote.evidence.capacity.stakeMicros));
+ return persistPaperBook(event,book,capacity,null,book.requestStartedAtMs,proof);
+}
+async function persistPaperBook(event:PaperBookCaptureEvent,book:ReadonlyResearchBook|null,
+ capacity:DepthQuote|null,reason:string|null,started:number,prequalification?:PaperBookCaptureEvent['prequalification']):Promise<PaperDepthReceipt|null>{
  const status=book&&capacity?"CAPTURED":"UNAVAILABLE";
  const id=event.positionId+":"+event.phase;
  try{
@@ -78,6 +98,9 @@ export async function savePostActionPaperBook(
       bestPriceTicks:capacity.bestPriceTicks,
       usedPriceLevels:capacity.usedPriceLevels,
       interpretation:capacity.interpretation,
+      observationPhase:prequalification?'PRE_QUALIFICATION':'POST_ACTION',
+      ...(prequalification?{sourceEvaluationId:prequalification.evaluationId,
+        quoteEvidence:prequalification.quote.evidence}:{}),
     }:null,errorCode:status==="UNAVAILABLE"?(reason??"unavailable"):null,
   }).onConflictDoNothing().returning({id:forwardTestBookSnapshotTable.id});
   if(!inserted)return null; // Never misreport an ignored duplicate as new evidence.
@@ -86,7 +109,7 @@ export async function savePostActionPaperBook(
    // decisions; explicit receipts are absent and completeness metrics stay low.
    return null;
  }
- return {id,phase:event.phase,status,
+ return {id,phase:event.phase,status,observationPhase:prequalification?"PRE_QUALIFICATION":"POST_ACTION",
   eventAt:event.eventAt.toISOString(),startedAt:new Date(started).toISOString(),
   receivedAt:book?new Date(book.receivedAtMs).toISOString():null,
   captureLagMs:book?book.receivedAtMs-event.eventAt.getTime():null,
@@ -106,7 +129,9 @@ export async function readPaperBookCaptureCoverage(engineId:string){
     r.capacity.modeledUnfilledContracts>0).length;
  const potentialZero=captured.filter(r=>r.capacity&&
     r.capacity.modeledFilledContracts===0).length;
- return {mode:"POST_ACTION_REST_OBSERVATION_ONLY" as const,
+ const prequalification=captured.filter(r=>r.capacity?.observationPhase==='PRE_QUALIFICATION').length;
+ return {mode:prequalification>0?"MIXED_PREQUALIFICATION_AND_POST_ACTION_OBSERVATION_ONLY" as const:"POST_ACTION_REST_OBSERVATION_ONLY" as const,
+   prequalificationReceipts:prequalification,
    proofOfActualExecution:false as const,
    exchangeTimestampVerified:false as const,
    feeScheduleProviderVerified:false as const,
@@ -115,5 +140,5 @@ export async function readPaperBookCaptureCoverage(engineId:string){
    entries:receipts.filter(r=>r.phase==="ENTRY").length,
    exits:receipts.filter(r=>r.phase==="EXIT").length,
    readLimit:2500,source:"KALSHI_PUBLIC_REST" as const,
-   warning:"REST books arrived after paper decisions, may be late or stale, and contain no venue fills, provider timestamps, or verified fee evidence"};
+   warning:"REST book timing is explicitly PRE_QUALIFICATION or POST_ACTION; local receipt times are not venue snapshot times. No venue fills, persistent liquidity or verified fees are proven"};
 }

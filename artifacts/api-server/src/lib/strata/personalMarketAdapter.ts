@@ -1,3 +1,4 @@
+import {validEntryCashRisk} from "../v13EntryCashRisk";
 import { ownedBalanceMicros } from "./ownedCashPrecision";
 import { cents } from "../v13-production/types";
 import { normalizeKalshiMoney } from "./kalshiUserRead";
@@ -75,6 +76,7 @@ export function validateMarketEvidence(evidence: MarketEvidence): void {
     Number.isSafeInteger(fee.reservedEntryFeeCents) && fee.reservedEntryFeeCents >= 0 &&
     Number.isSafeInteger(fee.reservedExitFeeCents) && fee.reservedExitFeeCents >= 0,
   "fee_evidence_missing");
+  requireProof(!fee.cashRisk||validEntryCashRisk(fee),"fee_cash_bound_unproven");
 }
 
 /**

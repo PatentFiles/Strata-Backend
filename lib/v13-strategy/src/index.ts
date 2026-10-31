@@ -46,6 +46,37 @@ export const calculateSignedBuffer = (btcPrice: number, target: number) =>
 const sideFor = (direction: V13Direction | null): V13Side =>
   direction === 'up' ? 'UP' : direction === 'down' ? 'DOWN' : 'NONE';
 
+/** Shared price-independent structure. This is a read-budget predicate, never
+ * a signal or order authority; the full classifier must still run with real quotes. */
+function entryStructure(input: Pick<V13Input, "btcPrice"|"target"|"previousBuffer"|"velocity">,
+  parameters: V13StrategyParameters) {
+  const buffer = input.btcPrice! - input.target!;
+  const crossedUp = input.previousBuffer !== null && input.previousBuffer <= 0 && buffer > 0;
+  const crossedDown = input.previousBuffer !== null && input.previousBuffer >= 0 && buffer < 0;
+  const freshCross = crossedUp || crossedDown;
+  const crossedDirection: V13Direction | null = crossedUp ? "up" : crossedDown ? "down" : null;
+  const currentDirection: V13Direction | null = buffer > 0 ? "up" : buffer < 0 ? "down" : null;
+  const candidateDirection = crossedDirection ?? currentDirection;
+  const directionalVelocity = input.velocity !== null &&
+    ((input.velocity > 0 && crossedDirection === "up") || (input.velocity < 0 && crossedDirection === "down"));
+  const currentVelocitySupports = input.velocity !== null &&
+    ((currentDirection === "up" && input.velocity > 0) || (currentDirection === "down" && input.velocity < 0));
+  const separation = Math.abs(buffer);
+  return {freshCross, crossedDirection, currentDirection, candidateDirection, separation,
+    scout: Boolean(candidateDirection) && separation >= parameters.scoutMinSeparation &&
+      separation <= parameters.scoutMaxSeparation && directionalVelocity,
+    confirm: freshCross && Boolean(candidateDirection) && separation >= parameters.confirmMinSeparation && currentVelocitySupports};
+}
+
+export function needsV13EntryPrice(input: Omit<V13Input, "upOffer"|"downOffer">): boolean {
+  if (input.freshness !== "current" || input.position?.status === "open" || !input.marketTicker ||
+      input.btcPrice === null || input.target === null || !Number.isFinite(input.btcPrice) ||
+      !Number.isFinite(input.target) || input.previousBuffer === null || !Number.isFinite(input.previousBuffer) ||
+      input.velocity === null || !Number.isFinite(input.velocity)) return false;
+  const structure = entryStructure(input, V13_CHAMPION_PARAMETER_SET.parameters);
+  return structure.freshCross && (structure.scout || structure.confirm);
+}
+
 // Pure V1.3 signal classification. The browser/worker owns feed acquisition,
 // per-market crossing history, paper position creation and settlement/P&L.
 export function evaluateV13StrategyWithParameters(
@@ -87,45 +118,13 @@ export function evaluateV13StrategyWithParameters(
     };
   }
 
-  const crossedUp =
-    previousBuffer !== null && previousBuffer <= 0 && buffer > 0;
-  const crossedDown =
-    previousBuffer !== null && previousBuffer >= 0 && buffer < 0;
-  const freshCross = crossedUp || crossedDown;
-  const crossedDirection: V13Direction | null = crossedUp
-    ? 'up'
-    : crossedDown
-      ? 'down'
-      : null;
-  const directionalVelocity =
-    velocity !== null &&
-    ((velocity > 0 && crossedDirection === 'up') ||
-      (velocity < 0 && crossedDirection === 'down'));
-  const currentDirection: V13Direction | null =
-    buffer > 0 ? 'up' : buffer < 0 ? 'down' : null;
-  const currentVelocitySupports =
-    velocity !== null &&
-    ((currentDirection === 'up' && velocity > 0) ||
-      (currentDirection === 'down' && velocity < 0));
-  const separation = Math.abs(buffer);
-  const candidateDirection = crossedDirection ?? currentDirection;
+  const structure = entryStructure(input, parameters);
+  const {freshCross, crossedDirection, currentDirection, candidateDirection, separation} = structure;
   const candidateOffer = candidateDirection
     ? candidateDirection === 'up' ? upOffer : downOffer
     : null;
-  const canScout =
-    Boolean(candidateDirection) &&
-    separation >= parameters.scoutMinSeparation &&
-    separation <= parameters.scoutMaxSeparation &&
-    directionalVelocity &&
-    candidateOffer !== null &&
-    candidateOffer <= parameters.scoutMaxOffer;
-  const canConfirm =
-    freshCross &&
-    Boolean(candidateDirection) &&
-    separation >= parameters.confirmMinSeparation &&
-    currentVelocitySupports &&
-    candidateOffer !== null &&
-    candidateOffer <= parameters.confirmMaxOffer;
+  const canScout = structure.scout && candidateOffer !== null && candidateOffer <= parameters.scoutMaxOffer;
+  const canConfirm = structure.confirm && candidateOffer !== null && candidateOffer <= parameters.confirmMaxOffer;
   const confirmTooExpensive =
     separation >= parameters.confirmMinSeparation &&
     candidateOffer !== null &&

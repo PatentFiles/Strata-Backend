@@ -1,3 +1,4 @@
+import {planCashBoundEntry,type V13EntryCashRisk,type V13EntryCashProof} from "./v13EntryCashRisk";
 import {
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
@@ -21,6 +22,8 @@ export type V13VerifiedFeeEvidence = {
   formulaVersion: string;
   fingerprint: string;
   verifiedAtMs: number;
+  /** Versioned conservative basis; selected count is pinned separately in preflight. */
+  cashRisk?: V13EntryCashRisk;
   contracts: number;
   limitPrice: number;
   reservedEntryFeeCents: number;
@@ -46,12 +49,14 @@ export type V13LiveMoneyEntryPreflightInput = {
   realizedTotalLossCents: number;
   /** Operator target. The approved policy maximum stays the hard ceiling. */
   configuredStakeCents?: number;
+  requireCashRisk?: boolean;
 };
 
 export type V13LiveMoneyEntryPreflightResult =
   | {
       ok: true;
       plan: V13IocEntryPlan;
+      cashRisk?: V13EntryCashProof;
       plannedAllInCents: number;
       policyHash: string;
       strategyParameterSetId: string;
@@ -100,14 +105,19 @@ export function preflightV13LiveMoneyEntry(
   )) {
     return { ok: false, reason: "live_money_configured_stake_invalid" };
   }
-  const plan = planV13IocEntry({
+  if(input.requireCashRisk&&!input.feeEvidence.cashRisk)return {ok:false,reason:"live_money_cash_risk_unproven"};
+  const budgetCents=Math.min(input.policy.maxEntryAllInCents,input.availableCashCents,input.capitalRemainingCents,
+    input.policy.maxDailyLossCents-input.realizedDailyLossCents,input.policy.maxTotalLossCents-input.realizedTotalLossCents);
+  const planInput={
     signal: input.signal,
     direction: input.direction,
     referenceOffer: input.referenceOffer,
     maxStakeCents: configured ?? input.policy.maxEntryStakeCents,
     bestAskDollars: input.bestAskDollars,
     askLevels: input.askLevels,
-  });
+  };
+  const plan=input.feeEvidence.cashRisk?planCashBoundEntry({...planInput,fee:input.feeEvidence,budgetCents}):planV13IocEntry(planInput);
+  const cashRisk:V13EntryCashProof|undefined=plan.ok&&"cashRisk" in plan?plan.cashRisk as V13EntryCashProof:undefined;
   if (!plan.ok) {
     return { ok: false, reason: `live_money_${plan.reason}` };
   }
@@ -122,15 +132,16 @@ export function preflightV13LiveMoneyEntry(
       !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(fees.verifiedAtMs) ||
       !Number.isSafeInteger(feeAgeMs) || feeAgeMs < 0 ||
       feeAgeMs > input.policy.maxFeeEvidenceAgeMs ||
-      !exactPlanFeeEvidence(plan.plan, fees)) {
+      !(cashRisk?cashRisk.contracts===plan.plan.contracts&&cashRisk.limitMicros===Math.round(plan.plan.limitPrice*1_000_000):exactPlanFeeEvidence(plan.plan, fees))) {
     return { ok: false, reason: "live_money_fee_evidence_invalid_or_stale" };
   }
 
   const risk = evaluateV13LiveMoneyRisk({
     policy: input.policy,
     plannedGrossCents: plan.plan.worstCaseGrossCents,
-    reservedEntryFeeCents: fees.reservedEntryFeeCents,
-    reservedExitFeeCents: fees.reservedExitFeeCents,
+    reservedEntryFeeCents: cashRisk?Number((BigInt(cashRisk.entryTradeFeeMicros)+9999n)/10000n):fees.reservedEntryFeeCents,
+    reservedExitFeeCents: cashRisk?.reservedExitFeeCents??fees.reservedExitFeeCents,
+    ...(cashRisk?{plannedEntryCashDebitCents:cashRisk.reservedEntryCashCents}:{}),
     availableCashCents: input.availableCashCents,
     capitalRemainingCents: input.capitalRemainingCents,
     openPositions: input.openPositions,
@@ -152,6 +163,7 @@ export function preflightV13LiveMoneyEntry(
   return {
     ok: true,
     plan: plan.plan,
+    ...(cashRisk?{cashRisk}:{}),
     plannedAllInCents: risk.plannedAllInCents,
     policyHash: input.policy.policyHash!,
     strategyParameterSetId: input.strategyParameterSetId,

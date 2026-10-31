@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, doublePrecision, index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, check, doublePrecision, index, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -11,6 +11,15 @@ export const forwardTestEvaluationTable = pgTable("forward_test_evaluations", {
   strategyParameterSetId: text("strategy_parameter_set_id"),
   strategyParameterHash: text("strategy_parameter_hash"),
   entryPolicyVersion: text("entry_policy_version"),
+  // NULL is historical/detail-based. New entry books never inherit a false provider timestamp.
+  entryQuoteEvidence: jsonb("entry_quote_evidence").$type<{
+    version:1; source:"KALSHI_PUBLIC_ORDERBOOK"; purpose:"PRE_QUALIFICATION"; marketTicker:string;
+    requestStartedAtMs:number; responseHeadersAtMs:number; bodyCompletedAtMs:number;
+    yesBidTicks:number; noBidTicks:number; yesAskTicks:number; noAskTicks:number;
+    normalizedBookDigest:string; rawResponseDigest:string|null; evidenceDigest:string;
+    capacity:{side:"YES"|"NO";referencePriceTicks:number;stakeMicros:string;requestedContracts:number;
+      modeledFilledContracts:number;modeledUnfilledContracts:number;modeledCashMicros:string};
+  }>(),
   marketTicker: text("market_ticker").notNull(),
   btcPrice: doublePrecision("btc_price").notNull(),
   target: doublePrecision("target").notNull(),

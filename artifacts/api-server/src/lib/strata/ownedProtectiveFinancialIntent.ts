@@ -1,3 +1,5 @@
+import {requestQuantityHundredths,formatContractHundredths} from "../v13-production/requestQuantity";
+import {planFractionalIocExit} from "../v13-production/fractionalExitPlanner";
 import type {Request,MarketEvidence} from "../v13-production/types";
 import type {ProtectiveExitDispatch} from "../v13-production/consumer";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
@@ -21,23 +23,22 @@ export function sealedFinancialProtectiveExitOrder(
     !Number.isSafeInteger(selection.minimumExitMicros)||
     selection.minimumExitMicros<1||selection.minimumExitMicros>=1_000_000)
   throw Error("protective_exit_owner_selection_invalid");
- const owned=BigInt(selection.quantityHundredths)/100n;
- if(owned<1n||owned>1000n||
+ const owned=BigInt(selection.quantityHundredths),quantity=requestQuantityHundredths(financial);
+ if(owned<1n||
     financial.market!==selection.market||financial.side!==selection.side||
     financial.action!=="SELL"||financial.reduceOnly!==true||
     financial.timeInForce!=="IOC"||!CLIENT.test(financial.clientOrderId)||
-    !Number.isSafeInteger(financial.contracts)||financial.contracts<1||
-    financial.contracts>Number(owned)||
+    quantity<1n||quantity>100000n||quantity>owned||
     !Number.isSafeInteger(financial.limitMicros)||financial.limitMicros<100||
     financial.limitMicros>999_900||financial.limitMicros%100!==0)
   throw Error("protective_exit_sealed_financial_intent_invalid");
- const plan=planV13IocExit({
-  ownedContracts:Number(owned),
-  bestBidDollars:book.bestBidDollars,bidLevels:book.bids,
-  minimumExitPrice:selection.minimumExitMicros/1_000_000,
- });
- if(!plan.ok||plan.plan.plannedContracts!==financial.contracts||
-    Math.round(plan.plan.limitPrice*1_000_000)!==financial.limitMicros)
+ const plan=financial.quantityVersion==='EXIT_HUNDREDTHS_V1'
+  ? planFractionalIocExit({ownedHundredths:owned.toString(),bestBidDollars:book.bestBidDollars,
+      bidLevels:book.bids,minimumExitMicros:selection.minimumExitMicros})
+  : planV13IocExit({ownedContracts:Number(owned/100n),bestBidDollars:book.bestBidDollars,
+      bidLevels:book.bids,minimumExitPrice:selection.minimumExitMicros/1_000_000});
+ if(!plan.ok||('plannedHundredths' in plan.plan?BigInt(plan.plan.plannedHundredths):BigInt(plan.plan.plannedContracts)*100n)!==quantity||
+    ('limitMicros' in plan.plan?plan.plan.limitMicros:Math.round(plan.plan.limitPrice*1_000_000))!==financial.limitMicros)
   throw Error("protective_exit_orderbook_changed_after_financial_preparation");
  const ticks=financial.limitMicros/100;
  const yesTicks=selection.side==="YES"?ticks:10_000-ticks;
@@ -45,7 +46,7 @@ export function sealedFinancialProtectiveExitOrder(
  return Object.freeze({
   ticker:financial.market,
   side:selection.side==="YES"?"ask":"bid",
-  count:financial.contracts.toFixed(2),
+  count:formatContractHundredths(quantity),
   price:"0."+String(yesTicks).padStart(4,"0"),
   client_order_id:financial.clientOrderId,
   time_in_force:"immediate_or_cancel",

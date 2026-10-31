@@ -148,8 +148,7 @@ async function finalizeNeverSent(token:object,db:DB):Promise<boolean>{
     AND i.request->>'action'='SELL' AND i.request->>'timeInForce'='IOC'
     AND i.request->>'market'=r.market_ticker AND i.side=r.reducing_side AND i.request->>'side'=r.reducing_side
     AND r.reducing_side=$9 AND r.quantity_hundredths=$10::bigint
-    AND i.request->>'contracts' ~ '^[0-9]{1,9}$'
-    AND (i.request->>'contracts')::bigint*100=r.quantity_hundredths
+    AND private.strata_exit_request_quantity_hundredths(i.request)=r.quantity_hundredths
     AND i.request->>'limitMicros'=$11::text
     AND pos.market=r.market_ticker AND pos.side=r.reducing_side AND pos.quantity_hundredths>=r.quantity_hundredths
     AND parent.kind='ENTRY' AND parent.terminal=true
@@ -246,7 +245,13 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  AND EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.client_order_id=r.client_order_id
    AND i.market=r.market_ticker AND i.kind='EXIT'
-   AND i.state='DISPATCHED' AND i.terminal=false)
+   AND i.state='DISPATCHED' AND i.terminal=false
+   AND i.exchange_order_id IS NULL AND i.filled_hundredths=0
+   AND i.side=$7 AND i.request->>'market'=r.market_ticker
+   AND i.request->>'side'=$7 AND i.request->>'clientOrderId'=r.client_order_id
+   AND private.strata_exit_request_quantity_hundredths(i.request)=$8::bigint
+   AND i.request->>'limitMicros'=$11::text
+   FOR SHARE OF i)
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
    AND i.client_order_id<>r.client_order_id)

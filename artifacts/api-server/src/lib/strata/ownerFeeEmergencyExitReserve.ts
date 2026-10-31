@@ -106,7 +106,7 @@ export async function reserveOwnedEmergencyExitProof(
       "AND fi.filled_hundredths=0 AND fi.request->>'action'='SELL' AND fi.request->>'reduceOnly'='true' " +
       "AND fi.request->>'timeInForce'='IOC' AND fi.request->>'market'=$3::text " +
       "AND fi.request->>'side'=$4::text AND fi.request->>'clientOrderId'=$9::text " +
-      "AND (fi.request->>'contracts')::integer*100=$6::bigint " +
+      "AND private.strata_exit_request_quantity_hundredths(fi.request)=$6::bigint " +
       "AND (fi.request->>'limitMicros')::integer=$10::integer " +
       "JOIN public.live_execution_config g ON g.id='singleton' " +
       "WHERE a.id=$1::text AND a.owner_user_id=$2::uuid " +

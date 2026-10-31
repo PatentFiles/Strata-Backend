@@ -15,6 +15,7 @@ on:
       - 'artifacts/api-server/src/lib/forwardTestWorker.ts'
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'artifacts/api-server/src/lib/v13-production/executor.ts'
+      - 'artifacts/api-server/src/lib/v13-production/entryQuoteEvidence*'
       - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
       - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
       - 'artifacts/api-server/src/lib/strata/entryWireClock*'
@@ -48,6 +49,11 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/strata/continuousExecutionAuthorization.postgres.test.ts src/lib/strata/continuousExecutionAuthorization.test.ts src/lib/v13-production/workerProtectiveRecovery.test.ts src/lib/v13-production/signalDecisionTrace.test.ts --bundle --platform=node --format=cjs --outdir=dist/standing-tests --out-extension:.js=.cjs --external:pg-native --external:@electric-sql/pglite
           NODE_PATH="$RUNNER_TEMP/strata-test-deps/node_modules" node --test dist/standing-tests/strata/*.cjs dist/standing-tests/v13-production/*.cjs
+      - name: Verify mandatory LIVE entry evidence and actual producer digest compatibility
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/v13-production/entryQuoteEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/entry-quote-evidence.cjs
+          node --test dist/entry-quote-evidence.cjs
       - name: Protective exit failure and restart tests
         env:
           DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused

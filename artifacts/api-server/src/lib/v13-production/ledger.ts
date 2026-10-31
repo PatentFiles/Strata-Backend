@@ -1,3 +1,6 @@
+import {reconciliationObservation} from "./reconciliationObservation";
+import {entryCashProof,entryFillFeeUpperMicros,validEntryCashRisk,type V13EntryCashProof} from "../v13EntryCashRisk";
+import {requestQuantityHundredths} from "./requestQuantity";
 import type { Pool, PoolClient } from "@workspace/db";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -196,6 +199,7 @@ export class ProductionLedger {
             i.state !== "PREPARED" && i.state !== "BLOCKED", "production_unattributed_order");
           if (i.exchange_order_id === null) i.exchange_order_id = o.orderId;
         }
+        const entrySpent=new Map<string,bigint>();
         const fills = snapshot.fills.slice().sort((x, y) => x.occurredAtMs - y.occurredAtMs || x.id.localeCompare(y.id));
         requireProof(new Set(fills.map(f => f.id)).size === fills.length, "production_duplicate_fill_in_scan");
         for (const f of fills) {
@@ -217,12 +221,37 @@ export class ProductionLedger {
             (f.action === "BUY" ? f.priceMicros <= i.request.limitMicros : f.priceMicros >= i.request.limitMicros),
           "production_fill_limit_or_amount_invalid");
           const filled = money(i.filled_hundredths) + qty;
-          requireProof(filled <= BigInt(i.request.contracts) * 100n, "production_overfill");
+          requireProof(filled <= requestQuantityHundredths(i.request), "production_overfill");
           let pnl = 0n, delta: bigint;
           if (i.kind === "ENTRY") {
+            // Validate the stored capability even for historical entries, so
+            // accidental removal of both version fields cannot hide corruption.
+            requireProof(i.capability_digest===digest({id:i.id,request:i.request,decision:i.decision,
+              policyHash:i.policy_hash,fee:i.fee_fingerprint}),"production_entry_capability_corrupt");
             if (i.terminal) a.blocked_reason = "late_fill_after_terminal"; // still account for owned money/contracts
             const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.id])).rows[0];
             requireProof(pos, "production_entry_position_missing");
+            const cashProof=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
+            const cashBasis=(i.decision.book as import("./types").MarketEvidence)?.fee?.cashRisk;
+            // Only history with neither versioned field is legacy. Partial
+            // stripping may not downgrade an authenticated fill's checks.
+            requireProof(Boolean(cashBasis)===Boolean(cashProof),"production_entry_cash_bound_corrupt");
+            if(cashProof){
+              const pinned=(i.decision.book as import("./types").MarketEvidence).fee;
+              requireProof(i.request.action==="BUY"&&typeof i.request.contracts==="number"&&validEntryCashRisk(pinned)&&
+                canonical(entryCashProof(pinned,i.request.contracts,cashProof.budgetCents))===canonical(cashProof)&&
+                cashProof.limitMicros===i.request.limitMicros&&cashProof.feeFingerprint===i.fee_fingerprint,
+                "production_entry_cash_bound_corrupt");
+              const oneFillCap=entryFillFeeUpperMicros(pinned,qty,f.priceMicros);
+              if(oneFillCap===null||fee>oneFillCap)a.blocked_reason??="entry_fill_fee_bound_exceeded";
+              if(!entrySpent.has(i.id)){
+                const spent=(await tx.query("SELECT coalesce(sum(-cash_delta_micros),0)::text AS amount FROM v13_production_event WHERE account_id=$1 AND intent_id=$2 AND kind='FILL'",[a.id,i.id])).rows[0];
+                entrySpent.set(i.id,money(spent.amount));
+              }
+              const spent=entrySpent.get(i.id)!+gross+fee;entrySpent.set(i.id,spent);
+              const joint=BigInt(pinned.cashRisk.entryCashDebitPerContractMicros)*filled/100n;
+              if(spent>joint)a.blocked_reason??="entry_cash_bound_exceeded";
+            }
             delta = -(gross + fee);
             let release = gross + fee;
             if (release > money(i.reserved_micros)) {
@@ -328,7 +357,7 @@ export class ProductionLedger {
           filled_hundredths=$4,reserved_micros=$5,terminal=$6 WHERE id=$1`,
         [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
         await this.assertConservation(tx, a);
-        await this.observe(tx, "RECONCILIATION", snapshot);
+        await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
         await this.persist(tx, a);
         await tx.query("UPDATE v13_production_account SET reconciled_at=$2,evidence_digest=$3 WHERE id=$1",
           [a.id, new Date(snapshot.observedAtMs), digest(snapshot)]);

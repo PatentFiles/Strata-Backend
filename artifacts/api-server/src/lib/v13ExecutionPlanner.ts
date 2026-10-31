@@ -80,6 +80,8 @@ export function planV13IocEntry(input: {
   maxStakeCents: number;
   bestAskDollars: string | null;
   askLevels: V13DepthLevel[];
+  /** Optional conservative whole-count cap; real depth and gross limits still apply. */
+  maxContracts?: number;
   /** Optional fee-inclusive production cash ceiling. Supply both fields or neither. */
   maxAllInCashDebitCents?: number;
   cashDebitMicrosPerContractAtLimit?: (
@@ -92,6 +94,8 @@ export function planV13IocEntry(input: {
       input.referenceOffer >= 1) {
     return { ok: false, reason: "invalid_input" };
   }
+  if(input.maxContracts!==undefined&&(!Number.isSafeInteger(input.maxContracts)||input.maxContracts<1))
+    return {ok:false,reason:"invalid_input"};
   const cashModelConfigured = input.maxAllInCashDebitCents !== undefined ||
     input.cashDebitMicrosPerContractAtLimit !== undefined;
   if (cashModelConfigured && (
@@ -142,7 +146,7 @@ export function planV13IocEntry(input: {
         input.maxAllInCashDebitCents! * 10_000 / cashDebitPerContractMicros!,
       );
     }
-    const contracts = Math.min(visible, grossBudget, cashBudget);
+    const contracts = Math.min(visible, grossBudget, cashBudget, input.maxContracts??Number.MAX_SAFE_INTEGER);
     if (contracts >= 1 && (selected === null || contracts > selected.contracts)) {
       selected = { contracts, limitPrice: level.price, visible, cashDebitPerContractMicros };
     }

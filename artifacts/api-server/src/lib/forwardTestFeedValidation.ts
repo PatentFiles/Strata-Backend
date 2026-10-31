@@ -11,6 +11,7 @@ export function forwardTestFeedError(
   market: MarketObservation,
   now: Date,
   hasOpenPosition: boolean,
+  entryBookQuotesPending = false,
 ) {
   const age = (value: Date) => now.getTime() - value.getTime();
   if (!Number.isFinite(btc.price) || btc.price <= 0 ||
@@ -34,7 +35,7 @@ export function forwardTestFeedError(
     market.startsAt.getTime() >= market.endsAt.getTime() ||
     (market.status !== "open" && market.status !== "active") ||
     market.endsAt.getTime() <= now.getTime() ||
-    !validOffer(market.yesAsk) || !validOffer(market.noAsk)
+    (!entryBookQuotesPending && (!validOffer(market.yesAsk) || !validOffer(market.noAsk)))
   )) return "Kalshi market is closed or a required side offer is missing";
   if (hasOpenPosition && market.result === null &&
       market.endsAt.getTime() > now.getTime() &&

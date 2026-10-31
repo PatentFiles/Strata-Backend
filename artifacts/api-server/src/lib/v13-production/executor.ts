@@ -1,3 +1,8 @@
+import {entryCashProof,validEntryCashRisk,samePinnedCashModel,pinnedEntryDepthAvailable,type V13EntryCashProof} from "../v13EntryCashRisk";
+import {conservativeExitFeeMicros} from "./fractionalExitFee";
+import {requestQuantityHundredths,EXIT_QUANTITY_VERSION} from "./requestQuantity";
+import {planFractionalIocExit} from "./fractionalExitPlanner";
+import {assertCanonicalEntryQuoteEvidence} from "./entryQuoteEvidence";
 import {assertChampionSourceReference} from "./sourceReference";
 import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
@@ -11,7 +16,7 @@ import { remainingLossBudgetAllowsEntry } from "../v13LiveMoneyRisk";
 import { preflightV13LiveMoneyEntry } from "../v13LiveMoneyEntryPreflight";
 import {verifyWalletV4FinalSignedAdmission} from "../strata/walletV4FinalSignedAdmission";
 import {DYNAMIC_FEE_POLICY_VERSION_V4} from "../strata/dynamicFeeOrderRiskV4";
-import { planV13IocEntry, planV13IocExit } from "../v13ExecutionPlanner";
+import { planV13IocEntry, signalCap } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, type Account, type Intent } from "./ledger";
 import { canonical, cents, digest, money, requireProof, type Exchange, type MarketEvidence, type Request, type Snapshot } from "./types";
 
@@ -162,6 +167,7 @@ export class ProductionExecutor {
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
     assertChampionSourceReference(source);
+    if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
     const side = source.direction === "UP" ? "YES" : "NO";
     const book = await this.exchange.market(source.market_ticker, side);
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
@@ -205,6 +211,7 @@ export class ProductionExecutor {
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);
+      if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
       const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
       requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
       const balances = await tx.query(`SELECT
@@ -227,9 +234,11 @@ export class ProductionExecutor {
         capitalRemainingCents: cents(capital), openPositions: Number(b.open),
         realizedDailyLossCents: Math.ceil(Number(money(b.daily_loss)) / 10_000),
         realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
-        configuredStakeCents: stake.cents,
+        configuredStakeCents: stake.cents, requireCashRisk:this.exchange.mode==="LIVE",
       });
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
+      if(pf.cashRisk)requireProof(book.fee.cashRisk&&book.fee.cashRisk.marketTicker===source.market_ticker&&book.fee.cashRisk.side===side&&
+        book.fee.cashRisk.policyHash===p.policyHash,"production_cash_risk_identity_invalid");
       const id = randomUUID(), clientOrderId = `v13p-${id}`;
       const request: Request = { market: source.market_ticker, side, action: "BUY", contracts: pf.plan.contracts,
         limitMicros: Math.round(pf.plan.limitPrice * 1_000_000), timeInForce: "IOC", reduceOnly: false, clientOrderId };
@@ -244,7 +253,7 @@ export class ProductionExecutor {
         request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [id, a.id, evaluationId, source.crossing_key, request.market, side, JSON.stringify(request), JSON.stringify(decision),
-        pf.policyHash, pf.feeEvidenceFingerprint, cap, clientOrderId, String(reservation), String(BigInt(book.fee.reservedExitFeeCents) * 10_000n)]);
+        pf.policyHash, pf.feeEvidenceFingerprint, cap, clientOrderId, String(reservation), String(BigInt(pf.cashRisk?.reservedExitFeeCents??book.fee.reservedExitFeeCents) * 10_000n)]);
       await tx.query("INSERT INTO v13_production_position(id,account_id,market,side) VALUES($1,$2,$3,$4)", [id, a.id, request.market, side]);
       this.fault("after_reservation");
       await this.ledger.persist(tx, a);
@@ -283,20 +292,19 @@ export class ProductionExecutor {
         position: { status: "open", direction: pos.side === "YES" ? "up" : "down" } });
       requireProof(ownedDecision.signal === "EXIT" && ownedDecision.positionExitReason, "production_owned_exit_not_eligible");
       const qty = money(pos.quantity_hundredths);
-      // Exit only whole owned contracts. Fractional residuals remain owned and
-      // persisted until settlement; never round quantity upward.
-      const plan = planV13IocExit({ ownedContracts: Number(qty / 100n), bestBidDollars: book.bestBidDollars,
-        bidLevels: book.bids, minimumExitPrice });
+      // Exact hundredths protect partial fills without increasing entry sizing.
+      const plan = planFractionalIocExit({ ownedHundredths:qty.toString(),bestBidDollars:book.bestBidDollars,
+        bidLevels:book.bids,minimumExitMicros:Math.round(minimumExitPrice*1_000_000) });
       requireProof(plan.ok, plan.ok ? "" : plan.reason);
       requireProof(this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
         this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
         book.fee.policyVersion === p.feePolicyVersion && book.fee.formulaVersion === p.feeFormulaVersion &&
         book.fee.sourceUrl === p.feeSourceUrl && book.fee.fingerprint.length >= 16 &&
         Number.isSafeInteger(book.fee.reservedExitFeeCents) && book.fee.reservedExitFeeCents >= 0 &&
-        BigInt(book.fee.reservedExitFeeCents) * 10_000n <= money(parent.reserved_micros), "production_exit_fee_or_quote_unproven");
+        conservativeExitFeeMicros(book.fee,plan.plan.plannedHundredths) <= money(parent.reserved_micros), "production_exit_fee_or_quote_unproven");
       const id = randomUUID();
       const request: Request = { market: parent.market, side: parent.side, action: "SELL",
-        contracts: plan.plan.plannedContracts, limitMicros: Math.round(plan.plan.limitPrice * 1_000_000),
+        quantityVersion:EXIT_QUANTITY_VERSION,quantityHundredths:plan.plan.plannedHundredths,limitMicros:plan.plan.limitMicros,
         timeInForce: "IOC", reduceOnly: true, clientOrderId: `v13p-${id}` };
       const decision = { book, plan: plan.plan, minimumExitPrice, policy: p, identity: identity(a), parentId,
         ownedEvaluation: { position: pos, source, sourcePaperEvaluationId: source.id, decision: ownedDecision } };
@@ -339,7 +347,12 @@ export class ProductionExecutor {
           i.capability_digest === digest({ id: i.id, request: i.request,
             decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
-        if (i.kind === "ENTRY") assertChampionSourceReference(i.decision.source);
+        if (i.kind === "ENTRY") {
+          if(this.exchange.mode==="LIVE")requireProof((i.decision.preflight as {cashRisk?:unknown}|undefined)?.cashRisk&&
+            (i.decision.book as MarketEvidence).fee.cashRisk,"production_cash_risk_unproven");
+          assertChampionSourceReference(i.decision.source);
+          if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(i.decision.source,this.now());
+        }
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
         const final = async () => {
@@ -355,8 +368,27 @@ export class ProductionExecutor {
           "production_capability_or_policy_changed");
           const book = await this.exchange.market(i.market, i.side);
           const stored = i.decision.book as MarketEvidence;
-          requireProof(book.fee.fingerprint === i.fee_fingerprint &&
-            canonical({ ...book.fee, verifiedAtMs: 0 }) === canonical({ ...stored.fee, verifiedAtMs: 0 }) &&
+          const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
+          if(i.kind==="ENTRY"&&this.exchange.mode==="LIVE")requireProof(pinnedCash,"production_cash_risk_unproven");
+          const cashEntry=i.kind==="ENTRY"&&pinnedCash!==undefined;
+          if(cashEntry){
+            const source=i.decision.source as {market_ticker:string;signal:"SCOUT"|"CONFIRM";direction:"UP"|"DOWN";entry_offer:number};
+            const preparedPlan=(i.decision.preflight as {plan:{contracts:number;limitPrice:number}}).plan;
+            // Admissibility is not reoptimization. Pin the originally approved
+            // request, while independently retaining its source price ceiling.
+            requireProof(i.request.action==="BUY"&&!i.request.reduceOnly&&i.request.timeInForce==="IOC"&&
+              i.request.market===source.market_ticker&&i.request.side===(source.direction==="UP"?"YES":"NO")&&
+              i.request.limitMicros<=Math.round(Math.min(signalCap(source.signal),source.entry_offer)*1_000_000)&&
+              preparedPlan?.contracts===i.request.contracts&&Math.round(preparedPlan.limitPrice*1_000_000)===i.request.limitMicros,
+              "production_pinned_entry_request_changed");
+            requireProof(validEntryCashRisk(stored.fee)&&stored.fee.cashRisk.marketTicker===i.market&&stored.fee.cashRisk.side===i.side&&
+              stored.fee.cashRisk.policyHash===p.policyHash&&typeof i.request.contracts==="number"&&
+              canonical(entryCashProof(stored.fee,i.request.contracts,pinnedCash.budgetCents))===canonical(pinnedCash)&&
+              pinnedCash.limitMicros===i.request.limitMicros&&pinnedCash.feeFingerprint===i.fee_fingerprint&&
+              BigInt(pinnedCash.plannedAllInCents)*10000n===money(i.reserved_micros),"production_pinned_cash_bound_changed");
+          }
+          requireProof((cashEntry?samePinnedCashModel(stored.fee,book.fee):book.fee.fingerprint === i.fee_fingerprint &&
+            canonical({ ...book.fee, verifiedAtMs: 0 }) === canonical({ ...stored.fee, verifiedAtMs: 0 })) &&
             this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
             this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs,
           "production_final_fee_or_quote_changed");
@@ -370,21 +402,24 @@ export class ProductionExecutor {
               stake.cents <= p.maxEntryStakeCents, "production_pinned_stake_changed_or_unproven");
             entryStake = pinnedStake;
           }
-          const plan = i.kind === "ENTRY" ? planV13IocEntry({
+          const plan = i.kind === "ENTRY" ? (cashEntry?{ok:true as const,plan:{contracts:i.request.contracts!,limitPrice:i.request.limitMicros/1_000_000}}:planV13IocEntry({
             signal: (i.decision.source as { signal: "SCOUT" | "CONFIRM" }).signal,
             direction: i.side === "YES" ? "UP" : "DOWN", referenceOffer: (i.decision.source as { entry_offer: number }).entry_offer,
             maxStakeCents: entryStake, bestAskDollars: book.bestAskDollars, askLevels: book.asks,
-          }) : planV13IocExit({ ownedContracts: i.request.contracts,
-            bestBidDollars: book.bestBidDollars, bidLevels: book.bids,
-            minimumExitPrice: (i.decision.minimumExitPrice as number) });
+          })) : planFractionalIocExit({ownedHundredths:requestQuantityHundredths(i.request).toString(),
+            bestBidDollars:book.bestBidDollars,bidLevels:book.bids,
+            minimumExitMicros:Math.round((i.decision.minimumExitPrice as number)*1_000_000)});
+          if(cashEntry)requireProof(pinnedEntryDepthAvailable(book.bestAskDollars,book.asks,i.request.contracts!,i.request.limitMicros),"production_final_depth_changed");
           requireProof(plan.ok && (i.kind === "ENTRY" ? ("contracts" in plan.plan && plan.plan.contracts === i.request.contracts) :
-            ("plannedContracts" in plan.plan && plan.plan.plannedContracts >= i.request.contracts)) &&
-            Math.round(plan.plan.limitPrice * 1_000_000) === i.request.limitMicros, "production_final_depth_changed");
+            ("plannedHundredths" in plan.plan && BigInt(plan.plan.plannedHundredths) === requestQuantityHundredths(i.request))) &&
+            ("limitMicros" in plan.plan?plan.plan.limitMicros:Math.round(plan.plan.limitPrice * 1_000_000)) === i.request.limitMicros, "production_final_depth_changed");
           if (i.kind === "EXIT") {
+            const feeParent=(await tx.query("SELECT reserved_micros FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR SHARE",[i.parent_id,a.id])).rows[0];
+            requireProof(feeParent&&conservativeExitFeeMicros(book.fee,requestQuantityHundredths(i.request).toString())<=money(feeParent.reserved_micros),"production_exit_fee_reservation_insufficient");
             requireProof(a.minimum_exit_micros === Math.round((i.decision.minimumExitPrice as number) * 1_000_000),
               "production_exit_floor_changed");
             const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.parent_id])).rows[0];
-            requireProof(pos && money(pos.quantity_hundredths) >= BigInt(i.request.contracts) * 100n && i.request.reduceOnly,
+            requireProof(pos && money(pos.quantity_hundredths) >= requestQuantityHundredths(i.request) && i.request.reduceOnly,
               "production_exit_ownership_changed");
             const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown> };
             const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
@@ -414,10 +449,12 @@ export class ProductionExecutor {
                 source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
             "production_final_source_changed_or_expired");
             assertChampionSourceReference(source);
+            if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
               await this.assertEntryPolicyWindow(tx, source);
             }
             const losses = (await tx.query(`SELECT
+              (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
               (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
               (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1
                 AND occurred_at >= $2) AS daily_loss`,
@@ -425,6 +462,14 @@ export class ProductionExecutor {
             const plannedAllInCents = Number(
               (i.decision.preflight as { plannedAllInCents?: unknown } | undefined)?.plannedAllInCents,
             );
+            if(cashEntry){
+              const otherReserved=money(a.reserved_micros)-money(i.reserved_micros);
+              requireProof(otherReserved>=0n&&plannedAllInCents===pinnedCash.plannedAllInCents&&
+                plannedAllInCents<=p.maxEntryAllInCents&&i.request.contracts!*i.request.limitMicros<=entryStake*10000&&
+                money(a.cash_micros)-otherReserved>=BigInt(plannedAllInCents)*10000n&&
+                BigInt(p.capitalLimitCents)*10000n-money(losses.basis)-otherReserved-money(losses.total_loss)>=BigInt(plannedAllInCents)*10000n,
+                "production_final_cash_bound_unaffordable");
+            }
             requireProof(remainingLossBudgetAllowsEntry(
               plannedAllInCents,
               p.maxDailyLossCents,
@@ -456,6 +501,7 @@ export class ProductionExecutor {
               const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
               try {
               assertChampionSourceReference(source);
+              if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
                   typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),

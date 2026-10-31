@@ -142,7 +142,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND fi.request->>'timeInForce'='IOC' AND fi.request->>'market'=r.market_ticker " +
       "AND fi.request->>'side'=r.reducing_side " +
       "AND fi.request->>'clientOrderId'=r.client_order_id " +
-      "AND (fi.request->>'contracts')::integer*100=r.quantity_hundredths " +
+      "AND private.strata_exit_request_quantity_hundredths(fi.request)=r.quantity_hundredths " +
       "AND (fi.request->>'limitMicros')::integer=$13::integer " +
       "AND w.state='owned' AND w.account_kill=false " +
       "AND w.credential_fingerprint=$11::text " +

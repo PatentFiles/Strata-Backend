@@ -11,6 +11,7 @@ on:
       - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.ts'
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.ts'
       - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.test.ts'
       - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.ts'
@@ -88,3 +89,23 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/cachePolicy.test.ts --bundle --platform=node --format=cjs --outfile=dist/officialFeeLeasePolicy.test.cjs
           node artifacts/api-server/dist/officialFeeLeasePolicy.test.cjs
+
+  held-owner-postgres-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: pnpm install --frozen-lockfile
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Verify signed diagnostic scope races without authority writes
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts

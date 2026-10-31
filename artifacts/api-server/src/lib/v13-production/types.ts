@@ -24,9 +24,10 @@ export const cents = (micros: bigint): number => {
 export type Identity = { subaccount: number; exchangeIndex: number; keyFingerprint: string };
 export type Request = {
   market: string; side: "YES" | "NO"; action: "BUY" | "SELL";
-  contracts: number; limitMicros: number; timeInForce: "IOC";
+  limitMicros: number; timeInForce: "IOC";
   reduceOnly: boolean; clientOrderId: string;
-};
+} & ({contracts:number;quantityVersion?:never;quantityHundredths?:never}|
+ {action:"SELL";reduceOnly:true;contracts?:never;quantityVersion:"EXIT_HUNDREDTHS_V1";quantityHundredths:string});
 export type MarketEvidence = {
   observedAtMs: number; bestAskDollars: string; asks: V13DepthLevel[];
   bestBidDollars: string; bids: V13DepthLevel[];

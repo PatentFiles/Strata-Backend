@@ -1,7 +1,7 @@
 name: Producer cadence candidate
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/v13-production/signalTraceSourceAge*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', 'artifacts/api-server/src/lib/sourceQuoteProvenance*', 'artifacts/api-server/src/lib/forwardTestFeeds*', 'artifacts/api-server/src/lib/forwardFeedReadScope*', 'artifacts/api-server/src/lib/btcFeedDiagnostics*', 'artifacts/api-server/src/lib/publicFeedJson*', 'artifacts/api-server/package.json', '.github/workflows/producer-cadence.yml']
+    paths: ['artifacts/api-server/src/lib/forwardEntryBookQuote*', 'artifacts/api-server/src/lib/forwardTestEntryBook*', 'lib/v13-strategy/**', 'lib/db/src/schema/forwardTestEvaluation.ts', 'lib/db/src/schema/forwardTestBookSnapshot.ts', 'sql/strata_forward_entry_book_quote.sql', 'artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/v13-production/signalTraceSourceAge*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', 'artifacts/api-server/src/lib/sourceQuoteProvenance*', 'artifacts/api-server/src/lib/forwardTestFeeds*', 'artifacts/api-server/src/lib/forwardFeedReadScope*', 'artifacts/api-server/src/lib/btcFeedDiagnostics*', 'artifacts/api-server/src/lib/publicFeedJson*', 'artifacts/api-server/package.json', '.github/workflows/producer-cadence.yml']
 permissions:
   contents: read
 jobs:
@@ -38,3 +38,23 @@ jobs:
           DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
           NODE_ENV: test
         run: pnpm run test:feed-read-recovery
+
+  book-qualification-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: pnpm install --frozen-lockfile
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Verify conditional book qualification, capacity and migration
+        run: pnpm --filter @workspace/api-server run test:entry-book-qualification

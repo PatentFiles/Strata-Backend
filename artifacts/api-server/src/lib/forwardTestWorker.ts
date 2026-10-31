@@ -1,3 +1,4 @@
+import {readEntryBookQuote,assertEntrySourceFresh,quoteFromEntryBook,type EntryBookQuote} from "./forwardEntryBookQuote";
 import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
 import {readForwardCycleFeeds} from "./forwardFeedReadScope";
 import {forwardTestFeedError} from "./forwardTestFeedValidation";
@@ -6,12 +7,12 @@ import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
-  forwardTestBtcPointTable, forwardTestEngineTable,
+  db, forwardTestBtcPointTable, forwardTestEngineTable,
   forwardTestEvaluationTable, forwardTestPositionTable, forwardTestWindowTable,
   type ForwardTestPosition,
 } from "@workspace/db";
 import {
-  evaluateV13Strategy,
+  evaluateV13Strategy, needsV13EntryPrice,
   V13_ENTRY_POLICY_VERSION, entryCrossAvailable,
   V13_CHAMPION_PARAMETER_HASH,
   V13_CHAMPION_PARAMETER_SET,
@@ -26,7 +27,7 @@ import {
   type BtcObservation, type ForwardTestFeeds, type MarketObservation,
 } from "./forwardTestFeeds";
 import { logger } from "./logger";
-import { savePostActionPaperBook, type PaperBookCaptureEvent } from "./forwardTestBookCapture";
+import { savePostActionPaperBook, savePrequalificationPaperBook, type PaperBookCaptureEvent } from "./forwardTestBookCapture";
 import { forwardTestStartupDecision } from "./forwardTestStartupGate";
 export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
 import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
@@ -38,6 +39,9 @@ export const FORWARD_TEST_CADENCE_MS = 5_000;
 const LEASE_SECONDS = 20;
 const POINT_HISTORY_MS = 120_000;
 const PAPER_STAKE = 5;
+// No quote sharing/backlog: duplicate invocations cannot burst entry reads while
+// one cycle is awaiting its quote/final commit. Epoch/DB fencing remains authority.
+const entryBookCycles = new Map<string, symbol>();
 
 export type WorkerIdentity = {
   owner: string;
@@ -48,6 +52,8 @@ export type WorkerIdentity = {
 export type CycleOptions = WorkerIdentity & {
   feeds?: ForwardTestFeeds;
   now?: Date;
+  /** Deterministic offline clock; runtime uses Date.now and original cycle now. */
+  clock?: () => number;
   signal?: AbortSignal;
 };
 
@@ -143,7 +149,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   if (!await renewWorkerLease(owner, epoch, engineId, LEASE_SECONDS)) {
     throw new WorkerLeaseLostError("Worker no longer owns the active lease");
   }
-  const now = options.now ?? new Date();
+  const clock = options.clock ?? Date.now;
+  const now = options.now ?? new Date(clock());
   await withWorkerLeaseTransaction(owner, epoch, async (tx) => {
     await tx.update(forwardTestEngineTable).set({ lastAttemptedCycleAt: now })
       .where(eq(forwardTestEngineTable.id, engineId));
@@ -163,7 +170,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     await recordCycleError({ owner, epoch, engineId }, reason);
     return { evaluationId: null, signal: "PASS", marketTicker: null, positionId: null, error: reason };
   }
-  const invalid = forwardTestFeedError(btc, market, now, Boolean(priorPosition));
+  const invalid = forwardTestFeedError(btc, market, now, Boolean(priorPosition), !priorPosition);
   if (invalid) {
     await recordCycleError({ owner, epoch, engineId }, invalid);
     return { evaluationId: null, signal: "PASS", marketTicker: market.ticker,
@@ -171,7 +178,42 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   }
   // target is validated above. Never invent a target/quote on malformed data.
   const target = market.target!;
+  const detailMarket = market; // Raw detail provenance must not be relabeled as a book quote.
+  let entryQuote: EntryBookQuote | null = null;
+  let previewWindow: typeof forwardTestWindowTable.$inferSelect | null = null;
+  let entryBookToken: symbol | null = null;
+  let lastEntryClock=now.getTime();
+  const entryClock=()=>{const at=clock();if(!Number.isSafeInteger(at)||at<lastEntryClock)
+    throw Error('entry_book_clock_regressed');lastEntryClock=at;return at;};
+  const windowIdentity = (w: typeof forwardTestWindowTable.$inferSelect) => JSON.stringify({
+    ticker:w.ticker,target:w.target,previousBuffer:w.previousBuffer,currentSide:w.currentSide,
+    firstCrossOccurred:w.firstCrossOccurred,crossingConsumed:w.crossingConsumed,
+    crossingKey:w.crossingKey,entryPolicyVersion:w.entryPolicyVersion,updatedAt:w.updatedAt.getTime()});
   try {
+    if (!priorPosition) {
+      // Read-only price-independent preview, outside every lease/strategy transaction.
+      // A consumed crossing must never add book work to an owned-position observation path.
+      previewWindow = (await db.select().from(forwardTestWindowTable)
+        .where(eq(forwardTestWindowTable.ticker, market.ticker)).limit(1))[0] ?? null;
+      if(previewWindow&&previewWindow.target!==target)throw Error('entry_book_target_changed');
+      const previous=previewWindow?.previousBuffer ?? null,buffer=btc.price-target;
+      const freshCross=previous!==null&&((previous<=0&&buffer>0)||(previous>=0&&buffer<0));
+      if (previewWindow && entryCrossAvailable(previewWindow.entryPolicyVersion,previewWindow,freshCross)) {
+        const cutoff=new Date(btc.receivedAt.getTime()-POINT_HISTORY_MS);
+        const prior=(await db.select().from(forwardTestBtcPointTable)
+          .where(and(eq(forwardTestBtcPointTable.engineId,engineId),sql`${forwardTestBtcPointTable.observedAt} >= ${cutoff}`))
+          .orderBy(desc(forwardTestBtcPointTable.observedAt)).limit(179)).reverse();
+        const velocity=velocityOf([...prior.map(p=>({price:p.price,time:p.observedAt.getTime()})),
+          {price:btc.price,time:btc.receivedAt.getTime()}].sort((a,b)=>a.time-b.time));
+        if(needsV13EntryPrice({marketTicker:market.ticker,btcPrice:btc.price,target,
+          previousBuffer:previous,velocity,freshness:'current',position:null})) {
+          if(entryBookCycles.has(engineId))throw Error('entry_book_cycle_pending');
+          entryBookToken=Symbol('entry book cycle');entryBookCycles.set(engineId,entryBookToken);
+          entryQuote=await readEntryBookQuote(feeds.book,btc,market,now.getTime(),entryClock,signal,PAPER_STAKE);
+          market=entryQuote.market;
+        }
+      }
+    }
   const result = await withWorkerLeaseTransaction(owner, epoch, async (tx, engine) => {
     const [openPosition] = await tx.select().from(forwardTestPositionTable)
       .where(and(eq(forwardTestPositionTable.engineId, engineId),
@@ -191,6 +233,13 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       throw new Error("BTC observation and Kalshi market window are inconsistent");
     }
 
+    if(entryQuote){
+      signal?.throwIfAborted();
+      if(!previewWindow||windowIdentity(previewWindow)!==windowIdentity(persistedWindow))
+        throw Error('entry_book_preview_changed');
+      assertEntrySourceFresh(btc,detailMarket,now.getTime(),entryClock());
+      quoteFromEntryBook(entryQuote.book,detailMarket,now.getTime(),entryClock(),btc.price>target?'YES':'NO',PAPER_STAKE);
+    }
     const cutoff = new Date(btc.receivedAt.getTime() - POINT_HISTORY_MS);
     await tx.delete(forwardTestBtcPointTable)
       .where(and(eq(forwardTestBtcPointTable.engineId, engineId),
@@ -206,6 +255,12 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     }));
     const velocity = velocityOf(points);
     const previousBuffer = persistedWindow.previousBuffer;
+    const finalStructure=needsV13EntryPrice({marketTicker:market.ticker,btcPrice:btc.price,target,
+      previousBuffer,velocity,freshness:'current',position:openPosition
+        ?{status:'open',direction:openPosition.direction==='UP'?'up':'down'}:null});
+    // A stale preview must never let detail quotes become canonical entry authority.
+    if(finalStructure&&entryCrossAvailable(persistedWindow.entryPolicyVersion,persistedWindow,true)&&!entryQuote)
+      throw Error('entry_book_required_after_recheck');
     const decision = evaluateV13Strategy({
       marketTicker: market.ticker, btcPrice: btc.price, target,
       previousBuffer, velocity,
@@ -229,7 +284,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       }).where(eq(forwardTestWindowTable.ticker, market.ticker));
     }
     const crossAvailable = entryCrossAvailable(persistedWindow.entryPolicyVersion, persistedWindow, decision.freshCross);
-    const actionable = !openPosition &&
+    const fullPaperCapacity=entryQuote?.evidence.capacity.modeledUnfilledContracts===0;
+    const actionable = !openPosition && fullPaperCapacity &&
       crossAvailable &&
       decision.qualifyingTrigger &&
       decision.entrySideOffer !== null && validOffer(market.yesAsk) && validOffer(market.noAsk) &&
@@ -241,6 +297,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       : openPosition ? "paper position already open"
       : !crossAvailable ? "window crossing consumed or unavailable"
       : !decision.qualifyingTrigger ? "strategy trigger not qualifying"
+      : !fullPaperCapacity ? "insufficient observed book capacity at reference (no paper fill)"
       : "required executable side offer missing";
     const evaluationReason = admissionBlock
       ? `${decision.reason} — ENTRY INELIGIBLE: ${admissionBlock}` : decision.reason;
@@ -250,6 +307,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       strategyParameterSetId: V13_CHAMPION_PARAMETER_SET.id,
       strategyParameterHash: V13_CHAMPION_PARAMETER_HASH,
       entryPolicyVersion: persistedWindow.entryPolicyVersion,
+      entryQuoteEvidence: entryQuote?.evidence ?? null,
       marketTicker: market.ticker, btcPrice: btc.price, target,
       signedBuffer: decision.buffer, absoluteBuffer: Math.abs(decision.buffer),
       velocity, upBid: market.yesBid, upOffer: market.yesAsk,
@@ -379,14 +437,16 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
           ? {positionId,engineId,marketTicker:market.ticker,
              phase:"ENTRY",direction:decision.direction,
              contracts:Math.floor(PAPER_STAKE/decision.entrySideOffer),
-             quotePrice:decision.entrySideOffer,eventAt:now}
+             quotePrice:decision.entrySideOffer,eventAt:now,
+             prequalification:entryQuote?{quote:entryQuote,evaluationId}:undefined}
           : undefined;
+    if(entryQuote){signal?.throwIfAborted();assertEntrySourceFresh(btc,detailMarket,now.getTime(),entryClock());}
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
   if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM")){
     notifyCommittedForwardSignal();
-    try{emitCommittedSourceQuote(market,{evaluationId:result.evaluationId,engineId,signal:result.signal,
+    try{emitCommittedSourceQuote(detailMarket,{evaluationId:result.evaluationId,engineId,signal:result.signal,
       marketTicker:market.ticker,evaluatedAtMs:now.getTime(),commitReturnObservedAtMs:Date.now(),
       qualifyingTrigger:result.researchEvent?.phase==="ENTRY"},
       event=>logger.info(event,"Committed paper quote provenance"));}catch{/* Optional diagnostics never change committed results. */}
@@ -401,6 +461,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     await recordCycleError({ owner, epoch, engineId }, reason);
     return { evaluationId: null, signal: "PASS", marketTicker: market.ticker,
       positionId: priorPosition?.id ?? null, error: reason };
+  } finally {
+    if(entryBookToken&&entryBookCycles.get(engineId)===entryBookToken)entryBookCycles.delete(engineId);
   }
 }
 
@@ -463,17 +525,19 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
             owner, epoch: lease.leaseEpoch, feeds, signal: controller.signal,
           });
           periodMs=discoveryRecovery.periodMs(cycle.error,cycleClock);
-          if (!stopped && cycle.researchEvent && feeds.book) {
+          if (!stopped && cycle.researchEvent && (cycle.researchEvent.prequalification || feeds.book)) {
             const event=cycle.researchEvent,book=feeds.book;
-            // One in flight, no backlog. Receipts retain the original committed
-            // eventAt and remain explicitly POST_ACTION, never fill evidence.
+            // One persistence/research lane, no backlog. Entry reuses its exact
+            // PRE_QUALIFICATION book; exit remains POST_ACTION, never fill evidence.
             const queued=bookCaptureLane.submit(async()=>{
-              const receipt=await savePostActionPaperBook(event,book);
+              const receipt=event.prequalification
+                ?await savePrequalificationPaperBook(event)
+                :await savePostActionPaperBook(event,book!);
               if(!receipt)logger.warn({positionId:event.positionId,phase:event.phase},
-                "Post-action paper book receipt unavailable");
-            },error=>logger.warn({err:error},"Post-action paper book capture failed"));
+                "Paper book evidence receipt unavailable");
+            },error=>logger.warn({err:error},"Paper book evidence persistence/capture failed"));
             if(!queued)logger.warn({positionId:event.positionId,phase:event.phase},
-              "Post-action paper book capture skipped: previous capture still pending");
+              "Paper book evidence skipped: previous research operation still pending");
           }
           if (!stopped && cycle.evaluationId) {
             try {
