@@ -1,3 +1,4 @@
+import {evidenceFieldType,type EvidenceFieldType} from '../rolloverReadShapeEvidence';
 import type {RolloverStrikeEvent} from '../rolloverStrikeDiagnostics';
 export type HeldLifecycleScope={ownerId:string;accountId:string;expectedSha:string;boundaryMs:number};
 export type ShadowFrame={generation:number;sid:number;receivedAtMs:number;raw:string};
@@ -9,17 +10,21 @@ const TRANSPORT_REASONS=new Set(['cancelled','invalid_clock','observer_failed','
 const TICKER=/^KXBTC15M-[A-Z0-9-]{1,80}$/;
 const object=(x:unknown):x is Record<string,unknown>=>!!x&&typeof x==='object'&&!Array.isArray(x);
 const safeInt=(x:unknown):x is number=>typeof x==='number'&&Number.isSafeInteger(x)&&x>=0&&x<=8640000000000000;
-type StrikeReceipt={ticker:string;strike:number;receivedAtMs:number;generation:number;seq:number|null;canonicalWindow:boolean;exchangeIndexVerified:boolean;providerSentAtMs:number|null;sourceAgeMs:number|null;sourceTimestampValid:boolean};
+type StrikeReceipt={ticker:string;strike:number;receivedAtMs:number;generation:number;seq:number|null;canonicalWindow:boolean;exchangeIndexVerified:boolean;providerSentAtMs:number|null;sourceAgeMs:number|null;sourceTimestampValid:boolean;fieldTypes:Record<string,EvidenceFieldType>;eventType:string;sid:number;openAtMs:number|null;closeAtMs:number|null;exchangeIndex:number|null};
 /** Observations only. No synthetic baseline, readiness cache or quote output exists. */
 export class HeldLifecycleComparison {
  private lastTransportReason:string|null=null;private lastTransportFailure:string|null=null;
  private generation=-1;private sid=-1;private lastSeq:number|null=null;
  private firstSubscribedAtMs:number|null=null;private subscriptions=0;private frames=0;private gaps=0;private invalidations=0;
  private receipts=new Map<string,StrikeReceipt>();private overflow=false;private conflicts=0;
+ private lastEnvelopeAtMs:number|null=null;private lastEnvelopeGeneration:number|null=null;private maximumInterframeReceiptGapMs=0;private receiptClockRegressions=0;
+ private senderTimestampMissing=0;private senderTimestampInvalid=0;private senderTimestampFuture=0;private maximumObservedSenderAgeMs:number|null=null;
+ private lastCurrentSourceFrameAtMs:number|null=null;private maximumCurrentSourceFrameReceiptGapMs:number|null=null;private currentSourceFrameCount=0;
+ private firstNonStrikeReady:RolloverStrikeEvent|null=null;
  private rest:RolloverStrikeEvent|null=null;private firstRest:RolloverStrikeEvent|null=null;
  constructor(private boundaryMs:number){}
  observer:ShadowObserver={
-  onSubscribed:e=>{this.generation=e.generation;this.sid=e.sid;this.lastSeq=null;this.subscriptions++;this.firstSubscribedAtMs??=e.receivedAtMs;},
+  onSubscribed:e=>{this.generation=e.generation;this.sid=e.sid;this.lastSeq=null;this.lastEnvelopeAtMs=null;this.lastEnvelopeGeneration=null;this.lastCurrentSourceFrameAtMs=null;this.subscriptions++;this.firstSubscribedAtMs??=e.receivedAtMs;},
   onInvalidated:e=>{this.invalidations++;this.lastSeq=null;this.generation=-1;this.sid=-1;
    const reason=object(e)&&typeof e.reason==='string'&&TRANSPORT_REASONS.has(e.reason)?e.reason:'unknown_transport_invalidation';
    this.lastTransportReason=reason;if(!['cancelled','duration_limit'].includes(reason))this.lastTransportFailure=reason;},
@@ -28,6 +33,28 @@ export class HeldLifecycleComparison {
    let f:unknown;try{f=JSON.parse(e.raw)}catch{return}if(!object(f))return;
    this.frames=Math.min(Number.MAX_SAFE_INTEGER,this.frames+1);
    const seq=safeInt(f.seq)?f.seq:null;
+   const sender=safeInt(f.sending_ts_ms)?f.sending_ts_ms:null;
+   const age=sender===null?null:e.receivedAtMs-sender;
+   if(!Object.prototype.hasOwnProperty.call(f,'sending_ts_ms'))this.senderTimestampMissing++;
+   else if(sender===null)this.senderTimestampInvalid++;
+   else if(age!<0)this.senderTimestampFuture++;
+   else this.maximumObservedSenderAgeMs=Math.max(this.maximumObservedSenderAgeMs??0,age!);
+   // Measurement only, never source admission. Receipt cadence alone includes
+   // old buffered frames; this separate series requires contiguous observed seq
+   // and a present nonfuture sender timestamp within the unchanged 5s window.
+   if(seq!==null&&(this.lastSeq===null||seq===this.lastSeq+1)&&age!==null&&age>=0&&age<=5000){
+    if(this.lastCurrentSourceFrameAtMs!==null&&e.receivedAtMs>=this.lastCurrentSourceFrameAtMs)
+     this.maximumCurrentSourceFrameReceiptGapMs=Math.max(this.maximumCurrentSourceFrameReceiptGapMs??0,e.receivedAtMs-this.lastCurrentSourceFrameAtMs);
+    this.lastCurrentSourceFrameAtMs=Math.max(this.lastCurrentSourceFrameAtMs??e.receivedAtMs,e.receivedAtMs);this.currentSourceFrameCount++;
+   }
+   if(seq!==null){
+    if(this.lastEnvelopeAtMs!==null){
+     if(e.receivedAtMs<this.lastEnvelopeAtMs)this.receiptClockRegressions++;
+     else this.maximumInterframeReceiptGapMs=Math.max(this.maximumInterframeReceiptGapMs,e.receivedAtMs-this.lastEnvelopeAtMs);
+    }
+    this.lastEnvelopeGeneration=e.generation;
+    this.lastEnvelopeAtMs=Math.max(this.lastEnvelopeAtMs??e.receivedAtMs,e.receivedAtMs);
+   }
    if(seq===null||this.lastSeq!==null&&seq!==this.lastSeq+1)this.gaps++;
    this.lastSeq=seq;
    if(f.type!=='market_lifecycle_v2'||!object(f.msg))return;
@@ -42,6 +69,12 @@ export class HeldLifecycleComparison {
    if(this.receipts.has(ticker)){if(this.receipts.get(ticker)!.strike!==data.floor_strike)this.conflicts++;return;}
    if(this.receipts.size>=2){this.overflow=true;return;}
    this.receipts.set(ticker,{ticker,strike:data.floor_strike,receivedAtMs:e.receivedAtMs,generation:e.generation,seq,
+    eventType:String(m.event_type),sid:e.sid,
+    fieldTypes:{open_ts:evidenceFieldType(m,'open_ts'),close_ts:evidenceFieldType(m,'close_ts'),exchange_index:evidenceFieldType(m,'exchange_index'),
+     strike_type:evidenceFieldType(data,'strike_type'),floor_strike:evidenceFieldType(data,'floor_strike'),cap_strike:evidenceFieldType(data,'cap_strike')},
+    openAtMs:safeInt(m.open_ts)&&safeInt(m.open_ts*1000)?m.open_ts*1000:null,
+    closeAtMs:safeInt(m.close_ts)&&safeInt(m.close_ts*1000)?m.close_ts*1000:null,
+    exchangeIndex:safeInt(m.exchange_index)&&m.exchange_index<=1000?m.exchange_index:null,
     canonicalWindow:m.open_ts===this.boundaryMs/1000&&m.close_ts===(this.boundaryMs+900000)/1000,
     exchangeIndexVerified:m.exchange_index===2,
     providerSentAtMs:safeInt(f.sending_ts_ms)?f.sending_ts_ms:null,
@@ -51,9 +84,11 @@ export class HeldLifecycleComparison {
  };
  observeRest(e:RolloverStrikeEvent){
   if(Date.parse(e.windowStartedAt)!==this.boundaryMs||!e.ticker||!TICKER.test(e.ticker))return;
-  this.firstRest??=e;for(const key of this.receipts.keys())if(key!==this.firstRest.ticker)this.receipts.delete(key);if(e.phase==='ready'&&!this.rest)this.rest=e;
+  this.firstRest??=e;
+  if(e.ticker===this.firstRest.ticker&&e.detailEvidence?.nonStrikeScopeAndOffersPresent&&!this.firstNonStrikeReady)this.firstNonStrikeReady=e;
+  for(const key of this.receipts.keys())if(key!==this.firstRest.ticker)this.receipts.delete(key);if(e.phase==='ready'&&!this.rest)this.rest=e;
  }
- summary(){
+ summary(nowMs?:number){
   const ticker=this.rest?.ticker??this.firstRest?.ticker??null;
   const ws=ticker?this.receipts.get(ticker)??null:null;
   const restAt=this.rest?Date.parse(this.rest.observedAt):null;
@@ -63,6 +98,20 @@ export class HeldLifecycleComparison {
    lifecycleReceiptCurrentGeneration:ws?ws.generation===this.generation:false,leadQualification:'RAW_RECEIPT_ONLY_NOT_EXECUTABLE',
    boundaryMs:this.boundaryMs,firstSubscribedAtMs:this.firstSubscribedAtMs,subscriptions:this.subscriptions,
    lastTransportReason:this.lastTransportReason,lastTransportFailure:this.lastTransportFailure,
+   currentObservedGeneration:this.generation>=0?this.generation:null,lastObservedEnvelopeGeneration:this.lastEnvelopeGeneration,
+   lastObservedSequencedEnvelopeAtMs:this.lastEnvelopeAtMs,maximumInterframeReceiptGapMs:this.maximumInterframeReceiptGapMs,
+   receiptClockRegressions:this.receiptClockRegressions,
+   observedFrameSilenceMs:safeInt(nowMs)&&this.lastEnvelopeAtMs!==null&&nowMs>=this.lastEnvelopeAtMs?nowMs-this.lastEnvelopeAtMs:null,
+   senderTimestampMissingCount:this.senderTimestampMissing,senderTimestampInvalidCount:this.senderTimestampInvalid,
+   senderTimestampFutureCount:this.senderTimestampFuture,maximumObservedSenderAgeMs:this.maximumObservedSenderAgeMs,
+   currentSourceFrameAgeLimitMs:5000,currentSourceFrameCount:this.currentSourceFrameCount,
+   lastCurrentSourceSequencedEnvelopeAtMs:this.lastCurrentSourceFrameAtMs,
+   maximumCurrentSourceFrameReceiptGapMs:this.maximumCurrentSourceFrameReceiptGapMs,
+   observedCurrentSourceSilenceMs:safeInt(nowMs)&&this.lastCurrentSourceFrameAtMs!==null&&nowMs>=this.lastCurrentSourceFrameAtMs?nowMs-this.lastCurrentSourceFrameAtMs:null,
+   observedSequenceBaseline:'FIRST_OBSERVED_POST_ACK_NOT_HISTORICAL' as const,
+   firstRestDetailEvidence:this.firstRest?.detailEvidence??null,
+   firstNonStrikeReadyAtMs:this.firstNonStrikeReady?Date.parse(this.firstNonStrikeReady.observedAt):null,
+   firstNonStrikeReadyEvidence:this.firstNonStrikeReady?.detailEvidence??null,
    framesObserved:this.frames,sequenceDiscontinuities:this.gaps,invalidations:this.invalidations,metadataOverflow:this.overflow,strikeConflicts:this.conflicts,
    exactTicker:ticker,firstRestObservedAtMs:this.firstRest?Date.parse(this.firstRest.observedAt):null,
    restStrikeReadyAtMs:restAt,lifecycleStrikeReceipt:ws,
@@ -108,6 +157,9 @@ export async function runHeldLifecycleShadowProbe(scope:HeldLifecycleScope,deps:
    if(transport.snapshot().stopped){reason='transport_stopped';break;}
   }
  }catch{reason='held_lifecycle_failed_closed';}
- finally{ended=true;try{transport?.stop()}catch{}try{unsubscribe()}catch{}if(transport)try{deps.save({...compare.summary(),reason})}catch{}}
+ finally{ended=true;try{transport?.stop()}catch{}try{unsubscribe()}catch{}
+  let summaryAt:number|undefined;try{summaryAt=deps.now()}catch{}
+  if(transport)try{deps.save({...compare.summary(summaryAt),reason})}catch{}
+ }
  return {ok:reason==='completed',reason};
 }

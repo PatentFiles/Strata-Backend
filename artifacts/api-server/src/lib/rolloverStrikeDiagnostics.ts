@@ -1,3 +1,4 @@
+import type {RolloverReadShapeEvidence} from './rolloverReadShapeEvidence';
 import type {PublicFeedReadEvidence} from './publicFeedJson';
 import {BOUNDARY_FAST_RETRY_LIMIT} from './forwardTestCadence';
 
@@ -27,14 +28,15 @@ export function marketStrikeEvidence(market:Record<string,unknown>):StrikeEviden
   providerUpdatedAt:Number.isFinite(updated)?new Date(updated).toISOString():null};
 }
 export type RolloverStrikeEvent={
- event:'kalshi_rollover_strike';phase:'first_unavailable'|'ready'|'unresolved_30s';
+ event:'kalshi_rollover_strike';phase:'first_unavailable'|'ready'|'unresolved_30s'|'non_strike_fields_ready';
  windowStartedAt:string;observedAt:string;firstObservedOffsetMs:number;observedOffsetMs:number;
  ticker:string|null;detailReadAttempts:number;invalidStrikeReads:number;transportFailures:number;
  configuredFastRetryLimit:number;strike:StrikeEvidence|null;transport:PublicFeedReadEvidence|null;
+ detailEvidence?:RolloverReadShapeEvidence|null;
  reason:'invalid_strike'|'transport'|'valid_strike';
 };
-/** One in-memory window, no database writes, at most three compact events per
- * window: first unavailable, deadline (if unresolved), and eventual readiness.
+/** One in-memory window, no database writes, at most four compact events per
+ * window: first unavailable, deadline (if unresolved), eventual readiness, and first usable non-strike fields if initially absent.
  * Diagnostic failures cannot alter eligibility, cadence, or the request budget.
  */
 export class RolloverStrikeDiagnostics {
@@ -47,15 +49,16 @@ export class RolloverStrikeDiagnostics {
  private unavailable=false;
  private deadline=false;
  private ready=false;
+ private shapeSeen=false;
  constructor(private emit:(event:RolloverStrikeEvent)=>void=()=>{}){}
- observe(nowMs:number,ticker:string|null,strike:StrikeEvidence|null,transport:PublicFeedReadEvidence|null):void {
+ observe(nowMs:number,ticker:string|null,strike:StrikeEvidence|null,transport:PublicFeedReadEvidence|null,detailEvidence:RolloverReadShapeEvidence|null=null):void {
   if(!Number.isSafeInteger(nowMs)||nowMs<0||nowMs>8640000000000000)return;
   const window=Math.floor(nowMs/900000)*900000;
   if(window<this.window||nowMs<this.last)return;
   this.last=nowMs;
   if(window>this.window){
    this.window=window;this.first=nowMs;this.attempts=0;this.invalid=0;this.failures=0;
-   this.unavailable=false;this.deadline=false;this.ready=false;
+   this.unavailable=false;this.deadline=false;this.ready=false;this.shapeSeen=false;
   }
   if(this.ready)return;
   this.attempts++;
@@ -67,12 +70,14 @@ export class RolloverStrikeDiagnostics {
   if(valid){this.ready=true;phase='ready';}
   else if(!this.unavailable){this.unavailable=true;phase='first_unavailable';}
   else if(!this.deadline&&nowMs-window>=30000){this.deadline=true;phase='unresolved_30s';}
+  const firstShape=detailEvidence?.nonStrikeScopeAndOffersPresent===true&&!this.shapeSeen;
+  if(firstShape){this.shapeSeen=true;phase??='non_strike_fields_ready';}
   if(!phase)return;
   const safeTicker=ticker&&/^KXBTC15M-[A-Z0-9-]{1,80}$/.test(ticker)?ticker:null;
   try{this.emit({event:'kalshi_rollover_strike',phase,windowStartedAt:new Date(window).toISOString(),
    observedAt:new Date(nowMs).toISOString(),firstObservedOffsetMs:this.first-window,observedOffsetMs:nowMs-window,
    ticker:safeTicker,detailReadAttempts:this.attempts,invalidStrikeReads:this.invalid,transportFailures:this.failures,
-   configuredFastRetryLimit:BOUNDARY_FAST_RETRY_LIMIT,strike,transport,reason});}catch{/* diagnostics are never authority */}
+   configuredFastRetryLimit:BOUNDARY_FAST_RETRY_LIMIT,strike,transport,detailEvidence,reason});}catch{/* diagnostics are never authority */}
  }
 }
 

@@ -5,11 +5,13 @@ on:
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'artifacts/api-server/src/lib/publicFeedJson*'
       - 'artifacts/api-server/src/lib/rolloverStrikeDiagnostics*'
+      - 'artifacts/api-server/src/lib/rolloverReadShapeEvidence*'
       - 'artifacts/api-server/src/lib/forwardTestCadence*'
       - 'research/discovery-boundary-20261029/**'
       - 'research/rollover-strike-20261031/**'
       - 'research/lifecycle-shadow-20261031/**'
       - 'research/held-lifecycle-20261031/**'
+      - 'research/strike-supplement-20261031/**'
       - 'artifacts/api-server/src/lib/strata/heldLifecycle*'
       - 'artifacts/api-server/src/lib/strata/lifecycleShadowTransport*'
       - 'artifacts/api-server/src/index.ts'
@@ -39,7 +41,9 @@ jobs:
           pnpm exec esbuild src/lib/forwardTestFeeds.test.ts --bundle --platform=node --format=cjs --outfile=dist/market-discovery.cjs --external:pg-native
           pnpm exec esbuild src/lib/publicFeedJson.test.ts --bundle --platform=node --format=cjs --outfile=dist/public-feed-json.cjs
           pnpm exec esbuild src/lib/rolloverStrikeDiagnostics.test.ts --bundle --platform=node --format=cjs --outfile=dist/rollover-strike-diagnostics.cjs
-          node --test dist/market-discovery.cjs dist/public-feed-json.cjs dist/rollover-strike-diagnostics.cjs
+          pnpm exec esbuild src/lib/rolloverReadShapeEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/rollover-read-shape.cjs
+          node --test dist/market-discovery.cjs dist/public-feed-json.cjs dist/rollover-strike-diagnostics.cjs dist/rollover-read-shape.cjs
+          node --test ../../research/strike-supplement-20261031/strike-supplement.test.mjs
           node --experimental-strip-types --test src/lib/forwardTestCadence.test.mjs src/lib/forwardTestFeedValidation.test.mjs
           node ../../research/rollover-strike-20261031/replay.mjs > /tmp/rollover-replay.json
           diff -u ../../research/rollover-strike-20261031/replay.json /tmp/rollover-replay.json

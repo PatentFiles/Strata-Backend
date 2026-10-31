@@ -34,3 +34,36 @@ test('NaN and Infinity at preflight or after start cannot report completion',asy
 test('transport failure reason survives normal shutdown and never retains unknown raw error',()=>{const c=new HeldLifecycleComparison(boundary);c.observer.onInvalidated({reason:'provider_subscription_error'});c.observer.onInvalidated({reason:'cancelled'});assert.equal(c.summary().lastTransportFailure,'provider_subscription_error');assert.equal(c.summary().lastTransportReason,'cancelled');c.observer.onInvalidated({reason:'secret-header-key'});assert.doesNotMatch(JSON.stringify(c.summary()),/secret-header-key/);assert.equal(c.summary().lastTransportFailure,'unknown_transport_invalidation')});
 
 test('startup exactly at boundary qualifies only the following full boundary',async()=>{const f=rig();f.setNow(boundary);assert.equal((await runHeldLifecycleShadowProbe(scope,f.deps)).ok,false);assert.equal(f.created,0)});
+
+test('held frame evidence distinguishes missing identity and observed gaps from historical continuity',()=>{
+ const c=new HeldLifecycleComparison(boundary);c.observer.onSubscribed({generation:1,sid:7,receivedAtMs:boundary});
+ const raw=JSON.stringify({type:'market_lifecycle_v2',seq:410,sending_ts_ms:boundary+565,msg:{market_ticker:ticker,event_type:'metadata_updated',floor_strike:77322.12,strike_type:'greater_or_equal'}});
+ c.observer.onEnvelope({generation:1,sid:7,receivedAtMs:boundary+591,raw});
+ c.observer.onEnvelope({generation:1,sid:7,receivedAtMs:boundary+3000,raw:JSON.stringify({type:'event_lifecycle',seq:411,msg:{}})});
+ c.observeRest(rest('first_unavailable',boundary+2392));
+ const before=c.summary(boundary+4000);assert.equal(before.maximumInterframeReceiptGapMs,2409);
+ assert.equal(before.observedFrameSilenceMs,1000);assert.equal(before.lifecycleReceiptCurrentGeneration,true);
+ assert.equal(before.lifecycleStrikeReceipt?.fieldTypes.exchange_index,'missing');assert.equal(before.lifecycleStrikeReceipt?.fieldTypes.open_ts,'missing');
+ assert.equal(before.lifecycleStrikeReceipt?.fieldTypes.cap_strike,'missing');assert.equal(before.lifecycleStrikeReceipt?.exchangeIndexVerified,false);
+ assert.equal(before.observedSequenceBaseline,'FIRST_OBSERVED_POST_ACK_NOT_HISTORICAL');assert.equal(before.continuityQualified,false);
+ c.observer.onInvalidated({reason:'cancelled'});const after=c.summary(boundary+5000);
+ assert.equal(after.lifecycleReceiptCurrentGeneration,false);assert.equal(after.lastTransportFailure,null);
+ assert.equal(after.lastObservedSequencedEnvelopeAtMs,boundary+3000);
+});
+test('terminal clock failure cannot drop already observed held diagnostics',async()=>{
+ const f=rig();const original=f.deps.now;let broken=false;
+ f.deps.now=()=>{if(broken)throw Error('secret clock');return original();};
+ const originalCreate=f.deps.createTransport;
+ f.deps.createTransport=async(...args)=>{const h=await originalCreate(...args);return {...h,stop:()=>{h.stop();broken=true;}};};
+ const result=await runHeldLifecycleShadowProbe(scope,f.deps);assert.equal(result.ok,true);assert.equal(f.saved.length,1);
+ assert.doesNotMatch(JSON.stringify(f.saved),/secret clock/);assert.equal((f.saved[0] as {observedFrameSilenceMs:unknown}).observedFrameSilenceMs,null);
+});
+test('receipt cadence cannot disguise stale other-market backlog as current source progress',()=>{
+ const c=new HeldLifecycleComparison(boundary);c.observer.onSubscribed({generation:1,sid:7,receivedAtMs:boundary});
+ const send=(seq:number,received:number,sender?:unknown)=>c.observer.onEnvelope({generation:1,sid:7,receivedAtMs:boundary+received,raw:JSON.stringify({type:'event_lifecycle',seq,...(sender===undefined?{}:{sending_ts_ms:sender}),msg:{}})});
+ send(10,100,boundary+90);send(11,1000,boundary-10000);send(12,2000);send(13,3000,'invalid');send(14,4000,boundary+4100);send(15,7000,boundary+6990);
+ const s=c.summary(boundary+7100);assert.equal(s.maximumInterframeReceiptGapMs,3000);assert.equal(s.maximumCurrentSourceFrameReceiptGapMs,6900);
+ assert.equal(s.currentSourceFrameCount,2);assert.equal(s.maximumObservedSenderAgeMs,11000);
+ assert.equal(s.senderTimestampMissingCount,1);assert.equal(s.senderTimestampInvalidCount,1);assert.equal(s.senderTimestampFutureCount,1);
+ assert.equal(s.observedCurrentSourceSilenceMs,100);assert.equal(s.continuityQualified,false);
+});
