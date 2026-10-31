@@ -1,3 +1,4 @@
+import {rolloverReadShapeEvidence} from './rolloverReadShapeEvidence';
 import {beginSourceQuoteRead} from "./sourceQuoteProvenance";
 import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
 import {publishHeldRolloverDiagnostics} from './rolloverStrikeDiagnostics';
@@ -228,7 +229,9 @@ return {
     const rawMarket=(detailRaw as {market:Record<string,unknown>}).market;
     // Diagnostic only: this uses the same exact response and never rescues a
     // malformed strike or treats metadata receipt as a fresh executable quote.
-    diagnostics.observe(detailMs,detail.ticker,marketStrikeEvidence(rawMarket),transport);
+    let detailEvidence=null;
+    try{detailEvidence=rolloverReadShapeEvidence(rawMarket,selectedTicker,currentWindow,detail,transport);}catch{/* optional evidence never changes reads */}
+    diagnostics.observe(detailMs,detail.ticker,marketStrikeEvidence(rawMarket),transport,detailEvidence);
     // Strike/offer validity remains enforced by the producer feed gate.
     // Never infer a strike or reuse list prices when the detail is incomplete.
     return detail;
