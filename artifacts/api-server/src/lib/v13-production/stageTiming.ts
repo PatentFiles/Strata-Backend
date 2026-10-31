@@ -1,3 +1,4 @@
+import {isEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {AsyncLocalStorage} from "node:async_hooks";
 import {performance} from "node:perf_hooks";
 import {deployedGitSha} from "../strata/deployedGitSha";
@@ -10,7 +11,7 @@ export type StageOutcome = "completed" | "rejected" | "eligible" | "proven_not_p
  "post_uncertain" | "reconciliation_required" | "http_response" | "network_error";
 export type StageContext = {accountId:string;mode:"LIVE"|"SIMULATION";evaluationId?:string|null;intentId?:string|null};
 export type StageTiming = StageContext & {stage:ExecutionStage;durationMs:number;outcome:StageOutcome;
- releaseCommitSha:string;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
+ releaseCommitSha:string;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
 export type TimingObserver = (event:Readonly<StageTiming>)=>void|Promise<void>;
 const safeId=(value:unknown)=>typeof value==="string"&&/^[a-zA-Z0-9:_-]{1,128}$/.test(value)?value:undefined;
 const reasonCode=(error:unknown)=>{
@@ -26,7 +27,7 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
  let started=0;
  try{started=clock();}catch{/* Optional clock instrumentation is not authority. */}
  let ended=false;
- return (outcome:StageOutcome,extra:{error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
+ return (outcome:StageOutcome,extra:{entryPrice?:EntryPriceDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
   if(ended)return;ended=true;
   if(!observer)return;
   try {
@@ -40,6 +41,7 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
    if(Number.isFinite(extra.sourceToDecisionAgeMs))event.sourceToDecisionAgeMs=extra.sourceToDecisionAgeMs;
    if(extra.error!==undefined)event.reason=reasonCode(extra.error);
    if(Number.isInteger(extra.httpStatus)&&extra.httpStatus!>=100&&extra.httpStatus!<=599)event.httpStatus=extra.httpStatus;
+   if(stage==="prepare_entry" && isEntryPriceDiagnostics(extra.entryPrice))event.entryPrice=extra.entryPrice;
    const captured=Object.freeze(event);
    // In particular, never invoke user/logger code between the last freshness
    // check and synchronous raw HTTP. No observer promise is awaited.

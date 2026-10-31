@@ -4,6 +4,13 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/gatherReadOnlyMarketEvidence*'
+      - 'artifacts/api-server/src/lib/strata/marketEvidenceReadTiming*'
+      - 'artifacts/api-server/src/lib/strata/entryMetadataSnapshot*'
+      - 'artifacts/api-server/src/lib/strata/publicMetadataReadRateLimit*'
+      - 'artifacts/api-server/src/lib/readOnlyRateLimit*'
+      - 'artifacts/api-server/src/lib/strata/ownedMarketFeeMetadata*'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
       - 'artifacts/api-server/src/lib/strata/step6ApiFeeObservation*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/two-source-fee-regression.yml'
@@ -11,6 +18,13 @@ on:
     branches: [main]
     paths:
       - 'artifacts/api-server/src/lib/strata/twoSourceFeeEvidence*'
+      - 'artifacts/api-server/src/lib/strata/gatherReadOnlyMarketEvidence*'
+      - 'artifacts/api-server/src/lib/strata/marketEvidenceReadTiming*'
+      - 'artifacts/api-server/src/lib/strata/entryMetadataSnapshot*'
+      - 'artifacts/api-server/src/lib/strata/publicMetadataReadRateLimit*'
+      - 'artifacts/api-server/src/lib/readOnlyRateLimit*'
+      - 'artifacts/api-server/src/lib/strata/ownedMarketFeeMetadata*'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
       - 'artifacts/api-server/src/lib/strata/step6ApiFeeObservation*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - '.github/workflows/two-source-fee-regression.yml'
@@ -49,3 +63,13 @@ jobs:
             --outfile=dist/step6ApiFeeObservation.test.cjs
       - name: Reject stale, mismatched or authorizing API fee observations
         run: node --test artifacts/api-server/dist/step6ApiFeeObservation.test.cjs
+      - name: Bundle dependency scheduling and exact-market metadata tests
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/gatherReadOnlyMarketEvidence.test.ts src/lib/strata/ownedMarketFeeMetadata.test.ts src/lib/strata/marketEvidenceReadTiming.test.ts src/lib/strata/entryMetadataSnapshot.test.ts src/lib/strata/publicMetadataReadRateLimit.test.ts \
+            --bundle --platform=node --format=cjs --outdir=dist/evidence-dag --out-extension:.js=.cjs
+      - name: Verify bounded fresh reads, fail-closed identity and pagination
+        run: node --test artifacts/api-server/dist/evidence-dag/*.cjs
+      - name: Preserve existing read-only Retry-After parsing contracts
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/readOnlyRateLimit.test.ts --bundle --platform=node --format=cjs --outfile=dist/read-only-rate-limit.cjs
+          node --test artifacts/api-server/dist/read-only-rate-limit.cjs

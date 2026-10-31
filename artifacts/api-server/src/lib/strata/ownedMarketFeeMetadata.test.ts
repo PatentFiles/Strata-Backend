@@ -84,3 +84,14 @@ test("fail closed on wrong or missing exchange index from any exact-market ident
     (p:OwnedFeeMetadataInput)=>{ (p.eventPayload as any).event.exchange_index=1; },
   ]) assert.equal(verify(bad).ok,false);
 });
+
+test("event fee changes require an explicit empty cursor; series cursor remains optional",()=>{
+ for(const cursor of [undefined,null,42,"more"]){
+  assert.equal(verify(p=>{(p.eventChangesPayload as any).cursor=cursor;}).ok,false);
+ }
+ assert.equal(verify(p=>{delete (p.seriesChangesPayload as any).cursor;}).ok,true);
+ assert.equal(verify(p=>{
+  delete (p.eventPayload as any).event.fee_type_override;
+  delete (p.eventPayload as any).event.fee_multiplier_override;
+ }).ok,true,"absent overrides still mean inheritance");
+});

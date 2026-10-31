@@ -30,7 +30,7 @@ export type V13IocEntryPlanResult =
         | "no_whole_contract_executable";
     };
 
-function signalCap(signal: V13ExecutionSignal): number {
+export function signalCap(signal: V13ExecutionSignal): number {
   return signal === "CONFIRM" ? 0.68 : 0.60;
 }
 

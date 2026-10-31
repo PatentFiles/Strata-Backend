@@ -53,7 +53,8 @@ export function createReadOnlyRateLimit(
 }
 
 const DIAGNOSTIC_ENDPOINTS = new Set([
-  "research_orderbook", "/trade-api/v2/portfolio/balance",
+  "research_orderbook", "/trade-api/v2/events/:ticker",
+  "/trade-api/v2/events/fee_changes", "/trade-api/v2/series/fee_changes", "/trade-api/v2/portfolio/balance",
   "/trade-api/v2/portfolio/subaccounts/balances", "/trade-api/v2/portfolio/subaccounts/transfers",
   "/trade-api/v2/portfolio/intra_exchange_instance_transfers",
   "/trade-api/v2/portfolio/intra_exchange_instance_transfers/:id",

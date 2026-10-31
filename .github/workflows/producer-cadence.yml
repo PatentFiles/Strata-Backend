@@ -1,7 +1,7 @@
 name: Producer cadence candidate
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
+    paths: ['artifacts/api-server/src/lib/forwardTestCadence*', 'artifacts/api-server/src/lib/forwardTestFeedValidation*', 'artifacts/api-server/src/lib/forwardTestSignalWake*', 'artifacts/api-server/src/lib/v13-production/worker*', 'artifacts/api-server/src/lib/v13-production/signalTraceSourceAge*', 'artifacts/api-server/src/lib/forwardTestWorker.ts', '.github/workflows/producer-cadence.yml']
 permissions:
   contents: read
 jobs:
