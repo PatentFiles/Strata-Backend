@@ -17,6 +17,7 @@ import {
   BOT_SUBACCOUNT,
   emptyKalshiUserRead,
   type KalshiUserRead,
+  type WalletDisplayReadDiagnostic, type WalletDisplayReadLabel,
 } from "./kalshiUserRead";
 import { presetFieldError, scaleSharedRiskPreset, STANDARD_PROPORTIONAL_PRESET, STANDARD_PROPORTIONAL_PRESET_ID, TEST_TWENTY_PERCENT_PRESET, TEST_TWENTY_PERCENT_PRESET_ID, type PolicyDraft, type SharedPreset } from "./sharedPresets";
 import {
@@ -342,14 +343,37 @@ function unverified(reason: string): KalshiUserRead {
   return { ...emptyKalshiUserRead(), verificationReason: reason };
 }
 
-function primaryFailureReason(error: unknown): string {
-  if (error instanceof KalshiApiError) {
-    if (error.type === "HTTP_ERROR" && error.status === 401) return "PRIMARY_BALANCE_HTTP_401";
-    if (error.type === "HTTP_ERROR" && error.status === 403) return "PRIMARY_BALANCE_HTTP_403";
-    if (error.type === "INVALID_CREDENTIALS") return "PRIMARY_BALANCE_AUTH_FAILED";
-    return "PRIMARY_BALANCE_INVALID_RESPONSE";
-  }
-  return "PRIMARY_BALANCE_AUTH_FAILED";
+function walletReadFailure(error: unknown): WalletDisplayReadDiagnostic {
+  const diagnostic: WalletDisplayReadDiagnostic = {status:"unavailable",reason:"READ_UNAVAILABLE",
+    httpStatus:null,occurrence:null,retryAfterMs:null,cooldownRemainingMs:null};
+  const duration=(value:unknown)=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0?value:null;
+  if(error instanceof KalshiApiError){
+    if(error.type==="HTTP_ERROR"){
+      if(error.status===429){
+        const limit=error.rateLimit;
+        diagnostic.reason=limit?.responseReceived===false?"LOCAL_COOLDOWN":"HTTP_429";
+        diagnostic.httpStatus=limit?.responseReceived===false?null:429;
+        diagnostic.occurrence=limit?.responseReceived===false?"local_cooldown":"provider_response";
+        diagnostic.retryAfterMs=duration(limit?.retryAfterMs);
+        diagnostic.cooldownRemainingMs=duration(limit?.remainingMs);
+      }else if(typeof error.status==="number"&&Number.isInteger(error.status)&&error.status>=100&&error.status<=599){
+        diagnostic.httpStatus=error.status;
+        diagnostic.occurrence="provider_response";
+        diagnostic.reason=error.status===401?"HTTP_401":error.status===403?"HTTP_403":"PROVIDER_UNAVAILABLE";
+      }
+    }else if(error.type==="INVALID_CREDENTIALS")diagnostic.reason="AUTH_FAILED";
+    else if(error.type==="NETWORK_ERROR")diagnostic.reason="NETWORK_UNAVAILABLE";
+    else if(error.type==="INVALID_RESPONSE"||error.type==="INVALID_JSON")diagnostic.reason="INVALID_RESPONSE";
+  }else if(error instanceof Error&&error.message==="kalshi_balance_quota_busy"){
+    diagnostic.reason="QUOTA_BUSY";diagnostic.occurrence="local_budget";
+  }else if(error instanceof SyntaxError)diagnostic.reason="INVALID_RESPONSE";
+  return diagnostic;
+}
+function initialWalletReadDiagnostics(): NonNullable<KalshiUserRead["displayReadDiagnostics"]> {
+  return {complete:false,reads:Object.fromEntries(
+    (["primary","limits","bot","positions","orders","fills","settlements","transfers"] as WalletDisplayReadLabel[])
+      .map(label=>[label,{status:"not_requested",reason:null,httpStatus:null,occurrence:null,retryAfterMs:null,cooldownRemainingMs:null}]),
+  ) as Record<WalletDisplayReadLabel,WalletDisplayReadDiagnostic>};
 }
 
 function balanceRecord(payload: unknown): unknown {
@@ -488,10 +512,24 @@ export function createDatabaseUserScopePort(
       if (!creds) return unverified("VAULT_SECRET_FORMAT_INVALID");
       return displayReads(JSON.stringify([userId,text(linked[0]?.provider_connection_id),text(linked[0]?.financial_account_id),vaultId,creds.keyId]),async()=>{
       const displayObservedAtMs=Date.now();
-      const read = async (path: string, query = "") => kalshiGet(creds, path, query);
-      const settled = async (path: string, query = "") => {
+      const displayReadDiagnostics=initialWalletReadDiagnostics();
+      const read = async (label: WalletDisplayReadLabel, path: string, query = "") => {
         try {
-          return await read(path, query);
+          const value=await kalshiGet(creds,path,query);
+          const activityKeys: Partial<Record<WalletDisplayReadLabel,string[]>>={positions:["market_positions","positions"],orders:["orders"],fills:["fills"],settlements:["settlements"],transfers:["transfers"]};
+          const keys=activityKeys[label];
+          const botMoney=label==="bot"?normalizeWalletDisplayMoney(balanceRecord(value)):null;
+          const usable=value!==null&&typeof value==="object"&&!Array.isArray(value)&&
+            (!keys||keys.some(key=>Array.isArray((value as Record<string,unknown>)[key])))&&
+            (label!=="bot"||botMoney?.cashCents!==null||botMoney?.portfolioValueCents!==null);
+          displayReadDiagnostics.reads[label]={status:usable?"response_received":"unavailable",reason:usable?null:"INVALID_RESPONSE",httpStatus:null,
+            occurrence:null,retryAfterMs:null,cooldownRemainingMs:null};
+          return value;
+        } catch(error) {displayReadDiagnostics.reads[label]=walletReadFailure(error);throw error;}
+      };
+      const settled = async (label: WalletDisplayReadLabel, path: string, query = "") => {
+        try {
+          return await read(label, path, query);
         } catch {
           return null;
         }
@@ -502,24 +540,25 @@ export function createDatabaseUserScopePort(
       // Kalshi's balance endpoint aggregates ALL exchange indexes when the
       // exchange_index query is omitted. This is still subaccount 0 only;
       // bot execution funds are read separately from subaccount 1/index 2.
-      const primaryOutcome = await read("/trade-api/v2/portfolio/balance", "?subaccount=0").then(
+      const primaryOutcome = await read("primary", "/trade-api/v2/portfolio/balance", "?subaccount=0").then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       );
-      if (!primaryOutcome.ok) return unverified(primaryFailureReason(primaryOutcome.error));
+      if (!primaryOutcome.ok) return {...unverified(`PRIMARY_BALANCE_${displayReadDiagnostics.reads.primary.reason}`),displayObservedAtMs,displayReadDiagnostics};
       const primary = balanceRecord(primaryOutcome.value);
       const money = normalizePrimaryDisplayMoney(primary);
       if (money.cashCents === null && money.portfolioValueCents === null) {
-        return { ...unverified("PRIMARY_BALANCE_INVALID_RESPONSE"), primary: money, displayObservedAtMs };
+        displayReadDiagnostics.reads.primary={...displayReadDiagnostics.reads.primary,status:"unavailable",reason:"INVALID_RESPONSE"};
+        return { ...unverified("PRIMARY_BALANCE_INVALID_RESPONSE"), primary: money, displayObservedAtMs,displayReadDiagnostics };
       }
       const [limits, bot, positions, orders, fills, settlements, transfers] = await Promise.all([
-        settled("/trade-api/v2/account/limits"),
-        settled("/trade-api/v2/portfolio/balance", botQuery),
-        settled("/trade-api/v2/portfolio/positions", activityQuery),
-        settled("/trade-api/v2/portfolio/orders", activityQuery),
-        settled("/trade-api/v2/portfolio/fills", activityQuery),
-        settled("/trade-api/v2/portfolio/settlements", activityQuery),
-        settled("/trade-api/v2/portfolio/subaccounts/transfers", activityQuery),
+        settled("limits", "/trade-api/v2/account/limits"),
+        settled("bot", "/trade-api/v2/portfolio/balance", botQuery),
+        settled("positions", "/trade-api/v2/portfolio/positions", activityQuery),
+        settled("orders", "/trade-api/v2/portfolio/orders", activityQuery),
+        settled("fills", "/trade-api/v2/portfolio/fills", activityQuery),
+        settled("settlements", "/trade-api/v2/portfolio/settlements", activityQuery),
+        settled("transfers", "/trade-api/v2/portfolio/subaccounts/transfers", activityQuery),
       ]);
       const assembled = assembleKalshiUserRead({
         credentialVerified: true,
@@ -546,7 +585,13 @@ export function createDatabaseUserScopePort(
         assembled.verificationReason = "API_TIER_UNAVAILABLE";
       }
       if (assembled.apiUsageTier === null) assembled.botEligible = false;
-      const result={...assembled,displayObservedAtMs};
+      displayReadDiagnostics.complete=Object.values(displayReadDiagnostics.reads).every(x=>x.status==="response_received");
+      if(!displayReadDiagnostics.complete){
+        assembled.botEligible=false;
+        assembled.botEligibilityReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
+        assembled.verificationReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
+      }
+      const result={...assembled,displayObservedAtMs,displayReadDiagnostics};
       if(assembled.credentialVerified&&assembled.botEligible&&assembled.verificationReason===null&&
         [limits,bot,positions,orders,fills,settlements,transfers].every(x=>x!==null))
         displayCacheable.add(result);
