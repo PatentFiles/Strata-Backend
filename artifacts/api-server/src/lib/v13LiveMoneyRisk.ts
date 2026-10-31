@@ -46,6 +46,8 @@ export type V13ApprovedLiveMoneyPolicy = {
 export type V13LiveMoneyRiskInput = {
   policy: V13ApprovedLiveMoneyPolicy;
   plannedGrossCents: number;
+  /** Joint gross+fee+fragment rounding bound, never added to gross again. */
+  plannedEntryCashDebitCents?: number;
   reservedEntryFeeCents: number;
   reservedExitFeeCents: number;
   availableCashCents: number;
@@ -219,8 +221,11 @@ export function evaluateV13LiveMoneyRisk(
     return { ok: false, reason: "live_money_entry_below_minimum_stake" };
   }
 
+  const joint=input.plannedEntryCashDebitCents;
+  if(joint!==undefined&&(!Number.isSafeInteger(joint)||joint<input.plannedGrossCents+input.reservedEntryFeeCents))
+    return {ok:false,reason:"live_money_cash_risk_unproven"};
   const plannedAllInCents =
-    input.plannedGrossCents + input.reservedEntryFeeCents + input.reservedExitFeeCents;
+    (joint??input.plannedGrossCents + input.reservedEntryFeeCents) + input.reservedExitFeeCents;
   if (!Number.isSafeInteger(plannedAllInCents) ||
       input.plannedGrossCents < 1 ||
       input.plannedGrossCents > p.maxEntryStakeCents ||

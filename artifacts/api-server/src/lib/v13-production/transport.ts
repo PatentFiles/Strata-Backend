@@ -1,3 +1,4 @@
+import {requestQuantityHundredths,formatContractHundredths} from "./requestQuantity";
 import { createPrivateKey, createHash, createSign, constants } from "node:crypto";
 import {
   readKalshiDedicatedPairEvidence, type KalshiDedicatedPairEvidence,
@@ -14,7 +15,7 @@ function decimal(value: string | null, scale: number): bigint {
   return BigInt(whole!) * 10n ** BigInt(scale) + BigInt(frac.padEnd(scale, "0"));
 }
 export function encodeProductionOrder(r: Request) {
-  requireProof(r.timeInForce === "IOC" && Number.isSafeInteger(r.contracts) && r.contracts > 0 &&
+  requireProof(r.timeInForce === "IOC" && requestQuantityHundredths(r)>0n &&
     Number.isSafeInteger(r.limitMicros) && r.limitMicros > 0 && r.limitMicros < 1_000_000 &&
     r.limitMicros % 100 === 0 && /^KXBTC15M[A-Za-z0-9._-]+$/.test(r.market) &&
     /^v13p-[a-f0-9-]{36}$/.test(r.clientOrderId) && (r.action === "SELL") === r.reduceOnly,
@@ -23,7 +24,7 @@ export function encodeProductionOrder(r: Request) {
   return {
     ticker: r.market, client_order_id: r.clientOrderId,
     side: (r.action === "BUY") === (r.side === "YES") ? "bid" : "ask",
-    count: r.contracts.toFixed(2), price: (yesPrice / 1_000_000).toFixed(4),
+    count: formatContractHundredths(requestQuantityHundredths(r)), price: (yesPrice / 1_000_000).toFixed(4),
     time_in_force: "immediate_or_cancel", self_trade_prevention_type: "taker_at_cross",
     // Emit an EXPLICIT false for ENTRY. The final reviewed fee transport
     // must distinguish a genuine BUY from a malformed/absent reduce_only flag.
@@ -73,7 +74,7 @@ export function normalizeProductionSnapshot(e: KalshiDedicatedPairEvidence, iden
     const side = recordSide(r);
     requireProof(expected && expected.market === r.details.ticker && expected.side === side &&
       expected.action === action(r, side) && BigInt(expected.limitMicros) === price(r, side) &&
-      BigInt(expected.contracts) * 100n === decimal(r.details.initial_count_fp ?? r.details.initial_count ?? null, 2) &&
+      requestQuantityHundredths(expected) === decimal(r.details.initial_count_fp ?? r.details.initial_count ?? null, 2) &&
       (!expected.reduceOnly || r.details.reduce_only === "true"), "production_signed_order_identity_mismatch");
     const status = r.details.status;
     requireProof(["executed", "canceled", "cancelled", "resting", "pending"].includes(status ?? ""), "production_order_status_unproven");

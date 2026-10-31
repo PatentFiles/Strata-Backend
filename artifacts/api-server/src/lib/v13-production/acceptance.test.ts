@@ -1,3 +1,7 @@
+import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
+import {requestQuantityHundredths} from "./requestQuantity";
+import {receiptFixture} from "./entryQuoteEvidence.fixture";
+import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
@@ -37,7 +41,7 @@ function policy(): V13ApprovedLiveMoneyPolicy {
   return p;
 }
 class SimulatedExchange implements Exchange {
-  readonly mode = "SIMULATION" as const;
+  mode: "SIMULATION"|"LIVE" = "SIMULATION";
   posts: Request[] = []; cancels: string[] = [];
   throwPost = false; throwCancel = false; afterFinalBeforePost:(()=>Promise<void>)|null=null; beforePost: (() => Promise<void>) | null = null;
   now = Date.now();
@@ -291,15 +295,18 @@ test("a paper EXIT cannot order an exit while the reconciled owned position has 
   await new ProductionWorker(f.executor).tick();
   assert.equal(f.exchange.posts.length, 1);
 });
-test("fractional fills remain exact hundredths; no upward-rounded fractional exit and winning settlement conserve money", async () => {
+test("fractional fills remain exact hundredths; precise protective exit and settlement conserve money", async () => {
   const f = await fixture(), id = await f.executor.prepareEntry(await f.source());
   await f.executor.dispatch(id); f.exchange.fill(f.exchange.posts[0]!, "50"); await f.executor.reconcile();
   await f.exitFeed();
-  await assert.rejects(f.executor.prepareExit(id, 0.4), /invalid_input/);
+  const fractionalExit=await f.executor.prepareExit(id,0.4);
+  const fractionalRequest=(await pool.query("SELECT request FROM v13_production_intent WHERE id=$1",[fractionalExit])).rows[0].request;
+  assert.equal(requestQuantityHundredths(fractionalRequest),50n);
+  await f.executor.dispatch(fractionalExit);f.exchange.fill(f.exchange.posts[1]!,"25");await f.executor.reconcile();
   f.exchange.evidence.settlements.push({ id: "fractional-settle", market: "TEST-MARKET", side: "YES",
-    result: "YES", quantityHundredths: "50", payoutMicros: "500000", feeMicros: "0", occurredAtMs: f.exchange.now });
+    result: "YES", quantityHundredths: "25", payoutMicros: "250000", feeMicros: "0", occurredAtMs: f.exchange.now });
   f.exchange.evidence.positions[0]!.quantityHundredths = "0";
-  f.exchange.evidence.cashMicros = String(BigInt(f.exchange.evidence.cashMicros) + 500000n);
+  f.exchange.evidence.cashMicros = String(BigInt(f.exchange.evidence.cashMicros) + 250000n);
   await f.executor.reconcile(); await invariant(f.ledger);
 });
 test("late terminal fills are booked and freeze new entry; GET-only restart recovery works with execution disabled", async () => {
@@ -1026,6 +1033,7 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  await pool.query("INSERT INTO private.kalshi_account_worker_lease VALUES('test-account',$1,'worker-local',7,'owned',$2)",[owner,fingerprint]);
  await pool.query(readFileSync("../../sql/strata_emergency_exit_reservation_private.sql","utf8"));
  await pool.query(readFileSync("../../sql/strata_protective_exit_local_no_send.sql","utf8"));
+ await pool.query(readFileSync("../../sql/strata_protective_exit_fractional_quantity.sql","utf8"));
  const rid=randomUUID(),body=order as unknown as Record<string,unknown>,orderDigest=createHash("sha256").update(JSON.stringify(order)).digest("hex");
  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations
   (reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_holder_id,worker_fencing_token)
@@ -1117,4 +1125,263 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  await f.executor.reconcile();await f.exitFeed();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE signal='EXIT'",[ticker]);
  assert.notEqual(await f.executor.prepareExit(parent,.4),fresh);
  await invariant(f.ledger);
+});
+
+async function liveReceiptFixture(side:"UP"|"DOWN"="UP",signal:"SCOUT"|"CONFIRM"="SCOUT") {
+  const f=await sourceReferenceFixture(side,signal),owner=randomUUID();
+  const ticker="KXBTC15M-TEST-000";
+  await pool.query("UPDATE forward_test_windows SET ticker=$1,crossing_key=$2",[ticker,`${ticker}:first`]);
+  await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1,crossing_key=$2 WHERE id=$3",[ticker,`${ticker}:first`,f.id]);
+  const receipt=receiptFixture(f.exchange.now,side).entry_quote_evidence;
+  await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,receipt]);
+  await pool.query("UPDATE v13_production_account SET owner_user_id=$1 WHERE id='test-account'",[owner]);
+  await pool.query("UPDATE v13_live_money_policy SET execution_account_id='test-account'");
+  await pool.query("UPDATE strata_configured_stake SET execution_account_id='test-account'");
+  await pool.query("DELETE FROM live_execution_config");
+  await pool.query(`INSERT INTO live_execution_config(id,mode,live_execution_enabled,manual_kill_switch)
+    VALUES('singleton','V13_PRODUCTION',true,false)`);
+  f.executor.accountOwnerUserId=owner;f.exchange.mode="LIVE";
+  const cashPolicy=(await f.ledger.readAccount());
+  const p=(await pool.query("SELECT policy_hash FROM v13_live_money_policy WHERE id=$1",[cashPolicy.policy_id])).rows[0];
+  f.exchange.book.fee=entryCashRiskFeeFixture({now:f.exchange.now,market:ticker,side:side==='UP'?'YES':'NO',price:.5,
+    contracts:10,policyHash:p.policy_hash});
+  return {...f,receipt};
+}
+test("LIVE book receipts bind both sides and both champion signals through real prepare and dispatch",async()=>{
+ for(const side of ["UP","DOWN"] as const)for(const signal of ["SCOUT","CONFIRM"] as const){
+  const f=await liveReceiptFixture(side,signal),id=await f.executor.prepareEntry(f.id);
+  await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.side,side==="UP"?"YES":"NO");
+ }
+});
+test("LIVE missing or inconsistent compact evidence rejects before any reservation and preserves historical NULL",async()=>{
+ for(const bad of [null,{}, {...receiptFixture().entry_quote_evidence,evidenceDigest:'f'.repeat(64)}]){
+  const f=await liveReceiptFixture();await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,bad]);
+  await assert.rejects(f.executor.prepareEntry(f.id),/entry_quote_evidence/);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_intent")).rows[0].n,0);assert.equal(f.exchange.posts.length,0);
+  assert.deepEqual((await pool.query("SELECT entry_quote_evidence FROM forward_test_evaluations WHERE id=$1",[f.id])).rows[0].entry_quote_evidence,bad);
+ }
+});
+test("LIVE compact receipt mutation after prepare is rejected even with recomputed checksum",async()=>{
+ const f=await liveReceiptFixture(),id=await f.executor.prepareEntry(f.id);
+ f.receipt.normalizedBookDigest='b'.repeat(64);f.receipt.evidenceDigest=canonicalEntryQuoteEvidenceDigest(f.receipt);
+ await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,f.receipt]);
+ await assert.rejects(f.executor.dispatch(id),/production_final_source_changed_or_expired/);assert.equal(f.exchange.posts.length,0);
+});
+test("LIVE wire callback rejects compact receipt age after final asynchronous work without posting",async()=>{
+ const f=await liveReceiptFixture(),id=await f.executor.prepareEntry(f.id);
+ f.exchange.afterFinalBeforePost=async()=>{f.exchange.now+=5001;f.ledger.assertFinalWireClock();};
+ await assert.rejects(f.executor.dispatch(id),/entry_quote_evidence_expired/);assert.equal(f.exchange.posts.length,0);
+});
+test("LIVE owned EXIT remains available with fresh non-entry observation lacking book qualification receipt",async()=>{
+ const f=await liveReceiptFixture(),parent=await f.executor.prepareEntry(f.id);
+ await f.executor.dispatch(parent);f.exchange.fill(f.exchange.posts[0]!);await f.executor.reconcile();await f.exitFeed();
+ await pool.query("UPDATE forward_test_evaluations SET market_ticker='KXBTC15M-TEST-000',entry_quote_evidence=NULL WHERE crossing_key='owned-exit-cross'");
+ const exit=await f.executor.prepareExit(parent,.4);await f.executor.dispatch(exit);
+ assert.equal(f.exchange.posts.length,2);assert.equal(f.exchange.posts[1]!.action,'SELL');
+});
+test("LIVE prepared source cannot strip receipt and repair only capability checksum",async()=>{
+ const f=await liveReceiptFixture(),id=await f.executor.prepareEntry(f.id);
+ const row=(await pool.query("SELECT * FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+ row.decision.source.entry_quote_evidence=null;
+ const capability=digest({id:row.id,request:row.request,decision:row.decision,policyHash:row.policy_hash,fee:row.fee_fingerprint});
+ await pool.query("UPDATE v13_production_intent SET decision=$2,capability_digest=$3 WHERE id=$1",[id,row.decision,capability]);
+ await assert.rejects(f.executor.dispatch(id),/entry_quote_evidence_invalid/);assert.equal(f.exchange.posts.length,0);
+});
+
+test('baseline exact final optimizer equality rejects a better book despite pinned order remaining executable',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ f.exchange.book.bestAskDollars='0.4900';f.exchange.book.asks=[{priceDollars:'0.4900',availableContracts:'10'}];
+ await assert.rejects(f.executor.dispatch(id),/production_final_depth_changed/);
+ assert.equal(f.exchange.posts.length,0);
+});
+
+async function cashBoundFixture(price=.52,depth='100'){
+ const f=await liveReceiptFixture();
+ const row=(await pool.query("SELECT * FROM v13_live_money_policy WHERE id='production-test'")).rows[0];
+ const {decodePolicy}=await import('./ledger');const p=decodePolicy(row);
+ p.maxEntryAllInCents=625;p.capitalLimitCents=2500;p.maxDailyLossCents=2500;p.maxTotalLossCents=2500;p.maxQuoteAgeMs=5000;
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query('UPDATE v13_live_money_policy SET max_entry_all_in_cents=625,capital_limit_cents=2500,max_daily_loss_cents=2500,max_total_loss_cents=2500,max_quote_age_ms=5000,policy_hash=$1',[p.policyHash]);
+ await pool.query("UPDATE v13_production_account SET cash_micros=25000000,initial_cash_micros=25000000 WHERE id='test-account'");
+ f.exchange.evidence.cashMicros='25000000';
+ const ticker='KXBTC15M-TEST-000',at=f.exchange.now;
+ const {quoteFromEntryBook}=await import('../forwardEntryBookQuote');
+ const ya=Math.round(price*10000),yb=ya-100,nb=10000-ya,na=10000-yb;
+ const q=quoteFromEntryBook({ticker,source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',requestStartedAtMs:at,receivedAtMs:at,bodyCompletedAtMs:at,
+  yesBids:[{priceTicks:yb,contractsHundredths:100000}],noBids:[{priceTicks:nb,contractsHundredths:100000}]},
+  {ticker,target:100000,startsAt:new Date(at-1000),endsAt:new Date(at+900000),fetchedAt:new Date(at),status:'active',result:null,
+   yesAsk:price,noAsk:na/10000,yesBid:yb/10000,noBid:nb/10000,yesPrice:price,noPrice:na/10000},at,at,'YES',5);
+ await pool.query('UPDATE forward_test_evaluations SET up_offer=$2,down_offer=$3,up_bid=$4,down_bid=$5,entry_offer=$2,entry_quote_evidence=$6 WHERE id=$1',
+  [f.id,price,na/10000,yb/10000,nb/10000,q.evidence]);
+ const updateBook=(ask=price,available=depth)=>{
+  f.exchange.book.bestAskDollars=ask.toFixed(4);f.exchange.book.asks=[{priceDollars:ask.toFixed(4),availableContracts:available}];
+  f.exchange.book.fee=entryCashRiskFeeFixture({now:at,market:ticker,side:'YES',price:ask,
+   contracts:Math.max(1,Math.min(Math.floor(5/ask+1e-9),Math.floor(Number(available)))),policyHash:p.policyHash!});
+ };
+ updateBook();return {...f,p,updateBook};
+}
+test('LIVE conservative cash-aware entry selects three whole52-cent contracts inside unchanged625-cent budget',async()=>{
+ for(const depth of ['100','3','3.99']){
+  const f=await cashBoundFixture(.52,depth),id=await f.executor.prepareEntry(f.id);
+  const intent=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+  assert.equal(intent.request.contracts,3);assert.equal(intent.request.limitMicros,520000);
+  assert.equal(intent.reserved_micros,'6000000');assert.equal(intent.exit_fee_micros,'3000000');
+  assert.equal(intent.decision.preflight.cashRisk.reservedEntryCashCents,300);
+  await f.executor.dispatch(id);assert.equal(f.exchange.posts[0]!.contracts,3);await invariant(f.ledger);
+ }
+});
+test('new LIVE entry requires cash envelope; a missing one cannot fall back to nominal fee arithmetic',async()=>{
+ const f=await cashBoundFixture();delete f.exchange.book.fee.cashRisk;
+ await assert.rejects(f.executor.prepareEntry(f.id),/cash_risk_unproven/);assert.equal(f.exchange.posts.length,0);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);
+});
+test('actual cash and remaining loss limits can reduce further or refuse every whole contract',async()=>{
+ for(const cents of [200,199]){
+  const f=await cashBoundFixture();f.exchange.evidence.cashMicros=String(cents*10000);
+  await pool.query("UPDATE v13_production_account SET cash_micros=$1,initial_cash_micros=$1 WHERE id='test-account'",[String(cents*10000)]);
+  if(cents===200){const id=await f.executor.prepareEntry(f.id);assert.equal((await pool.query('SELECT request FROM v13_production_intent WHERE id=$1',[id])).rows[0].request.contracts,1);}
+  else await assert.rejects(f.executor.prepareEntry(f.id),/no_whole_contract_affordable/);
+ }
+ const f=await cashBoundFixture();f.p.maxDailyLossCents=199;f.p.policyHash=computeV13LiveMoneyPolicyHash(f.p);
+ await pool.query('UPDATE v13_live_money_policy SET max_daily_loss_cents=199,policy_hash=$1',[f.p.policyHash]);f.updateBook();
+ await assert.rejects(f.executor.prepareEntry(f.id),/no_whole_contract_affordable/);
+});
+test('new version accepts a better final book but transmits only the original count and limit',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id),oldFingerprint=f.exchange.book.fee.fingerprint;
+ f.updateBook(.49,'100');assert.notEqual(f.exchange.book.fee.fingerprint,oldFingerprint);
+ await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);
+ assert.equal(f.exchange.posts[0]!.contracts,3);assert.equal(f.exchange.posts[0]!.limitMicros,520000);
+ assert.equal((await pool.query('SELECT reserved_micros FROM v13_production_intent WHERE id=$1',[id])).rows[0].reserved_micros,'6000000');
+});
+test('worse price, lost depth, changed semantic model and forged same-fingerprint terms deny pinned entry',async()=>{
+ for(const mode of ['price','depth','model','forged'] as const){
+  const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);
+  if(mode==='price')f.updateBook(.53,'100');
+  if(mode==='depth')f.updateBook(.49,'2.99');
+  if(mode==='model'){
+   f.exchange.book.fee.cashRisk!.gridDigest='f'.repeat(64);
+   const {cashRiskModelFingerprint,cashRiskFeeFingerprint}=await import('../v13EntryCashRisk');
+   f.exchange.book.fee.cashRisk!.modelFingerprint=cashRiskModelFingerprint(f.exchange.book.fee.cashRisk!);
+   f.exchange.book.fee.fingerprint=cashRiskFeeFingerprint(f.exchange.book.fee);
+  }
+  if(mode==='forged')f.exchange.book.fee.cashRisk!.entryCashDebitPerContractMicros=500000;
+  await assert.rejects(f.executor.dispatch(id),/production_final_fee_or_quote_changed|production_final_depth_changed/);
+  assert.equal(f.exchange.posts.length,0);
+ }
+});
+test('new prepared cash proof cannot be stripped even with recomputed unkeyed capability digest',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);
+ const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];delete i.decision.preflight.cashRisk;
+ const cap=digest({id:i.id,request:i.request,decision:i.decision,policyHash:i.policy_hash,fee:i.fee_fingerprint});
+ await pool.query('UPDATE v13_production_intent SET decision=$2,capability_digest=$3 WHERE id=$1',[id,i.decision,cap]);
+ await assert.rejects(f.executor.dispatch(id),/production_cash_risk_unproven/);assert.equal(f.exchange.posts.length,0);
+});
+function fillAt(f:Awaited<ReturnType<typeof cashBoundFixture>>,request:Request,qty:string,price:number,fee:string,terminal:boolean){
+ const fill=f.exchange.fill(request,qty,terminal,fee),before=BigInt(fill.grossMicros);
+ fill.priceMicros=Math.round(price*1e6);fill.grossMicros=String(BigInt(qty)*BigInt(fill.priceMicros)/100n);
+ f.exchange.evidence.cashMicros=String(BigInt(f.exchange.evidence.cashMicros)+before-BigInt(fill.grossMicros));return fill;
+}
+test('100 better-price .01 fills retain exact ownership without treating legitimate alignment fees as gross-budget loss',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);const request=f.exchange.posts[0]!;
+ for(let n=0;n<100;n++)fillAt(f,request,'1',.49,'5100',n===99);
+ await f.executor.reconcile();const a=await f.ledger.readAccount();
+ assert.equal(a.blocked_reason,null);assert.equal(a.cash_micros,'24000000');assert.equal(a.reserved_micros,'3000000');
+ const pos=(await pool.query('SELECT * FROM v13_production_position WHERE id=$1',[id])).rows[0];
+ assert.equal(pos.quantity_hundredths,'100');assert.equal(pos.basis_micros,'1000000');
+ await f.executor.reconcile();assert.equal((await f.ledger.readAccount()).cash_micros,'24000000');await invariant(f.ledger);
+});
+test('absurd whole-fill fee cannot consume unused fragmented-entry cash allowance',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+ fillAt(f,f.exchange.posts[0]!,'100',.50,'20001',true);await f.executor.reconcile();
+ assert.equal((await f.ledger.readAccount()).blocked_reason,'entry_fill_fee_bound_exceeded');
+ assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[id])).rows[0].quantity_hundredths,'100');
+ await invariant(f.ledger);
+});
+test('cumulative fragmented cash excess records real exposure but blocks further authority',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+ for(let n=0;n<100;n++)fillAt(f,f.exchange.posts[0]!,'1',.49,'5200',n===99);
+ await f.executor.reconcile();assert.match((await f.ledger.readAccount()).blocked_reason!,/entry_.*bound_exceeded/);
+ assert.equal((await pool.query('SELECT basis_micros FROM v13_production_position WHERE id=$1',[id])).rows[0].basis_micros,'1010000');
+ await invariant(f.ledger);
+});
+
+test('partial post-dispatch proof stripping cannot downgrade reconciliation to legacy arithmetic',async()=>{
+ for(const removed of ['proof','basis'] as const){
+  const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+  const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+  if(removed==='proof')delete i.decision.preflight.cashRisk;else delete i.decision.book.fee.cashRisk;
+  const cap=digest({id:i.id,request:i.request,decision:i.decision,policyHash:i.policy_hash,fee:i.fee_fingerprint});
+  await pool.query('UPDATE v13_production_intent SET decision=$2,capability_digest=$3 WHERE id=$1',[id,i.decision,cap]);
+  fillAt(f,f.exchange.posts[0]!,'100',.50,'20000',true);
+  await assert.rejects(f.executor.reconcile(),/production_entry_cash_bound_corrupt/);
+  assert.match((await f.ledger.readAccount()).blocked_reason!,/production_entry_cash_bound_corrupt/);
+  // Never invent flat recovery: the intent/reservation remain unresolved.
+  assert.equal((await pool.query('SELECT terminal FROM v13_production_intent WHERE id=$1',[id])).rows[0].terminal,false);
+ }
+});
+test('exact allowed whole-fill fee survives rounding while overfill and external cash anomalies still freeze',async()=>{
+ const good=await cashBoundFixture(),goodId=await good.executor.prepareEntry(good.id);await good.executor.dispatch(goodId);
+ fillAt(good,good.exchange.posts[0]!,'100',.50,'20000',true);await good.executor.reconcile();
+ assert.equal((await good.ledger.readAccount()).blocked_reason,null);await invariant(good.ledger);
+ for(const mode of ['overfill','cash'] as const){
+  const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+  fillAt(f,f.exchange.posts[0]!,mode==='overfill'?'301':'100',.50,'20000',true);
+  if(mode==='cash')f.exchange.evidence.cashMicros=String(BigInt(f.exchange.evidence.cashMicros)-1n);
+  await assert.rejects(f.executor.reconcile(),mode==='overfill'?/production_overfill/:/production_external_cash_mismatch/);
+  assert.ok((await f.ledger.readAccount()).blocked_reason);assert.equal(f.exchange.posts.length,1);
+ }
+});
+
+test('final pinned entry preserves source ceiling and cannot grow quantity despite repaired checksum',async()=>{
+ for(const mode of ['limit','count'] as const){
+  const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);
+  const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+  if(mode==='limit'){
+   f.updateBook(.53);i.request.limitMicros=530000;i.decision.book.fee=f.exchange.book.fee;
+   const {entryCashProof}=await import('../v13EntryCashRisk');
+   i.decision.preflight.cashRisk=entryCashProof(f.exchange.book.fee,3,625);i.decision.preflight.plan.limitPrice=.53;
+   i.fee_fingerprint=f.exchange.book.fee.fingerprint;
+  }else i.request.contracts=4;
+  const cap=digest({id:i.id,request:i.request,decision:i.decision,policyHash:i.policy_hash,fee:i.fee_fingerprint});
+  await pool.query('UPDATE v13_production_intent SET request=$2,decision=$3,capability_digest=$4,fee_fingerprint=$5 WHERE id=$1',[id,i.request,i.decision,cap,i.fee_fingerprint]);
+  await assert.rejects(f.executor.dispatch(id),/production_pinned_entry_request_changed/);assert.equal(f.exchange.posts.length,0);
+ }
+});
+test('final authority rechecks realized gross losses even when offsetting gains leave cash unchanged',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);
+ // Two already-accounted historical results net to zero cash/P&L, but the
+ // existing loss policy counts losses without offsetting gains.
+ for(const sign of [-1,1])await pool.query(`INSERT INTO v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at)
+ VALUES('test-account',$1,$2,'SETTLEMENT',$3,'{}',$4,$4,$5)`,[randomUUID(),id,'a'.repeat(64),String(sign*20000000),new Date(f.exchange.now)]);
+ await invariant(f.ledger);
+ await assert.rejects(f.executor.dispatch(id),/production_final_cash_bound_unaffordable|live_money_entry_exceeds_remaining_loss_budget/);
+ assert.equal(f.exchange.posts.length,0);
+});
+test('fresh signed cash mismatch denies final authority without resizing or posting',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);
+ f.exchange.evidence.cashMicros='5990000';
+ await assert.rejects(f.executor.dispatch(id),/production_final_account_changed_or_unproven/);assert.equal(f.exchange.posts.length,0);
+});
+
+test('ordinary removal of both version fields cannot hide a corrupt ENTRY capability during recovery',async()=>{
+ const f=await cashBoundFixture(),id=await f.executor.prepareEntry(f.id);await f.executor.dispatch(id);
+ const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ delete i.decision.preflight.cashRisk;delete i.decision.book.fee.cashRisk;
+ await pool.query('UPDATE v13_production_intent SET decision=$2 WHERE id=$1',[id,i.decision]);
+ fillAt(f,f.exchange.posts[0]!,'100',.50,'20000',true);
+ await assert.rejects(f.executor.reconcile(),/production_entry_capability_corrupt/);
+ assert.match((await f.ledger.readAccount()).blocked_reason!,/production_entry_capability_corrupt/);
+ assert.equal((await pool.query('SELECT terminal FROM v13_production_intent WHERE id=$1',[id])).rows[0].terminal,false);
+});
+
+test('reconciliation stores bounded non-replayable receipt while account retains full signed evidence digest',async()=>{
+ const f=await cashBoundFixture();await f.executor.reconcile();
+ const account=await f.ledger.readAccount();
+ const row=(await pool.query("SELECT payload,digest FROM v13_production_observation WHERE account_id=$1 AND kind='RECONCILIATION' ORDER BY observed_at DESC LIMIT 1",[account.id])).rows[0];
+ assert.equal(row.payload.version,'RECONCILIATION_SUMMARY_V1');assert.equal(row.payload.replayable,false);
+ assert.equal(row.payload.fullSnapshotDigest,digest(f.exchange.evidence));
+ assert.equal((await pool.query("SELECT evidence_digest FROM v13_production_account WHERE id=$1",[account.id])).rows[0].evidence_digest,digest(f.exchange.evidence));
+ assert.equal(row.digest,digest(row.payload));assert.equal('fills' in row.payload,false);
+ assert.equal(account.reconciled_at!.getTime(),f.exchange.evidence.observedAtMs);
+ assert.ok(Buffer.byteLength(JSON.stringify(row.payload))<4096);
 });

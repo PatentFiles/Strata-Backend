@@ -20,7 +20,7 @@ import { readForwardTestStatus } from "../routes/forwardTest";
 import {savePostActionPaperBook, readPaperBookCaptureCoverage} from "./forwardTestBookCapture";
 import {parseKalshiResearchOrderbook} from "./forwardTestOrderbookDepth";
 
-const suffix = randomUUID().replaceAll("-", "").slice(0, 14);
+const suffix = randomUUID().replaceAll("-", "").slice(0, 14).toUpperCase();
 const engineId = `TEST-WORKER-${suffix}`;
 const firstTicker = `KXBTC15M-TEST-${suffix}-1`;
 const nextTicker = `KXBTC15M-TEST-${suffix}-2`;
@@ -45,6 +45,16 @@ const market = (ticker: string): MarketObservation => ({
   result: ticker === firstTicker ? result : null,
 });
 const feeds: ForwardTestFeeds = {
+  async book(ticker) {
+    const m=market(ticker),up=price>=m.target!;
+    const ask=up?m.yesAsk:m.noAsk;
+    if(ask===null)throw Error('entry_book_offer_missing');
+    const ya=up?ask:1.01-ask,na=up?1.01-ask:ask;
+    return {ticker,requestStartedAtMs:now.getTime(),receivedAtMs:now.getTime(),bodyCompletedAtMs:now.getTime(),
+      source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',
+      yesBids:[{priceTicks:Math.round((1-na)*10000),contractsHundredths:100000}],
+      noBids:[{priceTicks:Math.round((1-ya)*10000),contractsHundredths:100000}]};
+  },
   async btc(): Promise<BtcObservation> {
     return { price, receivedAt: now,
       providerAt: new Date(now.getTime() - (staleBtc ? 60_000 : 0)) };
@@ -57,7 +67,7 @@ const feeds: ForwardTestFeeds = {
 const cycle = async (owner = "worker-A", epoch = lease.leaseEpoch, cycleFeeds = feeds) => {
   index += 1;
   now = new Date(base.getTime() + index * 5000);
-  return runForwardTestCycle({ owner, epoch, engineId, feeds: cycleFeeds, now });
+  return runForwardTestCycle({ owner, epoch, engineId, feeds: cycleFeeds, now, clock:()=>now.getTime() });
 };
 const countEvaluations = async () => (await db.select().from(forwardTestEvaluationTable)
   .where(like(forwardTestEvaluationTable.marketTicker, `KXBTC15M-TEST-${suffix}%`))).length;
@@ -117,13 +127,12 @@ test("first tick warms up without crossing; fresh crossing is identical to share
   assert.equal(first.signal, "PASS");
   assert.equal(first.positionId, null);
   price = 84010;
-  // A book provider that never resolves must not be awaited by the committed
-  // strategy cycle. The scheduler's bounded optional lane owns capture.
+  // Canonical entry now awaits ONE prequalification book; the scheduler reuses it.
   let bookCalls=0;
   const second = await cycle("worker-A",lease.leaseEpoch,{
-    ...feeds,book:async()=>{bookCalls++;return new Promise(()=>{});},
+    ...feeds,book:async(ticker,signal)=>{bookCalls++;return feeds.book!(ticker,signal);},
   });
-  assert.equal(bookCalls,0);
+  assert.equal(bookCalls,1);
   assert.equal(second.researchEvent?.phase,"ENTRY");
   assert.equal(second.researchEvent?.eventAt.getTime(),now.getTime());
   const [evaluation] = await db.select().from(forwardTestEvaluationTable)
@@ -137,7 +146,7 @@ test("first tick warms up without crossing; fresh crossing is identical to share
   assert.equal(evaluation.reason, decision.reason);
   assert.equal(evaluation.freshCross, decision.freshCross);
   assert.equal(evaluation.velocity, decision.qualifyingTrigger ? 132 : evaluation.velocity);
-  assert.equal(evaluation.upSpread, 0);
+  assert.ok(Math.abs((evaluation.upSpread ?? NaN)-0.01)<1e-12);
   assert.ok(Math.abs((evaluation.downSpread ?? NaN) - 0.01) < 1e-12);
   assert.equal(evaluation.btcProviderAgeMs, 0);
   assert.equal(evaluation.btcReceiveAgeMs, 0);
@@ -148,8 +157,8 @@ test("first tick warms up without crossing; fresh crossing is identical to share
     .where(eq(forwardTestPositionTable.engineId, engineId));
   assert.equal(position.stake, 4.68);
   assert.equal(position.entryOffer, 0.52);
-  assert.equal(position.entryBid, 0.52);
-  assert.equal(position.entrySpread, 0);
+  assert.equal(position.entryBid, 0.51);
+  assert.ok(Math.abs((position.entrySpread ?? NaN)-0.01)<1e-12);
   assert.ok((position.entrySecondsRemaining ?? 0) > 0);
   assert.equal(position.entryBtcProviderAgeMs, 0);
   assert.equal(position.entryBtcReceiveAgeMs, 0);
@@ -248,8 +257,10 @@ test("window rollover settles exactly once, and the new target cannot create an 
 test("a required offer cannot trigger entry; exit, expiry, loss, and P&L match browser arithmetic", async () => {
   yesAsk = null;
   const before = await countEvaluations();
-  assert.match((await cycle("worker-C")).error!, /offer/);
-  assert.equal(await countEvaluations(), before);
+  // No fresh crossing: missing detail ask cannot create an entry, and no book read is needed.
+  const observation=await cycle("worker-C");
+  assert.equal(observation.error,null);assert.equal(observation.positionId,null);
+  assert.equal(await countEvaluations(), before+1);
   const position = { direction: "DOWN", contracts: 12, stake: 4.8 };
   const quoted = { ...market(firstTicker), result: null };
   assert.deepEqual(

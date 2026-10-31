@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import { createReadOnlyRateLimit, emitReadRateLimitDiagnostic } from "./readOnlyRateLimit";
 /**
  * Read-only Kalshi KXBTC15M market-depth research. No order or account authority.
@@ -15,6 +16,9 @@ export type ReadonlyResearchBook = {
   ticker:string;
   requestStartedAtMs:number;
   receivedAtMs:number;
+  /** Header receipt above is not body completion or exchange time. */
+  bodyCompletedAtMs?:number;
+  rawResponseDigest?:string;
   source:"KALSHI_PUBLIC_REST"|"KALSHI_SEQUENCED_WEBSOCKET";
   timestampAuthority:"LOCAL_RECEIPT_ONLY"|"KALSHI_EXCHANGE_SENDING_TIMESTAMP";
   yesBids:ResearchBookLevel[];
@@ -155,5 +159,5 @@ export async function fetchKalshiPublicBook(ticker:string,signal?:AbortSignal):P
  try{raw=JSON.parse(text)}catch{throw Error("book_response_malformed")}
  const parsed=parseKalshiResearchOrderbook(raw,ticker,started,received);
  attempt.success!();
- return parsed;
+ return {...parsed,bodyCompletedAtMs:Date.now(),rawResponseDigest:createHash("sha256").update(text).digest("hex")};
 }

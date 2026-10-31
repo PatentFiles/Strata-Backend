@@ -55,6 +55,11 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    assert.match(sql,/a\.minimum_exit_micros <= \$11::bigint/);
    assert.match(sql,/FOR SHARE OF r,a,g,w,pos/);
    assert.match(sql,/r\.order_digest=\$12::text/);
+   assert.ok(sql.includes('private.strata_exit_request_quantity_hundredths(i.request)=$8::bigint'));
+   assert.ok(sql.includes("i.request->>'side'=$7"));
+   assert.ok(sql.includes("i.request->>'limitMicros'=$11::text"));
+   assert.ok(sql.includes('FOR SHARE OF i'));
+
    assert.match(sql,/w\.credential_fingerprint=\$13::text/);
    return {rows:input.denyLock?[]:[{reservation_id:reservationId,reservation_age_ms:input.reservationAgeMs??0,heartbeat_age_ms:input.heartbeatAgeMs??0}]};
   }

@@ -1,3 +1,4 @@
+import {requestQuantityHundredths,formatContractHundredths} from '../v13-production/requestQuantity';
 import { createHash } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
 import type { Account, Intent } from "../v13-production/ledger";
@@ -30,6 +31,7 @@ export async function recoverPreparedOwnedExitIntents(tx: PoolClient, input: {
       intent.request.action === "SELL" && intent.request.reduceOnly === true &&
       intent.request.timeInForce === "IOC" && intent.request.clientOrderId === intent.client_order_id,
       "protective_prepared_expiry_not_proven_unsent");
+    const requestedQuantity=requestQuantityHundredths(intent.request);
     const parent = intents.find(i => i.id === intent.parent_id && i.kind === "ENTRY");
     const position = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 AND account_id=$2 FOR UPDATE",
       [intent.parent_id,account.id])).rows[0];
@@ -48,7 +50,7 @@ export async function recoverPreparedOwnedExitIntents(tx: PoolClient, input: {
       try { if(typeof raw === "string") request=JSON.parse(raw); } catch { /* fail closed below */ }
       const expected = {
         ticker:intent.market,side:intent.side === "YES" ? "ask" : "bid",
-        count:intent.request.contracts.toFixed(2),
+        count:formatContractHundredths(requestedQuantity),
         price:((intent.side === "YES" ? intent.request.limitMicros : 1_000_000-intent.request.limitMicros)/1_000_000).toFixed(4),
         client_order_id:intent.client_order_id,time_in_force:"immediate_or_cancel",
         self_trade_prevention_type:"taker_at_cross",post_only:false,reduce_only:true,subaccount:1,exchange_index:2,
@@ -56,7 +58,7 @@ export async function recoverPreparedOwnedExitIntents(tx: PoolClient, input: {
       requireProof(marker.state === "PREPARED" && marker.trading_authorized === false &&
         marker.owner_user_id === ownerId && marker.execution_account_id === account.id &&
         marker.market_ticker === intent.market && marker.reducing_side === intent.side &&
-        money(marker.quantity_hundredths) === BigInt(intent.request.contracts)*100n &&
+        money(marker.quantity_hundredths) === requestedQuantity &&
         typeof raw === "string" && createHash("sha256").update(raw).digest("hex") === marker.order_digest &&
         canonical(request) === canonical(expected), "protective_prepared_expiry_marker_not_proven_unsent");
       const changed=await tx.query(`UPDATE private.strata_emergency_exit_reservations

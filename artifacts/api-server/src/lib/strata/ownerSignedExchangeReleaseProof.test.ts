@@ -6,7 +6,7 @@ const at=Date.parse("2026-10-25T12:00:00Z");
 const account={
  id:"owner-execution-1",owner_id:owner,kalshi_connection_id:"owner-credential",
  key_fingerprint:"issuer-signature-fingerprint",commissioned:true,
- kill_switch:true,blocked_reason:"awaiting_account_commissioning",
+ diagnostic_held:true,hold_revision:{account:"1",lease:null,credential:"2"},kill_switch:true,blocked_reason:"awaiting_account_commissioning",
  cash_precision_verified:true,cash_micros:"25000000",reserved_micros:"0",
  policy_id:"approved-v4-policy",policy_state:"APPROVED",
  fee_policy_version:"strata_owner_provider_dynamic_fee_v4",
@@ -62,7 +62,7 @@ test("signed cash mismatch never becomes fee metadata authority",async()=>{
  assert.equal(r.liveEligible,false);
 });
 test("owner kill OFF and non-provisional holds reject before retrieving signer",async()=>{
- for(const row of [{...account,kill_switch:false},
+ for(const row of [{...account,kill_switch:false,diagnostic_held:false},
                    {...account,blocked_reason:"unresolved_exchange_order"}]){
   const m=mock(row);
   const r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);
@@ -97,4 +97,18 @@ test("signed release proof compares exact subcent cash without inventing authori
  assert.equal(r.tradingAuthorized,false);assert.equal(r.liveEligible,false);
  const mismatch=await inspectOwnerSignedExchangeReleaseProof(owner,mock({...account,cash_micros:"24482500"},"24482501").deps);
  assert.equal(mismatch.ok,true);if(mismatch.ok)assert.equal(mismatch.exchangeCashMatchesLedger,false);
+});
+
+test('stopped commissioned account qualifies without changing saved execution or kill',async()=>{
+ const m=mock({...account,kill_switch:false,diagnostic_held:true});
+ const r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);assert.equal(r.ok,true);
+ assert.equal(r.tradingAuthorized,false);assert.equal(r.recordPersisted,false);
+});
+test('final guard failure after signed read reports attempted but never flat',async()=>{
+ const m=mock();let accountReads=0;
+ const original=(m.deps as {db:{query:(s:string,p?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>}}).db;
+ const r=await inspectOwnerSignedExchangeReleaseProof(owner,{...(m.deps as object),db:{query:async(s:string,p?:unknown[])=>{
+  if(s===OWNER_SIGNED_PROOF_ACCOUNT_SQL&&++accountReads===2)throw Error('secret database details');return original.query(s,p);
+ }}} as never);
+ assert.equal(r.ok,false);assert.equal(r.reason,'signed_diagnostic_final_hold_unavailable');assert.equal(r.signedExchangeReadAttempted,true);assert.equal(r.authenticatedExchangeFlat,false);assert.doesNotMatch(JSON.stringify(r),/secret database/);
 });

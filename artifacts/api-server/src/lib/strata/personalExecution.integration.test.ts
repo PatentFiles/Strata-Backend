@@ -1,4 +1,9 @@
+import {entryCashRiskFeeFixture} from "../v13-production/entryCashRisk.fixture";
+import {canonicalEntryQuoteEvidenceDigest} from "../v13-production/entryQuoteEvidence";
+import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
+import {requestQuantityHundredths,formatContractHundredths} from "../v13-production/requestQuantity";
 import { readFileSync } from "node:fs";
+import { quoteFromEntryBook } from "../forwardEntryBookQuote";
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { markOwnedEmergencyExitUnknownForReview } from "./ownerFeeEmergencyExitUnknownCommit";
 import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
@@ -161,7 +166,7 @@ test("a changed owned stake sizes the next mock order, and a crash does not repl
   await session.executor.dispatch(sized);
   assert.equal(posts.length, 1);
   assert.equal(posts[0]!.includes("\"subaccount\":1"), true);
-  assert.equal(posts[0]!.includes("KXBTC15M-TEST"), true);
+  assert.equal(posts[0]!.includes("KXBTC15M-TEST-000"), true);
   assert.equal(posts[0]!.includes("BEGIN"), false);
   await session.executor.dispatch(sized);
   assert.equal(posts.length, 1);
@@ -188,6 +193,7 @@ test("three independently approved owners cannot alter the current owner's V2 en
     "UPDATE v13_live_money_policy SET entry_policy_version=$1, policy_hash=$2 WHERE id=$3 AND execution_account_id=$4",
     [V13_ENTRY_POLICY_VERSION, approved.policyHash, approved.id, ACCOUNT],
   );
+  session.book.fee=entryCashRiskFeeFixture({now:session.now,market:"KXBTC15M-TEST-000",side:"YES",price:.5,contracts:10,policyHash:approved.policyHash!});
 
   // Distinct owner-linked APPROVED policies must coexist without affecting
   // the signed-in owner's ledger. No simulated POST is made for another owner.
@@ -297,8 +303,8 @@ test("a reconciled fill and settlement allow a second order without replaying th
   const id = await session.executor.prepareEntry(await source(session.now));
   const request = await requestOf(id);
   await session.executor.dispatch(id);
-  const quantity = `${request.contracts}.00`;
-  const hundredths = request.contracts * 100;
+  const quantity = formatContractHundredths(requestQuantityHundredths(request));
+  const hundredths = Number(requestQuantityHundredths(request));
   const gross = BigInt(hundredths) * BigInt(request.limitMicros) / 100n;
   const spent = gross;
   const first = personalAccountSnapshot(session.evidence.identity, {
@@ -468,12 +474,8 @@ function book(stakeCents: number, observedAtMs: number): MarketEvidence {
     observedAtMs, bestAskDollars: "0.5000",
     asks: [{ priceDollars: "0.5000", availableContracts: "100000" }],
     bestBidDollars: "0.4500", bids: [{ priceDollars: "0.4500", availableContracts: "100000" }],
-    fee: {
-      policyVersion: "test-fees", sourceUrl: "https://invalid.test/fees", formulaVersion: "test-v1",
-      fingerprint: "fee-evidence-fingerprint", verifiedAtMs: observedAtMs,
-      contracts: plan.plan.contracts, limitPrice: plan.plan.limitPrice,
-      reservedEntryFeeCents: 1, reservedExitFeeCents: 1,
-    },
+    fee: entryCashRiskFeeFixture({now:observedAtMs,market:"KXBTC15M-TEST-000",side:"YES",price:.5,
+      contracts:plan.plan.contracts,policyHash:policy().policyHash!}),
   };
 }
 
@@ -483,7 +485,7 @@ function contractsFor(stakeCents: number): number {
     bestAskDollars: "0.5000", askLevels: [{ priceDollars: "0.5000", availableContracts: "100000" }],
   });
   if (!plan.ok) throw new Error(plan.reason);
-  return plan.plan.contracts;
+  return Math.min(plan.plan.contracts,Math.floor(6_000_000*10000/(1_000_000+999900)));
 }
 
 function snapshot(fingerprint: string, observedAtMs: number, cashMicros: number): Snapshot {
@@ -507,13 +509,24 @@ function dispatchState(fingerprint: string): AccountDispatchState {
 
 async function source(now: number): Promise<string> {
   const id = randomUUID();
+  // Actual producer helper, offline coherent public-book fixture: no receipt
+  // bypass or invented integrity digest for the now-mandatory LIVE source gate.
+  const ticker = "KXBTC15M-TEST-000";
+  const quote = quoteFromEntryBook({ticker,source:"KALSHI_PUBLIC_REST",timestampAuthority:"LOCAL_RECEIPT_ONLY",
+    requestStartedAtMs:now,receivedAtMs:now,bodyCompletedAtMs:now,
+    yesBids:[{priceTicks:5000,contractsHundredths:100000}],
+    noBids:[{priceTicks:5000,contractsHundredths:100000}]},
+    {ticker,target:100000,startsAt:new Date(now-1000),endsAt:new Date(now+900000),
+      fetchedAt:new Date(now),status:"open",result:null,yesAsk:.5,noAsk:.5,yesBid:.5,noBid:.5,yesPrice:.5,noPrice:.5},
+    now,now,"YES",5);
   await pool.query(`INSERT INTO forward_test_evaluations(id,evaluated_at,market_ticker,btc_price,target,
     signed_buffer,absolute_buffer,velocity,feed_freshness,fresh_cross,crossing_consumed,crossing_key,signal,
     direction,qualifying_trigger,reason,entry_offer,position_was_open,previous_side,up_offer,down_offer,
-    btc_provider_age_ms,btc_receive_age_ms,market_age_ms,strategy_parameter_set_id,strategy_parameter_hash)
-    VALUES($1,$2,'KXBTC15M-TEST',100010,100000,10,10,1,'current',true,true,$3,'SCOUT','UP',true,'test',0.5,false,
-      'DOWN',0.5,0.5,0,0,0,$4,$5)`,
-  [id, new Date(now), `${id}:first`, V13_CHAMPION_PARAMETER_SET.id, V13_CHAMPION_PARAMETER_HASH]);
+    btc_provider_age_ms,btc_receive_age_ms,market_age_ms,strategy_parameter_set_id,strategy_parameter_hash,
+    up_bid,down_bid,entry_quote_evidence)
+    VALUES($1,$2,'KXBTC15M-TEST-000',100010,100000,10,10,1,'current',true,true,$3,'SCOUT','UP',true,'test',0.5,false,
+      'DOWN',0.5,0.5,0,0,0,$4,$5,0.5,0.5,$6::jsonb)`,
+  [id, new Date(now), `${id}:first`, V13_CHAMPION_PARAMETER_SET.id, V13_CHAMPION_PARAMETER_HASH, JSON.stringify(quote.evidence)]);
   return id;
 }
 
@@ -549,8 +562,10 @@ function fill(evidence: Snapshot, request: Request, quantity: string): void {
   };
   evidence.fills.push(fillRow);
   evidence.orders.push({ orderId, request, filledHundredths: quantity, terminal: true });
-  evidence.cashMicros = String(BigInt(evidence.cashMicros) - BigInt(gross) - 10_000n);
-  evidence.positions.push({ market: request.market, side: request.side, quantityHundredths: quantity });
+  evidence.cashMicros = String(BigInt(evidence.cashMicros) + (request.action==='BUY'?-BigInt(gross):BigInt(gross)) - 10_000n);
+  const position=evidence.positions.find(p=>p.market===request.market&&p.side===request.side);
+  const updated=(position?BigInt(position.quantityHundredths):0n)+(request.action==='BUY'?BigInt(quantity):-BigInt(quantity));
+  if(position)position.quantityHundredths=updated.toString();else evidence.positions.push({market:request.market,side:request.side,quantityHundredths:updated.toString()});
 }
 
 
@@ -596,7 +611,7 @@ test("open filled exposure holds entries until terminal settlement is independen
   const s=await tradingSession(500,[],60_000_000_000,undefined,true);
   const id=await s.executor.prepareEntry(await source(s.now));
   await s.executor.dispatch(id);
-  const request=await requestOf(id),quantity=String(request.contracts*100);
+  const request=await requestOf(id),quantity=requestQuantityHundredths(request).toString();
   fill(s.evidence,request,quantity);
   s.advance(1);await s.executor.reconcile();
   assert.equal(s.entryGate.mayEnter(s.exchange.state.entriesAuthorized,false),false,"open exposure held");
@@ -612,7 +627,7 @@ test("open filled exposure holds entries until terminal settlement is independen
   assert.equal(s.posts.length,1,"settlement reconciliation is GET-only");
 });
 
-async function protectiveFixture(withMarker:boolean,guardSnapshotUncertainty=false) {
+async function protectiveFixture(withMarker:boolean,guardSnapshotUncertainty=false,ownedQuantity="200",ownedSide:"YES"|"NO"="YES") {
   const s=await tradingSession(500,[],60_000_000_000,undefined,guardSnapshotUncertainty);
   await pool.query(`CREATE SCHEMA IF NOT EXISTS private; CREATE SCHEMA IF NOT EXISTS auth;
     CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY);
@@ -621,26 +636,34 @@ async function protectiveFixture(withMarker:boolean,guardSnapshotUncertainty=fal
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated; END IF; END $$;
     DROP TABLE IF EXISTS private.strata_emergency_exit_reservations CASCADE;
     DROP TABLE IF EXISTS private.kalshi_account_worker_lease CASCADE;`);
-  for(const file of ["strata_emergency_exit_reservation_private.sql","strata_emergency_exit_baseline_private.sql","strata_protective_exit_request_snapshot_private.sql"])
+  for(const file of ["strata_emergency_exit_reservation_private.sql","strata_emergency_exit_baseline_private.sql","strata_protective_exit_request_snapshot_private.sql","strata_protective_exit_reconciliation_private.sql","strata_protective_exit_local_no_send.sql","strata_protective_exit_fractional_quantity.sql"])
     await pool.query(readFileSync(`../../sql/${file}`,"utf8"));
   await pool.query(`CREATE TABLE private.kalshi_account_worker_lease(
     execution_account_id text PRIMARY KEY,owner_user_id uuid,holder_id text,fencing_token bigint,
     state text,account_kill boolean,arm_requested boolean,credential_fingerprint text,heartbeat_at timestamptz);
     INSERT INTO private.kalshi_account_worker_lease VALUES('${ACCOUNT}','${USER}','worker',3,'owned',false,true,'${s.evidence.identity.keyFingerprint}',now())`);
-  const parent=await s.executor.prepareEntry(await source(s.now));
-  await s.executor.dispatch(parent);fill(s.evidence,await requestOf(parent),"200");
+  const entrySource=await source(s.now);
+  if(ownedSide==='NO'){
+   s.book.fee=entryCashRiskFeeFixture({now:s.now,market:'KXBTC15M-TEST-000',side:'NO',price:.5,contracts:10,policyHash:s.book.fee.cashRisk!.policyHash});
+   const evidence=(await pool.query('SELECT entry_quote_evidence FROM forward_test_evaluations WHERE id=$1',[entrySource])).rows[0].entry_quote_evidence;
+   evidence.capacity.side='NO';evidence.evidenceDigest=canonicalEntryQuoteEvidenceDigest(evidence);
+   await pool.query("UPDATE forward_test_evaluations SET btc_price=99990,signed_buffer=-10,velocity=-1,previous_side='UP',direction='DOWN',entry_quote_evidence=$2 WHERE id=$1",[entrySource,evidence]);
+  }
+  const parent=await s.executor.prepareEntry(entrySource);
+  await s.executor.dispatch(parent);fill(s.evidence,await requestOf(parent),ownedQuantity);
   await s.executor.reconcile();
   async function exitFeed() {
     s.advance(1);const evaluation=await source(s.now);
     await pool.query(`UPDATE forward_test_evaluations SET btc_price=99999,signed_buffer=-1,absolute_buffer=1,
       velocity=-1,signal='EXIT',direction='UP',qualifying_trigger=false,fresh_cross=false WHERE id=$1`,[evaluation]);
+    if(ownedSide==='NO')await pool.query("UPDATE forward_test_evaluations SET btc_price=100001,signed_buffer=1,absolute_buffer=1,velocity=1,direction='DOWN' WHERE id=$1",[evaluation]);
   }
   await exitFeed();
   const exit=await s.executor.prepareExit(parent,.4);
-  const order=sealedFinancialProtectiveExitOrder({positionId:parent,market:"KXBTC15M-TEST",side:"YES",quantityHundredths:"200",minimumExitMicros:400000},await requestOf(exit),s.book);
+  const order=sealedFinancialProtectiveExitOrder({positionId:parent,market:"KXBTC15M-TEST-000",side:ownedSide,quantityHundredths:ownedQuantity,minimumExitMicros:400000},await requestOf(exit),s.book);
   const inspect: typeof import("./ownerFeeEmergencyExitRead").inspectOwnedEmergencyExitRead = async()=>({
     ok:false,reason:"test",tradingAuthorized:false,diagnosticEligible:true,needsIndependentApproval:true,
-    verifiedPositionFp:"2.00",verifiedPositionObservedAtMs:s.now,
+    verifiedPositionFp:(ownedSide==='NO'?'-':'')+formatContractHundredths(BigInt(ownedQuantity)),verifiedPositionObservedAtMs:s.now,
   });
   const lease={holderId:"worker",fencingToken:3};
   const reserve=()=>reserveOwnedEmergencyExitProof(USER,ACCOUNT,s.material,order,lease,{db:pool,inspect,now:()=>s.now});
@@ -793,4 +816,83 @@ test("final authority refresh cannot override a concurrent protective reservatio
   await assert.rejects(s.executor.dispatch(id),/production_other_uncertain_order/);
   assert.equal(s.posts.length,0);
   assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0].state,"BLOCKED");
+});
+
+test("main owned financial seal/reserve/UNKNOWN uses exact .01/.50/1.50 without entry resizing",async()=>{
+ for(const quantity of ['1','50','150']){
+  const f=await protectiveFixture(true,false,quantity),request=await requestOf(f.exit);
+  assert.equal(request.quantityVersion,'EXIT_HUNDREDTHS_V1');assert.equal(requestQuantityHundredths(request),BigInt(quantity));
+  assert.equal(Object.hasOwn(request,'contracts'),false);assert.equal(f.order.count,formatContractHundredths(BigInt(quantity)));
+  assert.equal((await requestOf(f.parent)).contracts,10,'ENTRY remains whole stake-sized');
+  const marker=await f.mark();assert.equal(marker.unknownRecorded,true,marker.reason);
+  const row=(await pool.query('SELECT state,quantity_hundredths FROM private.strata_emergency_exit_reservations')).rows[0];
+  assert.equal(row.state,'UNKNOWN');assert.equal(row.quantity_hundredths,quantity);
+  assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,quantity);
+  assert.equal(f.posts.length,1,'only synthetic entry, no unauthorized exit replay');
+ }
+});
+
+async function actualOwnedFinalFence(f:Awaited<ReturnType<typeof protectiveFixture>>) {
+ await pool.query(`CREATE TABLE IF NOT EXISTS private.strata_standing_execution_reviews(release_id uuid,owner_user_id uuid,execution_account_id text,release_commit_sha text);
+ CREATE TABLE IF NOT EXISTS private.strata_protective_exit_release(release_commit_sha text,state text,created_at timestamptz,expires_at timestamptz,revoked_at timestamptz,independent_reviewer_id uuid,operator_approver_id uuid);
+ DELETE FROM private.strata_standing_execution_reviews;DELETE FROM private.strata_protective_exit_release;
+ INSERT INTO private.strata_protective_exit_release VALUES('${'a'.repeat(40)}','approved',now()-interval '1 minute',now()+interval '1 hour',NULL,'33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444');`);
+ await f.executor.ledger.transaction(async(tx)=>{await f.executor.ledger.observe(tx,'OWNER_ACTIVATION_REQUEST',{});});
+ await pool.query("UPDATE private.kalshi_account_worker_lease SET heartbeat_at=now()");
+ return {ownerId:USER,accountId:ACCOUNT,reservationId:f.reservationId!,material:f.material,order:f.order,lease:{holderId:'worker',fencingToken:3}};
+}
+test("actual owned signed route closes exact fractional quantities through real PG fence and durable outcome",async()=>{
+ for(const side of ['YES','NO'] as const)for(const [quantity,filled] of [['1','1'],['50','50'],['150','150'],['150','25']]){
+  const residual=BigInt(quantity!)-BigInt(filled!);
+  const f=await protectiveFixture(true,false,quantity!,side),input=await actualOwnedFinalFence(f),original=globalThis.fetch;
+  let posts=0;
+  const receipt={order_id:'fractional-exit-'+quantity,client_order_id:f.order.client_order_id,fill_count:formatContractHundredths(BigInt(filled!)),remaining_count:'0.00',ts_ms:Date.now()};
+  globalThis.fetch=(async(_url,init)=>{posts++;assert.equal(init?.method,'POST');assert.ok(new Headers(init?.headers).get('KALSHI-ACCESS-SIGNATURE'));
+   const body=JSON.parse(String(init?.body));assert.equal(body.count,formatContractHundredths(BigInt(quantity!)));assert.equal(body.reduce_only,true);
+   return new Response(JSON.stringify(receipt),{status:201});}) as typeof fetch;
+  try{
+   const result=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker}) as any,
+    readAuthenticatedOutcome:async()=>({clientOrderId:String(f.order.client_order_id),requestedCountFp:String(f.order.count),marketTicker:String(f.order.ticker),
+      initialPositionFp:(side==='NO'?'-':'')+f.order.count,observedPositionFp:residual===0n?'0.00':(side==='NO'?'-':'')+formatContractHundredths(residual),positionMarketTicker:String(f.order.ticker),reducingBookSide:side==='YES'?'ask':'bid',
+      completeExchangeHistory:true,exactMarketAndAccountMatched:true,orderAndFillHistoryMatched:true,isolatedPositionDelta:true,
+      authenticatedOrder:{order_id:receipt.order_id,client_order_id:f.order.client_order_id,status:'canceled',initial_count_fp:f.order.count,fill_count_fp:receipt.fill_count,remaining_count_fp:'0.00'},
+      response:{httpStatus:201,...receipt}})});
+   assert.equal(result.state,'RECONCILED',result.reason);assert.equal(result.filledHundredths,filled);assert.equal(posts,1);
+   assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'RECONCILED');
+   fill(f.evidence,await requestOf(f.exit),filled!);f.advance(1);await f.executor.reconcile();
+   assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,residual.toString());
+   if(residual>0n){await f.exitFeed();const next=await f.executor.prepareExit(f.parent,.4);assert.notEqual(next,f.exit);assert.equal(requestQuantityHundredths(await requestOf(next)),residual);}
+   const again=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker}) as any});
+   assert.equal(again.postAttempted,false);assert.equal(posts,1);
+  }finally{globalThis.fetch=original;}
+ }
+});
+test("actual fractional exit transport uncertainty remains UNKNOWN and never replays",async()=>{
+ const f=await protectiveFixture(true,false,'50'),input=await actualOwnedFinalFence(f),original=globalThis.fetch;let posts=0;
+ globalThis.fetch=(async()=>{posts++;throw Error('synthetic timeout after send');}) as typeof fetch;
+ try{const ports={db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker}) as any};
+  const result=await dispatchReviewedProtectiveExitOnce(input,ports);assert.equal(result.state,'UNKNOWN');assert.equal(result.postAttempted,true);
+  assert.equal((await dispatchReviewedProtectiveExitOnce(input,ports)).postAttempted,false);assert.equal(posts,1);
+  assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,'50');
+ }finally{globalThis.fetch=original;}
+});
+test("actual fractional final fee no-send preserves inventory and durably permits fresh identity",async()=>{
+ const f=await protectiveFixture(true,false,'1'),input=await actualOwnedFinalFence(f);let checks=0,posts=0;
+ const result=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:++checks===1,monetaryFeeAuthorized:checks===1,marketTicker:f.order.ticker}) as any,post:async()=>{posts++;throw Error('must not post');}});
+ assert.equal(result.postAttempted,false);assert.equal(posts,0);
+ assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'VOID');
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[f.exit])).rows[0].state,'BLOCKED');
+ f.advance(1);await f.executor.reconcile();await f.exitFeed();assert.notEqual(await f.executor.prepareExit(f.parent,.4),f.exit);
+ assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,'1');
+});
+test("actual fractional final signed fence rejects post-marker quantity, side and price mutation",async()=>{
+ for(const mutation of [{quantityHundredths:'1'},{side:'NO'},{limitMicros:440000}]){
+  const f=await protectiveFixture(true,false,'50'),input=await actualOwnedFinalFence(f);let checks=0,posts=0;
+  const result=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>{
+   if(++checks===2)await pool.query('UPDATE v13_production_intent SET request=request || $2::jsonb WHERE id=$1',[f.exit,JSON.stringify(mutation)]);
+   return {ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker} as any;
+  },post:async()=>{posts++;throw Error('must not send changed identity');}});
+  assert.equal(posts,0);assert.equal(result.postAttempted,false);assert.equal(result.state,'UNKNOWN');
+  assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'UNKNOWN');
+ }
 });

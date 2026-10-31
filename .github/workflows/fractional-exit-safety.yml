@@ -1,0 +1,51 @@
+name: Fractional protective exit safety
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/v13-production/**'
+      - 'artifacts/api-server/src/lib/v13EntryCashRisk*'
+      - 'artifacts/api-server/src/lib/v13ExecutionPlanner*'
+      - 'artifacts/api-server/src/lib/v13LiveMoney*'
+      - 'artifacts/api-server/package.json'
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/scripts/run-v13-disposable-postgres.mjs'
+      - 'artifacts/api-server/src/lib/strata/ownerFeeEmergencyExit*'
+      - 'artifacts/api-server/src/lib/strata/preparedProtectiveExitRecovery*'
+      - 'artifacts/api-server/src/lib/strata/protectiveExitFractionalQuantity*'
+      - 'artifacts/api-server/src/lib/strata/personalExecution.integration.test.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExchangeRead.ts'
+      - 'sql/**'
+      - '.github/workflows/fractional-exit-safety.yml'
+permissions:
+  contents: read
+jobs:
+  bounded-fractional-exits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Verify quantity, fee bounds, recovery, private SQL and actual owned route
+        run: |
+          pnpm --filter @workspace/api-server run test:v13-entry-cash-risk
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/acceptance.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/fractionalExitPlanner.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/fractionalExitFee.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/preparedProtectiveExitRecovery.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/protectiveExitFractionalQuantity.postgres.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/reconciliationObservation.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownedHistoryCapacityDiagnostics.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownedHistoryCapacityRead.test.ts

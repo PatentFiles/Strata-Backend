@@ -1,6 +1,9 @@
+import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
+import {ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
+import {requestQuantityHundredths} from "../v13-production/requestQuantity";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
-import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros } from "../microLiveEntryFees";
+import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros, maximumEntryCashDebitPerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { canonical, digest, requireProof, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
@@ -140,7 +143,7 @@ export function personalAccountSnapshot(
       }
       if (text(record.ticker) !== request.market || bookSide(request) !== bookSideOf(record) ||
           yesPriceMicros(record) !== yesLimit(request) ||
-          countHundredths(record.initial_count_fp ?? record.initial_count) !== BigInt(request.contracts) * 100n ||
+          countHundredths(record.initial_count_fp ?? record.initial_count) !== requestQuantityHundredths(request) ||
           (request.reduceOnly && record.reduce_only !== undefined &&
             record.reduce_only !== true && record.reduce_only !== "true")) {
         return { ok: false, reason: "personal_exchange_history_unreconciled" };
@@ -259,6 +262,7 @@ async function pages(
       return { failed: "personal_exchange_history_unreconciled" };
     }
     rows.push(...parsed.rows);
+    reportOwnedHistoryCapacity(creds.keyId,path.includes("/historical/") ? `historical_${keys[0]}` : path.split("/").at(-1)!,page+1,rows.length,Boolean(parsed.cursor));
     if (!parsed.cursor) return { rows, unavailable: false };
     seen.add(parsed.cursor);
     cursor = parsed.cursor;
@@ -363,12 +367,15 @@ export function ownedMarketEvidence(input: {
   const entry = maximumEntryFeePerContractMicros(1, limit.toFixed(4), ticks ?? undefined, side);
   const exit = maximumExitFeePerContractMicros(1, ticks ?? undefined, side);
   requireProof(entry !== null && exit !== null && Number.isSafeInteger(input.verifiedAtMs), "fee_evidence_missing");
-  const bound = digest({ policyHash: input.policyHash, artifact: input.artifactDigest });
-  const fingerprint = digest({
-    bound, series, verifiedEvent: feeProof.eventTicker,
-    liveFeeMetadata: feeProof.fingerprint,
-    grid: metadata.price_level_structure, count, limit, entry, exit,
-  });
+  const ranges=metadata.price_ranges??[{start:"0.0000",end:"1.0000",step:"0.0001"}];
+  const cash=maximumEntryCashDebitPerContractMicros(1,limit.toFixed(4),ranges,side);
+  requireProof(cash!==null,"fee_cash_bound_unproven");
+  const identity={version:ENTRY_CASH_RISK_VERSION,marketTicker:input.market,side:input.side,
+    policyHash:input.policyHash,artifactDigest:input.artifactDigest,feeMetadataDigest:feeProof.fingerprint,
+    seriesDigest:digest(series),gridDigest:digest({structure,ranges})};
+  const cashRisk={...identity,modelFingerprint:cashRiskModelFingerprint(identity),
+    entryCashDebitPerContractMicros:cash,entryTradeFeePerContractMicros:entry,exitLossPerContractMicros:exit};
+  const fingerprint=cashRiskFeeFingerprint({contracts:count,limitPrice:limit,cashRisk});
   return marketEvidenceFromBook({
     market: input.market,
     side: input.side,
@@ -380,7 +387,7 @@ export function ownedMarketEvidence(input: {
       policyVersion: input.policyVersion,
       sourceUrl: input.sourceUrl,
       formulaVersion: input.formulaVersion,
-      fingerprint,
+      fingerprint, cashRisk,
       verifiedAtMs: input.verifiedAtMs,
       contracts: count,
       limitPrice: limit,

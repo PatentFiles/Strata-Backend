@@ -17,7 +17,7 @@ export const forwardTestBookSnapshotTable=pgTable("forward_test_book_snapshots",
  receivedAt:timestamp("received_at",{withTimezone:true}),
  status:text("status").notNull(),
  bidLevels:jsonb("bid_levels").$type<{yes:Array<{priceTicks:number;contractsHundredths:number}>;no:Array<{priceTicks:number;contractsHundredths:number}>}>(),
- capacity:jsonb("capacity").$type<{requestedContracts:number;modeledFilledContracts:number;modeledUnfilledContracts:number;modeledCashMicros:string;modeledAveragePriceTicks:number|null;bestPriceTicks:number|null;usedPriceLevels:number;interpretation:"BOOK_CAPACITY_ONLY_NOT_EXECUTION"}>(),
+ capacity:jsonb("capacity").$type<{requestedContracts:number;modeledFilledContracts:number;modeledUnfilledContracts:number;modeledCashMicros:string;modeledAveragePriceTicks:number|null;bestPriceTicks:number|null;usedPriceLevels:number;interpretation:"BOOK_CAPACITY_ONLY_NOT_EXECUTION";observationPhase?:"PRE_QUALIFICATION"|"POST_ACTION";sourceEvaluationId?:string;quoteEvidence?:unknown}>(),
  errorCode:text("error_code"),
  createdAt:timestamp("created_at",{withTimezone:true}).notNull().defaultNow(),
 },t=>[

@@ -90,7 +90,7 @@ test('held optional book capture never blocks another cycle and never builds a b
  release();await lane.drain();committedCycle();await lane.drain();
  assert.equal(captures,2);
 });
-test('worker wires optional post-action capture only after commit and outside cycle return path',()=>{
+test('worker wires optional evidence persistence only after commit and outside cycle return path',()=>{
  const source=readFileSync(new URL('./forwardTestWorker.ts',import.meta.url),'utf8');
  const cycle=source.slice(source.indexOf('export async function runForwardTestCycle'),source.indexOf('export function startServerForwardTestWorker'));
  assert.ok(cycle.includes('notifyCommittedForwardSignal()'));
@@ -98,7 +98,7 @@ test('worker wires optional post-action capture only after commit and outside cy
  const scheduler=source.slice(source.indexOf('export function startServerForwardTestWorker'));
  assert.ok(scheduler.indexOf('await runForwardTestCycle(')<scheduler.indexOf('bookCaptureLane.submit('));
  assert.ok(scheduler.indexOf('bookCaptureLane.submit(')<scheduler.indexOf('await processMicroLiveForwardTestCycle('));
- assert.ok(scheduler.includes('Post-action paper book capture skipped: previous capture still pending'));
+ assert.ok(scheduler.includes('Paper book evidence skipped: previous research operation still pending'));
  assert.ok(!scheduler.includes('await bookCaptureLane.drain()'));
 });
 

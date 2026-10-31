@@ -279,7 +279,9 @@ test("entry loss recheck and kill switch stay in front of submit without a new o
   assert.equal(prepareEntry.includes("gate(tx, a, true)"), false);
   assert.match(prepareExit, /gate\(tx, a, true\)/);
   assert.match(prepareExit, /reduceOnly: true/);
-  assert.match(prepareExit, /qty \/ 100n/);
+  assert.match(prepareExit, /planFractionalIocExit\(\{ ownedHundredths:qty\.toString\(\)/);
+  assert.match(prepareExit, /quantityVersion:EXIT_QUANTITY_VERSION,quantityHundredths:plan\.plan\.plannedHundredths/);
+  assert.equal(prepareExit.includes("qty / 100n"), false);
   assert.equal(prepareExit.includes("Math.ceil"), false);
   assert.match(prepareExit, /production_exit_not_owned/);
   assert.match(dispatch, /gate\(tx, a, i\.kind === "EXIT", id\)/);

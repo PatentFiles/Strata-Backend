@@ -19,7 +19,7 @@ after(() => pool.end());
 let previousEngine: string | null = null;
 
 async function fixture() {
-  const id = randomUUID(), engineId = `ENTRY-POLICY-${id}`, ticker = `KXBTC15M-ENTRY-${id}`;
+  const id = randomUUID(), engineId = `ENTRY-POLICY-${id}`, ticker = `KXBTC15M-ENTRY-${id.toUpperCase()}`;
   if (previousEngine) {
     await db.update(forwardTestEngineTable).set({ enabled: false })
       .where(eq(forwardTestEngineTable.id, previousEngine));
@@ -43,7 +43,11 @@ async function fixture() {
       status: "open", result: null, fetchedAt: now, ...options.market,
     };
     const cycle = () => runForwardTestCycle({ owner, epoch: lease.leaseEpoch, engineId,
-      now, feeds: { btc: async () => btc, market: async () => market } });
+      now, clock:()=>time, feeds: { btc: async () => btc, market: async () => market,
+        book:async()=>({ticker,requestStartedAtMs:time,receivedAtMs:time,bodyCompletedAtMs:time,
+          source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',
+          yesBids:market.noAsk===null?[]:[{priceTicks:Math.round((1-market.noAsk)*10000),contractsHundredths:100000}],
+          noBids:market.yesAsk===null?[]:[{priceTicks:Math.round((1-market.yesAsk)*10000),contractsHundredths:100000}]}) } });
     return options.concurrent ? Promise.all(Array.from({ length: 8 }, cycle)) : [await cycle()];
   }
   async function window() {

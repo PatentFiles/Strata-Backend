@@ -1,3 +1,4 @@
+import {requestQuantityContractsForDisplay} from "./requestQuantity";
 import { and, desc, eq } from "drizzle-orm";
 import {
   db,
@@ -197,7 +198,7 @@ interface ProductionView {
 function requestFields(request: unknown): { action: string | null; contracts: number | null; limitPrice: number | null } {
   if (!request || typeof request !== "object") return { action: null, contracts: null, limitPrice: null };
   const row = request as Record<string, unknown>;
-  const contracts = typeof row.contracts === "number" ? row.contracts : null;
+  const contracts = requestQuantityContractsForDisplay(row);
   const limit = typeof row.limitMicros === "number" ? row.limitMicros / 1_000_000 : null;
   return {
     action: typeof row.action === "string" ? row.action : null,

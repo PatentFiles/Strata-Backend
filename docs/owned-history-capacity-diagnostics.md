@@ -1,0 +1,5 @@
+# Owned history capacity warning
+
+Existing signed pagination still starts at page one, follows complete cursors and fails closed if page 20 retains a cursor. This patch only observes existing parsed page/row counters; no requests, filters, checkpoint, public reason or worker STOP behavior change.
+
+At page 16 it emits APPROACHING_PAGE_CAP; a nonterminal page 20 emits PAGE_CAP_REACHED immediately even after a near-cap warning. A terminal twentieth page is not declared incomplete. Each credential-bound owned scope/feed deduplicates for five minutes in a 128-entry bounded process-local map. Existing owned credentials are account-bound; rotation/restart/eviction can cause another safe warning. No key, scope hash, cursor, provider payload or secret is emitted. Diagnostic sink failure is swallowed, never changing reconciliation. Logs contain feed, page/row counts, cap and fixed subaccount/exchange scope. This is future-capacity telemetry, not evidence that a current account has reached the cap. No indefinite-operation guarantee.
