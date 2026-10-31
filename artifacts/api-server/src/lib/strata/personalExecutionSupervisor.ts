@@ -1,3 +1,4 @@
+import {reconcileOwnedProtectiveExitOutcome} from "./ownedProtectiveExitOutcome";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import { createEntryMetadataSnapshot } from "./entryMetadataSnapshot";
 import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
@@ -435,11 +436,12 @@ export function createProductionPersonalSession(
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
           });
-          if (outcome.state !== "RECONCILED") throw new Error(outcome.reason);
-          // The one-use private reservation is not the V13 cash/fill ledger.
-          // Verify the latter against signed provider history before treating
-          // position/cash balances as authoritative or permitting new entries.
-          await session.executor.reconcile();
+          // Preserve a known local no-send as a temporary reconciliation hold,
+          // never as entry authority. UNKNOWN and failed reads remain sticky.
+          await reconcileOwnedProtectiveExitOutcome({
+            outcome,ownerId:input.userId,accountId:input.accountId,reservationId:reservation.reservationId,
+            technicalRelease,state,reconcile:()=>session.executor.reconcile(),
+          });
         } catch (error) {
           // Exposure after an ambiguous IOC is never replaced by a new entry.
           state.entriesAuthorized = false;

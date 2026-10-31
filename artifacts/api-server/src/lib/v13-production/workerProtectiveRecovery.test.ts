@@ -96,3 +96,24 @@ test("held entries still audit unseen signals without attempting orders",async()
  await worker.tick();
  assert.equal(sweeps,1);assert.equal(entries,0);
 });
+
+import {consumeOwnedPosition} from "./consumer";
+import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from "@workspace/v13-strategy";
+test("LIVE owned exits require reviewed dispatcher, never generic fallback, even while entries are held",async()=>{
+ const pos={id:"owned-position",account_id:"account",market:"KXBTC15M-TEST",side:"YES",quantity_hundredths:"200"};
+ const source={id:"exit-source",market_ticker:pos.market,evaluated_at:new Date(1000),
+  strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
+  feed_freshness:"current",btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0,
+  btc_price:99999,target:100000,signed_buffer:-1,velocity:-1,up_offer:.5,down_offer:.5};
+ let generic=0,reviewed=0,reconciles=0;
+ const tx={query:async()=>({rows:[pos]})};
+ const executor={startTiming:()=>()=>{},now:()=>1000,exchange:{mode:"LIVE"},gate:async()=>{},
+  ledger:{accountId:"account",pool:{query:async(sql:string)=>({rows:sql.includes("forward_test_evaluations")?[source]:[pos]})},
+   transaction:async(fn:(t:unknown,a:unknown)=>Promise<unknown>)=>fn(tx,{minimum_exit_micros:400000}),
+   policy:async()=>({maxQuoteAgeMs:5000,policyHash:"test"}),observe:async()=>{}},
+  reconcile:async()=>{reconciles++;},prepareExit:async()=>{generic++;throw Error("generic forbidden");},dispatch:async()=>{generic++;},
+ };
+ await assert.rejects(consumeOwnedPosition(executor as never),/reviewed_protective_exit_worker_not_bound/);
+ const worker=new ProductionWorker(executor as never,2500,()=>{},()=>false,async()=>{},async()=>{reviewed++;});
+ await worker.tick();assert.equal(reconciles,1);assert.equal(reviewed,1);assert.equal(generic,0);
+});

@@ -1,10 +1,18 @@
-import {annotateFeeFailure} from "./feeFailureDiagnostics";
+import {annotateFeeFailure,getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import { pool,type PoolClient } from "@workspace/db";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import {
  parseReviewedApiSource, verifyReviewedApiFeeSourceStage, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION
 } from "./apiFeeSourceStage";
+/** Only exact local error identity and its validated order ID prove that this
+ * fee fence stopped before invoking the underlying transport. No public error
+ * property, message, cause, or copied diagnostics can grant this provenance. */
+const localFeeRefusals=new WeakMap<Error,string>();
+export function isReviewedApiFeeWireRefusal(error:unknown,clientOrderId:string):boolean {
+ return typeof clientOrderId==="string"&&error instanceof Error&&
+  localFeeRefusals.has(error)&&localFeeRefusals.get(error)===clientOrderId;
+}
 /**
  * Last exact-market API-source fee fence for the alternative PDF-free source.
  * Runs WITH a DB transaction and row-share locks until the signed exchange
@@ -157,6 +165,9 @@ export function createGuardedReviewedApiFeeFetch(
      typeof order.price!=="string"||!/^0\.[0-9]{4}$/.test(order.price) ||
      Number(order.price)<=0)
     throw new Error("api_fee_order_shape_unverified");
+  const clientOrderId=order.client_order_id;
+  let transportInvoked=false;
+  try{
   const borrowed=deps.borrowTransaction?.()??null;
   if(deps.borrowTransaction&&!borrowed)throw new Error('api_fee_final_executor_transaction_required');
   const connection=borrowed?null:await(deps.connect?.()??pool.connect());
@@ -198,12 +209,30 @@ export function createGuardedReviewedApiFeeFetch(
       !/^[a-f0-9]{64}$/.test(checked.identity.digest))
     throw annotateFeeFailure(new Error("api_fee_final_order_grant_or_market_closed"),
       {phase:"authorization",reason:"api_fee_source_identity_mismatch"},checked);
+   // Flip synchronously before calling: even a synchronous transport throw
+   // may follow acceptance. Never infer non-submission from its text/type.
+   transportInvoked=true;
    const response=await transport(request,init);
    if(connection)await client.query("COMMIT");committed=true;
    return response;
   }finally{
    if(connection){if(!committed){try{await connection.query("ROLLBACK");}catch{}}
     connection.release();}
+  }
+  }catch(error){
+   if(error instanceof Error){
+    // A transport can rethrow a previously captured local error. Its earlier
+    // provenance must not release this now-ambiguous submission's reservation.
+    localFeeRefusals.delete(error);
+    if(!transportInvoked){
+     const refusal=new Error(error.message,{cause:error});
+     const diagnostic=getFeeFailureDiagnostics(error);
+     if(diagnostic)annotateFeeFailure(refusal,{phase:diagnostic.phase,reason:diagnostic.reason},error);
+     localFeeRefusals.set(refusal,clientOrderId);
+     throw refusal;
+    }
+   }
+   throw error;
   }
  };
 }

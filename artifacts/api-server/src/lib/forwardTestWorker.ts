@@ -1,3 +1,5 @@
+import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
+import {readForwardCycleFeeds} from "./forwardFeedReadScope";
 import {forwardTestFeedError} from "./forwardTestFeedValidation";
 import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
 import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
@@ -150,16 +152,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   let market: MarketObservation;
   let currentMarket: MarketObservation;
   const priorPosition = await getOpenPaperPosition(engineId);
-  const requestSignal = signal
-    ? AbortSignal.any([signal, AbortSignal.timeout(8_000)])
-    : AbortSignal.timeout(8_000);
   try {
-    [btc, currentMarket] = await Promise.all([
-      feeds.btc(requestSignal), feeds.market(undefined, requestSignal),
-    ]);
-    market = priorPosition && priorPosition.marketTicker !== currentMarket.ticker
-      ? await feeds.market(priorPosition.marketTicker, requestSignal)
-      : currentMarket;
+    ({btc,currentMarket,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
     if (priorPosition && market.ticker !== priorPosition.marketTicker) {
       throw new Error("Open paper position does not match the fetched market window");
     }
@@ -390,8 +384,13 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
-  if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM"))
+  if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM")){
     notifyCommittedForwardSignal();
+    try{emitCommittedSourceQuote(market,{evaluationId:result.evaluationId,engineId,signal:result.signal,
+      marketTicker:market.ticker,evaluatedAtMs:now.getTime(),commitReturnObservedAtMs:Date.now(),
+      qualifyingTrigger:result.researchEvent?.phase==="ENTRY"},
+      event=>logger.info(event,"Committed paper quote provenance"));}catch{/* Optional diagnostics never change committed results. */}
+  }
   // Return the committed action immediately. The scheduler owns optional
   // post-action capture; a slow public book or receipt INSERT cannot hold the
   // next strategy cycle or the separately gated micro-live consumer.

@@ -37,6 +37,10 @@ test("production wiring does not convert ordinary reconciliation or successful e
  assert.doesNotMatch(source,/if\(unresolvedNow.mode==="recovery"\)state.entriesAuthorized=false/);
  const exit=source.slice(source.indexOf("dispatchProtectiveExit: async selection"),source.indexOf("recoverProtectiveExits: async"));
  assert.match(exit,/technicalRelease.beginReconciliation\(\)/);
+ assert.match(exit,/await dispatchReviewedProtectiveExitOnce\(/);
+ assert.match(exit,/await reconcileOwnedProtectiveExitOutcome\([\s\S]*reservationId:reservation.reservationId/);
+ assert.match(exit,/reconcile:\(\)=>session.executor.reconcile\(\)/);
+ assert.doesNotMatch(exit,/executor\.dispatch\(/);
  assert.match(exit,/catch \(error\)[\s\S]*state.entriesAuthorized = false/);
  assert.match(source,/technicalRelease.completeReconciliation\(eligible&&flat\)/);
  assert.match(source,/if\(currentEntry\)throw new Error\("production_other_uncertain_order"\)/);

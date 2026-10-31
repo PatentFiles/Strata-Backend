@@ -1,12 +1,13 @@
+import {feedAbortCause,type FeedAbortCause} from "./forwardFeedReadScope";
 /** Public GETs only. Cooldowns reject without returning cached observations;
  * neither source timestamps nor the live five-second freshness rule change. */
 type Provider='coinbase'|'kalshi';
 type Endpoint='btc_ticker'|'market_discovery'|'market_detail';
 type Cooldown={until:number;failures:number};
 export type PublicFeedReadEvidence={provider:Provider;endpoint:Endpoint;status:number|null;
- outcome:'response'|'request_failed'|'cooldown';receivedAt:string|null;roundTripMs:number|null;
+ outcome:'response'|'request_failed'|'cooldown'|'body_failed'|'complete';receivedAt:string|null;roundTripMs:number|null;
  responseDate:string|null;ageSeconds:number|null;cacheMaxAgeSeconds:number|null;cacheNoStore:boolean;
- aborted:boolean;cooldownRemainingMs:number|null};
+ abortCause:FeedAbortCause;aborted:boolean;cooldownRemainingMs:number|null};
 function seconds(value:string|null):number|null {
  if(value===null||!/^\d{1,10}$/.test(value.trim()))return null;
  const n=Number(value);return Number.isSafeInteger(n)?n:null;
@@ -55,7 +56,7 @@ export function createPublicFeedJsonReader(fetchImpl:typeof fetch=fetch,
     observe({provider,endpoint,status:response?.status??null,outcome,
      receivedAt:Number.isFinite(at)&&Math.abs(at)<=8640000000000000?new Date(at).toISOString():null,
      roundTripMs:Number.isFinite(elapsed)&&elapsed>=0?Math.round(elapsed*1000)/1000:null,
-     ...evidenceHeaders(response),aborted:signal?.aborted??false,cooldownRemainingMs:remaining});
+     ...evidenceHeaders(response),abortCause:feedAbortCause(signal),aborted:signal?.aborted??false,cooldownRemainingMs:remaining});
    }catch{/* optional diagnostics cannot affect transport or authorization */}
   };
   if(held&&before<held.until){
@@ -77,7 +78,8 @@ export function createPublicFeedJsonReader(fetchImpl:typeof fetch=fetch,
    throw Error(`${label} HTTP ${response.status}`);
   }
   let result:unknown;
-  try{result=await response.json();}catch{throw Error(`${label} invalid_json`);}
+  try{result=await response.json();}catch{report("body_failed",response);throw Error(`${label} invalid_json${signal?.aborted?" aborted=true":""}`);}
+  if(endpoint==="btc_ticker")report("complete",response);
   // An older in-flight success cannot clear a newer concurrent 429 hold.
   if(state.get(provider)===held)state.delete(provider);
   return result;
