@@ -3,6 +3,22 @@
 type Provider='coinbase'|'kalshi';
 type Endpoint='btc_ticker'|'market_discovery'|'market_detail';
 type Cooldown={until:number;failures:number};
+export type PublicFeedReadEvidence={provider:Provider;endpoint:Endpoint;status:number|null;
+ outcome:'response'|'request_failed'|'cooldown';receivedAt:string|null;roundTripMs:number|null;
+ responseDate:string|null;ageSeconds:number|null;cacheMaxAgeSeconds:number|null;cacheNoStore:boolean;
+ aborted:boolean;cooldownRemainingMs:number|null};
+function seconds(value:string|null):number|null {
+ if(value===null||!/^\d{1,10}$/.test(value.trim()))return null;
+ const n=Number(value);return Number.isSafeInteger(n)?n:null;
+}
+function evidenceHeaders(response?:Response){
+ const date=response?.headers.get('date'),at=date&&date.length<=128?Date.parse(date):NaN;
+ const cache=response?.headers.get('cache-control')??'';
+ return {responseDate:Number.isFinite(at)?new Date(at).toISOString():null,
+  ageSeconds:seconds(response?.headers.get('age')??null),
+  cacheMaxAgeSeconds:cache.length<=512?seconds(cache.match(/(?:^|,)\s*max-age=(\d+)\s*(?:,|$)/i)?.[1]??null):null,
+  cacheNoStore:cache.length<=512&&/(?:^|,)\s*no-store\s*(?:,|$)/i.test(cache)};
+}
 const FALLBACK_MS=30_000,MAX_FALLBACK_MS=300_000;
 /** Retry-After dates are converted once at receipt to a duration. Subsequent
  * wall-clock jumps cannot expire a provider's monotonic cooldown early. */
@@ -29,14 +45,27 @@ export function createPublicFeedJsonReader(fetchImpl:typeof fetch=fetch,
   // Fail closed if a supplied clock regresses; normal performance.now is monotonic.
   lastMono=Math.max(lastMono,value);return lastMono;
  };
- return async(provider:Provider,endpoint:Endpoint,url:string,signal?:AbortSignal):Promise<unknown>=>{
+ return async(provider:Provider,endpoint:Endpoint,url:string,signal?:AbortSignal,observe?:(event:PublicFeedReadEvidence)=>void):Promise<unknown>=>{
   const label=`Public market feed provider=${provider} endpoint=${endpoint}`;
   const before=mono(),held=state.get(provider);
-  if(held&&before<held.until)
+  const report=(outcome:PublicFeedReadEvidence['outcome'],response?:Response,remaining:number|null=null)=>{
+   if(!observe)return;
+   try{
+    const at=wallNow(),elapsed=monotonicNow()-before;
+    observe({provider,endpoint,status:response?.status??null,outcome,
+     receivedAt:Number.isFinite(at)&&Math.abs(at)<=8640000000000000?new Date(at).toISOString():null,
+     roundTripMs:Number.isFinite(elapsed)&&elapsed>=0?Math.round(elapsed*1000)/1000:null,
+     ...evidenceHeaders(response),aborted:signal?.aborted??false,cooldownRemainingMs:remaining});
+   }catch{/* optional diagnostics cannot affect transport or authorization */}
+  };
+  if(held&&before<held.until){
+   report('cooldown',undefined,Math.ceil(held.until-before));
    throw Error(`${label} cooldown remainingMs=${Math.ceil(held.until-before)}`);
+  }
   let response:Response;
   try{response=await fetchImpl(url,{signal,cache:'no-store',redirect:'error',credentials:'omit',headers:{Accept:'application/json'}});}
-  catch{throw Error(`${label} request_failed${signal?.aborted?' aborted=true':''}`);}
+  catch{report('request_failed');throw Error(`${label} request_failed${signal?.aborted?' aborted=true':''}`);}
+  report('response',response);
   if(!response.ok){
    if(response.status===429){
     const received=mono(),current=state.get(provider),failures=Math.min(5,(current?.failures??0)+1);

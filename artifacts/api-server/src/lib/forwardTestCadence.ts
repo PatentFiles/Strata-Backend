@@ -1,3 +1,4 @@
+export const BOUNDARY_FAST_RETRY_LIMIT=10;
 export function producerDelayMs(periodMs:number,elapsedMs:number):number {
  if(!Number.isFinite(periodMs)||periodMs<250||!Number.isFinite(elapsedMs)||elapsedMs<0)throw Error("invalid_producer_clock");
  return Math.max(250,Math.ceil(periodMs-elapsedMs));
@@ -37,7 +38,7 @@ export class BoundaryDiscoveryRecovery {
   const discoveryError=error==="Kalshi returned no current market" ||
     error==="Kalshi exact market strike is missing or invalid";
   if(!discoveryError||nowMs%900000>=30000){this.closed=true;return 5000;}
-  if(this.closed||this.attempts>=10)return 5000;
+  if(this.closed||this.attempts>=BOUNDARY_FAST_RETRY_LIMIT)return 5000;
   this.attempts++;return 1000;
  }
 }

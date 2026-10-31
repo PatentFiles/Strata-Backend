@@ -1,0 +1,209 @@
+{
+  "simulationOnly": true,
+  "providerTimingProven": false,
+  "productionPolicyChanged": false,
+  "results": [
+    {
+      "name": "current",
+      "schedule": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        15,
+        20,
+        25,
+        30
+      ],
+      "readsIfMissingThrough30s": 15,
+      "rows": [
+        {
+          "strikeReadySeconds": 0,
+          "firstObservedSeconds": 0,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 1
+        },
+        {
+          "strikeReadySeconds": 1,
+          "firstObservedSeconds": 1,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 2
+        },
+        {
+          "strikeReadySeconds": 5,
+          "firstObservedSeconds": 5,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 6
+        },
+        {
+          "strikeReadySeconds": 11,
+          "firstObservedSeconds": 15,
+          "delaySeconds": 4,
+          "readsThroughRecovery": 12
+        },
+        {
+          "strikeReadySeconds": 15,
+          "firstObservedSeconds": 15,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 12
+        },
+        {
+          "strikeReadySeconds": 20,
+          "firstObservedSeconds": 20,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 13
+        },
+        {
+          "strikeReadySeconds": 30,
+          "firstObservedSeconds": 30,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 15
+        }
+      ],
+      "hypotheticalUniformMeanDelay": 1.7774086378737537,
+      "hypotheticalUniformP95Delay": 4.6,
+      "maximumDelay": 4.9
+    },
+    {
+      "name": "spreadSameReads",
+      "schedule": [
+        0,
+        1,
+        3,
+        5,
+        7,
+        9,
+        10,
+        12,
+        14,
+        15,
+        17,
+        19,
+        20,
+        25,
+        30
+      ],
+      "readsIfMissingThrough30s": 15,
+      "rows": [
+        {
+          "strikeReadySeconds": 0,
+          "firstObservedSeconds": 0,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 1
+        },
+        {
+          "strikeReadySeconds": 1,
+          "firstObservedSeconds": 1,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 2
+        },
+        {
+          "strikeReadySeconds": 5,
+          "firstObservedSeconds": 5,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 4
+        },
+        {
+          "strikeReadySeconds": 11,
+          "firstObservedSeconds": 12,
+          "delaySeconds": 1,
+          "readsThroughRecovery": 8
+        },
+        {
+          "strikeReadySeconds": 15,
+          "firstObservedSeconds": 15,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 10
+        },
+        {
+          "strikeReadySeconds": 20,
+          "firstObservedSeconds": 20,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 13
+        },
+        {
+          "strikeReadySeconds": 30,
+          "firstObservedSeconds": 30,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 15
+        }
+      ],
+      "hypotheticalUniformMeanDelay": 1.3787375415282392,
+      "hypotheticalUniformP95Delay": 4.199999999999999,
+      "maximumDelay": 4.899999999999999
+    },
+    {
+      "name": "twoSecondFirst20",
+      "schedule": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14,
+        16,
+        18,
+        20,
+        25,
+        30
+      ],
+      "readsIfMissingThrough30s": 13,
+      "rows": [
+        {
+          "strikeReadySeconds": 0,
+          "firstObservedSeconds": 0,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 1
+        },
+        {
+          "strikeReadySeconds": 1,
+          "firstObservedSeconds": 2,
+          "delaySeconds": 1,
+          "readsThroughRecovery": 2
+        },
+        {
+          "strikeReadySeconds": 5,
+          "firstObservedSeconds": 6,
+          "delaySeconds": 1,
+          "readsThroughRecovery": 4
+        },
+        {
+          "strikeReadySeconds": 11,
+          "firstObservedSeconds": 12,
+          "delaySeconds": 1,
+          "readsThroughRecovery": 7
+        },
+        {
+          "strikeReadySeconds": 15,
+          "firstObservedSeconds": 16,
+          "delaySeconds": 1,
+          "readsThroughRecovery": 9
+        },
+        {
+          "strikeReadySeconds": 20,
+          "firstObservedSeconds": 20,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 11
+        },
+        {
+          "strikeReadySeconds": 30,
+          "firstObservedSeconds": 30,
+          "delaySeconds": 0,
+          "readsThroughRecovery": 13
+        }
+      ],
+      "hypotheticalUniformMeanDelay": 1.4451827242524915,
+      "hypotheticalUniformP95Delay": 4.199999999999999,
+      "maximumDelay": 4.899999999999999
+    }
+  ]
+}
