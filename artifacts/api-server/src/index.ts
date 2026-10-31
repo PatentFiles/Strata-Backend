@@ -1,3 +1,4 @@
+import {startHeldLifecycleShadowProbe} from './lib/strata/heldLifecycleShadowProbe';
 import {startHeldPrimaryBalanceProbe} from "./lib/strata/heldPrimaryBalanceProbe";
 import {startHeldExchangeLatencyProbe} from "./lib/strata/heldExchangeLatencyProbe";
 import app from "./app";
@@ -80,6 +81,7 @@ app.listen(port, "0.0.0.0", (err) => {
   startServerForwardTestWorker();
   // Opt-in, bounded signed GET diagnostics; requires a released account.
   startHeldExchangeLatencyProbe();
+  startHeldLifecycleShadowProbe();
   startHeldPrimaryBalanceProbe();
   // GET-only reference monitor, default OFF; no order capability or live gate.
   startKalshiBrtiShadowFeed();

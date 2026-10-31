@@ -4,7 +4,15 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/forwardTestFeeds*'
       - 'artifacts/api-server/src/lib/publicFeedJson*'
+      - 'artifacts/api-server/src/lib/rolloverStrikeDiagnostics*'
+      - 'artifacts/api-server/src/lib/forwardTestCadence*'
       - 'research/discovery-boundary-20261029/**'
+      - 'research/rollover-strike-20261031/**'
+      - 'research/lifecycle-shadow-20261031/**'
+      - 'research/held-lifecycle-20261031/**'
+      - 'artifacts/api-server/src/lib/strata/heldLifecycle*'
+      - 'artifacts/api-server/src/lib/strata/lifecycleShadowTransport*'
+      - 'artifacts/api-server/src/index.ts'
       - '.github/workflows/market-discovery-safety.yml'
   workflow_dispatch:
 permissions:
@@ -19,7 +27,7 @@ jobs:
           version: 9.15.9
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
@@ -30,4 +38,36 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/forwardTestFeeds.test.ts --bundle --platform=node --format=cjs --outfile=dist/market-discovery.cjs --external:pg-native
           pnpm exec esbuild src/lib/publicFeedJson.test.ts --bundle --platform=node --format=cjs --outfile=dist/public-feed-json.cjs
-          node --test dist/market-discovery.cjs dist/public-feed-json.cjs
+          pnpm exec esbuild src/lib/rolloverStrikeDiagnostics.test.ts --bundle --platform=node --format=cjs --outfile=dist/rollover-strike-diagnostics.cjs
+          node --test dist/market-discovery.cjs dist/public-feed-json.cjs dist/rollover-strike-diagnostics.cjs
+          node --experimental-strip-types --test src/lib/forwardTestCadence.test.mjs src/lib/forwardTestFeedValidation.test.mjs
+          node ../../research/rollover-strike-20261031/replay.mjs > /tmp/rollover-replay.json
+          diff -u ../../research/rollover-strike-20261031/replay.json /tmp/rollover-replay.json
+          node --test ../../research/lifecycle-shadow-20261031/*.test.mjs
+          node ../../research/lifecycle-shadow-20261031/replay.mjs > /tmp/lifecycle-shadow-replay.json
+          diff -u ../../research/lifecycle-shadow-20261031/replay.json /tmp/lifecycle-shadow-replay.json
+          pnpm exec esbuild src/lib/strata/heldLifecycleShadowProbeCore.test.ts src/lib/strata/heldLifecycleBoundedQuery.test.ts src/lib/strata/heldLifecycleShadowProbe.test.ts --bundle --platform=node --format=cjs --outdir=dist/held-lifecycle-tests --out-extension:.js=.cjs --external:pg-native
+          NODE_ENV=production node --test dist/held-lifecycle-tests/*.cjs
+          node --experimental-strip-types --test src/lib/strata/lifecycleShadowTransport.test.mjs
+  held-lifecycle-postgres-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Exact held lifecycle SQL against disposable local PostgreSQL
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldLifecycleShadowProbe.postgres.test.ts
+      - name: Complete existing offline safety suite
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --full-suite

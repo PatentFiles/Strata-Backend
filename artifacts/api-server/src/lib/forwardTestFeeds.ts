@@ -1,4 +1,6 @@
-import {createPublicFeedJsonReader} from "./publicFeedJson";
+import {publishHeldRolloverDiagnostics} from './rolloverStrikeDiagnostics';
+import {marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from "./rolloverStrikeDiagnostics";
+import {createPublicFeedJsonReader,type PublicFeedReadEvidence} from "./publicFeedJson";
 import { fetchKalshiPublicBook, type OrderbookRead } from "./forwardTestOrderbookDepth";
 // Public market data only. This module never authenticates with a trading
 // account and contains no order endpoint or trading capability.
@@ -92,11 +94,7 @@ function marketPrice(source:Record<string,unknown>,dollars:string,legacyCents:st
 }
 
 function targetOf(market: Record<string, unknown>) {
-  const direct = firstNumber(market, ["floor_strike", "floorStrike", "strike", "target", "threshold"]);
-  if (direct !== null) return direct;
-  // Never infer the settlement strike from human-readable titles. The
-  // wrong four-to-six-digit number could reverse the signal direction.
-  return null;
+  return marketStrikeEvidence(market).value;
 }
 
 function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | null {
@@ -134,8 +132,9 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
 /** Lists route discovery only. Their cached quotes/status are never promoted
  * into a current snapshot; refresh the selected exact contract every cycle.
  */
-export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now()):ForwardTestFeeds {
+export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void):ForwardTestFeeds {
 const getJson=createPublicFeedJsonReader(fetchImpl,()=>clock().getTime(),monotonicClock);
+const diagnostics=new RolloverStrikeDiagnostics(observe);
 // Cache routing identity only, never observations. Canonical 15-minute metadata
 // bounds this hint to one window; every use still performs a fresh exact GET.
 let route: {ticker:string; window:number} | null = null;
@@ -182,7 +181,13 @@ return {
       if(!selected)throw new Error('Kalshi returned no current market');
       selectedTicker=selected.ticker;
     }
-    const detailRaw=await getJson("kalshi","market_detail",`${KALSHI}/${encodeURIComponent(selectedTicker)}`,signal);
+    let transport:PublicFeedReadEvidence|null=null;
+    let detailRaw:unknown;
+    try{detailRaw=await getJson("kalshi","market_detail",`${KALSHI}/${encodeURIComponent(selectedTicker)}`,signal,event=>{transport=event;});}
+    catch(error){
+      try{const at=clock().getTime();if(!ticker&&Math.floor(at/900000)*900000===currentWindow)diagnostics.observe(at,selectedTicker,null,transport);}catch{}
+      throw error;
+    }
     const detailAt=clock();
     const detail=detailRaw&&typeof detailRaw==='object'
       ?normalizeMarket((detailRaw as {market?:unknown}).market,detailAt):null;
@@ -210,10 +215,14 @@ return {
        detail.startsAt.getTime()===currentWindow&&detail.endsAt.getTime()===currentWindow+900_000){
       route={ticker:detail.ticker,window:currentWindow};
     }else route=null;
+    const rawMarket=(detailRaw as {market:Record<string,unknown>}).market;
+    // Diagnostic only: this uses the same exact response and never rescues a
+    // malformed strike or treats metadata receipt as a fresh executable quote.
+    diagnostics.observe(detailMs,detail.ticker,marketStrikeEvidence(rawMarket),transport);
     // Strike/offer validity remains enforced by the producer feed gate.
     // Never infer a strike or reuse list prices when the detail is incomplete.
     return detail;
   },
 };
 }
-export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds();
+export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{console.info(JSON.stringify(event));publishHeldRolloverDiagnostics(event);});
