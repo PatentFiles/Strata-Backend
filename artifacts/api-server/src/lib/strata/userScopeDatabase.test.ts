@@ -739,3 +739,80 @@ test("current account read model retains subcent cash without hiding reserved mi
  assert.equal(settings.reservedBotCashCents,1);
  assert.equal(settings.capitalRemainingCents,2447);
 });
+
+test("wallet primary throttling and local quota are explicit, nonauthorizing, bounded and never credential errors",async()=>{
+ const endpoint="/trade-api/v2/portfolio/balance";
+ const cases:[unknown,string,string|null,number|null,number|null][]=[
+  [new KalshiApiError("HTTP_ERROR",429,{provider:"kalshi",endpoint,responseReceived:true,retryAfterMs:null,remainingMs:30000}),"HTTP_429","provider_response",429,30000],
+  [new KalshiApiError("HTTP_ERROR",429,{provider:"kalshi",endpoint,responseReceived:false,retryAfterMs:null,remainingMs:14736}),"LOCAL_COOLDOWN","local_cooldown",null,14736],
+  [new Error("kalshi_balance_quota_busy"),"QUOTA_BUSY","local_budget",null,null],
+  [new KalshiApiError("HTTP_ERROR",401),"HTTP_401","provider_response",401,null],
+  [new KalshiApiError("HTTP_ERROR",403),"HTTP_403","provider_response",403,null],
+  [new KalshiApiError("INVALID_CREDENTIALS"),"AUTH_FAILED",null,null,null],
+  [new KalshiApiError("NETWORK_ERROR"),"NETWORK_UNAVAILABLE",null,null,null],
+  [new SyntaxError("secret response body"),"INVALID_RESPONSE",null,null,null],
+  [new KalshiApiError("INVALID_JSON"),"INVALID_RESPONSE",null,null,null],
+  [new Error("secret database error"),"READ_UNAVAILABLE",null,null,null],
+ ];
+ for(const [error,reason,occurrence,httpStatus,remaining] of cases){
+  const {db}=database(true);let calls=0;
+  const port=createDatabaseUserScopePort(db,{kalshiGet:async()=>{calls++;throw error;}});
+  const wallet=await port.wallet(USER_A),d=wallet.displayReadDiagnostics!;
+  assert.equal(calls,1);assert.equal(wallet.credentialVerified,false);assert.equal(wallet.botEligible,false);
+  assert.equal(wallet.verificationReason,`PRIMARY_BALANCE_${reason}`);
+  assert.equal(d.complete,false);assert.equal(d.reads.primary.reason,reason);assert.equal(d.reads.primary.httpStatus,httpStatus);
+  assert.equal(d.reads.primary.occurrence,occurrence);assert.equal(d.reads.primary.cooldownRemainingMs,remaining);
+  assert.equal(d.reads.orders.status,"not_requested");assert.equal(d.reads.primary.retryAfterMs,null);
+  const published=sanitizePublic(wallet);assert.deepEqual(published.displayReadDiagnostics,d);
+  assert.doesNotMatch(JSON.stringify(published),/secret response|secret database|key-a|pem-a|vault-a/);
+ }
+});
+
+test("wallet secondary unavailable or malformed activity is not verified empty and never cached as healthy",async()=>{
+ for(const failure of ["throw","malformed","healthy"]){
+  const {db}=database(true);let calls=0;
+  const port=createDatabaseUserScopePort(db,{kalshiGet:async(_creds,path)=>{
+   calls++;
+   if(path.endsWith("/account/limits"))return {usage_tier:"advanced"};
+   if(path.endsWith("/portfolio/balance"))return {balance:2500,portfolio_value:0};
+   if(path.endsWith("/portfolio/positions")){
+    if(failure==="throw")throw new KalshiApiError("HTTP_ERROR",429,{provider:"kalshi",endpoint:path,responseReceived:false,retryAfterMs:null,remainingMs:12000});
+    if(failure==="malformed")return {unexpected:"not an empty inventory"};
+   }
+   return {market_positions:[],orders:[],fills:[],settlements:[],transfers:[]};
+  }});
+  const wallet=await port.wallet(USER_A),d=wallet.displayReadDiagnostics!;
+  assert.equal(calls,8);assert.deepEqual(wallet.positions,[]);assert.equal(wallet.credentialVerified,true);
+  assert.equal(wallet.botEligible,failure==="healthy");assert.equal(d.complete,failure==="healthy");
+  assert.equal(d.reads.positions.status,failure==="healthy"?"response_received":"unavailable");
+  assert.equal(d.reads.positions.reason,failure==="throw"?"LOCAL_COOLDOWN":failure==="malformed"?"INVALID_RESPONSE":null);
+  if(failure!=="healthy")assert.equal(wallet.verificationReason,"WALLET_DISPLAY_READS_UNAVAILABLE");
+  await port.wallet(USER_A);assert.equal(calls,failure==="healthy"?8:16);
+ }
+});
+
+ test("wallet Retry-After metadata is safe and malformed primary body stays invalid, not rate-limited",async()=>{
+  const {db}=database(true);let sends=0;
+  const error=new KalshiApiError("HTTP_ERROR",429,{provider:"kalshi",endpoint:"/trade-api/v2/portfolio/balance",responseReceived:true,retryAfterMs:120000,remainingMs:120000});
+  const port=createDatabaseUserScopePort(db,{kalshiGet:async()=>{sends++;throw error;}});
+  const result=await port.wallet(USER_A);assert.equal(sends,1);
+  assert.equal(result.displayReadDiagnostics?.reads.primary.retryAfterMs,120000);
+  const invalid=createDatabaseUserScopePort(db,{kalshiGet:async()=>({balance:"secret malformed cents"})});
+  const bad=await invalid.wallet(USER_A);assert.equal(bad.verificationReason,"PRIMARY_BALANCE_INVALID_RESPONSE");
+  assert.equal(bad.botEligible,false);assert.equal(bad.displayReadDiagnostics?.reads.primary.status,"unavailable");
+  assert.equal(bad.displayReadDiagnostics?.reads.primary.httpStatus,null);
+  assert.doesNotMatch(JSON.stringify(sanitizePublic(bad)),/secret malformed cents/);
+ });
+
+test("wallet malformed bot money is unavailable despite a successful primary display",async()=>{
+ const {db}=database(true);let calls=0;
+ const port=createDatabaseUserScopePort(db,{kalshiGet:async(_creds,path,query)=>{
+  calls++;if(path.endsWith("/portfolio/balance"))return query?.includes("subaccount=0")?{balance:2500}:{};
+  if(path.endsWith("/account/limits"))return {usage_tier:"advanced"};
+  return {market_positions:[],orders:[],fills:[],settlements:[],transfers:[]};
+ }});
+ const wallet=await port.wallet(USER_A);assert.equal(calls,8);assert.equal(wallet.primary.cashCents,2500);
+ assert.equal(wallet.botEligible,false);assert.equal(wallet.displayReadDiagnostics?.complete,false);
+ assert.equal(wallet.displayReadDiagnostics?.reads.bot.reason,"INVALID_RESPONSE");
+ assert.equal(wallet.displayReadDiagnostics?.reads.bot.status,"unavailable");
+});

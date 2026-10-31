@@ -10,7 +10,19 @@ export interface KalshiMoney {
   portfolioValueCents: number | null;
 }
 
+export type WalletDisplayReadLabel = "primary" | "limits" | "bot" | "positions" | "orders" | "fills" | "settlements" | "transfers";
+export interface WalletDisplayReadDiagnostic {
+  /** Response receipt is not proof of full pagination or execution eligibility. */
+  status: "response_received" | "unavailable" | "not_requested";
+  reason: string | null;
+  httpStatus: number | null;
+  occurrence: "provider_response" | "local_cooldown" | "local_budget" | null;
+  retryAfterMs: number | null;
+  cooldownRemainingMs: number | null;
+}
 export interface KalshiUserRead {
+  /** Optional display-only diagnostics; complete means received usable shapes, NOT full pagination or signed reconciliation. */
+  displayReadDiagnostics?: {complete: boolean; reads: Record<WalletDisplayReadLabel, WalletDisplayReadDiagnostic>};
   credentialVerified: boolean;
   verificationReason: string | null;
   apiUsageTier: string | null;
