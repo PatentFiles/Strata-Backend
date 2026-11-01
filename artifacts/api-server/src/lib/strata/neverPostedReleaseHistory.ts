@@ -24,7 +24,7 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
   AND kind IN ('PROVEN_NOT_POSTED','POST_ATTEMPT','POST_UNCERTAIN') AND payload->>'id'=ANY($2::text[])
   ORDER BY id LIMIT 3001 ${lock?'FOR SHARE':''}`,[accountId,ids])).rows;
  if(observations.length>3000)throw Error('release_history_bound_exceeded');
- const events=(await db.query(`SELECT id FROM public.v13_production_event
+ const events=(await db.query(`SELECT 1 AS present FROM public.v13_production_event
   WHERE account_id=$1 AND intent_id=ANY($2::text[]) LIMIT 1 ${lock?'FOR SHARE':''}`,[accountId,ids])).rows;
  if(events.length)throw Error('release_never_posted_financial_event_conflict');
  const neverPosted=[];

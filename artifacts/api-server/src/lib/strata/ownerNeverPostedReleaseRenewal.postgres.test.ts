@@ -1,8 +1,14 @@
+import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
+import {readFileSync} from 'node:fs';import {resolve} from 'node:path';
+import {getTableColumns} from 'drizzle-orm';import {v13ProductionEventTable} from '@workspace/db';
 import test from 'node:test';import assert from 'node:assert/strict';import {generateKeyPairSync,randomUUID} from 'node:crypto';
 import {pool as db} from '@workspace/db';import {digest} from '../v13-production/types';
 import {authorizeOwnerShaRelease,OWNER_SHA_RELEASE_CONFIRM} from './ownerShaRelease';
 import {inspectOwnerSignedExchangeReleaseProof} from './ownerSignedExchangeReleaseProof';
 import {dedicatedSignerFingerprint} from './commissioning';
+const migration=readFileSync(resolve(process.cwd(),'../../lib/db/drizzle/0000_reviewed_release_schema.sql'),'utf8');
+const eventDdl=migration.match(/CREATE TABLE IF NOT EXISTS "v13_production_event" \([\s\S]*?\n\);/)?.[0];
+if(!eventDdl)throw Error('actual_event_migration_ddl_required');
 const url=process.env.V13_RENEWAL_DISPOSABLE_URL;
 if(!url||url!==process.env.DATABASE_URL||new URL(url).hostname!=='127.0.0.1'||!/^\/renewal_disposable_\d+$/.test(new URL(url).pathname))throw Error('explicit_disposable_renewal_database_required');
 const owner='11111111-1111-4111-8111-111111111111',reviewer='22222222-2222-4222-8222-222222222222';
@@ -40,7 +46,7 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
  state text,terminal boolean,reserved_micros bigint,filled_hundredths bigint,kind text,market text,side text,parent_id text,cancel_attempted boolean,exchange_order_id text,
  policy_hash text,fee_fingerprint text,capability_digest text,client_order_id text UNIQUE);
  CREATE TABLE public.v13_production_position(id text,account_id text REFERENCES public.v13_production_account(id),quantity_hundredths bigint,basis_micros bigint,realized_pnl_micros bigint);
- CREATE TABLE public.v13_production_event(id text,account_id text REFERENCES public.v13_production_account(id),intent_id text);
+ ${eventDdl}
  CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text REFERENCES public.v13_production_account(id),state text);
  CREATE TABLE public.v13_production_observation(id text PRIMARY KEY,account_id text REFERENCES public.v13_production_account(id),kind text,payload jsonb,digest text,observed_at timestamptz DEFAULT now());
  CREATE TABLE private.strata_protective_release_qualification(qualification_id uuid PRIMARY KEY,owner_user_id uuid,execution_account_id text,release_commit_sha text,evidence_digest text,observed_at timestamptz,expires_at timestamptz);
@@ -93,6 +99,24 @@ const state=async()=>({account:(await db.query('SELECT * FROM public.v13_product
  grant:(await db.query('SELECT * FROM private.strata_continuous_execution_grants')).rows,
  review:(await db.query('SELECT * FROM private.strata_standing_execution_reviews')).rows});
 test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{try{await setup();
+ await t.test('unexpected SQLSTATE diagnostic is bounded and contains no raw error fields',()=>{
+  const error=Object.assign(new Error('secret SQL and credentials'),{code:'42703',detail:'secret value',query:'SELECT secret',account:'private'});
+  assert.deepEqual(ownerRenewalFailureDiagnostics(error,'preflight_history'),{version:1,phase:'preflight_history',category:'schema_contract',sqlState:'42703'});
+  assert.doesNotMatch(JSON.stringify(ownerRenewalFailureDiagnostics(error,'preflight_history')),/secret|credentials|SELECT|private/);
+ });
+ await t.test('unknown codes/phases and hostile code getters cannot leak or throw',()=>{
+  assert.deepEqual(ownerRenewalFailureDiagnostics({code:'secret'},'secret phase'),{version:1,phase:'unknown',category:'unclassified',sqlState:null});
+  const hostile={get code(){throw Error('secret getter');}};
+  assert.equal(ownerRenewalFailureDiagnostics(hostile,'commit').sqlState,null);
+  assert.equal(ownerRenewalFailureDiagnostics({code:'42501'},'locked_authority').category,'database_permission');
+ });
+ await t.test('actual migration/schema parity: old id projection fails42703 even with no events',async()=>{
+  const columns=(await db.query("SELECT attname FROM pg_attribute WHERE attrelid='public.v13_production_event'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attname")).rows.map(r=>r.attname);
+  assert.deepEqual(columns,Object.values(getTableColumns(v13ProductionEventTable)).map(c=>c.name).sort());
+  assert.ok(columns.includes('event_id'));assert.ok(!columns.includes('id'));
+  assert.equal((await db.query('SELECT count(*)::int n FROM public.v13_production_event')).rows[0].n,0);
+  await assert.rejects(db.query('SELECT id FROM public.v13_production_event WHERE account_id=$1 AND intent_id=ANY($2::text[]) LIMIT 1',['a',[]]),{code:'42703'});
+ });
  await t.test('five authentic no-send intents renew without changing controls/history; idempotent current SHA',async()=>{
   await reset();const before=await state();let unlocked=false;
   beforeRead=async()=>{const c=await db.connect();try{await c.query('BEGIN');await c.query("SELECT id FROM public.v13_production_account WHERE id='a' FOR UPDATE NOWAIT");await c.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id='a' FOR UPDATE NOWAIT");unlocked=true;}finally{await c.query('ROLLBACK');c.release();}};
@@ -115,7 +139,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
  ['mutated request',"UPDATE public.v13_production_intent SET request=jsonb_set(request,'{contracts}','4')"],
  ['mutated client',"UPDATE public.v13_production_intent SET client_order_id='other-'||id"],
  ['mutated decision',"UPDATE public.v13_production_intent SET decision='{}'"],
- ['financial event',"INSERT INTO public.v13_production_event SELECT 'fill','a',id FROM public.v13_production_intent LIMIT 1"],
+ ['financial event',"INSERT INTO public.v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at) SELECT 'a','fill',id,'FILL',repeat('a',64),'{}',0,0,now() FROM public.v13_production_intent LIMIT 1"],
  ['nonzero position',"INSERT INTO public.v13_production_position VALUES('pos','a',1,0,0)"],
  ['closed position with historical pnl',"INSERT INTO public.v13_production_position VALUES('pos','a',0,0,1)"],
  ['protective UNKNOWN',"INSERT INTO private.strata_emergency_exit_reservations VALUES('a','UNKNOWN')"],
