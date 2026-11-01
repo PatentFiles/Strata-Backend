@@ -1,3 +1,4 @@
+import {captureFinalComparison,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
 import {entryCashProof,validEntryCashRisk,samePinnedCashModel,pinnedEntryDepthAvailable,type V13EntryCashProof} from "../v13EntryCashRisk";
 import {conservativeExitFeeMicros} from "./fractionalExitFee";
 import {requestQuantityHundredths,EXIT_QUANTITY_VERSION} from "./requestQuantity";
@@ -87,13 +88,22 @@ export class ProductionExecutor {
     requireProof(!a.blocked_reason || allowBlockedExit || lifecycle, "production_account_frozen");
     requireProof(a.reconciled_at && a.reconciled_at.getTime() <= this.now() &&
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
-    const unknown = await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
+    // The owned account row is already locked by ledger.transaction. Batch only
+    // these adjacent independent reads; mutable master/policy checks stay later.
+    // CASE preserves UNKNOWN-first denial: do not read owner identity on that path.
+    const ownedGate = this.accountOwnerUserId ? (await tx.query(`
+      WITH uncertain AS MATERIALIZED (
+        SELECT EXISTS(SELECT 1 FROM v13_production_intent WHERE account_id=$1
+          AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)) AS has_uncertain_order
+      ) SELECT has_uncertain_order, CASE WHEN $3::boolean OR NOT has_uncertain_order
+        THEN (SELECT owner_user_id::text FROM v13_production_account WHERE id=$1)
+        ELSE NULL END AS owner_user_id FROM uncertain`, [a.id, ignoreIntentId, lifecycle])).rows[0] : null;
+    const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
-    requireProof(lifecycle || unknown.rows.length === 0, "production_uncertain_order_blocks_mutation");
+    requireProof(lifecycle || (ownedGate ? ownedGate.has_uncertain_order === false : unknown!.rows.length === 0),
+      "production_uncertain_order_blocks_mutation");
     if (this.accountOwnerUserId) {
-      const owner = await tx.query(`SELECT owner_user_id::text AS owner_user_id
-        FROM v13_production_account WHERE id=$1`, [a.id]);
-      requireProof(owner.rows.length === 1 && owner.rows[0].owner_user_id === this.accountOwnerUserId,
+      requireProof(ownedGate && ownedGate.owner_user_id === this.accountOwnerUserId,
         "foreign_execution_account");
       const master = await tx.query("SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config");
       requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
@@ -242,8 +252,9 @@ export class ProductionExecutor {
       const id = randomUUID(), clientOrderId = `v13p-${id}`;
       const request: Request = { market: source.market_ticker, side, action: "BUY", contracts: pf.plan.contracts,
         limitMicros: Math.round(pf.plan.limitPrice * 1_000_000), timeInForce: "IOC", reduceOnly: false, clientOrderId };
+      const preparedBook=pf.selectedFeeEvidence?{...book,fee:pf.selectedFeeEvidence}:book;
       const decision = {
-        source, book, preflight: pf, policy: p, identity: identity(a),
+        source, book:preparedBook, preflight: pf, policy: p, identity: identity(a),
         configuredStakeCents: stake.cents, stakeRevision: stake.revision,
       };
       const cap = digest({ id, request, decision, policyHash: pf.policyHash, fee: pf.feeEvidenceFingerprint });
@@ -330,7 +341,10 @@ export class ProductionExecutor {
       await this.ledger.persist(tx, a);
       return true;
     });
-    if (!claimed) return;
+    if (!claimed) {
+      this.startTiming("dispatch",{intentId:id})("noop_not_prepared");
+      return;
+    }
     this.fault("after_dispatch_commit");
     const dispatchTiming=this.startTiming("dispatch",{intentId:id});
     let invoked = false;
@@ -357,6 +371,7 @@ export class ProductionExecutor {
           await this.authorizeFinalEntry(tx);
         const final = async () => {
           const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
+          let finalComparison:FinalComparisonDiagnostics|undefined;
           try {
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
@@ -387,11 +402,21 @@ export class ProductionExecutor {
               pinnedCash.limitMicros===i.request.limitMicros&&pinnedCash.feeFingerprint===i.fee_fingerprint&&
               BigInt(pinnedCash.plannedAllInCents)*10000n===money(i.reserved_micros),"production_pinned_cash_bound_changed");
           }
+          try {
           requireProof((cashEntry?samePinnedCashModel(stored.fee,book.fee):book.fee.fingerprint === i.fee_fingerprint &&
             canonical({ ...book.fee, verifiedAtMs: 0 }) === canonical({ ...stored.fee, verifiedAtMs: 0 })) &&
             this.now() - book.observedAtMs >= 0 && this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
             this.now() - book.fee.verifiedAtMs >= 0 && this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs,
           "production_final_fee_or_quote_changed");
+          }catch(error){
+            // Diagnostics follow the unchanged short-circuit guard. No extra
+            // this.now() call, changed timestamp, provider read or authority.
+            try{finalComparison=captureFinalComparison({cashEntry,stored,fresh:book,
+              pinnedFingerprint:i.fee_fingerprint,requestContracts:i.request.contracts,
+              pinnedLimitMicros:i.request.limitMicros,source:i.decision.source,
+              maxQuoteAgeMs:p.maxQuoteAgeMs,maxFeeEvidenceAgeMs:p.maxFeeEvidenceAgeMs,sampledAtMs:Date.now()});}catch{/* Optional evidence only. */}
+            throw error;
+          }
           let entryStake = p.maxEntryStakeCents;
           if (i.kind === "ENTRY") {
             const pinnedStake = i.decision.configuredStakeCents;
@@ -522,7 +547,7 @@ export class ProductionExecutor {
           // downstream refusal proves its transport was never invoked.
           invoked = true;
           finalTiming("completed");
-          }catch(error){finalTiming("rejected",{error});throw error;}
+          }catch(error){finalTiming("rejected",{error,finalComparison});throw error;}
         };
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.

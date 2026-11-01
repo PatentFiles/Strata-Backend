@@ -28,9 +28,10 @@ function fixture(overrides:Record<string,unknown>={},fault=''){
   if(sql.includes('SELECT s.decrypted_secret'))return {rows:[{decrypted_secret:JSON.stringify({api_key_id:'test',private_key:pem})}]};
   if(sql.includes(') intents,'))return {rows:[{intents:fault==='unknown'?'1':'0',positions:fault==='position'?'1':'0',exits:fault==='unknown_exit'?'1':'0'}]};
   if(sql.includes('SELECT request')||sql.includes('SELECT * FROM v13_production_intent')||sql.includes('SELECT market,side'))return {rows:[]};
-  if(sql.includes('sum(cash_delta_micros)'))return {rows:[{cash:'0',pnl:'0'}]};
-  if(sql.includes('sum(basis_micros)'))return {rows:[{basis:'0',pnl:'0'}]};
-  if(sql.includes('sum(reserved_micros)'))return {rows:[{amount:'0'}]};
+  if(sql.includes('sum(cash_delta_micros)')){
+   assert.match(sql,/CROSS JOIN/);assert.match(sql,/sum\(basis_micros\)/);assert.match(sql,/sum\(reserved_micros\)/);
+   return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
+  }
   if(sql.includes('INSERT INTO v13_production_observation')){if(fault==='audit_failure')throw Error('audit unavailable');return {rows:[]};}
   if(sql.includes('UPDATE public.v13_production_account')){
    assert.match(sql,/execution_enabled=false,kill_switch=true/);
@@ -53,6 +54,7 @@ test('signed flat complete recovery only clears transient hold with gates closed
  const f=fixture();assert.equal((await f.run()).ok,true);assert.equal(f.reads,1);
  assert.ok(f.calls.includes('COMMIT'));assert.ok(!f.calls.includes('ROLLBACK'));
  assert.equal(f.calls.filter(s=>s.startsWith('UPDATE')).length,1);
+ assert.equal(f.calls.filter(s=>s.includes('sum(cash_delta_micros)')).length,1);
 });
 for(const fault of ['account_changed','lease_owned','armed','policy_revoked','credential_revoked','unknown','position','unknown_exit','audit_failure','cas_failure','expired','running','concurrent_start','archive_missing','cash_mismatch','exchange_position']){
  test(`refuses ${fault}, never commits recovery`,async()=>{

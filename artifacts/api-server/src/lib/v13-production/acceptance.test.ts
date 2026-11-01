@@ -93,6 +93,19 @@ class SimulatedExchange implements Exchange {
   }
 }
 
+// Compare the production one-statement totals to the previous three queries
+// on every fixture conservation check, including fills/settlements/corruption.
+class DifferentialConservationLedger extends ProductionLedger {
+ override async assertConservation(tx:import('@workspace/db').PoolClient,a:import('./ledger').Account){
+  const e=(await tx.query('SELECT coalesce(sum(cash_delta_micros),0)::text cash,coalesce(sum(pnl_micros),0)::text pnl FROM v13_production_event WHERE account_id=$1',[a.id])).rows[0];
+  const p=(await tx.query('SELECT coalesce(sum(basis_micros),0)::text basis,coalesce(sum(realized_pnl_micros),0)::text position_pnl FROM v13_production_position WHERE account_id=$1',[a.id])).rows[0];
+  const r=(await tx.query('SELECT coalesce(sum(reserved_micros),0)::text amount FROM v13_production_intent WHERE account_id=$1',[a.id])).rows[0];
+  let calls=0;
+  const wrapped={query:async(sql:string,args:unknown[])=>{calls++;const result=await tx.query(sql,args);assert.deepEqual(result.rows[0],{...e,...p,...r});return result;}};
+  try{await super.assertConservation(wrapped as never,a);}finally{assert.equal(calls,1);}
+ }
+}
+
 async function fixture(fault?: (stage: string) => void) {
   assert.equal((await pool.query("SHOW fsync")).rows[0].fsync, "on");
   assert.equal((await pool.query("SHOW synchronous_commit")).rows[0].synchronous_commit, "on");
@@ -107,7 +120,7 @@ async function fixture(fault?: (stage: string) => void) {
   await pool.query(`INSERT INTO strata_configured_stake(id,configured_stake_cents,revision,updated_at)
     VALUES('production',$1,1,now())`, [p.maxEntryStakeCents]);
   const exchange = new SimulatedExchange();
-  const ledger = new ProductionLedger(pool, "test-account");
+  const ledger = new DifferentialConservationLedger(pool, "test-account");
   const executor = new ProductionExecutor(ledger, exchange, () => exchange.now, fault);
   await executor.reconcile();
   async function source(id = randomUUID(), crossing = "test-cross") {
@@ -1195,8 +1208,8 @@ test('baseline exact final optimizer equality rejects a better book despite pinn
  assert.equal(f.exchange.posts.length,0);
 });
 
-async function cashBoundFixture(price=.52,depth='100'){
- const f=await liveReceiptFixture();
+async function cashBoundFixture(price=.52,depth='100',direction:'UP'|'DOWN'='UP'){
+ const f=await liveReceiptFixture(direction);
  const row=(await pool.query("SELECT * FROM v13_live_money_policy WHERE id='production-test'")).rows[0];
  const {decodePolicy}=await import('./ledger');const p=decodePolicy(row);
  p.maxEntryAllInCents=625;p.capitalLimitCents=2500;p.maxDailyLossCents=2500;p.maxTotalLossCents=2500;p.maxQuoteAgeMs=5000;
@@ -1206,16 +1219,16 @@ async function cashBoundFixture(price=.52,depth='100'){
  f.exchange.evidence.cashMicros='25000000';
  const ticker='KXBTC15M-TEST-000',at=f.exchange.now;
  const {quoteFromEntryBook}=await import('../forwardEntryBookQuote');
- const ya=Math.round(price*10000),yb=ya-100,nb=10000-ya,na=10000-yb;
+ const selected=Math.round(price*10000),ya=direction==='UP'?selected:10100-selected,yb=ya-100,nb=10000-ya,na=10000-yb;
  const q=quoteFromEntryBook({ticker,source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',requestStartedAtMs:at,receivedAtMs:at,bodyCompletedAtMs:at,
   yesBids:[{priceTicks:yb,contractsHundredths:100000}],noBids:[{priceTicks:nb,contractsHundredths:100000}]},
   {ticker,target:100000,startsAt:new Date(at-1000),endsAt:new Date(at+900000),fetchedAt:new Date(at),status:'active',result:null,
-   yesAsk:price,noAsk:na/10000,yesBid:yb/10000,noBid:nb/10000,yesPrice:price,noPrice:na/10000},at,at,'YES',5);
- await pool.query('UPDATE forward_test_evaluations SET up_offer=$2,down_offer=$3,up_bid=$4,down_bid=$5,entry_offer=$2,entry_quote_evidence=$6 WHERE id=$1',
-  [f.id,price,na/10000,yb/10000,nb/10000,q.evidence]);
+   yesAsk:ya/10000,noAsk:na/10000,yesBid:yb/10000,noBid:nb/10000,yesPrice:ya/10000,noPrice:na/10000},at,at,direction==='UP'?'YES':'NO',5);
+ await pool.query('UPDATE forward_test_evaluations SET up_offer=$2,down_offer=$3,up_bid=$4,down_bid=$5,entry_offer=$7,entry_quote_evidence=$6 WHERE id=$1',
+  [f.id,ya/10000,na/10000,yb/10000,nb/10000,q.evidence,price]);
  const updateBook=(ask=price,available=depth)=>{
   f.exchange.book.bestAskDollars=ask.toFixed(4);f.exchange.book.asks=[{priceDollars:ask.toFixed(4),availableContracts:available}];
-  f.exchange.book.fee=entryCashRiskFeeFixture({now:at,market:ticker,side:'YES',price:ask,
+  f.exchange.book.fee=entryCashRiskFeeFixture({now:at,market:ticker,side:direction==='UP'?'YES':'NO',price:ask,
    contracts:Math.max(1,Math.min(Math.floor(5/ask+1e-9),Math.floor(Number(available)))),policyHash:p.policyHash!});
  };
  updateBook();return {...f,p,updateBook};
@@ -1384,4 +1397,148 @@ test('reconciliation stores bounded non-replayable receipt while account retains
  assert.equal(row.digest,digest(row.payload));assert.equal('fills' in row.payload,false);
  assert.equal(account.reconciled_at!.getTime(),f.exchange.evidence.observedAtMs);
  assert.ok(Buffer.byteLength(JSON.stringify(row.payload))<4096);
+});
+
+test('diagnostic final38-to40 refusal under44 source stays noPOST; terminal retry explicit no-op',async()=>{
+ const f=await cashBoundFixture(.44);f.updateBook(.38);const id=await f.executor.prepareEntry(f.id);
+ const events:import('./stageTiming').StageTiming[]=[];f.executor.timingObserver=e=>{events.push(e);throw Error('observer');};
+ f.updateBook(.40);await assert.rejects(f.executor.dispatch(id),/production_final_fee_or_quote_changed/);
+ const d=events.find(e=>e.stage==='final_preparation'&&e.outcome==='rejected')!.finalComparison!;
+ assert.equal(d.pinnedLimitMicros,380000);assert.equal(d.freshBestAsk,.40);assert.equal(d.sourceReferenceOffer,.44);assert.ok(d.categories.includes('fresh_fee_limit_above_pinned'));assert.equal(f.exchange.posts.length,0);
+ const sql='SELECT state,terminal,exchange_order_id,reserved_micros FROM v13_production_intent WHERE id=$1';const before=(await pool.query(sql,[id])).rows[0];
+ assert.equal(before.state,'BLOCKED');assert.equal(before.terminal,true);assert.equal(before.exchange_order_id,null);assert.equal(before.reserved_micros,'0');
+ await f.executor.dispatch(id);await Promise.resolve();assert.equal(f.exchange.posts.length,0);assert.ok(events.some(e=>e.stage==='dispatch'&&e.outcome==='noop_not_prepared'));
+ assert.equal(events.some(e=>e.stage==='http_ack'||e.outcome==='reconciliation_required'),false);assert.deepEqual((await pool.query(sql,[id])).rows[0],before);
+});
+
+
+test('stale final quote or fee keeps existing refusal and diagnostic sample separate from guard',async()=>{
+ for(const stale of ['quote','fee'] as const){
+  const f=await cashBoundFixture(.44),id=await f.executor.prepareEntry(f.id);
+  const events:import('./stageTiming').StageTiming[]=[];f.executor.timingObserver=e=>{events.push(e);};
+  if(stale==='quote')f.exchange.book.observedAtMs-=60000;else f.exchange.book.fee.verifiedAtMs-=60000;
+  await assert.rejects(f.executor.dispatch(id),/production_final_fee_or_quote_changed/);
+  const d=events.find(e=>e.stage==='final_preparation'&&e.outcome==='rejected')!.finalComparison!;
+  assert.equal(d.flags.samePinnedCashModel,true);assert.ok(d.categories.includes(stale==='quote'?'quote_age_outside_limit_at_sample':'fee_age_outside_limit_at_sample'));
+  assert.equal(d.semantics,'post_failure_diagnostic_sample_not_guard_clock');assert.equal(f.exchange.posts.length,0);
+ }
+});
+
+test('batched conservation keeps account lock and rolls back corrupt writes',async()=>{
+ const f=await fixture(),other=await pool.connect();
+ try{
+  await f.ledger.transaction(async(tx,a)=>{
+   await other.query('BEGIN');await other.query("SET LOCAL lock_timeout='80ms'");
+   await assert.rejects(other.query("UPDATE v13_production_account SET revision=revision WHERE id='test-account'"),{code:'55P03'});
+   await other.query('ROLLBACK');await f.ledger.assertConservation(tx,a);
+  });
+  await other.query("UPDATE v13_production_account SET revision=revision WHERE id='test-account'");
+  const before=await f.ledger.readAccount();
+  await assert.rejects(f.ledger.transaction(async(tx,a)=>{
+   await tx.query('UPDATE v13_production_account SET cash_micros=cash_micros+1,revision=revision+1 WHERE id=$1',[a.id]);
+   a.cash_micros=String(BigInt(a.cash_micros)+1n);await f.ledger.assertConservation(tx,a);
+  }),/production_money_conservation_failed/);
+  const after=await f.ledger.readAccount();assert.equal(after.cash_micros,before.cash_micros);assert.equal(after.revision,before.revision);
+ }finally{await other.query('ROLLBACK');other.release();}
+});
+test('bounded local benchmark reports query counts and real versus injected delay without SLA',async()=>{
+ const f=await fixture(),base=new ProductionLedger(pool,'test-account');
+ const oldSql=[
+  'SELECT coalesce(sum(cash_delta_micros),0)::text cash,coalesce(sum(pnl_micros),0)::text pnl FROM v13_production_event WHERE account_id=$1',
+  'SELECT coalesce(sum(basis_micros),0)::text basis,coalesce(sum(realized_pnl_micros),0)::text pnl FROM v13_production_position WHERE account_id=$1',
+  'SELECT coalesce(sum(reserved_micros),0)::text amount FROM v13_production_intent WHERE account_id=$1'];
+ await base.transaction(async(tx,a)=>{
+  for(const delayMs of [0,5]){
+   const oldTimes:number[]=[],newTimes:number[]=[];let oldCalls=0,newCalls=0;const rounds=delayMs?5:20;
+   const delay=async()=>{if(delayMs)await new Promise(r=>setTimeout(r,delayMs));};
+   const old=async()=>{const t=performance.now();for(const sql of oldSql){oldCalls++;await delay();await tx.query(sql,[a.id]);}oldTimes.push(performance.now()-t);};
+   const fresh=async()=>{const t=performance.now();await base.assertConservation({query:async(sql:string,args:unknown[])=>{newCalls++;await delay();return tx.query(sql,args);}} as never,a);newTimes.push(performance.now()-t);};
+   for(let n=0;n<rounds;n++){if(n%2){await fresh();await old();}else{await old();await fresh();}}
+   assert.equal(oldCalls,rounds*3);assert.equal(newCalls,rounds);
+   const mean=(v:number[])=>v.reduce((a,b)=>a+b,0)/v.length;
+   console.log('CONSERVATION_BENCHMARK',JSON.stringify({scope:'disposable_local_flat_account',injectedPerQueryDelayMs:delayMs,rounds,oldCalls,newCalls,oldMeanMs:mean(oldTimes),newMeanMs:mean(newTimes)}));
+  }
+ });await invariant(f.ledger);
+});
+
+test('other-account history is excluded and its account lock remains independent',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());await f.executor.dispatch(id);f.exchange.fill(f.exchange.posts[0]!);await f.executor.reconcile();
+ await pool.query(`INSERT INTO v13_production_account SELECT (jsonb_populate_record(NULL::v13_production_account,to_jsonb(a)||$1::jsonb)).* FROM v13_production_account a WHERE id='test-account'`,
+  [{id:'other-account',owner_user_id:'11111111-1111-4111-8111-111111111111'}]);
+ await pool.query(`INSERT INTO v13_production_intent SELECT (jsonb_populate_record(NULL::v13_production_intent,to_jsonb(i)||$2::jsonb)).* FROM v13_production_intent i WHERE id=$1`,
+  [id,{id:'other-intent',account_id:'other-account',client_order_id:'other-client',reserved_micros:'123456'}]);
+ await pool.query(`INSERT INTO v13_production_position SELECT (jsonb_populate_record(NULL::v13_production_position,to_jsonb(p)||$2::jsonb)).* FROM v13_production_position p WHERE id=$1`,
+  [id,{id:'other-intent',account_id:'other-account',basis_micros:'654321',realized_pnl_micros:'888'}]);
+ await pool.query(`INSERT INTO v13_production_event SELECT (jsonb_populate_record(NULL::v13_production_event,to_jsonb(e)||$2::jsonb)).* FROM v13_production_event e WHERE intent_id=$1 LIMIT 1`,
+  [id,{account_id:'other-account',intent_id:'other-intent',event_id:'other-event',cash_delta_micros:'999999',pnl_micros:'777'}]);
+ const other=await pool.connect();try{await f.ledger.transaction(async(tx,a)=>{
+  await other.query('BEGIN');await other.query("SET LOCAL lock_timeout='80ms'");
+  await other.query("UPDATE v13_production_account SET revision=revision WHERE id='other-account'");await other.query('COMMIT');
+  await f.ledger.assertConservation(tx,a);
+ });}finally{await other.query('ROLLBACK');other.release();}
+ await invariant(f.ledger);
+});
+
+async function selectedDepthFixture(direction:'UP'|'DOWN'='UP'){
+ const f=await cashBoundFixture(.44,'100',direction);
+ const {ownedMarketEvidence}=await import('../strata/personalExchangeRead');
+ const at=f.exchange.now,close=new Date(at+900000).toISOString(),event='KXBTC15M-TEST-EVENT';
+ const own=[['0.3600','100']],opposite=[['0.6300','0.50'],['0.6200','100']];
+ const actual=ownedMarketEvidence({market:'KXBTC15M-TEST-000',side:direction==='UP'?'YES':'NO',
+  bookPayload:{orderbook_fp:{yes_dollars:direction==='UP'?own:opposite,no_dollars:direction==='UP'?opposite:own}},
+  seriesPayload:{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:'1'}},
+  marketPayload:{market:{ticker:'KXBTC15M-TEST-000',event_ticker:event,exchange_index:2,status:'active',close_time:close,expiration_time:close,latest_expiration_time:close,expected_expiration_time:close,price_level_structure:'tapered_deci_cent',price_ranges:[{start:'0.0000',end:'0.1000',step:'0.0010'},{start:'0.1000',end:'0.9000',step:'0.0100'},{start:'0.9000',end:'1.0000',step:'0.0010'}]}},
+  eventPayload:{event:{event_ticker:event,series_ticker:'KXBTC15M',exchange_index:2,fee_type_override:null,fee_multiplier_override:null}},seriesChangesPayload:{series_fee_change_arr:[]},eventChangesPayload:{event_fee_changes:[],cursor:''},
+  observedAtMs:at,nowMs:at,configuredStakeCents:500,policyVersion:f.exchange.book.fee.policyVersion,sourceUrl:f.exchange.book.fee.sourceUrl,formulaVersion:f.exchange.book.fee.formulaVersion,artifactDigest:'a'.repeat(64),policyHash:f.p.policyHash!,verifiedAtMs:at});
+ assert.equal(actual.fee.limitPrice,.37);assert.equal(actual.fee.contracts,1);
+ f.exchange.book=actual;return {...f,at};
+}
+test('selected-depth PREPARE uses independently recomputed fee at38 for fractional37 top and pins3 unchanged',async()=>{
+ const f=await selectedDepthFixture(),at=f.at,id=await f.executor.prepareEntry(f.id);
+ const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ assert.equal(i.request.contracts,3);assert.equal(i.request.limitMicros,380000);
+ assert.equal(i.decision.book.fee.limitPrice,.38);assert.equal(i.decision.book.fee.contracts,3);
+ assert.equal(i.decision.book.fee.verifiedAtMs,at);assert.equal(i.decision.book.observedAtMs,at);
+ assert.equal(i.decision.preflight.cashRisk.entryTradeFeeMicros,'49500');
+ assert.equal(i.reserved_micros,'6000000');
+ await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.contracts,3);assert.equal(f.exchange.posts[0]!.limitMicros,380000);
+});
+
+test('selected-depth PREPARE preserves advancing read clocks and never renews source age',async()=>{
+ const f=await selectedDepthFixture(),original=f.at;
+ f.exchange.market=async()=>{f.exchange.now+=200;const b=structuredClone(f.exchange.book);b.observedAtMs=f.exchange.now-100;b.fee.verifiedAtMs=f.exchange.now;return b;};
+ const id=await f.executor.prepareEntry(f.id);
+ const i=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ assert.equal(i.decision.book.fee.verifiedAtMs,original+200);
+ assert.equal(i.decision.book.observedAtMs,original+100);
+ assert.equal(new Date(i.decision.source.evaluated_at).getTime(),original);
+ f.exchange.now=original+5001;
+ await assert.rejects(f.executor.dispatch(id),/stale|expired|quote_evidence/);
+ assert.equal(f.exchange.posts.length,0);
+});
+test('selected-depth remains fail closed for cap, fractional-only depth, stale fee and invalid grid',async()=>{
+ for(const mutation of ['cap','depth','fee','grid'] as const){
+  const f=await selectedDepthFixture();
+  if(mutation==='cap')f.exchange.book.asks=[{priceDollars:'0.3700',availableContracts:'0.50'},{priceDollars:'0.4500',availableContracts:'100'}];
+  if(mutation==='depth')f.exchange.book.asks=[{priceDollars:'0.3700',availableContracts:'0.50'}];
+  if(mutation==='fee')f.exchange.book.fee.verifiedAtMs=f.at-15001;
+  if(mutation==='grid')f.exchange.book.fee.cashRisk!.gridEvidence!.ranges[0]!.step='0.0020';
+  await assert.rejects(f.executor.prepareEntry(f.id));
+  assert.equal(f.exchange.posts.length,0);
+  assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);
+ }
+});
+test('selected-depth exact five-second boundary remains inclusive, never extended',async()=>{
+ for(const elapsed of [5000,5001]){
+  const f=await selectedDepthFixture(),id=await f.executor.prepareEntry(f.id);
+  f.exchange.now=f.at+elapsed;
+  if(elapsed===5000){await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);}
+  else {await assert.rejects(f.executor.dispatch(id));assert.equal(f.exchange.posts.length,0);}
+ }
+});
+
+test('selected-depth DOWN uses the exact opposite-side complement and selected fee proof',async()=>{
+ const f=await selectedDepthFixture('DOWN'),id=await f.executor.prepareEntry(f.id);
+ await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);
+ assert.equal(f.exchange.posts[0]!.side,'NO');assert.equal(f.exchange.posts[0]!.limitMicros,380000);assert.equal(f.exchange.posts[0]!.contracts,3);
 });

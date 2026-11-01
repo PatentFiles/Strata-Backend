@@ -129,16 +129,20 @@ export class ProductionLedger {
     });
   }
   async assertConservation(tx: PoolClient, a: Account): Promise<void> {
-    const events = await tx.query(`SELECT coalesce(sum(cash_delta_micros),0)::text cash,
-      coalesce(sum(pnl_micros),0)::text pnl FROM v13_production_event WHERE account_id=$1`, [a.id]);
-    const positions = await tx.query(`SELECT coalesce(sum(basis_micros),0)::text basis,
-      coalesce(sum(realized_pnl_micros),0)::text pnl FROM v13_production_position WHERE account_id=$1`, [a.id]);
-    const reservations = await tx.query(`SELECT coalesce(sum(reserved_micros),0)::text amount
-      FROM v13_production_intent WHERE account_id=$1`, [a.id]);
-    requireProof(money(a.cash_micros) === money(a.initial_cash_micros) + money(events.rows[0].cash) &&
-      money(a.cash_micros) + money(positions.rows[0].basis) === money(a.initial_cash_micros) + money(events.rows[0].pnl) &&
-      money(positions.rows[0].pnl) === money(events.rows[0].pnl) &&
-      money(a.reserved_micros) === money(reservations.rows[0].amount), "production_money_conservation_failed");
+    // Three independent, one-row aggregates in one statement. Do not join raw
+    // history rows: that would multiply amounts. Account lock and every
+    // conservation equation remain unchanged; no history is omitted/cached.
+    const {rows:[totals]} = await tx.query(`SELECT e.cash,e.pnl,p.basis,p.position_pnl,r.amount
+      FROM (SELECT coalesce(sum(cash_delta_micros),0)::text cash,
+        coalesce(sum(pnl_micros),0)::text pnl FROM v13_production_event WHERE account_id=$1) e
+      CROSS JOIN (SELECT coalesce(sum(basis_micros),0)::text basis,
+        coalesce(sum(realized_pnl_micros),0)::text position_pnl FROM v13_production_position WHERE account_id=$1) p
+      CROSS JOIN (SELECT coalesce(sum(reserved_micros),0)::text amount
+        FROM v13_production_intent WHERE account_id=$1) r`, [a.id]);
+    requireProof(money(a.cash_micros) === money(a.initial_cash_micros) + money(totals.cash) &&
+      money(a.cash_micros) + money(totals.basis) === money(a.initial_cash_micros) + money(totals.pnl) &&
+      money(totals.position_pnl) === money(totals.pnl) &&
+      money(a.reserved_micros) === money(totals.amount), "production_money_conservation_failed");
   }
 
   async finalAccountProof(tx: PoolClient, a: Account, snapshot: Snapshot, nowMs: number): Promise<void> {
