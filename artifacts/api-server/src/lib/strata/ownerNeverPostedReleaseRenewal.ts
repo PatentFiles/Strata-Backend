@@ -1,3 +1,5 @@
+import {logger} from '../logger';
+import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
 import {randomUUID} from 'node:crypto';
 import {readReleaseOwner,loadedMaterial} from './inAppProtectiveRelease';
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from './personalExchangeRead';
@@ -81,18 +83,20 @@ async function noFinancialHistory(db:Query,account:string){
  * unsupported here, rather than being treated as empty or erased. */
 export async function authorizeNeverPostedReleaseRenewal(owner:string,qualification:string,sha:string,
  deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds}){
- let tx:Client|null=null,committed=false;
+ let tx:Client|null=null,committed=false;let phase="preflight_authority";
  try{
   const initial=await readReleaseOwner(deps.db,owner);requireProof(initial.ok,'owner_renewal_activation_unverified');
   if(!initial.ok)return fail(initial.reason);
   const a=await scope(deps.db,owner),account=String(a.id);
   const authority=await priorAuthority(deps.db,owner,a);
   const qualified=await currentQualification(deps.db,qualification,owner,account,sha);
+  phase="preflight_history";
   await noFinancialHistory(deps.db,account);
   const history=await readNeverPostedReleaseHistory(deps.db,account);
   requireProof(history.rows.length>0&&history.neverPosted.length===history.rows.length&&history.expectedRequests.length===0,
    'owner_renewal_only_proven_never_posted_history_supported');
   requireProof(history.rows.every(i=>i.policy_hash===a.policy_hash),'owner_renewal_history_policy_changed');
+  phase="signed_history";
   const material=await loadedMaterial(deps.db,a);
   requireProof(material&&dedicatedSignerFingerprint(material.keyId,material.privateKey)===a.key_fingerprint,
    'owner_renewal_restricted_signer_unverified');
@@ -105,16 +109,20 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
   requireProof('identity' in snapshot&&snapshot.authenticated&&snapshot.complete&&snapshot.cashExact&&!snapshot.unexplainedCashActivity&&
    snapshot.orders.length===0&&snapshot.fills.length===0&&snapshot.positions.length===0&&snapshot.settlements.length===0&&
    feeds.cashMicros===String(a.cash_micros),'owner_renewal_signed_history_conflicts_or_cash_changed');
+  phase="transaction_begin";
   tx=await deps.db.connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  phase="locked_authority";
   const locked=await scope(tx,owner,true);
   requireProof(digest(locked)===digest(a),'owner_renewal_account_policy_credential_or_worker_changed');
   const current=await readReleaseOwner(tx,owner);
   requireProof(current.ok&&digest(current.account)===digest(initial.account),'owner_renewal_activation_or_policy_changed');
   const lockedAuthority=await priorAuthority(tx,owner,locked,true);
   requireProof(digest(lockedAuthority)===digest(authority),'owner_renewal_prior_authority_changed');
+  phase="locked_history";
   await noFinancialHistory(tx,account);
   const finalHistory=await readNeverPostedReleaseHistory(tx,account,true);
   requireProof(finalHistory.historyDigest===history.historyDigest,'owner_renewal_history_changed_during_signed_read');
+  phase="locked_evidence";
   const currentMaterial=await loadedMaterial(tx,locked);
   requireProof(currentMaterial&&dedicatedSignerFingerprint(currentMaterial.keyId,currentMaterial.privateKey)===locked.key_fingerprint,
    'owner_renewal_restricted_signer_changed');
@@ -129,6 +137,7 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
    'approved_stake_or_available_cash_unverified');
   const proof=await currentQualification(tx,qualification,owner,account,sha,true);
   requireProof(digest(proof.rows)===digest(qualified.rows),'owner_renewal_qualification_changed');
+  phase="authorization_write";
   const approvals=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid
    AND execution_account_id=$2 AND release_commit_sha=$3 AND revoked_at IS NULL FOR UPDATE`,[owner,account,sha]);
   requireProof(approvals.rows.length<=1,'duplicate_owner_sha_approval');
@@ -140,14 +149,20 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
     AND to_timestamp($6::double precision/1000)+interval '15 seconds' RETURNING approval_id::text`,
    [owner,account,sha,qualification,proof.rows[0]!.evidence_digest,started]);
    requireProof(saved.rows.length===1,'owner_renewal_final_signed_proof_stale');approvalId=String(saved.rows[0]!.approval_id);}
+  phase="audit_write";
   const record={ownerId:owner,accountId:account,sha,approvalId,qualificationId:qualification,
    renewalMode:'COMMISSIONED_PROVEN_NEVER_POSTED_V1',priorAuthority:authority,policyHash:a.policy_hash,
    credentialFingerprint:a.key_fingerprint,historyDigest:history.historyDigest,neverPosted:history.neverPosted,providerReadAtMs:started};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
    VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION',$3::jsonb,$4)`,[randomUUID(),account,JSON.stringify(record),digest(record)]);
   requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');
+  phase="commit";
   await tx.query('COMMIT');committed=true;
   return {ok:true as const,reason:'owner_sha_approved_account_enabled_worker_stopped',sha,approvalId,ordersSubmitted:false as const};
- }catch(e){return fail(e instanceof Error&&/^(owner_renewal_|release_|financial_intent_|fresh_authenticated_|global_execution_|approved_stake_|duplicate_owner_)/.test(e.message)?e.message:'owner_renewal_transaction_or_evidence_unavailable');}
+ }catch(e){
+  const recognized=e instanceof Error&&/^(owner_renewal_|release_|financial_intent_|fresh_authenticated_|global_execution_|approved_stake_|duplicate_owner_)/.test(e.message);
+  if(!recognized)try{logger.warn({ownerRenewalFailure:ownerRenewalFailureDiagnostics(e,phase)},'Owner release renewal failed closed');}catch{/* Diagnostics never change admission. */}
+  return fail(recognized?(e as Error).message:'owner_renewal_transaction_or_evidence_unavailable');
+ }
  finally{if(tx){if(!committed)try{await tx.query('ROLLBACK');}catch{}tx.release();}}
 }
