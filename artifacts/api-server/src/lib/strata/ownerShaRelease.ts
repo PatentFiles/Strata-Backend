@@ -1,3 +1,4 @@
+import {authorizeNeverPostedReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {randomUUID} from "node:crypto";
@@ -112,6 +113,13 @@ export async function authorizeOwnerShaRelease(
   if(!repair&&args.provisionalRepairConfirmation!==undefined)
     return reject("commissioning_repair_confirmation_not_applicable");
   if(restoring&&(repair||alreadyEnabled||stagedStopped))return reject("owner_restore_requires_disabled_unfrozen_account");
+  // Bootstrap remains empty-history-only. Previously authorized accounts with
+  // retained never-posted intents use a separate, stricter stopped renewal.
+  if(!restoring&&isTrue(a.execution_enabled)&&a.blocked_reason==null){
+   const history=await db.query("SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1",[a.id]);
+   if(history.rows.length)return await authorizeNeverPostedReleaseRenewal(ownerId,String(args.qualificationId),sha,
+    {db,sha:deps.sha??deployedGitSha,now:deps.now??Date.now,readFeeds:deps.readFeeds??readOwnedKalshiFeeds});
+  }
   if(restoring||repair||alreadyEnabled||stagedStopped){
     const material=await loadedMaterial(db,a);
     if(!material)return reject("account_restricted_signer_unavailable");

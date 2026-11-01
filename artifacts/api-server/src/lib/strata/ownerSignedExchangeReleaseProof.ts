@@ -1,3 +1,4 @@
+import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
 /**
  * #165: Explicit owner-initiated signed-exchange release diagnostic.
  * Not an issuer grant, reconciliation write, review, exit approval or live order.
@@ -92,6 +93,7 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  const db=deps.db??pool as unknown as Db;
  const clock=deps.now??Date.now;
  let account:Row;const requests:Request[]=[];
+ let history:Awaited<ReturnType<typeof readNeverPostedReleaseHistory>>;
  try{
   const a=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
   if(a.rows.length!==1)return no("owned_execution_account_missing_or_ambiguous");
@@ -108,13 +110,8 @@ export async function inspectOwnerSignedExchangeReleaseProof(
    return no("ledger_cash_or_reservation_unverified");
   if(String(account.reserved_micros)!=="0")
    return no("ledger_reservations_must_be_zero");
-  const intents=await db.query(OWNER_SIGNED_PROOF_INTENTS_SQL,[account.id]);
-  for(const row of intents.rows){
-   const r=typeof row.request==="string"?JSON.parse(row.request):row.request;
-   if(!r||typeof r!=="object"||Array.isArray(r))
-    return no("ledger_intent_unreadable");
-   requests.push(r as Request);
-  }
+  history=await readNeverPostedReleaseHistory(db,String(account.id));
+  requests.push(...history.requests);
  }catch{return no("owner_read_only_database_unavailable");}
  let creds:Awaited<ReturnType<typeof loadedMaterial>>=null;
  try{creds=await (deps.material??loadedMaterial)(db as never,
@@ -134,7 +131,12 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   keyFingerprint:String(account.key_fingerprint??"")};
  const mapped=(deps.map??personalAccountSnapshot)(identity,read,requests);
  if(!("identity" in mapped))return no(mapped.reason,true);
- const flat=(deps.flat??migrationFlatHistoryCheck)(mapped,requests);
+ const excluded=new Set(history!.neverPosted.map(x=>x.clientOrderId));
+ const contradicted=mapped.orders.some(o=>excluded.has(o.request.clientOrderId));
+ const flat=contradicted?{ok:false as const,reason:"proven_never_posted_provider_record_conflict"}:
+  history!.neverPosted.length>0&&read.historicalCoverageComplete!==true
+   ?{ok:false as const,reason:"authenticated_exchange_history_incomplete"}
+   :(deps.flat??migrationFlatHistoryCheck)(mapped,history!.expectedRequests);
  const cashMatch=digits(read.cashMicros)&&read.cashMicros===String(account.cash_micros);
  const exchangeFlat=flat.ok===true;
  // Kalshi series multiplier alone is never a full issuer monetary authority.
@@ -154,6 +156,10 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  }catch{/* remain false; never grant permission */}
  // Final read is after ALL exchange/fee/readiness awaits. No locks span network.
  try{
+  if(history!.neverPosted.length>0){
+   const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id));
+   if(finalHistory.historyDigest!==history!.historyDigest)return no("financial_history_changed_during_signed_diagnostic",true);
+  }
   const final=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
   if(final.rows.length!==1||final.rows[0]!.id!==account.id||
     final.rows[0]!.diagnostic_held!==true||!sameRevision(account.hold_revision,final.rows[0]!.hold_revision))
