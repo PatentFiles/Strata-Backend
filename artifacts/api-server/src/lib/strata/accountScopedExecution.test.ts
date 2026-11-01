@@ -162,11 +162,20 @@ function ports(opened: { count: number }, fingerprint = FINGERPRINT_A, missingCr
   };
 }
 
-function memoryLeases(failAcquire = false): CredentialDatabase & { rows: LeaseRow[] } {
+function memoryLeases(failAcquire = false, accounts = new Map<string,OwnedExecutionAccount>()): CredentialDatabase & { rows: LeaseRow[] } {
   const rows: LeaseRow[] = [];
   let turn = Promise.resolve();
   let fail = failAcquire;
   const query: CredentialClient["query"] = async (text, params = []) => {
+    if(text.startsWith("SET LOCAL")||text.startsWith("SET TRANSACTION"))return {rows:[]};
+    if(text.startsWith("SELECT id FROM public.v13_production_account")){
+      const found=[...accounts.values()].filter(a=>text.includes("ORDER BY id")?a.ownerUserId===params[0]:a.executionAccountId===params[0]&&a.ownerUserId===params[1]);
+      return {rows:found.map(a=>({id:a.executionAccountId}))};
+    }
+    if(text.includes("AS positions")){
+      const a=accounts.get(String(params[0]));if(!a)return {rows:[]};
+      return {rows:[{positions:String(a.positions.filter(p=>p.quantityHundredths>0).length),orders:"0",unresolved:String(a.orders.filter(o=>!["TERMINAL","BLOCKED"].includes(o.state)).length)}]};
+    }
     const tag = text.match(/account-worker:([a-z-]+)/)?.[1] ?? "";
     if (tag === "lock-owner") {
       return { rows: rows.filter((item) => item.ownerUserId === params[0]).map(view) };
@@ -331,7 +340,7 @@ function deps(options?: {
     [ACCOUNT_B, accountFor(USER_B)],
   ]);
   if (options?.killSwitch) accounts.get(ACCOUNT_A)!.killSwitch = true;
-  const leases = memoryLeases(options?.failAcquire);
+  const leases = memoryLeases(options?.failAcquire,accounts);
   return {
     opened,
     leases,
@@ -513,6 +522,8 @@ test("stop and kill do not require a working signer", async () => {
       async markKilled() { killedAccount = true; },
     },
   });
+  // Persisted exposure matches safety-port fixture; STOP rereads it.
+  (await harness.deps.activity.readOwnedAccount(USER_A,ACCOUNT_A))!.positions.push({market:"KXBTC15M-TEST",quantityHundredths:100});
   blinded.deps.leases = harness.leases;
   const stopped = await operateAccountWorker(blinded.deps, {
     authenticatedUserId: USER_A,

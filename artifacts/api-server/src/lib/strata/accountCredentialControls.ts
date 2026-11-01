@@ -382,8 +382,8 @@ export function accountCredentialControls(
                 }];
               });
             },
-            async markKilled(ownerUserId, executionAccountId) {
-              await db.query(
+            async markKilled(ownerUserId, executionAccountId, client) {
+              await (client ?? db).query(
                 `UPDATE v13_production_account SET kill_switch = true
                  WHERE id = $1 AND owner_user_id = $2::uuid`,
                 [executionAccountId, ownerUserId],

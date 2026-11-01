@@ -1,3 +1,5 @@
+import {lockStopAccount,readStopExposure} from "./stopExposure";
+export {classifyStopExposureRow} from "./stopExposure";
 import {reconcileOwnedProtectiveExitOutcome} from "./ownedProtectiveExitOutcome";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import { createEntryMetadataSnapshot } from "./entryMetadataSnapshot";
@@ -829,21 +831,7 @@ export async function heartbeatLease(
  * never interpreted as a flat account and can NEVER release the worker lease.
  * KILL is deliberately a full halt (not an automatic guaranteed liquidation).
  */
-export function classifyStopExposureRow(row:Record<string,unknown>|undefined):
- {ok:true;managingExposure:boolean}|{ok:false;reason:"stop_exposure_unverified"}{
- if(!row)return {ok:false,reason:"stop_exposure_unverified"};
- const parse=(value:unknown):number|null=>{
-  const n=typeof value==="number"?value:
-    typeof value==="string"&&/^[0-9]+$/.test(value)?Number(value):NaN;
-  return Number.isSafeInteger(n)&&n>=0?n:null;
- };
- const positions=parse(row.positions),orders=parse(row.orders),unresolved=parse(row.unresolved);
- if(positions===null||orders===null||unresolved===null)
-  return {ok:false,reason:"stop_exposure_unverified"};
- return {ok:true,managingExposure:positions>0||orders>0||unresolved>0};
-}
-
-async function disarmWorkerLease(
+export async function disarmWorkerLease(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   ownerUserId: string,
   executionAccountId: string,
@@ -855,22 +843,29 @@ async function disarmWorkerLease(
       const killed = await db.query(KILL_LEASE_SQL, [executionAccountId, ownerUserId, now]);
       return { entriesBlocked: killed.rows.length === 1, managingExposure: false };
     }
-    const exposure = await db.query(
-      `SELECT
-         (SELECT count(*) FROM v13_production_position WHERE account_id = $1 AND quantity_hundredths > 0) AS positions,
-         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND exchange_order_id IS NOT NULL AND terminal = false) AS orders,
-         (SELECT count(*) FROM v13_production_intent WHERE account_id = $1 AND
-           (state IN ('DISPATCHED','UNKNOWN') OR terminal = false)) AS unresolved`,
-      [executionAccountId],
-    );
-    if(exposure.rows.length!==1)return {entriesBlocked:false,managingExposure:false};
-    const classified=classifyStopExposureRow(exposure.rows[0]);
-    if(!classified.ok)return {entriesBlocked:false,managingExposure:false};
-    const managingExposure=classified.managingExposure;
-    const updated = managingExposure
-      ? await db.query(HOLD_LEASE_SQL, [executionAccountId, ownerUserId])
-      : await releaseWorkerLease(db, ownerUserId, executionAccountId, false, now);
-    return { entriesBlocked: updated.rows.length === 1, managingExposure: managingExposure && updated.rows.length === 1 };
+    // A query-only port cannot guarantee a single transaction/connection.
+    // Refuse rather than issue BEGIN through a pool or release from stale reads.
+    if (!("connect" in db) || typeof db.connect !== "function")
+      return {entriesBlocked:false,managingExposure:false};
+    const client=await (db as Pool).connect();
+    let discard:Error|undefined;
+    try {
+      await client.query("BEGIN");
+      await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+      await client.query("SET LOCAL lock_timeout='750ms'");
+      await client.query("SET LOCAL statement_timeout='5000ms'");
+      await lockStopAccount(client,ownerUserId,executionAccountId);
+      const managingExposure=await readStopExposure(client,executionAccountId);
+      const updated=managingExposure
+        ? await client.query(HOLD_LEASE_SQL,[executionAccountId,ownerUserId])
+        : await releaseWorkerLease(client,ownerUserId,executionAccountId,false,now);
+      if(updated.rows.length!==1)throw Error("stop_lease_commit_unverified");
+      await client.query("COMMIT");
+      return {entriesBlocked:true,managingExposure};
+    } catch(error) {
+      try {await client.query("ROLLBACK");}catch(rollbackError){discard=rollbackError instanceof Error?rollbackError:new Error("stop_rollback_failed");}
+      throw error;
+    } finally {client.release(discard);}
   } catch {
     return { entriesBlocked: false, managingExposure: false };
   }

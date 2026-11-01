@@ -48,7 +48,7 @@ test('standing authorization, transactional crash traces and concurrent revocati
  INSERT INTO private.strata_owner_sha_approvals VALUES('${qid}','${owner}','acct','${sha}',NULL);
  INSERT INTO private.strata_protective_release_qualification VALUES('${qid}','${owner}','acct','${sha}','${policy}',now(),now()+interval '1 hour');
  INSERT INTO private.kalshi_account_worker_lease VALUES('acct','${owner}','owned',true,false,7,now());`);
- for(const file of ['0043_strata_continuous_execution_grants.sql','0044_v13_signal_decision_trace.sql'])
+ for(const file of ['0043_strata_continuous_execution_grants.sql','0044_v13_signal_decision_trace.sql','0045_v13_bounded_signal_audit.sql'])
   await pool.query(readFileSync(resolve('../../lib/db/drizzle',file),'utf8'));
  const body={ownerUserId:owner,qualificationId:qid,accountId:'acct',policyHash:policy,expectedSha:sha,
   confirmation:STANDING_REVIEW_CONFIRM,reviewUrl:'https://github.com/PatentFiles/Strata-Backend/pull/246',note:'Independently reviewed exact release, owner scope, reduction-only exits, revocation and recovery evidence. '.repeat(3)};
