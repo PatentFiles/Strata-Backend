@@ -1,4 +1,4 @@
-import './acceptance.test';
+import {fiveTerminalNoSendFixture} from './acceptance.test';
 import assert from 'node:assert/strict';import test,{before} from 'node:test';import {readFileSync} from 'node:fs';import {pool} from '@workspace/db';
 before(async()=>{
  const sql=readFileSync('../../lib/db/drizzle/0044_v13_signal_decision_trace.sql','utf8');
@@ -8,6 +8,7 @@ before(async()=>{
  await pool.query('CREATE SCHEMA IF NOT EXISTS private');await pool.query(table);await pool.query(fn);await pool.query(trigger);
 });
 test('actual intent trigger ignores unchanged persisted fields but records real changes',async()=>{
+ await fiveTerminalNoSendFixture();
  await pool.query('TRUNCATE private.strata_v13_execution_trace');
  const ids=(await pool.query("SELECT id FROM v13_production_intent WHERE account_id='test-account' ORDER BY id")).rows;assert.equal(ids.length,5);
  await pool.query("UPDATE v13_production_intent SET state=state,exchange_order_id=exchange_order_id,filled_hundredths=filled_hundredths,reserved_micros=reserved_micros,terminal=terminal WHERE account_id='test-account'");
@@ -17,6 +18,7 @@ test('actual intent trigger ignores unchanged persisted fields but records real 
 });
 
 test('trigger-enabled reconciliation preserves changed-state trace and omits unchanged noise',async()=>{
+ await fiveTerminalNoSendFixture();
  const {ProductionLedger,identity}=await import('./ledger');const ledger=new ProductionLedger(pool,'test-account');
  const i=(await pool.query("SELECT id,created_at,decision FROM v13_production_intent WHERE account_id='test-account' ORDER BY created_at DESC LIMIT 1")).rows[0];
  // Fixture-only setup: simulate one never-dispatched aged PREPARED row.
