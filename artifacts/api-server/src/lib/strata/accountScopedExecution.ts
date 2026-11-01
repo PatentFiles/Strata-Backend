@@ -1,3 +1,4 @@
+import {lockStopAccount,lockStopOwnerAccounts,readStopExposure} from "./stopExposure";
 import {
   computeV13LiveMoneyPolicyHash,
   remainingLossBudgetAllowsEntry,
@@ -84,7 +85,7 @@ export interface SafetyAccountRef {
 
 export interface AccountSafetyPort {
   listAccounts(authenticatedUserId: string): Promise<SafetyAccountRef[]>;
-  markKilled(authenticatedUserId: string, executionAccountId: string): Promise<void>;
+  markKilled(authenticatedUserId: string, executionAccountId: string, client?: CredentialClient): Promise<void>;
 }
 
 export interface AccountExecutionResult {
@@ -503,6 +504,12 @@ async function unboundSafety(
   if (!deps.safety) return refused("credential_unavailable");
   const now = new Date(deps.now()).toISOString();
   return deps.leases.transaction(async (client) => {
+    if(input.action === "STOP" || input.action === "KILL"){
+      await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+      await client.query("SET LOCAL lock_timeout='750ms'");
+      await client.query("SET LOCAL statement_timeout='5000ms'");
+    }
+    const lockedAccounts=(input.action === "STOP" || input.action === "KILL") ? await lockStopOwnerAccounts(client,input.authenticatedUserId) : null;
     const locked = await client.query(LOCK_OWNER_LEASES_SQL, [input.authenticatedUserId]);
     if (input.action === "KILL") {
       for (const row of locked.rows) {
@@ -527,14 +534,19 @@ async function unboundSafety(
             account.vaultSecretId,
           ]);
         }
-        await deps.safety?.markKilled(input.authenticatedUserId, account.executionAccountId);
+        await deps.safety?.markKilled(input.authenticatedUserId, account.executionAccountId, client);
       }
       return held("account_killed", null, "killed", false, true);
     }
     let stillOwned = false;
     for (const row of locked.rows) {
       const account = accounts.find((item) => item.executionAccountId === row.execution_account_id);
-      const exposure = !account || account.openPositionCount > 0 || account.unresolvedIntentCount > 0;
+      // Owner accounts were locked before leases. A newly appearing lease whose
+      // account was not in that lock set is conservatively retained, never read
+      // account-after-lease (which would invert dispatch lock ordering).
+      const exposure = input.action === "STOP"
+        ? !lockedAccounts!.has(String(row.execution_account_id)) || await readStopExposure(client,String(row.execution_account_id))
+        : !account || account.openPositionCount > 0 || account.unresolvedIntentCount > 0;
       if (input.action === "STOP" && row.state === "owned" && exposure) {
         await client.query(HOLD_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId]);
         stillOwned = true;
@@ -627,6 +639,16 @@ async function applyLeaseAction(
     staleBefore: string;
   },
 ): Promise<AccountExecutionResult> {
+  if(input.action === "STOP"){
+    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    await client.query("SET LOCAL lock_timeout='750ms'");
+    await client.query("SET LOCAL statement_timeout='5000ms'");
+  }
+  let stopExposure:boolean|undefined;
+  if(input.action === "STOP"){
+    await lockStopAccount(client,input.account.ownerUserId,input.account.executionAccountId);
+    stopExposure=await readStopExposure(client,input.account.executionAccountId);
+  }
   const locked = await client.query(LOCK_LEASE_SQL, [input.account.executionAccountId]);
   const current = locked.rows[0];
   if (current && text(current.owner_user_id) !== input.account.ownerUserId) {
@@ -641,7 +663,7 @@ async function applyLeaseAction(
   }
   if (input.action === "ARM") return armLease(client, input, current);
   if (input.action === "DISARM") return disarmLease(client, input, current);
-  if (input.action === "STOP") return releaseLease(client, input, current);
+  if (input.action === "STOP") return releaseLease(client, input, current, stopExposure!);
   return acquireLease(client, input, current);
 }
 
@@ -711,9 +733,10 @@ async function releaseLease(
   client: CredentialClient,
   input: ActionInput,
   current: Record<string, unknown> | undefined,
+  verifiedExposure: boolean,
 ): Promise<AccountExecutionResult> {
   if (!current || current.state !== "owned") return held("entries_stopped", tokenOf(current), "released", false, false);
-  const exposure = exposureBlocksStop(input.account);
+  const exposure = verifiedExposure;
   if (exposure) {
     const heldLease = await client.query(HOLD_LEASE_SQL, [
       input.account.executionAccountId,

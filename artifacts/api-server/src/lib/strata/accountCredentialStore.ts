@@ -36,6 +36,7 @@ export function credentialDatabaseFromPool(pool: PgPoolLike): CredentialDatabase
     query: (text, params) => pool.query(text, params),
     async transaction(work) {
       const client = await pool.connect();
+      let discard: Error | undefined;
       try {
         await client.query("BEGIN");
         const result = await work(client);
@@ -44,12 +45,14 @@ export function credentialDatabaseFromPool(pool: PgPoolLike): CredentialDatabase
       } catch (error) {
         try {
           await client.query("ROLLBACK");
-        } catch {
-          /* the failed statement already aborted the transaction */
+        } catch (rollbackError) {
+          // A failed rollback leaves transaction state unverified. Never return
+          // that connection to the pool for another owner or safety operation.
+          discard = rollbackError instanceof Error ? rollbackError : new Error("transaction_rollback_failed");
         }
         throw error;
       } finally {
-        client.release();
+        client.release(discard);
       }
     },
   };

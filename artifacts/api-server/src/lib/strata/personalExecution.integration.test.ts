@@ -896,3 +896,6 @@ test("actual fractional final signed fence rejects post-marker quantity, side an
   assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'UNKNOWN');
  }
 });
+
+// Local audit fixture exports; not a runtime change.
+export {tradingSession,protectiveFixture,source,requestOf,fill,policy,USER,ACCOUNT};

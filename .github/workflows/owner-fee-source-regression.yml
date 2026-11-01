@@ -208,7 +208,7 @@ jobs:
       - name: Test stake increase requires owner approval and produces one policy audit
         run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerStakePolicyAmendment.test.cjs
       - name: Bundle independent owner SHA release and global-kill isolation tests
-        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerShaRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerShaRelease.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/*
+        run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerShaRelease.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerShaRelease.test.cjs --external:pg-native --external:pdfjs-dist --external:drizzle-orm --external:drizzle-orm/* --external:pino --external:pino-pretty
       - name: Verify owner identity, revoked release status and global kill fail closed
         run: NODE_ENV=test DATABASE_URL=postgresql://test:test@127.0.0.1:5432/unreachable node --test artifacts/api-server/dist/ownerShaRelease.test.cjs
       - name: Bundle owned protective exit book and floor tests
