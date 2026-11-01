@@ -40,6 +40,7 @@ jobs:
           sudo systemctl stop postgresql
       - name: Verify quantity, fee bounds, recovery, private SQL and actual owned route
         run: |
+          pnpm --filter @workspace/api-server run test:owner-sha-renewal
           pnpm --filter @workspace/api-server run test:v13-entry-cash-risk
           DATABASE_URL=postgresql://test:test@127.0.0.1:1/offline NODE_ENV=test pnpm --filter @workspace/api-server run test:execution-stage-timing
           DATABASE_URL=postgresql://test:test@127.0.0.1:1/offline NODE_ENV=test pnpm --filter @workspace/api-server run test:conservation-batch

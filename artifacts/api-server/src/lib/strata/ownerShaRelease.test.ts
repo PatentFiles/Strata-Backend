@@ -50,6 +50,7 @@ test("owner alone may approve after authentic qualification, but stale freeze re
  const sqls:string[]=[];
  const query=async(sql:string)=>{
   sqls.push(sql);
+  if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
   if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
    return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,
@@ -80,6 +81,7 @@ test("historical $1.50 configured stake cannot authorize exact-SHA owner release
  const sqls:string[]=[];
  const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
    sqls.push(sql);
+  if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
    if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
      return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,
@@ -112,6 +114,7 @@ test("inconsistent global execution and kill state never records owner approval"
  const sqls:string[]=[];
  const query=async(sql:string)=> {
    sqls.push(sql);
+  if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
    if(sql==="BEGIN"||sql==="ROLLBACK"||sql.startsWith("SET LOCAL"))return {rows:[]};
    if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
      return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,
@@ -147,6 +150,7 @@ test("legacy-enabled Step 12 refuses a running lease without writing an approval
  const sqls:string[]=[];
  const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
    sqls.push(sql);
+  if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
    if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
      return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:true,
@@ -192,6 +196,7 @@ test("legacy-enabled commissioned owner can repair only the stale marker and app
  const calls:string[]=[];
  const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
    calls.push(sql);
+   if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
    if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
      return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:true,
@@ -249,6 +254,7 @@ test("global STOP permits separately signed SHA owner consent, without lifting a
  const calls:string[]=[];
  const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
    calls.push(sql);
+   if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
    if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
      return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:true,
