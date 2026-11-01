@@ -76,6 +76,9 @@ jobs:
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/gatherReadOnlyMarketEvidence.test.ts src/lib/strata/ownedMarketFeeMetadata.test.ts src/lib/strata/marketEvidenceReadTiming.test.ts src/lib/strata/entryMetadataSnapshot.test.ts src/lib/strata/publicMetadataReadRateLimit.test.ts src/lib/strata/feeFailureDiagnostics.test.ts \
             --bundle --platform=node --format=cjs --outdir=dist/evidence-dag --out-extension:.js=.cjs
       - name: Verify bounded fresh reads, fail-closed identity and pagination
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/offline
+          NODE_ENV: test
         run: node --test artifacts/api-server/dist/evidence-dag/*.cjs
       - name: Preserve existing read-only Retry-After parsing contracts
         run: |
