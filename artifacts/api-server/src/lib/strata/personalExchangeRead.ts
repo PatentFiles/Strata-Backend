@@ -373,7 +373,7 @@ export function ownedMarketEvidence(input: {
   const identity={version:ENTRY_CASH_RISK_VERSION,marketTicker:input.market,side:input.side,
     policyHash:input.policyHash,artifactDigest:input.artifactDigest,feeMetadataDigest:feeProof.fingerprint,
     seriesDigest:digest(series),gridDigest:digest({structure,ranges})};
-  const cashRisk={...identity,modelFingerprint:cashRiskModelFingerprint(identity),
+  const cashRisk={...identity,gridEvidence:{structure:structure as 'deci_cent'|'tapered_deci_cent',ranges:structuredClone(ranges) as Array<{start:string;end:string;step:string}>},modelFingerprint:cashRiskModelFingerprint(identity),
     entryCashDebitPerContractMicros:cash,entryTradeFeePerContractMicros:entry,exitLossPerContractMicros:exit};
   const fingerprint=cashRiskFeeFingerprint({contracts:count,limitPrice:limit,cashRisk});
   return marketEvidenceFromBook({

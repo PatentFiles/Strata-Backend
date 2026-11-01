@@ -1,8 +1,10 @@
+import {validEntryFeePriceGrid,repriceVerifiedEntryFee} from "./entryCashFeeRepricing";
 import {digest} from "./v13-production/types";
 import {planV13IocEntry,type V13IocEntryPlan,type V13DepthLevel,type V13ExecutionSignal,type V13ExecutionDirection} from './v13ExecutionPlanner';
 import type {V13VerifiedFeeEvidence} from './v13LiveMoneyEntryPreflight';
 export const ENTRY_CASH_RISK_VERSION='NON_DIRECT_CENT_FRAGMENTS_V1' as const;
 export type V13EntryCashRisk={version:typeof ENTRY_CASH_RISK_VERSION;marketTicker:string;side:'YES'|'NO';
+ gridEvidence?:{structure:'deci_cent'|'tapered_deci_cent';ranges:Array<{start:string;end:string;step:string}>};
  modelFingerprint:string;gridDigest:string;policyHash:string;artifactDigest:string;feeMetadataDigest:string;seriesDigest:string;entryCashDebitPerContractMicros:number;
  entryTradeFeePerContractMicros:number;exitLossPerContractMicros:number};
 export type V13EntryCashProof={version:typeof ENTRY_CASH_RISK_VERSION;contracts:number;limitMicros:number;
@@ -52,22 +54,29 @@ export function entryCashProof(fee:V13VerifiedFeeEvidence,contracts:number,budge
 }
 export function planCashBoundEntry(input:{signal:V13ExecutionSignal;direction:V13ExecutionDirection;referenceOffer:number;
  maxStakeCents:number;bestAskDollars:string|null;askLevels:V13DepthLevel[];fee:V13VerifiedFeeEvidence;budgetCents:number}):
- {ok:true;plan:V13IocEntryPlan;cashRisk:V13EntryCashProof}|{ok:false;reason:string}{
+ {ok:true;plan:V13IocEntryPlan;cashRisk:V13EntryCashProof;feeEvidence:V13VerifiedFeeEvidence}|{ok:false;reason:string}{
  const {fee,budgetCents}=input;
  const unit=entryCashProof(fee,1,Math.max(1,budgetCents));
  if(!unit)return {ok:false,reason:'cash_risk_unproven'};
  if(fee.cashRisk!.side!==(input.direction==='UP'?'YES':'NO'))return {ok:false,reason:'cash_risk_side_mismatch'};
  if(!Number.isSafeInteger(budgetCents)||budgetCents<1)return {ok:false,reason:'no_whole_contract_affordable'};
- const per=BigInt(fee.cashRisk!.entryCashDebitPerContractMicros)+BigInt(fee.cashRisk!.exitLossPerContractMicros);
- let max=Number(BigInt(budgetCents)*10000n/per);max=Math.min(max,fee.contracts);
- while(max>0&&entryCashProof(fee,max,budgetCents)!.plannedAllInCents>budgetCents)max--;
+ const grid=fee.cashRisk!.gridEvidence;
+ const selectedTerms=grid!==undefined;
+ if(selectedTerms&&!validEntryFeePriceGrid(fee,grid))return {ok:false,reason:'cash_risk_grid_unproven'};
+ const cash=BigInt(fee.cashRisk!.entryCashDebitPerContractMicros),exit=BigInt(fee.cashRisk!.exitLossPerContractMicros),per=cash+exit;
+ let max=Math.min(999999999,Number(BigInt(budgetCents)*10000n/per));
+ if(!selectedTerms)max=Math.min(max,fee.contracts);
+ while(max>0&&ceil(cash*BigInt(max),10000n)+ceil(exit*BigInt(max),10000n)>BigInt(budgetCents))max--;
  if(max<1)return {ok:false,reason:'no_whole_contract_affordable'};
  const plan=planV13IocEntry({...input,maxContracts:max});
  if(!plan.ok)return plan;
- if(Math.abs(plan.plan.limitPrice-fee.limitPrice)>1e-8)return {ok:false,reason:'fee_evidence_invalid_or_stale'};
- const proof=entryCashProof(fee,plan.plan.contracts,budgetCents)!;
- if(proof.plannedAllInCents>budgetCents)return {ok:false,reason:'cash_risk_unaffordable'};
- return {ok:true,plan:{...plan.plan,worstCaseEntryCashDebitCents:proof.reservedEntryCashCents},cashRisk:proof};
+ // Only the same freshly verified exact grid can mint different PREPARE
+ // terms. Never borrow a lower-price fee proof or alter an existing intent.
+ const selectedFee=selectedTerms?repriceVerifiedEntryFee(fee,grid,plan.plan.contracts,plan.plan.limitPrice):fee;
+ if(!selectedFee||Math.abs(plan.plan.limitPrice-selectedFee.limitPrice)>1e-8)return {ok:false,reason:'fee_evidence_invalid_or_stale'};
+ const proof=entryCashProof(selectedFee,plan.plan.contracts,budgetCents);
+ if(!proof||proof.plannedAllInCents>budgetCents)return {ok:false,reason:'cash_risk_unaffordable'};
+ return {ok:true,plan:{...plan.plan,worstCaseEntryCashDebitCents:proof.reservedEntryCashCents},cashRisk:proof,feeEvidence:selectedFee};
 }
 
 /** New-version final check: immutable model/grid identity, not reoptimization.

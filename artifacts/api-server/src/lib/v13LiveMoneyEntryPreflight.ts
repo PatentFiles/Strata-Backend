@@ -57,6 +57,7 @@ export type V13LiveMoneyEntryPreflightResult =
       ok: true;
       plan: V13IocEntryPlan;
       cashRisk?: V13EntryCashProof;
+      selectedFeeEvidence?: V13VerifiedFeeEvidence;
       plannedAllInCents: number;
       policyHash: string;
       strategyParameterSetId: string;
@@ -122,7 +123,7 @@ export function preflightV13LiveMoneyEntry(
     return { ok: false, reason: `live_money_${plan.reason}` };
   }
 
-  const fees = input.feeEvidence;
+  const fees = "feeEvidence" in plan ? plan.feeEvidence as V13VerifiedFeeEvidence : input.feeEvidence;
   const feeAgeMs = input.nowMs - fees.verifiedAtMs;
   if (!fees.policyVersion.trim() || !fees.sourceUrl.trim() ||
       !fees.formulaVersion.trim() || fees.fingerprint.trim().length < 16 ||
@@ -163,7 +164,7 @@ export function preflightV13LiveMoneyEntry(
   return {
     ok: true,
     plan: plan.plan,
-    ...(cashRisk?{cashRisk}:{}),
+    ...(cashRisk?{cashRisk,selectedFeeEvidence:fees}:{}),
     plannedAllInCents: risk.plannedAllInCents,
     policyHash: input.policy.policyHash!,
     strategyParameterSetId: input.strategyParameterSetId,

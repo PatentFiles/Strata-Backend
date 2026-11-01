@@ -4,6 +4,7 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/v13-production/**'
       - 'artifacts/api-server/src/lib/v13EntryCashRisk*'
+      - 'artifacts/api-server/src/lib/entryCashFeeRepricing*'
       - 'artifacts/api-server/src/lib/v13ExecutionPlanner*'
       - 'artifacts/api-server/src/lib/v13LiveMoney*'
       - 'artifacts/api-server/package.json'
@@ -40,7 +41,10 @@ jobs:
       - name: Verify quantity, fee bounds, recovery, private SQL and actual owned route
         run: |
           pnpm --filter @workspace/api-server run test:v13-entry-cash-risk
+          DATABASE_URL=postgresql://test:test@127.0.0.1:1/offline NODE_ENV=test pnpm --filter @workspace/api-server run test:execution-stage-timing
+          DATABASE_URL=postgresql://test:test@127.0.0.1:1/offline NODE_ENV=test pnpm --filter @workspace/api-server run test:conservation-batch
           node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/acceptance.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/ownedGateBatch.postgres.test.ts
           node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/fractionalExitPlanner.test.ts
           node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/fractionalExitFee.test.ts
           node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/preparedProtectiveExitRecovery.test.ts
