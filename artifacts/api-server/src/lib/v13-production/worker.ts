@@ -26,6 +26,8 @@ export class ProductionWorker {
   private detachWake:(()=>void)|null=null;
   private entryHoldReported = false;
   private lastTraceSweepAt = 0;
+  private traceSweep: Promise<void> | null = null;
+  private traceSweepsStopped = false;
   private readonly tracedEvaluations = new Set<string>();
   constructor(readonly executor: ProductionExecutor, readonly intervalMs = 2_500,
     readonly report: (error: unknown) => void = () => {},
@@ -37,6 +39,25 @@ export class ProductionWorker {
     readonly signalTrace: SignalTracePort|null=null) {}
   private async recordDecision(input:Parameters<SignalTracePort["record"]>[0]):Promise<boolean>{
     return this.signalTrace?this.signalTrace.record(input):true;
+  }
+  /** Optional catch-up observability is single-flight and rate-limited. It
+   * must not hold the serialized trading tick or a committed-signal wake.
+   * Per-signal decision receipts remain awaited on the trading path below.
+   * STOP cancels work not yet begun. An already-running DB audit may finish;
+   * it cannot submit orders, reopen entries, or schedule a trading tick.
+   */
+  private scheduleTraceSweep(observedAt: number): void {
+    if (!this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
+        observedAt - this.lastTraceSweepAt < 30_000) return;
+    this.lastTraceSweepAt = observedAt;
+    const trace = this.signalTrace;
+    this.traceSweep = Promise.resolve().then(async () => {
+      if (this.traceSweepsStopped) return;
+      await trace.sweep(this.executor.ledger.accountId);
+    }).catch(() => {
+      try { this.report(new Error("production_signal_trace_sweep_unavailable")); }
+      catch { /* Optional audit/reporting cannot acquire execution authority. */ }
+    }).finally(() => { this.traceSweep = null; });
   }
   async tick(): Promise<void> {
     if (this.running) return;
@@ -127,10 +148,7 @@ export class ProductionWorker {
       // Scan even while entry authority is held or reconciliation fails.
       // Never infer a past block reason from the worker's current state.
       const observedAt=this.signalTrace?this.executor.now():0;
-      if(this.signalTrace&&observedAt-this.lastTraceSweepAt>=30_000){
-        this.lastTraceSweepAt=observedAt;
-        await this.signalTrace.sweep(this.executor.ledger.accountId);
-      }
+      this.scheduleTraceSweep(observedAt);
       } finally {this.running = false;}
     }
   }
@@ -151,6 +169,7 @@ export class ProductionWorker {
     this.schedule();
   }
   private schedule(): void {
+    this.traceSweepsStopped = false;
     let active=false,pending=false;
     const loop = async () => {
       active=true;
@@ -177,7 +196,7 @@ export class ProductionWorker {
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void { this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }

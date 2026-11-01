@@ -331,6 +331,10 @@ test("prospective outcome summary requires time and sample before review", () =>
     champion,
     candidate,
   );
+  assert.equal(summary.pnlBasis, "GROSS_PAPER_EXCLUDING_EXECUTION_FEES");
+  assert.equal(summary.profitabilityProven, false);
+  assert.equal(summary.verifiedRealizedNetPnl, null);
+  assert.equal(summary.championPnl, 44.25);
   assert.equal(summary.championTrades, 60);
   assert.equal(summary.candidateTrades, 54);
   assert.equal(summary.avoidedTrades, 6);
@@ -349,6 +353,9 @@ test("prospective outcome summary requires time and sample before review", () =>
 
 test("advisory ranker never promotes before the evidence gate", () => {
   const baseSummary = {
+    pnlBasis: "GROSS_PAPER_EXCLUDING_EXECUTION_FEES" as const,
+    profitabilityProven: false as const,
+    verifiedRealizedNetPnl: null,
     parameterSetId: "a",
     activatedAt: "2026-10-01T00:00:00.000Z",
     elapsedDays: 8,
@@ -375,6 +382,10 @@ test("advisory ranker never promotes before the evidence gate", () => {
     { ...baseSummary, parameterSetId: "leader", pnlRetention: 1.01 },
   ]);
   assert.equal(ready.status, "REVIEW_READY");
+  assert.equal(ready.pnlBasis, "GROSS_PAPER_EXCLUDING_EXECUTION_FEES");
+  assert.equal(ready.profitabilityProven, false);
+  assert.equal(ready.verifiedRealizedNetPnl, null);
+  assert.match(ready.reason, /not an execution or profitability gate/);
   assert.equal(ready.leader?.parameterSetId, "leader");
 });
 

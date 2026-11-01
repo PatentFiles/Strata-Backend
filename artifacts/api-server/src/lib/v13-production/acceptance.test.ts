@@ -1542,3 +1542,34 @@ test('selected-depth DOWN uses the exact opposite-side complement and selected f
  await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);
  assert.equal(f.exchange.posts[0]!.side,'NO');assert.equal(f.exchange.posts[0]!.limitMicros,380000);assert.equal(f.exchange.posts[0]!.contracts,3);
 });
+
+test("reconciliation retains five terminal no-send intents without rewriting unchanged tuples", async () => {
+  const f = await fixture();
+  for (let n = 0; n < 5; n++) {
+    f.exchange.book.observedAtMs = f.exchange.now;
+    f.exchange.book.fee.verifiedAtMs = f.exchange.now;
+    const id = await f.executor.prepareEntry(await f.source(randomUUID(), `write-amplification-${n}`));
+    f.exchange.now += 16_001;
+    f.exchange.evidence.observedAtMs = f.exchange.now;
+    await f.executor.reconcile();
+    const row = (await pool.query("SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1", [id])).rows[0];
+    assert.deepEqual(row, { state: "BLOCKED", terminal: true, reserved_micros: "0" });
+  }
+  const tuples = async () => (await pool.query("SELECT id,ctid::text AS tuple FROM v13_production_intent WHERE account_id='test-account' ORDER BY id")).rows;
+  const before = await tuples();
+  assert.equal(before.length, 5);
+  const accountBefore = await f.ledger.readAccount();
+  const receiptsBefore = Number((await pool.query("SELECT count(*) FROM v13_production_observation WHERE kind='RECONCILIATION'")).rows[0].count);
+  for (let n = 0; n < 3; n++) {
+    f.exchange.now++;
+    f.exchange.evidence.observedAtMs = f.exchange.now;
+    await f.executor.reconcile();
+  }
+  assert.deepEqual(await tuples(), before, "unchanged intent tuples must not be physically updated");
+  const accountAfter = await f.ledger.readAccount();
+  assert.equal(BigInt(accountAfter.revision), BigInt(accountBefore.revision) + 3n);
+  assert.equal(new Date(accountAfter.reconciled_at!).getTime(), f.exchange.now);
+  assert.equal(Number((await pool.query("SELECT count(*) FROM v13_production_observation WHERE kind='RECONCILIATION'")).rows[0].count), receiptsBefore + 3);
+  assert.equal(f.exchange.posts.length, 0);
+  await invariant(f.ledger);
+});

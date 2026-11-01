@@ -503,7 +503,12 @@ export async function recordV13ShadowOpportunities(
 }
 
 
+export const V13_RESEARCH_PNL_BASIS = "GROSS_PAPER_EXCLUDING_EXECUTION_FEES" as const;
+
 export type V13ResearchPerformanceSummary = {
+  pnlBasis: typeof V13_RESEARCH_PNL_BASIS;
+  profitabilityProven: false;
+  verifiedRealizedNetPnl: null;
   parameterSetId: string;
   activatedAt: string;
   elapsedDays: number;
@@ -551,6 +556,9 @@ export function summarizeV13ResearchOutcomes(
   const elapsedDays = elapsedMs / 86_400_000;
 
   return {
+    pnlBasis: V13_RESEARCH_PNL_BASIS,
+    profitabilityProven: false,
+    verifiedRealizedNetPnl: null,
     parameterSetId,
     activatedAt: activatedAt.toISOString(),
     elapsedDays,
@@ -647,6 +655,9 @@ export async function summarizeV13ShadowCandidatePerformance(
 
 
 export type V13ResearchRecommendation = {
+  pnlBasis: typeof V13_RESEARCH_PNL_BASIS;
+  profitabilityProven: false;
+  verifiedRealizedNetPnl: null;
   status: "COLLECTING" | "REVIEW_READY";
   leader: V13ResearchPerformanceSummary | null;
   ranked: V13ResearchPerformanceSummary[];
@@ -671,18 +682,24 @@ export function rankV13ResearchSummaries(
   const eligible = ranked.filter((summary) => summary.reviewEligible);
   if (!eligible.length) {
     return {
+      pnlBasis: V13_RESEARCH_PNL_BASIS,
+      profitabilityProven: false,
+      verifiedRealizedNetPnl: null,
       status: "COLLECTING",
       leader: null,
       ranked,
-      reason: "No challenger has reached the 7-day / 50-completed-trade evidence gate",
+      reason: "Gross paper results only; no verified net profitability. No challenger has reached the 7-day / 50-completed-trade review gate",
     };
   }
 
   return {
+    pnlBasis: V13_RESEARCH_PNL_BASIS,
+    profitabilityProven: false,
+    verifiedRealizedNetPnl: null,
     status: "REVIEW_READY",
     leader: eligible[0] ?? null,
     ranked,
-    reason: "At least one challenger has enough prospective evidence for human review",
+    reason: "Gross paper results only; no verified net profitability. At least one challenger has reached the human-review sample gate, not an execution or profitability gate",
   };
 }
 

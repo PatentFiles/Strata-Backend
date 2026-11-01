@@ -1,3 +1,4 @@
+import {reconciledIntentState,reconciliationIntentChanged} from "./reconciliationIntentPersistence";
 import {reconciliationObservation} from "./reconciliationObservation";
 import {entryCashProof,entryFillFeeUpperMicros,validEntryCashRisk,type V13EntryCashProof} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "./requestQuantity";
@@ -191,6 +192,8 @@ export class ProductionLedger {
           !snapshot.unexplainedCashActivity && snapshot.observedAtMs <= nowMs &&
           nowMs - snapshot.observedAtMs <= 15_000, "production_history_incomplete_stale_or_cash_unproven");
         const intents = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE", [a.id])).rows;
+        // Snapshot the persisted fields under the existing account/intent locks.
+        const priorIntentStates = new Map(intents.map(i => [i.id, reconciledIntentState(i)]));
         const earliest = Math.min(...intents.map(i => i.created_at.getTime()), nowMs);
         requireProof(snapshot.historyFromMs <= earliest, "production_history_coverage_gap");
         const byClient = new Map(intents.map(i => [i.client_order_id, i]));
@@ -357,9 +360,14 @@ export class ProductionLedger {
             sourceAtMs: sourceAt, maxQuoteAgeMs: lifetime, evidenceObservedAtMs: snapshot.observedAtMs });
         }
         await this.recoverPreparedExits(tx, a, intents, snapshot);
-        for (const i of intents) await tx.query(`UPDATE v13_production_intent SET state=$2,exchange_order_id=$3,
+        // Historical rows with identical reconciled values need no UPDATE. All
+        // reads, locks, transitions, conservation and audit writes still run.
+        for (const i of intents) {
+          if (!reconciliationIntentChanged(priorIntentStates.get(i.id)!, i)) continue;
+          await tx.query(`UPDATE v13_production_intent SET state=$2,exchange_order_id=$3,
           filled_hundredths=$4,reserved_micros=$5,terminal=$6 WHERE id=$1`,
         [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
+        }
         await this.assertConservation(tx, a);
         await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
         await this.persist(tx, a);
