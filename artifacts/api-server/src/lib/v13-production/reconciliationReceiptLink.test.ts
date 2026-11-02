@@ -30,9 +30,9 @@ test('committed pointer is exact inserted UUID/account with unchanged payload/di
  assert.equal(receipt.observationId,insert.params[0]);assert.equal(receipt.accountId,insert.params[1]);
  assert.equal(insert.params[3],JSON.stringify(reconciliationObservation(snapshot)));
  assert.equal(insert.params[4],digest(reconciliationObservation(snapshot)));
- assert.equal(calls.find(x=>x.sql.startsWith('UPDATE v13_production_account SET reconciled_at'))!.params[2],digest(snapshot));
+ assert.equal(calls.find(x=>x.sql.includes('reconciled_at=$5,evidence_digest=$6'))!.params[5],digest(snapshot));
  assert.equal(JSON.stringify(snapshot),before);assert.equal(calls.at(-1)!.sql,'COMMIT');
- assert.equal(calls.length,8); // One BEGIN+account request; remaining seven statements unchanged.
+ assert.equal(calls.length,7); // Reconciliation combines two adjacent account UPDATEs into one request.
  assert.equal(calls[0]!.sql,"BEGIN; SELECT * FROM v13_production_account WHERE id='account-a' FOR UPDATE");
  assert.equal(calls.filter(x=>x.sql.includes('v13_production_observation')).length,1);
 });

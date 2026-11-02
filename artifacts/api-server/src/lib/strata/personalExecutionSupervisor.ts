@@ -1,3 +1,5 @@
+import {createFeeVerificationTiming} from "./feeVerificationTiming";
+import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
 import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
 import {processCommittedPublicMetadata,type MetadataPrefetchAttempt} from "./committedPublicMetadata";
 import {lockStopAccount,readStopExposure} from "./stopExposure";
@@ -519,7 +521,11 @@ export function createProductionPersonalSession(
             if(maintenance.rows.length)state.entriesAuthorized=false;
           }catch{state.entriesAuthorized=false;}
         }
-        const latest = await readOwnedKalshiFeeds(material, now(), get);
+        // Separate bounded diagnostics only; original signed-read clock/proof remain untouched.
+        const feedTiming=createOwnedFeedReadTiming(get,recordOwnedFeedReadTiming);
+        let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
+        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get); }
+        finally { feedTiming.finish(); }
         if (!latest.ok) throw new Error(latest.reason);
         const proven = emptySnapshot(identity, latest, await loadRequests(snapshotDb, input.accountId));
         if (!("identity" in proven)) throw new Error(proven.reason);
@@ -531,11 +537,12 @@ export function createProductionPersonalSession(
         market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,
         verifyFee:async(clock,readMetadata,captureMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
+              const feeReads=createFeeVerificationTiming();
               try {
               if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
                   sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
-                    probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata)});
+                    feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
                     {phase:"authorization",reason:"api_fee_order_market_mismatch"},checked);
@@ -562,9 +569,9 @@ export function createProductionPersonalSession(
                 feeVerifiedAt = refreshed.verifiedAt;
                 feeCheckedAt = clock;
               }
-              feeTiming("completed");
+              feeTiming("completed",{feeVerificationReads:feeReads.snapshot()});
               return feeVerifiedAt;
-              }catch(error){feeTiming("rejected",{error});throw error;}
+              }catch(error){feeTiming("rejected",{error,feeVerificationReads:feeReads.snapshot()});throw error;}
 
         },
         readBook:()=>get(material,`/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`,"?depth=100"),

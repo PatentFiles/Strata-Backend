@@ -42,3 +42,5 @@ export function createMarketEvidenceReadTiming(clock:()=>number=()=>performance.
   },
  };
 }
+
+export const isMarketEvidenceReadTiming=(value:unknown):value is MarketEvidenceReadTiming=>typeof value==="object"&&value!==null&&captured.has(value);
