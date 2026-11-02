@@ -894,7 +894,7 @@ test("failed expiry audit receipt rolls back both terminal state and released fu
   const observe=f.ledger.observe.bind(f.ledger);
   f.ledger.observe=async(tx,kind,value)=>{
     if(kind==="PROVEN_NOT_POSTED")throw Error("audit_write_failed");
-    await observe(tx,kind,value);
+    return await observe(tx,kind,value);
   };
   advanceRecoveryClock(f);
   await assert.rejects(f.executor.reconcile(),/audit_write_failed/);

@@ -23,6 +23,7 @@ export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private recoveryOnly = false;
+  private technicalRenewalDebt = false;
   private detachWake:(()=>void)|null=null;
   private entryHoldReported = false;
   private lastTraceSweepAt = 0;
@@ -59,14 +60,26 @@ export class ProductionWorker {
       catch { /* Optional audit/reporting cannot acquire execution authority. */ }
     }).finally(() => { this.traceSweep = null; });
   }
-  async tick(): Promise<void> {
+  async tick(origin: "normal" | "committed_signal" = "normal"): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       // Resolve or retain UNKNOWN protective exits BEFORE ordinary reconciliation
       // and before any chance of a new entry. Failures stop this tick; never POST.
       await this.recoverProtectiveExits();
-      await this.executor.reconcile(); // restart first; never replay dispatched POSTs
+      // One deferred early rotation forces the next tick normal even under a
+      // flood of committed wakes. Origin/debt cannot grant execution authority.
+      const scheduling=Object.freeze({
+        origin: this.technicalRenewalDebt || this.recoveryOnly ? "normal" as const : origin,
+        allowEarlyTechnicalLeaseReuse: origin === "committed_signal" &&
+          !this.technicalRenewalDebt && !this.recoveryOnly,
+      });
+      // Reserve before awaiting: partial failure after reuse must still force
+      // the next tick normal. A fresh settled result cancels this debt.
+      if(scheduling.allowEarlyTechnicalLeaseReuse)this.technicalRenewalDebt=true;
+      const renewal=await this.executor.reconcile(scheduling); // never replay dispatched POSTs
+      if(renewal?.technicalRenewal === "deferred")this.technicalRenewalDebt=true;
+      else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
       await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
       if (!this.entriesOpen()) {
@@ -171,10 +184,10 @@ export class ProductionWorker {
   private schedule(): void {
     this.traceSweepsStopped = false;
     let active=false,pending=false;
-    const loop = async () => {
+    const loop = async (origin: "normal" | "committed_signal" = "normal") => {
       active=true;
       const tickStartedAt = Date.now();
-      try { await this.tick(); } catch (error) {
+      try { await this.tick(origin); } catch (error) {
         this.report(error);
         if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
@@ -185,14 +198,14 @@ export class ProductionWorker {
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
       active=false;
-      if (this.timer) this.timer = setTimeout(loop,
+      if (this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
     this.detachWake=onCommittedForwardSignal(()=>{
       if(!this.timer||this.recoveryOnly)return;
       if(active){pending=true;return;}
-      clearTimeout(this.timer);this.timer=setTimeout(loop,0);
+      clearTimeout(this.timer);this.timer=setTimeout(()=>loop("committed_signal"),0);
     });
     this.timer = setTimeout(loop, 0);
   }

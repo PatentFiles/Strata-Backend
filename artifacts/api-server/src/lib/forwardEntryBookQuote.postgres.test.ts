@@ -8,6 +8,7 @@ import {db,pool,forwardTestEngineTable,forwardTestWindowTable,forwardTestPositio
  forwardTestEvaluationTable,forwardTestBtcPointTable,forwardTestBookSnapshotTable} from '@workspace/db';
 import {ensureWorkerEngine,acquireWorkerLease,releaseWorkerLease,WorkerLeaseLostError} from './forwardTestRepository';
 import {runForwardTestCycle} from './forwardTestWorker';
+import {onCommittedForwardSignal} from './forwardTestSignalWake';
 import {savePrequalificationPaperBook,readPaperBookCaptureCoverage} from './forwardTestBookCapture';
 import {fetchKalshiPublicBook,type ReadonlyResearchBook} from './forwardTestOrderbookDepth';
 import type {MarketObservation} from './forwardTestFeeds';
@@ -201,4 +202,89 @@ test('preview false but final structural candidate cannot fall back to detail of
   const after=await f.state();assert.equal(f.calls(),0);assert.equal(after.positions.length,0);
   assert.equal(after.evaluations.length,before.evaluations.length);assert.equal(after.points.length,before.points.length);
  }finally{db.transaction=original;}
+});
+
+// These probes count actual client SQL calls, not a SQL-text fixture or mock DB.
+test('first qualifier emits one window UPDATE with identical committed binding',async()=>{
+ const f=await fixture();await f.observe(-1);
+ const client=await pool.connect();const proto=Object.getPrototypeOf(client);client.release();
+ const original=proto.query;const writes:string[]=[];
+ proto.query=function(...args:any[]){const text=typeof args[0]==='string'?args[0]:args[0]?.text;
+  if(/^update "forward_test_windows"/i.test(text??''))writes.push(text);
+  return original.apply(this,args);};
+ let r;try{r=await f.observe(10);}finally{proto.query=original;}
+ assert.equal(writes.length,1);assert.equal(r.error,null);
+ const s=await f.state(),e=s.evaluations.find(x=>x.id===r.evaluationId)!;
+ assert.equal(s.window.firstCrossOccurred,true);assert.equal(s.window.crossingConsumed,true);
+ assert.equal(s.window.scoutTriggered,true);assert.equal(s.window.confirmTriggered,false);
+ assert.equal(s.window.previousSide,'DOWN');assert.equal(s.window.currentSide,'UP');assert.equal(s.window.previousBuffer,10);
+ assert.equal(s.window.crossingDirection,'UP');assert.equal(s.window.crossingKey,`${f.ticker}:first`);
+ assert.equal(s.window.crossingAt!.getTime(),e.evaluatedAt.getTime());assert.equal(s.window.updatedAt.getTime(),e.evaluatedAt.getTime());
+ assert.equal(e.qualifyingTrigger,true);assert.equal(e.crossingConsumed,true);assert.equal(e.previousSide,'DOWN');
+ assert.equal(e.currentSide,'UP');assert.equal(e.freshCross,true);assert.equal(e.entryOffer,.5);
+ assert.equal(s.positions.length,1);assert.equal(s.positions[0]!.id,`${f.ticker}:first:SCOUT`);
+ assert.equal(s.positions[0]!.enteredAt.getTime(),e.evaluatedAt.getTime());assert.equal(s.positions[0]!.stake,5);
+ assert.equal(s.positions[0]!.contracts,10);assert.equal(s.points.length,2);
+ // Stable full strategy-state snapshot for baseline/candidate differential runs.
+ // UUIDs, server-generated creation times and content digests are identities,
+ // not behavioral outputs; all price/state/timing-relative fields remain.
+ const origin=s.evaluations[0]!.evaluatedAt.getTime();
+ const normalize=(value:any,key=''):any=>{
+  if(value instanceof Date)return key==='createdAt'?'<db-created>':value.getTime()-origin;
+  if(Array.isArray(value))return value.map(x=>normalize(x));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value)
+   .filter(([k])=>!['evidenceDigest','normalizedBookDigest','rawResponseDigest'].includes(k))
+   .map(([k,v])=>[k,normalize(v,k==='updatedAt'&&value.createdAt instanceof Date&&v instanceof Date&&v.getTime()===value.createdAt.getTime()?'createdAt':k)]));
+  if(typeof value==='number'&&['requestStartedAtMs','responseHeadersAtMs','bodyCompletedAtMs'].includes(key))return value-origin;
+  if(typeof value==='string')return value.replaceAll(f.engineId,'<engine>').replaceAll(f.ticker,'<ticker>')
+   .replace(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi,'<uuid>');
+  return value;
+ };
+ console.info('WINDOW_DIFFERENTIAL_STATE '+JSON.stringify(normalize(s)));
+
+});
+
+test('failure after consolidated window update rolls back window evaluation position and history',async()=>{
+ const f=await fixture();await f.observe(-1);const before=await f.state();
+ const client=await pool.connect();const proto=Object.getPrototypeOf(client);client.release();const original=proto.query;
+ let windowWrites=0,injected=false,wakes=0;const unsubscribe=onCommittedForwardSignal(()=>wakes++);
+ proto.query=function(...args:any[]){const text=typeof args[0]==='string'?args[0]:args[0]?.text;
+  if(/^update "forward_test_windows"/i.test(text??''))windowWrites++;
+  if(/^insert into "forward_test_positions"/i.test(text??'')){injected=true;throw Error('injected_position_failure_after_window');}
+  return original.apply(this,args);};
+ let r;try{r=await f.observe(10);}finally{proto.query=original;unsubscribe();}
+ assert.equal(injected,true);assert.match(r.error!,/Failed query: insert into/);assert.equal(windowWrites,1);assert.equal(wakes,0);
+ const after=await f.state();assert.deepEqual(after,before);
+});
+
+test('expiry at end of consolidated transaction rolls back every strategy write',async()=>{
+ const f=await fixture();await f.observe(-1);const before=await f.state();
+ const client=await pool.connect();const proto=Object.getPrototypeOf(client);client.release();const original=proto.query;
+ let positionInserted=false;
+ proto.query=function(...args:any[]){const text=typeof args[0]==='string'?args[0]:args[0]?.text;
+  if(/^insert into "forward_test_positions"/i.test(text??''))positionInserted=true;
+  return original.apply(this,args);};
+ let r;try{r=await f.observe(10,{clock:at=>at+(positionInserted?5001:0)});}finally{proto.query=original;}
+ assert.equal(r.error,'entry_book_source_stale');assert.equal(positionInserted,true);assert.deepEqual(await f.state(),before);
+});
+
+test('concurrent qualifying producers consume crossing once and create one bound paper position',async()=>{
+ const f=await fixture();await f.observe(-1);
+ const rs=await Promise.all([f.observe(10),f.observe(10)]);
+ const s=await f.state();assert.equal(s.positions.length,1);assert.equal(s.window.crossingConsumed,true);
+ assert.equal(s.evaluations.filter(e=>e.qualifyingTrigger).length,1);
+ assert.equal(rs.filter(r=>r.researchEvent?.phase==='ENTRY').length,1);
+});
+
+test('exact five-second final source boundary remains accepted and later recross cannot reenter',async()=>{
+ const f=await fixture();await f.observe(-1);
+ const client=await pool.connect();const proto=Object.getPrototypeOf(client);client.release();const original=proto.query;
+ let inserted=false,wakes=0;const unsubscribe=onCommittedForwardSignal(()=>wakes++);
+ proto.query=function(...args:any[]){const text=typeof args[0]==='string'?args[0]:args[0]?.text;
+  if(/^insert into "forward_test_positions"/i.test(text??''))inserted=true;
+  return original.apply(this,args);};
+ let r;try{r=await f.observe(10,{clock:at=>at+(inserted?5000:0)});}finally{proto.query=original;unsubscribe();}
+ assert.equal(r.error,null);assert.equal(wakes,1);assert.equal((await f.state()).positions.length,1);
+ await f.observe(-10);await f.observe(10);assert.equal((await f.state()).positions.length,1);
+ assert.equal((await f.state()).evaluations.filter(e=>e.qualifyingTrigger).length,1);
 });

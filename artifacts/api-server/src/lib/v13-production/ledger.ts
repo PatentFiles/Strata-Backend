@@ -120,9 +120,11 @@ export class ProductionLedger {
       blocked_reason=$4,revision=revision+1 WHERE id=$1`,
     [a.id, a.cash_micros, a.reserved_micros, a.blocked_reason]);
   }
-  async observe(tx: PoolClient, kind: string, value: unknown): Promise<void> {
+  async observe(tx: PoolClient, kind: string, value: unknown): Promise<string> {
+    const observationId = randomUUID();
     await tx.query(`INSERT INTO v13_production_observation(id,account_id,kind,payload,digest)
-      VALUES($1,$2,$3,$4,$5)`, [randomUUID(), this.accountId, kind, JSON.stringify(value), digest(value)]);
+      VALUES($1,$2,$3,$4,$5)`, [observationId, this.accountId, kind, JSON.stringify(value), digest(value)]);
+    return observationId;
   }
   async freeze(reason: string): Promise<void> {
     await this.transaction(async (tx, a) => {
@@ -185,9 +187,11 @@ export class ProductionLedger {
   protected async recoverPreparedExits(_tx: PoolClient, _account: Account,
     _intents: Intent[], _snapshot: Snapshot): Promise<void> {}
 
-  async reconcile(snapshot: Snapshot, expectedRevision: string, nowMs: number): Promise<void> {
+  async reconcile(snapshot: Snapshot, expectedRevision: string, nowMs: number): Promise<{accountId:string;observationId:string}> {
     try {
-      await this.transaction(async (tx, a) => {
+      // transaction() returns only after COMMIT succeeds; a rejected/uncertain
+      // commit never exposes a durable reconciliation pointer.
+      return await this.transaction(async (tx, a) => {
         requireProof(a.revision === expectedRevision, "production_observation_raced");
         requireProof(canonical(snapshot.identity) === canonical(identity(a)), "production_account_mismatch");
         requireProof(snapshot.authenticated && snapshot.complete && snapshot.cashExact &&
@@ -387,10 +391,11 @@ export class ProductionLedger {
         [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
         }
         await this.assertConservation(tx, a);
-        await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
+        const observationId = await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
         await this.persist(tx, a);
         await tx.query("UPDATE v13_production_account SET reconciled_at=$2,evidence_digest=$3 WHERE id=$1",
           [a.id, new Date(snapshot.observedAtMs), digest(snapshot)]);
+        return {accountId:this.accountId,observationId};
       });
     } catch (error) {
       if ((error as Error).message !== "production_observation_raced") await this.freeze((error as Error).message);

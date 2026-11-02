@@ -53,6 +53,10 @@ test("5001ms source remains rejected under the unchanged five-second policy and 
   ["evaluation_age_admission","rejected","production_evaluation_stale"],
   ["prepare_entry","rejected","production_evaluation_stale"]]);
  assert.equal(events[0]!.sourceAgeMs,5001);
+ assert.deepEqual(events[1]!.substageTimings?.map(x=>[x.stage,x.completed]),[
+  ['source_read_and_validation',true],['market_evidence',true],['transaction_acquire',true],
+  ['duplicate_and_authority',true],['policy_and_window',true],['source_pin_and_classification',false],
+ ]);
 });
 
 test("real prepare path preserves price refusal and records normalized book for each side",async()=>{

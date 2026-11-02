@@ -276,13 +276,6 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     // The window row is locked; only its first actual strike crossing may
     // become the persistent crossing identity. Later recrosses cannot rename it.
     const firstCross = decision.freshCross && !persistedWindow.firstCrossOccurred;
-    if (firstCross) {
-      await tx.update(forwardTestWindowTable).set({
-        firstCrossOccurred: true, crossingKey,
-        crossingDirection: decision.crossedDirection?.toUpperCase() ?? null,
-        crossingAt: now,
-      }).where(eq(forwardTestWindowTable.ticker, market.ticker));
-    }
     const crossAvailable = entryCrossAvailable(persistedWindow.entryPolicyVersion, persistedWindow, decision.freshCross);
     const fullPaperCapacity=entryQuote?.evidence.capacity.modeledUnfilledContracts===0;
     const actionable = !openPosition && fullPaperCapacity &&
@@ -290,6 +283,23 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       decision.qualifyingTrigger &&
       decision.entrySideOffer !== null && validOffer(market.yesAsk) && validOffer(market.noAsk) &&
       (decision.signal === "SCOUT" || decision.signal === "CONFIRM");
+    // Only the first qualifying entry has all three disjoint window patches.
+    // Keep its write at the original first-cross write point, under the same
+    // engine/window locks; evaluation, position, lease and commit stay atomic.
+    const consolidatedEntryWindow = firstCross && actionable;
+    if (firstCross) {
+      await tx.update(forwardTestWindowTable).set({
+        firstCrossOccurred: true, crossingKey,
+        crossingDirection: decision.crossedDirection?.toUpperCase() ?? null,
+        crossingAt: now,
+        ...(consolidatedEntryWindow ? {
+          previousSide: persistedWindow.currentSide, currentSide: direction,
+          previousBuffer: decision.buffer, updatedAt: now,
+          crossingConsumed: true,
+          ...(decision.signal === "SCOUT" ? { scoutTriggered: true } : { confirmTriggered: true }),
+        } : {}),
+      }).where(eq(forwardTestWindowTable.ticker, market.ticker));
+    }
     // Strategy labels alone do not mean a new window entry is eligible.
     // Persist the actual admission explanation instead of suggesting a missed trade.
     const candidateSignal = decision.signal === "SCOUT" || decision.signal === "CONFIRM";
@@ -330,7 +340,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       entryOffer: actionable ? decision.entrySideOffer : null,
       positionWasOpen: Boolean(openPosition),
     });
-    await tx.update(forwardTestWindowTable).set({
+    if (!consolidatedEntryWindow) await tx.update(forwardTestWindowTable).set({
       previousSide: persistedWindow.currentSide,
       currentSide: direction,
       previousBuffer: decision.buffer,
@@ -396,7 +406,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         entryVelocity: velocity,
       }).onConflictDoNothing().returning();
       if (!created) throw new Error("Paper action already exists or another position is open");
-      await tx.update(forwardTestWindowTable).set({
+      if (!consolidatedEntryWindow) await tx.update(forwardTestWindowTable).set({
         crossingConsumed: true,
         ...(decision.signal === "SCOUT" ? { scoutTriggered: true } : { confirmTriggered: true }),
         updatedAt: now,
