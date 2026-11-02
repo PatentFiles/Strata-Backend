@@ -196,18 +196,31 @@ export class ProductionExecutor {
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
     assertChampionSourceReference(source);
-    if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+    // Reuse the existing canonical-evidence clock sample; never refresh a source
+    // timestamp. This only avoids provider work for an already-expired LIVE feed.
+    let feedAlreadyExpired = false;
+    let initialSourceElapsed: number | null = null;
+    if(this.exchange.mode==="LIVE") {
+      const sampledNow = this.now();
+      assertCanonicalEntryQuoteEvidence(source,sampledNow);
+      const elapsed = sampledNow - new Date(source.evaluated_at).getTime();
+      initialSourceElapsed = elapsed;
+      const ages = [source.btc_provider_age_ms,source.btc_receive_age_ms,source.market_age_ms];
+      feedAlreadyExpired = ages.every(age => typeof age === "number" && Number.isFinite(age) && age >= 0) &&
+        ages.some(age => age + elapsed > 5000);
+    }
     const side = source.direction === "UP" ? "YES" : "NO";
     subtimings.mark("market_evidence");
-    const book = await this.exchange.market(source.market_ticker, side, {
+    const readBook = () => this.exchange.market(source.market_ticker, side, {
       stage:"prepare",evaluationId,marketTicker:source.market_ticker,
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),
       btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
     });
+    let book = feedAlreadyExpired ? null : await readBook();
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
-    diagnostics.price = captureEntryPriceDiagnostics(source, book);
+    if(book) diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");
-    return this.ledger.transaction(async (tx, a) => {
+    const prepare = () => this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
       const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
       if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
@@ -234,10 +247,17 @@ export class ProductionExecutor {
         ...(sourceCurrent?{}:{error:"production_evaluation_stale"})});
       requireProof(sourceCurrent, "production_evaluation_stale");
       const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
+      // Preserve prior-intent replay and all authority/policy/window checks above.
+      // An expired observation cannot become eligible after a wall-clock rollback.
+      // Provider-error precedence is intentionally omitted on this stale-only path.
       requireProof(canonical(pinnedSource) === canonical(source) &&
         ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
           typeof source[k] === "number" && Number.isFinite(source[k]) && source[k] >= 0 &&
-          source[k] + sourceAge <= p.maxQuoteAgeMs), "production_source_feed_stale_or_changed");
+          source[k] + sourceAge <= p.maxQuoteAgeMs &&
+          (!feedAlreadyExpired || source[k] + initialSourceElapsed! <= p.maxQuoteAgeMs)), "production_source_feed_stale_or_changed");
+      // Wider legacy policies may still admit this observation. Release locks
+      // before real provider reads, then repeat all authoritative checks below.
+      if(book === null) return null;
       const classified = evaluateV13Strategy({
         marketTicker: source.market_ticker, btcPrice: source.btc_price, target: source.target,
         previousBuffer: previousBufferFromSide(source.previous_side),
@@ -301,6 +321,15 @@ export class ProductionExecutor {
       await this.ledger.assertConservation(tx, a);
       return id;
     });
+    const prepared = await prepare();
+    if(prepared !== null) return prepared;
+    subtimings.mark("market_evidence");
+    book = await readBook();
+    diagnostics.price = captureEntryPriceDiagnostics(source,book);
+    subtimings.mark("transaction_acquire");
+    const retried = await prepare();
+    requireProof(retried !== null, "production_source_feed_stale_or_changed");
+    return retried;
   }
 
   async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {

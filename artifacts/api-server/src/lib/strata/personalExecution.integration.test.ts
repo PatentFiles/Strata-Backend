@@ -1083,3 +1083,92 @@ test("enabled/disabled identical-delay replay through actual worker, supervisor 
  assert.ok(Number(outcomes[1]!.initialEvidenceMs)<Number(outcomes[0]!.initialEvidenceMs),"same delays must actually overlap, not just rename a cache");
  console.info("PUBLIC_PREFETCH_IDENTICAL_DELAY_REPLAY",JSON.stringify({delaysMs:{public:80,signedBook:60,feeAuthority:40,signedAccount:300},outcomes,scope:"offline mocked provider/fee authority; actual worker/reader/ledger/executor/wire guard; not production savings"}));
 });
+
+async function staleRetryFixture(maxAge=5000) {
+ const posts:string[]=[],s=await tradingSession(500,posts);
+ const approved={...policy(),maxQuoteAgeMs:maxAge};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
+ await pool.query("UPDATE v13_live_money_policy SET max_quote_age_ms=$1,policy_hash=$2 WHERE id=$3",[maxAge,approved.policyHash,approved.id]);
+ s.book.fee=entryCashRiskFeeFixture({now:s.now,market:"KXBTC15M-TEST-000",side:"YES",price:.5,contracts:10,policyHash:approved.policyHash!});
+ const id=await source(s.now);let reads=0;
+ const original=s.exchange.market.bind(s.exchange);
+ Object.defineProperty(s.exchange,"market",{value:async(...args:Parameters<typeof original>)=>{reads++;return original(...args);},configurable:true});
+ return {s,id,get reads(){return reads;}};
+}
+
+test("stale retry: each original feed age preserves inclusive 5000 boundary and skips all market/fee work at 5001",async()=>{
+ for(const field of ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"]){
+  for(const effective of [5000,5001]){
+   const f=await staleRetryFixture();await pool.query(`UPDATE forward_test_evaluations SET ${field}=$2 WHERE id=$1`,[f.id,effective-4000]);f.s.advance(4000);
+   let clocks=0;Object.defineProperty(f.s.executor,"now",{value:()=>{clocks++;return f.s.now;}});
+   if(effective===5000){const intent=await f.s.executor.prepareEntry(f.id);assert.ok(intent);assert.equal(f.reads,1);}
+   else{await assert.rejects(f.s.executor.prepareEntry(f.id),/production_source_feed_stale_or_changed/);assert.equal(f.reads,0);assert.equal(clocks,4,"canonical sample + two reconciliation checks + admission; no added clock");}
+   assert.equal(f.s.posts.length,0);
+  }
+ }
+});
+
+test("stale retry: existing PREPARED UNKNOWN and TERMINAL intents replay without another reservation or provider read",async()=>{
+ for(const state of ["PREPARED","UNKNOWN","TERMINAL"]){
+  const f=await staleRetryFixture();const intent=await f.s.executor.prepareEntry(f.id);
+  await pool.query("UPDATE v13_production_intent SET state=$2,terminal=$3 WHERE id=$1",[intent,state,state==="TERMINAL"]);
+  await pool.query("UPDATE forward_test_evaluations SET btc_provider_age_ms=1001 WHERE id=$1",[f.id]);f.s.advance(4000);
+  const before=(await pool.query("SELECT reserved_micros,revision FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows[0];
+  assert.equal(await f.s.executor.prepareEntry(f.id),intent);assert.equal(f.reads,1);
+  assert.deepEqual((await pool.query("SELECT reserved_micros,revision FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows[0],before);
+  assert.equal(f.s.posts.length,0);
+ }
+});
+
+test("stale retry: authoritative account policy and source denials precede stale without market evidence",async()=>{
+ for(const mode of ["kill","frozen","revoked","wrong-policy","changed-source","unknown"]){
+  const f=await staleRetryFixture();
+  if(mode==="unknown") {const other=await source(f.s.now);const intent=await f.s.executor.prepareEntry(other);await pool.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1",[intent]);}
+  await pool.query("UPDATE forward_test_evaluations SET btc_provider_age_ms=1001 WHERE id=$1",[f.id]);f.s.advance(4000);const beforeReads=f.reads;
+  const reasons:Record<string,string>={kill:"production_authority_disabled_or_uncommissioned",frozen:"production_account_frozen",revoked:"production_policy_missing","wrong-policy":"production_entry_policy_revision_not_approved","changed-source":"production_source_feed_stale_or_changed",unknown:"production_uncertain_order_blocks_mutation"};
+  if(mode==="kill")await pool.query("UPDATE v13_production_account SET kill_switch=true WHERE id=$1",[ACCOUNT]);
+  if(mode==="frozen")await pool.query("UPDATE v13_production_account SET blocked_reason='test' WHERE id=$1",[ACCOUNT]);
+  if(mode==="revoked")await pool.query("UPDATE v13_live_money_policy SET state='REVOKED' WHERE id='policy-personal'");
+  if(mode==="wrong-policy")await pool.query("UPDATE forward_test_evaluations SET entry_policy_version='not-approved' WHERE id=$1",[f.id]);
+  if(mode==="changed-source"){
+   const original=f.s.executor.ledger.transaction.bind(f.s.executor.ledger);
+   Object.defineProperty(f.s.executor.ledger,"transaction",{value:async(...args:Parameters<typeof original>)=>{await pool.query("UPDATE forward_test_evaluations SET reason='changed' WHERE id=$1",[f.id]);return original(...args);}});
+  }
+  await assert.rejects(f.s.executor.prepareEntry(f.id),new RegExp(reasons[mode]!));assert.equal(f.reads,beforeReads);assert.equal(f.s.posts.length,0);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_intent WHERE evaluation_id=$1",[f.id])).rows[0].n,0);
+ }
+});
+
+test("stale retry: wider approved policy falls back outside locks and repeats STOP gate after real read",async()=>{
+ for(const stop of [false,true]){
+  const f=await staleRetryFixture(15000);await pool.query("UPDATE forward_test_evaluations SET btc_provider_age_ms=1001 WHERE id=$1",[f.id]);f.s.advance(4000);
+  const original=f.s.exchange.market.bind(f.s.exchange);
+  Object.defineProperty(f.s.exchange,"market",{value:async(...args:Parameters<typeof original>)=>{
+   // A separate connection can acquire the account row: no DB lock held over network.
+   const client=await pool.connect();try{await client.query("BEGIN; SET LOCAL lock_timeout='100ms'");await client.query("SELECT id FROM v13_production_account WHERE id=$1 FOR UPDATE",[ACCOUNT]);if(stop)await client.query("UPDATE v13_production_account SET kill_switch=true WHERE id=$1",[ACCOUNT]);await client.query("COMMIT");}finally{client.release();}
+   return original(...args);
+  }});
+  if(stop)await assert.rejects(f.s.executor.prepareEntry(f.id),/production_authority_disabled_or_uncommissioned/);
+  else assert.ok(await f.s.executor.prepareEntry(f.id));
+  assert.equal(f.reads,1);assert.equal(f.s.posts.length,0);
+ }
+});
+
+test("stale retry: observed expiry cannot be erased by clock rollback, provider failure no longer masks stale",async()=>{
+ const f=await staleRetryFixture();await pool.query("UPDATE forward_test_evaluations SET btc_provider_age_ms=1001 WHERE id=$1",[f.id]);f.s.advance(4000);
+ let calls=0;Object.defineProperty(f.s.executor,"now",{value:()=>{calls++;return f.s.now-(calls===1?0:1000);}});
+ Object.defineProperty(f.s.exchange,"market",{value:async()=>{throw Error("provider_failure_must_not_run");}});
+ await assert.rejects(f.s.executor.prepareEntry(f.id),/production_source_feed_stale_or_changed/);assert.equal(f.s.posts.length,0);
+});
+
+test("stale retry: invalid current-policy window still denies before stale, concurrent stale callers create nothing",async()=>{
+ const f=await staleRetryFixture();const p={...policy(),maxQuoteAgeMs:5000,entryPolicyVersion:V13_ENTRY_POLICY_VERSION};p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,policy_hash=$2 WHERE id=$3",[V13_ENTRY_POLICY_VERSION,p.policyHash,p.id]);
+ await pool.query("UPDATE forward_test_evaluations SET entry_policy_version=$2,crossing_key=market_ticker||':first',btc_provider_age_ms=1001 WHERE id=$1",[f.id,V13_ENTRY_POLICY_VERSION]);f.s.advance(4000);
+ await assert.rejects(f.s.executor.prepareEntry(f.id),/production_entry_window_or_claim_not_current/);assert.equal(f.reads,0);
+ const g=await staleRetryFixture();await pool.query("UPDATE forward_test_evaluations SET market_age_ms=1001 WHERE id=$1",[g.id]);g.s.advance(4000);
+ const results=await Promise.allSettled([g.s.executor.prepareEntry(g.id),g.s.executor.prepareEntry(g.id)]);
+ for(const result of results){assert.equal(result.status,"rejected");if(result.status==="rejected")assert.match(String(result.reason),/production_source_feed_stale_or_changed/);}
+ assert.equal(g.reads,0);assert.equal(g.s.posts.length,0);
+ assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_intent WHERE account_id=$1",[ACCOUNT])).rows[0].n,0);
+ assert.equal((await pool.query("SELECT reserved_micros FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows[0].reserved_micros,"0");
+});
