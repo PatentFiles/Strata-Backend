@@ -15,7 +15,7 @@ import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
-import { ProductionLedger, identity } from "./ledger";
+import { ProductionLedger, identity, TERMINAL_POSITION_BATCH_SQL } from "./ledger";
 import { ProductionExecutor } from "./executor";
 import { ProductionWorker } from "./worker";
 import { encodeProductionOrder, KalshiProductionExchange } from "./transport";
@@ -1564,7 +1564,7 @@ class CountReconcileQueriesLedger extends ProductionLedger {
   return super.transaction(async(tx,a)=>body(new Proxy(tx,{get:(target,key)=>{
    if(key==='query')return (sql:unknown,...args:unknown[])=>{
     if(typeof sql==='string' && /^UPDATE v13_production_intent SET state=/.test(sql))this.intentUpdates++;
-    if(typeof sql==='string' && /^SELECT (id,)?quantity_hundredths FROM v13_production_position WHERE/.test(sql)){
+    if(typeof sql==='string' && (/^SELECT (id,)?quantity_hundredths FROM v13_production_position WHERE/.test(sql) || /^SELECT position.id,position.quantity_hundredths FROM \(SELECT DISTINCT unnest/.test(sql))){
       this.terminalPositionReads++;
       const values=args[0] as unknown[];this.terminalPositionBatchSizes.push(Array.isArray(values[0])?values[0].length:1);
     }
@@ -1612,9 +1612,11 @@ test('terminal position batches are bounded, use PK plan, exclude foreign rows, 
  await pool.query('ANALYZE v13_production_position');
  const plans=[];
  for(const ids of [[id,'batch-intent-1','batch-intent-2','batch-intent-3','batch-intent-4'],Array.from({length:100},(_,n)=>`batch-intent-${n+1}`)]){
-  const plan=(await pool.query(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT id,quantity_hundredths FROM v13_production_position WHERE id=ANY($1::text[])`,[ids])).rows[0]['QUERY PLAN'][0];
+  const plan=(await pool.query(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ${TERMINAL_POSITION_BATCH_SQL}`,[ids])).rows[0]['QUERY PLAN'][0];
   assert.match(JSON.stringify(plan),/v13_production_position_pkey/);assert.doesNotMatch(JSON.stringify(plan),/"Node Type":"Seq Scan"/);assert.equal(plan.Plan['Actual Rows'],ids.length);plans.push(plan);
  }
+ const duplicateAndMissing=(await pool.query(TERMINAL_POSITION_BATCH_SQL,[[id,id,'missing-batch-position',null]])).rows;
+ assert.equal(duplicateAndMissing.length,1);assert.equal(duplicateAndMissing[0].id,id);assert.equal(duplicateAndMissing[0].quantity_hundredths,'0');
  const counted=new CountReconcileQueriesLedger(pool,'test-account');const executor=new ProductionExecutor(counted,f.exchange,()=>f.exchange.now);
  await executor.reconcile();assert.deepEqual(counted.terminalPositionBatchSizes,[100,100,6]);assert.equal(counted.terminalPositionReads,3);assert.equal(counted.intentUpdates,0);
  await invariant(counted);assert.equal((await counted.readAccount()).reserved_micros,'0');assert.equal(f.exchange.posts.length,0);

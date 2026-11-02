@@ -8,6 +8,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { canonical, digest, money, requireProof, type Identity, type Snapshot, type Request } from "./types";
 
+export const TERMINAL_POSITION_BATCH_SQL = "SELECT position.id,position.quantity_hundredths FROM (SELECT DISTINCT unnest($1::text[]) AS id) AS requested CROSS JOIN LATERAL (SELECT id,quantity_hundredths FROM v13_production_position WHERE id=requested.id LIMIT 1) AS position";
+
 export type Account = {
   id: string; policy_id: string; subaccount: string; exchange_index: string; owner_user_id?: string | null;
   key_fingerprint: string; commissioning_digest: string | null;
@@ -322,12 +324,15 @@ export class ProductionLedger {
         // so read its exact position quantities once in bounded primary-key batches.
         // Do not use the later positive-position projection: zero/missing rows
         // have distinct recovery meanings and must not disappear from this proof.
+        // Correlated LIMIT 1 keeps each lookup a point probe instead of allowing
+        // ANY(array) to become a whole-history scan on PostgreSQL 16. DISTINCT
+        // retains ANY semantics for duplicate keys; absent/null keys return no row.
         const terminalEntries = intents.filter(i => i.kind === "ENTRY" && i.terminal);
         const terminalPositions = new Map<string, {id:string;quantity_hundredths:string}>();
         for (let offset=0;offset<terminalEntries.length;offset+=100) {
           const ids=terminalEntries.slice(offset,offset+100).map(i=>i.id);
           const rows=(await tx.query<{id:string;quantity_hundredths:string}>(
-            "SELECT id,quantity_hundredths FROM v13_production_position WHERE id=ANY($1::text[])",[ids])).rows;
+            TERMINAL_POSITION_BATCH_SQL,[ids])).rows;
           for(const row of rows)terminalPositions.set(row.id,row);
         }
         for (const i of terminalEntries) {
