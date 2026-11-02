@@ -169,6 +169,14 @@ export const CONTINUOUS_CURRENT_LEASE_SQL=CONTINUOUS_ENTRY_AUTHORIZATION_SQL.rep
     WHERE ex.execution_account_id=g.execution_account_id
       AND ex.state IN ('PREPARED','DISPATCHED','UNKNOWN'))
   LIMIT 2`);
+/** One source-priority tick may reuse an already valid lease. This is only
+ * early-rotation scheduling: the locked final >20s authorization is unchanged.
+ * clock_timestamp prevents a caller transaction's old now() from extending reuse.
+ */
+export const CONTINUOUS_SIGNAL_CURRENT_LEASE_SQL=CONTINUOUS_CURRENT_LEASE_SQL
+ .replace("SELECT g.grant_id", "SELECT g.grant_id, (l.expires_at<=clock_timestamp()+interval '120 seconds') AS early_rotation_due")
+ .replace("AND l.expires_at>now()+interval '120 seconds'",
+   "AND l.observed_at<=clock_timestamp() AND l.expires_at>clock_timestamp()+interval '20 seconds'");
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
@@ -220,6 +228,7 @@ export async function renewContinuousTechnicalLease(input:{
  observedAtMs:number;cashMicros:string;fencingToken:string;
  authenticated:boolean;complete:boolean;unexplainedCashActivity:boolean;
  providerEvidence:unknown;
+ allowEarlyRotationDeferral?:boolean;
 },deps:{db?:Db;now?:()=>number}={}){
  if(!UUID.test(input.ownerId)||!SHA.test(input.releaseSha)||
   !DIGEST.test(input.policyHash)||!Number.isSafeInteger(input.observedAtMs)||
@@ -237,10 +246,19 @@ export async function renewContinuousTechnicalLease(input:{
   // cash, fence and exit-hold predicates in one read instead of opening the
   // multi-round-trip renewal transaction on every worker tick. This preliminary
   // result never replaces the locked final entry/exit authorization.
-  const current=await db.query(CONTINUOUS_CURRENT_LEASE_SQL,
+  const current=await db.query(input.allowEarlyRotationDeferral===true?CONTINUOUS_SIGNAL_CURRENT_LEASE_SQL:CONTINUOUS_CURRENT_LEASE_SQL,
     [input.ownerId,input.releaseSha,input.accountId,input.policyHash,input.cashMicros,input.fencingToken]);
-  if(current.rows.length===1)return {ok:true as const,reason:"standing_short_technical_lease_current",
+  if(current.rows.length===1){
+   if(input.allowEarlyRotationDeferral===true){
+    const freshNow=(deps.now??Date.now)();
+    if(!Number.isFinite(freshNow) || input.observedAtMs>freshNow || freshNow-input.observedAtMs>15_000 ||
+       typeof current.rows[0]?.early_rotation_due!=="boolean")
+      return denied("standing_signed_exchange_proof_stale");
+   }
+   return {ok:true as const,reason:"standing_short_technical_lease_current",
+    earlyRotationDeferred:input.allowEarlyRotationDeferral===true&&current.rows[0]?.early_rotation_due===true,
     ordersSubmitted:false as const,workerStarted:false as const};
+  }
   if(current.rows.length>1)return denied("standing_duplicate_technical_lease");
   c=await db.connect();await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='1000ms'");
@@ -293,14 +311,15 @@ export async function renewContinuousTechnicalLease(input:{
   // Avoid a write on each 2.5-second heartbeat. Rotate only as the
   // five-minute signed technical lease approaches its two-minute margin.
   const existing=await c.query(`
-   SELECT expires_at,fencing_token::text AS fencing_token FROM private.strata_continuous_execution_technical_lease
+   SELECT expires_at,fencing_token::text AS fencing_token,
+    expires_at>clock_timestamp()+interval '120 seconds' AS rotation_not_due FROM private.strata_continuous_execution_technical_lease
    WHERE grant_id=$1 FOR UPDATE`,[v.grant_id]);
   if(existing.rows.length>1)return denied("standing_duplicate_technical_lease");
   if(existing.rows.length===1&&
      String(existing.rows[0]?.fencing_token)===input.fencingToken&&
-     Date.parse(String(existing.rows[0]?.expires_at))>now+120_000){
+     existing.rows[0]?.rotation_not_due===true){
     await c.query("COMMIT");committed=true;
-    return {ok:true as const,reason:"standing_short_technical_lease_current",
+    return {ok:true as const,reason:"standing_short_technical_lease_current",earlyRotationDeferred:false,
      ordersSubmitted:false as const,workerStarted:false as const};
   }
   const dg=hash({owner:input.ownerId,account:input.accountId,sha:input.releaseSha,
@@ -322,7 +341,7 @@ export async function renewContinuousTechnicalLease(input:{
    VALUES($1,$2,'LEASE_RENEWED',$3,'signed_owned_reconciliation')`,
     [v.grant_id,input.accountId,dg]);
   await c.query("COMMIT");committed=true;
-  return {ok:true as const,reason:"standing_short_technical_lease_renewed",
+  return {ok:true as const,reason:"standing_short_technical_lease_renewed",earlyRotationDeferred:false,
    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return denied("standing_lease_renewal_unavailable")}
  finally{if(c){if(!committed)try{await c.query("ROLLBACK")}catch{};c.release()}}

@@ -586,26 +586,32 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
-    session.executor.afterReconcile=async snapshot=>{
+    session.executor.afterReconcile=async (snapshot,subtimings,scheduling)=>{
       const sha=deployedGitSha();
       const scoped=/^[a-f0-9]{40}$/.test(sha);
+      subtimings?.mark("grant_history");
       const hasGrant=scoped?await hasContinuousGrantHistory(db,input.userId,sha):false;
       let eligible=false;
+      let technicalRenewal: "deferred" | "settled" | undefined;
       if(hasGrant){
         if(!("connect" in db))throw new Error("standing_transactional_database_required");
+        subtimings?.mark("technical_lease");
         const renewed=await renewContinuousTechnicalLease({
           ownerId:input.userId,accountId:input.accountId,releaseSha:sha,policyHash,
           observedAtMs:snapshot.observedAtMs,cashMicros:snapshot.cashMicros,
           fencingToken:String(state.fencingToken),authenticated:snapshot.authenticated,
           complete:snapshot.complete,unexplainedCashActivity:snapshot.unexplainedCashActivity,
           providerEvidence:snapshot,
+          allowEarlyRotationDeferral:scheduling?.origin==="committed_signal"&&scheduling.allowEarlyTechnicalLeaseReuse===true,
         },{db,now});
-        eligible=renewed.ok&&await checkContinuousEligibility(db,input.userId,sha);
-      }else eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;
+        if(renewed.ok){technicalRenewal=renewed.earlyRotationDeferred?"deferred":"settled";subtimings?.mark("continuous_eligibility");eligible=await checkContinuousEligibility(db,input.userId,sha);}
+      }else {subtimings?.mark("legacy_protective_release");eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;}
+      subtimings?.mark("flat_entry_evidence");
       const flat=await reconciledFlatEntryEvidence(db,{
         accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),
       });
       technicalRelease.completeReconciliation(eligible&&flat);
+      return technicalRenewal?{technicalRenewal}:undefined;
     };
     session.executor.authorizeFinalEntry=async tx=>{
       const sha=deployedGitSha();

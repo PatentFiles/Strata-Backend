@@ -83,7 +83,7 @@ class OwnedAccountLedger extends ProductionLedger {
   }
   protected override async recoverPreparedExits(tx:PoolClient,account:Account,intents:Intent[],snapshot:Snapshot):Promise<void> {
     await recoverPreparedOwnedExitIntents(tx,{ownerId:this.ownerUserId,account,intents,snapshot,
-      observe:(kind,value)=>this.observe(tx,kind,value)});
+      observe:async(kind,value)=>{await this.observe(tx,kind,value);}});
   }
   override async policy(tx: PoolClient, account: Account) {
     const { rows } = await tx.query(

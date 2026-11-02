@@ -1,3 +1,4 @@
+import {ExecutionSubtimings} from "./executionSubtimings";
 import {captureFinalComparison,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
 import {entryCashProof,validEntryCashRisk,samePinnedCashModel,pinnedEntryDepthAvailable,type V13EntryCashProof} from "../v13EntryCashRisk";
 import {conservativeExitFeeMicros} from "./fractionalExitFee";
@@ -32,6 +33,13 @@ function stakeRevisionFromDecision(decision:unknown):number {
  * Never constructed or started by API startup. Production mutation authority
  * is separate from micro-live and never inherits paper positions or sizing.
  */
+/** Scheduling metadata only: never substitutes for entry/exit authorization. */
+export type ReconcileSchedulingContext = Readonly<{
+  origin: "normal" | "committed_signal";
+  allowEarlyTechnicalLeaseReuse: boolean;
+}>;
+export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled"} | void;
+
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
@@ -46,7 +54,7 @@ export class ProductionExecutor {
   }
 
   /** Server-owned hooks; snapshot acquisition alone must never renew authority. */
-  afterReconcile: ((snapshot: Snapshot) => Promise<void>) | null = null;
+  afterReconcile: ((snapshot: Snapshot, subtimings?:ExecutionSubtimings, scheduling?:ReconcileSchedulingContext) => Promise<ReconcileSchedulingResult>) | null = null;
   authorizeFinalEntry: ((tx: PoolClient) => Promise<void>) | null = null;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
@@ -140,8 +148,11 @@ export class ProductionExecutor {
     }
   }
 
-  async reconcile(): Promise<void> {
+  async reconcile(): Promise<void>;
+  async reconcile(scheduling:ReconcileSchedulingContext): Promise<ReconcileSchedulingResult>;
+  async reconcile(scheduling:ReconcileSchedulingContext = Object.freeze({origin:"normal",allowEarlyTechnicalLeaseReuse:false})): Promise<ReconcileSchedulingResult> {
     const done=this.startTiming("reconciliation");
+    let schedulingResult:ReconcileSchedulingResult=undefined;
     try {
       const a = await this.ledger.readAccount();
       const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
@@ -150,24 +161,27 @@ export class ProductionExecutor {
       try {snapshot=await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());signed("completed");}
       catch(error){signed("rejected",{error});throw error;}
       const commit=this.startTiming("ledger_reconcile_commit");
-      try {await this.ledger.reconcile(snapshot,a.revision,this.now());commit("completed");}
+      try {const reconciliationReceipt=await this.ledger.reconcile(snapshot,a.revision,this.now());
+        commit("completed",{reconciliationReceipt});}
       catch(error){commit("rejected",{error});throw error;}
       if(this.afterReconcile){
-        const after=this.startTiming("after_reconcile");
-        try{await this.afterReconcile(snapshot);after("completed");}
-        catch(error){after("rejected",{error});throw error;}
+        const after=this.startTiming("after_reconcile"),subtimings=new ExecutionSubtimings();
+        try{schedulingResult=await this.afterReconcile(snapshot,subtimings,scheduling);after("completed",{substageTimings:subtimings.snapshot(true)});}
+        catch(error){after("rejected",{error,substageTimings:subtimings.snapshot(false)});throw error;}
       }
       done("completed");
+      return schedulingResult;
     }catch(error){done("rejected",{error});throw error;}
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
     const done=this.startTiming("prepare_entry",{evaluationId});
-    const diagnostics: {price?: EntryPriceDiagnostics} = {};
-    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price});return id;}
-    catch(error){done("rejected",{error,entryPrice:diagnostics.price});throw error;}
+    const diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
+    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
+    catch(error){done("rejected",{error,entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
   }
-  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics}): Promise<string> {
+  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
+    const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
     const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
     requireProof(source && source.evaluation_source === "paper" &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -179,13 +193,17 @@ export class ProductionExecutor {
     assertChampionSourceReference(source);
     if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
     const side = source.direction === "UP" ? "YES" : "NO";
+    subtimings.mark("market_evidence");
     const book = await this.exchange.market(source.market_ticker, side);
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     diagnostics.price = captureEntryPriceDiagnostics(source, book);
+    subtimings.mark("transaction_acquire");
     return this.ledger.transaction(async (tx, a) => {
+      subtimings.mark("duplicate_and_authority");
       const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
       if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
       await this.gate(tx, a);
+      subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
       const sourcePolicy = source.entry_policy_version ?? V13_LEGACY_ENTRY_POLICY;
       requireProof(
@@ -199,6 +217,7 @@ export class ProductionExecutor {
           "production_entry_policy_claim_not_proven");
         await this.assertEntryPolicyWindow(tx, source);
       }
+      subtimings.mark("source_pin_and_classification");
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
       const admission=this.startTiming("evaluation_age_admission",{evaluationId});
       const sourceCurrent=sourceAge >= 0 && sourceAge <= p.maxQuoteAgeMs;
@@ -222,6 +241,7 @@ export class ProductionExecutor {
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);
       if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+      subtimings.mark("exposure_and_stake");
       const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
       requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
       const balances = await tx.query(`SELECT
@@ -260,6 +280,7 @@ export class ProductionExecutor {
       const cap = digest({ id, request, decision, policyHash: pf.policyHash, fee: pf.feeEvidenceFingerprint });
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
       a.reserved_micros = String(money(a.reserved_micros) + reservation);
+      subtimings.mark("reservation_and_conservation");
       await tx.query(`INSERT INTO v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,
         request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,

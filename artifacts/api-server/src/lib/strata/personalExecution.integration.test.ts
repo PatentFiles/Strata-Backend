@@ -712,7 +712,7 @@ test("coupled EXIT cleanup audit failure rolls back VOID and BLOCKED while retai
   const f=await protectiveFixture(true);
   const observe=f.executor.ledger.observe.bind(f.executor.ledger);
   f.executor.ledger.observe=async(tx,kind,payload)=>{
-    if(kind==="PROVEN_NOT_POSTED")throw Error("audit_write_failed");await observe(tx,kind,payload);
+    if(kind==="PROVEN_NOT_POSTED")throw Error("audit_write_failed");return await observe(tx,kind,payload);
   };
   f.advance(15_001);await assert.rejects(f.executor.reconcile(),/audit_write_failed/);
   assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,"PREPARED");

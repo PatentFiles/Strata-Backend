@@ -1,3 +1,4 @@
+import {sanitizeExecutionSubtimings,type ExecutionSubtiming} from "./executionSubtimings";
 import {isFinalComparisonDiagnostics,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
 import {getFeeFailureDiagnostics,type FeeFailureDiagnostics} from "../strata/feeFailureDiagnostics";
 import {isEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
@@ -13,7 +14,7 @@ export type StageOutcome = "completed" | "rejected" | "eligible" | "proven_not_p
  "noop_not_prepared" | "post_uncertain" | "reconciliation_required" | "http_response" | "network_error";
 export type StageContext = {accountId:string;mode:"LIVE"|"SIMULATION";evaluationId?:string|null;intentId?:string|null};
 export type StageTiming = StageContext & {stage:ExecutionStage;durationMs:number;outcome:StageOutcome;
- releaseCommitSha:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
+ releaseCommitSha:string;substageTimings?:readonly ExecutionSubtiming[];reconciliationObservationId?:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
 export type TimingObserver = (event:Readonly<StageTiming>)=>void|Promise<void>;
 const safeId=(value:unknown)=>typeof value==="string"&&/^[a-zA-Z0-9:_-]{1,128}$/.test(value)?value:undefined;
 const reasonCode=(error:unknown)=>{
@@ -29,7 +30,7 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
  let started=0;
  try{started=clock();}catch{/* Optional clock instrumentation is not authority. */}
  let ended=false;
- return (outcome:StageOutcome,extra:{finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
+ return (outcome:StageOutcome,extra:{substageTimings?:readonly ExecutionSubtiming[];reconciliationReceipt?:{accountId:string;observationId:string};finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
   if(ended)return;ended=true;
   if(!observer)return;
   try {
@@ -37,6 +38,18 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
    const event:StageTiming={accountId:safeId(context.accountId)??"redacted",mode:context.mode,
     stage,outcome,durationMs:Number.isFinite(elapsed)?Math.max(0,elapsed):0,releaseCommitSha:deployedGitSha()};
    const evaluationId=safeId(context.evaluationId),intentId=safeId(context.intentId);
+   if(stage==="prepare_entry"||stage==="after_reconcile"){
+     const substageTimings=sanitizeExecutionSubtimings(extra.substageTimings);
+     if(substageTimings)event.substageTimings=substageTimings;
+   }
+   // Only a completed ledger commit for this exact account may expose a PK.
+   // Never copy arbitrary receipt bodies, credentials, or error metadata.
+   const receipt=extra.reconciliationReceipt;
+   if(stage==="ledger_reconcile_commit"&&outcome==="completed"&&
+      receipt?.accountId===context.accountId&&safeId(context.accountId)&&
+      typeof receipt.observationId==="string"&&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(receipt.observationId))
+     event.reconciliationObservationId=receipt.observationId;
    if(evaluationId)event.evaluationId=evaluationId;
    if(intentId)event.intentId=intentId;
    if(Number.isFinite(extra.sourceAgeMs))event.sourceAgeMs=extra.sourceAgeMs;
