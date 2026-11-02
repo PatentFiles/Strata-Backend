@@ -1,5 +1,5 @@
 import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
-import {onCommittedForwardSignal} from "../forwardTestSignalWake";
+import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
@@ -23,6 +23,14 @@ export class ProductionWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private recoveryOnly = false;
+  private pendingSourceHint:CommittedForwardSourceHint|undefined;
+  private mandatoryReconcileActive=false;
+  private metadataAttempt:ReturnType<NonNullable<ProductionExecutor["prefetchCommittedPublicMetadata"]>>=null;
+  private beginMetadata(hint:CommittedForwardSourceHint|undefined):void {
+    if(!hint||this.recoveryOnly||this.metadataAttempt||!this.executor.prefetchCommittedPublicMetadata)return;
+    // A scheduling hint may fail or exhaust its budget; it never fails a tick.
+    try{this.metadataAttempt=this.executor.prefetchCommittedPublicMetadata(hint);}catch{/* normal reads remain the fallback only before any attempt is admitted */}
+  }
   private technicalRenewalDebt = false;
   private detachWake:(()=>void)|null=null;
   private entryHoldReported = false;
@@ -77,7 +85,12 @@ export class ProductionWorker {
       // Reserve before awaiting: partial failure after reuse must still force
       // the next tick normal. A fresh settled result cancels this debt.
       if(scheduling.allowEarlyTechnicalLeaseReuse)this.technicalRenewalDebt=true;
-      const renewal=await this.executor.reconcile(scheduling); // never replay dispatched POSTs
+      let renewal;
+      this.mandatoryReconcileActive=true;
+      try {
+        this.beginMetadata(this.pendingSourceHint);this.pendingSourceHint=undefined;
+        renewal=await this.executor.reconcile(scheduling); // never replay dispatched POSTs
+      }finally{this.mandatoryReconcileActive=false;this.metadataAttempt?.pause?.();}
       if(renewal?.technicalRenewal === "deferred")this.technicalRenewalDebt=true;
       else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
@@ -162,7 +175,15 @@ export class ProductionWorker {
       // Never infer a past block reason from the worker's current state.
       const observedAt=this.signalTrace?this.executor.now():0;
       this.scheduleTraceSweep(observedAt);
-      } finally {this.running = false;}
+      } finally {
+        const metadata=this.metadataAttempt;this.metadataAttempt=null;
+        metadata?.discard();
+        // Never let advisory I/O delay mandatory recovery/reconciliation.
+        // The coordinator retains actual in-flight/account slots until settle;
+        // an abort-ignoring adapter cannot start replacement speculative work.
+        void metadata?.drained.catch(()=>{});
+        this.running = false;
+      }
     }
   }
   async start(): Promise<void> {
@@ -202,14 +223,20 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=onCommittedForwardSignal(()=>{
+    this.detachWake=onCommittedForwardSignal((hint)=>{
       if(!this.timer||this.recoveryOnly)return;
+      if(hint){
+        this.pendingSourceHint=hint;
+        if(this.metadataAttempt&&this.metadataAttempt.source.evaluationId!==hint.evaluationId)
+          this.metadataAttempt.discard("entry_metadata_source_changed");
+        if(this.mandatoryReconcileActive)this.beginMetadata(hint);
+      }
       if(active){pending=true;return;}
       clearTimeout(this.timer);this.timer=setTimeout(()=>loop("committed_signal"),0);
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void { this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }

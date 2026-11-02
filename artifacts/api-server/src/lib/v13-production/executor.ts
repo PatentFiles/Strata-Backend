@@ -1,3 +1,4 @@
+import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import {ExecutionSubtimings} from "./executionSubtimings";
 import {captureFinalComparison,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
 import {entryCashProof,validEntryCashRisk,samePinnedCashModel,pinnedEntryDepthAvailable,type V13EntryCashProof} from "../v13EntryCashRisk";
@@ -55,6 +56,10 @@ export class ProductionExecutor {
 
   /** Server-owned hooks; snapshot acquisition alone must never renew authority. */
   afterReconcile: ((snapshot: Snapshot, subtimings?:ExecutionSubtimings, scheduling?:ReconcileSchedulingContext) => Promise<ReconcileSchedulingResult>) | null = null;
+  /** Public-only optional scheduling hook. Never fee/account/order authority. */
+  prefetchCommittedPublicMetadata: ((hint:CommittedForwardSourceHint)=>{
+    source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
+  }|null)|null=null;
   authorizeFinalEntry: ((tx: PoolClient) => Promise<void>) | null = null;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
@@ -194,7 +199,11 @@ export class ProductionExecutor {
     if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
     const side = source.direction === "UP" ? "YES" : "NO";
     subtimings.mark("market_evidence");
-    const book = await this.exchange.market(source.market_ticker, side);
+    const book = await this.exchange.market(source.market_ticker, side, {
+      stage:"prepare",evaluationId,marketTicker:source.market_ticker,
+      evaluatedAtMs:new Date(source.evaluated_at).getTime(),
+      btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
+    });
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");

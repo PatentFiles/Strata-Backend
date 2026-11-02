@@ -48,7 +48,7 @@ test('supervisor STOP with already prepared EXIT retains worker and real reserva
 
 async function waitForAccountWaiter(){
  const end=Date.now()+1500;while(Date.now()<end){
-  const r=await pool.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT * FROM v13_production_account WHERE id=%' LIMIT 2");
+  const r=await pool.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'SELECT * FROM v13_production_account WHERE id=%' OR query LIKE 'BEGIN; SELECT * FROM v13_production_account WHERE id=%') AND cardinality(pg_blocking_pids(pid))>0 LIMIT 2");
   if(r.rows.length)return;await new Promise(resolve=>setTimeout(resolve,10));
  }throw Error('account_lock_wait_not_observed');
 }
@@ -60,12 +60,14 @@ test('supervisor STOP serializes against late real preparation; late dispatch ca
   return c.query(sql,args);
  }};}};
  const supervisor=supervisorFor(s,wrapped as never);await supervisor.start({userId:USER,accountId:ACCOUNT} as never);
+ try{
  const stopped=await supervisor.stop({userId:USER,accountId:ACCOUNT,action:'STOP'});
  assert.equal(stopped.workerStopped,true);assert.equal(stopped.managingExposure,false);assert.equal((await lease()).state,'released');
  assert.ok(prepared);const id=await prepared;await assert.rejects(s.executor.dispatch(id),/entries_stopped|production_entry_release_not_current|stale_worker_fence/);
  assert.equal(s.posts.length,0);assert.equal(s.exchange.state.entriesAuthorized,false);
  const intent=(await pool.query('SELECT state,terminal FROM v13_production_intent WHERE id=$1',[id])).rows[0];
  assert.equal(intent.state,'BLOCKED');assert.equal(intent.terminal,true);
+ }finally{await prepared?.catch(()=>{});}
 });
 
 test('bound STOP refreshes account exposure rather than trusting pre-transaction activity snapshot',async()=>{

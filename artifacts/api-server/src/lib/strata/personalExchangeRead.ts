@@ -1,3 +1,4 @@
+import type {MetadataCaptureManifest} from "./metadataCapture";
 import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
 import {ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "../v13-production/requestQuantity";
@@ -326,6 +327,7 @@ export function ownedMarketEvidence(input: {
   artifactDigest: string;
   policyHash: string;
   verifiedAtMs: number;
+  metadataCapture?: MetadataCaptureManifest;
 }): MarketEvidence {
   // All fee metadata is bound to the SAME market used for the book and the
   // final POST re-read. Never rely on series multiplier alone.
@@ -335,6 +337,7 @@ export function ownedMarketEvidence(input: {
     seriesChangesPayload: input.seriesChangesPayload,
     eventChangesPayload: input.eventChangesPayload,
     observedAtMs: input.observedAtMs, nowMs: input.nowMs,
+    ...(input.metadataCapture !== undefined?{metadataCapture:input.metadataCapture}:{}),
   });
   if (!feeProof.ok) throw new Error(feeProof.reason);
   const seriesBody = object(input.seriesPayload);
@@ -376,7 +379,7 @@ export function ownedMarketEvidence(input: {
   const cashRisk={...identity,gridEvidence:{structure:structure as 'deci_cent'|'tapered_deci_cent',ranges:structuredClone(ranges) as Array<{start:string;end:string;step:string}>},modelFingerprint:cashRiskModelFingerprint(identity),
     entryCashDebitPerContractMicros:cash,entryTradeFeePerContractMicros:entry,exitLossPerContractMicros:exit};
   const fingerprint=cashRiskFeeFingerprint({contracts:count,limitPrice:limit,cashRisk});
-  return marketEvidenceFromBook({
+  const evidence=marketEvidenceFromBook({
     market: input.market,
     side: input.side,
     book,
@@ -388,13 +391,18 @@ export function ownedMarketEvidence(input: {
       sourceUrl: input.sourceUrl,
       formulaVersion: input.formulaVersion,
       fingerprint, cashRisk,
-      verifiedAtMs: input.verifiedAtMs,
+      // Public-body age cannot be renewed by later ORDER_ENTRY validation.
+      // Keep the older of authorization proof time and captured-body time.
+      verifiedAtMs: feeProof.metadataCapture
+        ? Math.min(input.verifiedAtMs,feeProof.verifiedAtMs) : input.verifiedAtMs,
       contracts: count,
       limitPrice: limit,
       reservedEntryFeeCents: Math.ceil(entry * count / 10_000),
       reservedExitFeeCents: Math.ceil(exit * count / 10_000),
     },
   });
+  return feeProof.metadataCapture
+    ? {...evidence,publicMetadataCapture:feeProof.metadataCapture} : evidence;
 }
 
 function ticksFromRanges(value: unknown): number[] | null {

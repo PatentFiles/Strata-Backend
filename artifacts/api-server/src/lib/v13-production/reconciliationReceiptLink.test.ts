@@ -10,6 +10,7 @@ function fixture(fail:'none'|'persist'|'commit'='none',commitWait?:Promise<void>
  const calls:{sql:string;params:unknown[]}[]=[];
  const tx={query:async(sql:string,params:unknown[]=[])=>{
   calls.push({sql,params});
+  if(sql==="BEGIN; SELECT * FROM v13_production_account WHERE id='account-a' FOR UPDATE")return [{command:'BEGIN',rows:[]},{command:'SELECT',rows:[account]}];
   if(sql==='COMMIT'){onCommitEntered?.();if(commitWait)await commitWait;}
   if(sql.startsWith('SELECT e.cash'))return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
   if((fail==='persist'&&sql.startsWith('UPDATE'))||(fail==='commit'&&sql==='COMMIT'))throw Error('test_failure');
@@ -31,7 +32,8 @@ test('committed pointer is exact inserted UUID/account with unchanged payload/di
  assert.equal(insert.params[4],digest(reconciliationObservation(snapshot)));
  assert.equal(calls.find(x=>x.sql.startsWith('UPDATE v13_production_account SET reconciled_at'))!.params[2],digest(snapshot));
  assert.equal(JSON.stringify(snapshot),before);assert.equal(calls.at(-1)!.sql,'COMMIT');
- assert.equal(calls.length,9); // BEGIN, account, intents, positions, conservation, receipt, persist, account proof, COMMIT
+ assert.equal(calls.length,8); // One BEGIN+account request; remaining seven statements unchanged.
+ assert.equal(calls[0]!.sql,"BEGIN; SELECT * FROM v13_production_account WHERE id='account-a' FOR UPDATE");
  assert.equal(calls.filter(x=>x.sql.includes('v13_production_observation')).length,1);
 });
 test('rollback and failed/uncertain COMMIT never return or emit a durable reconciliation pointer',async()=>{

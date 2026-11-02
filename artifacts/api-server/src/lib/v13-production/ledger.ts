@@ -89,14 +89,25 @@ export class ProductionLedger {
     const tx = await this.pool.connect();
     const wireScope={active:true,check:null as (()=>void)|null};
     try {
-      await tx.query("BEGIN");
-      if (options.lockTimeoutMs !== undefined) {
-        requireProof(Number.isSafeInteger(options.lockTimeoutMs) && options.lockTimeoutMs > 0 &&
-          options.lockTimeoutMs <= 5000, "production_lock_timeout_invalid");
-        // Recovery must bound the FIRST account lock, not just later queries.
-        await tx.query("SELECT set_config('lock_timeout',$1,true)", [`${options.lockTimeoutMs}ms`]);
+      let rows: Account[];
+      // No application decision occurs between BEGIN and the first lock. Send
+      // the same ordered statements as one simple-query message for validated
+      // identifier text only; all other inputs retain parameterized SQL.
+      if(options.lockTimeoutMs===undefined&&typeof this.accountId==='string'&&/^[a-zA-Z0-9:_-]{1,128}$/.test(this.accountId)){
+        const results=await tx.query(`BEGIN; SELECT * FROM v13_production_account WHERE id='${this.accountId}' FOR UPDATE`);
+        requireProof(Array.isArray(results)&&results.length===2&&results[0].command==='BEGIN'&&results[1].command==='SELECT'&&Array.isArray(results[1].rows),
+          "production_transaction_start_result_invalid");
+        rows=results[1].rows;
+      }else{
+        await tx.query("BEGIN");
+        if (options.lockTimeoutMs !== undefined) {
+          requireProof(Number.isSafeInteger(options.lockTimeoutMs) && options.lockTimeoutMs > 0 &&
+            options.lockTimeoutMs <= 5000, "production_lock_timeout_invalid");
+          // Recovery must bound the FIRST account lock, not just later queries.
+          await tx.query("SELECT set_config('lock_timeout',$1,true)", [`${options.lockTimeoutMs}ms`]);
+        }
+        rows=(await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId])).rows;
       }
-      const { rows } = await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId]);
       requireProof(rows.length === 1, "production_account_missing");
       const result = await this.context.run(tx, () => this.wireContext.run(wireScope,()=>body(tx, rows[0]!)));
       await tx.query("COMMIT");

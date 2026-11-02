@@ -1,3 +1,4 @@
+import type {ValidatedMetadataCapture} from "../strata/metadataCapture";
 import { createHash } from "node:crypto";
 import type { V13DepthLevel } from "../v13ExecutionPlanner";
 import type { V13VerifiedFeeEvidence } from "../v13LiveMoneyEntryPreflight";
@@ -28,7 +29,12 @@ export type Request = {
   reduceOnly: boolean; clientOrderId: string;
 } & ({contracts:number;quantityVersion?:never;quantityHundredths?:never}|
  {action:"SELL";reduceOnly:true;contracts?:never;quantityVersion:"EXIT_HUNDREDTHS_V1";quantityHundredths:string});
+export type EntryPrepareMarketContext=Readonly<{
+ stage:"prepare";evaluationId:string;marketTicker:string;evaluatedAtMs:number;
+ btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number;
+}>;
 export type MarketEvidence = {
+  publicMetadataCapture?:ValidatedMetadataCapture;
   observedAtMs: number; bestAskDollars: string; asks: V13DepthLevel[];
   bestBidDollars: string; bids: V13DepthLevel[];
   fee: V13VerifiedFeeEvidence;
@@ -56,7 +62,7 @@ export type Snapshot = {
 // evidence, including pagination and history coverage, before any release.
 export interface Exchange {
   readonly mode: "LIVE" | "SIMULATION";
-  market(market: string, side: "YES" | "NO"): Promise<MarketEvidence>;
+  market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext): Promise<MarketEvidence>;
   snapshot(identity: Identity, historyFromMs: number): Promise<Snapshot>;
   submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }>;
   cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void>;
