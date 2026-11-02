@@ -1,3 +1,4 @@
+import {validateMetadataCapture,type MetadataCaptureManifest,type ValidatedMetadataCapture} from "./metadataCapture";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 import {beginPublicMetadataRead} from "./publicMetadataReadRateLimit";
 /**
@@ -38,6 +39,8 @@ export type KalshiMarketFeeReadOnly = {
   feeType?: "quadratic";
   feeMultiplier?: "1";
   metadataDigest?: string;
+  /** Original public capture provenance; not a semantic fee model or authority. */
+  metadataCapture?: ValidatedMetadataCapture;
   selectionMode?: "exact_market_detail"|"complete_open_inventory";
   pdfProvenanceApproved: false;
   ownerPolicyApproved: false;
@@ -157,11 +160,13 @@ export async function probeCurrentKalshiFeeApi(
   clock: () => number = Date.now,
   expectedMarketTicker?: string,
   readMetadata?: (path:string)=>Promise<JsonObject>,
+  captureMetadata?: () => MetadataCaptureManifest,
 ): Promise<KalshiMarketFeeReadOnly> {
   // Order-time calls MUST bind evidence to the exact order market.
   // An ambiguous/absent ticker cannot fall back to another open market.
   if(expectedMarketTicker!==undefined && !tickerPattern.test(expectedMarketTicker))
     return fail("exact_market_identity_invalid");
+  if(captureMetadata && expectedMarketTicker===undefined)return fail("exact_market_identity_invalid");
   const started = clock();
   try {
     const metadata=readMetadata??((path:string)=>getJson(path,fetchImpl));
@@ -244,16 +249,27 @@ export async function probeCurrentKalshiFeeApi(
     const verifiedAt = clock();
     if (verifiedAt < started || verifiedAt - started > 15_000 || verifiedAt >= closeAt)
       return fail("market_fee_evidence_stale");
+    // Prefetched public bodies retain original transport time. The callback is
+    // deliberately consulted only at the existing validation point, after all
+    // mandatory reads, and uses the clock already sampled above.
+    const metadataCapture=captureMetadata ? validateMetadataCapture({
+      manifest:captureMetadata(),marketTicker:ticker,eventTicker,nowMs:verifiedAt,
+      marketPayload:m,eventPayload:e,seriesPayload:s,seriesChangesPayload:sc,eventChangesPayload:ec,
+    }):undefined;
+    if(captureMetadata && !metadataCapture)return fail("market_fee_capture_invalid_or_stale");
+    const observedAt=metadataCapture?.observedAtMs ?? verifiedAt;
     const facts = JSON.stringify({
       series: SERIES, ticker, eventTicker,
       seriesFeeType: series.fee_type, seriesMultiplier: series.fee_multiplier,
       seriesChanges: sc.series_fee_change_arr, eventChanges: ec.event_fee_changes,
-      observedAt: verifiedAt,
+      observedAt,
+      ...(metadataCapture?{captureFingerprint:metadataCapture.fingerprint}:{}),
     });
     return {
       ok: true, reason: "live_series_event_fee_metadata_verified_read_only",
       series: SERIES, exchangeIndex: 2, referenceDigest: REVIEWED_REFERENCE_PDF_SHA256,
-      liveVerifiedAt: new Date(verifiedAt).toISOString(),
+      liveVerifiedAt: new Date(observedAt).toISOString(),
+      ...(metadataCapture?{metadataCapture}:{}),
       selectionMode:expectedMarketTicker===undefined?"complete_open_inventory":"exact_market_detail",
       marketTicker: ticker, eventTicker, feeType: "quadratic", feeMultiplier: "1",
       metadataDigest: createHash("sha256").update(facts).digest("hex"),

@@ -93,7 +93,10 @@ test('held optional book capture never blocks another cycle and never builds a b
 test('worker wires optional evidence persistence only after commit and outside cycle return path',()=>{
  const source=readFileSync(new URL('./forwardTestWorker.ts',import.meta.url),'utf8');
  const cycle=source.slice(source.indexOf('export async function runForwardTestCycle'),source.indexOf('export function startServerForwardTestWorker'));
- assert.ok(cycle.includes('notifyCommittedForwardSignal()'));
+ assert.ok(cycle.includes('notifyCommittedForwardSignal(result.researchEvent?.phase==="ENTRY" ? {'));
+ assert.ok(cycle.includes('evaluationId:result.evaluationId,marketTicker:result.marketTicker!'));
+ assert.ok(cycle.includes('btcProviderAgeMs:Math.max(0,now.getTime()-btc.providerAt.getTime())'));
+ assert.ok(cycle.indexOf('}, engineId, LEASE_SECONDS);')<cycle.indexOf('notifyCommittedForwardSignal('));
  assert.ok(!cycle.includes('savePostActionPaperBook('));
  const scheduler=source.slice(source.indexOf('export function startServerForwardTestWorker'));
  assert.ok(scheduler.indexOf('await runForwardTestCycle(')<scheduler.indexOf('bookCaptureLane.submit('));

@@ -455,7 +455,13 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
   if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM")){
-    notifyCommittedForwardSignal();
+    notifyCommittedForwardSignal(result.researchEvent?.phase==="ENTRY" ? {
+      evaluationId:result.evaluationId,marketTicker:result.marketTicker!,evaluatedAtMs:now.getTime(),
+      committedAtMs:Date.now(),qualifyingTrigger:true,
+      btcProviderAgeMs:Math.max(0,now.getTime()-btc.providerAt.getTime()),
+      btcReceiveAgeMs:Math.max(0,now.getTime()-btc.receivedAt.getTime()),
+      marketAgeMs:Math.max(0,now.getTime()-market.fetchedAt.getTime()),
+    }:undefined);
     try{emitCommittedSourceQuote(detailMarket,{evaluationId:result.evaluationId,engineId,signal:result.signal,
       marketTicker:market.ticker,evaluatedAtMs:now.getTime(),commitReturnObservedAtMs:Date.now(),
       qualifyingTrigger:result.researchEvent?.phase==="ENTRY"},

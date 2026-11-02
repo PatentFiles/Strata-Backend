@@ -1,3 +1,4 @@
+import {validateMetadataCapture,type MetadataCaptureManifest,type ValidatedMetadataCapture} from "./metadataCapture";
 /**
  * Fail-closed fee metadata for the EXACT market about to be ordered by the
  * personal C52/C53 worker. Pure validation; no signals, prices or strategy
@@ -35,9 +36,10 @@ export type OwnedFeeMetadataInput = {
   eventChangesPayload: unknown;
   observedAtMs: number;
   nowMs: number;
+  metadataCapture?: MetadataCaptureManifest;
 };
 export type OwnedFeeMetadataProof =
-  | { ok: true; fingerprint: string; eventTicker: string; verifiedAtMs: number }
+  | { ok: true; fingerprint: string; eventTicker: string; verifiedAtMs: number; metadataCapture?: ValidatedMetadataCapture }
   | { ok: false; reason: "production_event_fee_evidence_unverified" };
 
 export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMetadataProof {
@@ -75,10 +77,15 @@ export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMe
   const end=Math.max(closing,...timeline as number[]);
   if (!scheduledClear(input.seriesChangesPayload,"series_fee_change_arr",end) ||
       !scheduledClear(input.eventChangesPayload,"event_fee_changes",end)) return fail();
+  const metadataCapture=input.metadataCapture !== undefined ? validateMetadataCapture({
+    ...input,manifest:input.metadataCapture,eventTicker,
+  }):undefined;
+  if(input.metadataCapture !== undefined && !metadataCapture)return fail();
   const sr=obj(input.seriesChangesPayload)!;
   const er=obj(input.eventChangesPayload)!;
   return {
-    ok:true,eventTicker,verifiedAtMs:input.nowMs,
+    ok:true,eventTicker,verifiedAtMs:metadataCapture?.observedAtMs ?? input.nowMs,
+    ...(metadataCapture?{metadataCapture}:{}),
     fingerprint:digest({
       scope:"personal_KXBTC15M_market_fee_metadata_v1",
       market:input.marketTicker,event:eventTicker,

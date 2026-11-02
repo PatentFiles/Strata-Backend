@@ -1,10 +1,10 @@
+import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
+import {processCommittedPublicMetadata,type MetadataPrefetchAttempt} from "./committedPublicMetadata";
 import {lockStopAccount,readStopExposure} from "./stopExposure";
 export {classifyStopExposureRow} from "./stopExposure";
 import {reconcileOwnedProtectiveExitOutcome} from "./ownedProtectiveExitOutcome";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
-import { createEntryMetadataSnapshot } from "./entryMetadataSnapshot";
 import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
-import { attachMarketEvidenceReadTiming, getMarketEvidenceReadTiming } from "./marketEvidenceReadTiming";
 import {beginExecutionStage,timedFinalFetch,type TimingObserver} from "../v13-production/stageTiming";
 import {logger} from "../logger";
 import {createEntryWireClockFetch} from "./entryWireClock";
@@ -47,10 +47,8 @@ import {
   RELEASE_LEASE_SQL,
 } from "./accountScopedExecution";
 import { dedicatedSignerFingerprint } from "./commissioning";
-import { gatherCompleteReadOnlyMarketEvidence } from "./gatherReadOnlyMarketEvidence";
 import {
   emptySnapshot,
-  ownedMarketEvidence,
   PERSONAL_KALSHI_HOST,
   PERSONAL_MARKET_METADATA_HOST,
   readOwnedKalshiFeeds,
@@ -206,6 +204,8 @@ export function createProductionPersonalSession(
     kalshiGet?: typeof getScopedKalshiJson;
     verifyFee?: typeof verifyCurrentFeeArtifact;
     now?: () => number;
+    /** LOCAL prototype opt-in. Production construction leaves this disabled. */
+    publicMetadataPrefetch?: boolean;
   } = {},
 ): PersonalSessionControl {
   const get = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch) =>
@@ -378,6 +378,9 @@ export function createProductionPersonalSession(
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
     },personalProductionFetch,timingObserver,timingContext);
+    let activeMetadata:MetadataPrefetchAttempt|null=null;
+    const metadataScope=()=>({accountId:input.accountId,ownerId:input.userId,releaseSha:deployedGitSha(),
+      holderId,fence:String(state.fencingToken),policyHash});
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -524,22 +527,15 @@ export function createProductionPersonalSession(
         // or the final transactional account proof can reopen it.
         return proven;
       },
-      readMarket: async (market, side) => {
-        const clock = now();
-        // Fresh per prepare/final invocation; only reviewed public API metadata is shared.
-        const metadataSnapshot=apiSource?createEntryMetadataSnapshot(market):undefined;
-        // Fee authorization is mandatory; overlap its read-only verification
-        // with immutable market metadata and the signed orderbook GET.
-        // Nothing becomes a verified book until every branch completes.
-        const gathered = await gatherCompleteReadOnlyMarketEvidence({
-            market,
-            verifyFee: async () => {
+      readMarket: (market,side,context)=>readOwnedEntryMarket({
+        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,
+        verifyFee:async(clock,readMetadata,captureMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               try {
               if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
                   sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
-                    probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,metadataSnapshot!.read)});
+                    probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata)});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
                     {phase:"authorization",reason:"api_fee_order_market_mismatch"},checked);
@@ -567,25 +563,30 @@ export function createProductionPersonalSession(
                 feeCheckedAt = clock;
               }
               feeTiming("completed");
+              return feeVerifiedAt;
               }catch(error){feeTiming("rejected",{error});throw error;}
-            },
-            readBook: () => get(material, `/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`, "?depth=100"),
-            readPublic: metadataSnapshot?.read??publicKalshiObject,
-          });
-        // All reads are mandatory and repeated on final dispatch. Missing,
-        // paginated or changed fee metadata still fails closed below.
-        const {bookPayload,seriesPayload,marketPayload,eventPayload,seriesChangesPayload,eventChangesPayload} = gathered;
-        return attachMarketEvidenceReadTiming(ownedMarketEvidence({
-          market, side, bookPayload, seriesPayload, marketPayload,
-          eventPayload, seriesChangesPayload, eventChangesPayload,
-          observedAtMs: clock, nowMs: now(), configuredStakeCents: configuredStake,
-          policyVersion, sourceUrl, formulaVersion, artifactDigest: digest, policyHash,
-          verifiedAtMs: feeVerifiedAt,
-        }), getMarketEvidenceReadTiming(gathered));
-      },
+
+        },
+        readBook:()=>get(material,`/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`,"?depth=100"),
+        readPublic:publicKalshiObject,configuredStakeCents:configuredStake,
+        policyVersion,sourceUrl,formulaVersion,artifactDigest:digest,policyHash,
+      }),
       fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
+    if(apiSource&&options.publicMetadataPrefetch===true){
+      session.executor.prefetchCommittedPublicMetadata=hint=>{
+        if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
+          state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
+        const attempt=processCommittedPublicMetadata.start(metadataScope(),hint);
+        if(!attempt)return null;
+        activeMetadata=attempt;
+        return {source:attempt.source,drained:attempt.drained,pause:attempt.pause,discard(reason){
+          attempt.discard(reason);
+          void attempt.drained.then(()=>{if(activeMetadata===attempt)activeMetadata=null;});
+        }};
+      };
+    }
     session.executor.afterReconcile=async (snapshot,subtimings,scheduling)=>{
       const sha=deployedGitSha();
       const scoped=/^[a-f0-9]{40}$/.test(sha);

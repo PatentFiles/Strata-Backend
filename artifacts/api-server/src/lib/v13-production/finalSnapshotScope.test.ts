@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ProductionLedger } from "./ledger";
 
-const pool = {connect:async()=>({query:async(sql:string)=>({rows:sql.startsWith("SELECT")?[{id:"account"}]:[]}),release:()=>{}})};
+const pool = {connect:async()=>({query:async(sql:string)=>sql==="BEGIN; SELECT * FROM v13_production_account WHERE id='account' FOR UPDATE"?[{command:"BEGIN",rows:[]},{command:"SELECT",rows:[{id:"account"}]}]:({rows:sql.startsWith("SELECT")?[{id:"account"}]:[]}),release:()=>{}})};
 test("final snapshot identity requires transaction and is cleared after success or failure",async()=>{
   const ledger = new ProductionLedger(pool as never,"account");
   await assert.rejects(ledger.withFinalAccountSnapshot("entry",async()=>{}),/transaction_required/);

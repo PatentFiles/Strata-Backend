@@ -1659,3 +1659,135 @@ test("reconciliation retains five terminal no-send intents without rewriting unc
   await invariant(f.ledger);
 });
 
+
+test('batched transaction start preserves complete source-to-wire boundary and removes one client request per transaction',async()=>{
+ const evaluated=Date.parse('2026-11-02T04:30:17.659Z'),btcAge=817;
+ const environment={NODE_ENV:process.env.NODE_ENV,RAILWAY_GIT_COMMIT_SHA:process.env.RAILWAY_GIT_COMMIT_SHA,STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+ Object.assign(process.env,{NODE_ENV:'test',RAILWAY_GIT_COMMIT_SHA:'e'.repeat(40),STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true'});
+ try{
+  for(const effectiveAge of [5000,5001,5421,-1,-5421]){
+   const replay=effectiveAge<0;const runs=[];
+   for(const baseline of [true,false]){
+    process.env.NODE_ENV='test';
+    const f=await fixture();const p=policy();p.maxQuoteAgeMs=5000;p.policyHash=computeV13LiveMoneyPolicyHash(p);
+    await pool.query('UPDATE v13_live_money_policy SET max_quote_age_ms=5000,policy_hash=$1 WHERE id=$2',[p.policyHash,p.id]);
+    f.exchange.now=evaluated+(replay?-77:1000);f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;f.exchange.evidence.observedAtMs=f.exchange.now;
+    const evaluation=await f.source();const market='KXBTC15M-26NOV012345-45';
+    await pool.query('UPDATE forward_test_evaluations SET evaluated_at=$2,btc_provider_age_ms=$3,market_ticker=$4 WHERE id=$1',[evaluation,new Date(evaluated),btcAge,market]);
+    let requests=0,batches=0,raw=0,finalSnapshots=0,authorizations=0;let wireAge:number|null=null;
+    const charge=(n:number)=>{requests+=n;if(replay)f.exchange.now+=20*n};
+    const counted=new Proxy(pool,{get(target,key){
+     if(key==='connect')return async()=>{const client=await target.connect();return new Proxy(client,{get(c,k){
+      if(k==='query')return async(...args:unknown[])=>{
+       const sql=String(args[0]);
+       if(sql.startsWith('BEGIN; SELECT * FROM v13_production_account')){
+        batches++;
+        if(baseline){charge(2);const begin=await client.query('BEGIN');const lock=await client.query('SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE',['test-account']);return [begin,lock]}
+       }
+       charge(1);return Reflect.apply(client.query,client,args);
+      };
+      const value=Reflect.get(c,k);return typeof value==='function'?value.bind(c):value;
+     }})};
+     if(key==='query')return (...args:unknown[])=>{charge(1);return Reflect.apply(target.query,target,args)};
+     const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+    }});
+    Object.defineProperty(f.ledger,'pool',{value:counted});
+    f.executor.authorizeFinalEntry=async tx=>{assert.equal(tx,f.ledger.currentTransaction());authorizations++};
+    if(replay){let snapshots=0,markets=0;
+     f.exchange.snapshot=async()=>{f.exchange.now+=snapshots++===0?773:638;f.exchange.evidence.observedAtMs=f.exchange.now;return structuredClone(f.exchange.evidence)};
+     f.exchange.market=async()=>{f.exchange.now+=markets++===0?444:213;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;return structuredClone(f.exchange.book)};
+    }
+    await f.executor.reconcile();
+    const id=await f.executor.prepareEntry(evaluation);
+    const oldSnapshot=f.exchange.snapshot.bind(f.exchange);
+    f.exchange.snapshot=async identity=>{finalSnapshots++;return oldSnapshot(identity)};
+    if(!replay)f.exchange.now=evaluated+3000;
+    f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;f.exchange.evidence.observedAtMs=f.exchange.now;
+    const source='strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555';
+    f.exchange.afterFinalBeforePost=async()=>{
+     const locked=f.ledger.currentTransaction();assert.ok(locked);
+     const tx={query:async(sql:string,args:unknown[])=>sql.includes('SELECT a.id')?{rows:[{id:'test-account'}]}:sql.includes('strata_continuous_execution_grants')?{rows:[{grant_id:'fixture-standing'}]}:locked.query(sql,args)};
+     const wire=createEntryWireClockFetch(()=>{wireAge=f.exchange.now-evaluated+btcAge;f.ledger.assertFinalWireClock()},async()=>{raw++;return new Response('{}')});
+     const guarded=createGuardedReviewedApiFeeFetch('11111111-1111-4111-8111-111111111111','test-account',source,wire,'b'.repeat(64),'c'.repeat(64),7,'test-holder',{
+      borrowTransaction:()=>tx as never,
+      verify:(async(_owner:unknown,_stage:unknown,_source:unknown,_market:unknown,options:{db:unknown})=>{
+       assert.equal(options.db,tx);assert.equal(f.ledger.currentTransaction(),locked);
+       // 1068ms is a calibration residual, not a measured provider/SQL cost.
+       // It makes the BASELINE full-wire fixture match recorded5421ms;
+       // the identical residual is used for the candidate.
+       if(replay)f.exchange.now+=325+(effectiveAge===-5421?1068:0);else f.exchange.now=evaluated+effectiveAge-btcAge;
+       return {ok:true,identity:{marketTicker:market,sourceUrl:source,digest:'d'.repeat(64),feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION}};
+      }) as never,
+     });
+     const request=(await locked.query('SELECT request FROM v13_production_intent WHERE id=$1',[id])).rows[0].request;
+     process.env.NODE_ENV='production';
+     try{await guarded('https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders',{method:'POST',body:JSON.stringify(encodeProductionOrder(request))});}finally{process.env.NODE_ENV='test'}
+    };
+    let refusal:string|null=null;
+    if(replay){try{await f.executor.dispatch(id)}catch(error){refusal=(error as Error).message}}
+    else if(effectiveAge<=5000)await f.executor.dispatch(id);else await assert.rejects(f.executor.dispatch(id),/production_final_wire_source_expired/);
+    assert.equal(finalSnapshots,1);if(!replay)assert.equal(raw,effectiveAge<=5000?1:0);assert.equal(authorizations,2);
+    const row=(await pool.query('SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+    if(!replay)assert.equal(row.state,effectiveAge<=5000?'UNKNOWN':'BLOCKED');
+    if(effectiveAge>5000)assert.equal(row.reserved_micros,'0');
+    runs.push({requests,batches,state:row.state,raw,finalSnapshots,authorizations,wireAge,refusal});
+   }
+   if(replay){assert.equal(runs[0].wireAge!-runs[1].wireAge!,80);
+    if(effectiveAge===-5421){assert.equal(runs[0].wireAge,5421);assert.equal(runs[1].wireAge,5341);assert.equal(runs[0].raw,0);assert.equal(runs[1].raw,0)}}
+   assert.equal(runs[0].batches,runs[1].batches);assert.ok(runs[1].batches>=4);
+   assert.equal(runs[0].requests-runs[1].requests,runs[1].batches);
+   console.log('TRANSACTION_START_PIPELINE',JSON.stringify({effectiveAge,replay,perClientQueryDelayMs:replay?20:0,baseline:runs[0],batched:runs[1]}));
+  }
+ }finally{for(const [key,value]of Object.entries(environment)){if(value===undefined)delete process.env[key];else process.env[key]=value}}
+});
+
+test('batched BEGIN/lock keeps rollback, identifier fallback and lock-timeout behavior',async()=>{
+ await fixture();
+ for(const scenario of ['missing','unsafe_identifier','select_error','malformed_result','timeout','invalid_timeout'] as const){
+  const calls:string[]=[];let bodies=0,releases=0;
+  const wrapped=new Proxy(pool,{get(target,key){if(key==='connect')return async()=>{
+   const c=await target.connect();return new Proxy(c,{get(client,k){
+    if(k==='query')return async(sql:string,args?:unknown[])=>{calls.push(sql);
+     if(sql.startsWith('BEGIN;')&&scenario==='select_error')return c.query('BEGIN; SELECT nonexistent_column FROM v13_production_account FOR UPDATE');
+     const result=await c.query(sql,args);
+     return sql.startsWith('BEGIN;')&&scenario==='malformed_result'?[]:result;
+    };
+    if(k==='release')return ()=>{releases++;c.release()};
+    const v=Reflect.get(client,k);return typeof v==='function'?v.bind(client):v;
+   }})};const v=Reflect.get(target,key);return typeof v==='function'?v.bind(target):v}});
+  const ledger=new ProductionLedger(wrapped,scenario==='missing'?'missing-account':scenario==='unsafe_identifier'?"absent' ; SELECT 1 --":'test-account');
+  const options=scenario==='timeout'?{lockTimeoutMs:100}:scenario==='invalid_timeout'?{lockTimeoutMs:0}:{};
+  const run=ledger.transaction(async()=>{bodies++},options);
+  if(scenario==='timeout')await run;else await assert.rejects(run);
+  assert.equal(bodies,scenario==='timeout'?1:0);assert.equal(releases,1);
+  assert.equal(calls.at(-1),scenario==='timeout'?'COMMIT':'ROLLBACK');
+  if(['unsafe_identifier','timeout','invalid_timeout'].includes(scenario))assert.equal(calls[0],'BEGIN');
+  else assert.ok(calls[0].startsWith('BEGIN; SELECT'));
+  if(scenario==='timeout')assert.ok(calls[1].includes("set_config('lock_timeout'"));
+ }
+});
+
+test('batched account lock serializes contenders and observes committed revision after waiting',async()=>{
+ const f=await fixture();const old=(await f.ledger.readAccount()).revision;
+ let release!:()=>void,entered!:()=>void;
+ const wait=new Promise<void>(r=>{release=r}),ready=new Promise<void>(r=>{entered=r});
+ const holder=f.ledger.transaction(async tx=>{await tx.query('UPDATE v13_production_account SET revision=revision+1 WHERE id=$1',['test-account']);entered();await wait});
+ await ready;let secondEntered=false;let publishPid!:(pid:number)=>void;
+ const pidReady=new Promise<number>(resolve=>{publishPid=resolve});
+ const contenderPool=new Proxy(pool,{get(target,key){if(key==='connect')return async()=>{
+  const client=await target.connect();const result=await client.query('SELECT pg_backend_pid() AS pid');publishPid(result.rows[0].pid);return client;
+ };const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value}});
+ const contender=new ProductionLedger(contenderPool,'test-account').transaction(async(_tx,a)=>{secondEntered=true;assert.equal(BigInt(a.revision),BigInt(old)+1n)});
+ let confirmedBlocked=false;
+ try{
+  const pid=await pidReady;
+  for(let attempt=0;attempt<100;attempt++){
+   const row=(await pool.query("SELECT wait_event_type,cardinality(pg_blocking_pids(pid)) AS blockers FROM pg_stat_activity WHERE pid=$1",[pid])).rows[0];
+   if(row?.wait_event_type==='Lock'&&Number(row.blockers)>0){confirmedBlocked=true;break}
+   await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(confirmedBlocked,true,'exact contender backend must be observed blocked on the held account lock');assert.equal(secondEntered,false);
+ }finally{release()}
+ await holder;await contender;assert.equal(secondEntered,true);
+ console.log('TRANSACTION_START_LOCK_BARRIER',JSON.stringify({confirmedBlocked,revisionAdvanced:true}));
+});
