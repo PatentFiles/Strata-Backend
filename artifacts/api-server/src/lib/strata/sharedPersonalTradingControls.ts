@@ -18,8 +18,13 @@ if (publicMetadataPrefetch.source === "invalid") {
     console.warn("strata_public_metadata_prefetch_config_invalid", {enabled:false});
   } catch { /* Optional diagnostics cannot disable mandatory recovery. */ }
 }
+const finalPublicMetadataPrefetch=readPublicMetadataPrefetchConfig(process.env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED);
+if(finalPublicMetadataPrefetch.source==="invalid"){
+  try{console.warn("strata_final_public_metadata_prefetch_config_invalid",{enabled:false});}catch{}
+}
 export const personalTradingSession = createProductionPersonalSession(pool, {
   publicMetadataPrefetch: publicMetadataPrefetch.enabled,
+  finalPublicMetadataPrefetch:finalPublicMetadataPrefetch.enabled,
 });
 export const personalTradingControls = createDatabaseUserScopePort(pool, {
   session: personalTradingSession,

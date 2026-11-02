@@ -15,14 +15,23 @@ const freeze=(value:unknown)=>{const pending=[value];while(pending.length){const
 export type MetadataPrefetchScope=Readonly<{accountId:string;ownerId:string;releaseSha:string;holderId:string;fence:string;policyHash:string}>;
 export type PreparedMetadataSource=Readonly<{evaluationId:string;marketTicker:string;evaluatedAtMs:number;btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number}>;
 export type PrefetchedPublicMetadata=Readonly<{read:(path:string)=>Promise<Body>;capture:()=>MetadataCaptureManifest}>;
-export type MetadataPrefetchAttempt={
-  readonly source:CommittedForwardSourceHint;
-  consume(scope:MetadataPrefetchScope,source:PreparedMetadataSource):PrefetchedPublicMetadata;
+export type MetadataPhaseBinding=Readonly<{phase:"FINAL_MARKET"|"WIRE_FEE";intentId:string}>;
+export type PhaseMetadataIdentity=MetadataPhaseBinding;
+type MetadataAttempt<S extends PreparedMetadataSource>={
+  readonly source:S;
+  consume(scope:MetadataPrefetchScope,source:PreparedMetadataSource,phase?:MetadataPhaseBinding):PrefetchedPublicMetadata;
   pause():void;
   discard(reason?:string):void;
   /** Settles after all actual fetch/body operations settle, not merely a timeout race. */
   readonly drained:Promise<void>;
 };
+
+export type MetadataPrefetchAttempt=MetadataAttempt<CommittedForwardSourceHint>;
+export type PhaseMetadataPrefetchAttempt=Omit<MetadataAttempt<PreparedMetadataSource>,"consume">&{
+ consume(scope:MetadataPrefetchScope,source:PreparedMetadataSource,phase:MetadataPhaseBinding):PrefetchedPublicMetadata;
+};
+
+export type PhaseMetadataAttempt=PhaseMetadataPrefetchAttempt;
 
 type Queued={allowed:()=>boolean;signal:AbortSignal;start:()=>void;reject:(error:Error)=>void};
 /** One instance must be shared by every owned session in one process. An aborted
@@ -32,7 +41,7 @@ type Queued={allowed:()=>boolean;signal:AbortSignal;start:()=>void;reject:(error
 export class CommittedPublicMetadataCoordinator {
   private active=0;
   private queue:Queued[]=[];
-  private accounts=new Map<string,MetadataPrefetchAttempt>();
+  private accounts=new Map<string,{discard(reason?:string):void;drained:Promise<void>}>();
   private seen=new Map<string,number>();
   constructor(private readonly fetchImpl:typeof fetch=globalThis.fetch,
     private readonly wallNow=Date.now,private readonly monotonicNow=()=>performance.now(),
@@ -60,20 +69,40 @@ export class CommittedPublicMetadataCoordinator {
     });
   }
   start(scopeInput:MetadataPrefetchScope,hintInput:CommittedForwardSourceHint):MetadataPrefetchAttempt|null {
+    return this.startScoped(scopeInput,hintInput);
+  }
+  /** Advisory only. Unlike PREPARE, these scopes originate from an already
+   * persisted intent. Never manufacture a producer committedAt timestamp.
+   * The same global/account slots and original source deadline still apply. */
+  startPhase(scopeInput:MetadataPrefetchScope,source:PreparedMetadataSource,
+    binding:MetadataPhaseBinding):PhaseMetadataPrefetchAttempt|null {
+    if(!binding||!["FINAL_MARKET","WIRE_FEE"].includes(binding.phase)||
+      typeof binding.intentId!=="string"||!identifier.test(binding.intentId))return null;
+    return this.startScoped(scopeInput,source,binding);
+  }
+  private startScoped<S extends PreparedMetadataSource>(scopeInput:MetadataPrefetchScope,hintInput:S,
+    phaseInput?:MetadataPhaseBinding):MetadataAttempt<S>|null {
     const at=this.wallNow(),mono=this.monotonicNow();
+    if(phaseInput&&(!Number.isFinite(mono)||mono<0))return null;
     for(const [key,end] of this.seen)if(end<=at)this.seen.delete(key);
     const ages=[hintInput.btcProviderAgeMs,hintInput.btcReceiveAgeMs,hintInput.marketAgeMs];
     if(![scopeInput.accountId,scopeInput.ownerId,scopeInput.holderId,hintInput.evaluationId,hintInput.marketTicker].every(v=>typeof v==="string")||!identifier.test(scopeInput.accountId)||!identifier.test(scopeInput.ownerId)||!identifier.test(scopeInput.holderId)||
       !/^[0-9]+$/.test(scopeInput.fence)||!/^[a-f0-9]{40}$/.test(scopeInput.releaseSha)||!/^[a-f0-9]{64}$/.test(scopeInput.policyHash)||
-      !identifier.test(hintInput.evaluationId)||!ticker.test(hintInput.marketTicker)||hintInput.qualifyingTrigger!==true||
-      ![hintInput.evaluatedAtMs,hintInput.committedAtMs,at,...ages].every(Number.isSafeInteger)||ages.some(x=>x<0)||
-      hintInput.evaluatedAtMs>hintInput.committedAtMs||hintInput.committedAtMs>at)return null;
+      !identifier.test(hintInput.evaluationId)||!ticker.test(hintInput.marketTicker)||
+      ![hintInput.evaluatedAtMs,at,...ages].every(Number.isSafeInteger)||ages.some(x=>x<0)||
+      hintInput.evaluatedAtMs>at)return null;
+    if(!phaseInput){
+      const committed=hintInput as unknown as CommittedForwardSourceHint;
+      if(committed.qualifyingTrigger!==true||!Number.isSafeInteger(committed.committedAtMs)||
+        committed.evaluatedAtMs>committed.committedAtMs||committed.committedAtMs>at)return null;
+    }
     // Conservative budget only. All existing policy/source/price clocks still run.
     const expires=hintInput.evaluatedAtMs+5_000-Math.max(...ages);
-    const key=JSON.stringify([scopeInput.accountId,hintInput.evaluationId]);
+    const key=JSON.stringify(phaseInput?[scopeInput.accountId,hintInput.evaluationId,phaseInput.phase,phaseInput.intentId]:[scopeInput.accountId,hintInput.evaluationId]);
     if(expires<=at||this.accounts.has(scopeInput.accountId)||this.accounts.size>=this.limits.accounts||
       this.seen.has(key)||this.seen.size>=this.limits.seen)return null;
     const scope=Object.freeze({...scopeInput}),hint=Object.freeze({...hintInput});
+    const phase=phaseInput?Object.freeze({...phaseInput}):undefined;
     this.seen.set(key,expires);
     const controller=new AbortController(),bodies=new Map<string,Body>(),captures=new Map<string,MetadataBodyCapture>();
     const requests:Promise<unknown>[]=[];
@@ -92,7 +121,7 @@ export class CommittedPublicMetadataCoordinator {
     timer.unref?.();
     const fresh=(includeProviderFailure=true)=>{
       const now=this.wallNow(),elapsed=this.monotonicNow()-mono;
-      if(now<at||now>=expires||elapsed<0||elapsed>=Math.min(this.limits.timeoutMs,expires-at))discard("entry_metadata_prefetch_expired");
+      if((phase&&(!Number.isFinite(now)||!Number.isFinite(elapsed)))||now<at||now>=expires||elapsed<0||elapsed>=Math.min(this.limits.timeoutMs,expires-at))discard("entry_metadata_prefetch_expired");
       if(discarded||(includeProviderFailure&&failed))throw failure;
     };
     const load=(path:string):Promise<Body>=>{
@@ -152,10 +181,11 @@ export class CommittedPublicMetadataCoordinator {
     void complete.catch(()=>{});
 
     const drained=Promise.allSettled([complete,events]).then(async()=>{await Promise.allSettled(requests);finished=true;if(discarded)this.accounts.delete(scope.accountId);});
-    const attempt:MetadataPrefetchAttempt=Object.freeze({source:hint,drained,discard,pause:()=>{allowed=false;},
-      consume:(expectedScope:MetadataPrefetchScope,source:PreparedMetadataSource)=>{
+    const attempt:MetadataAttempt<S>=Object.freeze({source:hint,drained,discard,pause:()=>{allowed=false;},
+      consume:(expectedScope:MetadataPrefetchScope,source:PreparedMetadataSource,expectedPhase?:MetadataPhaseBinding)=>{
         if(consumed)throw error("entry_metadata_prefetch_already_consumed");consumed=true;
-        if(Object.keys(scope).some(k=>scope[k as keyof MetadataPrefetchScope]!==expectedScope[k as keyof MetadataPrefetchScope])||
+        if((phase?(expectedPhase?.phase!==phase.phase||expectedPhase?.intentId!==phase.intentId):expectedPhase!==undefined)||
+          Object.keys(scope).some(k=>scope[k as keyof MetadataPrefetchScope]!==expectedScope[k as keyof MetadataPrefetchScope])||
           source.evaluationId!==hint.evaluationId||source.marketTicker!==hint.marketTicker||source.evaluatedAtMs!==hint.evaluatedAtMs||
           source.btcProviderAgeMs!==hint.btcProviderAgeMs||source.btcReceiveAgeMs!==hint.btcReceiveAgeMs||source.marketAgeMs!==hint.marketAgeMs){
           discard("entry_metadata_scope_changed");

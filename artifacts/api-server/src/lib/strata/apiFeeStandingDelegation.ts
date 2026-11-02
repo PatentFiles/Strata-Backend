@@ -1,3 +1,4 @@
+import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {deployedGitSha} from "./deployedGitSha";
@@ -225,11 +226,13 @@ export async function renewStandingFeeObservationLease(
     !["STEP_11","ORDER_ENTRY"].includes(stage))
    return {ok:false,reason:"standing_fee_stage_identity_invalid"};
  try{
-  const updated=await (deps.db??pool).query(CONTINUE_SQL,
+  const done=beginFeeAuthorityTiming("fee_standing_renewal_query");let fulfilled=false;
+  try{const updated=await (deps.db??pool).query(CONTINUE_SQL,
     [ownerId,grantId,release,stage,API_POLICY_SIGNED_REVIEW_V1,
      PDF_FREE_RATE_REVIEW_VECTOR_VERSION,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]);
+  fulfilled=true;
   if(updated.rows.length!==1)return {ok:false,reason:"standing_model_consent_or_live_policy_missing"};
-  return {ok:true,validUntil:updated.rows[0]?.valid_until};
+  return {ok:true,validUntil:updated.rows[0]?.valid_until};}finally{done(fulfilled?"fulfilled":"rejected");}
  }catch{return {ok:false,reason:"standing_fee_lease_unavailable"};}
 }
 

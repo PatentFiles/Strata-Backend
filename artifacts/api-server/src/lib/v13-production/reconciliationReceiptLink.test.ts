@@ -65,8 +65,7 @@ test('receipt metadata is UUID-only, account-bound and restricted to completed l
 test('actual executor forwards committed pointer exactly once on existing event, not snapshot/authority stages',async()=>{
  const {ProductionExecutor}=await import('./executor');
  const id='11111111-1111-4111-8111-111111111111';let providerReads=0;
- const executor=new ProductionExecutor({accountId:'account-a',readAccount:async()=>({id:'account-a'}),
-  pool:{query:async()=>({rows:[{earliest:null}]})},reconcile:async()=>({accountId:'account-a',observationId:id})} as never,
+ const executor=new ProductionExecutor({accountId:'account-a',readReconcileAccount:async()=>({account:{id:'account-a'},earliest:null}),reconcile:async()=>({accountId:'account-a',observationId:id})} as never,
   {mode:'SIMULATION',snapshot:async()=>{providerReads++;return {};}} as never,()=>1000);
  const events:StageTiming[]=[];executor.timingObserver=e=>{events.push(e)};
  await executor.reconcile();await Promise.resolve();
@@ -80,8 +79,7 @@ test('held COMMIT cannot emit early pointer; release emits once, actual executor
   let release!:()=>void;const wait=new Promise<void>(r=>{release=r});
   let entered!:()=>void;const commitEntered=new Promise<void>(r=>{entered=r});
   const {ledger}=fixture(failure,wait,entered);
-  ledger.readAccount=async()=>({id:'account-a',revision:'1'}) as Account;
-  (ledger.pool as any).query=async()=>({rows:[{earliest:null}]});
+  ledger.readReconcileAccount=async()=>({account:{id:'account-a',revision:'1'} as Account,earliest:null});
   const executor=new ProductionExecutor(ledger,{mode:'SIMULATION',snapshot:async()=>snapshot} as never,()=>1000);
   const events:StageTiming[]=[];executor.timingObserver=e=>{events.push(e)};
   const pending=executor.reconcile();

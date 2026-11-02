@@ -1,3 +1,4 @@
+import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { deployedGitSha } from "./deployedGitSha";
@@ -180,8 +181,9 @@ export const CONTINUOUS_SIGNAL_CURRENT_LEASE_SQL=CONTINUOUS_CURRENT_LEASE_SQL
 export async function checkContinuousEligibility(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))return false;
  try{
-  const r=await db.query(CONTINUOUS_ENTRY_AUTHORIZATION_SQL,[ownerId,sha]);
-  return r.rows.length===1;
+  const done=beginFeeAuthorityTiming("standing_eligibility_query");let fulfilled=false;
+  try{const r=await db.query(CONTINUOUS_ENTRY_AUTHORIZATION_SQL,[ownerId,sha]);fulfilled=true;
+  return r.rows.length===1;}finally{done(fulfilled?"fulfilled":"rejected");}
  }catch{return false}
 }
 
@@ -353,7 +355,8 @@ export async function renewContinuousTechnicalLease(input:{
  */
 export async function hasContinuousGrantHistory(db:Pick<Db,"query">,ownerId:string,sha:string){
  if(!UUID.test(ownerId)||!SHA.test(sha))throw new Error("standing_scope_invalid");
- const rows=await db.query(`SELECT grant_id FROM private.strata_continuous_execution_grants
+ const done=beginFeeAuthorityTiming("standing_history_query");let fulfilled=false;
+ try{const rows=await db.query(`SELECT grant_id FROM private.strata_continuous_execution_grants
    WHERE owner_user_id=$1::uuid AND release_commit_sha=$2 FOR SHARE`,[ownerId,sha]);
- return rows.rows.length>0;
+ fulfilled=true;return rows.rows.length>0;}finally{done(fulfilled?"fulfilled":"rejected");}
 }

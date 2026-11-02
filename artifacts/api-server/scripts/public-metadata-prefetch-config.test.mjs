@@ -8,6 +8,7 @@ import {build} from "esbuild";
 const entry=fileURLToPath(new URL("../src/lib/strata/sharedPersonalTradingControls.ts",import.meta.url));
 const supervisor=fileURLToPath(new URL("../src/lib/strata/personalExecutionSupervisor.ts",import.meta.url));
 const flag="STRATA_PUBLIC_METADATA_PREFETCH_ENABLED";
+const finalFlag="STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED";
 // Compile the ACTUAL process-wide construction module. Only its DB, supervisor
 // factory and HTTP-control-port dependencies are offline stubs. Config parsing
 // and option forwarding are real; no worker, DB, provider or socket is started.
@@ -43,14 +44,15 @@ function construct(value,{extra={},throwDiagnostic=false}={}){
     fetch(){throw Error("network_forbidden_in_configuration_test");}};
   return {run:()=>runInNewContext(source,context,{timeout:1000}),calls,values,module,diagnostics,envReads};
 }
-function verifySharedConstruction(c,enabled){
+function verifySharedConstruction(c,enabled,finalEnabled=false){
   assert.equal(c.calls.length,2);const [session,controls]=c.calls;
   assert.equal(session.kind,"supervisor");assert.equal(session.options.publicMetadataPrefetch,enabled);
-  assert.deepEqual(Object.keys(session.options),["publicMetadataPrefetch"]);
+  assert.deepEqual(Object.keys(session.options),["publicMetadataPrefetch","finalPublicMetadataPrefetch"]);
+  assert.equal(session.options.finalPublicMetadataPrefetch,finalEnabled);
   assert.equal(controls.kind,"controls");assert.equal(controls.pool,session.pool);
   assert.equal(controls.options.session,c.module.exports.personalTradingSession);
   assert.equal(c.module.exports.personalTradingControls.session,c.module.exports.personalTradingSession);
-  assert.deepEqual(c.envReads,[flag],"only the explicit rollout flag is read, exactly once");
+  assert.deepEqual(c.envReads,[flag,finalFlag],"only the two explicit independent rollout flags are read, exactly once each");
 }
 
 test("unset and exact false retain OFF at the actual shared supervisor construction",()=>{
@@ -94,5 +96,18 @@ test("other execution flags cannot opt in and are neither read nor changed",()=>
       STRATA_AUTOMATIC_WITHDRAWALS_ENABLED:"true",STRATA_BOGUS_PREFETCH_ENABLED:"true"};
     const c=construct(value,{extra});c.run();verifySharedConstruction(c,value==="true");
     for(const [name,setting] of Object.entries(extra))assert.equal(c.values[name],setting);
+  }
+});
+
+// The prior PREPARE rollout flag cannot silently expand to final/wire phases.
+test("final phases require their own exact true and do not enable PREPARE",()=>{
+  for(const prepare of [undefined,"false","true"]){
+    for(const final of [undefined,"false","true","TRUE"," true","true "]){
+      const c=construct(prepare,{extra:final===undefined?{}:{[finalFlag]:final}});c.run();
+      verifySharedConstruction(c,prepare==="true",final==="true");
+      assert.equal(c.diagnostics.length,[undefined,"false","true"].includes(final)?0:1);
+      if(c.diagnostics.length)assert.deepEqual(JSON.parse(JSON.stringify(c.diagnostics)),[["strata_final_public_metadata_prefetch_config_invalid",{enabled:false}]]);
+      assert.equal(c.values[finalFlag],final);
+    }
   }
 });

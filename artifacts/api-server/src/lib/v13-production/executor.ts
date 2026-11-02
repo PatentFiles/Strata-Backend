@@ -1,3 +1,5 @@
+import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
+import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
 import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
 import {OwnedFeedTimingCapture} from "../strata/ownedFeedReadTiming";
 import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
@@ -62,6 +64,15 @@ export class ProductionExecutor {
   prefetchCommittedPublicMetadata: ((hint:CommittedForwardSourceHint)=>{
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
   }|null)|null=null;
+  finalPublicMetadata:FinalPublicMetadataHooks|null=null;
+  private phaseContext(i:Intent,invocation:symbol|undefined):FinalPublicMetadataContext|null {
+    if(!invocation)return null;
+    const source=i.decision?.source as Record<string,any>|undefined;
+    if(!source||typeof source!=="object")return null;
+    try{return {intentId:i.id,invocation,source:{evaluationId:i.evaluation_id!,marketTicker:i.market,
+      evaluatedAtMs:new Date(source.evaluated_at).getTime(),btcProviderAgeMs:source.btc_provider_age_ms,
+      btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms}};}catch{return null;}
+  }
   authorizeFinalEntry: ((tx: PoolClient) => Promise<void>) | null = null;
 
   private async assertEntryPolicyWindow(tx: PoolClient, source: {
@@ -161,8 +172,7 @@ export class ProductionExecutor {
     const done=this.startTiming("reconciliation");
     let schedulingResult:ReconcileSchedulingResult=undefined;
     try {
-      const a = await this.ledger.readAccount();
-      const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+      const { account: a, earliest: floor } = await this.ledger.readReconcileAccount();
       const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
       try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot()});}
@@ -390,13 +400,23 @@ export class ProductionExecutor {
     });
   }
 
-  async dispatch(id: string): Promise<void> {
+  dispatch(id: string): Promise<void> {
+    // A nested dispatch must not contribute pre-submit authorization to its parent.
+    // Scope exit is synchronous and returns the exact existing promise.
+    return withoutFeeAuthorityTiming(()=>{
+    if(!this.finalPublicMetadata)return this.dispatchWithPhases(id);
+    const invocation=Symbol("dispatch-metadata");
+    return this.dispatchWithPhases(id,invocation).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
+    });
+  }
+  private async dispatchWithPhases(id:string,invocation?:symbol):Promise<void> {
     // Precommit dispatch identity BEFORE any network side effect. A crash in
     // the gap is indistinguishable from an uncertain POST, so NEVER replay it.
     const claimed = await this.ledger.transaction(async (tx, a) => {
       const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
       requireProof(i, "production_intent_missing");
       if (i.state !== "PREPARED") return false;
+      if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
       await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
       await this.ledger.persist(tx, a);
@@ -408,10 +428,12 @@ export class ProductionExecutor {
     }
     this.fault("after_dispatch_commit");
     const dispatchTiming=this.startTiming("dispatch",{intentId:id});
+    const feeAuthorityTiming={capture:null as FeeAuthorityTimingCapture|null};
     let invoked = false;
     try {
       await this.ledger.transaction(async (tx, a) => {
         const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
+        if(i?.kind==="ENTRY"&&this.timingObserver)feeAuthorityTiming.capture=new FeeAuthorityTimingCapture();
         // Lock and recheck the durable capability/authorization before entering
         // the transport. Network quote/account proof belongs at its final
         // pre-sign boundary; doing it here as well duplicates signed reads.
@@ -443,7 +465,10 @@ export class ProductionExecutor {
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
             i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
-          const book = await this.exchange.market(i.market, i.side);
+          const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
+          const book = phaseContext&&this.finalPublicMetadata
+            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side))
+            :await this.exchange.market(i.market, i.side);
           finalMarketReads=getMarketEvidenceReadTiming(book);
           const stored = i.decision.book as MarketEvidence;
           const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
@@ -518,6 +543,7 @@ export class ProductionExecutor {
             "production_final_owned_feed_changed_or_stale");
           }
           const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+          if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("WIRE_FEE",context);}
           const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
           let snapshot:Snapshot;
           try{snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
@@ -615,27 +641,27 @@ export class ProductionExecutor {
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.
         // Durable authorization locks remain held through signing and sending.
-        await this.exchange.submit(i.request, final);
+        await (i.kind==="ENTRY"&&feeAuthorityTiming.capture?feeAuthorityTiming.capture.run(()=>withFeeAuthorityTimingPurpose("FINAL_MARKET",()=>this.exchange.submit(i.request,final))):withoutFeeAuthorityTiming(()=>this.exchange.submit(i.request, final)));
         this.fault("after_post_before_commit");
         await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1", [id]);
         await this.ledger.observe(tx, "POST_ATTEMPT", { id, clientOrderId: i.client_order_id, outcome: "GET_RECONCILIATION_REQUIRED" });
         await this.ledger.persist(tx, a);
       });
-      dispatchTiming("reconciliation_required");
+      dispatchTiming("reconciliation_required",{feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
     } catch (error) {
       // Even a rejected/timeout response is not terminal account evidence.
       await this.ledger.transaction(async (tx, a) => {
         const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
         if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id) ||
             isReviewedApiFeeWireRefusal(error,failed.client_order_id)) {
-          dispatchTiming("proven_not_posted",{error});
+          dispatchTiming("proven_not_posted",{error,feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
           const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");
           a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
           await tx.query("UPDATE v13_production_intent SET state='BLOCKED',terminal=true,reserved_micros=0 WHERE id=$1", [id]);
           await this.ledger.observe(tx, "PROVEN_NOT_POSTED", { id, reason: (error as Error).message });
         } else {
-          dispatchTiming("post_uncertain",{error});
+          dispatchTiming("post_uncertain",{error,feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
           await tx.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1 AND state='DISPATCHED'", [id]);
           await this.ledger.observe(tx, "POST_UNCERTAIN", { id, reason: (error as Error).message });
         }

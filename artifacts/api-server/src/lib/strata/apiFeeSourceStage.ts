@@ -1,3 +1,4 @@
+import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 /**
  * Real, service-owned API fee policy source stage check.
@@ -99,8 +100,10 @@ export async function verifyReviewedApiFeeSourceStage(
  const parsed=expectedSourceUrl===undefined?null:parseReviewedApiSource(expectedSourceUrl);
  if(expectedSourceUrl!==undefined && !parsed) return no("api_fee_source_url_invalid");
  // Only valid LIVE provider-origin market evidence qualifies; no PDF request.
- const observation=await (deps.probe??probeCurrentKalshiFeeApi)(
-   globalThis.fetch,deps.now??Date.now,exactOrderMarket);
+ let observation:Awaited<ReturnType<typeof probeCurrentKalshiFeeApi>>;
+ const probeDone=beginFeeAuthorityTiming("fee_public_probe");let probeOk=false;
+ try{observation=await (deps.probe??probeCurrentKalshiFeeApi)(
+   globalThis.fetch,deps.now??Date.now,exactOrderMarket);probeOk=observation.ok===true;}finally{probeDone(probeOk?"fulfilled":"rejected");}
  const candidate=preparePdfFreeApiFeePolicyReview(observation,(deps.now??Date.now)());
  if(!candidate.ok) return no(candidate.reason,candidate);
  if(exactOrderMarket && candidate.marketTicker!==exactOrderMarket)
@@ -108,11 +111,12 @@ export async function verifyReviewedApiFeeSourceStage(
  let records:Record<string,unknown>[];
  try {
   const db=deps.db??pool;
-  const loaded=await db.query(READ_API_FEE_STAGE_SQL,[
+  const done=beginFeeAuthorityTiming("fee_review_query");let fulfilled=false;
+  try{const loaded=await db.query(READ_API_FEE_STAGE_SQL,[
    ownerUserId,parsed?.grantId??null,stage,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
   ]);
-  records=loaded.rows;
+  records=loaded.rows;fulfilled=true;}finally{done(fulfilled?"fulfilled":"rejected");}
  }catch{return no("api_fee_database_review_unavailable");}
  if(records.length!==1){
   // A previously approved per-owner 15m bootstrap grant must NEVER be

@@ -1172,3 +1172,129 @@ test("stale retry: invalid current-policy window still denies before stale, conc
  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_intent WHERE account_id=$1",[ACCOUNT])).rows[0].n,0);
  assert.equal((await pool.query("SELECT reserved_micros FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows[0].reserved_micros,"0");
 });
+
+import {FinalPublicMetadataPhases} from './finalPublicMetadataPhases';
+import {createGuardedReviewedApiFeeFetch,FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL} from './guardedReviewedApiFeeWire';
+import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from './apiFeeSourceStage';
+test('two distinct final public scopes overlap real owned-ledger gates and signed work without changing requests, original clocks or wire checks',async()=>{
+ const results:any[]=[],accounting=new Map<string,unknown>();
+ const fixtureOpen=new Date(Date.now()-60000).toISOString(),fixtureClose=new Date(Date.now()+900000).toISOString();
+ const savedEnv={node:process.env.NODE_ENV,sha:process.env.RAILWAY_GIT_COMMIT_SHA,release:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+ process.env.NODE_ENV='production';process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ try{for(const enabled of [false,true])for(const failure of ['none','wire-stale','wire-revoked','after-claim-hold','A-429','B-429','B-bad-body','B-429-authority-closed','A-429-authority-closed','credential-replaced','owner-replaced','rollover','B-stop-queued','deadline-stress','production-shaped','slower-stress']){
+  const posts:string[]=[],s=await tradingSession(500,posts),market='KXBTC15M-TEST-000',event='KXBTC15M-TEST';
+  const observedStages:any[]=[];s.executor.timingObserver=stage=>{observedStages.push(stage);};
+  const sourceUrl='strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555';
+  const approved={...policy(),maxQuoteAgeMs:5000,feePolicyVersion:API_SOURCE_POLICY_VERSION,feeFormulaVersion:API_SOURCE_FORMULA_VERSION,feeSourceUrl:sourceUrl};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
+  await pool.query('UPDATE v13_live_money_policy SET max_quote_age_ms=5000,fee_policy_version=$1,fee_formula_version=$2,fee_source_url=$3,policy_hash=$4 WHERE id=$5',[approved.feePolicyVersion,approved.feeFormulaVersion,sourceUrl,approved.policyHash,approved.id]);
+  const evaluationId=await source(s.now),originalAt=s.now,anchor=performance.now();
+  const sensitivity=['deadline-stress','production-shaped','slower-stress'].includes(failure);
+  const delays=failure==='production-shaped'?{db:26,root:60,event:180,signed:500}:failure==='slower-stress'?{db:35,root:80,event:240,signed:650}:failure==='deadline-stress'?{db:16,root:50,event:150,signed:300}:{db:8,root:30,event:75,signed:180};
+  if(sensitivity)await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=228 WHERE id=$1',[evaluationId]);
+  let clockOffset=0;const dbDelay=delays.db;
+  const time=()=>{const at=originalAt+clockOffset+Math.floor(performance.now()-anchor);if(at>s.now)s.advance(at-s.now);return s.now;};
+  const delay=async(ms:number)=>{await new Promise<void>(r=>setTimeout(r,ms));time();};
+  let authorityClockCalls=0;Object.defineProperty(s.executor,'now',{value:()=>{authorityClockCalls++;return time();}});
+  const close=fixtureClose,open=fixtureOpen;
+  const pages:Record<string,unknown>={
+   [`/markets/${market}`]:{market:{ticker:market,event_ticker:event,exchange_index:2,status:'active',open_time:open,close_time:close,expiration_time:close,expected_expiration_time:close,latest_expiration_time:close,price_level_structure:'deci_cent'}},
+   [`/events/${event}`]:{event:{event_ticker:event,series_ticker:'KXBTC15M',exchange_index:2,fee_type_override:null,fee_multiplier_override:null}},
+   '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
+   '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[]},
+   [`/events/fee_changes?event_ticker=${event}&limit=100`]:{event_fee_changes:[],cursor:''},
+  };
+  let dispatching=false,books=0,feeReviews=0,wireReviews=0,signed=0,wireAt=0,allowed=true;
+  const calls:Array<{path:string;at:number}>=[],captures:any[]=[],sqlCalls:string[]=[],timeline:Array<{event:string;atMs:number}>=[];
+  const mark=(event:string)=>timeline.push({event,atMs:performance.now()-anchor});
+  const fetchPublic=(async(input,init)=>{const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');assert.equal(init?.method,'GET');assert.ok(path in pages);calls.push({path,at:time()});const callNumber=calls.length;if(dispatching)await delay(path.startsWith('/events/')?delays.event:delays.root);if(dispatching&&((failure.startsWith('A-429')&&callNumber===6)||(failure.startsWith('B-429')&&callNumber===11)))return new Response('{}',{status:429,headers:{'content-type':'application/json','retry-after':'1'}});if(failure==='B-bad-body'&&callNumber===11)return Response.json(null);return Response.json(pages[path]);}) as typeof fetch;
+  const binding={accountId:ACCOUNT,ownerId:USER,holderId:'phase-fixture',releaseSha:'a'.repeat(40),fence:'3',policyHash:approved.policyHash!};
+  const coordinator=new CommittedPublicMetadataCoordinator(fetchPublic,time,()=>performance.now());
+  const phases=enabled?new FinalPublicMetadataPhases(coordinator,()=>binding,()=>allowed):null;
+  s.executor.finalPublicMetadata=phases;
+  if(phases){const startPhase=phases.start.bind(phases);phases.start=(phase,context)=>{mark(`${phase}_start`);startPhase(phase,context);};const consumeA=phases.consumeFinalMarket.bind(phases);phases.consumeFinalMarket=(ticker)=>{mark('FINAL_MARKET_consume');return consumeA(ticker);};const consumeB=phases.consumeWire.bind(phases);phases.consumeWire=(id,ticker)=>{mark('WIRE_FEE_consume');return consumeB(id,ticker);};}
+  Object.defineProperty(s.exchange,'readMarket',{value:async(ticker:string,side:'YES'|'NO',context:any)=>{
+   const result=await readOwnedEntryMarket({market:ticker,side,context,now:time,apiSource:true,activeMetadata:null,metadataScope:()=>binding,publicFetch:fetchPublic,
+    finalPublicMetadata:()=>phases?.consumeFinalMarket(ticker),
+    verifyFee:async(_clock,read,capture)=>{feeReviews++;const proof=await probeCurrentKalshiFeeApi(fetchPublic,time,ticker,read,capture);if(!proof.ok)throw Error(proof.reason);if(dispatching)await delay(40);return Date.parse(proof.liveVerifiedAt!);},
+    readBook:async()=>{books++;if(dispatching)await delay(25);return {orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};},
+    readPublic:async()=>{throw Error('unexpected_public_fallback');},configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:'d'.repeat(64),policyHash:approved.policyHash!});
+   if(dispatching&&result.publicMetadataCapture)captures.push(result.publicMetadataCapture);if(dispatching&&failure==='credential-replaced')s.exchange.state.credentialFingerprint='e'.repeat(64);return result;
+  }});
+  const snapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof snapshot>)=>{signed++;if(dispatching){mark('signed_account_start');if(failure==='owner-replaced')await s.executor.ledger.currentTransaction()!.query('UPDATE v13_production_account SET owner_user_id=$2 WHERE id=$1',[ACCOUNT,OTHER]);if(failure==='rollover')(pages[`/markets/${market}`] as any).market.ticker='KXBTC15M-OTHER';if(failure==='B-stop-queued'){allowed=false;phases?.discardAll();}await delay(delays.signed);mark('signed_account_complete');}return snapshot(...args);}});
+  s.executor.authorizeFinalEntry=async()=>{if(!allowed)throw Error('production_entry_release_not_current');};
+  const originalTx=s.executor.ledger.transaction.bind(s.executor.ledger);
+  Object.defineProperty(s.executor.ledger,'transaction',{value:async(fn:any)=>originalTx(async(tx:any,a:any)=>{
+   const q=tx.query.bind(tx);const wrapped={...tx,query:async(sql:string,args:any)=>{sqlCalls.push(sql);if(dispatching){mark('db_request_start');await delay(dbDelay);mark('db_request_complete');}return q(sql,args);}};
+   const result=await fn(wrapped,a);if(dispatching&&(failure==='after-claim-hold'||failure==='A-429-authority-closed')&&result===true){allowed=false;phases?.discardAll();}return result;
+  })});
+  const raw=s.exchange.fetchImpl!;
+  const checkedClock=createEntryWireClockFetch(()=>s.executor.ledger.assertFinalWireClock(),async(input,init)=>{wireAt=time()-originalAt;return raw(input,init);});
+  const guarded=createGuardedReviewedApiFeeFetch(USER,ACCOUNT,sourceUrl,checkedClock,approved.policyHash!,s.exchange.state.credentialFingerprint,3,'phase-fixture',{
+   // The actual ledger and borrowed transaction are used; these two private
+   // authority schemas are explicit fixture ports, not production consent.
+   borrowTransaction:(()=>({query:async(sql:string,args?:unknown[])=>{assert.ok(s.executor.ledger.currentTransaction());sqlCalls.push(sql);await delay(dbDelay);if(sql===FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL){const owner=(await s.executor.ledger.currentTransaction()!.query('SELECT owner_user_id FROM v13_production_account WHERE id=$1',[ACCOUNT])).rows[0]?.owner_user_id;return {rows:allowed&&failure!=='B-429-authority-closed'&&owner===USER?[{id:ACCOUNT}]:[]};}if(sql.includes('strata_continuous_execution_grants'))return {rows:[]};return s.executor.ledger.currentTransaction()!.query(sql,args);}})) as never,
+   consumePublicMetadata:(id,ticker)=>phases?.consumeWire(id,ticker),
+   verify:(async(_owner:any,_stage:any,_url:any,ticker:any,deps:any)=>{wireReviews++;const observed=await (deps.probe??((_:typeof fetch,clock:()=>number,target:string)=>probeCurrentKalshiFeeApi(fetchPublic,clock,target)))(fetchPublic,time,ticker);if(!observed.ok)throw Error(observed.reason);if(observed.metadataCapture)captures.push(observed.metadataCapture);await delay(40);if(failure==='wire-stale')s.advance(6000);if(failure==='wire-revoked')return {ok:false,reason:'fixture_revoked'};return {ok:true,identity:{marketTicker:ticker,sourceUrl,feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION,digest:'d'.repeat(64)}};}) as never,
+  });
+  Object.defineProperty(s.exchange,'fetchImpl',{value:guarded});
+  const intent=await s.executor.prepareEntry(evaluationId);const before=(await pool.query('SELECT decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
+  dispatching=true;if(sensitivity)clockOffset=3650;let shouldPost=failure==='none'||(failure==='deadline-stress'&&enabled);const start=performance.now();
+  let refusal:string|null=null;
+  if(sensitivity&&failure!=='deadline-stress'){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
+  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
+  const elapsed=performance.now()-start;phases?.discardAll();const drainDeadline=performance.now()+2000;while(coordinator.diagnostics().accounts&&performance.now()<drainDeadline)await new Promise(r=>setTimeout(r,5));
+  const final=(await pool.query('SELECT state,decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
+  assert.equal(new Date(final.decision.source.evaluated_at).getTime(),originalAt);assert.deepEqual(final.request,before.request);assert.equal(final.decision.preflight.plannedAllInCents,before.decision.preflight.plannedAllInCents);
+  assert.equal(posts.length,shouldPost?1:0);assert.equal(final.state,shouldPost?'UNKNOWN':'BLOCKED');
+  const financial=(await pool.query(`SELECT cash_micros::text,reserved_micros::text,kill_switch,execution_enabled,
+    (SELECT coalesce(sum(reserved_micros),0)::text FROM v13_production_intent WHERE account_id=$1) AS intent_reserved
+    FROM v13_production_account WHERE id=$1`,[ACCOUNT])).rows[0];
+  assert.equal(financial.cash_micros,'60000000000');assert.equal(financial.reserved_micros,financial.intent_reserved);
+  if(!shouldPost){assert.equal(financial.reserved_micros,'0');assert.equal(financial.kill_switch,false);assert.equal(financial.execution_enabled,true);}
+  if(!sensitivity){if(!enabled)accounting.set(failure,financial);else assert.deepEqual(financial,accounting.get(failure),'enabled failure races preserve cash/reserve/authority accounting');}
+  // Lease/grant SQL here is an explicit read-only fixture port; no assertion of
+  // production private-schema authorization or lease/grant persistence is made.
+
+  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe');assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
+  else if(failure==='after-claim-hold'||failure==='A-429-authority-closed'){assert.ok(calls.length<=10,'at most five extra advisory A reads after a later gate failure');assert.equal(books,1);assert.equal(wireReviews,0);}
+  else {assert.ok(calls.length<=15,'started phase failures never launch a replacement five-GET attempt');if(['B-429-authority-closed','owner-replaced','credential-replaced','B-stop-queued'].includes(failure))assert.equal(wireReviews,0);}
+  if(enabled&&['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs,'WIRE must be a newly captured invocation, never FINAL bytes');assert.notEqual(captures[0].fingerprint,captures[1].fingerprint);}
+  if(enabled&&failure==='deadline-stress'){
+   const at=(event:string)=>timeline.find(row=>row.event===event)!.atMs;
+   assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));
+   assert.ok(timeline.some(row=>row.event==='db_request_start'&&row.atMs>at('FINAL_MARKET_start')&&row.atMs<at('FINAL_MARKET_consume')),'A overlaps real ledger request waits');
+   assert.ok(at('WIRE_FEE_start')<=at('signed_account_start'));assert.ok(at('signed_account_complete')<=at('WIRE_FEE_consume'));
+   assert.ok(wireAt+228<=4800,'controlled enabled raw wire retains at least 200ms margin');
+  }
+  if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'synthetic timing stress, no historical wire-probe assumption or fill evidence'}));}
+  if(failure==='none'){const dispatch=observedStages.filter(e=>e.stage==='dispatch');assert.equal(dispatch.length,1);const groups=dispatch[0].feeAuthorityReads.stages;const group=(op:string)=>groups.find((x:any)=>x.purpose==='WIRE_FEE'&&x.operation===op);assert.equal(group('standing_history_query').attempted,1);assert.equal(group('standing_eligibility_query').attempted,0);assert.equal(group('final_account_fence_query').attempted,1);assert.equal(group('final_account_fence_query').rejected,0);assert.ok(wireAt<5000);results.push({enabled,elapsedMs:elapsed,wireAgeMs:wireAt,publicCalls:calls.length,books,signed,feeReviews,wireReviews,authorityClockCalls,sqlQueries:sqlCalls.length,request:JSON.stringify({...final.request,clientOrderId:null}),cashModel:final.decision.book.fee.cashRisk.modelFingerprint});}
+  assert.equal(coordinator.diagnostics().accounts,0);
+ }
+ assert.equal(results[0].publicCalls,results[1].publicCalls);assert.equal(results[0].authorityClockCalls,results[1].authorityClockCalls);assert.equal(results[0].sqlQueries,results[1].sqlQueries);assert.equal(results[0].request,results[1].request);assert.equal(results[0].cashModel,results[1].cashModel);assert.ok(results[1].elapsedMs<results[0].elapsedMs,'actual asynchronous scheduling must hide public work');
+ console.info('TWO_PHASE_PUBLIC_METADATA_REPLAY',JSON.stringify({assumedDelays:{publicRootMs:30,publicEventMs:75,feeRemainderMs:40,signedAccountMs:180,dbRequestMs:8},results,scope:'actual owned ledger/executor/readers/wire guards; mocked provider/private fee authority; not historical replay or fill proof'}));
+ }finally{for(const [key,value] of [['NODE_ENV',savedEnv.node],['RAILWAY_GIT_COMMIT_SHA',savedEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',savedEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
+});
+
+test('phase OFF returns the original async body promise without an extra await or lifecycle finalizer',async()=>{const {ProductionExecutor}=await import('../v13-production/executor');const fixture=Object.create(ProductionExecutor.prototype);fixture.finalPublicMetadata=null;const promise=Promise.resolve();let args:unknown[]=[];fixture.dispatchWithPhases=(...value:unknown[])=>{args=value;return promise;};assert.equal(fixture.dispatch('fixture-intent'),promise);assert.deepEqual(args,['fixture-intent']);await promise;});
+test('malformed advisory source cannot replace the existing account authority denial',async()=>{for(const enabled of [false,true]){const posts:string[]=[],s=await tradingSession(500,posts);const id=await s.executor.prepareEntry(await source(s.now));await pool.query("UPDATE v13_production_intent SET decision=decision-'source' WHERE id=$1",[id]);await pool.query('UPDATE v13_production_account SET kill_switch=true WHERE id=$1',[ACCOUNT]);let starts=0;s.executor.finalPublicMetadata=enabled?{start(){starts++;},finalMarket:async(_context,operation)=>operation(),finish(){}}:null;await assert.rejects(s.executor.dispatch(id),/production_authority_disabled_or_uncommissioned/);assert.equal(starts,0);assert.equal(posts.length,0);}});
+
+// Actual dispatch wiring must suppress an ancestor ENTRY timing context for EXIT.
+// Transport is a refusal test double: this test does not claim an exit fill.
+test('observed EXIT dispatch emits no fee-authority envelope and cannot inherit parent ENTRY timing',async()=>{
+ const {FeeAuthorityTimingCapture,beginFeeAuthorityTiming}=await import('./feeAuthorityTiming');
+ const f=await protectiveFixture(false),events:any[]=[];f.executor.timingObserver=e=>{events.push(e);};
+ let clocks=0,submits=0;const parent=new FeeAuthorityTimingCapture(()=>{clocks++;return clocks;});const failure=Error('fixture_exit_transport_refused');
+ Object.defineProperty(f.exchange,'submit',{value:async()=>{submits++;const done=beginFeeAuthorityTiming('final_account_fence_query');done('fulfilled');throw failure;}});
+ await assert.rejects(parent.run(()=>f.executor.dispatch(f.exit)),e=>e===failure);
+ await Promise.resolve();assert.equal(submits,1);assert.equal(clocks,0);assert.ok(parent.snapshot()!.stages.every(r=>r.attempted===0));
+ const dispatch=events.filter(e=>e.stage==='dispatch');assert.equal(dispatch.length,1);assert.equal(dispatch[0].feeAuthorityReads,undefined);
+});
+
+test('nested ENTRY pre-submit authorization cannot contaminate ancestor timing capture',async()=>{
+ const {FeeAuthorityTimingCapture,beginFeeAuthorityTiming}=await import('./feeAuthorityTiming');
+ const s=await tradingSession(500,[]),intent=await s.executor.prepareEntry(await source(s.now));s.executor.timingObserver=()=>{};
+ let clocks=0,calls=0;const parent=new FeeAuthorityTimingCapture(()=>{clocks++;return clocks;});const failure=Error('fixture_entry_authority_refused');
+ s.executor.authorizeFinalEntry=async()=>{calls++;beginFeeAuthorityTiming('standing_history_query')('fulfilled');throw failure;};
+ await assert.rejects(parent.run(()=>s.executor.dispatch(intent)),e=>e===failure);
+ assert.equal(calls,1);assert.equal(clocks,0);assert.ok(parent.snapshot()!.stages.every(r=>r.attempted===0));assert.equal(s.posts.length,0);
+});
