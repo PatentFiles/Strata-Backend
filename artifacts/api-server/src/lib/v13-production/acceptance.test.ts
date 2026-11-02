@@ -15,7 +15,7 @@ import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
-import { ProductionLedger, identity } from "./ledger";
+import { ProductionLedger, identity, TERMINAL_POSITION_BATCH_SQL } from "./ledger";
 import { ProductionExecutor } from "./executor";
 import { ProductionWorker } from "./worker";
 import { encodeProductionOrder, KalshiProductionExchange } from "./transport";
@@ -1543,7 +1543,8 @@ test('selected-depth DOWN uses the exact opposite-side complement and selected f
  assert.equal(f.exchange.posts[0]!.side,'NO');assert.equal(f.exchange.posts[0]!.limitMicros,380000);assert.equal(f.exchange.posts[0]!.contracts,3);
 });
 
-test("reconciliation retains five terminal no-send intents without rewriting unchanged tuples", async () => {
+/** Explicit fixture for trigger tests: never depend on whichever acceptance test ran last. */
+export async function fiveTerminalNoSendFixture(){
   const f = await fixture();
   for (let n = 0; n < 5; n++) {
     f.exchange.book.observedAtMs = f.exchange.now;
@@ -1555,16 +1556,100 @@ test("reconciliation retains five terminal no-send intents without rewriting unc
     const row = (await pool.query("SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1", [id])).rows[0];
     assert.deepEqual(row, { state: "BLOCKED", terminal: true, reserved_micros: "0" });
   }
+  return f;
+}
+class CountReconcileQueriesLedger extends ProductionLedger {
+ intentUpdates=0;terminalPositionReads=0;terminalPositionBatchSizes:number[]=[];
+ override async transaction<T>(body:Parameters<ProductionLedger["transaction"]>[0],options:Parameters<ProductionLedger["transaction"]>[1]={}):Promise<T>{
+  return super.transaction(async(tx,a)=>body(new Proxy(tx,{get:(target,key)=>{
+   if(key==='query')return (sql:unknown,...args:unknown[])=>{
+    if(typeof sql==='string' && /^UPDATE v13_production_intent SET state=/.test(sql))this.intentUpdates++;
+    if(typeof sql==='string' && (/^SELECT (id,)?quantity_hundredths FROM v13_production_position WHERE/.test(sql) || /^SELECT position.id,position.quantity_hundredths FROM \(SELECT DISTINCT unnest/.test(sql))){
+      this.terminalPositionReads++;
+      const values=args[0] as unknown[];this.terminalPositionBatchSizes.push(Array.isArray(values[0])?values[0].length:1);
+    }
+    return Reflect.apply(target.query,target,[sql,...args]);
+   };
+   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+  }}),a) as Promise<T>,options);
+ }
+}
+test("reconciliation UNKNOWN changed fill remains persisted with actual UPDATE query",async()=>{
+ const f=await fixture();
+ for(let n=0;n<2;n++){
+  f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+  await f.executor.prepareEntry(await f.source(randomUUID(),`mixed-flat-${n}`));
+  f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;await f.executor.reconcile();
+ }
+ f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;f.exchange.throwPost=true;
+ const id=await f.executor.prepareEntry(await f.source());await assert.rejects(f.executor.dispatch(id),/timeout/);
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[id])).rows[0].state,'UNKNOWN');
+ const counted=new CountReconcileQueriesLedger(pool,'test-account');
+ f.exchange.fill(f.exchange.posts[0]!,'200',true);
+ const executor=new ProductionExecutor(counted,f.exchange,()=>f.exchange.now);
+ await executor.reconcile();
+ assert.equal(counted.intentUpdates,1);assert.deepEqual(counted.terminalPositionBatchSizes,[3]);
+ const row=(await pool.query('SELECT state,terminal,filled_hundredths,exchange_order_id FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ assert.equal(row.state,'TERMINAL');assert.equal(row.terminal,true);assert.equal(row.filled_hundredths,'200');assert.ok(row.exchange_order_id);
+ assert.equal(f.exchange.posts.length,1);await invariant(counted);
+ console.log('RECONCILE_CHANGED_QUERY_PROOF',JSON.stringify({intentUpdateQueries:counted.intentUpdates,terminal:row.terminal,filledHundredths:row.filled_hundredths}));
+});
+
+test('terminal position batches are bounded, use PK plan, exclude foreign rows, and missing owned rows still fail closed',async()=>{
+ const f=await fixture(),source=await f.source(),id=await f.executor.prepareEntry(source);
+ f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;await f.executor.reconcile();
+ await pool.query(`INSERT INTO v13_production_account SELECT (jsonb_populate_record(NULL::v13_production_account,to_jsonb(a)||'{"id":"foreign-batch-account","owner_user_id":"11111111-1111-4111-8111-111111111111"}'::jsonb)).* FROM v13_production_account a WHERE id='test-account'`);
+ await pool.query(`INSERT INTO forward_test_evaluations SELECT (jsonb_populate_record(NULL::forward_test_evaluations,to_jsonb(e)||jsonb_build_object('id','batch-source-'||n))).*
+  FROM forward_test_evaluations e CROSS JOIN generate_series(1,10205)n WHERE e.id=$1`,[source]);
+ await pool.query(`INSERT INTO v13_production_intent SELECT (jsonb_populate_record(NULL::v13_production_intent,to_jsonb(i)||jsonb_build_object(
+  'id','batch-intent-'||n,'account_id',CASE WHEN n<=205 THEN 'test-account' ELSE 'foreign-batch-account' END,
+  'evaluation_id','batch-source-'||n,'crossing_key','batch-cross-'||n,'client_order_id','batch-client-'||n))).*
+  FROM v13_production_intent i CROSS JOIN generate_series(1,10205)n WHERE i.id=$1`,[id]);
+ await pool.query(`INSERT INTO v13_production_position SELECT (jsonb_populate_record(NULL::v13_production_position,to_jsonb(p)||jsonb_build_object(
+  'id','batch-intent-'||n,'account_id',CASE WHEN n<=205 THEN 'test-account' ELSE 'foreign-batch-account' END,
+  'quantity_hundredths',CASE WHEN n<=205 THEN 0 ELSE 999 END))).*
+  FROM v13_production_position p CROSS JOIN generate_series(1,10205)n WHERE p.id=$1`,[id]);
+ await pool.query('ANALYZE v13_production_position');
+ const plans=[];
+ for(const ids of [[id,'batch-intent-1','batch-intent-2','batch-intent-3','batch-intent-4'],Array.from({length:100},(_,n)=>`batch-intent-${n+1}`)]){
+  const plan=(await pool.query(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ${TERMINAL_POSITION_BATCH_SQL}`,[ids])).rows[0]['QUERY PLAN'][0];
+  assert.match(JSON.stringify(plan),/v13_production_position_pkey/);assert.doesNotMatch(JSON.stringify(plan),/"Node Type":"Seq Scan"/);assert.equal(plan.Plan['Actual Rows'],ids.length);plans.push(plan);
+ }
+ const duplicateAndMissing=(await pool.query(TERMINAL_POSITION_BATCH_SQL,[[id,id,'missing-batch-position',null]])).rows;
+ assert.equal(duplicateAndMissing.length,1);assert.equal(duplicateAndMissing[0].id,id);assert.equal(duplicateAndMissing[0].quantity_hundredths,'0');
+ const counted=new CountReconcileQueriesLedger(pool,'test-account');const executor=new ProductionExecutor(counted,f.exchange,()=>f.exchange.now);
+ await executor.reconcile();assert.deepEqual(counted.terminalPositionBatchSizes,[100,100,6]);assert.equal(counted.terminalPositionReads,3);assert.equal(counted.intentUpdates,0);
+ await invariant(counted);assert.equal((await counted.readAccount()).reserved_micros,'0');assert.equal(f.exchange.posts.length,0);
+ console.log('TERMINAL_BATCH_INDEX_PROOF',JSON.stringify({ownedRows:206,foreignRows:10000,batchSizes:counted.terminalPositionBatchSizes,plans}));
+ await pool.query('DELETE FROM v13_production_position WHERE id=$1',[id]);
+ await assert.rejects(executor.reconcile(),/quantity_hundredths/);
+ assert.match((await counted.readAccount()).blocked_reason!,/quantity_hundredths/);
+});
+
+test("reconciliation retains five terminal no-send intents without rewriting unchanged tuples", async () => {
+  const f = await fiveTerminalNoSendFixture();
   const tuples = async () => (await pool.query("SELECT id,ctid::text AS tuple FROM v13_production_intent WHERE account_id='test-account' ORDER BY id")).rows;
   const before = await tuples();
   assert.equal(before.length, 5);
+  const counted=new CountReconcileQueriesLedger(pool,'test-account');
+  const countedExecutor=new ProductionExecutor(counted,f.exchange,()=>f.exchange.now);
+  await pool.query(`CREATE TABLE reconcile_trigger_probe(n int); INSERT INTO reconcile_trigger_probe VALUES(0);
+   CREATE FUNCTION count_reconcile_intent_update() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN UPDATE reconcile_trigger_probe SET n=n+1; RETURN NEW; END$$;
+   CREATE TRIGGER count_reconcile_intent_update AFTER UPDATE ON v13_production_intent FOR EACH ROW EXECUTE FUNCTION count_reconcile_intent_update()`);
   const accountBefore = await f.ledger.readAccount();
   const receiptsBefore = Number((await pool.query("SELECT count(*) FROM v13_production_observation WHERE kind='RECONCILIATION'")).rows[0].count);
   for (let n = 0; n < 3; n++) {
     f.exchange.now++;
     f.exchange.evidence.observedAtMs = f.exchange.now;
-    await f.executor.reconcile();
+    await countedExecutor.reconcile();
   }
+  const triggerUpdates=Number((await pool.query('SELECT n FROM reconcile_trigger_probe')).rows[0].n);
+  await pool.query('DROP TRIGGER count_reconcile_intent_update ON v13_production_intent; DROP FUNCTION count_reconcile_intent_update(); DROP TABLE reconcile_trigger_probe');
+  console.log('RECONCILE_NOOP_QUERY_PROOF',JSON.stringify({historyRows:5,ticks:3,intentUpdateQueries:counted.intentUpdates,triggerUpdates,terminalPositionReads:counted.terminalPositionReads,batchSizes:counted.terminalPositionBatchSizes,productionMillisecondsProven:false}));
+  assert.equal(counted.intentUpdates,0,'unchanged history must send no UPDATE query, not merely suppress the write in SQL');
+  assert.equal(triggerUpdates,0);
+  assert.equal(counted.terminalPositionReads,3,'five terminal rows should use one exact position batch per tick');
+  assert.deepEqual(counted.terminalPositionBatchSizes,[5,5,5]);
   assert.deepEqual(await tuples(), before, "unchanged intent tuples must not be physically updated");
   const accountAfter = await f.ledger.readAccount();
   assert.equal(BigInt(accountAfter.revision), BigInt(accountBefore.revision) + 3n);
@@ -1573,3 +1658,4 @@ test("reconciliation retains five terminal no-send intents without rewriting unc
   assert.equal(f.exchange.posts.length, 0);
   await invariant(f.ledger);
 });
+

@@ -8,6 +8,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { canonical, digest, money, requireProof, type Identity, type Snapshot, type Request } from "./types";
 
+export const TERMINAL_POSITION_BATCH_SQL = "SELECT position.id,position.quantity_hundredths FROM (SELECT DISTINCT unnest($1::text[]) AS id) AS requested CROSS JOIN LATERAL (SELECT id,quantity_hundredths FROM v13_production_position WHERE id=requested.id LIMIT 1) AS position";
+
 export type Account = {
   id: string; policy_id: string; subaccount: string; exchange_index: string; owner_user_id?: string | null;
   key_fingerprint: string; commissioning_digest: string | null;
@@ -317,8 +319,24 @@ export class ProductionLedger {
             VALUES($1,$2,$3,'SETTLEMENT',$4,$5,$6,$7,$8)`,
           [a.id, `settlement:${s.id}`, parent.id, digest(s), JSON.stringify(s), String(delta), String(pnl), new Date(s.occurredAtMs)]);
         }
-        for (const i of intents.filter(i => i.kind === "ENTRY" && i.terminal)) {
-          const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1", [i.id])).rows[0];
+        // These intent IDs were read under FOR UPDATE and the account lock is
+        // retained. The retention loop mutates only local reservation values,
+        // so read its exact position quantities once in bounded primary-key batches.
+        // Do not use the later positive-position projection: zero/missing rows
+        // have distinct recovery meanings and must not disappear from this proof.
+        // Correlated LIMIT 1 keeps each lookup a point probe instead of allowing
+        // ANY(array) to become a whole-history scan on PostgreSQL 16. DISTINCT
+        // retains ANY semantics for duplicate keys; absent/null keys return no row.
+        const terminalEntries = intents.filter(i => i.kind === "ENTRY" && i.terminal);
+        const terminalPositions = new Map<string, {id:string;quantity_hundredths:string}>();
+        for (let offset=0;offset<terminalEntries.length;offset+=100) {
+          const ids=terminalEntries.slice(offset,offset+100).map(i=>i.id);
+          const rows=(await tx.query<{id:string;quantity_hundredths:string}>(
+            TERMINAL_POSITION_BATCH_SQL,[ids])).rows;
+          for(const row of rows)terminalPositions.set(row.id,row);
+        }
+        for (const i of terminalEntries) {
+          const pos = terminalPositions.get(i.id)!;
           const retain = money(pos.quantity_hundredths) > 0n ? money(i.exit_fee_micros) : 0n;
           if (money(i.reserved_micros) < retain) {
             const add = retain - money(i.reserved_micros);
