@@ -1,3 +1,6 @@
+import {isMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
+import {isFeeVerificationTiming,type FeeVerificationTiming} from "../strata/feeVerificationTiming";
+import {isOwnedFeedReadTiming,type OwnedFeedReadTiming} from "../strata/ownedFeedReadTiming";
 import {sanitizeExecutionSubtimings,type ExecutionSubtiming} from "./executionSubtimings";
 import {isFinalComparisonDiagnostics,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
 import {getFeeFailureDiagnostics,type FeeFailureDiagnostics} from "../strata/feeFailureDiagnostics";
@@ -14,7 +17,7 @@ export type StageOutcome = "completed" | "rejected" | "eligible" | "proven_not_p
  "noop_not_prepared" | "post_uncertain" | "reconciliation_required" | "http_response" | "network_error";
 export type StageContext = {accountId:string;mode:"LIVE"|"SIMULATION";evaluationId?:string|null;intentId?:string|null};
 export type StageTiming = StageContext & {stage:ExecutionStage;durationMs:number;outcome:StageOutcome;
- releaseCommitSha:string;substageTimings?:readonly ExecutionSubtiming[];reconciliationObservationId?:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
+ releaseCommitSha:string;signedFeedReads?:OwnedFeedReadTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationObservationId?:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
 export type TimingObserver = (event:Readonly<StageTiming>)=>void|Promise<void>;
 const safeId=(value:unknown)=>typeof value==="string"&&/^[a-zA-Z0-9:_-]{1,128}$/.test(value)?value:undefined;
 const reasonCode=(error:unknown)=>{
@@ -30,13 +33,16 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
  let started=0;
  try{started=clock();}catch{/* Optional clock instrumentation is not authority. */}
  let ended=false;
- return (outcome:StageOutcome,extra:{substageTimings?:readonly ExecutionSubtiming[];reconciliationReceipt?:{accountId:string;observationId:string};finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
+ return (outcome:StageOutcome,extra:{signedFeedReads?:OwnedFeedReadTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationReceipt?:{accountId:string;observationId:string};finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
   if(ended)return;ended=true;
   if(!observer)return;
   try {
    const elapsed=clock()-started;
    const event:StageTiming={accountId:safeId(context.accountId)??"redacted",mode:context.mode,
     stage,outcome,durationMs:Number.isFinite(elapsed)?Math.max(0,elapsed):0,releaseCommitSha:deployedGitSha()};
+   if((stage==="signed_snapshot"||stage==="final_signed_snapshot")&&isOwnedFeedReadTiming(extra.signedFeedReads))event.signedFeedReads=extra.signedFeedReads;
+   if(stage==="final_preparation"&&isMarketEvidenceReadTiming(extra.finalMarketReads))event.finalMarketReads=extra.finalMarketReads;
+   if(stage==="fee_verification"&&isFeeVerificationTiming(extra.feeVerificationReads))event.feeVerificationReads=extra.feeVerificationReads;
    const evaluationId=safeId(context.evaluationId),intentId=safeId(context.intentId);
    if(stage==="prepare_entry"||stage==="after_reconcile"){
      const substageTimings=sanitizeExecutionSubtimings(extra.substageTimings);

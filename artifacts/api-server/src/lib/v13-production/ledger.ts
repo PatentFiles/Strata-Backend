@@ -403,9 +403,13 @@ export class ProductionLedger {
         }
         await this.assertConservation(tx, a);
         const observationId = await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
-        await this.persist(tx, a);
-        await tx.query("UPDATE v13_production_account SET reconciled_at=$2,evidence_digest=$3 WHERE id=$1",
-          [a.id, new Date(snapshot.observedAtMs), digest(snapshot)]);
+        // The same account row remains locked. Persist reconciliation state and
+        // its evidence together: no check/read separated these adjacent writes.
+        // Keep the single revision increment and observation-before-write order.
+        await tx.query(`UPDATE v13_production_account SET cash_micros=$2,reserved_micros=$3,
+          blocked_reason=$4,revision=revision+1,reconciled_at=$5,evidence_digest=$6 WHERE id=$1`,
+          [a.id, a.cash_micros, a.reserved_micros, a.blocked_reason,
+            new Date(snapshot.observedAtMs), digest(snapshot)]);
         return {accountId:this.accountId,observationId};
       });
     } catch (error) {

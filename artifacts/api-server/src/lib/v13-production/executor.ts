@@ -1,3 +1,5 @@
+import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
+import {OwnedFeedTimingCapture} from "../strata/ownedFeedReadTiming";
 import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import {ExecutionSubtimings} from "./executionSubtimings";
 import {captureFinalComparison,type FinalComparisonDiagnostics} from "./finalComparisonDiagnostics";
@@ -161,10 +163,10 @@ export class ProductionExecutor {
     try {
       const a = await this.ledger.readAccount();
       const floor = (await this.ledger.pool.query("SELECT min(created_at) AS earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-      const signed=this.startTiming("signed_snapshot");
+      const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
-      try {snapshot=await this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now());signed("completed");}
-      catch(error){signed("rejected",{error});throw error;}
+      try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot()});}
+      catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
       const commit=this.startTiming("ledger_reconcile_commit");
       try {const reconciliationReceipt=await this.ledger.reconcile(snapshot,a.revision,this.now());
         commit("completed",{reconciliationReceipt});}
@@ -431,6 +433,7 @@ export class ProductionExecutor {
         const final = async () => {
           const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
           let finalComparison:FinalComparisonDiagnostics|undefined;
+          let finalMarketReads:MarketEvidenceReadTiming|undefined;
           try {
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
@@ -441,6 +444,7 @@ export class ProductionExecutor {
             i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
           const book = await this.exchange.market(i.market, i.side);
+          finalMarketReads=getMarketEvidenceReadTiming(book);
           const stored = i.decision.book as MarketEvidence;
           const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
           if(i.kind==="ENTRY"&&this.exchange.mode==="LIVE")requireProof(pinnedCash,"production_cash_risk_unproven");
@@ -514,11 +518,11 @@ export class ProductionExecutor {
             "production_final_owned_feed_changed_or_stale");
           }
           const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-          const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id});
+          const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
           let snapshot:Snapshot;
-          try{snapshot=await this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
-            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime()));snapshotTiming("completed");}
-          catch(error){snapshotTiming("rejected",{error});throw error;}
+          try{snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
+            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime())));snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot()});}
+          catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
           await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
@@ -605,8 +609,8 @@ export class ProductionExecutor {
           // failures after success remain UNKNOWN unless an exact, private
           // downstream refusal proves its transport was never invoked.
           invoked = true;
-          finalTiming("completed");
-          }catch(error){finalTiming("rejected",{error,finalComparison});throw error;}
+          finalTiming("completed",{finalMarketReads});
+          }catch(error){finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
         };
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.

@@ -64,7 +64,9 @@ export async function gatherCompleteReadOnlyMarketEvidence<B>(sources: {
  // Never leave newly launching reads behind after a rejected invocation. Existing
  // adapters own bounded deadlines; drain them before the worker's next attempt.
  const results=await Promise.all(pending).catch(async()=>{
-  await Promise.allSettled(pending);throw firstError;
+  await Promise.allSettled(pending);
+  if(typeof firstError==="object"&&firstError!==null)attachMarketEvidenceReadTiming(firstError,timing.snapshot());
+  throw firstError;
  });
  const [,bookPayload,seriesPayload,marketPayload,seriesChangesPayload,[eventPayload,eventChangesPayload]] = results;
  return attachMarketEvidenceReadTiming({bookPayload,seriesPayload,marketPayload,seriesChangesPayload,eventPayload,eventChangesPayload}, timing.snapshot());
