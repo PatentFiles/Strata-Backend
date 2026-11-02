@@ -1,3 +1,4 @@
+import {FinalPublicMetadataPhases} from "./finalPublicMetadataPhases";
 import {createFeeVerificationTiming} from "./feeVerificationTiming";
 import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
 import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
@@ -208,6 +209,7 @@ export function createProductionPersonalSession(
     now?: () => number;
     /** LOCAL prototype opt-in. Production construction leaves this disabled. */
     publicMetadataPrefetch?: boolean;
+    finalPublicMetadataPrefetch?: boolean;
   } = {},
 ): PersonalSessionControl {
   const get = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch) =>
@@ -370,12 +372,13 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     const timingObserver:TimingObserver=event=>logger.info({event:"strata_execution_stage",...event});
     const timingContext={accountId:input.accountId,mode:"LIVE" as const};
+    let finalPublicMetadata:FinalPublicMetadataPhases|null=null;
     const measuredFetch=timedFinalFetch(raw=>{
     const clockCheckedTransport=createEntryWireClockFetch(()=>{
       if(!finalLedger)throw new Error("production_final_wire_clock_missing");
       finalLedger.assertFinalWireClock();
     },raw);
-    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
+    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
@@ -534,7 +537,7 @@ export function createProductionPersonalSession(
         return proven;
       },
       readMarket: (market,side,context)=>readOwnedEntryMarket({
-        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,
+        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),
         verifyFee:async(clock,readMetadata,captureMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               const feeReads=createFeeVerificationTiming();
@@ -581,6 +584,12 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
+    if(apiSource&&options.finalPublicMetadataPrefetch===true){
+      finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
+        ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
+        ()=>{activeMetadata?.discard();activeMetadata=null;});
+      session.executor.finalPublicMetadata=finalPublicMetadata;
+    }
     if(apiSource&&options.publicMetadataPrefetch===true){
       session.executor.prefetchCommittedPublicMetadata=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
@@ -658,7 +667,7 @@ export function createProductionPersonalSession(
       ok: true,
       worker: session.worker,
       state,
-      disarm: (action) => disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString()),
+      disarm: (action) => {finalPublicMetadata?.discardAll();return disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString());},
     };
   });
 }

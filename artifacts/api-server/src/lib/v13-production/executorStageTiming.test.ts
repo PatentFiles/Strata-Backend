@@ -7,8 +7,7 @@ import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_LEGACY_ENTRY_
 test("reconciliation stages preserve snapshot / commit / callback order with failing observers",async()=>{
  const order:string[]=[];
  const snapshot={identity:{}};
- const ledger={accountId:"account",readAccount:async()=>({id:"account"}),
-  pool:{query:async()=>({rows:[{earliest:null}]})},
+ const ledger={accountId:"account",readReconcileAccount:async()=>({account:{id:"account"},earliest:null}),
   reconcile:async()=>{order.push("commit")}};
  const exchange={mode:"SIMULATION",snapshot:async()=>{order.push("snapshot");return snapshot}};
  const executor=new ProductionExecutor(ledger as never,exchange as never,()=>1000);
@@ -22,8 +21,7 @@ test("reconciliation stages preserve snapshot / commit / callback order with fai
 });
 test("failed ledger reconciliation never renews authority and emits no successful afterReconcile",async()=>{
  let after=0;const error=Error("production_snapshot_incomplete");
- const executor=new ProductionExecutor({accountId:"account",readAccount:async()=>({id:"account"}),
-  pool:{query:async()=>({rows:[{}]})},reconcile:async()=>{throw error}} as never,
+ const executor=new ProductionExecutor({accountId:"account",readReconcileAccount:async()=>({account:{id:"account"},earliest:null}),reconcile:async()=>{throw error}} as never,
   {mode:"SIMULATION",snapshot:async()=>({})} as never,()=>1000);
  const events:StageTiming[]=[];executor.timingObserver=e=>{events.push(e)};
  executor.afterReconcile=async()=>{after++};

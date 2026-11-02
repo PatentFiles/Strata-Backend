@@ -10,6 +10,14 @@ import { canonical, digest, money, requireProof, type Identity, type Snapshot, t
 
 export const TERMINAL_POSITION_BATCH_SQL = "SELECT position.id,position.quantity_hundredths FROM (SELECT DISTINCT unnest($1::text[]) AS id) AS requested CROSS JOIN LATERAL (SELECT id,quantity_hundredths FROM v13_production_position WHERE id=requested.id LIMIT 1) AS position";
 
+// Reconciliation's account and history floor share one statement snapshot. The
+// scalar history subquery is correlated to the matching account, so no history
+// is read for a missing account. This is not authority: reconciliation still
+// checks the captured revision under the existing final account lock.
+export const RECONCILE_ACCOUNT_HISTORY_SQL = `SELECT a.*,
+  (SELECT min(i.created_at) FROM v13_production_intent i WHERE i.account_id=a.id) AS reconciliation_history_floor
+  FROM v13_production_account a WHERE a.id=$1`;
+
 export type Account = {
   id: string; policy_id: string; subaccount: string; exchange_index: string; owner_user_id?: string | null;
   key_fingerprint: string; commissioning_digest: string | null;
@@ -83,6 +91,14 @@ export class ProductionLedger {
     const { rows } = await this.query<Account>("SELECT * FROM v13_production_account WHERE id=$1", [this.accountId]);
     requireProof(rows.length === 1, "production_account_missing");
     return rows[0]!;
+  }
+  async readReconcileAccount(): Promise<{ account: Account; earliest: Date | null }> {
+    const { rows } = await this.query<Account & { reconciliation_history_floor: Date | null }>(
+      RECONCILE_ACCOUNT_HISTORY_SQL, [this.accountId]);
+    requireProof(rows.length === 1, "production_account_missing");
+    // Do not leak the synthetic projection into account serialization/digests.
+    const { reconciliation_history_floor: earliest, ...account } = rows[0]!;
+    return { account, earliest };
   }
   async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>,
     options: { lockTimeoutMs?: number } = {}): Promise<T> {

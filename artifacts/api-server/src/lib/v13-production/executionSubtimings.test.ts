@@ -39,15 +39,14 @@ test('existing stage event carries immutable subgroups only for permitted parent
 });
 test('executor callback subgroups keep original calls, eligibility clock count and failure identity',async()=>{
  const order:string[]=[];let eligibilityClockCalls=0;const failure=Error('authority_revoked');
- const ledger={accountId:'account',readAccount:async()=>{order.push('read');return{id:'account'}},
-  pool:{query:async()=>{order.push('floor');return{rows:[{earliest:null}]}}},
+ const ledger={accountId:'account',readReconcileAccount:async()=>{order.push('account_history');return{account:{id:'account'},earliest:null}},
   reconcile:async()=>{order.push('commit');return undefined}};
  const exchange={mode:'SIMULATION',snapshot:async()=>{order.push('signed');return{identity:{}}}};
  const executor=new ProductionExecutor(ledger as never,exchange as never,()=>{eligibilityClockCalls++;return 1000});
  executor.afterReconcile=async(_snapshot,t)=>{t?.mark('grant_history');order.push('history');t?.mark('technical_lease');order.push('renew');throw failure};
  const events:StageTiming[]=[];executor.timingObserver=e=>{events.push(e);throw Error('logger failed')};
  await assert.rejects(executor.reconcile(),e=>e===failure);await Promise.resolve();
- assert.deepEqual(order,['read','floor','signed','commit','history','renew']);assert.equal(eligibilityClockCalls,2);
+ assert.deepEqual(order,['account_history','signed','commit','history','renew']);assert.equal(eligibilityClockCalls,2);
  const event=events.find(e=>e.stage==='after_reconcile')!;assert.equal(event.outcome,'rejected');
  assert.deepEqual(event.substageTimings?.map(x=>[x.stage,x.completed]),[['grant_history',true],['technical_lease',false]]);
  assert.equal(events.filter(e=>e.stage==='after_reconcile').length,1);

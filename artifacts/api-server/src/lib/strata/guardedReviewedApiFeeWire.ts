@@ -1,3 +1,6 @@
+import {beginFeeAuthorityTiming,withFeeAuthorityTimingPurpose} from "./feeAuthorityTiming";
+import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
+import type {PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import {annotateFeeFailure,getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import { pool,type PoolClient } from "@workspace/db";
@@ -87,6 +90,7 @@ export function createGuardedReviewedApiFeeFetch(
  expectedFencingToken:number,expectedLeaseHolderId:string,
  deps:{connect?:()=>ReturnType<typeof pool.connect>;
    borrowTransaction?:()=>Pick<PoolClient,"query">|null;
+   consumePublicMetadata?:(clientOrderId:string,market:string)=>PrefetchedPublicMetadata|undefined;
    verify?:typeof verifyReviewedApiFeeSourceStage;
    verifyMonetary?:typeof verifyMonetaryFeeContract}={},
 ):typeof fetch {
@@ -179,14 +183,16 @@ export function createGuardedReviewedApiFeeFetch(
     await client.query("SET LOCAL lock_timeout='1000ms'");
     await client.query("SET LOCAL statement_timeout='15000ms'");
    }
-   const standingMode=isEntry&&await hasContinuousGrantHistory(client,ownerUserId,deployedSha!);
-   const standingAllowed=standingMode&&await checkContinuousEligibility(client,ownerUserId,deployedSha!);
+   const standingMode=isEntry&&await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>hasContinuousGrantHistory(client,ownerUserId,deployedSha!));
+   const standingAllowed=standingMode&&await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>checkContinuousEligibility(client,ownerUserId,deployedSha!));
    if(standingMode&&!standingAllowed)throw new Error('standing_final_fee_wire_authority_closed');
-   const finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
+   let finalAccount:{rows:Record<string,unknown>[]};
+   const accountDone=withFeeAuthorityTimingPurpose("WIRE_FEE",()=>beginFeeAuthorityTiming("final_account_fence_query"));let accountOk=false;
+   try{finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
     expectedFencingToken,expectedLeaseHolderId,isEntry,
     isEntry?deployedSha:null,standingAllowed,
-   ]);
+   ]);accountOk=true;}finally{accountDone(accountOk?"fulfilled":"rejected");}
    if(finalAccount.rows.length!==1)
     throw new Error(isEntry?
      "api_fee_final_entry_exit_release_owner_or_account_closed":
@@ -200,8 +206,9 @@ export function createGuardedReviewedApiFeeFetch(
     if(!monetary.ok || monetary.marketTicker!==ticker)
      throw new Error("api_fee_final_order_monetary_source_closed");
    }
-   const checked=await (deps.verify??verifyReviewedApiFeeSourceStage)(
-    ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client});
+   const publicMetadata=isEntry?deps.consumePublicMetadata?.(clientOrderId,ticker):undefined;
+   const checked=await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>(deps.verify??verifyReviewedApiFeeSourceStage)(
+    ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client,...(publicMetadata?{probe:(fetchImpl:typeof fetch,clock:()=>number,exactMarket?:string)=>probeCurrentKalshiFeeApi(fetchImpl,clock,exactMarket,publicMetadata.read,publicMetadata.capture)}:{})}));
    if(!checked.ok || checked.identity.marketTicker!==ticker ||
       checked.identity.sourceUrl!==sourceUrl ||
       checked.identity.feePolicyVersion!==API_SOURCE_POLICY_VERSION ||

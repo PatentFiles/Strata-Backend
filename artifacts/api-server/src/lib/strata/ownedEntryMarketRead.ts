@@ -1,5 +1,5 @@
 import type {EntryPrepareMarketContext,MarketEvidence} from "../v13-production/types";
-import type {MetadataPrefetchAttempt,MetadataPrefetchScope} from "./committedPublicMetadata";
+import type {MetadataPrefetchAttempt,MetadataPrefetchScope,PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import type {MetadataCaptureManifest} from "./metadataCapture";
 import {createEntryMetadataSnapshot} from "./entryMetadataSnapshot";
 import {gatherCompleteReadOnlyMarketEvidence} from "./gatherReadOnlyMarketEvidence";
@@ -8,21 +8,24 @@ import {attachMarketEvidenceReadTiming,getMarketEvidenceReadTiming} from "./mark
 
 type PublicReader=(path:string)=>Promise<Record<string,unknown>>;
 /** The supervisor's actual market read, shared with its offline integration
- * fixture. Only explicit prepare context can adopt exact-source public bytes.
- * All final/exit calls create fresh invocations. Fee authority and signed-book
+ * fixture. Explicit prepare or separately scoped FINAL_MARKET phases may adopt
+ * their own exact-source public bytes. EXIT and unscoped calls remain fresh.
+ * FINAL_MARKET never adopts PREPARE or WIRE_FEE captures. Fee authority and signed-book
  * adapters still run once at their existing stage, never in the coordinator.
  */
 export async function readOwnedEntryMarket(input:{
   market:string;side:"YES"|"NO";context?:EntryPrepareMarketContext;
   now:()=>number;apiSource:boolean;activeMetadata:MetadataPrefetchAttempt|null;
   metadataScope:()=>MetadataPrefetchScope;
+  finalPublicMetadata?:()=>PrefetchedPublicMetadata|undefined;
   verifyFee:(clock:number,readMetadata:PublicReader|undefined,captureMetadata:(()=>MetadataCaptureManifest)|undefined)=>Promise<number>;
   readBook:()=>Promise<unknown>;readPublic:(path:string)=>Promise<unknown>;publicFetch?:typeof fetch;
   configuredStakeCents:number;policyVersion:string;sourceUrl:string;formulaVersion:string;artifactDigest:string;policyHash:string;
 }):Promise<MarketEvidence>{
   const clock=input.now(),{market,side,context,activeMetadata}=input;
-  const speculative=input.apiSource&&context?.stage==="prepare"&&activeMetadata?.source.evaluationId===context.evaluationId
-    ?activeMetadata.consume(input.metadataScope(),context):undefined;
+  const finalMetadata=input.apiSource&&!context?input.finalPublicMetadata?.():undefined;
+  const speculative=finalMetadata??(input.apiSource&&context?.stage==="prepare"&&activeMetadata?.source.evaluationId===context.evaluationId
+    ?activeMetadata.consume(input.metadataScope(),context):undefined);
   if(context&&activeMetadata&&!speculative)activeMetadata.discard("entry_metadata_source_changed");
   const metadataSnapshot=input.apiSource?(speculative??createEntryMetadataSnapshot(market,input.publicFetch)):undefined;
   let verifiedAtMs:number;

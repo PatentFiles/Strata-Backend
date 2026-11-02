@@ -1714,7 +1714,8 @@ test('batched transaction start preserves complete source-to-wire boundary and r
        assert.equal(options.db,tx);assert.equal(f.ledger.currentTransaction(),locked);
        // 1068ms is a calibration residual, not a measured provider/SQL cost.
        // It originally calibrated the two-write reconcile BASELINE to5421ms;
-       // the merged reconcile tail now saves one synthetic20ms request in BOTH runs.
+       // the merged reconcile tail and account/history read each save one
+       // synthetic20ms request in BOTH runs.
        // the identical residual is used for the candidate.
        if(replay)f.exchange.now+=325+(effectiveAge===-5421?1068:0);else f.exchange.now=evaluated+effectiveAge-btcAge;
        return {ok:true,identity:{marketTicker:market,sourceUrl:source,digest:'d'.repeat(64),feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION}};
@@ -1734,7 +1735,7 @@ test('batched transaction start preserves complete source-to-wire boundary and r
     runs.push({requests,batches,state:row.state,raw,finalSnapshots,authorizations,wireAge,refusal});
    }
    if(replay){assert.equal(runs[0].wireAge!-runs[1].wireAge!,80);
-    if(effectiveAge===-5421){assert.equal(runs[0].wireAge,5401);assert.equal(runs[1].wireAge,5321);assert.equal(runs[0].raw,0);assert.equal(runs[1].raw,0)}}
+    if(effectiveAge===-5421){assert.equal(runs[0].wireAge,5381);assert.equal(runs[1].wireAge,5301);assert.equal(runs[0].raw,0);assert.equal(runs[1].raw,0)}}
    assert.equal(runs[0].batches,runs[1].batches);assert.ok(runs[1].batches>=4);
    assert.equal(runs[0].requests-runs[1].requests,runs[1].batches);
    console.log('TRANSACTION_START_PIPELINE',JSON.stringify({effectiveAge,replay,perClientQueryDelayMs:replay?20:0,baseline:runs[0],batched:runs[1]}));
