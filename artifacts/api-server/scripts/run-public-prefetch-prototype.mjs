@@ -11,6 +11,6 @@ const tests=["strata/committedPublicMetadata","strata/metadataCapture","strata/e
 const env={PATH:process.env.PATH,HOME:process.env.HOME,NODE_ENV:"test",NODE_PATH:join(api,"node_modules"),NODE_OPTIONS:`--require=${fence}`};
 function run(cmd,args){const result=spawnSync(cmd,args,{cwd:api,env,stdio:"inherit",timeout:120000});if(result.status!==0)throw Error(`prefetch_unit_command_failed:${result.status}`);}
 try{
- run(join(api,"node_modules/.bin/esbuild"),[...tests.map(t=>`src/lib/${t}.test.ts`),"--bundle","--platform=node","--format=cjs",`--outdir=${root}/out`,`--outbase=src/lib`,"--out-extension:.js=.cjs",`--alias:@workspace/db=${stub}`,"--external:pg-native","--external:pdfjs-dist","--external:pino","--external:pino-pretty"]);
+ run(join(api,"node_modules/.bin/esbuild"),[...tests.map(t=>`src/lib/${t}.test.ts`),"--bundle","--platform=node","--format=cjs",`--outdir=${root}/out`,`--outbase=src/lib`,"--out-extension:.js=.cjs",`--alias:@workspace/db=${stub}`,`--alias:@workspace/db/pool-checkout-timing=${join(api,"../../lib/db/src/poolCheckoutTiming.ts")}`,"--external:pg-native","--external:pdfjs-dist","--external:pino","--external:pino-pretty"]);
  run(process.execPath,["--test",...tests.map(t=>`${root}/out/${t}.test.cjs`)]);
 }finally{rmSync(root,{recursive:true,force:true});}
