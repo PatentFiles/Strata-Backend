@@ -1298,3 +1298,56 @@ test('nested ENTRY pre-submit authorization cannot contaminate ancestor timing c
  await assert.rejects(parent.run(()=>s.executor.dispatch(intent)),e=>e===failure);
  assert.equal(calls,1);assert.equal(clocks,0);assert.ok(parent.snapshot()!.stages.every(r=>r.attempted===0));assert.equal(s.posts.length,0);
 });
+
+test('improved protective bids keep the sealed NO/YES fractional order through actual fence and UNKNOWN recovery',async()=>{
+ for(const side of ['YES','NO'] as const){
+  const f=await protectiveFixture(true,false,'150',side),request=await requestOf(f.exit);
+  const before=JSON.stringify(request);
+  const better={...f.book,bestBidDollars:'0.5100',bids:[{priceDollars:'0.5100',availableContracts:'100.00'}]};
+  const resealed=sealedFinancialProtectiveExitOrder({positionId:f.parent,market:request.market,side,quantityHundredths:'150',minimumExitMicros:400000},request,better);
+  assert.deepEqual(resealed,f.order);assert.equal(JSON.stringify(await requestOf(f.exit)),before);
+  const input={...await actualOwnedFinalFence(f),order:resealed};let posts=0;
+  const ports={db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:request.market}) as any,
+   post:async(_material:unknown,order:unknown)=>{posts++;assert.deepEqual(order,f.order);throw Error('fixture_uncertain_transport');}};
+  const result=await dispatchReviewedProtectiveExitOnce(input,ports);
+  assert.equal(result.state,'UNKNOWN');assert.equal(result.postAttempted,true);assert.equal(posts,1);
+  assert.equal((await dispatchReviewedProtectiveExitOnce(input,ports)).postAttempted,false);assert.equal(posts,1);
+  assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,'150');
+ }
+});
+test('worse protective bids cannot create a marker or change sealed financial request',async()=>{
+ const f=await protectiveFixture(false),request=await requestOf(f.exit),before=JSON.stringify(request);
+ const worse={...f.book,bestBidDollars:'0.3900',bids:[{priceDollars:'0.3900',availableContracts:'100.00'}]};
+ assert.throws(()=>sealedFinancialProtectiveExitOrder({positionId:f.parent,market:request.market,side:request.side,quantityHundredths:'200',minimumExitMicros:400000},request,worse),/orderbook_changed/);
+ assert.equal(JSON.stringify(await requestOf(f.exit)),before);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_emergency_exit_reservations')).rows[0].n,0);
+ assert.equal(f.posts.length,1,'only the fixture entry was posted');
+});
+
+test('protective final fence rechecks identical monetary authority and original expiry before any send',async()=>{
+ for(const scenario of ['valid','revoked','changed','expired-before-send','rollback-clock'] as const){
+  const f=await protectiveFixture(true,false,'150'),input=await actualOwnedFinalFence(f);let posts=0,checks=0,clocks=0;
+  let fingerprint='';
+  const {verifyReviewedProtectiveExitFee}=await import('./reviewedProtectiveExitFee');
+  const result=await dispatchReviewedProtectiveExitOnce(input,{
+   db:pool,mark:async()=>f.mark(),verifyFee:async()=>{
+    // The authority/provider data are explicit fixtures, but the proof brand
+    // and completion-time freshness receipt are minted by the real verifier.
+    const proof=await verifyReviewedProtectiveExitFee(input.ownerId,input.accountId,String(f.order.ticker),{
+     sha:()=> 'a'.repeat(40),db:{query:async(sql)=>({rows:sql.includes('AS standing_history')?[{standing_history:false}]:[{grant_id:'11111111-1111-4111-8111-111111111111',review_id:'22222222-2222-4222-8222-222222222222',consent_id:'33333333-3333-4333-8333-333333333333',policy_hash:'fixture-policy',legacy_valid:true,valid_for_ms:60000}]})},
+     readFee:async(ticker)=>({ok:true,reason:'fixture',marketOpen:true,marketTicker:ticker,fingerprint:'b'.repeat(64),observedAtMs:Date.now()}) as any,
+    });assert.equal(proof.ok,true);fingerprint=proof.authorityFingerprint!;return proof as any;
+   },
+   verifyFeeAuthority:async(_owner,_account,_sha,db)=>{
+    checks++;assert.ok(db);return scenario==='revoked'?{ok:false,reason:'protective_fee_standing_successor_missing'}:
+     {ok:true,reason:'verified',authorityFingerprint:scenario==='changed'?'e'.repeat(64):fingerprint,validForMs:scenario==='expired-before-send'?5:1000};
+   },
+   monotonicNow:()=>{clocks++;return clocks<3?100:scenario==='rollback-clock'?99:110;},
+   post:async()=>{posts++;throw Error('fixture_uncertain_post');},
+  });
+  assert.equal(checks,1);assert.equal(posts,scenario==='valid'?1:0);
+  assert.equal(result.postAttempted,scenario==='valid');
+  assert.equal(result.state,scenario==='expired-before-send'||scenario==='rollback-clock'?'BLOCKED':'UNKNOWN');
+  assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,'150');
+ }
+});

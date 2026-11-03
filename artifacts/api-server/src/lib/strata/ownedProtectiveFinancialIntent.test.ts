@@ -52,3 +52,33 @@ test("modified sealed intent, stale depth or floor fails closed without POST",()
   selection,request,{...book,bestBidDollars:"0.5400",
    bids:[{priceDollars:"0.5400",availableContracts:"5.00"}]}));
 });
+
+test("better bids preserve the exact sealed whole/fractional YES/NO order",()=>{
+ for(const side of ["YES","NO"] as const)for(const fractional of [false,true]){
+  const {contracts:_whole,...fields}=request;
+  const financial:Request=fractional?{...fields,side,action:"SELL",reduceOnly:true,quantityVersion:"EXIT_HUNDREDTHS_V1",quantityHundredths:"150"}:{...request,side};
+  const selected={...selection,side};const original:string=JSON.stringify(financial);
+  const improved={...book,bestBidDollars:"0.5700",bids:[{priceDollars:"0.5700",availableContracts:"1.00"},{priceDollars:"0.5600",availableContracts:"5.00"}]};
+  const result=sealedFinancialProtectiveExitOrder(selected,financial,improved);
+  assert.equal(result.price,side==="YES"?"0.5500":"0.4500");assert.equal(result.count,fractional?"1.50":"2.00");
+  assert.equal(result.client_order_id,financial.clientOrderId);assert.equal(JSON.stringify(financial),original);
+ }
+});
+test("more owned liquidity never increases sealed quantity and split exact depth is accepted",()=>{
+ const {contracts:_whole,...fields}=request;
+ const fractional={...fields,action:"SELL" as const,reduceOnly:true as const,quantityVersion:"EXIT_HUNDREDTHS_V1" as const,quantityHundredths:"150"};
+ const selected={...selection,quantityHundredths:"300"};
+ const depth={...book,bestBidDollars:"0.5600",bids:[{priceDollars:"0.5600",availableContracts:"0.50"},{priceDollars:"0.5500",availableContracts:"1.00"},{priceDollars:"0.5400",availableContracts:"50.00"}]};
+ assert.equal(sealedFinancialProtectiveExitOrder(selected,fractional,depth).count,"1.50");
+ assert.throws(()=>sealedFinancialProtectiveExitOrder(selected,{...fractional,quantityHundredths:"151"},depth),/orderbook_changed/);
+});
+test("worse/thin/malformed depth or raised owner floor cannot weaken sealed exit",()=>{
+ for(const changed of [
+  {...book,bestBidDollars:"0.5400",bids:[{priceDollars:"0.5400",availableContracts:"100.00"}]},
+  {...book,bids:[{priceDollars:"0.5500",availableContracts:"1.99"}]},
+  {...book,bestBidDollars:"0.5600",bids:[{priceDollars:"0.5500",availableContracts:"10.00"}]},
+  {...book,bids:[{priceDollars:"0.5500",availableContracts:"2.00"},{priceDollars:"0.5500",availableContracts:"1.00"}]},
+  {...book,bids:[{priceDollars:"0.5500",availableContracts:"2.001"}]},
+ ])assert.throws(()=>sealedFinancialProtectiveExitOrder(selection,request,changed),/orderbook_changed/);
+ assert.throws(()=>sealedFinancialProtectiveExitOrder({...selection,minimumExitMicros:560000},request,book),/sealed_financial_intent_invalid/);
+});

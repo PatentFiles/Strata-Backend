@@ -3,15 +3,14 @@ import {planFractionalIocExit} from "../v13-production/fractionalExitPlanner";
 import type {Request,MarketEvidence} from "../v13-production/types";
 import type {ProtectiveExitDispatch} from "../v13-production/consumer";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
-import {planV13IocExit} from "../v13ExecutionPlanner";
 
 type Selection=Parameters<ProtectiveExitDispatch>[0];
 const CLIENT=/^v13p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * The V13 ledger and signed exit ledger MUST have the SAME client ID,
  * contracts, side and price. prepareExit commits the authenticated intent.
- * A separately refreshed order book must support EXACTLY the sealed IOC;
- * if it changes, deny without creating any reservation/POST.
+ * A separately refreshed order book must support the unchanged sealed IOC.
+ * Better bids may execute it; never reprice or resize the sealed request.
  */
 export function sealedFinancialProtectiveExitOrder(
  selection:Selection,financial:Request,book:MarketEvidence,
@@ -30,15 +29,17 @@ export function sealedFinancialProtectiveExitOrder(
     financial.timeInForce!=="IOC"||!CLIENT.test(financial.clientOrderId)||
     quantity<1n||quantity>100000n||quantity>owned||
     !Number.isSafeInteger(financial.limitMicros)||financial.limitMicros<100||
-    financial.limitMicros>999_900||financial.limitMicros%100!==0)
+    financial.limitMicros>999_900||financial.limitMicros%100!==0||
+    financial.limitMicros<selection.minimumExitMicros)
   throw Error("protective_exit_sealed_financial_intent_invalid");
- const plan=financial.quantityVersion==='EXIT_HUNDREDTHS_V1'
-  ? planFractionalIocExit({ownedHundredths:owned.toString(),bestBidDollars:book.bestBidDollars,
-      bidLevels:book.bids,minimumExitMicros:selection.minimumExitMicros})
-  : planV13IocExit({ownedContracts:Number(owned/100n),bestBidDollars:book.bestBidDollars,
-      bidLevels:book.bids,minimumExitPrice:selection.minimumExitMicros/1_000_000});
- if(!plan.ok||('plannedHundredths' in plan.plan?BigInt(plan.plan.plannedHundredths):BigInt(plan.plan.plannedContracts)*100n)!==quantity||
-    ('limitMicros' in plan.plan?plan.plan.limitMicros:Math.round(plan.plan.limitPrice*1_000_000))!==financial.limitMicros)
+ // Test admissibility of exactly the sealed quantity at its sealed SELL
+ // limit. Reoptimizing all owned units would reject better bids or deeper
+ // liquidity even though neither change requires modifying this request.
+ const plan=planFractionalIocExit({ownedHundredths:quantity.toString(),
+   bestBidDollars:book.bestBidDollars,bidLevels:book.bids,
+   minimumExitMicros:financial.limitMicros});
+ if(!plan.ok||BigInt(plan.plan.plannedHundredths)!==quantity||
+    plan.plan.limitMicros<financial.limitMicros)
   throw Error("protective_exit_orderbook_changed_after_financial_preparation");
  const ticks=financial.limitMicros/100;
  const yesTicks=selection.side==="YES"?ticks:10_000-ticks;
