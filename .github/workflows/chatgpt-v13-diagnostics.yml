@@ -554,3 +554,52 @@ jobs:
         run: |
           pnpm exec esbuild src/lib/microLiveFeeOfficialSnapshot.test.ts --bundle --platform=node --format=cjs --outfile=dist/microLiveFeeOfficialSnapshot.test.cjs --external:pdfjs-dist --external:pdfjs-dist/*
           node --test dist/microLiveFeeOfficialSnapshot.test.cjs
+
+  both-prefetch-safety:
+    name: BOTH-prefetch safety (PG${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: v13_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d v13_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/v13_ci
+      NODE_ENV: test
+      GITHUB_ACTIONS: "true"
+      CI: "true"
+      STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED: "true"
+      STRATA_PUBLIC_METADATA_PREFETCH_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+      - name: Build workspace
+        run: pnpm run build
+      - name: Initialize disposable database schema
+        run: pnpm --filter @workspace/db run push
+      - name: Test BOTH-prefetch production and micro-live safety suites
+        working-directory: artifacts/api-server
+        run: pnpm run test:v13-safety-all

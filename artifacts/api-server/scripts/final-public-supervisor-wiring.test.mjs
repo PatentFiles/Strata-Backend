@@ -52,7 +52,7 @@ const built=await build({stdin:{contents:entry,resolveDir:base,sourcefile:'offli
  });
  b.onLoad({filter:/.*/,namespace:'offline'},args=>({loader:'js',resolveDir:base,contents:args.path==='session-wrapper'?`
   import * as real from ${JSON.stringify(strata+'/accountProductionSession.ts')};
-  export function openOwnedExecutionSession(input){const bound=real.openOwnedExecutionSession(input);globalThis.fixture.bound=bound;globalThis.fixture.openInput=input;return bound;}
+  export function openOwnedExecutionSession(input){const bound=real.openOwnedExecutionSession(input);globalThis.fixture.bound=bound;globalThis.fixture.openInput=input;globalThis.fixture.boundByAccount.set(input.executionAccountId,bound);return bound;}
   export async function scheduleOwnedAccountWorker(bound,mode){
    globalThis.fixture.scheduleCalls.push(mode);
    const actual=bound.worker,stop=actual.stop.bind(actual);let scheduled=true;
@@ -87,32 +87,35 @@ function pages(){return {
 };}
 function fixture(value,{api=true,old='false'}={}){
  const f={now:at,digest:'d'.repeat(64),policy:'b'.repeat(64),logs:[],warnings:[],calls:[],sql:[],scheduleCalls:[],startupReleaseCalls:0,standingHistoryCalls:0,startupFeedReads:0,monetaryCalls:0,workerStops:0,books:0,externalNetworkCalls:0,orderTransportCalls:0,realTimers:0,abortSignalDeadlines:[],timers:new Map(),publicPages:pages(),stopExposure:false,reviewMutator:r=>r};
- f.oldFlag=old;
+ f.oldFlag=old;f.boundByAccount=new Map();f.accountRows=new Map();f.transportInFlight=0;f.maxTransportInFlight=0;
  f.source=api?'strata-api-reviewed://kxbtc15m/'+grant:'https://kalshi.com/docs/kalshi-fee-schedule.pdf';
  f.row={key_fingerprint:fingerprint,credential_fingerprint:fingerprint,cash_micros:'60000000000',reserved_micros:'0',reconciled_at:iso(at-1000),commissioned:true,execution_enabled:true,kill_switch:false,blocked_reason:null,fee_artifact_digest:f.digest,cash_precision_verified:true,subaccount:1,exchange_index:2,financial_account_id:'financial-offline',provider_connection_id:'provider-offline',vault_secret_id:'vault-offline',decrypted_secret:JSON.stringify({api_key_id:keyId,private_key:privateKey}),policy_hash:f.policy,fee_policy_version:'strata_api_fee_source_signed_review_v2',fee_source_url:f.source,fee_formula_version:'standard-quadratic-0.07-v1',policy_state:'APPROVED',configured_stake_cents:500};
  f.review=()=>f.reviewMutator({grant_id:grant,owner_user_id:owner,issuer_admin_id:'22222222-2222-4222-8222-222222222222',rate_decision_digest:f.exports.PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,fee_model_version:f.exports.PDF_FREE_RATE_REVIEW_VECTOR_VERSION,policy_version:'strata_api_fee_source_signed_review_v2',scope:'KXBTC15M:INDEX2',issued_at:iso(at-20000),expires_at:iso(at+60000),revoked_at:null,authorized_stages:['STEP_9','STEP_11','ORDER_ENTRY'],consent_owner:owner,confirmed_at:iso(at-15000),consent_revoked_at:null,first_review_id:'66666666-6666-4666-8666-666666666666',first_reviewer:'22222222-2222-4222-8222-222222222222',first_digest:f.exports.PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,first_model:f.exports.PDF_FREE_RATE_REVIEW_VECTOR_VERSION,first_scope:'KXBTC15M:INDEX2',first_signed:iso(at-30000),first_expires:iso(at+70000),first_revoked:null});
+ f.accountRows.set(account,f.row);
+ f.registerAccount=id=>{assert.ok(!f.accountRows.has(id));const row={...f.row,financial_account_id:'financial-'+id,provider_connection_id:'provider-'+id,vault_secret_id:'vault-'+id};f.accountRows.set(id,row);return row;};
+ const ownedRow=(id,userId=owner)=>{assert.equal(userId,owner,'fixture owner must be explicit');assert.ok(f.accountRows.has(id),'unregistered fixture account '+id);return f.accountRows.get(id);};
  const query=async(sql,args=[])=>{
   f.sql.push({sql,args});
-  if(sql.includes('-- personal-session:signer'))return {rows:[f.row]};
+  if(sql.includes('-- personal-session:signer'))return {rows:[ownedRow(args[1],args[0])]};
   if(sql.includes("FROM live_execution_config WHERE id = 'singleton'"))return {rows:[{live_execution_enabled:true,manual_kill_switch:false}]};
   if(sql==='SELECT request FROM v13_production_intent WHERE account_id = $1')return {rows:[]};
   if(sql.includes('-- api-fee:two-person-source-stage.'))return {rows:[f.review()]};
   if(sql.includes("to_regclass('private.kalshi_account_worker_lease')"))return {rows:[{name:'offline-test-port'}]};
   if(sql.includes('SELECT state, account_kill FROM private.kalshi_account_worker_lease'))return {rows:[{state:'released',account_kill:false}]};
-  if(sql.includes('-- account-worker:arm'))return {rows:[{id:account}]};
-  if(sql.includes('-- account-worker:acquire'))return {rows:[{fencing_token:'3'}]};
+  if(sql.includes('-- account-worker:arm')){ownedRow(args[0],args[1]);return {rows:[{id:args[0]}]};}
+  if(sql.includes('-- account-worker:acquire')){ownedRow(args[0],args[7]);return {rows:[{fencing_token:'3'}]};}
   if(sql.includes('WITH unresolved_intents AS'))return {rows:[{n:'0'}]};
   if(sql.startsWith('BEGIN; SELECT * FROM v13_production_account'))return [{command:'BEGIN',rows:[]},{command:'SELECT',rows:[{id:account}]}];
   if(sql.includes('SELECT a.id')&&sql.includes('FOR SHARE OF a,p,live,c,lease'))return {rows:f.accountFenceClosed?[]:[{id:account}]};
   if(['BEGIN','COMMIT','ROLLBACK'].includes(sql)||sql.startsWith('SET '))return {rows:[]};
-  if(sql.startsWith('SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE'))return {rows:[{id:account}]};
+  if(sql.startsWith('SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE')){ownedRow(args[0],args[1]);return {rows:[{id:args[0]}]};}
   if(sql.includes('AS positions')&&sql.includes('AS unresolved'))return {rows:[{positions:f.stopExposure?1:0,orders:0,unresolved:0}]};
   if(sql.includes('-- account-worker:release')||sql.includes('-- account-worker:hold')||sql.includes('-- account-worker:kill'))return {rows:[{id:account}]};
   throw Error('unexpected_offline_sql:'+sql);
  };
  f.db={query,connect:async()=>{f.sql.push({offlineConnect:true});return {query,release(){f.sql.push({offlineRelease:true});}};}};
  f.signedGet=async(_material,p)=>{assert.equal(p,`/trade-api/v2/markets/${market}/orderbook`);f.books++;return {orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};};
- f.fetch=async(input,init)=>{const url=String(input);if((init?.method??'GET')!=='GET'){f.orderTransportCalls++;throw Error('offline_order_transport_forbidden');}assert.ok(url.startsWith('https://external-api.kalshi.com/trade-api/v2/'));assert.equal(init?.redirect,'error');const p=url.replace('https://external-api.kalshi.com/trade-api/v2','');assert.ok(p in f.publicPages,'unexpected fixture public path '+p);f.calls.push({path:p,at:f.now,signal:init?.signal});if(f.pausePublic)await f.pausePublic;return Response.json(f.publicPages[p]);};
+ f.fetch=async(input,init)=>{const url=String(input);if((init?.method??'GET')!=='GET'){f.orderTransportCalls++;throw Error('offline_order_transport_forbidden');}assert.ok(url.startsWith('https://external-api.kalshi.com/trade-api/v2/'));assert.equal(init?.redirect,'error');const p=url.replace('https://external-api.kalshi.com/trade-api/v2','');assert.ok(p in f.publicPages,'unexpected fixture public path '+p);const call={path:p,at:f.now,signal:init?.signal,index:f.calls.length};f.calls.push(call);f.transportInFlight++;f.maxTransportInFlight=Math.max(f.maxTransportInFlight,f.transportInFlight);try{if(f.pausePublic)await f.pausePublic;return f.respond?await f.respond(call):Response.json(f.publicPages[p]);}finally{f.transportInFlight--;}};
  class ClockDate extends Date{constructor(...a){super(...(a.length?a:[f.now]));}static now(){return f.now;}}
  const env=Object.freeze({[oldFlag]:old,...(value===undefined?{}:{[finalFlag]:value}),NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:release,STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true'});
  const OfflineAbortSignal={timeout(ms){const controller=new AbortController();f.abortSignalDeadlines.push({ms,controller});return controller.signal;},abort:AbortSignal.abort.bind(AbortSignal),any:AbortSignal.any.bind(AbortSignal)};
@@ -178,6 +181,32 @@ try{
   p.start('FINAL_MARKET',c);await turns();assert.equal(f.calls.length-before,10);assert.ok(f.calls.slice(before,before+5).every(x=>x.signal.aborted));
   const evidence=await p.finalMarket(c,()=>f.bound.exchange.market(market,'YES'));assert.ok(evidence.publicMetadataCapture);assert.equal(f.calls.length-before,10);await f.stop();return {oldFlag:'true only in supplemental releasePrepare test',publicGets:10,cleanup:await cleaned(f)};
  });
+ await check('BOTH actual supervisor shares two-account three-request budget and isolates queued STOP',async()=>{
+  const f=await start(fixture('true',{old:'true'}));const a=f.bound,pa=a.executor.finalPublicMetadata;
+  const ids=['offline-account-b','offline-account-c'];
+  for(const id of ids){f.registerAccount(id);const result=await f.exports.personalTradingSession.start({userId:owner,accountId:id,action:'START'});assert.equal(result.ok,true,JSON.stringify(result));}
+  const b=f.boundByAccount.get(ids[0]),c=f.boundByAccount.get(ids[1]);assert.ok(b);assert.ok(c);assert.notEqual(a,b);
+  for(const bound of [a,b,c]){assert.equal(typeof bound.executor.prefetchCommittedPublicMetadata,'function');assert.ok(bound.executor.finalPublicMetadata instanceof f.exports.FinalPublicMetadataPhases);}
+  const initialCalls=f.calls.length;f.maxTransportInFlight=0;
+  let releaseHeaders;f.pausePublic=new Promise(resolve=>{releaseHeaders=resolve;});
+  const hint={...source('prepare-account-a'),committedAtMs:at,qualifyingTrigger:true};
+  const prepare=a.executor.prefetchCommittedPublicMetadata(hint);assert.ok(prepare);await turns();
+  assert.equal(f.calls.length-initialCalls,3);assert.equal(f.transportInFlight,3);
+  const cb=phaseContext('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');b.executor.finalPublicMetadata.start('FINAL_MARKET',cb);await turns();
+  let d=f.exports.processCommittedPublicMetadata.diagnostics();assert.equal(d.accounts,2);assert.equal(d.activeRequests,3);assert.ok(d.queuedRequests>0);
+  assert.equal(c.executor.prefetchCommittedPublicMetadata({...hint,evaluationId:'prepare-account-c'}),null);
+  assert.equal(a.executor.prefetchCommittedPublicMetadata({...hint,evaluationId:'duplicate-account-a'}),null);
+  assert.throws(()=>b.executor.finalPublicMetadata.consumeWire('v13p-'+phaseContext().intentId,market),/phase_metadata_intent_mismatch/);
+  const stopped=await f.exports.personalTradingSession.stop({userId:owner,accountId:ids[0],action:'STOP'});assert.equal(stopped.workerStopped,true);
+  await assert.rejects(b.executor.finalPublicMetadata.finalMarket(cb,()=>b.exchange.market(market,'YES')),/phase_metadata_authority_hold/);
+  assert.equal(a.exchange.state.entriesAuthorized,true);assert.equal(a.exchange.state.armRequested,true);assert.ok(f.calls.slice(initialCalls).every(call=>!call.signal.aborted),'stopping queued B must not abort A requests');
+  prepare.discard('fixture-account-a-cancel');await turns();d=f.exports.processCommittedPublicMetadata.diagnostics();assert.equal(d.activeRequests,3);assert.ok(f.calls.slice(initialCalls).every(call=>call.signal.aborted));
+  const queuedC=c.executor.prefetchCommittedPublicMetadata({...hint,evaluationId:'prepare-account-c-after-stop'});assert.ok(queuedC,'B queued cancellation frees only its account slot');await turns();assert.equal(f.calls.length-initialCalls,3,'ignored A abort retains all transport slots');assert.equal(f.exports.processCommittedPublicMetadata.diagnostics().activeRequests,3);queuedC.discard('fixture-account-c-cancel');
+  f.pausePublic=null;releaseHeaders();await prepare.drained;await turns();assert.equal(f.calls.length-initialCalls,3,'queued B never starts after STOP');assert.equal(f.transportInFlight,0);assert.equal(f.maxTransportInFlight,3);
+  const ca=phaseContext('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab');pa.start('FINAL_MARKET',ca);await turns();const evidence=await pa.finalMarket(ca,()=>a.exchange.market(market,'YES'));assert.ok(evidence.publicMetadataCapture);assert.equal(f.calls.length-initialCalls,8,'unaffected A can start distinct FINAL after drain');
+  await f.exports.personalTradingSession.stop({userId:owner,accountId:account,action:'STOP'});await f.exports.personalTradingSession.stop({userId:owner,accountId:ids[1],action:'STOP'});
+  return {sameOwnerDistinctAccounts:3,oldFlag:'true',finalFlag:'true',maxTransportInFlight:f.maxTransportInFlight,publicGets:f.calls.length-initialCalls,cleanup:await cleaned(f),limits:'Actual supervisor callbacks; synthetic DB and signed books; same-owner isolation only; no real worker scheduling or production authority'};
+ });
  await check('actual API verifier refuses revoked review before wire and never treats cached public bytes as authority',async()=>{
   const f=await start(fixture('true')),p=phases(f),c=phaseContext();p.start('WIRE_FEE',c);await turns();f.reviewMutator=r=>({...r,first_revoked:iso(at-1)});const before=f.calls.length;await assert.rejects(wire(f,c),/api_fee_final_order_grant_or_market_closed/);assert.equal(f.calls.length,before);p.finish(c.intentId,c.invocation);await f.stop();return {rawOrderTransportCalls:0,cleanup:await cleaned(f)};
  });
@@ -186,7 +215,7 @@ try{
  });
 }finally{
  const binding=[];for(const [filename,before] of [...sourceInputs].sort()){const after=sha(await readFile(filename));assert.equal(after,before,'frozen source mutated');binding.push({path:path.relative(base,filename),sha256:before});}
- await writeFile(out+'/source-binding.json',JSON.stringify({sourceRoot:base,referenceFrozenMerge:release,referenceFrozenTree:'97ed06f602e27f5d10cec6371e4be77ddbb21a2f',allReadSourceFilesUnchanged:true,files:binding},null,2)+'\n');
+ await writeFile(out+'/source-binding.json',JSON.stringify({sourceRoot:base,qualificationTargetMerge:'0d9c2def02157f6c00886b7d0bf8fab519c20ad8',qualificationTargetTree:'a1fe7410d1b1d9b7e39858059f77a1527b5ff494',qualificationTargetBinding:'Qualification baseline identifies the runtime source; local source bytes are hashed below. Synthetic deployment release is not production authority.',referenceFrozenMerge:release,referenceFrozenTree:'97ed06f602e27f5d10cec6371e4be77ddbb21a2f',allReadSourceFilesUnchanged:true,files:binding},null,2)+'\n');
  await writeFile(out+'/stub-boundaries.json',JSON.stringify({namedStubs:Object.keys(stubs),wrappers:['accountProductionSession scheduler boundary + capture real open','personalExchangeRead startup snapshot/feed fixtures only'],stubUses},null,2)+'\n');
  await writeFile(out+'/results.json',JSON.stringify({scope:'Offline actual construction and callback wiring qualification. No real worker START, timers, provider IO, database, order transport, economic replay, production authority, or historical full-path proof.',passed:results.filter(x=>x.status==='passed').length,failed:results.filter(x=>x.status==='failed').length,results},null,2)+'\n');
 }

@@ -1712,3 +1712,214 @@ test('protective base FINAL overlap economic timing',async()=>{
  console.info('FOURTH_ECONOMIC_TIMED_SUMMARY',JSON.stringify({cases:cases.length,arms:results.length,posts:results.filter(r=>r.shouldPost).length,refusals:results.filter(r=>!r.shouldPost).length}));
  }finally{for(const [key,value] of [['NODE_ENV',savedEnv.node],['RAILWAY_GIT_COMMIT_SHA',savedEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',savedEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
 });
+async function bothSyntheticNoSource(now:number):Promise<string>{
+ const id=randomUUID(),ticker='KXBTC15M-30JAN010015-00';
+ const quote=quoteFromEntryBook({ticker,source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',requestStartedAtMs:now,receivedAtMs:now,bodyCompletedAtMs:now,yesBids:[{priceTicks:4900,contractsHundredths:10000000}],noBids:[{priceTicks:5000,contractsHundredths:100000}]},
+ {ticker,target:100000,startsAt:new Date(now-1000),endsAt:new Date(now+900000),fetchedAt:new Date(now),status:'open',result:null,yesAsk:.50,noAsk:.51,yesBid:.49,noBid:.50,yesPrice:.50,noPrice:.51},now,now,'NO',5);
+ await pool.query(`INSERT INTO forward_test_evaluations(id,evaluated_at,market_ticker,btc_price,target,signed_buffer,absolute_buffer,velocity,feed_freshness,fresh_cross,crossing_consumed,crossing_key,signal,direction,qualifying_trigger,reason,entry_offer,position_was_open,previous_side,up_offer,down_offer,btc_provider_age_ms,btc_receive_age_ms,market_age_ms,strategy_parameter_set_id,strategy_parameter_hash,up_bid,down_bid,entry_quote_evidence)
+ VALUES($1,$2,$3,99990,100000,-10,10,-1,'current',true,true,$4,'SCOUT','DOWN',true,'synthetic-economic-fixture',.51,false,'UP',.50,.51,68,0,0,$5,$6,.49,.50,$7::jsonb)`,[id,new Date(now),ticker,`${id}:first`,V13_CHAMPION_PARAMETER_SET.id,V13_CHAMPION_PARAMETER_HASH,JSON.stringify(quote.evidence)]);
+ return id;
+}
+
+test('BOTH active committed worker PREPARE to FINAL and WIRE preserves original economic and raw guards',async()=>{
+ if(!(await pool.query("SELECT to_regclass('private.strata_v13_execution_trace') AS table_name")).rows[0].table_name)await pool.query(readFileSync('src/lib/strata/fixtures/finalOverlapExecutionTrace.sql','utf8'));
+ const syntheticEconomicInput=JSON.parse(readFileSync('src/lib/strata/fixtures/bothPrefetchSyntheticExpected.json','utf8'));
+ const results:any[]=[];
+ const cases:any[]=[
+  {name:'both-active-coherent',failure:'none'},
+  {name:'both-active-pending-prepare',failure:'none',prepareDelayMs:25},
+  {name:'both-active-duplicate-dispatch',failure:'none',race:true},
+  {name:'both-active-STOP-final',failure:'B-stop-queued'},
+  {name:'both-active-stale-5001',failure:'none',forceEffective:5001},
+  {name:'both-active-price-pin',failure:'pin-rise'},
+ ].map(spec=>({...spec,age:0,rtt:0,fast:true}));
+ const fixtureOpen=new Date(Date.now()-60000).toISOString(),fixtureClose=new Date(Date.now()+900000).toISOString();
+ const savedEnv={node:process.env.NODE_ENV,sha:process.env.RAILWAY_GIT_COMMIT_SHA,release:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+ process.env.NODE_ENV='production';process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ try{for(const spec of cases){const failure=spec.failure,enabled=true;
+  const posts:string[]=[],prepareSqlMeasurements:any[]=[],faults:string[]=[],freshEconomicFees:any[]=[];const s=await tradingSession(500,posts,spec.cashShort?1_990_000:25_000_000,stage=>{faults.push(stage);if(stage==='after_reservation'&&failure==='after-reservation-fault')throw Error('fixture_after_reservation');}),market='KXBTC15M-30JAN010015-00',event='KXBTC15M-30JAN010015';
+  await pool.query('TRUNCATE private.strata_v13_execution_trace');
+  const observedStages:any[]=[];s.executor.timingObserver=stage=>{observedStages.push(stage);};
+  const sourceUrl='strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555';
+  const approved={...policy(),maxEntryStakeCents:500,maxEntryAllInCents:625,maxQuoteAgeMs:5000,feePolicyVersion:API_SOURCE_POLICY_VERSION,feeFormulaVersion:API_SOURCE_FORMULA_VERSION,feeSourceUrl:sourceUrl};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
+  await pool.query('UPDATE v13_live_money_policy SET max_entry_stake_cents=500,max_entry_all_in_cents=625,max_quote_age_ms=5000,fee_policy_version=$1,fee_formula_version=$2,fee_source_url=$3,policy_hash=$4 WHERE id=$5',[approved.feePolicyVersion,approved.feeFormulaVersion,sourceUrl,approved.policyHash,approved.id]);
+  const evaluationId=await bothSyntheticNoSource(s.now),originalAt=s.now,anchor=performance.now();
+  const originalBtcAge=68;
+  await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=$2 WHERE id=$1',[evaluationId,originalBtcAge]);
+  const delays=spec.fast?{db:0,root:0,event:0,signed:0,finalFee:0,wireRoot:0,wireEvent:0,wireFee:0,jitter:0,book:0}:{db:26,root:58,event:60,signed:587,finalFee:102,wireRoot:121,wireEvent:122,wireFee:70,jitter:0,book:63};
+  let clockOffset=0,forcedAt:number|null=null;const dbDelay=delays.db;
+  const time=()=>{const at=forcedAt??(originalAt+clockOffset+Math.floor(performance.now()-anchor));if(at>s.now)s.advance(at-s.now);return s.now;};
+  const delay=async(ms:number)=>{if(ms)await new Promise<void>(r=>setTimeout(r,ms));time();};
+  let authorityClockCalls=0;Object.defineProperty(s.executor,'now',{value:()=>{authorityClockCalls++;return time();}});
+  const close=fixtureClose,open=fixtureOpen;
+  const pages:Record<string,unknown>={
+   [`/markets/${market}`]:{market:{ticker:market,event_ticker:event,exchange_index:2,status:'active',open_time:open,close_time:close,expiration_time:close,expected_expiration_time:close,latest_expiration_time:close,price_level_structure:'tapered_deci_cent',price_ranges:syntheticEconomicInput.syntheticPinnedFee.cashRisk.gridEvidence.ranges}},
+   [`/events/${event}`]:{event:{event_ticker:event,series_ticker:'KXBTC15M',exchange_index:2,fee_type_override:null,fee_multiplier_override:null}},
+   '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
+   '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[]},
+   [`/events/fee_changes?event_ticker=${event}&limit=100`]:{event_fee_changes:[],cursor:''},
+  };
+  let guardAt:number|null=null,dispatchSourceAge=0;let dispatching=false,books=0,feeReviews=0,wireReviews=0,signed=0,wireAt=0,allowed=true;
+  const calls:Array<{path:string;at:number}>=[],captures:any[]=[],sqlCalls:string[]=[],timeline:Array<{event:string;atMs:number}>=[];
+  const mark=(event:string)=>timeline.push({event,atMs:performance.now()-anchor});
+  const fetchPublic=(async(input,init)=>{const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');assert.equal(init?.method,'GET');assert.ok(path in pages);calls.push({path,at:time()});const callNumber=calls.length;if(!dispatching&&spec.prepareDelayMs)await delay(spec.prepareDelayMs);if(dispatching){const wire=callNumber>10;await delay(Math.max(0,(wire?(path.startsWith('/events/')?delays.wireEvent:delays.wireRoot):(path.startsWith('/events/')?delays.event:delays.root))+delays.jitter));}if(dispatching&&((failure.startsWith('A-429')&&callNumber===6)||(failure.startsWith('B-429')&&callNumber===11)))return new Response('{}',{status:429,headers:{'content-type':'application/json','retry-after':'1'}});if(failure==='B-bad-body'&&callNumber===11)return Response.json(null);return Response.json(pages[path]);}) as typeof fetch;
+  const binding={accountId:ACCOUNT,ownerId:USER,holderId:'phase-fixture',releaseSha:'a'.repeat(40),fence:'3',policyHash:approved.policyHash!};
+  const coordinator=new CommittedPublicMetadataCoordinator(fetchPublic,time,()=>performance.now());
+  let activePrepare:MetadataPrefetchAttempt|null=null,prepareAttempt:MetadataPrefetchAttempt|null=null;
+  let prepareStarts=0,releasePrepareCalls=0;const prepareCaptures:any[]=[];
+  let reachedInitial!:()=>void,releaseInitial!:()=>void;
+  const initialReached=new Promise<void>(r=>{reachedInitial=r;}),initialGate=new Promise<void>(r=>{releaseInitial=r;});
+  const admission=()=>allowed&&s.exchange.state.armRequested===true&&s.exchange.state.entriesAuthorized!==false&&!s.exchange.state.accountKill&&!s.exchange.state.globalKill&&s.exchange.state.presentedToken===s.exchange.state.fencingToken;
+  const phases=new FinalPublicMetadataPhases(coordinator,()=>binding,admission,()=>{releasePrepareCalls++;mark('release_prepare');activePrepare?.discard();activePrepare=null;});
+  s.executor.finalPublicMetadata=phases;
+  s.executor.prefetchCommittedPublicMetadata=hint=>{
+   if(activePrepare||!admission())return null;
+   const attempt=coordinator.start(binding,hint);if(!attempt)return null;
+   prepareStarts++;mark('worker_prepare_prefetch_start');activePrepare=attempt;prepareAttempt=attempt;
+   return {source:attempt.source,drained:attempt.drained,pause:attempt.pause,discard(reason){attempt.discard(reason);void attempt.drained.then(()=>{if(activePrepare===attempt)activePrepare=null;});}};
+  };
+  if(phases){const startPhase=phases.start.bind(phases);phases.start=(phase,context)=>{mark(`${phase}_start`);startPhase(phase,context);};const consumeA=phases.consumeFinalMarket.bind(phases);phases.consumeFinalMarket=(ticker)=>{mark('FINAL_MARKET_consume');return consumeA(ticker);};const consumeB=phases.consumeWire.bind(phases);phases.consumeWire=(id,ticker)=>{mark('WIRE_FEE_consume');return consumeB(id,ticker);};}
+  Object.defineProperty(s.exchange,'readMarket',{value:async(ticker:string,side:'YES'|'NO',context:any)=>{
+   const result=await readOwnedEntryMarket({market:ticker,side,context,now:time,apiSource:true,activeMetadata:activePrepare,metadataScope:()=>binding,publicFetch:fetchPublic,
+    finalPublicMetadata:()=>phases?.consumeFinalMarket(ticker),
+    verifyFee:async(_clock,read,capture)=>{feeReviews++;const proof=await probeCurrentKalshiFeeApi(fetchPublic,time,ticker,read,capture);if(!proof.ok)throw Error(proof.reason);if(dispatching)await delay(delays.finalFee);return Date.parse(proof.liveVerifiedAt!);},
+    readBook:async()=>{books++;if(dispatching)await delay(delays.book);return {orderbook_fp:{yes_dollars:dispatching&&failure==='pin-rise'?[['0.4800','100000'],['0.4700','100000']]:[['0.4900','100000'],['0.4800','100000'],['0.4700','100000']],no_dollars:[['0.5000','100000']]}};},
+    readPublic:async()=>{throw Error('unexpected_public_fallback');},configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:'d'.repeat(64),policyHash:approved.policyHash!});
+   if(context&&result.publicMetadataCapture){prepareCaptures.push(result.publicMetadataCapture);mark('prepare_capture_consumed');}if(dispatching)freshEconomicFees.push(structuredClone(result.fee));if(dispatching&&result.publicMetadataCapture)captures.push(result.publicMetadataCapture);if(dispatching&&failure==='credential-replaced')s.exchange.state.credentialFingerprint='e'.repeat(64);return result;
+  }});
+  const snapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof snapshot>)=>{signed++;if(!dispatching&&signed===1){mark('initial_signed_start');reachedInitial();await initialGate;mark('initial_signed_released');}if(dispatching){mark('signed_account_start');if(failure==='owner-replaced')await s.executor.ledger.currentTransaction()!.query('UPDATE v13_production_account SET owner_user_id=$2 WHERE id=$1',[ACCOUNT,OTHER]);if(failure==='rollover')(pages[`/markets/${market}`] as any).market.ticker='KXBTC15M-OTHER';if(failure==='B-stop-queued'){allowed=false;s.worker.stop();phases?.discardAll();}await delay(Math.max(0,delays.signed+delays.jitter));mark('signed_account_complete');}return snapshot(...args);}});
+  s.executor.authorizeFinalEntry=async()=>{if(!allowed)throw Error('production_entry_release_not_current');};
+  const originalTx=s.executor.ledger.transaction.bind(s.executor.ledger);
+  Object.defineProperty(s.executor.ledger,'transaction',{value:async(fn:any)=>originalTx(async(tx:any,a:any)=>{
+   const q=tx.query.bind(tx);const wrapped={...tx,query:async(sql:any,args:any)=>{assert.equal(typeof sql,'string','original sequential queries only; no protocol helper');sqlCalls.push(sql);if(!dispatching&&/^INSERT INTO v13_production_(intent|position)\b/.test(sql)){prepareSqlMeasurements.push({table:sql.includes('v13_production_intent')?'intent':'position',parameters:args.length});await delay(spec.rtt);}if(dispatching){mark('db_request_start');await delay(dbDelay);mark('db_request_complete');}return q(sql,args);}};
+   const result=await fn(wrapped,a);if(dispatching&&(failure==='after-claim-hold'||failure==='A-429-authority-closed')&&result===true){allowed=false;phases?.discardAll();}return result;
+  })});
+  const raw=s.exchange.fetchImpl!;
+  const checkedClock=createEntryWireClockFetch(()=>{guardAt=time()-originalAt;s.executor.ledger.assertFinalWireClock();},async(input,init)=>{wireAt=time()-originalAt;return raw(input,init);});
+  const guarded=createGuardedReviewedApiFeeFetch(USER,ACCOUNT,sourceUrl,checkedClock,approved.policyHash!,s.exchange.state.credentialFingerprint,3,'phase-fixture',{
+   // The actual ledger and borrowed transaction are used; these two private
+   // authority schemas are explicit fixture ports, not production consent.
+   borrowTransaction:(()=>({query:async(sql:string,args?:unknown[])=>{assert.ok(s.executor.ledger.currentTransaction());sqlCalls.push(sql);await delay(dbDelay);if(sql===FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL){const owner=(await s.executor.ledger.currentTransaction()!.query('SELECT owner_user_id FROM v13_production_account WHERE id=$1',[ACCOUNT])).rows[0]?.owner_user_id;return {rows:allowed&&failure!=='B-429-authority-closed'&&owner===USER?[{id:ACCOUNT}]:[]};}if(sql.includes('strata_continuous_execution_grants'))return {rows:[]};return s.executor.ledger.currentTransaction()!.query(sql,args);}})) as never,
+   consumePublicMetadata:(id,ticker)=>phases?.consumeWire(id,ticker),
+   verify:(async(_owner:any,_stage:any,_url:any,ticker:any,deps:any)=>{wireReviews++;const observed=await (deps.probe??((_:typeof fetch,clock:()=>number,target:string)=>probeCurrentKalshiFeeApi(fetchPublic,clock,target)))(fetchPublic,time,ticker);if(!observed.ok)throw Error(observed.reason);if(observed.metadataCapture)captures.push(observed.metadataCapture);await delay(delays.wireFee);if(spec.forceEffective)forcedAt=originalAt+spec.forceEffective-originalBtcAge;if(failure==='wire-stale')s.advance(6000);if(failure==='wire-revoked')return {ok:false,reason:'fixture_revoked'};return {ok:true,identity:{marketTicker:ticker,sourceUrl,feePolicyVersion:API_SOURCE_POLICY_VERSION,formulaVersion:API_SOURCE_FORMULA_VERSION,digest:'d'.repeat(64)}};}) as never,
+  });
+  Object.defineProperty(s.exchange,'fetchImpl',{value:guarded});
+  // Actual worker tick performs discovery, source preparation, decision receipts and dispatch.
+  // A synthetic prefix is fixed BEFORE PREPARE; there is no reset at dispatch and no claim of historical timestamps.
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+   CREATE TABLE IF NOT EXISTS private.strata_v13_signal_decisions (
+   decision_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,execution_account_id text NOT NULL,
+   evaluation_id text NOT NULL REFERENCES forward_test_evaluations(id),observed_at timestamptz NOT NULL DEFAULT now(),
+   phase text NOT NULL,source_age_ms integer,reason text,release_commit_sha text NOT NULL,
+   UNIQUE(execution_account_id,evaluation_id,phase))`);
+  s.worker.signalTrace!.record=d=>recordLiveSignalDecision(d,pool,'a'.repeat(40));
+  s.worker.signalTrace!.sweep=async()=>0;
+  const originalDispatch=s.executor.dispatch.bind(s.executor);
+  let intent='',before:any=null,refusal:string|null=null,start=0,finished=0;
+  Object.defineProperty(s.executor,'dispatch',{value:async(id:string)=>{
+   intent=id;before=(await pool.query('SELECT decision,request FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+   dispatching=true;dispatchSourceAge=time()-originalAt;start=performance.now();
+   try{if(spec.race)await Promise.all([originalDispatch(id),originalDispatch(id)]);else await originalDispatch(id);}
+   catch(error){refusal=String(error);throw error;}finally{finished=performance.now();s.worker.stop();}
+  }});
+  if(spec.prepareRace){const prepare=s.executor.prepareEntry.bind(s.executor);Object.defineProperty(s.executor,'prepareEntry',{value:async(id:string)=>{const ids=await Promise.all([prepare(id),prepare(id)]);assert.equal(ids[0],ids[1]);return ids[0];}});}
+  const insertFailure=failure==='first-insert-failure'||failure==='second-insert-failure';
+  if(insertFailure)await pool.query(`CREATE OR REPLACE FUNCTION public.prepare_pair_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture_insert_failure' USING ERRCODE='P0001';END$$;CREATE TRIGGER prepare_pair_test_fail BEFORE INSERT ON ${failure==='first-insert-failure'?'v13_production_intent':'v13_production_position'} FOR EACH ROW EXECUTE FUNCTION public.prepare_pair_test_fail()`);
+  const tickStarted=performance.now();clockOffset=Math.max(0,spec.age-Math.floor(performance.now()-anchor));time();const preparePrefixMs=time()-originalAt;
+  const until=async(check:()=>boolean)=>{const deadline=performance.now()+10000;while(!check()){if(performance.now()>deadline)throw Error('both_active_worker_timeout');await delay(1);}};
+  try{
+   (s.worker as unknown as {schedule():void}).schedule();
+   await Promise.race([initialReached,new Promise<never>((_,reject)=>{const timer=setTimeout(()=>reject(Error('initial_snapshot_not_reached')),10000);timer.unref();})]);
+   notifyCommittedForwardSignal({evaluationId,marketTicker:market,evaluatedAtMs:originalAt,committedAtMs:time(),btcProviderAgeMs:originalBtcAge,btcReceiveAgeMs:0,marketAgeMs:0,qualifyingTrigger:true});
+   await until(()=>prepareStarts===1&&calls.length>=3);
+   if(!spec.prepareDelayMs)await (prepareAttempt as MetadataPrefetchAttempt|null)!.drained;
+   const prepareStateAtReconcileRelease=coordinator.diagnostics();
+   if(spec.prepareDelayMs)assert.equal(prepareStateAtReconcileRelease.activeRequests,3,'PREPARE really remains pending across reconciliation');
+   mark('release_initial_reconciliation');releaseInitial();
+   await until(()=>finished>0&&!(s.worker as unknown as {running:boolean}).running);
+  }finally{releaseInitial();s.worker.stop();if(insertFailure)await pool.query(`DROP TRIGGER prepare_pair_test_fail ON ${failure==='first-insert-failure'?'v13_production_intent':'v13_production_position'};DROP FUNCTION public.prepare_pair_test_fail()`);}
+  const tickElapsedMs=performance.now()-tickStarted;
+  if(spec.cashShort){
+   assert.equal(prepareSqlMeasurements.length,0);assert.equal(intent,'');assert.equal(posts.length,0);assert.equal(faults.includes('after_reservation'),false);
+   const clean=(await pool.query(`SELECT (SELECT count(*)::int FROM v13_production_intent WHERE account_id=$1) intents,(SELECT count(*)::int FROM v13_production_position WHERE account_id=$1) positions,(SELECT count(*)::int FROM private.strata_v13_execution_trace WHERE execution_account_id=$1) traces,(SELECT cash_micros::text FROM v13_production_account WHERE id=$1) cash,(SELECT reserved_micros::text FROM v13_production_account WHERE id=$1) reserve`,[ACCOUNT])).rows[0];
+   assert.deepEqual(clean,{intents:0,positions:0,traces:0,cash:'1990000',reserve:'0'});
+   const receipts=(await pool.query('SELECT phase,reason FROM private.strata_v13_signal_decisions WHERE evaluation_id=$1 ORDER BY decision_id',[evaluationId])).rows;
+   assert.deepEqual(receipts.map(r=>r.phase),['QUALIFYING_SEEN','PREPARE_REJECTED']);assert.equal(receipts[1].reason,'live_money_no_whole_contract_affordable');
+   const result={scenario:spec.name,enabled,originalBtcAgeMs:68,preparePrefixMs,tickElapsedMs,prepareSqlMeasurements,faults,clean,postCount:0,shouldPost:false,receipts,scope:'synthetic cash shortage, actual reader/ledger/preflight; no authority transplant'};results.push(result);console.info('BOTH_ACTIVE_WORKER',JSON.stringify(result));continue;
+  }
+  assert.deepEqual(prepareSqlMeasurements,[{table:'intent',parameters:14},{table:'position',parameters:4}],'one original sequential insert pair despite duplicate PREPARE');
+  if(insertFailure||failure==='after-reservation-fault'){
+   assert.equal(intent,'');assert.equal(posts.length,0);
+   const clean=(await pool.query(`SELECT (SELECT count(*)::int FROM v13_production_intent WHERE account_id=$1) intents,(SELECT count(*)::int FROM v13_production_position WHERE account_id=$1) positions,(SELECT count(*)::int FROM private.strata_v13_execution_trace WHERE execution_account_id=$1) traces,(SELECT reserved_micros::text FROM v13_production_account WHERE id=$1) reserve`,[ACCOUNT])).rows[0];
+   assert.deepEqual(clean,{intents:0,positions:0,traces:0,reserve:'0'});
+   assert.equal(faults.includes('after_reservation'),failure==='after-reservation-fault');
+   const receipts=(await pool.query('SELECT phase,reason FROM private.strata_v13_signal_decisions WHERE evaluation_id=$1 ORDER BY decision_id',[evaluationId])).rows;
+   assert.deepEqual(receipts.map(r=>r.phase),['QUALIFYING_SEEN','PREPARE_REJECTED']);
+   const result={scenario:spec.name,enabled,originalBtcAgeMs:68,preparePrefixMs,tickElapsedMs,prepareSqlMeasurements,faults,clean,postCount:0,shouldPost:false,receipts,scope:'isolated actual worker/ledger/executor PREPARE pair failure; no provider POST'};
+   results.push(result);console.info('BOTH_ACTIVE_WORKER',JSON.stringify(result));continue;
+  }
+  assert.ok(intent,'worker must prepare and attempt dispatch');
+  const shouldPost=posts.length===1;
+  if(failure!=='none'||spec.forceEffective===5001)assert.equal(shouldPost,false,spec.name+' must never POST');
+  if(spec.forceEffective===5000)assert.equal(shouldPost,true,'5000 inclusive at real raw guard');
+  if(spec.age===0&&failure==='none'&&!spec.forceEffective||spec.race)assert.equal(shouldPost,true,'ample-budget control must POST exactly once');
+  assert.equal(prepareStarts,1,'committed hint must acquire PREPARE once through actual worker');
+  assert.equal(releasePrepareCalls,1,'original FINAL start releases PREPARE once');
+  assert.equal(prepareCaptures.length,1,'actual PREPARE reader consumed the hint capture');
+  assert.ok(before.decision.book.publicMetadataCapture,'PREPARE capture persisted in original decision');
+  assert.deepEqual(before.decision.book.publicMetadataCapture,prepareCaptures[0]);
+  assert.equal((prepareAttempt as MetadataPrefetchAttempt|null)!.source.evaluatedAtMs,originalAt);
+  const hintAt=timeline.find(t=>t.event==='worker_prepare_prefetch_start')!.atMs;
+  assert.ok(hintAt>=timeline.find(t=>t.event==='initial_signed_start')!.atMs);
+  assert.ok(hintAt<timeline.find(t=>t.event==='initial_signed_released')!.atMs);
+  const elapsed=finished-start;phases?.discardAll();const drainDeadline=performance.now()+2000;while(coordinator.diagnostics().accounts&&performance.now()<drainDeadline)await new Promise(r=>setTimeout(r,5));
+  const final=(await pool.query('SELECT state,decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
+  assert.equal(new Date(final.decision.source.evaluated_at).getTime(),originalAt);assert.deepEqual(final.request,before.request);assert.equal(final.decision.preflight.plannedAllInCents,before.decision.preflight.plannedAllInCents);
+  assert.equal(posts.length,shouldPost?1:0);assert.equal(final.state,shouldPost?'UNKNOWN':'BLOCKED');
+  const financial=(await pool.query(`SELECT cash_micros::text,reserved_micros::text,kill_switch,execution_enabled,
+    (SELECT coalesce(sum(reserved_micros),0)::text FROM v13_production_intent WHERE account_id=$1) AS intent_reserved
+    FROM v13_production_account WHERE id=$1`,[ACCOUNT])).rows[0];
+  assert.equal(financial.cash_micros,'25000000');assert.equal(financial.reserved_micros,shouldPost?'6000000':'0');assert.equal(financial.reserved_micros,financial.intent_reserved);
+  if(spec.prepareRace){const rows=(await pool.query('SELECT (SELECT count(*)::int FROM v13_production_intent WHERE account_id=$1) intents,(SELECT count(*)::int FROM v13_production_position WHERE account_id=$1) positions',[ACCOUNT])).rows[0];assert.deepEqual(rows,{intents:1,positions:1});assert.equal(posts.length,1);}
+  if(!shouldPost){assert.equal(financial.reserved_micros,'0');assert.equal(financial.kill_switch,false);assert.equal(financial.execution_enabled,true);}
+  assert.equal(final.decision.source.btc_provider_age_ms,68,'original provider age is never reset');
+  const localFee=before.decision.book.fee,localProof=before.decision.preflight.cashRisk;
+  assert.equal(final.request.side,'NO');assert.equal(final.request.contracts,3);assert.equal(final.request.limitMicros,510000);assert.equal(final.request.market,market);
+  assert.equal(localProof.budgetCents,625);assert.equal(localProof.plannedAllInCents,600);
+  assert.equal(fourthRiskChecks.validEntryCashRisk(localFee),true);assert.equal(fourthGridChecks.validEntryFeePriceGrid(localFee,localFee.cashRisk.gridEvidence),true);
+  assert.deepEqual(localFee.cashRisk.gridEvidence,syntheticEconomicInput.syntheticPinnedFee.cashRisk.gridEvidence);
+  const {modelFingerprint:_model,feeFingerprint:_fee,...economics}=localProof;
+  const {modelFingerprint:_oldModel,feeFingerprint:_oldFee,...syntheticEconomics}=syntheticEconomicInput.syntheticPinnedCashRisk;
+  assert.deepEqual(economics,syntheticEconomics);
+  if(failure==='pin-rise'){assert.equal(freshEconomicFees.length,1);const fresh=freshEconomicFees[0];assert.equal(fresh.limitPrice,.52);assert.equal(fresh.cashRisk.modelFingerprint,localFee.cashRisk.modelFingerprint);assert.equal(fresh.cashRisk.feeMetadataDigest,localFee.cashRisk.feeMetadataDigest);assert.equal(fourthRiskChecks.samePinnedCashModel(localFee,fresh),false);assert.match(refusal??'',/production_final_fee_or_quote_changed/);}
+
+  // Lease/grant SQL here is an explicit read-only fixture port; no assertion of
+  // production private-schema authorization or lease/grant persistence is made.
+
+  assert.ok(calls.length<=(spec.prepareRace?20:15),'no public failure can launch replacement five-call fallback; duplicate PREPARE has its own initial five reads');
+  if(shouldPost||failure==='wire-stale'||failure==='wire-revoked'){
+   assert.equal(calls.length,spec.prepareRace?20:15);assert.equal(books,spec.prepareRace?3:2);assert.equal(feeReviews,spec.prepareRace?3:2);assert.equal(signed,2);assert.equal(wireReviews,1);
+  }
+  if(enabled&&shouldPost){
+   assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs);
+   assert.notEqual(captures[0].fingerprint,captures[1].fingerprint,'FINAL and WIRE are distinct captures');assert.notEqual(prepareCaptures[0].fingerprint,captures[0].fingerprint);assert.notEqual(prepareCaptures[0].fingerprint,captures[1].fingerprint);assert.equal(new Set([prepareCaptures[0].fingerprint,...captures.map(c=>c.fingerprint)]).size,3);
+   const at=(event:string)=>timeline.find(row=>row.event===event)!.atMs;
+   assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));
+   assert.ok(timeline.some(row=>row.event==='db_request_start'&&row.atMs>at('FINAL_MARKET_start')&&row.atMs<at('FINAL_MARKET_consume')));
+   assert.ok(at('WIRE_FEE_start')<=at('signed_account_start'));assert.ok(at('signed_account_complete')<=at('WIRE_FEE_consume'));
+  }
+  const receipts=(await pool.query('SELECT phase,reason,source_age_ms FROM private.strata_v13_signal_decisions WHERE evaluation_id=$1 ORDER BY decision_id',[evaluationId])).rows;
+  assert.deepEqual(receipts.map(r=>r.phase),['QUALIFYING_SEEN','ENTRY_PREPARED',shouldPost?'DISPATCH_COMPLETED':'DISPATCH_REJECTED']);
+  const result={scenario:spec.name,enabled,prepareStarts,releasePrepareCalls,prepareCaptures,preparePrefixMs,tickElapsedMs,prepareSqlMeasurements,faults,originalBtcAgeMs:68,dispatchSourceAgeMs:dispatchSourceAge,dispatchElapsedMs:elapsed,
+   rawGuardSourceAgeMs:guardAt,rawGuardEffectiveAgeMs:guardAt===null?null:guardAt+68,rawPostSourceAgeMs:wireAt||null,
+   shouldPost,postCount:posts.length,state:final.state,refusal,publicCalls:calls.length,books,signed,feeReviews,wireReviews,authorityClockCalls,
+   sqlQueries:sqlCalls.length,request:JSON.stringify({...final.request,clientOrderId:null}),cashModel:final.decision.book.fee.cashRisk.modelFingerprint,
+   localFee,localCashProof:localProof,freshEconomicFees,syntheticConfiguredStakeCents:500,delays,forcedEffectiveAge:spec.forceEffective??null,financial,receipts,timeline,
+   captures:captures.map(c=>({fingerprint:c.fingerprint,startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),
+   scope:'BOTH-active actual scheduled worker committed hint plus shared coordinator PREPARE/FINAL/WIRE; new coherent synthetic NO3@51c; synthetic numeric grid/cash bounds and fixture-generated policy/metadata/fee identities; actual worker/ledger/executor/rawguard; no historical authority/replay/rescue claim'};
+  results.push(result);console.info('BOTH_ACTIVE_WORKER',JSON.stringify(result));
+  assert.equal(coordinator.diagnostics().accounts,0);
+ }
+ console.info('BOTH_ACTIVE_WORKER_SUMMARY',JSON.stringify({cases:cases.length,arms:results.length,posts:results.filter(r=>r.shouldPost).length,refusals:results.filter(r=>!r.shouldPost).length}));
+ }finally{for(const [key,value] of [['NODE_ENV',savedEnv.node],['RAILWAY_GIT_COMMIT_SHA',savedEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',savedEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
+});
