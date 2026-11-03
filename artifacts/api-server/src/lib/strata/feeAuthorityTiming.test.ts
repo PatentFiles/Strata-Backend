@@ -103,3 +103,53 @@ test('inactive scope preserves exact promise/value/error identity both alone and
   const rejected=Promise.reject(error);assert.equal(invoke(()=>withoutFeeAuthorityTiming(()=>rejected)),rejected);await assert.rejects(rejected,e=>e===error);
  }
 });
+
+// Pool attribution is optional numeric metadata on the existing dispatch envelope.
+import {installPoolCheckoutTiming} from '@workspace/db/pool-checkout-timing';
+import {withFinalFeePoolCheckout} from './feeAuthorityTiming';
+test('pool attribution is FINAL-only, operation-specific, restores nested scopes and excludes inactive descendants',async()=>{
+ const fake={connect(cb:(e:null,c:object,r:()=>void)=>void){cb(null,{},()=>{});return undefined;}};
+ installPoolCheckoutTiming(fake as never);
+ const checkout=()=>fake.connect(()=>{}),capture=new FeeAuthorityTimingCapture();
+ await capture.run(async()=>{
+  withFinalFeePoolCheckout('fee_review_query',checkout);
+  withFeeAuthorityTimingPurpose('WIRE_FEE',()=>withFinalFeePoolCheckout('fee_review_query',checkout));
+  withoutFeeAuthorityTiming(()=>withFinalFeePoolCheckout('fee_review_query',checkout));
+  withFinalFeePoolCheckout('fee_standing_renewal_query',()=>{
+   withFinalFeePoolCheckout('fee_review_query',checkout);checkout();
+  });
+  const later=withFinalFeePoolCheckout('fee_review_query',()=>Promise.resolve().then(checkout));await later;
+ });
+ assert.equal(row(capture,'FINAL_MARKET','fee_review_query').poolCheckout!.attempted,2);
+ assert.equal(row(capture,'FINAL_MARKET','fee_standing_renewal_query').poolCheckout!.attempted,1);
+ assert.equal(row(capture,'WIRE_FEE','fee_review_query').poolCheckout,undefined);
+});
+test('pool timing fixed operation allowlist prevents unbounded metadata and preserves exact dispatch result',()=>{
+ const c=new FeeAuthorityTimingCapture(()=>{throw Error('clock should not run');}),value={};
+ for(const key of ['secret','constructor','__proto__',{},null])assert.equal(c.run(()=>withFinalFeePoolCheckout(key as never,()=>value)),value);
+ assert.ok(c.snapshot()!.stages.every(s=>s.poolCheckout===undefined));
+});
+test('worst bounded existing stages plus both pool groups fit original4096-byte envelope',()=>{
+ let now=0;const c=new FeeAuthorityTimingCapture(()=>now);
+ const fake={connect(cb:(e:null)=>void){now+=100000.123;cb(null);}};installPoolCheckoutTiming(fake as never);
+ const operations=['standing_history_query','standing_eligibility_query','final_account_fence_query','fee_public_probe','fee_review_query','fee_standing_renewal_query'] as const;
+ for(const purpose of ['FINAL_MARKET','WIRE_FEE'] as const)for(const op of operations)for(let i=0;i<21;i++){
+  const done=c.begin(purpose,op);now+=100000.123;done('rejected');
+ }
+ c.run(()=>{for(const op of ['fee_review_query','fee_standing_renewal_query'] as const)for(let i=0;i<21;i++)withFinalFeePoolCheckout(op,()=>fake.connect(()=>{}));});
+ const snapshot=c.snapshot();assert.ok(snapshot);assert.ok(Buffer.byteLength(JSON.stringify(snapshot))<=4096);
+ for(const op of ['fee_review_query','fee_standing_renewal_query']){const group=row(c,'FINAL_MARKET',op).poolCheckout!;assert.equal(group.attempted,20);assert.equal(group.capped,true);assert.ok(Object.isFrozen(group));}
+});
+
+test('open parent checkout scope cannot attribute nested WIRE, invalid or explicitly inactive work',()=>{
+ const c=new FeeAuthorityTimingCapture(),fake={connect(cb:()=>void){cb();}};installPoolCheckoutTiming(fake as never);
+ const checkout=()=>fake.connect(()=>{});
+ c.run(()=>withFinalFeePoolCheckout('fee_review_query',()=>{
+  withoutFeeAuthorityTiming(()=>withFinalFeePoolCheckout('fee_review_query',checkout));
+  withFeeAuthorityTimingPurpose('WIRE_FEE',()=>withFinalFeePoolCheckout('fee_review_query',checkout));
+  withFeeAuthorityTimingPurpose('invalid' as never,checkout);
+  withFinalFeePoolCheckout('invalid' as never,checkout);
+  checkout();
+ }));
+ assert.equal(row(c,'FINAL_MARKET','fee_review_query').poolCheckout!.attempted,1);
+});

@@ -1,4 +1,4 @@
-import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
+import {beginFeeAuthorityTiming,withFinalFeePoolCheckout} from "./feeAuthorityTiming";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 /**
  * Real, service-owned API fee policy source stage check.
@@ -112,10 +112,10 @@ export async function verifyReviewedApiFeeSourceStage(
  try {
   const db=deps.db??pool;
   const done=beginFeeAuthorityTiming("fee_review_query");let fulfilled=false;
-  try{const loaded=await db.query(READ_API_FEE_STAGE_SQL,[
+  try{const loaded=await withFinalFeePoolCheckout("fee_review_query",()=>db.query(READ_API_FEE_STAGE_SQL,[
    ownerUserId,parsed?.grantId??null,stage,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,
-  ]);
+  ]));
   records=loaded.rows;fulfilled=true;}finally{done(fulfilled?"fulfilled":"rejected");}
  }catch{return no("api_fee_database_review_unavailable");}
  if(records.length!==1){
