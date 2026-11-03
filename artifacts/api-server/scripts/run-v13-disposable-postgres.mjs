@@ -57,6 +57,8 @@ globalThis.fetch = (...args) => {
 const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
   // Avoid host timezone autodetection during initdb in restricted containers.
   TZ: "UTC", PGTZ: "UTC",
+  STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED: process.env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,
+  STRATA_PUBLIC_METADATA_PREFETCH_ENABLED: process.env.STRATA_PUBLIC_METADATA_PREFETCH_ENABLED,
   NODE_OPTIONS: `--require=${fence}`,
   PGOPTIONS: "-c statement_timeout=30000 -c lock_timeout=10000",
   MICRO_LIVE_TEST_TIMEOUT_MS: "45000",
@@ -80,6 +82,7 @@ function run(command, args, options = {}) {
   });
   if (r.status !== 0) throw new Error(`Disposable test command failed (${r.status}): ${command}`);
 }
+console.info("ISOLATED_FINAL_OVERLAP_ENV",JSON.stringify({port,fullSuite,final:env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,older:env.STRATA_PUBLIC_METADATA_PREFETCH_ENABLED}));
 let started = false;
 try {
   run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",

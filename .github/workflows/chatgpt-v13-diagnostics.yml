@@ -342,6 +342,9 @@ jobs:
           node --test dist/apiFeeStandingDelegation.test.cjs
       - name: Test V13 production and micro-live safety suites
         working-directory: artifacts/api-server
+        env:
+          STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED: "true"
+          STRATA_PUBLIC_METADATA_PREFETCH_ENABLED: "false"
         run: pnpm run test:v13-safety-all
       - name: Test owned V2 policy, frontend contracts and multi-user isolation
         working-directory: artifacts/api-server
