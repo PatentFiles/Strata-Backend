@@ -110,7 +110,7 @@ export async function inspectOwnerSignedExchangeReleaseProof(
    return no("ledger_cash_or_reservation_unverified");
   if(String(account.reserved_micros)!=="0")
    return no("ledger_reservations_must_be_zero");
-  history=await readNeverPostedReleaseHistory(db,String(account.id));
+  history=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
   requests.push(...history.requests);
  }catch{return no("owner_read_only_database_unavailable");}
  let creds:Awaited<ReturnType<typeof loadedMaterial>>=null;
@@ -157,7 +157,7 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  // Final read is after ALL exchange/fee/readiness awaits. No locks span network.
  try{
   if(history!.neverPosted.length>0){
-   const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id));
+   const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
    if(finalHistory.historyDigest!==history!.historyDigest)return no("financial_history_changed_during_signed_diagnostic",true);
   }
   const final=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);

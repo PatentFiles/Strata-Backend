@@ -9,6 +9,11 @@ on:
       - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.ts'
       - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.test.ts'
+      - 'artifacts/api-server/src/lib/strata/expiredExitNoSendEvidence*'
+      - 'artifacts/api-server/src/lib/strata/neverPostedReleaseHistory.ts'
+      - 'artifacts/api-server/src/lib/strata/preparedProtectiveExitRecovery.ts'
+      - 'sql/strata_emergency_exit_reservation_private.sql'
+      - 'sql/strata_protective_exit_request_snapshot_private.sql'
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.ts'
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.test.ts'
       - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts'
@@ -66,6 +71,10 @@ jobs:
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerSignedExchangeReleaseProof.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
           DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerSignedExchangeReleaseProof.test.cjs
+      - name: Verify expired exit producer and diagnostic fail-closed cases
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/expiredExitNoSendEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/expiredExitNoSendEvidence.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/expiredExitNoSendEvidence.test.cjs
       - name: Verify V4 owner issuer-backed repair never bypasses signed flatness or kill switch
         run: |
           pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerV4CommissioningRepair.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerV4CommissioningRepair.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
@@ -109,3 +118,5 @@ jobs:
           sudo systemctl stop postgresql
       - name: Verify signed diagnostic scope races without authority writes
         run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts
+      - name: Verify expired exit marker SQL, decoding, index and concurrent history changes
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/expiredExitNoSendEvidence.postgres.test.ts
