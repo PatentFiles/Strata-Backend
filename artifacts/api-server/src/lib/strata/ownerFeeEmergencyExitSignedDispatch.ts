@@ -3,7 +3,7 @@ import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
-import {verifyReviewedProtectiveExitFee} from "./reviewedProtectiveExitFee";
+import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority,isReviewedProtectiveExitFeeFresh} from "./reviewedProtectiveExitFee";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
@@ -23,6 +23,7 @@ import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
 const HOST="https://external-api.kalshi.com";
 const PATH="/trade-api/v2/portfolio/events/orders";
 const SHA=/^[0-9a-f]{40}$/;
+const SHA256=/^[0-9a-f]{64}$/;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLIENT=/^v13p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
@@ -48,6 +49,7 @@ type Ports={
  db?:DB;now?:()=>number;monotonicNow?:()=>number;
  mark?:typeof markOwnedEmergencyExitUnknownForReview;
  verifyFee?:typeof verifyMonetaryFeeContract;
+ verifyFeeAuthority?:typeof verifyReviewedProtectiveExitFeeAuthority;
  post?:(material:Material,order:Readonly<EmergencyExitOrder>)=>Promise<Receipt>;
  readAuthenticatedOutcome?:(input:Input,receipt:Receipt)=>Promise<IocRecoveryObservation>;
  persistReconciled?:typeof persistAuthenticatedExitReconciliation;
@@ -179,15 +181,27 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * The one-use UNKNOWN marker remains durable; DB-relative evidence lifetimes
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
-async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number):
+async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:typeof verifyReviewedProtectiveExitFeeAuthority;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
  let c:DBClient|null=null,committed=false,eligible=false;
- let evidenceStart=NaN,remainingMs=NaN;
+ let evidenceStart=NaN,remainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
   c=await db.connect();
   await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='750ms'");
   await c.query("SET LOCAL statement_timeout='12000ms'");
+  if(feeAuthority){
+   feeAuthorityStart=monotonicNow();
+   if(!Number.isFinite(feeAuthorityStart)||feeAuthorityStart<0)return {attempted:false,receipt:null};
+   // Recheck and SHARE-lock the SAME monetary approval after provider GETs.
+   // COMMIT releases these locks before signing/network; original DB expiry
+   // remains bounded at the existing synchronous beforeSend boundary.
+   const approved=await feeAuthority.verify(input.ownerId,input.accountId,sha,c);
+   if(!approved.ok||approved.authorityFingerprint!==feeAuthority.fingerprint||
+      typeof approved.validForMs!=="number"||!Number.isFinite(approved.validForMs)||approved.validForMs<=0)
+    return {attempted:false,receipt:null};
+   feeAuthorityRemainingMs=approved.validForMs;
+  }
   const yesMicros=Number((input.order.price as string).slice(2))*100;
   const proceeds=input.order.side==="ask"?yesMicros:1_000_000-yesMicros;
   const units=(BigInt(String(input.order.count).split(".")[0]!)*100n+
@@ -289,7 +303,8 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  try{
   const receipt=await send(()=>{
    const current=monotonicNow();
-   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs){
+   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs||
+      (feeAuthority&&(current<feeAuthorityStart||current-feeAuthorityStart>=feeAuthorityRemainingMs||!feeAuthority.providerFresh()))){
     expired=true;throw Error("protective_exit_final_evidence_expired");
    }
    attempted=true;
@@ -308,7 +323,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  if(!testMode&&(process.env.NODE_ENV!=="production"||
     process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
   return fail("protective_exit_release_disabled");
- if(!testMode&&(ports.db||ports.mark||ports.verifyFee||ports.post||ports.readAuthenticatedOutcome||ports.persistReconciled||ports.monotonicNow))
+ if(!testMode&&(ports.db||ports.mark||ports.verifyFee||ports.verifyFeeAuthority||ports.post||ports.readAuthenticatedOutcome||ports.persistReconciled||ports.monotonicNow))
   return fail("protective_exit_injection_forbidden");
  const sha=process.env.RAILWAY_GIT_COMMIT_SHA;
  if(!testMode&&(!sha||!SHA.test(sha)))return fail("protective_exit_release_version_unknown");
@@ -329,8 +344,13 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  // independently approved code SHA at the signed POST fence.
  const checkFee=ports.verifyFee??((_stage:"ORDER_ENTRY",market:string)=>
    verifyReviewedProtectiveExitFee(ownerId,accountId,market));
+ // Only explicit local test fee doubles may omit the new private proof.
+ // Hosted processes reject all injected ports above, even under NODE_ENV=test.
+ const enforceFeeAuthority=!(testMode&&ports.verifyFee&&!ports.verifyFeeAuthority);
  const fee=await checkFee("ORDER_ENTRY",String(order.ticker));
- if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker)
+ const initialAuthority=(fee as {authorityFingerprint?:unknown}).authorityFingerprint;
+ if(!fee.ok||!fee.monetaryFeeAuthorized||fee.marketTicker!==order.ticker||
+    (enforceFeeAuthority&&(typeof initialAuthority!=="string"||!SHA256.test(initialAuthority))))
   return fail("protective_exit_monetary_fees_unverified");
  let marker:Awaited<ReturnType<typeof markOwnedEmergencyExitUnknownForReview>>;
  try{marker=await (ports.mark??markOwnedEmergencyExitUnknownForReview)(
@@ -348,13 +368,16 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
   // confined to that read, never the final fence/signing/order transport.
   return refuseNeverSent(input,"final_fee_unavailable",ports.db??(pool as unknown as DB));
  }
- if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker)
+ const currentAuthority=(current as {authorityFingerprint?:unknown}).authorityFingerprint;
+ if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker||
+    (enforceFeeAuthority&&currentAuthority!==initialAuthority))
   return refuseNeverSent(input,"final_fee_rejected",ports.db??(pool as unknown as DB));
  const outcome=await withFinalReleaseFence(input,releaseSha,
   beforeSend=>{
    if(ports.post){beforeSend();return ports.post(material,order);}
    return signedPost(material,order,beforeSend);
-  },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()));
+  },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),
+    enforceFeeAuthority?{fingerprint:initialAuthority as string,verify:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority,providerFresh:()=>isReviewedProtectiveExitFeeFresh(current)}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
  if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);

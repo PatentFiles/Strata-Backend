@@ -401,3 +401,16 @@ test("production outcome helper rejects forged/uncertain results and never enabl
   assert.equal(reads,0);assert.equal(state.entriesAuthorized,false);assert.equal(gate.mayEnter(true,false),false);
  }
 });
+
+test('hosted process cannot inject the monetary authority port even with release opt-in',async()=>{
+ const keys=['NODE_ENV','RAILWAY_SERVICE_ID','STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE'];
+ const prior=keys.map(k=>process.env[k]);let called=0;
+ try{
+  process.env.NODE_ENV='test';process.env.RAILWAY_SERVICE_ID='hosted-fixture';process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+  let result=await dispatchReviewedProtectiveExitOnce(identity,{verifyFeeAuthority:async()=>{called++;throw Error('forbidden');}});
+  assert.equal(result.reason,'protective_exit_release_disabled');
+  process.env.NODE_ENV='production';
+  result=await dispatchReviewedProtectiveExitOnce(identity,{verifyFeeAuthority:async()=>{called++;throw Error('forbidden');}});
+  assert.equal(result.reason,'protective_exit_injection_forbidden');assert.equal(called,0);assert.equal(result.postAttempted,false);
+ }finally{keys.forEach((k,i)=>{if(prior[i]===undefined)delete process.env[k];else process.env[k]=prior[i];});}
+});
