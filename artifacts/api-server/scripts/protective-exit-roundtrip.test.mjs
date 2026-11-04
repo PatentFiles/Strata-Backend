@@ -209,13 +209,14 @@ function installExitFixture(f,spec){
 for(const spec of [
  {name:'source-4999',sourceAge:4999,posts:1},
  {name:'source-5000-inclusive',sourceAge:5000,posts:1},
- {name:'source-5001',sourceAge:5001,posts:0},
- {name:'source-6001',sourceAge:6001,posts:0},
+ {name:'source-5001',sourceAge:5001,posts:0,blocked:true},
+ {name:'source-6001',sourceAge:6001,posts:0,blocked:true},
  {name:'source-expires-signing',sourceAge:4500,signDelay:501,posts:0,blocked:true},
  {name:'finite-review-expires-signing',releaseMs:100,signDelay:184,posts:0,blocked:true},
  {name:'finite-review-expires-commit',releaseMs:100,commitDelay:100,posts:0,blocked:true},
  {name:'standing-has-no-ttl',standing:true,signDelay:501,posts:1},
  {name:'blocked-recovery-read-fails',sourceAge:4500,signDelay:501,posts:0,blocked:true,badRecovery:true},
+ {name:'already-expired-recovery-read-fails',sourceAge:6001,posts:0,blocked:true,badRecovery:true},
 ])await test('actual producer → supervisor → signed dispatcher: '+spec.name,async()=>{
  const f=installExitFixture(await start(fixture('false')),spec);
  const selection={positionId:parentId,market,side:'YES',quantityHundredths:'25',minimumExitMicros:400000};

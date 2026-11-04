@@ -70,12 +70,12 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  await insert('private.kalshi_account_worker_lease',{execution_account_id:account,owner_user_id:owner,holder_id:'worker',fencing_token:8,state:'owned',credential_fingerprint:fingerprint,account_kill:false,heartbeat_at:new Date()});
  await insert('public.v13_production_observation',{account_id:account,kind:'OWNER_ACTIVATION_REQUEST'});
  const results=[];
- for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay','stale-source-final','stale-source-after-commit','malformed-source-final','no-send-audit-rollback','final-lock-probe','legacy-release-expiry'] as const){
+ for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay','stale-source-final','stale-source-final-no-send-rollback','future-source-final','stale-source-after-commit','malformed-source-final','no-send-audit-rollback','final-lock-probe','legacy-release-expiry'] as const){
   await db.query(`TRUNCATE public.v13_production_position,public.v13_production_intent,private.strata_emergency_exit_reservations,private.strata_protective_exit_local_no_send`);
   await db.query(`UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()+interval '1 hour',revoked_at=NULL`);
   await db.query(`UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()+interval '50 minutes',revoked_at=NULL`);
   await db.query('DROP TRIGGER IF EXISTS synthetic_block_failure ON public.v13_production_intent');
-  if(scenario==='no-send-audit-rollback'){
+  if(scenario==='no-send-audit-rollback'||scenario==='stale-source-final-no-send-rollback'){
    await db.query(`CREATE OR REPLACE FUNCTION public.synthetic_block_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic_block_failure'; END $$;
     CREATE TRIGGER synthetic_block_failure BEFORE UPDATE ON public.v13_production_intent FOR EACH ROW WHEN (NEW.state='BLOCKED') EXECUTE FUNCTION public.synthetic_block_failure()`);
   }
@@ -84,14 +84,14 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
    await db.query("UPDATE private.strata_api_fee_rate_reviews SET expires_at=clock_timestamp()+interval '1 hour'");
    await insert('private.strata_protective_exit_release',{release_commit_sha:sha,state:'approved',created_at:before,expires_at:future,independent_reviewer_id:admin,operator_approver_id:owner});
   }
-  const noSend=scenario==='expire-after-commit'||scenario.startsWith('stale-provider-')||scenario==='stale-source-after-commit'||scenario==='legacy-release-expiry';
+  const noSend=scenario==='expire-after-commit'||scenario.startsWith('stale-provider-')||scenario==='stale-source-after-commit'||scenario==='stale-source-final'||scenario==='legacy-release-expiry';
   const reservationId=randomUUID(),clientId='v13p-'+randomUUID(),market='KXBTC15M-26NOV031945-45';
   const order={ticker:market,client_order_id:clientId,side:'ask',count:'2.00',price:'0.5500',time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,reduce_only:true,subaccount:1,exchange_index:2};
   const request={action:'SELL',reduceOnly:true,timeInForce:'IOC',market,side:'YES',clientOrderId:clientId,contracts:2,limitMicros:550000};
   const digest=createHash('sha256').update(JSON.stringify(order)).digest('hex');
   await insert('public.v13_production_position',{id:'parent',account_id:account,market,side:'YES',quantity_hundredths:300});
   await insert('public.v13_production_intent',{id:'parent',account_id:account,kind:'ENTRY',state:'FILLED',terminal:true});
-  await insert('public.v13_production_intent',{id:'exit',parent_id:'parent',account_id:account,client_order_id:clientId,market,kind:'EXIT',state:'PREPARED',terminal:false,filled_hundredths:0,reserved_micros:0,side:'YES',request:JSON.stringify(request),policy_hash:policy,decision:JSON.stringify({ownedEvaluation:{sourcePaperEvaluationId:'synthetic-source',source:{id:'synthetic-source',market_ticker:market,evaluated_at:new Date(Date.now()-(scenario==='stale-source-final'?6001:0)).toISOString(),feed_freshness:'current',strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}})});
+  await insert('public.v13_production_intent',{id:'exit',parent_id:'parent',account_id:account,client_order_id:clientId,market,kind:'EXIT',state:'PREPARED',terminal:false,filled_hundredths:0,reserved_micros:0,side:'YES',request:JSON.stringify(request),policy_hash:policy,decision:JSON.stringify({ownedEvaluation:{sourcePaperEvaluationId:'synthetic-source',source:{id:'synthetic-source',market_ticker:market,evaluated_at:new Date(Date.now()-(scenario.startsWith('stale-source-final')?6001:scenario==='future-source-final'?-3600000:0)).toISOString(),feed_freshness:'current',strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}})});
   await insert('private.strata_emergency_exit_reservations',{reservation_id:reservationId,owner_user_id:owner,execution_account_id:account,client_order_id:clientId,market_ticker:market,reducing_side:'YES',quantity_hundredths:200,worker_holder_id:'worker',worker_fencing_token:8,state:'PREPARED',trading_authorized:false,order_digest:digest,initial_position_fp:'3.00',created_at:new Date(),updated_at:new Date()});
   if(scenario==='malformed-source-final')await db.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}','"not-a-timestamp"'::jsonb) WHERE kind='EXIT'`);
   await db.query('UPDATE private.kalshi_account_worker_lease SET heartbeat_at=clock_timestamp()');
@@ -167,10 +167,12 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
   }
   const result=await dispatchReviewedProtectiveExitOnce(input,ports);
   assert.equal(feeCalls,2,scenario+' actual public verifier twice');assert.equal(providerCalls,2);
+  if(scenario==='stale-source-final')assert.equal(auditInsertAttempts,1,'intact already-expired evidence must receive audited no-send cleanup');
+  if(scenario==='future-source-final')assert.equal(auditInsertAttempts,0,'future timestamps are invalid, never authenticated expiry');
   if(scenario==='malformed-source-final'){
    assert.ok(failures.some(f=>f.sql.includes('AS source_age_ms')&&f.code==='22007'),'actual timestamp cast must fail');
   }
-  if(scenario==='no-send-audit-rollback'){
+  if(scenario==='no-send-audit-rollback'||scenario==='stale-source-final-no-send-rollback'){
    assert.equal(auditInsertAttempts,1,'audit insert precedes failing financial update');
    assert.ok(failures.some(f=>f.sql.startsWith("UPDATE public.v13_production_intent SET state='BLOCKED'")&&f.code==='P0001'&&f.message==='synthetic_block_failure'),'actual trigger must abort no-send transaction');
   }

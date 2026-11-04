@@ -429,12 +429,43 @@ test('hosted process cannot inject the monetary authority port even with release
  }finally{keys.forEach((k,i)=>{if(prior[i]===undefined)delete process.env[k];else process.env[k]=prior[i];});}
 });
 
-test("pinned EXIT source expiry is checked after COMMIT, with inclusive 5000ms boundary",async()=>{
+test("pinned EXIT source expiry is checked before and after COMMIT, with inclusive 5000ms boundary",async()=>{
  for(const [age,delay,posted] of [[4999,0,true],[5000,0,true],[5001,0,false],[6001,0,false],[4999,2,false],[4000,2001,false]] as const){
   const h=harness({sourceAgeMs:age,commitDelayMs:delay,finalize:true}),r=await h.run();
   assert.equal(h.calls.post,posted?1:0);assert.equal(r.postAttempted,posted);
-  if(!posted)assert.equal(r.state,age>5000?'UNKNOWN':'BLOCKED');
+  if(!posted)assert.equal(r.state,'BLOCKED');
   assert.equal(r.mayRetry,false);
+ }
+});
+test("already-expired intact source gets scoped audited no-send only after cleanup commits",async()=>{
+ const h=harness({sourceAgeMs:6001,finalize:true,realFee:true}),r=await h.run();
+ assert.equal(r.state,'BLOCKED');assert.equal(r.reason,'protective_exit_proven_not_posted_refresh_required');
+ assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);assert.equal(r.mayRetry,false);
+ assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),true);
+ const rollback=h.calls.sql.indexOf('ROLLBACK');
+ const audit=h.calls.sql.findIndex(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send'));
+ assert.ok(rollback>=0&&audit>rollback,'release read-fence locks before audited cleanup');
+ await h.run();assert.equal(h.calls.post,0,'expired identity is never replayed');
+});
+test("expired-source cleanup failure or invalid evidence retains UNKNOWN without false no-send proof",async()=>{
+ for(const change of [{leaseChanged:true},...['insert','intent','reservation','commit'].map(finalizeFail=>({finalizeFail}))]){
+  const h=harness({sourceAgeMs:6001,finalize:true,...change}),r=await h.run();
+  assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);
+  assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
+  await h.run();assert.equal(h.calls.post,0);
+ }
+ for(const sourceAgeMs of [-1,NaN,Infinity]){
+  const h=harness({sourceAgeMs,finalize:true}),r=await h.run();
+  assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);
+  assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')));
+ }
+ for(const change of [{denyLock:true},{standing:true,revokedStanding:true},
+  ...[0,-1,null,NaN,Infinity,'60000'].map(releaseRemainingMs=>({releaseRemainingMs}))]){
+  const h=harness({sourceAgeMs:6001,finalize:true,...change}),r=await h.run();
+  assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);
+  assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
+  assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')),
+   'source expiry cannot bypass denied final SQL or missing/revoked release authority');
  }
 });
 test("finite technical release expires at the final send boundary without borrowing owner authority",async()=>{
@@ -466,7 +497,7 @@ test("real fee freshness and authority proof cannot hide EXIT source or finite r
   const expected='standing' in options;
   assert.equal(posts,expected?1:0);assert.equal(r.postAttempted,expected);
   assert.equal(h.calls.fee,2);assert.equal(r.mayRetry,false);
-  assert.equal(r.state,expected||options.sourceAgeMs===6001?'UNKNOWN':'BLOCKED');
+  assert.equal(r.state,expected?'UNKNOWN':'BLOCKED');
   await h.run();assert.equal(posts,expected?1:0,'no replay after either outcome');
   t.mock.restoreAll();
  }

@@ -293,6 +293,11 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const releaseRemaining=standingAllowed?Infinity:row.release_remaining_ms;
   if(sourceLifetime===null||(!standingAllowed&&(typeof releaseRemaining!=="number"||
      !Number.isFinite(releaseRemaining)||releaseRemaining<=0)))return {attempted:false,receipt:null};
+  // This exact locked EXIT has intact but expired source evidence. The send
+  // callback has not been entered and no COMMIT was attempted in this fence.
+  // Release read locks via ROLLBACK, then use the existing one-use, audited
+  // no-send finalizer. Invalid evidence and uncertain outcomes stay UNKNOWN.
+  if(sourceLifetime<0)return {attempted:false,receipt:null,expiredBeforeSend:true};
   sourceRemainingMs=sourceLifetime;
   remainingMs=Math.min(8000-reservationAge,5000-heartbeatAge,releaseRemaining as number);
   // The PREPARED -> UNKNOWN marker is already committed. This final
