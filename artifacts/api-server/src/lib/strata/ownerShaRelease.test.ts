@@ -326,6 +326,8 @@ test("post-recovery owner reauthorization reuses exact-SHA approval and preserve
     return {rows:[{qualification_id:QID,evidence_digest:feeDigest}]};
    }
    if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
+   if(sql.includes('count(*)::text FROM public.v13_production_event'))return {rows:[{intents:'0',events:'0',positions:'0',exits:'0'}]};
+   if(sql.includes('SELECT owner_user_id::text,state,arm_requested,account_kill,credential_fingerprint'))return {rows:[]};
    if(sql.includes("SELECT approval_id::text FROM private.strata_owner_sha_approvals")){
     assert.deepEqual(params,[OWNER,ACCOUNT,SHA]);return {rows:[{approval_id:QID}]};
    }

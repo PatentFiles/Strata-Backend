@@ -1,12 +1,17 @@
 import {logger} from '../logger';
 import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {readReleaseOwner,loadedMaterial} from './inAppProtectiveRelease';
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from './personalExchangeRead';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {digest,type Identity} from '../v13-production/types';
-import {V13_MIN_ENTRY_STAKE_CENTS} from '../v13LiveMoneyRisk';
+import {V13_MIN_ENTRY_STAKE_CENTS,computeV13LiveMoneyPolicyHash} from '../v13LiveMoneyRisk';
+import {approvedFromRow} from './ownerStakePolicyAmendment';
+import {STANDING_REVIEW_CONFIRM} from './standingExecutionReview';
+import {ProductionLedger,type Account} from '../v13-production/ledger';
+import type {Pool,PoolClient} from '@workspace/db';
+import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
 type Client=Query&{release():void};type Db=Query&{connect():Promise<Client>};
@@ -77,25 +82,70 @@ async function noFinancialHistory(db:Query,account:string){
  requireProof(r.rows.length===1&&['events','positions','exits'].every(k=>r.rows[0]![k]==='0'),
   'owner_renewal_actual_financial_or_exit_history_unsupported');
 }
+async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{releaseId:string;sha:string},lock=false){
+ const policy=await db.query(`SELECT p.*,p.xmin::text AS row_revision FROM public.v13_live_money_policy p
+  WHERE id=$1 AND execution_account_id=$2 AND created_by=$3 AND state='APPROVED' ${lock?'FOR SHARE':''}`,[a.policy_id,a.id,owner]);
+ requireProof(policy.rows.length===1,'owner_renewal_policy_unverified');
+ const decoded=approvedFromRow(policy.rows[0]!);
+ requireProof(decoded&&decoded.policyHash===a.policy_hash&&computeV13LiveMoneyPolicyHash(decoded)===a.policy_hash,'owner_renewal_policy_unverified');
+ const reviews=await db.query(`SELECT r.*,r.xmin::text AS review_revision,q.xmin::text AS qualification_revision,
+  q.evidence_digest AS qualification_digest,q.observed_at AS qualification_observed_at,q.expires_at AS qualification_expires_at
+  FROM private.strata_standing_execution_reviews r JOIN private.strata_protective_release_qualification q
+  ON q.qualification_id=r.qualification_id AND q.owner_user_id=r.owner_user_id AND q.execution_account_id=r.execution_account_id
+   AND q.release_commit_sha=r.release_commit_sha WHERE r.release_id=$1::uuid AND r.owner_user_id=$2::uuid
+  AND r.execution_account_id=$3 AND r.release_commit_sha=$4 ${lock?'FOR SHARE OF r,q':''}`,[authority.releaseId,owner,a.id,authority.sha]);
+ requireProof(reviews.rows.length===1,'owner_renewal_prior_review_proof_unverified');const r=reviews.rows[0]!;
+ const when=(x:unknown)=>x instanceof Date?x.getTime():Date.parse(String(x));
+ const at=when(r.created_at),start=when(r.qualification_observed_at),end=when(r.qualification_expires_at);
+ const expected=createHash('sha256').update(JSON.stringify({actor:r.independent_reviewer_id,owner,sha:authority.sha,qid:r.qualification_id,
+  account:a.id,policy:r.policy_hash,qualification:r.qualification_digest,note:r.review_note,url:r.review_url,scope:STANDING_REVIEW_CONFIRM})).digest('hex');
+ requireProof(r.state==='approved'&&r.revoked_at===null&&r.policy_hash===a.policy_hash&&r.independent_reviewer_id!==owner&&
+  r.confirmation===STANDING_REVIEW_CONFIRM&&Number.isFinite(at)&&Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<end&&
+  typeof r.review_note==='string'&&r.review_note.length>=120&&r.review_note.length<=2500&&
+  /^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/.test(String(r.review_url))&&r.evidence_digest===expected,
+  'owner_renewal_prior_review_proof_unverified');
+ return digest({policy:policy.rows[0],review:r});
+}
 /** Narrow owner-consent renewal for a previously authorized commissioned account
  * whose entire retained order history is proven never posted. No account/worker,
  * fee, standing-grant or reviewer authority is changed. Filled histories remain
  * unsupported here, rather than being treated as empty or erased. */
 export async function authorizeNeverPostedReleaseRenewal(owner:string,qualification:string,sha:string,
  deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds}){
+ return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,false);
+}
+/** Explicit new-SHA owner consent with retained, reconciled history. Shares
+ * all prior-authority, stopped scope, freshness and atomic approval fences;
+ * never changes controls, historical evidence, grants or reviewer authority. */
+export async function authorizeReconciledHistoryReleaseRenewal(owner:string,qualification:string,sha:string,
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds}){
+ try{
+  const initial=await readReleaseOwner(deps.db,owner);
+  if(!initial.ok)return fail(initial.reason);
+  const retained=await deps.db.query("SELECT id FROM public.v13_production_intent WHERE account_id=$1 AND (kind='EXIT' OR state='TERMINAL') LIMIT 1",[initial.account.id]);
+  // Existing ENTRY-only never-posted renewals keep their original contract.
+  // This classification grants nothing; either core path revalidates history.
+  return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,retained.rows.length>0);
+ }catch{return fail('owner_renewal_history_classification_unavailable');}
+}
+async function authorizeRetainedReleaseRenewal(owner:string,qualification:string,sha:string,
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},reconciled:boolean){
  let tx:Client|null=null,committed=false;let phase="preflight_authority";
  try{
   const initial=await readReleaseOwner(deps.db,owner);requireProof(initial.ok,'owner_renewal_activation_unverified');
   if(!initial.ok)return fail(initial.reason);
   const a=await scope(deps.db,owner),account=String(a.id);
   const authority=await priorAuthority(deps.db,owner,a);
+  const authorityProof=reconciled?await reconciledAuthorityProof(deps.db,owner,a,authority):null;
   const qualified=await currentQualification(deps.db,qualification,owner,account,sha);
   phase="preflight_history";
-  await noFinancialHistory(deps.db,account);
-  const history=await readNeverPostedReleaseHistory(deps.db,account);
-  requireProof(history.rows.length>0&&history.neverPosted.length===history.rows.length&&history.expectedRequests.length===0,
-   'owner_renewal_only_proven_never_posted_history_supported');
-  requireProof(history.rows.every(i=>i.policy_hash===a.policy_hash),'owner_renewal_history_policy_changed');
+  if(!reconciled)await noFinancialHistory(deps.db,account);
+  const history=reconciled?await readReconciledReleaseRenewalHistory(deps.db,account,owner):await readNeverPostedReleaseHistory(deps.db,account);
+  if(!reconciled){
+   requireProof(history.rows.length>0&&history.neverPosted.length===history.rows.length&&history.expectedRequests.length===0,
+    'owner_renewal_only_proven_never_posted_history_supported');
+   requireProof(history.rows.every(i=>i.policy_hash===a.policy_hash),'owner_renewal_history_policy_changed');
+  }
   phase="signed_history";
   const material=await loadedMaterial(deps.db,a);
   requireProof(material&&dedicatedSignerFingerprint(material.keyId,material.privateKey)===a.key_fingerprint,
@@ -107,8 +157,11 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
   const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
   const snapshot=personalAccountSnapshot(identity,feeds,history.requests);
   requireProof('identity' in snapshot&&snapshot.authenticated&&snapshot.complete&&snapshot.cashExact&&!snapshot.unexplainedCashActivity&&
-   snapshot.orders.length===0&&snapshot.fills.length===0&&snapshot.positions.length===0&&snapshot.settlements.length===0&&
    feeds.cashMicros===String(a.cash_micros),'owner_renewal_signed_history_conflicts_or_cash_changed');
+  if(!('identity' in snapshot))return fail('owner_renewal_signed_history_conflicts_or_cash_changed');
+  if(reconciled)verifyReconciledReleaseRenewalSnapshot(history as ReconciledReleaseHistory,snapshot);
+  else requireProof(snapshot.orders.length===0&&snapshot.fills.length===0&&snapshot.positions.length===0&&snapshot.settlements.length===0,
+   'owner_renewal_signed_history_conflicts_or_cash_changed');
   phase="transaction_begin";
   tx=await deps.db.connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
   phase="locked_authority";
@@ -118,10 +171,18 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
   requireProof(current.ok&&digest(current.account)===digest(initial.account),'owner_renewal_activation_or_policy_changed');
   const lockedAuthority=await priorAuthority(tx,owner,locked,true);
   requireProof(digest(lockedAuthority)===digest(authority),'owner_renewal_prior_authority_changed');
+  if(reconciled)requireProof(await reconciledAuthorityProof(tx,owner,locked,lockedAuthority,true)===authorityProof,'owner_renewal_prior_review_or_policy_changed');
   phase="locked_history";
-  await noFinancialHistory(tx,account);
-  const finalHistory=await readNeverPostedReleaseHistory(tx,account,true);
-  requireProof(finalHistory.historyDigest===history.historyDigest,'owner_renewal_history_changed_during_signed_read');
+  if(!reconciled)await noFinancialHistory(tx,account);
+  const finalHistory=reconciled?await readReconciledReleaseRenewalHistory(tx,account,owner,true):await readNeverPostedReleaseHistory(tx,account,true);
+  requireProof(reconciled?(finalHistory as ReconciledReleaseHistory).reconciliationDigest===(history as ReconciledReleaseHistory).reconciliationDigest:
+   finalHistory.historyDigest===history.historyDigest,'owner_renewal_history_changed_during_signed_read');
+  if(reconciled){
+   verifyReconciledReleaseRenewalSnapshot(finalHistory as ReconciledReleaseHistory,snapshot);
+   const ledger=new ProductionLedger(deps.db as unknown as Pool,account);
+   await ledger.finalAccountProof(tx as unknown as PoolClient,locked as unknown as Account,snapshot,deps.now());
+   await ledger.assertConservation(tx as unknown as PoolClient,locked as unknown as Account);
+  }
   phase="locked_evidence";
   const currentMaterial=await loadedMaterial(tx,locked);
   requireProof(currentMaterial&&dedicatedSignerFingerprint(currentMaterial.keyId,currentMaterial.privateKey)===locked.key_fingerprint,
@@ -151,8 +212,9 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
    requireProof(saved.rows.length===1,'owner_renewal_final_signed_proof_stale');approvalId=String(saved.rows[0]!.approval_id);}
   phase="audit_write";
   const record={ownerId:owner,accountId:account,sha,approvalId,qualificationId:qualification,
-   renewalMode:'COMMISSIONED_PROVEN_NEVER_POSTED_V1',priorAuthority:authority,policyHash:a.policy_hash,
-   credentialFingerprint:a.key_fingerprint,historyDigest:history.historyDigest,neverPosted:history.neverPosted,providerReadAtMs:started};
+   renewalMode:reconciled?'COMMISSIONED_RECONCILED_SETTLED_HISTORY_V1':'COMMISSIONED_PROVEN_NEVER_POSTED_V1',priorAuthority:authority,policyHash:a.policy_hash,
+   credentialFingerprint:a.key_fingerprint,historyDigest:history.historyDigest,
+   ...(reconciled?{reconciliationDigest:(history as ReconciledReleaseHistory).reconciliationDigest}:{}),neverPosted:history.neverPosted,providerReadAtMs:started};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
    VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION',$3::jsonb,$4)`,[randomUUID(),account,JSON.stringify(record),digest(record)]);
   requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');

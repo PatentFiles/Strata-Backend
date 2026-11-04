@@ -1,4 +1,4 @@
-import {authorizeNeverPostedReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
+import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {randomUUID} from "node:crypto";
@@ -114,10 +114,10 @@ export async function authorizeOwnerShaRelease(
     return reject("commissioning_repair_confirmation_not_applicable");
   if(restoring&&(repair||alreadyEnabled||stagedStopped))return reject("owner_restore_requires_disabled_unfrozen_account");
   // Bootstrap remains empty-history-only. Previously authorized accounts with
-  // retained never-posted intents use a separate, stricter stopped renewal.
+  // retained history use a separate, stricter stopped and reconciled renewal.
   if(!restoring&&isTrue(a.execution_enabled)&&a.blocked_reason==null){
    const history=await db.query("SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1",[a.id]);
-   if(history.rows.length)return await authorizeNeverPostedReleaseRenewal(ownerId,String(args.qualificationId),sha,
+   if(history.rows.length)return await authorizeReconciledHistoryReleaseRenewal(ownerId,String(args.qualificationId),sha,
     {db,sha:deps.sha??deployedGitSha,now:deps.now??Date.now,readFeeds:deps.readFeeds??readOwnedKalshiFeeds});
   }
   if(restoring||repair||alreadyEnabled||stagedStopped){
@@ -205,6 +205,24 @@ export async function authorizeOwnerShaRelease(
 
   if(current.blocked_reason!=null&&current.blocked_reason!=="awaiting_account_commissioning")
     return reject("account_frozen_for_independent_remediation");
+  if(!restoring&&!isTrue(current.execution_enabled)){
+   // Disabled bootstrap is not an escape from retained-history renewal or
+   // an already armed/owned worker. Account lock fences canonical writers.
+   const bootstrap=await tx.query(`SELECT
+    (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1) intents,
+    (SELECT count(*)::text FROM public.v13_production_event WHERE account_id=$1) events,
+    (SELECT count(*)::text FROM public.v13_production_position WHERE account_id=$1) positions,
+    (SELECT count(*)::text FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1) exits`,[accountId]);
+   if(reserved!==0n||bootstrap.rows.length!==1||!['intents','events','positions','exits'].every(k=>bootstrap.rows[0]?.[k]==='0'))
+    return reject('owner_bootstrap_empty_history_and_stopped_worker_required');
+   const bootstrapLease=await tx.query(`SELECT owner_user_id::text,state,arm_requested,account_kill,credential_fingerprint
+    FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE`,[accountId]);
+   // A first-ever empty account has no lease until ARM. If a lease exists,
+   // require the exact owner/signer in released, explicitly disarmed state.
+   if(bootstrapLease.rows.length>1||bootstrapLease.rows.some(w=>w.owner_user_id!==ownerId||w.state!=='released'||
+    w.arm_requested!==false||w.account_kill!==false||w.credential_fingerprint!==current.key_fingerprint))
+    return reject('owner_bootstrap_empty_history_and_stopped_worker_required');
+  }
   if(repairing || legacyEnabled || stagedStopped){
      // A stale marker repair or adoption of a pre-enabled legacy account
      // requires a fresh, fully empty authenticated exchange and local ledger.

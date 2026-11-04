@@ -4,6 +4,10 @@ on:
     branches: [fix/continuous-grant-revocation-fences-20261027]
   pull_request:
     paths:
+      - 'artifacts/api-server/src/lib/strata/ownerShaRelease*'
+      - 'artifacts/api-server/src/lib/strata/ownerNeverPostedReleaseRenewal*'
+      - 'artifacts/api-server/src/lib/strata/reconciledReleaseRenewalHistory*'
+      - 'artifacts/api-server/src/lib/strata/neverPostedReleaseHistory*'
       - 'artifacts/api-server/src/lib/strata/userScopeDatabase*'
       - 'artifacts/api-server/src/lib/strata/walletDisplayReads*'
       - 'artifacts/api-server/src/lib/strata/continuousExecutionAuthorization*'

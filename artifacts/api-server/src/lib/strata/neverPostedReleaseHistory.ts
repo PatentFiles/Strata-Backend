@@ -18,8 +18,10 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  const requests:Request[]=[];
  for(const row of rows){const r=json(row.request);if(!object(r))throw Error('financial_intent_unreadable');requests.push(r as Request);}
  if(requests.some(r=>typeof r.clientOrderId!=='string'||!r.clientOrderId)||new Set(requests.map(r=>r.clientOrderId)).size!==requests.length)throw Error('release_history_client_identity_ambiguous');
- // Opt-in is restricted to the read-only diagnostic. Renewal callers retain
- // their existing entry-only contract and cannot acquire new authority here.
+ // This opt-in validates expired EXIT evidence only; it does not grant any
+ // authority. Authorization callers additionally require complete signed
+ // history, financial reconciliation, stopped scope and locked revalidation.
+ // Default callers retain the existing entry-only contract.
  const candidates=rows.filter(r=>r.state==='BLOCKED'&&(r.kind==='ENTRY'||(diagnostic&&r.kind==='EXIT')));
  if(!candidates.length)return {rows,requests,expectedRequests:requests,neverPosted:[],historyDigest:digest(rows)};
  const ids=candidates.map(r=>String(r.id));
