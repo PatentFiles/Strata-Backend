@@ -1,3 +1,4 @@
+import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -184,7 +185,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
 async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:typeof verifyReviewedProtectiveExitFeeAuthority;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
  let c:DBClient|null=null,committed=false,eligible=false;
- let evidenceStart=NaN,remainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
+ let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
   c=await db.connect();
   await c.query("BEGIN");
@@ -215,9 +216,16 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   if(standingMode&&!standingAllowed)return {attempted:false,receipt:null};
   const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
- EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms
+ EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
+ i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,
+ EXTRACT(EPOCH FROM (clock_timestamp()-(i.decision#>>'{ownedEvaluation,source,evaluated_at}')::timestamptz))*1000::double precision AS source_age_ms,
+ CASE WHEN $14::boolean THEN NULL ELSE
+ EXTRACT(EPOCH FROM (code_release.expires_at-clock_timestamp()))*1000::double precision END AS release_remaining_ms
  FROM private.strata_emergency_exit_reservations r
  JOIN public.v13_production_account a ON a.id=r.execution_account_id AND a.owner_user_id=r.owner_user_id
+ JOIN public.v13_production_intent i ON i.account_id=a.id AND i.client_order_id=r.client_order_id
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+   AND p.policy_hash=i.policy_hash AND p.state='APPROVED'
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
  JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
@@ -225,19 +233,17 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  -- constitutes independent review of the executable emergency exit.
  -- Every signed protective IOC must have a genuinely independent exact-SHA
  -- technical release, including after a durable owner-SHA authorization.
- JOIN LATERAL (
-   SELECT 1 AS code_authorized
-   WHERE $14::boolean OR EXISTS (
-     SELECT 1 FROM private.strata_protective_exit_release v
-     WHERE v.release_commit_sha=$1 AND v.state='approved'
-       AND v.created_at<=now() AND v.expires_at>now()
+ LEFT JOIN LATERAL (
+     SELECT v.expires_at FROM private.strata_protective_exit_release v
+     WHERE NOT $14::boolean AND v.release_commit_sha=$1 AND v.state='approved'
+       AND v.created_at<=clock_timestamp() AND v.expires_at>clock_timestamp()
        AND v.revoked_at IS NULL
        AND v.independent_reviewer_id<>a.owner_user_id
        AND v.operator_approver_id<>v.independent_reviewer_id
      FOR SHARE OF v
-   )
  ) code_release ON TRUE
- WHERE r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
+ WHERE ($14::boolean OR code_release.expires_at IS NOT NULL)
+ AND r.reservation_id=$2::uuid AND r.owner_user_id=$3::uuid
  AND r.execution_account_id=$4 AND r.client_order_id=$5 AND r.market_ticker=$6
  AND r.reducing_side=$7 AND r.quantity_hundredths=$8::bigint
  AND r.worker_holder_id=$9 AND r.worker_fencing_token=$10::bigint
@@ -256,20 +262,17 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
 
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
    WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
- AND EXISTS (SELECT 1 FROM public.v13_production_intent i
-   WHERE i.account_id=a.id AND i.client_order_id=r.client_order_id
-   AND i.market=r.market_ticker AND i.kind='EXIT'
+ AND i.market=r.market_ticker AND i.kind='EXIT'
    AND i.state='DISPATCHED' AND i.terminal=false
    AND i.exchange_order_id IS NULL AND i.filled_hundredths=0
    AND i.side=$7 AND i.request->>'market'=r.market_ticker
    AND i.request->>'side'=$7 AND i.request->>'clientOrderId'=r.client_order_id
    AND private.strata_exit_request_quantity_hundredths(i.request)=$8::bigint
    AND i.request->>'limitMicros'=$11::text
-   FOR SHARE OF i)
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
    AND i.client_order_id<>r.client_order_id)
- FOR SHARE OF r,a,g,w,pos`;
+ FOR SHARE OF r,a,g,w,pos,i,p`;
   // Anchor local elapsed BEFORE the DB read. DB-computed ages avoid comparing
   // host/DB wall clocks; subtracting the full round trip is conservative.
   evidenceStart=monotonicNow();
@@ -284,7 +287,14 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   if(typeof reservationAge!=="number"||!Number.isFinite(reservationAge)||reservationAge<0||reservationAge>=8000||
      typeof heartbeatAge!=="number"||!Number.isFinite(heartbeatAge)||heartbeatAge<0||heartbeatAge>=5000)
    return {attempted:false,receipt:null};
-  remainingMs=Math.min(8000-reservationAge,5000-heartbeatAge);
+  // The prepared strategy source is pinned to this exact financial EXIT.
+  // A newly fetched book or fee response cannot refresh that source.
+  const sourceLifetime=protectiveExitSourceRemainingMs(row.owned_evaluation,row.max_quote_age_ms,row.source_age_ms,String(input.order.ticker));
+  const releaseRemaining=standingAllowed?Infinity:row.release_remaining_ms;
+  if(sourceLifetime===null||(!standingAllowed&&(typeof releaseRemaining!=="number"||
+     !Number.isFinite(releaseRemaining)||releaseRemaining<=0)))return {attempted:false,receipt:null};
+  sourceRemainingMs=sourceLifetime;
+  remainingMs=Math.min(8000-reservationAge,5000-heartbeatAge,releaseRemaining as number);
   // The PREPARED -> UNKNOWN marker is already committed. This final
   // authorization fence must COMMIT before any network request is attempted.
   // No row lock may be held across the external transport.
@@ -303,7 +313,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  try{
   const receipt=await send(()=>{
    const current=monotonicNow();
-   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs||
+   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs||current-evidenceStart>sourceRemainingMs||
       (feeAuthority&&(current<feeAuthorityStart||current-feeAuthorityStart>=feeAuthorityRemainingMs||!feeAuthority.providerFresh()))){
     expired=true;throw Error("protective_exit_final_evidence_expired");
    }

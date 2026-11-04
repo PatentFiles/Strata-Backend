@@ -1,5 +1,7 @@
+import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority} from "./reviewedProtectiveExitFee";
+import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from "@workspace/v13-strategy";
 import test from "node:test";
-import {generateKeyPairSync,createPublicKey,verify,constants} from "node:crypto";
+import {generateKeyPairSync,createPublicKey,verify,constants,Sign} from "node:crypto";
 import assert from "node:assert/strict";
 import {dispatchReviewedProtectiveExitOnce,isDurableProtectiveExitNoSend} from "./ownerFeeEmergencyExitSignedDispatch";
 import type {IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
@@ -19,18 +21,20 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
  marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;
- failPersist?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string}={}){
- const clientId=input.clientOrderId??CID,reservationId=input.reservationId??RES;
+ failPersist?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid"}={}){
+ const clientId=input.clientOrderId??CID,reservationId=input.reservationId??RES,count=input.count??"2.00",side=input.side??"ask";
  const calls:{fee:number;mark:number;post:number;read:number;releases:number;sql:string[]}={
    fee:0,mark:0,post:0,read:0,releases:0,sql:[],
  };
  let consumed=false;let monotonic=0;
  const receipt={httpStatus:201,order_id:"order-1",client_order_id:clientId,
   fill_count:input.fill??"1.00",remaining_count:
-    input.fill==="0.00"?"2.00":input.fill==="2.00"?"0.00":"1.00",
+    (Number(count)-Number(input.fill??"1.00")).toFixed(2),
   ts_ms:1792200000000};
  const db={connect:async()=>({query:async (sql:string)=>{
   calls.sql.push(sql);
+  if(sql.startsWith("SELECT release_id FROM private.strata_standing_execution_reviews"))return {rows:input.standing?[{release_id:"standing"}]:[]};
+  if(sql.startsWith("SELECT r.release_id"))return {rows:input.standing&&!input.revokedStanding?[{release_id:"standing"}]:[]};
   if(sql.includes("AS intent_id"))return {rows:input.finalize?[{reservation_id:reservationId,intent_id:"exit-intent"}]:[]};
   if(sql.startsWith("SELECT id FROM public.v13_production_account"))return {rows:input.finalize?[{id:identity.accountId}]:[]};
   if(sql.startsWith("SELECT execution_account_id FROM private.kalshi_account_worker_lease"))return {rows:input.finalize&&!input.leaseChanged?[{execution_account_id:identity.accountId}]:[]};
@@ -58,20 +62,30 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    assert.ok(sql.includes('private.strata_exit_request_quantity_hundredths(i.request)=$8::bigint'));
    assert.ok(sql.includes("i.request->>'side'=$7"));
    assert.ok(sql.includes("i.request->>'limitMicros'=$11::text"));
-   assert.ok(sql.includes('FOR SHARE OF i'));
+   assert.ok(sql.includes('FOR SHARE OF r,a,g,w,pos,i,p'));
 
    assert.match(sql,/w\.credential_fingerprint=\$13::text/);
-   return {rows:input.denyLock?[]:[{reservation_id:reservationId,reservation_age_ms:input.reservationAgeMs??0,heartbeat_age_ms:input.heartbeatAgeMs??0}]};
+   return {rows:input.denyLock?[]:[{reservation_id:reservationId,reservation_age_ms:input.reservationAgeMs??0,heartbeat_age_ms:input.heartbeatAgeMs??0,
+    max_quote_age_ms:5000,source_age_ms:input.sourceAgeMs??0,
+    release_remaining_ms:'releaseRemainingMs' in input?input.releaseRemainingMs:60000,
+    owned_evaluation:{sourcePaperEvaluationId:'source',source:{id:'source',market_ticker:MARKET,
+     strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
+     evaluated_at:'2026-11-03T00:00:00.000Z',feed_freshness:'current',btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}}]};
   }
   return {rows:[]};
  },release:()=>{calls.releases++}})};
- const run=()=>dispatchReviewedProtectiveExitOnce({...identity,reservationId,order:{...o,client_order_id:clientId}},{
+ const authorityDb={query:async(sql:string)=>({rows:sql.includes('AS standing_history')?[{standing_history:false}]:[{grant_id:RES,legacy_valid:true,valid_for_ms:60000}]})};
+ const run=()=>dispatchReviewedProtectiveExitOnce({...identity,reservationId,order:{...o,count,side,client_order_id:clientId}},{
    db,monotonicNow:()=>monotonic,verifyFee:(async()=>{
-     calls.fee++;if(input.secondFeeThrows&&calls.fee===2)throw Error("SECRET read-only provider failure");
+     calls.fee++;
+     if(input.realFee)return verifyReviewedProtectiveExitFee(OWNER,identity.accountId,MARKET,{
+      sha:()=>"a".repeat(40),db:authorityDb,readFee:async()=>({ok:true,marketTicker:MARKET,marketOpen:true,observedAtMs:Date.now(),fingerprint:'c'.repeat(64)}) as never});
+     if(input.secondFeeThrows&&calls.fee===2)throw Error("SECRET read-only provider failure");
      const feeOk=input.fee!==false&&!(input.secondFeeRejected&&calls.fee===2);
      return {ok:feeOk,monetaryFeeAuthorized:feeOk,
       marketTicker:MARKET,reason:"verified"};
    }) as never,
+   verifyFeeAuthority:input.realFee?async(owner,account,sha)=>verifyReviewedProtectiveExitFeeAuthority(owner,account,sha,authorityDb):undefined,
    mark:(async()=>{calls.mark++;
      if(input.marker===false||consumed)return {unknownRecorded:false};
      consumed=true;
@@ -89,16 +103,16 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    readAuthenticatedOutcome:async(_input,observed)=>{
     calls.read++;
     const filled=input.fill??"1.00";
-    const initial=input.initialPosition??"3.00",position=(Number(initial)-Number(filled)).toFixed(2);
-    return {clientOrderId:clientId,marketTicker:MARKET,requestedCountFp:"2.00",
+    const initial=input.initialPosition??(side==="ask"?"3.00":"-3.00"),position=(Number(initial)+(side==="ask"?-1:1)*Number(filled)).toFixed(2);
+    return {clientOrderId:clientId,marketTicker:MARKET,requestedCountFp:count,
      initialPositionFp:initial,observedPositionFp:position,
-     positionMarketTicker:MARKET,reducingBookSide:"ask",
+     positionMarketTicker:MARKET,reducingBookSide:side,
      completeExchangeHistory:true,exactMarketAndAccountMatched:true,
      orderAndFillHistoryMatched:input.badHistory!==true,isolatedPositionDelta:true,
      response:observed} satisfies IocRecoveryObservation;
    }
  });
- return {run,calls,elapsed:()=>monotonic};
+ return {run,calls,elapsed:()=>monotonic,advance:(ms:number)=>{monotonic+=ms;}};
 }
 test("one committed UNKNOWN marker produces at most one signed IOC, even across repeated calls",async()=>{
  const h=harness();
@@ -413,4 +427,56 @@ test('hosted process cannot inject the monetary authority port even with release
   result=await dispatchReviewedProtectiveExitOnce(identity,{verifyFeeAuthority:async()=>{called++;throw Error('forbidden');}});
   assert.equal(result.reason,'protective_exit_injection_forbidden');assert.equal(called,0);assert.equal(result.postAttempted,false);
  }finally{keys.forEach((k,i)=>{if(prior[i]===undefined)delete process.env[k];else process.env[k]=prior[i];});}
+});
+
+test("pinned EXIT source expiry is checked after COMMIT, with inclusive 5000ms boundary",async()=>{
+ for(const [age,delay,posted] of [[4999,0,true],[5000,0,true],[5001,0,false],[6001,0,false],[4999,2,false],[4000,2001,false]] as const){
+  const h=harness({sourceAgeMs:age,commitDelayMs:delay,finalize:true}),r=await h.run();
+  assert.equal(h.calls.post,posted?1:0);assert.equal(r.postAttempted,posted);
+  if(!posted)assert.equal(r.state,age>5000?'UNKNOWN':'BLOCKED');
+  assert.equal(r.mayRetry,false);
+ }
+});
+test("finite technical release expires at the final send boundary without borrowing owner authority",async()=>{
+ for(const lifetime of [0,-84,null,undefined,NaN,Infinity]){
+  const h=harness({releaseRemainingMs:lifetime}),r=await h.run();assert.equal(h.calls.post,0);assert.equal(r.state,'UNKNOWN');
+ }
+ for(const delay of [99,100,184]){
+  const h=harness({releaseRemainingMs:100,commitDelayMs:delay,finalize:true}),r=await h.run();
+  assert.equal(h.calls.post,delay<100?1:0);assert.equal(r.state,delay<100?'RECONCILED':'BLOCKED');
+  assert.equal(r.mayRetry,false);
+ }
+});
+test("standing technical review remains without TTL, but revoked standing history cannot fall back",async()=>{
+ const good=harness({standing:true,releaseRemainingMs:null});assert.equal((await good.run()).postAttempted,true);
+ const revoked=harness({standing:true,revokedStanding:true,releaseRemainingMs:60000});
+ assert.equal((await revoked.run()).postAttempted,false);assert.equal(revoked.calls.post,0);
+});
+
+test("real fee freshness and authority proof cannot hide EXIT source or finite release expiry during signing",async t=>{
+ for(const options of [{sourceAgeMs:6001},{sourceAgeMs:4500},{releaseRemainingMs:100},{standing:true,releaseRemainingMs:null}]){
+  const h=harness({...options,rawSigned:true,realFee:true,finalize:true});
+  t.mock.method(performance,'now',()=>h.elapsed());
+  const original=Sign.prototype.sign;
+  t.mock.method(Sign.prototype,'sign',function(this:Sign,...args:unknown[]){
+   const result=(original as Function).apply(this,args);h.advance(501);return result;
+  });
+  let posts=0;t.mock.method(globalThis,'fetch',async()=>{posts++;throw Error('synthetic_uncertain_transport');});
+  const r=await h.run();
+  const expected='standing' in options;
+  assert.equal(posts,expected?1:0);assert.equal(r.postAttempted,expected);
+  assert.equal(h.calls.fee,2);assert.equal(r.mayRetry,false);
+  assert.equal(r.state,expected||options.sourceAgeMs===6001?'UNKNOWN':'BLOCKED');
+  await h.run();assert.equal(posts,expected?1:0,'no replay after either outcome');
+  t.mock.restoreAll();
+ }
+});
+
+test("fresh genuine fractional YES and NO reductions preserve zero, partial and full reconciliation",async()=>{
+ for(const side of ['ask','bid'] as const)for(const fill of ['0.00','0.10','0.25']){
+  const h=harness({side,count:'0.25',fill,realFee:true,sourceAgeMs:1000});
+  const r=await h.run();assert.equal(r.state,'RECONCILED');assert.equal(r.postAttempted,true);
+  assert.equal(r.filledHundredths,String(Math.round(Number(fill)*100)));assert.equal(h.calls.read,1);
+  await h.run();assert.equal(h.calls.post,1);assert.equal(r.tradingAuthorized,false);
+ }
 });
