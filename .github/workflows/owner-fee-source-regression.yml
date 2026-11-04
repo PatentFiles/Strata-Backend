@@ -29,6 +29,10 @@ on:
       - '.github/workflows/owner-fee-source-regression.yml'
   pull_request:
     paths:
+      - 'artifacts/api-server/src/lib/strata/ownerShaRelease*'
+      - 'artifacts/api-server/src/lib/strata/ownerNeverPostedReleaseRenewal*'
+      - 'artifacts/api-server/src/lib/strata/reconciledReleaseRenewalHistory*'
+      - 'artifacts/api-server/src/lib/strata/neverPostedReleaseHistory*'
       - 'artifacts/api-server/src/lib/strata/operatorFee*'
       - 'artifacts/api-server/src/lib/microLiveFeeArtifact*'
       - 'artifacts/api-server/src/lib/strata/monetaryFeeContract*'
