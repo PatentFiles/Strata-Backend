@@ -1,3 +1,4 @@
+import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from "@workspace/v13-strategy";
 import test from 'node:test';
 import {createHash,generateKeyPairSync,randomUUID,Sign} from 'node:crypto';
 import {readFileSync} from 'node:fs';
@@ -25,7 +26,7 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  CREATE TABLE private.role_assignments(email text,role text);
  CREATE TABLE public.profiles(id uuid,role text);
  CREATE TABLE public.v13_production_account(id text,owner_user_id uuid,policy_id text,subaccount int,exchange_index int,commissioned boolean,execution_enabled boolean,kill_switch boolean);
- CREATE TABLE public.v13_live_money_policy(id text,execution_account_id text,policy_hash text,state text,approved_at timestamptz,fee_policy_version text,fee_formula_version text,fee_source_url text);
+ CREATE TABLE public.v13_live_money_policy(id text,execution_account_id text,policy_hash text,state text,approved_at timestamptz,fee_policy_version text,fee_formula_version text,fee_source_url text,max_quote_age_ms integer DEFAULT 5000);
  CREATE TABLE private.strata_api_fee_source_grants(grant_id uuid,owner_user_id uuid,issuer_admin_id uuid,rate_decision_digest text,fee_model_version text,scope text,policy_version text,confirmation text,issued_at timestamptz,revoked_at timestamptz);
  CREATE TABLE private.strata_api_fee_rate_reviews(review_id uuid,owner_user_id uuid,reviewer_user_id uuid,rate_decision_digest text,fee_model_version text,scope text,confirmation text,signed_at timestamptz,expires_at timestamptz,revoked_at timestamptz);
  CREATE TABLE private.strata_api_fee_owner_consents(consent_id uuid,owner_user_id uuid,grant_id uuid,confirmation text,confirmed_at timestamptz,revoked_at timestamptz);
@@ -56,7 +57,7 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,holder_id text,fencing_token bigint,state text,credential_fingerprint text,account_kill boolean,heartbeat_at timestamptz);
  CREATE TABLE public.v13_production_position(id text,account_id text,market text,side text,quantity_hundredths bigint);
  CREATE TABLE public.v13_production_observation(account_id text,kind text);
- CREATE TABLE public.v13_production_intent(id text,parent_id text,account_id text,client_order_id text,market text,kind text,state text,terminal boolean,exchange_order_id text,filled_hundredths bigint,reserved_micros bigint,side text,request jsonb,dispatch_at timestamptz);
+ CREATE TABLE public.v13_production_intent(id text,parent_id text,account_id text,client_order_id text,market text,kind text,state text,terminal boolean,exchange_order_id text,filled_hundredths bigint,reserved_micros bigint,side text,request jsonb,decision jsonb,policy_hash text,dispatch_at timestamptz);
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id uuid,owner_user_id uuid,execution_account_id text,client_order_id text,market_ticker text,reducing_side text,quantity_hundredths bigint,worker_holder_id text,worker_fencing_token bigint,state text,trading_authorized boolean,order_digest text,initial_position_fp text,created_at timestamptz,updated_at timestamptz);
  CREATE TABLE private.strata_protective_exit_release(release_commit_sha text,state text,created_at timestamptz,expires_at timestamptz,revoked_at timestamptz,independent_reviewer_id uuid,operator_approver_id uuid);
  CREATE TABLE private.strata_protective_exit_local_no_send(reservation_id uuid PRIMARY KEY,owner_user_id uuid,execution_account_id text,client_order_id text,order_digest text,worker_holder_id text,worker_fencing_token bigint,reason text,evidence_sha256 text,signer_fingerprint text,market_ticker text,reducing_side text,quantity_hundredths bigint,limit_micros bigint);`);
@@ -69,19 +70,32 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  await insert('private.kalshi_account_worker_lease',{execution_account_id:account,owner_user_id:owner,holder_id:'worker',fencing_token:8,state:'owned',credential_fingerprint:fingerprint,account_kill:false,heartbeat_at:new Date()});
  await insert('public.v13_production_observation',{account_id:account,kind:'OWNER_ACTIVATION_REQUEST'});
  const results=[];
- for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay'] as const){
+ for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay','stale-source-final','stale-source-final-no-send-rollback','future-source-final','stale-source-after-commit','malformed-source-final','no-send-audit-rollback','final-lock-probe','legacy-release-expiry'] as const){
   await db.query(`TRUNCATE public.v13_production_position,public.v13_production_intent,private.strata_emergency_exit_reservations,private.strata_protective_exit_local_no_send`);
   await db.query(`UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()+interval '1 hour',revoked_at=NULL`);
   await db.query(`UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()+interval '50 minutes',revoked_at=NULL`);
+  await db.query('DROP TRIGGER IF EXISTS synthetic_block_failure ON public.v13_production_intent');
+  if(scenario==='no-send-audit-rollback'||scenario==='stale-source-final-no-send-rollback'){
+   await db.query(`CREATE OR REPLACE FUNCTION public.synthetic_block_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic_block_failure'; END $$;
+    CREATE TRIGGER synthetic_block_failure BEFORE UPDATE ON public.v13_production_intent FOR EACH ROW WHEN (NEW.state='BLOCKED') EXECUTE FUNCTION public.synthetic_block_failure()`);
+  }
+  if(scenario==='legacy-release-expiry'){
+   await db.query('TRUNCATE private.strata_standing_execution_reviews,private.strata_api_fee_standing_models,private.strata_api_fee_standing_delegations');
+   await db.query("UPDATE private.strata_api_fee_rate_reviews SET expires_at=clock_timestamp()+interval '1 hour'");
+   await insert('private.strata_protective_exit_release',{release_commit_sha:sha,state:'approved',created_at:before,expires_at:future,independent_reviewer_id:admin,operator_approver_id:owner});
+  }
+  const noSend=scenario==='expire-after-commit'||scenario.startsWith('stale-provider-')||scenario==='stale-source-after-commit'||scenario==='stale-source-final'||scenario==='legacy-release-expiry';
   const reservationId=randomUUID(),clientId='v13p-'+randomUUID(),market='KXBTC15M-26NOV031945-45';
   const order={ticker:market,client_order_id:clientId,side:'ask',count:'2.00',price:'0.5500',time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,reduce_only:true,subaccount:1,exchange_index:2};
   const request={action:'SELL',reduceOnly:true,timeInForce:'IOC',market,side:'YES',clientOrderId:clientId,contracts:2,limitMicros:550000};
   const digest=createHash('sha256').update(JSON.stringify(order)).digest('hex');
   await insert('public.v13_production_position',{id:'parent',account_id:account,market,side:'YES',quantity_hundredths:300});
   await insert('public.v13_production_intent',{id:'parent',account_id:account,kind:'ENTRY',state:'FILLED',terminal:true});
-  await insert('public.v13_production_intent',{id:'exit',parent_id:'parent',account_id:account,client_order_id:clientId,market,kind:'EXIT',state:'PREPARED',terminal:false,filled_hundredths:0,reserved_micros:0,side:'YES',request:JSON.stringify(request)});
+  await insert('public.v13_production_intent',{id:'exit',parent_id:'parent',account_id:account,client_order_id:clientId,market,kind:'EXIT',state:'PREPARED',terminal:false,filled_hundredths:0,reserved_micros:0,side:'YES',request:JSON.stringify(request),policy_hash:policy,decision:JSON.stringify({ownedEvaluation:{sourcePaperEvaluationId:'synthetic-source',source:{id:'synthetic-source',market_ticker:market,evaluated_at:new Date(Date.now()-(scenario.startsWith('stale-source-final')?6001:scenario==='future-source-final'?-3600000:0)).toISOString(),feed_freshness:'current',strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}})});
   await insert('private.strata_emergency_exit_reservations',{reservation_id:reservationId,owner_user_id:owner,execution_account_id:account,client_order_id:clientId,market_ticker:market,reducing_side:'YES',quantity_hundredths:200,worker_holder_id:'worker',worker_fencing_token:8,state:'PREPARED',trading_authorized:false,order_digest:digest,initial_position_fp:'3.00',created_at:new Date(),updated_at:new Date()});
+  if(scenario==='malformed-source-final')await db.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}','"not-a-timestamp"'::jsonb) WHERE kind='EXIT'`);
   await db.query('UPDATE private.kalshi_account_worker_lease SET heartbeat_at=clock_timestamp()');
+  const failures:Array<{sql:string;code:string;message:string}>=[];let auditInsertAttempts=0;
   let lastProviderAt=0,providerAgeAtFinal=0;
   let connections=0;
   let feeCalls=0,providerCalls=0,authorityCalls=0,posts=0,finalSuccessorQueries=0,finalFenceQueries=0,commitDelayed=false;
@@ -94,10 +108,29 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
      if(scenario==='expire-during-query')await c.query('SELECT pg_sleep(0.35)');
      if(scenario==='stale-provider-delay')await c.query('SELECT pg_sleep(3.10)');
     }
-    if(sql.includes('AS reservation_age_ms')){finalFenceQueries++;providerAgeAtFinal=Date.now()-lastProviderAt;}
-    const out=await c.query(sql,args);
-    if(sql==='COMMIT'&&finalAuthority&&(scenario==='expire-after-commit'||scenario==='stale-provider-commit-delay')&&!commitDelayed){
-     commitDelayed=true;await new Promise(r=>setTimeout(r,scenario==='expire-after-commit'?350:3100));
+    if(sql.includes('AS reservation_age_ms')){
+     finalAuthority=true;finalFenceQueries++;providerAgeAtFinal=Date.now()-lastProviderAt;
+     // Set synthetic lifetimes at the final query, excluding setup/provider latency.
+     if(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback')await c.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}',to_jsonb(clock_timestamp()-interval '4 seconds')) WHERE kind='EXIT'`);
+     if(scenario==='legacy-release-expiry')await c.query("UPDATE private.strata_protective_exit_release SET expires_at=clock_timestamp()+interval '1 second'");
+    }
+    if(sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send'))auditInsertAttempts++;
+    let out;
+    try{out=await c.query(sql,args);}catch(error:any){failures.push({sql,code:error.code,message:error.message});throw error;}
+    if(sql.includes('AS reservation_age_ms')&&scenario==='final-lock-probe'){
+     assert.equal(out.rows.length,1);assert.equal(typeof out.rows[0].source_age_ms,'number');
+     assert.equal(typeof out.rows[0].max_quote_age_ms,'number');
+     const contender=await pool.connect();
+     try{
+      for(const statement of ["UPDATE public.v13_production_intent SET policy_hash=policy_hash WHERE kind='EXIT'","UPDATE public.v13_live_money_policy SET max_quote_age_ms=max_quote_age_ms"]){
+       await contender.query('BEGIN');await contender.query("SET LOCAL lock_timeout='50ms'");
+       await assert.rejects(contender.query(statement),(error:any)=>error.code==='55P03');
+       await contender.query('ROLLBACK');
+      }
+     }finally{contender.release();}
+    }
+    if(sql==='COMMIT'&&finalAuthority&&(scenario==='expire-after-commit'||scenario==='stale-provider-commit-delay'||scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback'||scenario==='legacy-release-expiry')&&!commitDelayed){
+     commitDelayed=true;await new Promise(r=>setTimeout(r,scenario==='stale-provider-commit-delay'?3100:(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback'||scenario==='legacy-release-expiry')?1500:350));
     }
     return out;
    }};
@@ -134,19 +167,28 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
   }
   const result=await dispatchReviewedProtectiveExitOnce(input,ports);
   assert.equal(feeCalls,2,scenario+' actual public verifier twice');assert.equal(providerCalls,2);
-  assert.equal(authorityCalls,1);assert.equal(finalSuccessorQueries,1);
+  if(scenario==='stale-source-final')assert.equal(auditInsertAttempts,1,'intact already-expired evidence must receive audited no-send cleanup');
+  if(scenario==='future-source-final')assert.equal(auditInsertAttempts,0,'future timestamps are invalid, never authenticated expiry');
+  if(scenario==='malformed-source-final'){
+   assert.ok(failures.some(f=>f.sql.includes('AS source_age_ms')&&f.code==='22007'),'actual timestamp cast must fail');
+  }
+  if(scenario==='no-send-audit-rollback'||scenario==='stale-source-final-no-send-rollback'){
+   assert.equal(auditInsertAttempts,1,'audit insert precedes failing financial update');
+   assert.ok(failures.some(f=>f.sql.startsWith("UPDATE public.v13_production_intent SET state='BLOCKED'")&&f.code==='P0001'&&f.message==='synthetic_block_failure'),'actual trigger must abort no-send transaction');
+  }
+  assert.equal(authorityCalls,1);assert.equal(finalSuccessorQueries,scenario==='legacy-release-expiry'?0:1);
   assert.equal(finalFenceQueries,scenario==='revoke-after-provider'||scenario==='change-proof-after-provider'||scenario==='expire-during-query'?0:1);
-  assert.equal(posts,(scenario==='valid-unknown'||scenario==='first-proof-only-stale')?1:0,scenario+JSON.stringify(result));
-  assert.equal(result.postAttempted,scenario==='valid-unknown'||scenario==='first-proof-only-stale');assert.equal(result.mayRetry,false);
+  assert.equal(posts,(scenario==='valid-unknown'||scenario==='first-proof-only-stale'||scenario==='final-lock-probe')?1:0,scenario+JSON.stringify(result));
+  assert.equal(result.postAttempted,scenario==='valid-unknown'||scenario==='first-proof-only-stale'||scenario==='final-lock-probe');assert.equal(result.mayRetry,false);
   const state=(await db.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state;
-  assert.equal(state,(scenario==='expire-after-commit'||scenario.startsWith('stale-provider-'))?'VOID':'UNKNOWN');
-  assert.equal(result.state,(scenario==='expire-after-commit'||scenario.startsWith('stale-provider-'))?'BLOCKED':'UNKNOWN');
+  assert.equal(state,noSend?'VOID':'UNKNOWN');
+  assert.equal(result.state,noSend?'BLOCKED':'UNKNOWN');
   const priorPosts=posts;
   const repeated=await dispatchReviewedProtectiveExitOnce(input,ports);
   assert.equal(posts,priorPosts);assert.equal(repeated.postAttempted,false);assert.equal(repeated.mayRetry,false);
   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,state,'repeat preserves original durable reservation distinction');
-  assert.equal((await db.query("SELECT state FROM public.v13_production_intent WHERE kind='EXIT'")).rows[0].state,(scenario==='expire-after-commit'||scenario.startsWith('stale-provider-'))?'BLOCKED':'DISPATCHED');
-  assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_local_no_send')).rows[0].n,(scenario==='expire-after-commit'||scenario.startsWith('stale-provider-'))?1:0,'repeat cannot manufacture or duplicate no-send audit');
+  assert.equal((await db.query("SELECT state FROM public.v13_production_intent WHERE kind='EXIT'")).rows[0].state,noSend?'BLOCKED':'DISPATCHED');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_local_no_send')).rows[0].n,noSend?1:0,'repeat cannot manufacture or duplicate no-send audit');
   assert.equal((await db.query('SELECT quantity_hundredths FROM public.v13_production_position')).rows[0].quantity_hundredths,'300');
   results.push({scenario,providerAgeAtFinal,state:result.state,ledger:state,posts,feeCalls,authorityCalls,finalSuccessorQueries,finalFenceQueries,repeatState:repeated.state});
  }

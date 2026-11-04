@@ -1077,7 +1077,12 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  let mono=0,connections=0,posts=0,consumed=false;
  const db={connect:async()=>{const c=await pool.connect(),isFence=++connections===1;
   return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
-   if(isFence&&sql.startsWith("SELECT r.reservation_id"))return {rows:[{reservation_id:rid,reservation_age_ms:0,heartbeat_age_ms:0}]};
+   if(isFence&&sql.startsWith("SELECT r.reservation_id")){
+    // This test stubs only the final authority read; use the actual producer's
+    // serialized source and an explicit fresh five-second synthetic budget.
+    const row=(await c.query("SELECT decision->'ownedEvaluation' AS owned_evaluation FROM v13_production_intent WHERE id=$1",[exit])).rows[0];
+    return {rows:[{reservation_id:rid,reservation_age_ms:0,heartbeat_age_ms:0,...row,max_quote_age_ms:5000,source_age_ms:0,release_remaining_ms:60000}]};
+   }
    if(isFence&&sql.startsWith("SELECT"))return {rows:[]};
    const r=await c.query(sql,args);
    if(!isFence&&sql.startsWith("SELECT execution_account_id FROM private.kalshi_account_worker_lease")){
@@ -1119,7 +1124,10 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
   VALUES($1,$2,'test-account',$3,$4,'YES',200,$5,'worker-local',7)`,[rid2,owner,ticker,body2.client_order_id,createHash("sha256").update(JSON.stringify(order2)).digest("hex")]);
  let conn2=0,mono2=0,marked2=false;
  const db2={connect:async()=>{const c=await pool.connect(),fence=++conn2===1;return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
-  if(fence&&sql.startsWith("SELECT r.reservation_id"))return {rows:[{reservation_id:rid2,reservation_age_ms:0,heartbeat_age_ms:0}]};
+  if(fence&&sql.startsWith("SELECT r.reservation_id")){
+   const row=(await c.query("SELECT decision->'ownedEvaluation' AS owned_evaluation FROM v13_production_intent WHERE id=$1",[fresh])).rows[0];
+   return {rows:[{reservation_id:rid2,reservation_age_ms:0,heartbeat_age_ms:0,...row,max_quote_age_ms:5000,source_age_ms:0,release_remaining_ms:60000}]};
+  }
   if(fence&&sql.startsWith("SELECT"))return {rows:[]};
   const r=await c.query(sql,args);if(sql==="COMMIT"){if(fence)mono2=6000;else throw Error("lost acknowledgement after commit");}return r;
  }};}};

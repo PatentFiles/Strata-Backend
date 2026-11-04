@@ -371,6 +371,7 @@ async function tradingSession(
   cashMicros = 60_000_000_000,
   fault?: (stage: string) => void,
   guardSnapshotUncertainty = false,
+  maxQuoteAgeMs = 15_000,
 ) {
   await reset();
   await pool.query(`UPDATE live_execution_config
@@ -381,7 +382,8 @@ async function tradingSession(
   const material = { keyId: "personal-key", privateKey: pair.privateKey.export({ type: "pkcs1", format: "pem" }).toString() };
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
   assert.ok(fingerprint);
-  const approved = { ...policy(), executionAccountId: ACCOUNT };
+  const approved = { ...policy(), executionAccountId: ACCOUNT, maxQuoteAgeMs };
+  approved.policyHash = computeV13LiveMoneyPolicyHash(approved);
   const keys = Object.keys(approved);
   await pool.query(`INSERT INTO v13_live_money_policy(${keys.map((key) => key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)).join(",")})
     VALUES(${keys.map((_, index) => `$${index + 1}`).join(",")})`, Object.values(approved));
@@ -402,7 +404,7 @@ async function tradingSession(
   }
   const entryGate=new TechnicalReleaseEntryGate();
   const evidence = snapshot(fingerprint!, now, cashMicros);
-  let currentBook = book(stakeCents, now);
+  let currentBook = book(stakeCents, now, approved.policyHash!);
   const session = openOwnedExecutionSession({
     pool,
     ownerUserId: USER,
@@ -464,7 +466,7 @@ function policy(): V13ApprovedLiveMoneyPolicy {
   return approved;
 }
 
-function book(stakeCents: number, observedAtMs: number): MarketEvidence {
+function book(stakeCents: number, observedAtMs: number, policyHash = policy().policyHash!): MarketEvidence {
   const plan = planV13IocEntry({
     signal: "SCOUT", direction: "UP", referenceOffer: 0.5, maxStakeCents: stakeCents,
     bestAskDollars: "0.5000", askLevels: [{ priceDollars: "0.5000", availableContracts: "100000" }],
@@ -475,7 +477,7 @@ function book(stakeCents: number, observedAtMs: number): MarketEvidence {
     asks: [{ priceDollars: "0.5000", availableContracts: "100000" }],
     bestBidDollars: "0.4500", bids: [{ priceDollars: "0.4500", availableContracts: "100000" }],
     fee: entryCashRiskFeeFixture({now:observedAtMs,market:"KXBTC15M-TEST-000",side:"YES",price:.5,
-      contracts:plan.plan.contracts,policyHash:policy().policyHash!}),
+      contracts:plan.plan.contracts,policyHash}),
   };
 }
 
@@ -628,7 +630,8 @@ test("open filled exposure holds entries until terminal settlement is independen
 });
 
 async function protectiveFixture(withMarker:boolean,guardSnapshotUncertainty=false,ownedQuantity="200",ownedSide:"YES"|"NO"="YES") {
-  const s=await tradingSession(500,[],60_000_000_000,undefined,guardSnapshotUncertainty);
+  // Signed protective dispatch requires a policy no weaker than five seconds.
+  const s=await tradingSession(500,[],60_000_000_000,undefined,guardSnapshotUncertainty,5000);
   await pool.query(`CREATE SCHEMA IF NOT EXISTS private; CREATE SCHEMA IF NOT EXISTS auth;
     CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY);
     INSERT INTO auth.users VALUES('${USER}') ON CONFLICT DO NOTHING;
