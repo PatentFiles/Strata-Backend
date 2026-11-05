@@ -1,3 +1,5 @@
+import "./reconciliationProjection.postgres.test";
+import "./finalAccountProofProjection.test";
 import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
@@ -1800,4 +1802,95 @@ test('batched account lock serializes contenders and observes committed revision
  }finally{release()}
  await holder;await contender;assert.equal(secondEntered,true);
  console.log('TRANSACTION_START_LOCK_BARRIER',JSON.stringify({confirmedBlocked,revisionAdvanced:true}));
+});
+
+
+// Additional projection-specific integration cases. Original acceptance suite
+// remains above this appendix, with its current guards/late-fill/cash tests.
+import {recoverPreparedOwnedExitIntents as projectionRecoverPreparedExit} from '../strata/preparedProtectiveExitRecovery';
+const projectionOwner='11111111-1111-4111-8111-111111111111';
+async function projectionBlockedFixture(){
+ const f=await fixture();const id=await f.executor.prepareEntry(await f.source());
+ f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;
+ await f.executor.reconcile();
+ const original=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ assert.equal(original.state,'BLOCKED');assert.equal(original.terminal,true);
+ return {...f,id,original};
+}
+class ProjectionOwnedLedger extends DifferentialConservationLedger {
+ override async recoverPreparedExits(tx:import('@workspace/db').PoolClient,account:import('./ledger').Account,intents:import('./ledger').ReconciliationIntent[],snapshot:Snapshot){
+  await projectionRecoverPreparedExit(tx,{ownerId:projectionOwner,account,intents,snapshot,
+   observe:async(kind,value)=>{await this.observe(tx,kind,value);}});
+ }
+}
+test('payload projection: blocked history decisions may be any valid JSON without hiding history or changing stored values',async()=>{
+ for(const value of [null,{},[],false,true,0,123,'primitive',{large:'fixture'.repeat(3000)}]){
+  const f=await projectionBlockedFixture();
+  await pool.query('UPDATE v13_production_intent SET decision=$2::jsonb WHERE id=$1',[f.id,JSON.stringify(value)]);
+  const before=(await pool.query('SELECT decision,state,terminal,filled_hundredths,reserved_micros,xmin::text revision FROM v13_production_intent WHERE id=$1',[f.id])).rows[0];
+  await f.executor.reconcile();
+  assert.deepEqual((await pool.query('SELECT decision,state,terminal,filled_hundredths,reserved_micros,xmin::text revision FROM v13_production_intent WHERE id=$1',[f.id])).rows[0],before);
+  await invariant(f.ledger);
+ }
+});
+test('payload projection: forged BLOCKED order fails before decision or fill and transaction leaves finance unchanged',async()=>{
+ const f=await projectionBlockedFixture();await pool.query('UPDATE v13_production_intent SET decision=\'null\'::jsonb WHERE id=$1',[f.id]);
+ f.exchange.fill(f.original.request,'100');
+ const before=(await pool.query('SELECT cash_micros,reserved_micros FROM v13_production_account WHERE id=$1',[f.ledger.accountId])).rows[0];
+ await assert.rejects(f.executor.reconcile(),/production_unattributed_order/);
+ assert.deepEqual((await pool.query('SELECT cash_micros,reserved_micros FROM v13_production_account WHERE id=$1',[f.ledger.accountId])).rows[0],before);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_event')).rows[0].n,0);
+ assert.deepEqual((await pool.query('SELECT state,terminal,decision FROM v13_production_intent WHERE id=$1',[f.id])).rows[0],{state:'BLOCKED',terminal:true,decision:null});
+});
+test('payload projection: orphan BLOCKED fill still fails attribution',async()=>{
+ const f=await projectionBlockedFixture();f.exchange.fill(f.original.request,'100');f.exchange.evidence.orders=[];
+ await assert.rejects(f.executor.reconcile(),/production_unattributed_fill/);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_event')).rows[0].n,0);
+});
+test('payload projection: oldest BLOCKED intent controls full-history floor even with irrelevant corrupt decision',async()=>{
+ const f=await projectionBlockedFixture();const at=f.original.created_at.getTime();f.exchange.evidence.historyFromMs=at+1;
+ await assert.rejects(f.executor.reconcile(),/production_history_coverage_gap/);
+});
+test('payload projection: BLOCKED terminal position is not omitted from retention and conservation',async()=>{
+ for(const mode of ['missing','positive','bad-reserve']){
+  const f=await projectionBlockedFixture();
+  if(mode==='missing')await pool.query('DELETE FROM v13_production_position WHERE id=$1',[f.id]);
+  else if(mode==='positive')await pool.query('UPDATE v13_production_position SET quantity_hundredths=1,basis_micros=1 WHERE id=$1',[f.id]);
+  else await pool.query('UPDATE v13_production_intent SET reserved_micros=1 WHERE id=$1',[f.id]);
+  await assert.rejects(f.executor.reconcile(),mode==='missing'?/quantity_hundredths/:mode==='positive'?/production_external_position_mismatch/:/check constraint|production_money_conservation_failed/);
+ }
+});
+test('payload projection: genuine historical TERMINAL late fill keeps full decision authentication and accounting',async()=>{
+ for(const corrupt of [false,true]){
+  const f=await fixture(),id=await f.executor.prepareEntry(await f.source());await f.executor.dispatch(id);
+  f.exchange.fill(f.exchange.posts[0]!,'100');await f.executor.reconcile();
+  if(corrupt)await pool.query('UPDATE v13_production_intent SET decision=\'{}\'::jsonb WHERE id=$1',[id]);
+  f.exchange.fill(f.exchange.posts[0]!,'100');
+  if(corrupt){await assert.rejects(f.executor.reconcile(),/production_entry_capability_corrupt/);assert.equal((await pool.query('SELECT filled_hundredths FROM v13_production_intent WHERE id=$1',[id])).rows[0].filled_hundredths,'100');}
+  else{await f.executor.reconcile();assert.equal((await pool.query('SELECT filled_hundredths FROM v13_production_intent WHERE id=$1',[id])).rows[0].filled_hundredths,'200');assert.equal((await f.ledger.readAccount()).blocked_reason,'late_fill_after_terminal');await invariant(f.ledger);}
+ }
+});
+test('payload projection: malformed used PREPARED decisions retain failure and reservation',async()=>{
+ for(const value of [null,{},[],false,0,'primitive']){
+  const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+  const before=(await pool.query('SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+  await pool.query('UPDATE v13_production_intent SET decision=$2::jsonb WHERE id=$1',[id,JSON.stringify(value)]);
+  f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;await assert.rejects(f.executor.reconcile());
+  assert.deepEqual((await pool.query('SELECT state,terminal,reserved_micros FROM v13_production_intent WHERE id=$1',[id])).rows[0],before);
+ }
+});
+test('payload projection: owned PREPARED EXIT recovery still receives full decision and preserves parent quantities',async()=>{
+ await pool.query('CREATE SCHEMA IF NOT EXISTS private');
+ await pool.query('CREATE TABLE IF NOT EXISTS private.strata_emergency_exit_reservations(client_order_id text)');
+ for(const corrupt of [false,true]){
+  const f=await fixture(),id=await f.executor.prepareEntry(await f.source());await f.executor.dispatch(id);f.exchange.fill(f.exchange.posts[0]!,'100');await f.executor.reconcile();await f.exitFeed();
+  const exit=await f.executor.prepareExit(id,.4);await pool.query('UPDATE v13_production_account SET owner_user_id=$1::uuid WHERE id=$2',[projectionOwner,f.ledger.accountId]);
+  if(corrupt)await pool.query('UPDATE v13_production_intent SET capability_digest=\'corrupt\' WHERE id=$1',[exit]);
+  f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;
+  const before=(await pool.query('SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1',[id])).rows[0];
+  const owned=new ProjectionOwnedLedger(pool,f.ledger.accountId),account=await owned.readAccount();
+  if(corrupt){await assert.rejects(owned.reconcile(f.exchange.evidence,account.revision,f.exchange.now),/protective_prepared_expiry_evidence_invalid/);assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[exit])).rows[0].state,'PREPARED');}
+  else{await owned.reconcile(f.exchange.evidence,account.revision,f.exchange.now);assert.deepEqual((await pool.query('SELECT state,terminal FROM v13_production_intent WHERE id=$1',[exit])).rows[0],{state:'BLOCKED',terminal:true});}
+  assert.deepEqual((await pool.query('SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1',[id])).rows[0],before);
+ }
 });

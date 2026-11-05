@@ -35,7 +35,8 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
  CREATE TABLE private.kalshi_connection_credentials(owner_user_id uuid,financial_account_id text,role text,revoked_at timestamptz,
  verified_at timestamptz,verification_reason text,key_fingerprint text,vault_secret_id text);
  CREATE TABLE vault.decrypted_secrets(id text,decrypted_secret text);
- CREATE TABLE public.v13_production_intent(id text,account_id text,created_at timestamptz,request jsonb,state text,terminal boolean,reserved_micros bigint);
+ CREATE TABLE public.v13_production_intent(id text,account_id text,created_at timestamptz,request jsonb,state text,terminal boolean,reserved_micros bigint,
+ client_order_id text NOT NULL,exchange_order_id text,filled_hundredths bigint NOT NULL DEFAULT 0);
  CREATE TABLE public.v13_production_position(account_id text,market text,side text,quantity_hundredths bigint,basis_micros bigint,realized_pnl_micros bigint);
  CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text);
  CREATE TABLE public.v13_production_event(account_id text,event_id text,digest text,cash_delta_micros bigint,pnl_micros bigint);

@@ -5,7 +5,7 @@ import { constants, createPrivateKey, createSign } from "node:crypto";
 import type { Pool, PoolClient } from "@workspace/db";
 import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { ProductionExecutor } from "../v13-production/executor";
-import { decodePolicy, ProductionLedger, type Account, type Intent } from "../v13-production/ledger";
+import { decodePolicy, ProductionLedger, type Account, type ReconciliationIntent } from "../v13-production/ledger";
 import { encodeProductionOrder } from "../v13-production/transport";
 import { canonical, requireProof, type EntryPrepareMarketContext, type Exchange, type Identity, type MarketEvidence, type Request, type Snapshot } from "../v13-production/types";
 import {recordLiveSignalDecision,auditUnseenExpiredSignals} from "../v13-production/signalDecisionTrace";
@@ -81,7 +81,7 @@ class OwnedAccountLedger extends ProductionLedger {
   constructor(pool: Pool, accountId: string, readonly ownerUserId: string) {
     super(pool, accountId);
   }
-  protected override async recoverPreparedExits(tx:PoolClient,account:Account,intents:Intent[],snapshot:Snapshot):Promise<void> {
+  protected override async recoverPreparedExits(tx:PoolClient,account:Account,intents:ReconciliationIntent[],snapshot:Snapshot):Promise<void> {
     await recoverPreparedOwnedExitIntents(tx,{ownerId:this.ownerUserId,account,intents,snapshot,
       observe:async(kind,value)=>{await this.observe(tx,kind,value);}});
   }

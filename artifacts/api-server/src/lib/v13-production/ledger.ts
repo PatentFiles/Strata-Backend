@@ -35,6 +35,11 @@ export type Intent = {
   reserved_micros: string; exit_fee_micros: string; filled_hundredths: string;
   terminal: boolean; cancel_attempted: boolean; created_at: Date; dispatch_at: Date | null;
 };
+/** Reconciliation alone may omit the unused decision of a terminal BLOCKED row.
+ * Hooks must keep this nullable contract; PREPARED and attributed-fill branches
+ * retain their original full decision, including malformed stored JSON.
+ */
+export type ReconciliationIntent = Omit<Intent, "decision"> & { decision: Intent["decision"] | null };
 export const identity = (a: Account): Identity => ({
   subaccount: Number(a.subaccount), exchangeIndex: Number(a.exchange_index), keyFingerprint: a.key_fingerprint,
 });
@@ -182,7 +187,11 @@ export class ProductionLedger {
       snapshot.complete && snapshot.cashExact && !snapshot.unexplainedCashActivity &&
       snapshot.observedAtMs <= nowMs && nowMs - snapshot.observedAtMs <= 15_000 &&
       money(snapshot.cashMicros) === money(a.cash_micros), "production_final_account_changed_or_unproven");
-    const known = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1", [a.id])).rows;
+    // Final signed-account comparison needs every intent, but never reads its
+    // decision/capability JSON. Reconciliation retains its full locked history.
+    const known = (await tx.query<Pick<Intent,
+      "created_at" | "client_order_id" | "request" | "exchange_order_id" | "terminal" | "filled_hundredths">>(
+      "SELECT created_at,client_order_id,request,exchange_order_id,terminal,filled_hundredths FROM v13_production_intent WHERE account_id=$1", [a.id])).rows;
     requireProof(snapshot.historyFromMs <= Math.min(...known.map(i => i.created_at.getTime()), nowMs),
       "production_final_history_gap");
     for (const o of snapshot.orders) {
@@ -212,7 +221,7 @@ export class ProductionLedger {
   /** Owned-account subclasses may recover coupled never-sent EXIT markers.
    * Legacy ledgers have no private reservation authority. */
   protected async recoverPreparedExits(_tx: PoolClient, _account: Account,
-    _intents: Intent[], _snapshot: Snapshot): Promise<void> {}
+    _intents: ReconciliationIntent[], _snapshot: Snapshot): Promise<void> {}
 
   async reconcile(snapshot: Snapshot, expectedRevision: string, nowMs: number): Promise<{accountId:string;observationId:string}> {
     try {
@@ -224,7 +233,17 @@ export class ProductionLedger {
         requireProof(snapshot.authenticated && snapshot.complete && snapshot.cashExact &&
           !snapshot.unexplainedCashActivity && snapshot.observedAtMs <= nowMs &&
           nowMs - snapshot.observedAtMs <= 15_000, "production_history_incomplete_stale_or_cash_unproven");
-        const intents = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE", [a.id])).rows;
+        // Every intent remains locked and reconciled, including never-posted
+        // history. A terminal BLOCKED row is rejected by the order-attribution
+        // pass before fill/capability reads and cannot enter PREPARED recovery.
+        // Keep full decisions for all other states, especially late-filled
+        // TERMINAL entries. Only unused BLOCKED decision payload is omitted.
+        const intents = (await tx.query<ReconciliationIntent>(`SELECT id,account_id,evaluation_id,crossing_key,parent_id,
+          kind,market,side,state,request,
+          CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision,
+          policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id,
+          reserved_micros,exit_fee_micros,filled_hundredths,terminal,cancel_attempted,dispatch_at,created_at
+          FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE`, [a.id])).rows;
         // Snapshot the persisted fields under the existing account/intent locks.
         const priorIntentStates = new Map(intents.map(i => [i.id, reconciledIntentState(i)]));
         const earliest = Math.min(...intents.map(i => i.created_at.getTime()), nowMs);
@@ -264,6 +283,8 @@ export class ProductionLedger {
           requireProof(filled <= requestQuantityHundredths(i.request), "production_overfill");
           let pnl = 0n, delta: bigint;
           if (i.kind === "ENTRY") {
+            // The complete order-attribution pass already rejects BLOCKED rows.
+            // This type-only assertion preserves malformed-data error precedence.
             // Validate the stored capability even for historical entries, so
             // accidental removal of both version fields cannot hide corruption.
             requireProof(i.capability_digest===digest({id:i.id,request:i.request,decision:i.decision,
@@ -271,13 +292,13 @@ export class ProductionLedger {
             if (i.terminal) a.blocked_reason = "late_fill_after_terminal"; // still account for owned money/contracts
             const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.id])).rows[0];
             requireProof(pos, "production_entry_position_missing");
-            const cashProof=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
-            const cashBasis=(i.decision.book as import("./types").MarketEvidence)?.fee?.cashRisk;
+            const cashProof=(i.decision!.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
+            const cashBasis=(i.decision!.book as import("./types").MarketEvidence)?.fee?.cashRisk;
             // Only history with neither versioned field is legacy. Partial
             // stripping may not downgrade an authenticated fill's checks.
             requireProof(Boolean(cashBasis)===Boolean(cashProof),"production_entry_cash_bound_corrupt");
             if(cashProof){
-              const pinned=(i.decision.book as import("./types").MarketEvidence).fee;
+              const pinned=(i.decision!.book as import("./types").MarketEvidence).fee;
               requireProof(i.request.action==="BUY"&&typeof i.request.contracts==="number"&&validEntryCashRisk(pinned)&&
                 canonical(entryCashProof(pinned,i.request.contracts,cashProof.budgetCents))===canonical(cashProof)&&
                 cashProof.limitMicros===i.request.limitMicros&&cashProof.feeFingerprint===i.fee_fingerprint,
@@ -390,8 +411,9 @@ export class ProductionLedger {
         // expired source can prove this never-dispatched reservation releasable.
         // The intent and crossing remain consumed; nothing is replayed.
         for (const i of intents.filter(i => i.kind === "ENTRY" && i.state === "PREPARED")) {
-          const source = i.decision.source as { evaluated_at?: unknown } | undefined;
-          const policy = i.decision.policy as { maxQuoteAgeMs?: unknown } | undefined;
+          // PREPARED is never projected to null; do not add a new runtime guard.
+          const source = i.decision!.source as { evaluated_at?: unknown } | undefined;
+          const policy = i.decision!.policy as { maxQuoteAgeMs?: unknown } | undefined;
           const sourceAt = typeof source?.evaluated_at === "string" ? Date.parse(source.evaluated_at) : NaN;
           const lifetime = policy?.maxQuoteAgeMs;
           requireProof(Number.isSafeInteger(sourceAt) && typeof lifetime === "number" &&
