@@ -1,3 +1,4 @@
+import {transactionConnectionFence} from "./transactionConnectionFence";
 import {reconciledIntentState,reconciliationIntentChanged} from "./reconciliationIntentPersistence";
 import {reconciliationObservation} from "./reconciliationObservation";
 import {entryCashProof,entryFillFeeUpperMicros,validEntryCashRisk,type V13EntryCashProof} from "../v13EntryCashRisk";
@@ -49,7 +50,7 @@ export function decodePolicy(row: Record<string, unknown>): V13ApprovedLiveMoney
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
   private readonly finalSnapshotIntent = new AsyncLocalStorage<{ active: boolean; entryIntentId: string | null }>();
-  private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null}>();
+  private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null;connection:ReturnType<typeof transactionConnectionFence>}>();
   constructor(readonly pool: Pool, readonly accountId: string) {}
   // Read providers invoked inside a final fence MUST use its existing client,
   // not open another transaction/connection behind the held account lock.
@@ -70,6 +71,8 @@ export class ProductionLedger {
   assertFinalWireClock():void {
     const scope=this.wireContext.getStore();
     requireProof(this.currentTransaction()&&scope?.active&&scope.check,"production_final_wire_clock_missing");
+    scope.connection.assertLive();
+    // Original source clock remains the final check before raw transport.
     scope.check();
   }
   /** Only the currently locked ENTRY may be discounted from its own final
@@ -103,7 +106,10 @@ export class ProductionLedger {
   async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>,
     options: { lockTimeoutMs?: number } = {}): Promise<T> {
     const tx = await this.pool.connect();
-    const wireScope={active:true,check:null as (()=>void)|null};
+    const connection=transactionConnectionFence(tx);
+    const wireScope={active:true,check:null as (()=>void)|null,connection};
+    let discard=false,failed=false;
+    const close=()=>{wireScope.active=false;wireScope.check=null;connection.close();};
     try {
       let rows: Account[];
       // No application decision occurs between BEGIN and the first lock. Send
@@ -126,10 +132,20 @@ export class ProductionLedger {
       }
       requireProof(rows.length === 1, "production_account_missing");
       const result = await this.context.run(tx, () => this.wireContext.run(wireScope,()=>body(tx, rows[0]!)));
-      await tx.query("COMMIT");
+      close();
+      if(connection.broken())throw new Error("production_transaction_connection_lost");
+      try { await tx.query("COMMIT"); } catch(error) { discard=true;throw error; }
       return result;
-    } catch (error) { await tx.query("ROLLBACK"); throw error; }
-    finally { wireScope.active=false;wireScope.check=null;tx.release(); }
+    } catch (error) {
+      failed=true;close();
+      try { await tx.query("ROLLBACK"); } catch { discard=true; }
+      throw error;
+    } finally {
+      close();discard=discard||connection.broken();
+      try { tx.release(discard?new Error("production_transaction_connection_discarded"):undefined); }
+      catch(error) { discard=true;if(!failed)throw error; }
+      finally { connection.cleanup(discard); }
+    }
   }
   async policy(tx: PoolClient, a: Account): Promise<V13ApprovedLiveMoneyPolicy> {
     // Lock the immutable approval row through the final network fence. Never
