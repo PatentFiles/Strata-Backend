@@ -8,8 +8,16 @@ import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
   authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
-  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
+  REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,PROTECTIVE_REVIEWED_RELEASE_HOURS,
 } from "./inAppProtectiveRelease";
+test("independently approved same-SHA release has a long but bounded coordination window",()=>{
+  // This is deliberately not perpetual authority. If humans need longer,
+  // require a new reviewed record; do not silently extend prior consent.
+  assert.equal(PROTECTIVE_REVIEWED_RELEASE_HOURS,23);
+  assert.ok(PROTECTIVE_REVIEWED_RELEASE_HOURS>2);
+  assert.ok(PROTECTIVE_REVIEWED_RELEASE_HOURS<=24);
+});
+
 const OWNER="11111111-1111-4111-8111-111111111111";
 const REVIEWER="22222222-2222-4222-8222-222222222222";
 const SHA="a".repeat(40);
