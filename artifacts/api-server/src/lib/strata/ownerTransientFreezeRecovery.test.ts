@@ -8,6 +8,7 @@ const owner='11111111-1111-4111-8111-111111111111';
 const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}).toString();
 const fp=dedicatedSignerFingerprint('test',pem)!;
 const now=Date.now();
+const finalAccountIntentSql='SELECT created_at,client_order_id,request,exchange_order_id,terminal,filled_hundredths FROM v13_production_intent WHERE account_id=$1';
 function fixture(overrides:Record<string,unknown>={},fault=''){
  const calls:string[]=[];let reads=0;
  const account={id:'a',owner_user_id:owner,subaccount:1,exchange_index:2,policy_id:'p',
@@ -27,7 +28,7 @@ function fixture(overrides:Record<string,unknown>={},fault=''){
   if(sql.includes('SELECT key_fingerprint'))return {rows:fault==='credential_revoked'?[]:[{key_fingerprint:fp}]};
   if(sql.includes('SELECT s.decrypted_secret'))return {rows:[{decrypted_secret:JSON.stringify({api_key_id:'test',private_key:pem})}]};
   if(sql.includes(') intents,'))return {rows:[{intents:fault==='unknown'?'1':'0',positions:fault==='position'?'1':'0',exits:fault==='unknown_exit'?'1':'0'}]};
-  if(sql.includes('SELECT request')||sql.includes('SELECT * FROM v13_production_intent')||sql.includes('SELECT market,side'))return {rows:[]};
+  if(sql.includes('SELECT request')||sql===finalAccountIntentSql||sql.includes('SELECT market,side'))return {rows:[]};
   if(sql.includes('sum(cash_delta_micros)')){
    assert.match(sql,/CROSS JOIN/);assert.match(sql,/sum\(basis_micros\)/);assert.match(sql,/sum\(reserved_micros\)/);
    return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
@@ -52,6 +53,7 @@ function fixture(overrides:Record<string,unknown>={},fault=''){
 }
 test('signed flat complete recovery only clears transient hold with gates closed',async()=>{
  const f=fixture();assert.equal((await f.run()).ok,true);assert.equal(f.reads,1);
+ assert.equal(f.calls.filter(sql=>sql===finalAccountIntentSql).length,1);
  assert.ok(f.calls.includes('COMMIT'));assert.ok(!f.calls.includes('ROLLBACK'));
  assert.equal(f.calls.filter(s=>s.startsWith('UPDATE')).length,1);
  assert.equal(f.calls.filter(s=>s.includes('sum(cash_delta_micros)')).length,1);

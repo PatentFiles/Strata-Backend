@@ -1,7 +1,7 @@
 import {requestQuantityHundredths,formatContractHundredths} from '../v13-production/requestQuantity';
 import { createHash } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
-import type { Account, Intent } from "../v13-production/ledger";
+import type { Account, ReconciliationIntent } from "../v13-production/ledger";
 import { canonical, digest, money, requireProof, type Snapshot } from "../v13-production/types";
 
 /** Called only by the owned ledger, inside its account/intent transaction AFTER
@@ -9,13 +9,15 @@ import { canonical, digest, money, requireProof, type Snapshot } from "../v13-pr
  * position reduction or release of parent cash/exit-fee reservations occurs.
  */
 export async function recoverPreparedOwnedExitIntents(tx: PoolClient, input: {
-  ownerId: string; account: Account; intents: Intent[]; snapshot: Snapshot;
+  ownerId: string; account: Account; intents: ReconciliationIntent[]; snapshot: Snapshot;
   observe: (kind: string, value: unknown) => Promise<void>;
 }): Promise<void> {
   const { account, intents, snapshot, ownerId } = input;
   for (const intent of intents.filter(i => i.kind === "EXIT" && i.state === "PREPARED")) {
-    const owned = intent.decision.ownedEvaluation as { source?: { evaluated_at?: unknown } } | undefined;
-    const policy = intent.decision.policy as { maxQuoteAgeMs?: unknown } | undefined;
+    // PREPARED decisions remain complete. The assertion is type-only so corrupt
+    // stored JSON keeps the same validation and property-access error behavior.
+    const owned = intent.decision!.ownedEvaluation as { source?: { evaluated_at?: unknown } } | undefined;
+    const policy = intent.decision!.policy as { maxQuoteAgeMs?: unknown } | undefined;
     const at = typeof owned?.source?.evaluated_at === "string" ? Date.parse(owned.source.evaluated_at) : NaN;
     const ttl = policy?.maxQuoteAgeMs;
     requireProof(account.owner_user_id === ownerId && snapshot.authenticated && snapshot.complete && snapshot.cashExact &&
