@@ -1267,6 +1267,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
    assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));
    assert.ok(timeline.some(row=>row.event==='db_request_start'&&row.atMs>at('FINAL_MARKET_start')&&row.atMs<at('FINAL_MARKET_consume')),'A overlaps real ledger request waits');
    assert.ok(at('WIRE_FEE_start')<=at('signed_account_start'));assert.ok(at('signed_account_complete')<=at('WIRE_FEE_consume'));
+   if(wireAt+228>4800) console.error('MARGIN_FAILURE_DIAGNOSTIC',JSON.stringify({node:process.version,wireAt,effectiveBtcAge:wireAt+228,marginMs:5000-wireAt-228,elapsed,preDispatchAnchorMs:start-anchor,clockOffset,timeline,captures,publicCalls:calls.length}));
    assert.ok(wireAt+228<=4800,'controlled enabled raw wire retains at least 200ms margin');
   }
   if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'synthetic timing stress, no historical wire-probe assumption or fill evidence'}));}
