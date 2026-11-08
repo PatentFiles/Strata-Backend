@@ -1322,6 +1322,8 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
    assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));
    assert.ok(timeline.some(row=>row.event==='db_request_start'&&row.atMs>at('FINAL_MARKET_start')&&row.atMs<at('FINAL_MARKET_consume')),'A overlaps real ledger request waits');
    assert.ok(at('WIRE_FEE_start')<=at('signed_account_start'));assert.ok(at('signed_account_complete')<=at('WIRE_FEE_consume'));
+   // Failure-only diagnostic: existing values only, with no new clock read or await.
+   if(wireAt+228>4800)console.info('TWO_PHASE_DEADLINE_RESERVE_FAILURE',JSON.stringify({wireAt,effectiveBtcAge:wireAt+228,remainingMs:5000-(wireAt+228),headroomAbove200Ms:4800-(wireAt+228),elapsed,clockOffset,authorityClockCalls,sqlQueries:sqlCalls.length,publicCalls:calls.length,books,signed,feeReviews,wireReviews,timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),observedStages}));
    assert.ok(wireAt+228<=4800,'controlled enabled raw wire retains at least 200ms margin');
   }
   if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'synthetic timing stress, no historical wire-probe assumption or fill evidence'}));}

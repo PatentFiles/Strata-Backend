@@ -195,7 +195,9 @@ test('final transaction rejects backward clock even above original observation t
 test('preview false but final structural candidate cannot fall back to detail offers',async()=>{
  const f=await fixture();await f.observe(1);const before=await f.state();let transactions=0;const original=db.transaction;
  (db as any).transaction=async(...args:any[])=>{
-  if(++transactions===2)await pool.query('UPDATE forward_test_windows SET previous_buffer=-1 WHERE ticker=$1',[f.ticker]);
+  // The marker now shares the initial renewal UPDATE, so the first transaction
+  // is the final strategy transaction. Inject drift at that same boundary.
+  if(++transactions===1)await pool.query('UPDATE forward_test_windows SET previous_buffer=-1 WHERE ticker=$1',[f.ticker]);
   return (original as any).apply(db,args);
  };
  try{const r=await f.observe(10);assert.equal(r.error,'entry_book_required_after_recheck');

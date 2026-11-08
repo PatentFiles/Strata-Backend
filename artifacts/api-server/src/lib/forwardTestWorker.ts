@@ -146,15 +146,15 @@ async function recordCycleError(identity: WorkerIdentity, reason: string) {
 export async function runForwardTestCycle(options: CycleOptions): Promise<CycleResult> {
   const { owner, epoch, engineId = FORWARD_TEST_ENGINE_ID,
     feeds = publicForwardTestFeeds, signal } = options;
-  if (!await renewWorkerLease(owner, epoch, engineId, LEASE_SECONDS)) {
+  const clock = options.clock ?? Date.now;
+  // The earlier timestamp is diagnostic only. Keep the strategy/source clock
+  // at its original boundary AFTER the initial guarded renewal, including at
+  // market rollover. Original feed timestamps still bound every source age.
+  const attemptedAt = options.now ?? new Date(clock());
+  if (!await renewWorkerLease(owner, epoch, engineId, LEASE_SECONDS, attemptedAt)) {
     throw new WorkerLeaseLostError("Worker no longer owns the active lease");
   }
-  const clock = options.clock ?? Date.now;
   const now = options.now ?? new Date(clock());
-  await withWorkerLeaseTransaction(owner, epoch, async (tx) => {
-    await tx.update(forwardTestEngineTable).set({ lastAttemptedCycleAt: now })
-      .where(eq(forwardTestEngineTable.id, engineId));
-  }, engineId);
   let btc: BtcObservation;
   let market: MarketObservation;
   let currentMarket: MarketObservation;
