@@ -1,6 +1,8 @@
 import {entryCashRiskFeeFixture} from "../v13-production/entryCashRisk.fixture";
 import {canonicalEntryQuoteEvidenceDigest} from "../v13-production/entryQuoteEvidence";
 import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
+import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
+import {persistAuthenticatedExitReconciliation} from "./ownerFeeEmergencyExitReconciliationCommit";
 import {requestQuantityHundredths,formatContractHundredths} from "../v13-production/requestQuantity";
 import { readFileSync } from "node:fs";
 import { quoteFromEntryBook } from "../forwardEntryBookQuote";
@@ -890,13 +892,31 @@ test("actual owned signed route closes exact fractional quantities through real 
    return new Response(JSON.stringify(receipt),{status:201});}) as typeof fetch;
   try{
    const result=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker}) as any,
-    readAuthenticatedOutcome:async()=>({clientOrderId:String(f.order.client_order_id),requestedCountFp:String(f.order.count),marketTicker:String(f.order.ticker),
-      initialPositionFp:(side==='NO'?'-':'')+f.order.count,observedPositionFp:residual===0n?'0.00':(side==='NO'?'-':'')+formatContractHundredths(residual),positionMarketTicker:String(f.order.ticker),reducingBookSide:side==='YES'?'ask':'bid',
-      completeExchangeHistory:true,exactMarketAndAccountMatched:true,orderAndFillHistoryMatched:true,isolatedPositionDelta:true,
-      authenticatedOrder:{order_id:receipt.order_id,client_order_id:f.order.client_order_id,status:'canceled',initial_count_fp:f.order.count,fill_count_fp:receipt.fill_count,remaining_count_fp:'0.00'},
-      response:{httpStatus:201,...receipt}})});
+    readAuthenticatedOutcome:async(recoveryInput,postedReceipt)=>{
+     // The provider rows are synthetic, but the real reader verifies the real
+     // immutable PG baseline and mints the exact-object freshness receipt.
+     const observation=await readAuthenticatedProtectiveExitOutcome(recoveryInput,postedReceipt,{db:pool,
+      readFeeds:async(_material,observedAtMs)=>({ok:true,historicalCoverageComplete:true,observedAtMs,cashMicros:'0',settlements:[],
+       orders:[{order_id:receipt.order_id,client_order_id:f.order.client_order_id,ticker:f.order.ticker,
+        book_side:f.order.side,subaccount_number:1,exchange_index:2,created_time:new Date(receipt.ts_ms).toISOString(),
+        yes_price_dollars:f.order.price,status:'canceled',initial_count_fp:f.order.count,fill_count_fp:receipt.fill_count,remaining_count_fp:'0.00'}],
+       fills:[{trade_id:'fractional-fill-'+quantity+'-'+filled,order_id:receipt.order_id,ticker:f.order.ticker,
+        count_fp:receipt.fill_count,subaccount_number:1,exchange_index:2,created_time:new Date(receipt.ts_ms).toISOString()}],
+       positions:[{ticker:f.order.ticker,subaccount_number:1,exchange_index:2,
+        position_fp:residual===0n?'0.00':(side==='NO'?'-':'')+formatContractHundredths(residual)}]})});
+     // A lookalike must not reach the durable audit. Return only the original
+     // reader-issued object to the real dispatch/persistence path below.
+     const copied=await persistAuthenticatedExitReconciliation(recoveryInput,{...observation},{db:pool});
+     assert.equal(copied.commitState,'NOT_ATTEMPTED');assert.equal(copied.reason,'exit_reconcile_freshness_unverified');
+     assert.equal(copied.committed,false);assert.equal(copied.mayRetry,false);
+     assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[f.reservationId])).rows[0].n,0);
+     assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1',[f.reservationId])).rows[0].state,'UNKNOWN');
+     return observation;
+    }});
    assert.equal(result.state,'RECONCILED',result.reason);assert.equal(result.filledHundredths,filled);assert.equal(posts,1);
    assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'RECONCILED');
+   assert.deepEqual((await pool.query('SELECT filled_hundredths::text,remaining_hundredths::text FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[f.reservationId])).rows,
+    [{filled_hundredths:filled,remaining_hundredths:residual.toString()}]);
    fill(f.evidence,await requestOf(f.exit),filled!);f.advance(1);await f.executor.reconcile();
    assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,residual.toString());
    if(residual>0n){await f.exitFeed();const next=await f.executor.prepareExit(f.parent,.4);assert.notEqual(next,f.exit);assert.equal(requestQuantityHundredths(await requestOf(next)),residual);}
@@ -1279,7 +1299,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   dispatching=true;if(sensitivity)clockOffset=3650;let shouldPost=failure==='none'||(failure==='deadline-stress'&&enabled);const start=performance.now();
   let refusal:string|null=null;
   if(sensitivity&&failure!=='deadline-stress'){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
-  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
+  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{refusal=String(error);if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
   const elapsed=performance.now()-start;phases?.discardAll();const drainDeadline=performance.now()+2000;while(coordinator.diagnostics().accounts&&performance.now()<drainDeadline)await new Promise(r=>setTimeout(r,5));
   const final=(await pool.query('SELECT state,decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
   assert.equal(new Date(final.decision.source.evaluated_at).getTime(),originalAt);assert.deepEqual(final.request,before.request);assert.equal(final.decision.preflight.plannedAllInCents,before.decision.preflight.plannedAllInCents);
@@ -1293,7 +1313,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   // Lease/grant SQL here is an explicit read-only fixture port; no assertion of
   // production private-schema authorization or lease/grant persistence is made.
 
-  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe');assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
+  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe: '+JSON.stringify({enabled,failure,shouldPost,sourceAgeMs:clockOffset+Math.floor(performance.now()-anchor),wireAt,wireReviews,refusal,timeline}));assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
   else if(failure==='after-claim-hold'||failure==='A-429-authority-closed'){assert.ok(calls.length<=10,'at most five extra advisory A reads after a later gate failure');assert.equal(books,1);assert.equal(wireReviews,0);}
   else {assert.ok(calls.length<=15,'started phase failures never launch a replacement five-GET attempt');if(['B-429-authority-closed','owner-replaced','credential-replaced','B-stop-queued'].includes(failure))assert.equal(wireReviews,0);}
   if(enabled&&['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs,'WIRE must be a newly captured invocation, never FINAL bytes');assert.notEqual(captures[0].fingerprint,captures[1].fingerprint);}

@@ -21,7 +21,7 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
  marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;
- failPersist?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid"}={}){
+ failPersist?:boolean;missingPersistenceProof?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid"}={}){
  const clientId=input.clientOrderId??CID,reservationId=input.reservationId??RES,count=input.count??"2.00",side=input.side??"ask";
  const calls:{fee:number;mark:number;post:number;read:number;releases:number;sql:string[]}={
    fee:0,mark:0,post:0,read:0,releases:0,sql:[],
@@ -99,7 +99,7 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
      calls.post++;if(input.reject)throw Error("timed out");
      return input.receipt===false?null:receipt;
    },
-   persistReconciled:async()=>({committed:input.failPersist!==true,mayRetry:false,tradingAuthorized:false,reason:"test"}),
+   persistReconciled:async()=>({committed:input.failPersist!==true,commitState:input.missingPersistenceProof?undefined as never:input.failPersist?"UNKNOWN":"COMMITTED",freshnessVerified:input.missingPersistenceProof?undefined as never:input.failPersist!==true,mayRetry:false,tradingAuthorized:false,reason:"test"}),
    readAuthenticatedOutcome:async(_input,observed)=>{
     calls.read++;
     const filled=input.fill??"1.00";
@@ -511,3 +511,9 @@ test("fresh genuine fractional YES and NO reductions preserve zero, partial and 
   await h.run();assert.equal(h.calls.post,1);assert.equal(r.tradingAuthorized,false);
  }
 });
+
+ test("missing persistence freshness/commit provenance remains UNKNOWN after witnessed POST",async()=>{
+ const h=harness({missingPersistenceProof:true}),result=await h.run();
+ assert.equal(result.state,"UNKNOWN");assert.equal(result.postAttempted,true);
+ assert.equal(result.mayRetry,false);assert.equal(h.calls.post,1);
+ });
