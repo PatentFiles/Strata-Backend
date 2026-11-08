@@ -18,7 +18,7 @@ const SIZE = 281129;
 const REVIEWS = "strata_fee_operator_source_reviews";
 const RELEASES = "strata_fee_operator_release_candidates";
 const CONFIRMATION = "REVIEW_OPERATOR_ATTESTED_COMMISSIONING_ONLY";
-const HOST = Deno.env.get("STRATA_WEB_ORIGIN")?.trim() || "https://private-multi-asset-eviv.bolt.host";
+const HOST = "https://strata.bolt.host";
 const CORS = {
   "access-control-allow-origin": HOST, "access-control-allow-headers":
     "authorization, apikey, content-type, x-client-info, x-supabase-client-platform, x-supabase-client-version",

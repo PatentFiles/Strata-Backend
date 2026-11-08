@@ -13,8 +13,7 @@ const EXPECTED_BYTES = 281_129;
 const TABLE = "strata_fee_operator_source_reviews";
 // Browser access is limited to the configured Strata frontend, not to arbitrary origins.
 // JWT verification and the private ADMIN role check remain independently mandatory.
-const ALLOWED_ORIGIN = Deno.env.get("STRATA_WEB_ORIGIN")?.trim() ||
-  "https://private-multi-asset-eviv.bolt.host";
+const ALLOWED_ORIGIN = "https://strata.bolt.host";
 const CORS = {
   "access-control-allow-origin": ALLOWED_ORIGIN,
   "access-control-allow-headers": "authorization, apikey, content-type, x-client-info, x-supabase-client-platform, x-supabase-client-version",

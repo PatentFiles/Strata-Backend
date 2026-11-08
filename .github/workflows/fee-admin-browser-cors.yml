@@ -30,7 +30,10 @@ jobs:
           from pathlib import Path
           for name in ('strata-fee-pending-audit','strata-fee-operator-review'):
               s=Path('supabase/functions/'+name+'/index.ts').read_text()
-              assert 'private-multi-asset-eviv.bolt.host' in s
+              if name == 'strata-fee-operator-review':
+                  assert 'const ALLOWED_ORIGIN = "https://strata.bolt.host";' in s
+              else:
+                  assert 'private-multi-asset-eviv.bolt.host' in s
               assert 'request.method === "OPTIONS"' in s
               assert 'request.headers.get("origin") !== ALLOWED_ORIGIN' in s
               assert '"access-control-allow-origin": ALLOWED_ORIGIN' in s
