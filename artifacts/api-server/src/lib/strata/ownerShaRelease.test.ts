@@ -181,7 +181,7 @@ test("legacy-enabled Step 12 refuses a running lease without writing an approval
  const db={query,connect:async()=>({query,release(){}})};
  const result=await authorizeOwnerShaRelease(OWNER,confirmation,{db:db as never,sha:()=>SHA,
    readFeeds:(async(_material:unknown,observedAtMs:number)=>({
-     ok:true,observedAtMs,cashMicros:"25000000",
+     ok:true,historicalCoverageComplete:true,observedAtMs,cashMicros:"25000000",
      orders:[],fills:[],positions:[],settlements:[],
    })) as never});
  assert.equal(result.ok,false,JSON.stringify(result));
@@ -236,7 +236,7 @@ test("legacy-enabled commissioned owner can repair only the stale marker and app
      "I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STALE_COMMISSIONING_BLOCKER",
  },{db:db as never,sha:()=>SHA,
     readFeeds:(async(_material:unknown,observedAtMs:number)=>({
-      ok:true,observedAtMs,cashMicros:"25000000",
+      ok:true,historicalCoverageComplete:true,observedAtMs,cashMicros:"25000000",
       orders:[],fills:[],positions:[],settlements:[],
     })) as never});
  assert.equal(result.ok,true,JSON.stringify(result));
@@ -290,7 +290,7 @@ test("global STOP permits separately signed SHA owner consent, without lifting a
  const result=await authorizeOwnerShaRelease(OWNER,confirmation,{
    db:db as never,sha:()=>SHA,
    readFeeds:(async(_creds:unknown,observedAtMs:number)=>({
-     ok:true,observedAtMs,cashMicros:"25000000",
+     ok:true,historicalCoverageComplete:true,observedAtMs,cashMicros:"25000000",
      orders:[],fills:[],positions:[],settlements:[],
    })) as never,
  });
@@ -440,4 +440,42 @@ test("restore status distinguishes durable authority from account admission and 
   assert.equal(result.available,["eligible","revoked_grant"].includes(scenario),scenario);
   if(scenario!=="unavailable")assert.equal('accountId' in result?result.accountId:null,ACCOUNT);
  }
+});
+
+for(const mode of ["enabled","repair","global-stop"] as const)
+for(const coverage of [false,undefined] as const)
+test(`owner SHA ${mode} refuses ${coverage===false?"incomplete":"missing"} archive coverage before writes`,async()=>{
+ const sqls:string[]=[];let connected=0,feedsRead=0;
+ const query=async(sql:string):Promise<{rows:Record<string,unknown>[]}>=>{
+  sqls.push(sql);
+  assert.match(sql,/^\s*SELECT\b/i,"incomplete history must reject before write transaction or mutating SQL");
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))
+   return {rows:[{id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:true,
+    kill_switch:mode==="global-stop",cash_precision_verified:true,minimum_exit_micros:10000,
+    cash_micros:"25000000",reserved_micros:"0",fee_artifact_digest:feeDigest,
+    policy_state:"APPROVED",policy_id:policyId,commissioning_digest:cDigest,
+    configured_stake_cents:stake,max_entry_stake_cents:2500,max_entry_all_in_cents:2500,
+    revision:1,key_fingerprint:"f".repeat(64),kalshi_connection_id:QID,
+    blocked_reason:mode==="repair"?"awaiting_account_commissioning":null}]};
+  if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{digest:evidence}]};
+  if(sql==="SELECT id FROM public.v13_production_intent WHERE account_id=$1 LIMIT 1")return {rows:[]};
+  if(sql.includes("FROM private.kalshi_connection_credentials c"))
+   return {rows:[{decrypted_secret:JSON.stringify({api_key_id:"offline-key-id",private_key:"offline-only"})}]};
+  throw Error("unexpected preflight query: "+sql.slice(0,90));
+ };
+ const db={query,connect:async()=>{connected++;throw Error("incomplete history cannot open a write transaction");}};
+ const result=await authorizeOwnerShaRelease(OWNER,{
+  ...confirmation,...(mode==="repair"?{provisionalRepairConfirmation:
+   "I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STALE_COMMISSIONING_BLOCKER"}:{}),
+ },{db:db as never,sha:()=>SHA,
+  readFeeds:(async(_material:unknown,observedAtMs:number)=>{
+   feedsRead++;
+   return {ok:true,...(coverage===undefined?{}:{historicalCoverageComplete:coverage}),
+    observedAtMs,cashMicros:"25000000",orders:[],fills:[],positions:[],settlements:[]};
+  }) as never});
+ assert.deepEqual(result,{ok:false,reason:"owner_release_snapshot_mismatch",ordersSubmitted:false});
+ assert.equal(feedsRead,1,"rejection must exercise the signed-feed snapshot completeness gate");
+ assert.equal(connected,0);
+ assert.equal(sqls.some(sql=>/\b(?:INSERT|UPDATE|DELETE|BEGIN|COMMIT)\b/i.test(sql)),false);
+ assert.equal(sqls.some(sql=>sql.includes("private.strata_owner_sha_approvals")),false);
 });

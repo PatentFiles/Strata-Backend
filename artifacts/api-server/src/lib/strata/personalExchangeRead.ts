@@ -134,6 +134,12 @@ export function personalAccountSnapshot(
   requests: Request[],
 ): Snapshot | { ok: false; reason: string } {
   try {
+    // An empty current feed is not proof that unavailable/unknown archival
+    // history is empty. Diagnostics may retain such a read, but it cannot
+    // become complete financial reconciliation or entry-authority evidence.
+    if (read.historicalCoverageComplete !== true) {
+      return { ok: false, reason: "personal_exchange_history_unreconciled" };
+    }
     const orders = new Map<string, Snapshot["orders"][number]>();
     for (const row of read.orders) {
       const record = recordOf(row);
@@ -253,7 +259,7 @@ async function pages(
       payload = await get(creds, path, query);
     } catch (error) {
       const status = error && typeof error === "object" && "status" in error ? Number((error as { status: unknown }).status) : NaN;
-      if (status === 404 && rows.length === 0 && (path === HISTORICAL_ORDER_PATH || path === HISTORICAL_FILL_PATH)) {
+      if (status === 404 && page === 0 && (path === HISTORICAL_ORDER_PATH || path === HISTORICAL_FILL_PATH)) {
         return { rows: [], unavailable: true };
       }
       return { failed: classifyOwnedKalshiReadFailure(error) };
@@ -274,6 +280,9 @@ async function pages(
 function pageOf(payload: unknown, keys: string[]): { rows: unknown[]; cursor: string | null } | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const body = payload as Record<string, unknown>;
+  // Preserve the provider's optional string cursor; a non-string value must
+  // not silently turn a partial page into complete account history.
+  if (body.cursor !== undefined && body.cursor !== null && typeof body.cursor !== "string") return null;
   const cursor = typeof body.cursor === "string" && body.cursor.trim() ? body.cursor : null;
   for (const key of keys) {
     if (Array.isArray(body[key])) return { rows: body[key] as unknown[], cursor };

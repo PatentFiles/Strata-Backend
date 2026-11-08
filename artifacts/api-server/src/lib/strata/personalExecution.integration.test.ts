@@ -1,6 +1,8 @@
 import {entryCashRiskFeeFixture} from "../v13-production/entryCashRisk.fixture";
 import {canonicalEntryQuoteEvidenceDigest} from "../v13-production/entryQuoteEvidence";
 import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
+import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
+import {persistAuthenticatedExitReconciliation} from "./ownerFeeEmergencyExitReconciliationCommit";
 import {requestQuantityHundredths,formatContractHundredths} from "../v13-production/requestQuantity";
 import { readFileSync } from "node:fs";
 import { quoteFromEntryBook } from "../forwardEntryBookQuote";
@@ -16,7 +18,8 @@ import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import type { Fill, MarketEvidence, Request, Snapshot } from "../v13-production/types";
 import { openOwnedExecutionSession, type AccountDispatchState } from "./accountProductionSession";
-import { personalAccountSnapshot } from "./personalExchangeRead";
+import { personalAccountSnapshot,readOwnedKalshiFeeds } from "./personalExchangeRead";
+import {KalshiApiError} from "../kalshiAccountClient";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
@@ -308,7 +311,7 @@ test("a reconciled fill and settlement allow a second order without replaying th
   const gross = BigInt(hundredths) * BigInt(request.limitMicros) / 100n;
   const spent = gross;
   const first = personalAccountSnapshot(session.evidence.identity, {
-    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) - spent),
+    ok: true, historicalCoverageComplete: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) - spent),
     orders: [exchangeOrder(request, quantity)],
     fills: [exchangeFill(request, quantity, session.now)],
     positions: [{ ticker: request.market, position_fp: quantity, subaccount: 1, exchange_index: 2 }],
@@ -320,7 +323,7 @@ test("a reconciled fill and settlement allow a second order without replaying th
   await session.executor.reconcile();
   const payout = BigInt(hundredths) * 10_000n;
   const settled = personalAccountSnapshot(session.evidence.identity, {
-    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) + payout),
+    ok: true, historicalCoverageComplete: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) + payout),
     orders: [exchangeOrder(request, quantity)],
     fills: [exchangeFill(request, quantity, session.now)],
     positions: [{ ticker: request.market, position_fp: "0.00", subaccount: 1, exchange_index: 2 }],
@@ -347,6 +350,40 @@ test("stake amounts from the minimum through the ceiling are executable sizes, n
     assert.equal((await requestOf(id)).contracts, contractsFor(cents));
     assert.equal(session.posts.length, 0);
   }
+});
+
+test("incomplete provider history cannot commit reconciliation or release an UNKNOWN reservation",async()=>{
+ for(const unknown of [false,true])for(const invalid of ["archive404","numericCursor"]){
+  const posts:string[]=[];const session=await tradingSession(500,posts);
+  const requests:Request[]=[];
+  if(unknown){const intent=await session.executor.prepareEntry(await source(session.now));
+   requests.push(await requestOf(intent));await session.executor.dispatch(intent);}
+  const retained=async()=>({
+   account:(await pool.query("SELECT revision,cash_micros,reserved_micros,reconciled_at,blocked_reason FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows,
+   intents:(await pool.query("SELECT id,state,terminal,reserved_micros,filled_hundredths FROM v13_production_intent WHERE account_id=$1 ORDER BY id",[ACCOUNT])).rows,
+   observations:(await pool.query("SELECT count(*)::int AS n FROM v13_production_observation WHERE account_id=$1",[ACCOUNT])).rows,
+   events:(await pool.query("SELECT count(*)::int AS n FROM v13_production_event WHERE account_id=$1",[ACCOUNT])).rows,
+  });
+  const before=await retained(),postCount=posts.length;let afterReconcile=0;
+  session.executor.afterReconcile=async()=>{afterReconcile++;};
+  Object.defineProperty(session.exchange,"snapshot",{value:async()=>{
+   const feed=await readOwnedKalshiFeeds(session.material,session.now,async(_c,path)=>{
+    if(invalid==="archive404"&&path.includes("/historical/"))throw new KalshiApiError("HTTP_ERROR",404);
+    if(path.endsWith("/balance"))return {balance_dollars:"60000.0000",subaccount:1,exchange_index:2};
+    if(invalid==="numericCursor"&&path.endsWith("/portfolio/orders"))return {orders:[],cursor:42};
+    return {orders:[],fills:[],market_positions:[],settlements:[]};
+   });
+   if(!feed.ok)throw Error(feed.reason);
+   const mapped=personalAccountSnapshot(session.evidence.identity,feed,requests);
+   if(!("identity" in mapped))throw Error(mapped.reason);
+   return mapped;
+  }});
+  await assert.rejects(session.executor.reconcile(),/personal_exchange_history_unreconciled/);
+  assert.deepEqual(await retained(),before,"no reconciliation receipt, revision, event, or reservation mutation");
+  assert.equal(afterReconcile,0,"technical renewal and entry reopening callback not reached");
+  assert.equal(posts.length,postCount);
+  if(unknown){assert.equal(before.intents[0].state,"UNKNOWN");assert.ok(BigInt(before.intents[0].reserved_micros)>0n);}
+ }
 });
 
 async function reset(): Promise<void> {
@@ -855,13 +892,31 @@ test("actual owned signed route closes exact fractional quantities through real 
    return new Response(JSON.stringify(receipt),{status:201});}) as typeof fetch;
   try{
    const result=await dispatchReviewedProtectiveExitOnce(input,{db:pool,mark:async()=>f.mark(),verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,marketTicker:f.order.ticker}) as any,
-    readAuthenticatedOutcome:async()=>({clientOrderId:String(f.order.client_order_id),requestedCountFp:String(f.order.count),marketTicker:String(f.order.ticker),
-      initialPositionFp:(side==='NO'?'-':'')+f.order.count,observedPositionFp:residual===0n?'0.00':(side==='NO'?'-':'')+formatContractHundredths(residual),positionMarketTicker:String(f.order.ticker),reducingBookSide:side==='YES'?'ask':'bid',
-      completeExchangeHistory:true,exactMarketAndAccountMatched:true,orderAndFillHistoryMatched:true,isolatedPositionDelta:true,
-      authenticatedOrder:{order_id:receipt.order_id,client_order_id:f.order.client_order_id,status:'canceled',initial_count_fp:f.order.count,fill_count_fp:receipt.fill_count,remaining_count_fp:'0.00'},
-      response:{httpStatus:201,...receipt}})});
+    readAuthenticatedOutcome:async(recoveryInput,postedReceipt)=>{
+     // The provider rows are synthetic, but the real reader verifies the real
+     // immutable PG baseline and mints the exact-object freshness receipt.
+     const observation=await readAuthenticatedProtectiveExitOutcome(recoveryInput,postedReceipt,{db:pool,
+      readFeeds:async(_material,observedAtMs)=>({ok:true,historicalCoverageComplete:true,observedAtMs,cashMicros:'0',settlements:[],
+       orders:[{order_id:receipt.order_id,client_order_id:f.order.client_order_id,ticker:f.order.ticker,
+        book_side:f.order.side,subaccount_number:1,exchange_index:2,created_time:new Date(receipt.ts_ms).toISOString(),
+        yes_price_dollars:f.order.price,status:'canceled',initial_count_fp:f.order.count,fill_count_fp:receipt.fill_count,remaining_count_fp:'0.00'}],
+       fills:[{trade_id:'fractional-fill-'+quantity+'-'+filled,order_id:receipt.order_id,ticker:f.order.ticker,
+        count_fp:receipt.fill_count,subaccount_number:1,exchange_index:2,created_time:new Date(receipt.ts_ms).toISOString()}],
+       positions:[{ticker:f.order.ticker,subaccount_number:1,exchange_index:2,
+        position_fp:residual===0n?'0.00':(side==='NO'?'-':'')+formatContractHundredths(residual)}]})});
+     // A lookalike must not reach the durable audit. Return only the original
+     // reader-issued object to the real dispatch/persistence path below.
+     const copied=await persistAuthenticatedExitReconciliation(recoveryInput,{...observation},{db:pool});
+     assert.equal(copied.commitState,'NOT_ATTEMPTED');assert.equal(copied.reason,'exit_reconcile_freshness_unverified');
+     assert.equal(copied.committed,false);assert.equal(copied.mayRetry,false);
+     assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[f.reservationId])).rows[0].n,0);
+     assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1',[f.reservationId])).rows[0].state,'UNKNOWN');
+     return observation;
+    }});
    assert.equal(result.state,'RECONCILED',result.reason);assert.equal(result.filledHundredths,filled);assert.equal(posts,1);
    assert.equal((await pool.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,'RECONCILED');
+   assert.deepEqual((await pool.query('SELECT filled_hundredths::text,remaining_hundredths::text FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[f.reservationId])).rows,
+    [{filled_hundredths:filled,remaining_hundredths:residual.toString()}]);
    fill(f.evidence,await requestOf(f.exit),filled!);f.advance(1);await f.executor.reconcile();
    assert.equal((await pool.query('SELECT quantity_hundredths FROM v13_production_position WHERE id=$1',[f.parent])).rows[0].quantity_hundredths,residual.toString());
    if(residual>0n){await f.exitFeed();const next=await f.executor.prepareExit(f.parent,.4);assert.notEqual(next,f.exit);assert.equal(requestQuantityHundredths(await requestOf(next)),residual);}
@@ -1244,7 +1299,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   dispatching=true;if(sensitivity)clockOffset=3650;let shouldPost=failure==='none'||(failure==='deadline-stress'&&enabled);const start=performance.now();
   let refusal:string|null=null;
   if(sensitivity&&failure!=='deadline-stress'){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
-  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
+  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{refusal=String(error);if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
   const elapsed=performance.now()-start;phases?.discardAll();const drainDeadline=performance.now()+2000;while(coordinator.diagnostics().accounts&&performance.now()<drainDeadline)await new Promise(r=>setTimeout(r,5));
   const final=(await pool.query('SELECT state,decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
   assert.equal(new Date(final.decision.source.evaluated_at).getTime(),originalAt);assert.deepEqual(final.request,before.request);assert.equal(final.decision.preflight.plannedAllInCents,before.decision.preflight.plannedAllInCents);
@@ -1258,7 +1313,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   // Lease/grant SQL here is an explicit read-only fixture port; no assertion of
   // production private-schema authorization or lease/grant persistence is made.
 
-  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe');assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
+  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe: '+JSON.stringify({enabled,failure,shouldPost,sourceAgeMs:clockOffset+Math.floor(performance.now()-anchor),wireAt,wireReviews,refusal,timeline}));assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
   else if(failure==='after-claim-hold'||failure==='A-429-authority-closed'){assert.ok(calls.length<=10,'at most five extra advisory A reads after a later gate failure');assert.equal(books,1);assert.equal(wireReviews,0);}
   else {assert.ok(calls.length<=15,'started phase failures never launch a replacement five-GET attempt');if(['B-429-authority-closed','owner-replaced','credential-replaced','B-stop-queued'].includes(failure))assert.equal(wireReviews,0);}
   if(enabled&&['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs,'WIRE must be a newly captured invocation, never FINAL bytes');assert.notEqual(captures[0].fingerprint,captures[1].fingerprint);}
@@ -1267,6 +1322,8 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
    assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));
    assert.ok(timeline.some(row=>row.event==='db_request_start'&&row.atMs>at('FINAL_MARKET_start')&&row.atMs<at('FINAL_MARKET_consume')),'A overlaps real ledger request waits');
    assert.ok(at('WIRE_FEE_start')<=at('signed_account_start'));assert.ok(at('signed_account_complete')<=at('WIRE_FEE_consume'));
+   // Failure-only diagnostic: existing values only, with no new clock read or await.
+   if(wireAt+228>4800)console.info('TWO_PHASE_DEADLINE_RESERVE_FAILURE',JSON.stringify({wireAt,effectiveBtcAge:wireAt+228,remainingMs:5000-(wireAt+228),headroomAbove200Ms:4800-(wireAt+228),elapsed,clockOffset,authorityClockCalls,sqlQueries:sqlCalls.length,publicCalls:calls.length,books,signed,feeReviews,wireReviews,timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),observedStages}));
    assert.ok(wireAt+228<=4800,'controlled enabled raw wire retains at least 200ms margin');
   }
   if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'synthetic timing stress, no historical wire-probe assumption or fill evidence'}));}

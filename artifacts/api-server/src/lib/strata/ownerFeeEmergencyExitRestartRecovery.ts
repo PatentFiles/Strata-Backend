@@ -19,7 +19,8 @@ export async function reconcileUnknownProtectiveExitAfterRestart(input:{
  ownerId:string;accountId:string;reservationId:string;
  material:{keyId:string;privateKey:string};
  order:Readonly<EmergencyExitOrder>;
-},ports:RestartPorts={}):Promise<{state:"UNKNOWN"|"RECONCILED";reason:string;mayRetry:false;postAttempted:false}> {
+},ports:RestartPorts={}):Promise<{state:"UNKNOWN"|"RECONCILED";reason:string;mayRetry:false;postAttempted:false;
+ reconciliationCommitState?:"NOT_ATTEMPTED"|"UNKNOWN"|"COMMITTED";reconciliationFreshnessVerified?:boolean}> {
  // Injected ports are strictly for offline unit tests, never a hosted worker.
  const hosted=Boolean(process.env.RAILWAY_ENVIRONMENT_ID||
    process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID);
@@ -33,8 +34,11 @@ export async function reconcileUnknownProtectiveExitAfterRestart(input:{
   if(verified.state!=="RECONCILED")
    return {state:"UNKNOWN",reason:verified.reason,mayRetry:false,postAttempted:false};
   const committed=await (ports.persistReconciled??persistAuthenticatedExitReconciliation)(input,observation);
-  if(!committed.committed)
-   return {state:"UNKNOWN",reason:committed.reason,mayRetry:false,postAttempted:false};
+  if(!committed.committed||committed.freshnessVerified!==true||committed.commitState!=="COMMITTED"||committed.mayRetry!==false)
+   // UNKNOWN is the caller's verification outcome, not proof of durable
+   // rollback. Preserve acknowledged/uncertain COMMIT explicitly.
+   return {state:"UNKNOWN",reason:committed.reason,mayRetry:false,postAttempted:false,
+    reconciliationCommitState:committed.commitState,reconciliationFreshnessVerified:committed.freshnessVerified};
   return {state:"RECONCILED",reason:"signed_exchange_history_reconciled",mayRetry:false,postAttempted:false};
  }catch {
   return {state:"UNKNOWN",reason:"authenticated_restart_history_unproven",mayRetry:false,postAttempted:false};

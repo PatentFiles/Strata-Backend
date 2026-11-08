@@ -42,17 +42,59 @@ function position(x:bigint):string{
  const neg=x<0n?"-":"",v=x<0n?-x:x;
  return neg+(v/100n).toString()+"."+(v%100n).toString().padStart(2,"0");
 }
+type RecoveryDeadline={
+ ownerId:string;accountId:string;reservationId:string;orderDigest:string;observationDigest:string;
+ observedAtMs:number;startedAtMs:number;startedMonotonic:number;
+ wallNow:()=>number;monotonicNow:()=>number;
+ lastWallMs:number;lastMonotonic:number;invalid:boolean;
+};
+const recoveryDeadlines=new WeakMap<object,RecoveryDeadline>();
+/** Internal read-only provenance check, not order or entry authority. Only the
+ * authenticated reader below can mint a receipt. Copies, mutations and other
+ * account/reservation scopes cannot borrow its original three-second lifetime.
+ * Clock high-water marks only reject regression; they never renew the anchors. */
+export function authenticatedProtectiveRecoveryFresh(
+ input:{ownerId:string;accountId:string;reservationId:string;order:unknown},
+ observation:IocRecoveryObservation,
+):boolean{
+ const proof=recoveryDeadlines.get(observation);
+ if(!proof||proof.invalid)return false;
+ try{
+  if(input.ownerId!==proof.ownerId||input.accountId!==proof.accountId||input.reservationId!==proof.reservationId||
+     createHash("sha256").update(JSON.stringify(input.order)).digest("hex")!==proof.orderDigest||
+     createHash("sha256").update(JSON.stringify(observation)).digest("hex")!==proof.observationDigest){
+   proof.invalid=true;return false;
+  }
+  const wall=proof.wallNow(),monotonic=proof.monotonicNow();
+  if(!Number.isSafeInteger(wall)||!Number.isFinite(monotonic)||
+     wall<proof.lastWallMs||monotonic<proof.lastMonotonic||
+     Math.max(wall-proof.observedAtMs,
+      proof.startedAtMs-proof.observedAtMs+monotonic-proof.startedMonotonic)>3000){
+   proof.invalid=true;return false;
+  }
+  proof.lastWallMs=wall;proof.lastMonotonic=monotonic;
+  return true;
+ }catch{proof.invalid=true;return false;}
+}
 export async function readAuthenticatedProtectiveExitOutcome(
  input:Input,receipt:Receipt,
- deps:{db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;now?:()=>number}={},
+ deps:{db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;now?:()=>number;monotonicNow?:()=>number}={},
 ):Promise<IocRecoveryObservation>{
+ // Capture scope and serialized request values before any await. A caller's
+ // later mutation cannot change which signed baseline the deadline belongs to.
+ input={...input,material:Object.freeze({...input.material}),
+  order:Object.freeze(structuredClone(input.order))};
+ if(receipt!==null)receipt=Object.freeze(structuredClone(receipt));
  if(!UUID.test(input.ownerId)||!UUID.test(input.reservationId)||
     (receipt!==null&&(receipt.httpStatus!==201||
      receipt.client_order_id!==input.order.client_order_id||
      typeof receipt.order_id!=="string"||!receipt.order_id))||
     input.order.ticker===undefined)
   return fail("exit_recovery_receipt_or_owner_invalid");
- const now=(deps.now??Date.now)();
+ const wallNow=deps.now??Date.now,monotonicNow=deps.monotonicNow??(()=>performance.now());
+ const startedMonotonic=monotonicNow(),now=wallNow();
+ if(!Number.isSafeInteger(now)||!Number.isFinite(startedMonotonic)||startedMonotonic<0)
+  return fail("exit_recovery_exchange_snapshot_stale");
  const fp=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
  if(!fp||!/^[a-f0-9]{64}$/.test(fp))return fail("exit_recovery_signer_invalid");
  const query=await (deps.db??pool).query(
@@ -87,7 +129,14 @@ export async function readAuthenticatedProtectiveExitOutcome(
   return fail("exit_recovery_original_position_invalid");
  const feed=await (deps.readFeeds??readOwnedKalshiFeeds)(input.material,now);
  if(!feed.ok)return fail("exit_recovery_exchange_history_unavailable");
- if(feed.observedAtMs>now||now-feed.observedAtMs>3000)
+ if(feed.historicalCoverageComplete!==true)return fail("exit_recovery_exchange_history_incomplete");
+ // Keep the original observation time; completing a slow signed scan must not
+ // renew its three-second lifetime. Monotonic elapsed also bounds wall-clock
+ // stalls or regressions that would otherwise disguise stale evidence.
+ const completedAt=wallNow(),completedMonotonic=monotonicNow(),elapsed=completedMonotonic-startedMonotonic;
+ if(!Number.isSafeInteger(feed.observedAtMs)||!Number.isSafeInteger(completedAt)||
+    completedAt<now||feed.observedAtMs>now||!Number.isFinite(elapsed)||elapsed<0||
+    Math.max(completedAt-feed.observedAtMs,now-feed.observedAtMs+elapsed)>3000)
   return fail("exit_recovery_exchange_snapshot_stale");
  const matchingPositions=feed.positions.map(object).filter(x=>x.ticker===input.order.ticker);
  if(matchingPositions.length!==1)return fail("exit_recovery_position_not_unique");
@@ -173,7 +222,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
   return fail("exit_recovery_fill_receipt_disagreement");
  const expected=initialUnits>0n?initialUnits-total:initialUnits+total;
  if(expected!==observed)return fail("exit_recovery_position_not_attributable");
- return {
+ const observation:IocRecoveryObservation={
   clientOrderId:text(input.order.client_order_id),
   requestedCountFp:text(input.order.count),
   marketTicker:text(input.order.ticker),
@@ -194,4 +243,13 @@ export async function readAuthenticatedProtectiveExitOutcome(
     remaining_count_fp:text(order.remaining_count_fp)
   },
  };
+ recoveryDeadlines.set(observation,{
+  ownerId:input.ownerId,accountId:input.accountId,reservationId:input.reservationId,
+  orderDigest:digest,observationDigest:createHash("sha256").update(JSON.stringify(observation)).digest("hex"),
+  observedAtMs:feed.observedAtMs,startedAtMs:now,startedMonotonic,wallNow,monotonicNow,
+  lastWallMs:completedAt,lastMonotonic:completedMonotonic,invalid:false,
+ });
+ if(!authenticatedProtectiveRecoveryFresh(input,observation))
+  return fail("exit_recovery_exchange_snapshot_stale");
+ return observation;
 }

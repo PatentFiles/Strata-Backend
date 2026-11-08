@@ -91,11 +91,12 @@ test('existing whole-contract blocked ENTRY exclusion remains unchanged',async()
  f.observations=[];await assert.rejects(history(f,false));await assert.rejects(history(f,true));
 });
 
-async function diagnostic(f:ReturnType<typeof fixture>,options:{contradiction?:boolean,incomplete?:boolean,openPosition?:boolean,openOrder?:boolean,afterRead?:()=>void}={}){
+async function diagnostic(f:ReturnType<typeof fixture>,options:{contradiction?:boolean,incomplete?:boolean,missingCoverage?:boolean,openPosition?:boolean,openOrder?:boolean,afterRead?:()=>void}={}){
  const providerOrder=(i:Row)=>({order_id:i===f.parent?'synthetic-provider-order':'contradicting-exit',client_order_id:i.client_order_id,ticker:i.market,
   book_side:i===f.parent?'bid':'ask',action:i.request.action.toLowerCase(),status:options.openOrder?'resting':i===f.parent?'executed':'canceled',initial_count_fp:'3.00',fill_count_fp:i===f.parent?'3.00':'0.00',yes_price_dollars:'0.5000'});
  return inspectOwnerSignedExchangeReleaseProof(owner,{db:db(f),now:()=>at,material:async()=>({keyId:'synthetic',privateKey:'unused'}),
-  read:async()=>{options.afterRead?.();return {ok:true,observedAtMs:at,cashMicros:'25000000',historicalCoverageComplete:!options.incomplete,
+  read:async()=>{options.afterRead?.();return {ok:true,observedAtMs:at,cashMicros:'25000000',
+   ...(options.missingCoverage?{}:{historicalCoverageComplete:!options.incomplete}),
    orders:[providerOrder(f.parent),...(options.contradiction?[providerOrder(f.exit)]:[])],
    fills:[{order_id:'synthetic-provider-order',trade_id:'synthetic-fill',ticker:f.parent.market,count_fp:'3.00',yes_price_dollars:'0.5000',fee_cost:'0.0500',created_time:new Date(at-20000).toISOString()}],
    positions:options.openPosition?[{ticker:f.parent.market,position_fp:'1.00'}]:[],settlements:options.openPosition||options.openOrder?[]:[{ticker:f.parent.market,yes_count_fp:'3.00',no_count_fp:'0.00',market_result:'yes',revenue:300,settled_time:new Date(at-500).toISOString()}]};},
@@ -110,9 +111,23 @@ test('signed provider order contradicting receipt stays blocked',async()=>{
  const r=await diagnostic(fixture(),{contradiction:true});assert.equal(r.ok,true,JSON.stringify(r));if(!r.ok)return;
  assert.equal(r.authenticatedExchangeFlat,false);assert.ok(r.blockedReasons.includes('proven_never_posted_provider_record_conflict'));
 });
-test('incomplete archive history stays blocked',async()=>{
- const r=await diagnostic(fixture(),{incomplete:true});assert.equal(r.ok,true,JSON.stringify(r));if(!r.ok)return;
- assert.equal(r.authenticatedExchangeFlat,false);assert.ok(r.blockedReasons.includes('authenticated_exchange_history_incomplete'));
+for(const [name,options] of [
+ ['incomplete archive history',{incomplete:true}],
+ ['missing archive coverage flag',{missingCoverage:true}],
+] as const)test(`${name} stays blocked before diagnostic completion`,async()=>{
+ for(const marker of [false,true]){
+  const f=fixture(marker),before=JSON.stringify(f);
+  const r=await diagnostic(f,options);
+  assert.deepEqual(r,{
+   ok:false,reason:'personal_exchange_history_unreconciled',readOnly:true,
+   ordersSubmitted:false,tradingAuthorized:false,liveEligible:false,
+   signedExchangeReadAttempted:true,authenticatedExchangeFlat:false,
+   exchangeCashMatchesLedger:false,apiMarketFeeMetadataVerified:false,
+   completeIssuerMonetaryAuthorityVerified:false,protectiveExitQualified:false,
+   ownerShaReleasePresent:false,recordPersisted:false,
+  });
+  assert.equal(JSON.stringify(f),before,'rejection must not mutate account, intent, receipt or reservation state');
+ }
 });
 test('receipt and reservation changes after signed read fail final history fence',async()=>{
  for(const markerChange of [false,true]){const f=fixture(true);const r=await diagnostic(f,{afterRead:()=>{

@@ -38,6 +38,9 @@ type Result={
  mayRetry:false;tradingAuthorized:false;
  /** Means exactly one signed POST was attempted; NOT proof of a fill. */
  postAttempted:boolean;
+ /** UNKNOWN is a verification result, not proof that COMMIT rolled back. */
+ reconciliationCommitState?:"NOT_ATTEMPTED"|"UNKNOWN"|"COMMITTED";
+ reconciliationFreshnessVerified?:boolean;
 };
 const fail=(reason:string,state:Result["state"]="BLOCKED",postAttempted=false):Result=>
  ({state,reason,mayRetry:false,tradingAuthorized:false,postAttempted});
@@ -412,8 +415,9 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  // a one-shot immutable reconciliation row and terminal state. A failed or
  // ambiguous commit never permits any retry or treats a fill as cleared.
  const persisted=await (ports.persistReconciled??persistAuthenticatedExitReconciliation)(input,observed);
- if(persisted.committed!==true||persisted.mayRetry!==false)
-  return fail("protective_exit_terminal_audit_unverified","UNKNOWN",true);
+ if(persisted.committed!==true||persisted.freshnessVerified!==true||persisted.commitState!=="COMMITTED"||persisted.mayRetry!==false)
+  return {...fail(persisted.commitState==="COMMITTED"?"protective_exit_committed_freshness_unverified":"protective_exit_terminal_audit_unverified","UNKNOWN",true),
+   reconciliationCommitState:persisted.commitState,reconciliationFreshnessVerified:persisted.freshnessVerified};
  // This response reports durable recovery, not permission for another POST.
  return {state:"RECONCILED",reason:"protective_exit_reconciled_read_only",
   clientOrderId:order.client_order_id,filledHundredths:result.filledHundredths,
