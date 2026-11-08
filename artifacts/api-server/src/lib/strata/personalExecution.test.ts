@@ -592,14 +592,14 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(session.isScheduled(USER, "acct-a"), false);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
-    { ok: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
+    { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
   );
   assert.equal("reason" in open && open.reason, "personal_exchange_history_unreconciled");
   const request = order();
   const mapped = personalAccountSnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
     {
-      ok: true, observedAtMs: NOW, cashMicros: "900000",
+      ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "900000",
       orders: [{
         order_id: "ord-1", client_order_id: request.clientOrderId, ticker: request.market,
         status: "executed", side: "bid", price: "0.5000", initial_count_fp: "1.00", fill_count_fp: "1.00",

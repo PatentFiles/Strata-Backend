@@ -166,7 +166,7 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   throw Error("unexpected SQL in migration test");
  };
  const db={connect:async()=>({query,release(){}})};
- const read=async(_creds:unknown,t:number)=>({ok:true,observedAtMs:t,cashMicros:"25000000",
+ const read=async(_creds:unknown,t:number)=>({ok:true,observedAtMs:t,historicalCoverageComplete:true,cashMicros:"25000000",
   orders:[{client_order_id:historicalRequest.clientOrderId,order_id:"historical-order-1",
    status:"executed",ticker:market,book_side:"bid",yes_price_dollars:"0.400000",
    initial_count_fp:"1.00",fill_count_fp:"1.00"}],
@@ -183,6 +183,26 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   formulaVersion:V3_FEE_FORMULA_VERSION,marketTicker:"KXBTC15M-26OCT222015",
   verifiedAtMs:now,
  }}) as never;
+ for(const coverage of [false,"missing"] as const){
+  statements.length=0;
+  const incompleteRead=async(creds:unknown,t:number)=>{
+   const feed:Record<string,unknown>=await read(creds,t);
+   if(coverage==="missing")delete feed.historicalCoverageComplete;
+   else feed.historicalCoverageComplete=coverage;
+   return feed;
+  };
+  const denied=await migrateOwnedV3FeePolicy(OWNER,{
+   confirmation:OWNER_V3_POLICY_MIGRATION_CONFIRM,expectedPolicyId:POLICY,
+   expectedPolicyHash:old.policyHash,expectedPolicyVersion:1,
+  expectedV3SourceUrl:SOURCE,
+  },{db,read:incompleteRead as never,verify,now:()=>now,enabled:()=>true});
+  assert.equal(denied.ok,false,coverage.toString());
+  assert.equal(denied.reason,"personal_exchange_history_unreconciled");
+  assert.equal(denied.tradingAuthorized,false);assert.equal(denied.policyMigrated,false);
+  assert.equal(statements.some(x=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(x.sql)),false);
+  assert.equal(statements.some(x=>x.sql==="COMMIT"),false);
+ }
+ statements.length=0;
  const res=await migrateOwnedV3FeePolicy(OWNER,{
   confirmation:OWNER_V3_POLICY_MIGRATION_CONFIRM,expectedPolicyId:POLICY,
   expectedPolicyHash:old.policyHash,expectedPolicyVersion:1,

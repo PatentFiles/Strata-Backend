@@ -16,7 +16,8 @@ import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import type { Fill, MarketEvidence, Request, Snapshot } from "../v13-production/types";
 import { openOwnedExecutionSession, type AccountDispatchState } from "./accountProductionSession";
-import { personalAccountSnapshot } from "./personalExchangeRead";
+import { personalAccountSnapshot,readOwnedKalshiFeeds } from "./personalExchangeRead";
+import {KalshiApiError} from "../kalshiAccountClient";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
@@ -308,7 +309,7 @@ test("a reconciled fill and settlement allow a second order without replaying th
   const gross = BigInt(hundredths) * BigInt(request.limitMicros) / 100n;
   const spent = gross;
   const first = personalAccountSnapshot(session.evidence.identity, {
-    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) - spent),
+    ok: true, historicalCoverageComplete: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) - spent),
     orders: [exchangeOrder(request, quantity)],
     fills: [exchangeFill(request, quantity, session.now)],
     positions: [{ ticker: request.market, position_fp: quantity, subaccount: 1, exchange_index: 2 }],
@@ -320,7 +321,7 @@ test("a reconciled fill and settlement allow a second order without replaying th
   await session.executor.reconcile();
   const payout = BigInt(hundredths) * 10_000n;
   const settled = personalAccountSnapshot(session.evidence.identity, {
-    ok: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) + payout),
+    ok: true, historicalCoverageComplete: true, observedAtMs: session.now, cashMicros: String(BigInt(session.evidence.cashMicros) + payout),
     orders: [exchangeOrder(request, quantity)],
     fills: [exchangeFill(request, quantity, session.now)],
     positions: [{ ticker: request.market, position_fp: "0.00", subaccount: 1, exchange_index: 2 }],
@@ -347,6 +348,40 @@ test("stake amounts from the minimum through the ceiling are executable sizes, n
     assert.equal((await requestOf(id)).contracts, contractsFor(cents));
     assert.equal(session.posts.length, 0);
   }
+});
+
+test("incomplete provider history cannot commit reconciliation or release an UNKNOWN reservation",async()=>{
+ for(const unknown of [false,true])for(const invalid of ["archive404","numericCursor"]){
+  const posts:string[]=[];const session=await tradingSession(500,posts);
+  const requests:Request[]=[];
+  if(unknown){const intent=await session.executor.prepareEntry(await source(session.now));
+   requests.push(await requestOf(intent));await session.executor.dispatch(intent);}
+  const retained=async()=>({
+   account:(await pool.query("SELECT revision,cash_micros,reserved_micros,reconciled_at,blocked_reason FROM v13_production_account WHERE id=$1",[ACCOUNT])).rows,
+   intents:(await pool.query("SELECT id,state,terminal,reserved_micros,filled_hundredths FROM v13_production_intent WHERE account_id=$1 ORDER BY id",[ACCOUNT])).rows,
+   observations:(await pool.query("SELECT count(*)::int AS n FROM v13_production_observation WHERE account_id=$1",[ACCOUNT])).rows,
+   events:(await pool.query("SELECT count(*)::int AS n FROM v13_production_event WHERE account_id=$1",[ACCOUNT])).rows,
+  });
+  const before=await retained(),postCount=posts.length;let afterReconcile=0;
+  session.executor.afterReconcile=async()=>{afterReconcile++;};
+  Object.defineProperty(session.exchange,"snapshot",{value:async()=>{
+   const feed=await readOwnedKalshiFeeds(session.material,session.now,async(_c,path)=>{
+    if(invalid==="archive404"&&path.includes("/historical/"))throw new KalshiApiError("HTTP_ERROR",404);
+    if(path.endsWith("/balance"))return {balance_dollars:"60000.0000",subaccount:1,exchange_index:2};
+    if(invalid==="numericCursor"&&path.endsWith("/portfolio/orders"))return {orders:[],cursor:42};
+    return {orders:[],fills:[],market_positions:[],settlements:[]};
+   });
+   if(!feed.ok)throw Error(feed.reason);
+   const mapped=personalAccountSnapshot(session.evidence.identity,feed,requests);
+   if(!("identity" in mapped))throw Error(mapped.reason);
+   return mapped;
+  }});
+  await assert.rejects(session.executor.reconcile(),/personal_exchange_history_unreconciled/);
+  assert.deepEqual(await retained(),before,"no reconciliation receipt, revision, event, or reservation mutation");
+  assert.equal(afterReconcile,0,"technical renewal and entry reopening callback not reached");
+  assert.equal(posts.length,postCount);
+  if(unknown){assert.equal(before.intents[0].state,"UNKNOWN");assert.ok(BigInt(before.intents[0].reserved_micros)>0n);}
+ }
 });
 
 async function reset(): Promise<void> {

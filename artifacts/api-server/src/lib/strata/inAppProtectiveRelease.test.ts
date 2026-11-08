@@ -35,7 +35,7 @@ const v4Observed=(model:DynamicFeeModel=V4_MODEL)=>({
 });
 const emptySignedFeed=(override:Record<string,unknown>={})=>({
  ok:true as const,observedAtMs:Date.now(),cashMicros:"25000000",
- orders:[],fills:[],positions:[],settlements:[],...override,
+ historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[],...override,
 });
 const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
  provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
@@ -130,7 +130,7 @@ test("PRODUCTION qualifier performs only owned GET and stores a digest, not a tr
  const result=await qualifyProtectiveRelease(OWNER,{
   db:h.db,sha:()=>SHA,now:()=>Date.parse("2026-10-20T05:30:00Z"),
   readFeeds:(async()=>{reads++;return {ok:true,observedAtMs:Date.parse("2026-10-20T05:30:00Z"),
-    cashMicros:"25000000",orders:[],fills:[],positions:[],settlements:[]}}) as never,
+    cashMicros:"25000000",historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]}}) as never,
   verifyFee:(async()=>({ok:true,monetaryFeeAuthorized:true,sourceDigest:DIGEST})) as never,
  });
  assert.equal(result.ok,true,JSON.stringify(result));
@@ -139,6 +139,48 @@ test("PRODUCTION qualifier performs only owned GET and stores a digest, not a tr
  assert.equal(h.executed.filter(s=>s.includes("INSERT INTO")).length,1);
  assert.equal(h.executed.some(s=>/INSERT INTO (?:public\.v13_production_intent|private\.strata_protective_exit_release)/.test(s)),false);
 });
+for(const coverage of [false,"missing"] as const){
+ test(`protective qualification refuses ${coverage} history coverage before fee authority or persistence`,async()=>{
+  for(const source of [{},{apiSource:true},{v4Source:true}]){
+   const h=fakeDb(source);
+   let reads=0,feeReads=0;
+   const feed:Record<string,unknown>=emptySignedFeed({observedAtMs:V4_CLOCK});
+   if(coverage==="missing")delete feed.historicalCoverageComplete;
+   else feed.historicalCoverageComplete=coverage;
+   const forbiddenFee=async()=>{feeReads++;throw Error("fee authority must not be reached");};
+   const r=await qualifyProtectiveRelease(OWNER,{
+    db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
+    readFeeds:(async()=>{reads++;return feed;}) as never,
+    verifyFee:forbiddenFee as never,verifyApiFee:forbiddenFee as never,
+    observeV4Fee:forbiddenFee,
+   });
+   assert.equal(r.ok,false,JSON.stringify(source));
+   assert.equal(r.reason,"personal_exchange_history_unreconciled");
+   assert.equal(r.ordersSubmitted,false);
+   assert.equal(reads,1);assert.equal(feeReads,0);
+   assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
+   assert.equal(h.executed.includes("COMMIT"),false);
+  }
+ });
+ test(`commissioning repair refuses ${coverage} history coverage without release or freeze writes`,async()=>{
+  const h=fakeDb({freeze:"awaiting_account_commissioning",fresh:false});
+  const observedAtMs=Date.now();let reads=0;
+  const feed:Record<string,unknown>=emptySignedFeed({observedAtMs});
+  if(coverage==="missing")delete feed.historicalCoverageComplete;
+  else feed.historicalCoverageComplete=coverage;
+  const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
+   db:h.db,sha:()=>SHA,now:()=>observedAtMs,
+   readFeeds:(async()=>{reads++;return feed;}) as never,
+  });
+  assert.equal(r.ok,false);
+  assert.equal(r.reason,"commissioning_repair_live_exposure_unverified");
+  assert.equal(r.ordersSubmitted,false);
+  assert.equal(reads,1);
+  assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
+  assert.equal(h.executed.includes("COMMIT"),false);
+  assert.ok(h.executed.includes("ROLLBACK"));
+ });
+}
 test("Step 12 reports sanitized provider source reasons and still refuses missing or changed PDF digest",async()=>{
  const cases=[
   {fee:{ok:false,reason:"independent_official_fee_snapshot_expired"},
@@ -159,7 +201,7 @@ test("Step 12 reports sanitized provider source reasons and still refuses missin
   const result=await qualifyProtectiveRelease(OWNER,{
    db:h.db,sha:()=>SHA,now:()=>Date.parse("2026-10-20T05:30:00Z"),
    readFeeds:(async()=>({ok:true,observedAtMs:Date.parse("2026-10-20T05:30:00Z"),
-    cashMicros:"25000000",orders:[],fills:[],positions:[],settlements:[]})) as never,
+    cashMicros:"25000000",historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
    verifyFee:(async()=>row.fee) as never,
   });
   assert.equal(result.ok,false,row.expected);
@@ -174,7 +216,7 @@ test("Step 12 accepts a genuine reviewed API-source eligibility without a PDF ca
  const r=await qualifyProtectiveRelease(OWNER,{
   db:h.db,sha:()=>SHA,now:()=>observed,
   readFeeds:(async()=>({ok:true,observedAtMs:observed,cashMicros:"25000000",
-    orders:[],fills:[],positions:[],settlements:[]})) as never,
+    historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
   verifyFee:(async()=>{pdfReads++;throw Error("PDF must not be used for API-reviewed source")}) as never,
   verifyApiFee:(async(owner:string,stage:string,url:string)=>{
    apiReads++;
@@ -200,7 +242,7 @@ test("V4 protective qualification uses exact owner-approved dynamic issuer model
  const r=await qualifyProtectiveRelease(OWNER,{
   db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
   readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
-   orders:[],fills:[],positions:[],settlements:[]})) as never,
+   historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
   verifyFee:(async()=>{legacyReads++;throw Error("wrong policy branch");}) as never,
   observeV4Fee:async(ticker)=>{
     assert.equal(ticker,V4_TICKER);readModel++;return v4Observed();
@@ -233,7 +275,7 @@ test("V4 qualification fails closed on absent, duplicate, malformed, changed, fu
    const r=await qualifyProtectiveRelease(OWNER,{
     db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
     readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
-     orders:[],fills:[],positions:[],settlements:[]})) as never,
+     historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
     verifyFee:(async()=>{throw Error("Legacy proof used for V4");}) as never,
     observeV4Fee:async()=>v4Observed("model" in c?c.model:V4_MODEL),
    });
@@ -246,7 +288,7 @@ test("V4 qualification fails closed on absent, duplicate, malformed, changed, fu
  const failed=await qualifyProtectiveRelease(OWNER,{
    db:unavailable.db,sha:()=>SHA,now:()=>V4_CLOCK,
    readFeeds:(async()=>({ok:true,observedAtMs:V4_CLOCK,cashMicros:"25000000",
-    orders:[],fills:[],positions:[],settlements:[]})) as never,
+    historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
    observeV4Fee:async()=>({ok:false,reason:"dynamic_fee_publication_http_429",tradingAuthorized:false}),
  });
  assert.equal(failed.ok,false);
@@ -261,7 +303,7 @@ test("Step 12 denies a revoked, wrong or stale API fee-source review",async()=>{
   const r=await qualifyProtectiveRelease(OWNER,{
    db:h.db,sha:()=>SHA,now:()=>observed,
    readFeeds:(async()=>({ok:true,observedAtMs:observed,cashMicros:"25000000",
-     orders:[],fills:[],positions:[],settlements:[]})) as never,
+     historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never,
    verifyFee:(async()=>{throw Error("unexpected PDF request")}) as never,
    verifyApiFee:(async()=>{
     if(caseName==="revoked")return {ok:false,reason:"api_fee_grant_missing_invalid_or_expired"};
@@ -287,7 +329,7 @@ test("owner-only qualification rejects stale exchange readings and expired provi
   db:expired.db,sha:()=>SHA,now:()=>observed,
   readFeeds:(async()=>({
    ok:true,observedAtMs:observed-45_001,cashMicros:"25000000",
-   orders:[],fills:[],positions:[],settlements:[],
+   historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[],
   })) as never,
   verifyFee:(async()=>({ok:true,sourceDigest:DIGEST})) as never,
  });
@@ -301,7 +343,7 @@ test("owner-only qualification rejects stale exchange readings and expired provi
     observedClockCalls===2?observed:observed+45_001,
   readFeeds:(async()=>({
    ok:true,observedAtMs:observed,cashMicros:"25000000",
-   orders:[],fills:[],positions:[],settlements:[],
+   historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[],
   })) as never,
   verifyFee:(async()=>({ok:true,sourceDigest:DIGEST})) as never,
  });

@@ -45,11 +45,19 @@ test('owner signed diagnostic uses concurrent committed row revisions without lo
  assert.doesNotMatch(OWNER_SIGNED_PROOF_ACCOUNT_SQL,/production_observation|jsonb_agg|string_agg|FOR UPDATE|FOR SHARE/i);
  console.log('Exact held revision query: indexed position/intent/unresolved-exit probes eligible; no history aggregate');
  let mutate:()=>Promise<unknown>=async()=>{},late:()=>Promise<unknown>=async()=>{};let reads=0;
- const run=()=>inspectOwnerSignedExchangeReleaseProof(owner,{db,now:()=>now,material:async()=>({keyId:'fixture',privateKey:'fixture'}),
-  read:async()=>{reads++;await mutate();return {ok:true,observedAtMs:at,cashMicros:'25000000',orders:[],fills:[],positions:[],settlements:[]}},
+ const run=(coverage:true|false|"missing"=true)=>inspectOwnerSignedExchangeReleaseProof(owner,{db,now:()=>now,material:async()=>({keyId:'fixture',privateKey:'fixture'}),
+  read:async()=>{reads++;await mutate();return {ok:true,observedAtMs:at,...(coverage==="missing"?{}:{historicalCoverageComplete:coverage}),cashMicros:'25000000',orders:[],fills:[],positions:[],settlements:[]}},
   feeProbe:async()=>({ok:true}),v4:async()=>{await late();return {ok:true,checks:{protectiveExitRelease:false,ownerShaApproval:false}}}
  } as never);
  assert.equal((await run()).ok,true,'STOP while saved execution_enabled=true');
+ for(const coverage of [false,"missing"] as const){
+  const before=reads,r=await run(coverage);
+  assert.equal(r.ok,false);assert.equal(r.reason,'personal_exchange_history_unreconciled');
+  assert.equal(reads,before+1);assert.equal(r.signedExchangeReadAttempted,true);
+  assert.equal(r.authenticatedExchangeFlat,false);assert.equal(r.apiMarketFeeMetadataVerified,false);
+  assert.equal(r.tradingAuthorized,false);assert.equal(r.liveEligible,false);
+  assert.equal(r.recordPersisted,false);assert.equal(r.ordersSubmitted,false);
+ }
  const races=[
   "UPDATE private.kalshi_account_worker_lease SET arm_requested=true",
   "UPDATE private.kalshi_account_worker_lease SET arm_requested=true; UPDATE private.kalshi_account_worker_lease SET arm_requested=false",

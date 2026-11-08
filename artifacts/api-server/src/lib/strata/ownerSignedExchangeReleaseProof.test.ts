@@ -11,7 +11,7 @@ const account={
  policy_id:"approved-v4-policy",policy_state:"APPROVED",
  fee_policy_version:"strata_owner_provider_dynamic_fee_v4",
 };
-function mock(row:Record<string,unknown>=account,readCash="25000000"){
+function mock(row:Record<string,unknown>=account,readCash="25000000",coverage:true|false|"missing"=true){
  const seen:string[]=[];
  let reads=0,feeCalls=0,signerCalls=0;
  const deps={
@@ -27,6 +27,7 @@ function mock(row:Record<string,unknown>=account,readCash="25000000"){
   now:()=>at,
   material:async()=>{signerCalls++;return {keyId:"mock",privateKey:"never-used"};},
   read:async()=>{reads++;return {ok:true,observedAtMs:at,cashMicros:readCash,
+   ...(coverage==="missing"?{}:{historicalCoverageComplete:coverage}),
    orders:[],fills:[],positions:[],settlements:[]};},
   feeProbe:async()=>{feeCalls++;return {ok:true};},
   v4:async()=>({ok:true,checks:{protectiveExitRelease:false,ownerShaApproval:false}}),
@@ -112,3 +113,18 @@ test('final guard failure after signed read reports attempted but never flat',as
  }}} as never);
  assert.equal(r.ok,false);assert.equal(r.reason,'signed_diagnostic_final_hold_unavailable');assert.equal(r.signedExchangeReadAttempted,true);assert.equal(r.authenticatedExchangeFlat,false);assert.doesNotMatch(JSON.stringify(r),/secret database/);
 });
+
+for(const coverage of [false,"missing"] as const){
+ test(`signed exchange diagnostic refuses ${coverage} history without authority or persistence`,async()=>{
+  const m=mock(account,"25000000",coverage),r=await inspectOwnerSignedExchangeReleaseProof(owner,m.deps);
+  assert.equal(r.ok,false);assert.equal(r.reason,"personal_exchange_history_unreconciled");
+  assert.equal(r.signedExchangeReadAttempted,true);assert.equal(r.authenticatedExchangeFlat,false);
+  assert.equal(r.exchangeCashMatchesLedger,false);assert.equal(r.apiMarketFeeMetadataVerified,false);
+  assert.equal(r.completeIssuerMonetaryAuthorityVerified,false);
+  assert.equal(r.protectiveExitQualified,false);assert.equal(r.ownerShaReleasePresent,false);
+  assert.equal(r.liveEligible,false);assert.equal(r.recordPersisted,false);
+  assert.equal(r.tradingAuthorized,false);assert.equal(r.ordersSubmitted,false);
+  assert.deepEqual(m.stats(),{reads:1,feeCalls:0,signerCalls:1});
+  assert.equal(m.seen.some(sql=>/\b(INSERT|UPDATE|DELETE|CALL|TRUNCATE)\b/i.test(sql)),false);
+ });
+}
