@@ -54,11 +54,15 @@ export async function acquireWorkerLease(
 
 export async function renewWorkerLease(
   owner: string, epoch: number, id = FORWARD_TEST_ENGINE_ID, durationSeconds = 20,
+  attemptedAt?: Date,
 ): Promise<ForwardTestEngine | null> {
   const [row] = await db.update(forwardTestEngineTable).set({
     leaseRenewedAt: sql`clock_timestamp()`,
     leaseExpiresAt: sql`clock_timestamp() + ${leaseDuration(durationSeconds)}`,
     lastHeartbeatAt: sql`clock_timestamp()`,
+    // The attempt marker shares the exact owner/epoch/enabled/expiry fence.
+    // No separate pre-feed transaction is needed for this diagnostic write.
+    ...(attemptedAt === undefined ? {} : { lastAttemptedCycleAt: attemptedAt }),
   }).where(and(
     eq(forwardTestEngineTable.id, id),
     eq(forwardTestEngineTable.enabled, true),
