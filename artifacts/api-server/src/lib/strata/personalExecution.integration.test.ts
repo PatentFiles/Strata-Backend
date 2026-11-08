@@ -1262,6 +1262,8 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   else if(failure==='after-claim-hold'||failure==='A-429-authority-closed'){assert.ok(calls.length<=10,'at most five extra advisory A reads after a later gate failure');assert.equal(books,1);assert.equal(wireReviews,0);}
   else {assert.ok(calls.length<=15,'started phase failures never launch a replacement five-GET attempt');if(['B-429-authority-closed','owner-replaced','credential-replaced','B-stop-queued'].includes(failure))assert.equal(wireReviews,0);}
   if(enabled&&['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs,'WIRE must be a newly captured invocation, never FINAL bytes');assert.notEqual(captures[0].fingerprint,captures[1].fingerprint);}
+  // Diagnostic only: all values were collected before this log; no clock read or await.
+  if(enabled&&failure==='deadline-stress')console.info('TWO_PHASE_DEADLINE_DIAGNOSTIC',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt+228,remainingMs:5000-(wireAt+228),headroomAbove200Ms:4800-(wireAt+228),elapsed,clockOffset,authorityClockCalls,sqlQueries:sqlCalls.length,publicCalls:calls.length,books,signed,feeReviews,wireReviews,timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),observedStages,scope:'single diagnostic run; offline mocked provider/private authority; assertions unchanged'}));
   if(enabled&&failure==='deadline-stress'){
    const at=(event:string)=>timeline.find(row=>row.event===event)!.atMs;
    assert.ok(at('FINAL_MARKET_start')<at('FINAL_MARKET_consume'));

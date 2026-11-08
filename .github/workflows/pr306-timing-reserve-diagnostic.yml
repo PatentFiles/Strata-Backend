@@ -1,0 +1,33 @@
+name: PR306 single timing reserve diagnostic
+on:
+  push:
+    branches: ['diagnostic/pr306-timing-reserve-20261108']
+permissions:
+  contents: read
+jobs:
+  held-lifecycle-postgres-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16=16.15-1.pgdg24.04+2
+          sudo systemctl stop postgresql
+          /usr/lib/postgresql/16/bin/postgres --version
+          node --version
+          pnpm --version
+          git log -1 --format='%H %P'
+      - name: Exact held lifecycle SQL against disposable local PostgreSQL
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldLifecycleShadowProbe.postgres.test.ts
+      - name: Complete existing offline safety suite
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --full-suite
