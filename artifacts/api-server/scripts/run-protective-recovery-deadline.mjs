@@ -64,6 +64,17 @@ export function postgresBinaries(path, exists = existsSync) {
   return Object.fromEntries(["initdb", "pg_ctl", "createdb"].map(name => [name, join(directory, name + extension)]));
 }
 
+export function bundleTests(run, apiDirectory, files, outdir) {
+  // esbuild's installed CLI can be a JavaScript launcher or a native binary.
+  // Its supported JS API handles both layouts inside the same fenced child.
+  const options = { entryPoints: files, bundle: true, platform: "node", format: "cjs",
+    outdir, outExtension: { ".js": ".cjs" },
+    external: ["pg-native", "pdfjs-dist", "pino", "pino-pretty"] };
+  run(process.execPath, ["--eval",
+    `require(${JSON.stringify(join(apiDirectory, "node_modules/esbuild"))}).buildSync(JSON.parse(process.argv[1]));`,
+    JSON.stringify(options)]);
+}
+
 // Dependency injection permits cleanup verification without launching a server.
 export function withDisposableCluster({ root, binaries, port, database, run, test, remove }) {
   let startAttempted = false;
@@ -108,10 +119,7 @@ export async function main(args = process.argv.slice(2)) {
   const test = () => {
     const names = postgres ? ["protectiveRecoveryDeadline.postgres.test.ts"] : unitTests;
     const files = names.map(name => `src/lib/strata/${name}`);
-    const esbuild = join(api, "node_modules/esbuild/bin/esbuild");
-    run(process.execPath, [esbuild, ...files, "--bundle", "--platform=node", "--format=cjs",
-      `--outdir=${root}`, "--out-extension:.js=.cjs", "--external:pg-native", "--external:pdfjs-dist",
-      "--external:pino", "--external:pino-pretty"]);
+    bundleTests(run, api, files, root);
     run(process.execPath, ["--test", ...names.map(name => join(root, name.replace(/\.ts$/, ".cjs")))]);
   };
   const remove = () => rmSync(root, { recursive: true, force: true });

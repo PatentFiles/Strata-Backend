@@ -1,7 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { runInNewContext } from "node:vm";
-import { childEnvironment, disposableTarget, networkFence, postgresBinaries, withDisposableCluster } from "./run-protective-recovery-deadline.mjs";
+import { bundleTests, childEnvironment, disposableTarget, networkFence, postgresBinaries, withDisposableCluster } from "./run-protective-recovery-deadline.mjs";
+
+for (const [shape, cliBytes] of [["JavaScript launcher", "#!/usr/bin/env node\n"], ["native ELF", "\x7fELF\x02\x01"]]) {
+  test(`bundling uses the supported JS API when the installed CLI is a ${shape}`, () => {
+    let calls = 0, built;
+    const apiDirectory = "/test/api", packagePath = `${apiDirectory}/node_modules/esbuild`;
+    const files = ["src/lib/strata/protectiveRecoveryDeadline.test.ts"];
+    const modules = { [packagePath]: { buildSync: options => { built = options; } }, [`${packagePath}/bin/esbuild`]: cliBytes };
+    bundleTests((command, args) => {
+      calls++;assert.equal(command, process.execPath);assert.equal(args[0], "--eval");
+      assert.equal(args.length, 3);
+      runInNewContext(args[1], {
+        require: path => { assert.equal(path, packagePath, "never interpret the CLI bytes as JavaScript");return modules[path]; },
+        process: { argv: [command, args[2]] },
+      });
+    }, apiDirectory, files, "/isolated/output");
+    assert.equal(calls, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(built)), { entryPoints: files, bundle: true, platform: "node", format: "cjs",
+      outdir: "/isolated/output", outExtension: { ".js": ".cjs" }, external: ["pg-native", "pdfjs-dist", "pino", "pino-pretty"] });
+  });
+}
 
 test("disposable target pins generated name, loopback and isolated user", () => {
   assert.equal(disposableTarget(32001, 123), "postgresql://v13_test@127.0.0.1:32001/protective_deadline_disposable_123");

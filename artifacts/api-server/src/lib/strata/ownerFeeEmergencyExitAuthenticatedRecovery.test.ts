@@ -17,6 +17,11 @@ const input={ownerId:OWNER,accountId:"owner-execution-2",reservationId:RES,
   self_trade_prevention_type:"taker_at_cross",subaccount:1,exchange_index:2}};
 const receipt={httpStatus:201,client_order_id:ID,order_id:"order-1",
  fill_count:"1.00",remaining_count:"1.00",ts_ms:NOW};
+async function withRestartTestPorts<T>(run:()=>Promise<T>):Promise<T>{
+ const previous=process.env.NODE_ENV;process.env.NODE_ENV="test";
+ try{return await run();}
+ finally{if(previous===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=previous;}
+}
 function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badOrder?:boolean;differentPosition?:boolean;noBaseline?:boolean;restart?:boolean;
  failPages?:boolean;badOrderStatus?:boolean;badPrice?:boolean;badFillMarket?:boolean;
@@ -237,11 +242,12 @@ test("invalid or regressed recovery clocks fail closed",async()=>{
  ])await assert.rejects(()=>harness(options).run(),/exit_recovery_exchange_snapshot_stale/);
 });
 test("expired scan keeps restart UNKNOWN without terminal persistence or POST",async()=>{
- let persisted=0;
- const result=await reconcileUnknownProtectiveExitAfterRestart(input,{
+ let persisted=0;const previous=process.env.NODE_ENV;
+ const result=await withRestartTestPorts(()=>reconcileUnknownProtectiveExitAfterRestart(input,{
   readOutcome:async()=>harness({restart:true,wallElapsedMs:0,monotonicElapsedMs:3001}).run(),
   persistReconciled:async()=>{persisted++;return {committed:true,commitState:"COMMITTED",freshnessVerified:true,reason:"unexpected",mayRetry:false,tradingAuthorized:false};},
- });
+ }));
+ assert.equal(process.env.NODE_ENV,previous);
  assert.equal(result.state,"UNKNOWN");
  assert.equal(result.reason,"authenticated_restart_history_unproven");
  assert.equal(result.mayRetry,false);
@@ -254,21 +260,26 @@ test("invalid initial wall clock rejects before baseline, feed or persistence",a
   await assert.rejects(()=>h.run(),/exit_recovery_exchange_snapshot_stale/);
   assert.equal(h.calls.baseline,0);assert.equal(h.calls.feed,0);
   let persisted=0;
-  const result=await reconcileUnknownProtectiveExitAfterRestart(input,{
+  const previous=process.env.NODE_ENV;
+  const result=await withRestartTestPorts(()=>reconcileUnknownProtectiveExitAfterRestart(input,{
    readOutcome:async()=>h.run(),
    persistReconciled:async()=>{persisted++;return {committed:true,commitState:"COMMITTED",freshnessVerified:true,reason:"unexpected",mayRetry:false,tradingAuthorized:false};},
-  });
+  }));
+  assert.equal(process.env.NODE_ENV,previous);
   assert.equal(result.state,"UNKNOWN");assert.equal(result.postAttempted,false);
+  assert.equal(result.reason,"authenticated_restart_history_unproven");assert.equal(h.calls.wall,2);
   assert.equal(persisted,0);assert.equal(h.calls.baseline,0);assert.equal(h.calls.feed,0);
  }
 });
 test("throwing either clock at start or completion keeps restart UNKNOWN",async()=>{
  for(const options of [{throwWallAt:1},{throwWallAt:2},{throwMonotonicAt:1},{throwMonotonicAt:2}]){
   const h=harness({restart:true,...options});let persisted=0;
-  const result=await reconcileUnknownProtectiveExitAfterRestart(input,{
+  const previous=process.env.NODE_ENV;
+  const result=await withRestartTestPorts(()=>reconcileUnknownProtectiveExitAfterRestart(input,{
    readOutcome:async()=>h.run(),
    persistReconciled:async()=>{persisted++;return {committed:true,commitState:"COMMITTED",freshnessVerified:true,reason:"unexpected",mayRetry:false,tradingAuthorized:false};},
-  });
+  }));
+  assert.equal(process.env.NODE_ENV,previous);
   assert.equal(result.state,"UNKNOWN");assert.equal(result.reason,"authenticated_restart_history_unproven");
   assert.equal(result.mayRetry,false);assert.equal(result.postAttempted,false);assert.equal(persisted,0);
   if(options.throwWallAt===1||options.throwMonotonicAt===1){
