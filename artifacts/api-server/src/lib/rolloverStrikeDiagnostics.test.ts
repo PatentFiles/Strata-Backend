@@ -52,17 +52,18 @@ test('cross-boundary expired exact response cannot create ready event or pin nex
  const api=createPublicForwardTestFeeds(async input=>{calls++;if(!String(input).includes('?'))now=T+900000;return new Response(JSON.stringify(String(input).includes('?')?{markets:[row(null)]}:{market:row(77080.15)}));},()=>new Date(now),()=>0,e=>events.push(e));
  await assert.rejects(api.market(),/no current market/);assert.equal(events.length,0);assert.equal(calls,2);
 });
-test('bounded schedule replay quantifies ready times without changing deployed cadence',()=>{
- const ready=[0,1,5,11,15,20,30],observed:number[]=[];
+test('bounded schedule replay pins ready times and exact reads for fifteen fast retries',()=>{
+ const ready=[0,1,5,11,15,20,30],observed:number[]=[],readCounts:number[]=[];
  for(const seconds of ready){
   const recovery=new BoundaryDiscoveryRecovery();let now=T,reads=0;
   while(now-T<60000){reads++;if(now-T>=seconds*1000)break;
    const period=recovery.periodMs('Kalshi exact market strike is missing or invalid',now);
    now+=150+producerDelayMs(period,150);
   }
-  observed.push((now-T)/1000);assert.ok(reads<=15);
+  observed.push((now-T)/1000);readCounts.push(reads);
  }
- assert.deepEqual(observed,[0,1,5,15,15,20,30]);
+ assert.deepEqual(observed,[0,1,5,11,15,20,30]);
+ assert.deepEqual(readCounts,[1,2,6,12,16,17,19]);
 });
 
 test('valid strike diagnostics cannot rescue stale BTC or snapshot evidence',async()=>{

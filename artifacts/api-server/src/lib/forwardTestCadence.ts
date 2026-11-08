@@ -1,4 +1,4 @@
-export const BOUNDARY_FAST_RETRY_LIMIT=10;
+export const BOUNDARY_FAST_RETRY_LIMIT=15;
 export function producerDelayMs(periodMs:number,elapsedMs:number):number {
  if(!Number.isFinite(periodMs)||periodMs<250||!Number.isFinite(elapsedMs)||elapsedMs<0)throw Error("invalid_producer_clock");
  return Math.max(250,Math.ceil(periodMs-elapsedMs));
@@ -14,7 +14,7 @@ export class OptionalResearchLane {
 }
 
 /** Error-only recovery while a new quarter-hour market is being published.
- * At most ten one-second retry schedules share one budget per 15m window.
+ * At most fifteen one-second retry schedules share one budget per 15m window.
  * The first success or any unrelated failure (including HTTP429) permanently
  * closes that window's fast lane. Valid evaluations retain five-second cadence;
  * the worker still awaits each cycle and enforces its overrun pause.

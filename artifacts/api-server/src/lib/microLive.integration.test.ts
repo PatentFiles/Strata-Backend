@@ -3047,12 +3047,13 @@ test("primary terminal exit and restart late-fill recovery remain GET-only and a
 
 test("all independent gates fail closed; kill switch atomically disables both flags", async () => {
   const id = await insertEvaluation({});
+  const decisionAt = Date.now();
   process.env.MICRO_LIVE_PRODUCTION_ENABLED = "false";
-  assert.equal((await executeQualifiedV13Trigger(id, mocks())).reason, "environment_flags_not_both_true");
+  assert.equal((await executeQualifiedV13Trigger(id, mocks({now:()=>new Date(decisionAt)}))).reason, "environment_flags_not_both_true");
   process.env.MICRO_LIVE_PRODUCTION_ENABLED = "true";
   await db.update(microLiveConfigTable).set({ manualKillSwitch: true })
     .where(eq(microLiveConfigTable.id, "singleton"));
-  assert.equal((await executeQualifiedV13Trigger(id, mocks())).reason, "micro_live_kill_switch_on");
+  assert.equal((await executeQualifiedV13Trigger(id, mocks({now:()=>new Date(decisionAt + 1)}))).reason, "micro_live_kill_switch_on");
   await db.update(microLiveConfigTable).set({
     manualKillSwitch: false, microLiveProductionEnabled: true, liveExecutionEnabled: true,
   }).where(eq(microLiveConfigTable.id, "singleton"));

@@ -20,26 +20,26 @@ test('optional research has one task and no backlog, failures release the lane',
  assert.equal(lane.submit(async()=>{calls++;},()=>reports++),true);await lane.drain();assert.equal(calls,2);
 });
 
-test('rollover discovery has one shared ten-retry budget and resets only next quarter',()=>{
+test('rollover discovery has one shared fifteen-retry budget and resets only next quarter',()=>{
  const retry=new BoundaryDiscoveryRecovery(),t=900000;
- for(let i=0;i<10;i++)assert.equal(retry.periodMs(i%2?
+ for(let i=0;i<15;i++)assert.equal(retry.periodMs(i%2?
    'Kalshi returned no current market':'Kalshi exact market strike is missing or invalid',t+i*1000),1000);
- for(let i=10;i<40;i++)assert.equal(retry.periodMs('Kalshi returned no current market',t+i*1000),5000);
+ for(let i=15;i<40;i++)assert.equal(retry.periodMs('Kalshi returned no current market',t+i*1000),5000);
  assert.equal(retry.periodMs('Kalshi returned no current market',t-1),5000);
  assert.equal(retry.periodMs('Kalshi returned no current market',t+900000),1000);
  assert.equal(retry.periodMs('Kalshi returned no current market',t+899999),5000);
  assert.equal(producerDelayMs(1000,1500),250,'slow cycles stay sequential with an overrun pause');
 });
 
-test('ten fast discovery retries preserve original regular poll and cover observed late strike',()=>{
+test('fifteen fast discovery retries preserve original regular poll and cover observed late strike',()=>{
  const retry=new BoundaryDiscoveryRecovery();let clock=900000;
  const starts=[clock];
- for(let i=0;i<13;i++){
+ for(let i=0;i<18;i++){
   const period=retry.periodMs('Kalshi exact market strike is missing or invalid',clock);
   const processingMs=150;
   clock+=processingMs+producerDelayMs(period,processingMs);starts.push(clock);
  }
- assert.deepEqual(starts.map(x=>x-starts[0]),[0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,15000,20000,25000]);
+ assert.deepEqual(starts.map(x=>x-starts[0]),[...Array.from({length:16},(_,i)=>i*1000),20000,25000,30000]);
  // Scenario replay: a valid response known observable by +7.940s. This is
  // not a claim that the provider first published it at that exact instant.
  const firstAfterObservedValid=starts.find(t=>t-starts[0]>=7940)-starts[0];
