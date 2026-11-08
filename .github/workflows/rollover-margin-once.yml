@@ -1,0 +1,44 @@
+name: Single isolated margin diagnostic
+on:
+  push:
+    branches: ['diagnostic/rollover-margin-once-20261108']
+    paths: ['.github/workflows/rollover-margin-once.yml']
+permissions:
+  contents: read
+jobs:
+  full-disposable-margin-diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install local disposable PostgreSQL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Record exact diagnostic source and runtime
+        run: |
+          git rev-parse HEAD
+          node --version
+          /usr/lib/postgresql/16/bin/postgres --version
+      - name: One full suite with unchanged assertions
+        shell: bash
+        run: |
+          set -o pipefail
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --full-suite 2>&1 | tee /tmp/rollover-margin-once.log
+      - name: Preserve diagnostic output even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollover-margin-once
+          path: /tmp/rollover-margin-once.log
+          if-no-files-found: warn
+          retention-days: 7
