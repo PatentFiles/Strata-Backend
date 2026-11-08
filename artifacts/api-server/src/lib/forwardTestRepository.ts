@@ -1,4 +1,5 @@
 import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
+import { createSingleFlightAnalyticsBatch } from "./readOnlyAnalyticsBatch";
 import {
   db,
   forwardTestEngineTable,
@@ -316,27 +317,31 @@ export async function settlePaperPositionSafely(id: string, settlement: Settleme
   return existing;
 }
 
-export async function aggregateForwardTestStatistics(engineId?: string) {
+// Key scope matches the position filter. Different engine IDs remain independent;
+// global evaluation/window counts are not coalesced across those distinct keys.
+const readForwardTestStatisticsBatch = createSingleFlightAnalyticsBatch([
   // Count the evaluation ledger once, instead of issuing separate full scans
   // for total, qualifying, SCOUT and CONFIRM dashboard statistics. This
   // operation is read-only and never participates in entry authorization.
-  const [[evaluations], [windows], [positions]] = await Promise.all([
-    db.select({
-      total: sql<number>`count(*)::integer`,
-      triggers: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal IN ('SCOUT', 'CONFIRM'))::integer`,
-      scout: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'SCOUT')::integer`,
-      confirm: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'CONFIRM')::integer`,
-    }).from(forwardTestEvaluationTable),
-    db.select({ value: count() }).from(forwardTestWindowTable),
-    db.select({
-      wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
-      losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
-      open: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} = 'OPEN')::integer`,
-      completed: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED'))::integer`,
-      pnl: sql<number>`coalesce(sum(${forwardTestPositionTable.pnl}) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED')), 0)::double precision`,
-    }).from(forwardTestPositionTable)
-      .where(engineId ? eq(forwardTestPositionTable.engineId, engineId) : undefined),
-  ]);
+  () => db.select({
+    total: sql<number>`count(*)::integer`,
+    triggers: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal IN ('SCOUT', 'CONFIRM'))::integer`,
+    scout: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'SCOUT')::integer`,
+    confirm: sql<number>`count(*) FILTER (WHERE qualifying_trigger = true AND signal = 'CONFIRM')::integer`,
+  }).from(forwardTestEvaluationTable),
+  () => db.select({ value: count() }).from(forwardTestWindowTable),
+  engineId => db.select({
+    wins: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} > 0)::integer`,
+    losses: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED') AND ${forwardTestPositionTable.pnl} <= 0)::integer`,
+    open: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} = 'OPEN')::integer`,
+    completed: sql<number>`count(*) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED'))::integer`,
+    pnl: sql<number>`coalesce(sum(${forwardTestPositionTable.pnl}) FILTER (WHERE ${forwardTestPositionTable.status} IN ('SETTLED','CLOSED')), 0)::double precision`,
+  }).from(forwardTestPositionTable)
+    .where(engineId ? eq(forwardTestPositionTable.engineId, engineId) : undefined),
+]);
+
+export async function aggregateForwardTestStatistics(engineId?: string) {
+  const [[evaluations], [windows], [positions]] = await readForwardTestStatisticsBatch(engineId);
   return {
     wins: positions.wins,
     losses: positions.losses,
