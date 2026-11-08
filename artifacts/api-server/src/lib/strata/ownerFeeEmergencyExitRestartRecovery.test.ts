@@ -32,7 +32,7 @@ function providerProof():IocRecoveryObservation{
  };
 }
 const persisted=(committed:boolean)=>({
- committed,reason:committed?"verified":"duplicate_or_ambiguous",
+ committed,commitState:committed?"COMMITTED" as const:"NOT_ATTEMPTED" as const,freshnessVerified:committed,reason:committed?"verified":"duplicate_or_ambiguous",
  mayRetry:false as const,tradingAuthorized:false as const,
 });
 test("restart succeeds exactly once on terminal provider proof without a POST",async()=>{
@@ -102,5 +102,18 @@ test("runtime forbids injected evidence/reconciliation on a hosted worker",async
  }finally{
   if(original===undefined)delete process.env.RAILWAY_PROJECT_ID;
   else process.env.RAILWAY_PROJECT_ID=original;
+ }
+});
+test("missing commit or freshness provenance cannot report successful restart recovery",async()=>{
+ for(const result of [
+  {committed:true,reason:"legacy",mayRetry:false,tradingAuthorized:false},
+  {...persisted(true),commitState:undefined},
+  {...persisted(true),freshnessVerified:undefined},
+  {...persisted(true),freshnessVerified:false},
+ ]){
+  const outcome=await reconcileUnknownProtectiveExitAfterRestart(input,{
+   readOutcome:async()=>providerProof(),persistReconciled:(async()=>result) as never,
+  });
+  assert.equal(outcome.state,"UNKNOWN");assert.equal(outcome.mayRetry,false);assert.equal(outcome.postAttempted,false);
  }
 });
