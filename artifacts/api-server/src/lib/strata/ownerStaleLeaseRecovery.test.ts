@@ -44,7 +44,7 @@ test("issue155: preflight unavailability does not start worker or mutate lease",
  assert.equal(transactions,0);
 });
 
-test("issue155: stale owner lease is atomically token-fenced, signed twice and leaves risk freeze untouched",async()=>{
+function staleLeaseFixture(coverage:true|false|"missing"=true,incompleteRead=1){
  const owner="11111111-1111-4111-8111-111111111111",account="owner-account";
  const hb=new Date(now-3600000),fp="f".repeat(64);
  const calls:string[]=[];let signed=0;
@@ -79,14 +79,20 @@ test("issue155: stale owner lease is atomically token-fenced, signed twice and l
   throw Error("unexpected SQL "+sql.slice(0,90));
  };
  const db={query:q,connect:async()=>({query:q,release(){}})};
- const result=await recoverOwnerStaleLease(owner,OWNER_STALE_LEASE_CONFIRMATION,{
+ const run=()=>recoverOwnerStaleLease(owner,OWNER_STALE_LEASE_CONFIRMATION,{
   db:db as never,now:()=>now,bootAtMs:now-30000,
   readFeeds:(async(_material:unknown,ms:number)=>{
     signed++;return {ok:true,observedAtMs:ms,cashMicros:"25000000",
+     ...(signed!==incompleteRead?{historicalCoverageComplete:true}:
+       coverage==="missing"?{}:{historicalCoverageComplete:coverage}),
      orders:[],fills:[],positions:[],settlements:[]};
   }) as never,
   isScheduled:()=>false,
  });
+ return {run,calls,signed:()=>signed};
+}
+test("issue155: stale owner lease is atomically token-fenced, signed twice and leaves risk freeze untouched",async()=>{
+ const f=staleLeaseFixture(),result=await f.run(),calls=f.calls,signed=f.signed();
  assert.equal(result.ok,true,JSON.stringify(result));
  assert.equal(signed,2,"before and after signed account reads");
  assert.ok(calls.includes("COMMIT"));
@@ -97,3 +103,25 @@ test("issue155: stale owner lease is atomically token-fenced, signed twice and l
  assert.match(release,/NOT EXISTS/);
 });
 const GRANT_ID="22222222-2222-4222-8222-222222222222";
+
+for(const coverage of [false,"missing"] as const){
+ test(`stale-lease recovery refuses ${coverage} preflight history without writes`,async()=>{
+  const f=staleLeaseFixture(coverage),r=await f.run();
+  assert.equal(r.ok,false);assert.equal(r.reason,"cash_or_exposure_not_reconciled");
+  assert.equal(r.ordersSubmitted,false);assert.equal(r.workerStarted,false);
+  assert.equal(r.riskFreezeCleared,false);assert.equal(f.signed(),1);
+  assert.equal(f.calls.some(sql=>/\b(INSERT|UPDATE|DELETE|BEGIN|COMMIT)\b/.test(sql)),false);
+ });
+ test(`stale-lease recovery refuses ${coverage} post-fence history without certifying recovery`,async()=>{
+  const f=staleLeaseFixture(coverage,2),r=await f.run();
+  assert.equal(r.ok,false);assert.equal(r.reason,"post_recovery_signed_exchange_exposure");
+  assert.equal(r.ordersSubmitted,false);assert.equal(r.workerStarted,false);
+  assert.equal(r.riskFreezeCleared,false);assert.equal(f.signed(),2);
+  // The complete preflight permitted the safety fence, never a trading grant.
+  assert.equal(f.calls.filter(sql=>sql==="COMMIT").length,1);
+  assert.equal(f.calls.some(sql=>sql.includes("OWNER_STALE_LEASE_POST_RECOVERY_PROOF")),false);
+  assert.equal(f.calls.some(sql=>sql.includes("UPDATE public.v13_production_account")||
+    sql.includes("UPDATE public.live_execution_config")||
+    sql.includes("INSERT INTO private.strata_protective_exit_release")),false);
+ });
+}

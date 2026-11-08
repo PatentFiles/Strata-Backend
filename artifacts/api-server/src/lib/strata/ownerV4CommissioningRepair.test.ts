@@ -37,7 +37,7 @@ const body={confirmation:OWNER_V4_REPAIR_CONFIRM,
  authorityId:authority,expectedDeployedSha:sha};
 function fixture(
  overrides:Record<string,unknown>={},
- opts:{onRead?:()=>unknown;fee?:boolean;cash?:string}={},
+ opts:{onRead?:()=>unknown;fee?:boolean;cash?:string;coverage?:true|false|"missing"}={},
 ){
  const a={...base,...overrides},writes:string[]=[];
  let readCalls=0,modelCalls=0;
@@ -64,6 +64,7 @@ function fixture(
  const deps={db,now:()=>now,sha:()=>sha,
   material:async()=>({keyId:"test",privateKey:"never-disclosed"}),
   read:async()=>{readCalls++;opts.onRead?.();return {ok:true,observedAtMs:now,
+    ...(opts.coverage==="missing"?{}:{historicalCoverageComplete:opts.coverage??true}),
     cashMicros:opts.cash??"25000000",orders:[],fills:[],positions:[],settlements:[]};},
   observe:async()=>{modelCalls++;return opts.fee===false?{ok:false,reason:"dynamic_fee_publication_http_429",tradingAuthorized:false}:
    {ok:true,reason:"dynamic_fee_observation_for_review_only",
@@ -121,3 +122,13 @@ test("genuine V4 fee + signed flatness clears only provisional hold and invalida
  assert.doesNotMatch(changes,/UPDATE public.v13_live_money_policy|SET\s+kill_switch\s*=|SET\s+execution_enabled\s*=/i);
  assert.deepEqual(f.counts(),{readCalls:1,modelCalls:1});
 });
+
+for(const coverage of [false,"missing"] as const){
+ test(`V4 commissioning repair refuses ${coverage} history before grants or writes`,async()=>{
+  const f=fixture({}, {coverage}),res=await repairOwnerV4CommissioningHold(owner,body,f.deps);
+  assert.equal(res.ok,false);assert.equal(res.reason,"personal_exchange_history_unreconciled");
+  assert.equal(res.repaired,false);assert.equal(res.tradingAuthorized,false);
+  assert.equal(res.ordersSubmitted,false);assert.equal(res.killSwitchChanged,false);
+  assert.deepEqual(f.writes,[]);assert.deepEqual(f.counts(),{readCalls:1,modelCalls:0});
+ });
+}
