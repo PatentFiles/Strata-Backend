@@ -25,7 +25,7 @@ function inspect(side: "YES" | "NO", echoed: boolean | undefined) {
     ...(echoed === undefined ? {} : { reduce_only: echoed }),
   };
   const feed: OwnedKalshiRead = {
-    ok: true, observedAtMs: NOW, cashMicros: "11500000",
+    ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "11500000",
     orders: [order],
     fills: [{
       trade_id: "provider-fill-1", order_id: order.order_id,
