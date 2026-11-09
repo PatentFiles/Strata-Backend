@@ -84,7 +84,7 @@
     "test:owner-unknown-recovery": "node --test scripts/run-owner-unknown-recovery.test.mjs && node scripts/run-owner-unknown-recovery.mjs",
     "test:owner-unknown-recovery-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecovery.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecoverySchema.postgres.test.ts",
     "test:unknown-entry-held-recovery": "node scripts/run-unknown-entry-recovery-offline.mjs",
-    "test:unknown-entry-held-recovery-postgres": "node scripts/run-unknown-entry-hold-postgres.mjs && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldReconciliationFence.postgres.test.ts"
+    "test:unknown-entry-held-recovery-postgres": "node scripts/run-unknown-entry-hold-postgres.mjs && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldReconciliationFence.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorDispatch.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorNoSend.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorAmbiguous.postgres.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",

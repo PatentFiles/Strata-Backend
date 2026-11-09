@@ -1,4 +1,4 @@
-/** Unregistered integration candidate. Called only by a future authenticated
+/** Default-off integration candidate. Called only by the authenticated
  * server-held session, never with client supplied owner/account/fence.
  * Establishes the existing STOP-style hold without KILL or any financial write.
  * A successful hold is NOT authority to read, reconcile, renew, or sell.
