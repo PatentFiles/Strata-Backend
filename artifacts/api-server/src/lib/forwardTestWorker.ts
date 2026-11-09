@@ -1,3 +1,4 @@
+import {ForwardTransactionTiming} from "./forwardTransactionTiming";
 import {ForwardCycleDiagnostics,diagnosticWallNow,type CycleTiming} from "./forwardCycleDiagnostics";
 import {readEntryBookQuote,assertEntrySourceFresh,quoteFromEntryBook,type EntryBookQuote} from "./forwardEntryBookQuote";
 import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
@@ -227,6 +228,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         }
       }
     }
+  const transactionTiming=new ForwardTransactionTiming();
   const result = await withWorkerLeaseTransaction(owner, epoch, async (tx, engine) => {
     const [openPosition] = await tx.select().from(forwardTestPositionTable)
       .where(and(eq(forwardTestPositionTable.engineId, engineId),
@@ -234,6 +236,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     if ((openPosition?.id ?? null) !== (priorPosition?.id ?? null)) {
       throw new Error("Open position changed while market data was fetched; retry with a coherent snapshot");
     }
+    transactionTiming.mark("position_read");
     await tx.insert(forwardTestWindowTable).values({
       ticker: market.ticker, target, startsAt: market.startsAt, endsAt: market.endsAt,
       entryPolicyVersion: V13_ENTRY_POLICY_VERSION,
@@ -246,6 +249,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
       throw new Error("BTC observation and Kalshi market window are inconsistent");
     }
 
+    transactionTiming.mark("window_ready");
     if(entryQuote){
       signal?.throwIfAborted();
       if(!previewWindow||windowIdentity(previewWindow)!==windowIdentity(persistedWindow))
@@ -263,6 +267,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     const samples = await tx.select().from(forwardTestBtcPointTable)
       .where(eq(forwardTestBtcPointTable.engineId, engineId))
       .orderBy(desc(forwardTestBtcPointTable.observedAt)).limit(180);
+    transactionTiming.mark("history_ready");
     const points = samples.reverse().map((point) => ({
       price: point.price, time: point.observedAt.getTime(),
     }));
@@ -285,6 +290,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         : null,
     });
     timing.classifierFinishedAtMs=diagnosticWallNow();
+    transactionTiming.mark("classified");
     if (decision.buffer === null) throw new Error("V1.3 did not produce a signed buffer");
     const direction = sideOf(decision.buffer);
     const crossingKey = `${market.ticker}:first`;
@@ -468,7 +474,9 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     if(entryQuote){signal?.throwIfAborted();assertEntrySourceFresh(btc,detailMarket,now.getTime(),entryClock());}
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
-  }, engineId, LEASE_SECONDS);
+  }, engineId, LEASE_SECONDS, transactionTiming.mark);
+  transactionTiming.mark("committed");
+  timing.transactionPhases=transactionTiming.snapshot();
   timing.commitReturnedAtMs=diagnosticWallNow();
   cycleDiagnostics.committed(engineId,timing,{evaluationId:result.evaluationId,evaluatedAtMs:now.getTime(),
     btcProviderAtMs:btc.providerAt.getTime(),btcReceivedAtMs:btc.receivedAt.getTime(),

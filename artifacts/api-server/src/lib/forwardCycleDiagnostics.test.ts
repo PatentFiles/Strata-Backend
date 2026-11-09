@@ -49,3 +49,12 @@ test('regressed monotonic time cannot bypass rate limit; default emission is def
  now=0;d.committed('paper',timing,source);now=-1;d.committed('paper',timing,source);
  await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(count,1);
 });
+
+test('sampled event includes only allowlisted transaction interval fields',()=>{
+ const events:Record<string,unknown>[]=[];const d=new ForwardCycleDiagnostics(e=>events.push(e),()=>0,cb=>cb());
+ d.observe('paper',1,2);
+ const transactionPhases={complete:true,poolAndBeginMs:1,leaseLockMs:2,positionReadMs:3,windowPreparationMs:4,historyPreparationMs:5,classificationPreparationMs:6,strategyPersistenceMs:7,leaseRenewalMs:8,commitAndReleaseMs:9,secret:'not-logged'};
+ d.committed('paper',{...timing,transactionPhases},source);
+ assert.equal(events[0].schemaVersion,2);assert.equal(JSON.stringify(events).includes('not-logged'),false);
+ assert.equal((events[0].transactionPhases as Record<string,unknown>).poolAndBeginMs,1);
+});

@@ -1,3 +1,4 @@
+import {serializeForwardTransaction,type ForwardTransactionSnapshot} from "./forwardTransactionTiming";
 /** Non-authoritative local timing. No prices, account data, network or DB writes.
  * Clock reads are separate from the strategy clock and never gate a cycle.
  * State is bounded to 32 engines; counters reset on process restart/eviction.
@@ -6,6 +7,7 @@ export type CycleTiming = {
  cycleObservedAtMs:number|null; feedsDecodedObservedAtMs:number|null;
  classifierStartedAtMs:number|null; classifierFinishedAtMs:number|null;
  commitReturnedAtMs:number|null;
+ transactionPhases?:ForwardTransactionSnapshot;
 };
 export function diagnosticWallNow(clock:()=>number=Date.now):number|null {
  try { const n=clock();return Number.isSafeInteger(n)&&n>=0?n:null; } catch{return null;}
@@ -45,7 +47,7 @@ export class ForwardCycleDiagnostics {
    if(state.lastEmit!==null&&mono-state.lastEmit<30_000)return;
    state.lastEmit=mono;
    // Explicit allowlist: never spread caller data into telemetry.
-   const event={event:'forward_cycle_timing',schemaVersion:1,authority:'DIAGNOSTIC_ONLY',
+   const event={event:'forward_cycle_timing',schemaVersion:2,authority:'DIAGNOSTIC_ONLY',
     evaluationId:source.evaluationId&&/^[a-f0-9-]{36}$/i.test(source.evaluationId)?source.evaluationId:null,
     timestampAuthority:'LOCAL_WALL_CLOCK_OBSERVATIONS',coverage:'SAMPLED_COMMITTED_CYCLES',
     counterScope:'PROCESS_LOCAL_BOUNDED_ENGINE_STATE',
@@ -54,6 +56,8 @@ export class ForwardCycleDiagnostics {
     commitReturnedAtMs:timing.commitReturnedAtMs,legacyEvaluatedAtMs:source.evaluatedAtMs,
     btcProviderAtMs:source.btcProviderAtMs,btcReceivedAtMs:source.btcReceivedAtMs,
     marketDecodedAtMs:source.marketDecodedAtMs,
+    transactionPhaseClock:"LOCAL_MONOTONIC_ELAPSED",
+    transactionPhases:serializeForwardTransaction(timing.transactionPhases),
     observations:state.observations,duplicateProviderTimestamps:state.duplicateProviderTimestamps,
     regressedProviderTimestamps:state.regressedProviderTimestamps,receiveGapsOver30Seconds:state.receiveGapsOver30Seconds};
    if(this.queued)return;this.queued=true;
