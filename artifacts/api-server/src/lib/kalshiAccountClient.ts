@@ -1,3 +1,4 @@
+import {allowedDiagnosticUrl} from './strata/heldReadDiagnosticPolicy';
 import { createReadOnlyRateLimit, emitReadRateLimitDiagnostic, type ReadRateLimitDetails } from "./readOnlyRateLimit";
 import {
   constants as cryptoConstants,
@@ -429,6 +430,13 @@ function scopedReadLimit(fetchImpl: typeof fetch) {
   if (!value) { value = createReadOnlyRateLimit(); scopedReadLimits.set(fetchImpl, value); }
   return value;
 }
+/** Server-only restricted diagnostic hooks. Observe cannot widen the fixed GET
+ * allowlist. Original transport identity continues to own quota/cooldown state. */
+export type HeldReadDiagnosticHooks={
+ authorize:()=>Promise<void>;
+ consumeBytes?:(bytes:number)=>void;
+ observe:(event:Readonly<{phase:'start'|'settled';endpoint:string;elapsedMs:number;sent:boolean;completed:boolean}>)=>void;
+};
 export async function getScopedKalshiJson(
   creds: { keyId: string; privateKey: string },
   path: string,
@@ -437,7 +445,14 @@ export async function getScopedKalshiJson(
   host = baseUrl(),
   rateLimitOwnerId?: string,
   externalSignal?: AbortSignal,
+  diagnostic?:HeldReadDiagnosticHooks,
 ): Promise<unknown> {
+  const diagnosticStarted=performance.now();let diagnosticSent=false,diagnosticCompleted=false;
+  try {
+  if(diagnostic){
+    if(!externalSignal||!allowedDiagnosticUrl(`${host}${path}${query}`))throw new KalshiApiError("INVALID_RESPONSE");
+    externalSignal.throwIfAborted();await diagnostic.authorize();externalSignal.throwIfAborted();
+  }
   externalSignal?.throwIfAborted();
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
   if (host !== "https://external-api.kalshi.com" && host !== "https://external-api.demo.kalshi.co") {
@@ -469,10 +484,14 @@ export async function getScopedKalshiJson(
     emitReadRateLimitDiagnostic(attempt.blocked);
     throw new KalshiApiError("HTTP_ERROR", 429, attempt.blocked);
   }
+  if(diagnostic){externalSignal!.throwIfAborted();await diagnostic.authorize();externalSignal!.throwIfAborted();}
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp);
   let response:Response;
   try {
+    diagnosticSent=true;
+    if(diagnostic){try{diagnostic.observe(Object.freeze({phase:'start',endpoint:path,elapsedMs:performance.now()-diagnosticStarted,sent:true,completed:false}));}catch{}}
+
     response = await fetchImpl(`${host}${path}${query}`, {
       method: "GET",
       ...(externalSignal?{signal:externalSignal}:{}),
@@ -494,12 +513,38 @@ export async function getScopedKalshiJson(
   if (!response.ok) {
     const details = response.status === 429 ? attempt.limited!(response.headers.get("retry-after")) : undefined;
     if (details) emitReadRateLimitDiagnostic(details);
+    if(diagnostic&&response.body){
+      // Failed cancellation cannot justify releasing the diagnostic lease.
+      try{await response.body.cancel();}catch{await new Promise<never>(()=>{});}
+    }
     throw new KalshiApiError("HTTP_ERROR", response.status, details);
   }
-  const result = await response.json() as unknown;
+  let result:unknown;
+  if(diagnostic){
+    if(!response.body)throw new KalshiApiError('INVALID_JSON');
+    const reader=response.body.getReader(),chunks:Uint8Array[]=[];let bytes=0,ended=false;
+    try{
+      for(;;){
+        externalSignal!.throwIfAborted();
+        const part=await reader.read();externalSignal!.throwIfAborted();
+        if(part.done){ended=true;break;}
+        bytes+=part.value.byteLength;
+        if(bytes>1048576)throw new KalshiApiError('INVALID_RESPONSE');
+        diagnostic.consumeBytes?.(part.value.byteLength);chunks.push(part.value);
+      }
+      result=JSON.parse(Buffer.concat(chunks,bytes).toString('utf8'));
+    }finally{
+      if(!ended){try{await reader.cancel();}catch{await new Promise<never>(()=>{});}}
+      reader.releaseLock();
+    }
+  }else result = await response.json() as unknown;
   externalSignal?.throwIfAborted();
   attempt.success!();
+  diagnosticCompleted=true;
   return result;
+  } finally {
+    if(diagnostic){try{diagnostic.observe(Object.freeze({phase:'settled',endpoint:allowedDiagnosticUrl(`${host}${path}${query}`)?path:'refused',elapsedMs:performance.now()-diagnosticStarted,sent:diagnosticSent,completed:diagnosticCompleted}));}catch{/* Observation cannot grant authority or change a read result. */}}
+  }
 }
 
 const QUALIFICATION_ORDER_PATH = `${API_PREFIX}/portfolio/events/orders`;
