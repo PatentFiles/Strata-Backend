@@ -131,3 +131,22 @@ test("repricing never reads current time, renews a receipt, mutates source or al
   const missing = { ...fee, cashRisk: undefined };
   assert.equal(repriceVerifiedEntryFee(missing, full, 3, .38), null);
 });
+
+import {prepareVerifiedEntryFeeRepricing} from './entryCashFeeRepricing';
+test('invocation-local repricing preserves exact outputs and cannot retain caller aliases',()=>{
+ for(const grid of [full,tapered])for(const side of ['YES','NO'] as const){
+  const fee=fixture(grid,side),before=structuredClone(fee),inputGrid=structuredClone(grid);
+  const selected=prepareVerifiedEntryFeeRepricing(fee,inputGrid)!;assert.ok(selected);
+  fee.limitPrice=.99;fee.verifiedAtMs=999999;fee.cashRisk!.entryCashDebitPerContractMicros=1;inputGrid.ranges.length=0;
+  for(const price of [.01,.37,.38,.50,.99])for(const contracts of [1,3,100]){
+   const expected=repriceVerifiedEntryFee(before,grid,contracts,price);
+   const actual=selected(contracts,price);assert.deepEqual(actual,expected);
+   if(actual){actual.cashRisk!.gridEvidence!.ranges.length=0;assert.deepEqual(selected(contracts,price),expected);}
+  }
+ }
+});
+test('invocation-local repricing rejects malformed or under-reserved original proof before selection',()=>{
+ const fee=fixture();fee.reservedEntryFeeCents=0;
+ assert.equal(prepareVerifiedEntryFeeRepricing(fee,full),null);
+ assert.equal(prepareVerifiedEntryFeeRepricing(fixture(),{...full,ranges:[]}),null);
+});
