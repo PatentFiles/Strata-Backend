@@ -95,28 +95,72 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
   await insert('private.strata_emergency_exit_reservations',{reservation_id:reservationId,owner_user_id:owner,execution_account_id:account,client_order_id:clientId,market_ticker:market,reducing_side:'YES',quantity_hundredths:200,worker_holder_id:'worker',worker_fencing_token:8,state:'PREPARED',trading_authorized:false,order_digest:digest,initial_position_fp:'3.00',created_at:new Date(),updated_at:new Date()});
   if(scenario==='malformed-source-final')await db.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}','"not-a-timestamp"'::jsonb) WHERE kind='EXIT'`);
   await db.query('UPDATE private.kalshi_account_worker_lease SET heartbeat_at=clock_timestamp()');
+  // These scenarios test exact boundary expiry, not host scheduling latency.
+  // Wall time for provider/advisory evidence and monotonic elapsed share one
+  // test-local clock; PostgreSQL predicates and returned budgets stay native.
+  const wallBase=Date.now();let elapsedMs=0;
+  const now=()=>wallBase+elapsedMs,advance=(ms:number)=>{assert.ok(Number.isSafeInteger(ms)&&ms>=0);elapsedMs+=ms;};
+  t.mock.method(performance,'now',()=>elapsedMs);
   const failures:Array<{sql:string;code:string;message:string}>=[];let auditInsertAttempts=0;
+  let markerOutcome:unknown=null;const feeProofs:Array<Awaited<ReturnType<typeof verifyReviewedProtectiveExitFee>>>=[];
+  let authorityBudgetMs=NaN,sourceBudgetMs=NaN,releaseBudgetMs=NaN,heartbeatBudgetMs=NaN,reservationBudgetMs=NaN;
+  let firstMarkerPrepared=false,finalFixturePrepared=false;
   let lastProviderAt=0,providerAgeAtFinal=0;
   let connections=0;
-  let feeCalls=0,providerCalls=0,authorityCalls=0,posts=0,finalSuccessorQueries=0,finalFenceQueries=0,commitDelayed=false;
+  let feeCalls=0,providerCalls=0,authorityCalls=0,posts=0,signCalls=0,finalSuccessorQueries=0,finalFenceQueries=0,commitDelayed=false;
   const txDb={connect:async()=>{
-   connections++;if(connections===2&&scenario==='stale-provider-pool-wait')await new Promise(r=>setTimeout(r,3100));
+   connections++;if(connections===2&&scenario==='stale-provider-pool-wait')advance(3100);
    const c=await pool.connect();let finalAuthority=false;
    return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
+    if(sql==='BEGIN'&&connections===1&&!firstMarkerPrepared){
+     const out=await c.query(sql,args);firstMarkerPrepared=true;
+     // Seed only the first PREPARED marker fixture. now() is this transaction's
+     // start, so unrelated initial fee/setup latency cannot expire its lease.
+     // Never refresh a consumed reservation, its updated_at, or a repeat.
+     await c.query("UPDATE private.strata_emergency_exit_reservations SET created_at=now() WHERE reservation_id=$1 AND state='PREPARED'",[reservationId]);
+     await c.query('UPDATE private.kalshi_account_worker_lease SET heartbeat_at=now() WHERE execution_account_id=$1',[account]);
+     return out;
+    }
     if(sql.includes('SELECT d.delegation_id')){
      finalAuthority=true;finalSuccessorQueries++;
-     if(scenario==='expire-during-query')await c.query('SELECT pg_sleep(0.35)');
-     if(scenario==='stale-provider-delay')await c.query('SELECT pg_sleep(3.10)');
+     // Native successor SQL must itself reject the expired rows. The original
+     // sleep happened before this same query; explicit fixture expiry removes
+     // scheduler dependence without replacing SQL or its returned evidence.
+     if(scenario==='expire-during-query')await db.query("UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()-interval '1 second'; UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()-interval '2 seconds'");
+     if(scenario==='expire-after-commit')await db.query("UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()+interval '2 seconds'; UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()+interval '1 second'");
+     if(scenario==='stale-provider-delay')advance(3100);
     }
     if(sql.includes('AS reservation_age_ms')){
-     finalAuthority=true;finalFenceQueries++;providerAgeAtFinal=Date.now()-lastProviderAt;
-     // Set synthetic lifetimes at the final query, excluding setup/provider latency.
-     if(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback')await c.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}',to_jsonb(clock_timestamp()-interval '4 seconds')) WHERE kind='EXIT'`);
-     if(scenario==='legacy-release-expiry')await c.query("UPDATE private.strata_protective_exit_release SET expires_at=clock_timestamp()+interval '1 second'");
+     finalAuthority=true;finalFenceQueries++;providerAgeAtFinal=now()-lastProviderAt;
+     assert.equal(finalFixturePrepared,false);finalFixturePrepared=true;
+     // Separate autocommit fixture writes release their locks before the native
+     // final fence, preserving the intent/policy SHARE-lock contention probes.
+     // The real UNKNOWN reservation.updated_at is never refreshed here.
+     await db.query('UPDATE private.kalshi_account_worker_lease SET heartbeat_at=clock_timestamp() WHERE execution_account_id=$1',[account]);
+     if(scenario!=='malformed-source-final'){
+      const sourceAge=scenario.startsWith('stale-source-final')?6001:scenario==='future-source-final'?-3600000:(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback')?4000:0;
+      await db.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}',to_jsonb(clock_timestamp()-($1::double precision * interval '1 millisecond'))) WHERE kind='EXIT'`,[sourceAge]);
+     }
+     if(scenario==='legacy-release-expiry')await db.query("UPDATE private.strata_protective_exit_release SET expires_at=clock_timestamp()+interval '1 second'");
     }
     if(sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send'))auditInsertAttempts++;
     let out;
     try{out=await c.query(sql,args);}catch(error:any){failures.push({sql,code:error.code,message:error.message});throw error;}
+    if(sql.includes('SELECT d.delegation_id')&&scenario==='expire-after-commit'){
+     assert.equal(out.rows.length,1,'positive native authority must be observed before commit expiry');
+     assert.ok(Number.isFinite(out.rows[0].valid_for_ms)&&out.rows[0].valid_for_ms>0&&out.rows[0].valid_for_ms+1<3000);
+    }
+    if(sql.includes('AS reservation_age_ms')&&out.rows.length===1){
+     sourceBudgetMs=Number(out.rows[0].max_quote_age_ms)-Number(out.rows[0].source_age_ms);
+     releaseBudgetMs=Number(out.rows[0].release_remaining_ms);
+     heartbeatBudgetMs=5000-Number(out.rows[0].heartbeat_age_ms);
+     reservationBudgetMs=8000-Number(out.rows[0].reservation_age_ms);
+     if(scenario.startsWith('stale-provider-')){
+      const required=scenario==='stale-provider-signing-delay'||scenario==='stale-provider-commit-delay'?3100:0;
+      assert.ok([sourceBudgetMs,heartbeatBudgetMs,reservationBudgetMs].every(b=>Number.isFinite(b)&&b>required),'provider expiry must not be masked by native source/heartbeat/reservation expiry');
+      assert.ok(Number.isFinite(authorityBudgetMs)&&authorityBudgetMs>3100,'provider expiry must not be masked by authority expiry');
+     }
+    }
     if(sql.includes('AS reservation_age_ms')&&scenario==='final-lock-probe'){
      assert.equal(out.rows.length,1);assert.equal(typeof out.rows[0].source_age_ms,'number');
      assert.equal(typeof out.rows[0].max_quote_age_ms,'number');
@@ -130,43 +174,61 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
      }finally{contender.release();}
     }
     if(sql==='COMMIT'&&finalAuthority&&(scenario==='expire-after-commit'||scenario==='stale-provider-commit-delay'||scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback'||scenario==='legacy-release-expiry')&&!commitDelayed){
-     commitDelayed=true;await new Promise(r=>setTimeout(r,scenario==='stale-provider-commit-delay'?3100:(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback'||scenario==='legacy-release-expiry')?1500:350));
+     commitDelayed=true;
+     const budget=scenario==='expire-after-commit'?authorityBudgetMs:scenario==='legacy-release-expiry'?releaseBudgetMs:sourceBudgetMs;
+     if(scenario!=='stale-provider-commit-delay')assert.ok(Number.isFinite(budget)&&budget>0&&budget<3000,'native expiry budget must be positive and isolate this boundary');
+     const step=scenario==='stale-provider-commit-delay'?3100:Math.floor(budget)+1;
+     if(scenario==='expire-after-commit'||scenario==='legacy-release-expiry'){
+      assert.ok(sourceBudgetMs>step&&heartbeatBudgetMs>step&&reservationBudgetMs>step,'authority/release expiry must precede other native evidence expiry');
+     }
+     if(scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback')assert.ok(heartbeatBudgetMs>step&&reservationBudgetMs>step,'source expiry must precede heartbeat/reservation expiry');
+     advance(step);
     }
     return out;
    }};
   }};
   const verifyFee=async()=>{
    feeCalls++;
-   return verifyReviewedProtectiveExitFee(owner,account,market,{
-    db:pool,sha:()=>sha,readFee:async()=>{
+   const proof=await verifyReviewedProtectiveExitFee(owner,account,market,{
+    db:pool,sha:()=>sha,now,readFee:async()=>{
      providerCalls++;
      if(providerCalls===2){
       if(scenario==='revoke-after-provider')await pool.query('UPDATE private.strata_api_fee_standing_delegations SET revoked_at=clock_timestamp()');
       if(scenario==='change-proof-after-provider')await pool.query('UPDATE private.strata_standing_execution_reviews SET release_id=$1',[randomUUID()]);
-      if(scenario.startsWith('expire-'))await pool.query(`UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()+interval '0.25 second'; UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()+interval '0.20 second'`);
      }
-     lastProviderAt=Date.now();return {ok:true,marketTicker:market,marketOpen:true,observedAtMs:lastProviderAt,fingerprint:'c'.repeat(64)} as never;
+     lastProviderAt=now();return {ok:true,marketTicker:market,marketOpen:true,observedAtMs:lastProviderAt,fingerprint:'c'.repeat(64)} as never;
     },
    });
+   feeProofs.push(proof);return proof;
   };
   const input={ownerId:owner,accountId:account,reservationId,material,order,lease:{holderId:'worker',fencingToken:8}};
-  const ports={db:txDb,verifyFee:verifyFee as never,
-   verifyFeeAuthority:async(o:string,a:string,s:string,c:any)=>{authorityCalls++;return verifyReviewedProtectiveExitFeeAuthority(o,a,s,c);},
-   mark:async()=>{const marked=await markOwnedEmergencyExitUnknownForReview(owner,account,reservationId,material,order,input.lease,{db:txDb,inspect:async()=>({diagnosticEligible:true,tradingAuthorized:false,verifiedPositionFp:'3.00',verifiedPositionObservedAtMs:Date.now()}) as never});if(scenario==='first-proof-only-stale')await new Promise(r=>setTimeout(r,3100));return marked;},
+  const ports={db:txDb,monotonicNow:()=>elapsedMs,verifyFee:verifyFee as never,
+   verifyFeeAuthority:async(o:string,a:string,s:string,c:any)=>{
+    authorityCalls++;const approved=await verifyReviewedProtectiveExitFeeAuthority(o,a,s,c);authorityBudgetMs=approved.validForMs??NaN;
+    if(scenario==='expire-after-commit'){
+     assert.equal(approved.ok,true);
+     assert.ok(Number.isFinite(authorityBudgetMs)&&authorityBudgetMs>0&&authorityBudgetMs+1<3000);
+    }
+    return approved;
+   },
+   mark:async()=>{const marked=await markOwnedEmergencyExitUnknownForReview(owner,account,reservationId,material,order,input.lease,{db:txDb,now,inspect:async()=>({diagnosticEligible:true,tradingAuthorized:false,verifiedPositionFp:'3.00',verifiedPositionObservedAtMs:now()}) as never});markerOutcome=marked;if(scenario==='first-proof-only-stale')advance(3100);return marked;},
    post:async()=>{posts++;throw Error('isolated_uncertain_transport');},
   };
   if(scenario==='stale-provider-signing-delay'){
    const sign=Sign.prototype.sign;
    t.mock.method(Sign.prototype,'sign',function(this:any,...args:any[]){
-    const result=(sign as any).apply(this,args),start=performance.now();
-    while(performance.now()-start<3100){} // isolated synthetic synchronous signing delay
+    const result=(sign as any).apply(this,args);
+    signCalls++;assert.equal(feeCalls,2,'signing must follow both real fee verifications');advance(3100);
     return result;
    });
    t.mock.method(globalThis,'fetch',async()=>{posts++;throw Error('raw_fetch_must_not_run');});
    (ports as any).post=undefined;
   }
   const result=await dispatchReviewedProtectiveExitOnce(input,ports);
-  assert.equal(feeCalls,2,scenario+' actual public verifier twice');assert.equal(providerCalls,2);
+  const diagnostic=JSON.stringify({scenario,result,feeProofs,markerOutcome,feeCalls,providerCalls,authorityCalls,posts,signCalls,connections,finalSuccessorQueries,finalFenceQueries,failures,elapsedMs,authorityBudgetMs,sourceBudgetMs,releaseBudgetMs,heartbeatBudgetMs,reservationBudgetMs});
+  assert.equal(feeCalls,2,scenario+' actual public verifier twice '+diagnostic);assert.equal(providerCalls,2);
+  if(scenario==='expire-after-commit'||scenario==='stale-provider-commit-delay'||scenario==='stale-source-after-commit'||scenario==='no-send-audit-rollback'||scenario==='legacy-release-expiry')assert.equal(commitDelayed,true,'intended expiry must occur after the real final COMMIT '+diagnostic);
+  if(scenario==='stale-provider-signing-delay')assert.equal(signCalls,1,'intended expiry must occur inside real signing '+diagnostic);
   if(scenario==='stale-source-final')assert.equal(auditInsertAttempts,1,'intact already-expired evidence must receive audited no-send cleanup');
   if(scenario==='future-source-final')assert.equal(auditInsertAttempts,0,'future timestamps are invalid, never authenticated expiry');
   if(scenario==='malformed-source-final'){
@@ -185,12 +247,14 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
   assert.equal(result.state,noSend?'BLOCKED':'UNKNOWN');
   const priorPosts=posts;
   const repeated=await dispatchReviewedProtectiveExitOnce(input,ports);
+  assert.notEqual(feeProofs.at(-1)?.reason,'protective_fee_clock_invalid','repeat must not pass merely because the test clock became fractional');
   assert.equal(posts,priorPosts);assert.equal(repeated.postAttempted,false);assert.equal(repeated.mayRetry,false);
   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,state,'repeat preserves original durable reservation distinction');
   assert.equal((await db.query("SELECT state FROM public.v13_production_intent WHERE kind='EXIT'")).rows[0].state,noSend?'BLOCKED':'DISPATCHED');
   assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_local_no_send')).rows[0].n,noSend?1:0,'repeat cannot manufacture or duplicate no-send audit');
   assert.equal((await db.query('SELECT quantity_hundredths FROM public.v13_production_position')).rows[0].quantity_hundredths,'300');
-  results.push({scenario,providerAgeAtFinal,state:result.state,ledger:state,posts,feeCalls,authorityCalls,finalSuccessorQueries,finalFenceQueries,repeatState:repeated.state});
+  results.push({scenario,providerAgeAtFinal,state:result.state,ledger:state,posts,signCalls,feeCalls,authorityCalls,finalSuccessorQueries,finalFenceQueries,repeatState:repeated.state,repeatFeeReason:feeProofs.at(-1)?.reason,elapsedMs,authorityBudgetMs,sourceBudgetMs,releaseBudgetMs,heartbeatBudgetMs,reservationBudgetMs});
+  t.mock.restoreAll();
  }
  console.log('REAL_AUTHORITY_DISPATCH_RESULTS '+JSON.stringify(results));
  }finally{db.release();await pool.end();}

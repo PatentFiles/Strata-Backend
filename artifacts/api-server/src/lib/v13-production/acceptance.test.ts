@@ -22,6 +22,7 @@ import { ProductionExecutor } from "./executor";
 import { ProductionWorker } from "./worker";
 import { encodeProductionOrder, KalshiProductionExchange } from "./transport";
 import type { Exchange, Fill, Identity, MarketEvidence, Request, Snapshot } from "./types";
+import {personalAccountSnapshot as timestampSnapshot} from "../strata/personalExchangeRead";
 
 const url = process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.ok(url && /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url), "explicit disposable cluster required");
@@ -1893,4 +1894,51 @@ test('payload projection: owned PREPARED EXIT recovery still receives full decis
   else{await owned.reconcile(f.exchange.evidence,account.revision,f.exchange.now);assert.deepEqual((await pool.query('SELECT state,terminal FROM v13_production_intent WHERE id=$1',[exit])).rows[0],{state:'BLOCKED',terminal:true});}
   assert.deepEqual((await pool.query('SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1',[id])).rows[0],before);
  }
+});
+
+function timestampRawSnapshot(f: Awaited<ReturnType<typeof fixture>>, request: Request, timestamp: Record<string, unknown>) {
+ const orderId = `order-${request.clientOrderId}`;
+ return timestampSnapshot(f.exchange.evidence.identity, {
+  ok:true,historicalCoverageComplete:true,observedAtMs:f.exchange.now,cashMicros:"99490000",
+  orders:[{order_id:orderId,client_order_id:request.clientOrderId,ticker:request.market,status:"executed",
+   book_side:"bid",yes_price_dollars:"0.500000",initial_count_fp:String(Number(requestQuantityHundredths(request))/100),fill_count_fp:"1.00"}],
+  fills:[{order_id:orderId,trade_id:"timestamp-fixture-fill",ticker:request.market,count_fp:"1.00",
+   yes_price_dollars:"0.500000",fee_cost:"0.010000",...timestamp}],
+  positions:[{ticker:request.market,position_fp:"1.00"}],settlements:[]
+ },[request]);
+}
+test("raw ts-only fill reconciles on real PostgreSQL once, preserves cash and position", async()=>{
+ const f=await fixture(), id=await f.executor.prepareEntry(await f.source());
+ await f.executor.dispatch(id);
+ const snapshot=timestampRawSnapshot(f,f.exchange.posts[0]!,{ts:Math.floor(f.exchange.now/1000)});
+ if("ok" in snapshot) assert.fail(snapshot.reason);
+ assert.equal(snapshot.fills[0].occurredAtMs,Math.floor(f.exchange.now/1000)*1000);
+ f.exchange.evidence=snapshot;
+ await f.executor.reconcile(); await f.executor.reconcile();
+ assert.equal((await f.ledger.readAccount()).cash_micros,"99490000");
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"30000");
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[id])).rows[0].quantity_hundredths,"100");
+ assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_event")).rows[0].n,1);
+ assert.equal(f.exchange.posts.length,1);
+ await invariant(f.ledger);
+});
+test("milliseconds in ts remain future-invalid on real PostgreSQL with UNKNOWN funds retained",async()=>{
+ const f=await fixture(), id=await f.executor.prepareEntry(await f.source());
+ await f.executor.dispatch(id);
+ const before=(await pool.query("SELECT state,terminal,reserved_micros,filled_hundredths FROM v13_production_intent WHERE id=$1",[id])).rows[0];
+ const beforeAccount=await f.ledger.readAccount();
+ const beforePosition=(await pool.query("SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1",[id])).rows;
+ assert.equal(before.state,"UNKNOWN");
+ assert.equal(before.terminal,false);
+ const snapshot=timestampRawSnapshot(f,f.exchange.posts[0]!,{ts:f.exchange.now});
+ if("ok" in snapshot) assert.fail(snapshot.reason);
+ f.exchange.evidence=snapshot;
+ await assert.rejects(f.executor.reconcile(),/production_fill_precision_or_time_invalid/);
+ assert.deepEqual((await pool.query("SELECT state,terminal,reserved_micros,filled_hundredths FROM v13_production_intent WHERE id=$1",[id])).rows[0],before);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,beforeAccount.reserved_micros);
+ assert.deepEqual((await pool.query("SELECT quantity_hundredths,basis_micros FROM v13_production_position WHERE id=$1",[id])).rows,beforePosition);
+ assert.equal((await f.ledger.readAccount()).cash_micros,"100000000");
+ assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_event")).rows[0].n,0);
+ assert.equal(f.exchange.posts.length,1);
+ await invariant(f.ledger);
 });

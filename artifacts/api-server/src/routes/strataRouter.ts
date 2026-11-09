@@ -1,3 +1,5 @@
+import {createOwnerUnknownRecoveryRouter} from "./ownerUnknownRecoveryRouter";
+import type {OwnerUnknownRecoveryPort} from "../lib/strata/ownerUnknownRecoveryService";
 import { EmergencyStopMicroLiveBody } from "@workspace/api-zod";
 import { Router, type IRouter } from "express";
 import { entryPolicyRuntimeState } from "../lib/strata/configuredStake";
@@ -39,6 +41,7 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   emergencyStop: () => Promise<unknown>;
   commissioning?: CommissioningPort;
   userScope?: UserScopePort;
+  unknownAccountingRecovery?: OwnerUnknownRecoveryPort;
 }
 
 function blockedCommissioningPort(): CommissioningPort {
@@ -165,6 +168,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
   const userScope = deps.userScope ?? closedUserScopePort();
+  router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
   router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));

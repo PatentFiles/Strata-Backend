@@ -1,3 +1,6 @@
+import {createOwnerUnknownRecoveryService} from "../lib/strata/ownerUnknownRecoveryService";
+import {loadedMaterial} from "../lib/strata/inAppProtectiveRelease";
+import {readOwnedKalshiFeeds} from "../lib/strata/personalExchangeRead";
 import { pool } from "@workspace/db";
 import { emergencyStopMicroLive, getMicroLiveState } from "../lib/microLive";
 import { getPhase4State } from "../lib/shadowLive";
@@ -14,7 +17,7 @@ import {
 import { readForwardTestHistory, readForwardTestStatus } from "./forwardTest";
 import { createDatabaseCommissioningPort } from "../lib/strata/commissioningStore";
 import { createDatabaseStakePort } from "../lib/strata/configuredStakeStore";
-import { personalTradingControls } from "../lib/strata/sharedPersonalTradingControls";
+import { personalTradingControls, personalTradingSession } from "../lib/strata/sharedPersonalTradingControls";
 import { createStrataRouter } from "./strataRouter";
 
 let keys: ReturnType<typeof remoteJwks> | null = null;
@@ -60,4 +63,9 @@ export default createStrataRouter({
   emergencyStop: () => emergencyStopMicroLive(),
   commissioning: createDatabaseCommissioningPort(() => supervisor().view().workerRunning),
   userScope: personalTradingControls,
+  unknownAccountingRecovery: createOwnerUnknownRecoveryService({
+    db: pool, now: Date.now,
+    isScheduled: (owner, account) => personalTradingSession.isScheduled(owner, account),
+    material: loadedMaterial, readFeeds: readOwnedKalshiFeeds,
+  }),
 });
