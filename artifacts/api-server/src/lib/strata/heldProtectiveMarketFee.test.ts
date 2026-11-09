@@ -29,3 +29,20 @@ test('supervisor held fee branch precedes ordinary entry verifier without fallba
  const source=readFileSync('src/lib/strata/personalExecutionSupervisor.ts','utf8');
  assert.match(source,/if\(heldRecoveryScope\)\{\s*feeVerifiedAt=await readHeldProtectiveMarketFee[\s\S]*?\}else if\(apiSource\)\{\s*const checked=await verifyReviewedApiFeeSourceStage/);
 });
+
+test('actual protective verifier accepts fresh protective model without reading or renewing expired entry observation',async()=>{
+ const {verifyReviewedProtectiveExitFee}=await import('./reviewedProtectiveExitFee');
+ const {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256}=await import('./apiFeeRateReference');
+ const at=Date.now(),queries:string[]=[];
+ const scoped={...input,ownerId:'11111111-1111-4111-8111-111111111111',digest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256};
+ const verified=await readHeldProtectiveMarketFee(scoped,{verify:(owner,account,market)=>
+  verifyReviewedProtectiveExitFee(owner,account,market,{
+   now:()=>at,sha:()=>'a'.repeat(40),
+   db:{query:async sql=>{queries.push(sql);return {rows:sql.includes('AS standing_history')?
+    [{standing_history:false}]:[{grant_id:'12345678-1234-1234-1234-123456789abc',legacy_valid:true,valid_for_ms:60000}]};}},
+   readFee:async market=>({ok:true,marketTicker:market,marketOpen:true,observedAtMs:at,fingerprint:'b'.repeat(64)}),
+  })});
+ assert.equal(verified,at);assert.equal(queries.length,2);
+ for(const sql of queries){assert.doesNotMatch(sql,/\b(INSERT|UPDATE|DELETE)\b/);assert.doesNotMatch(sql,/strata_api_fee_observation_leases/);}
+ assert.doesNotMatch(queries[0]!,/g\.expires_at\s*>/);
+});
