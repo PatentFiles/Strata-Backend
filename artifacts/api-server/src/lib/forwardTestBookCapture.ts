@@ -9,7 +9,8 @@ import type {EntryBookQuote} from "./forwardEntryBookQuote";
 import {db, forwardTestBookSnapshotTable} from "@workspace/db";
 import {fetchKalshiPublicBook, simulateBookCapacity, type OrderbookRead,
   type ReadonlyResearchBook, type DepthQuote} from "./forwardTestOrderbookDepth";
-import {eq,desc} from "drizzle-orm";
+import {eq,desc,and,inArray} from "drizzle-orm";
+import {readExpectedPaperBookCoverage,type CoveragePosition} from "./paperBookExpectedCoverage";
 
 export type PaperBookCaptureEvent={
  positionId:string;engineId:string;marketTicker:string;
@@ -117,7 +118,14 @@ async function persistPaperBook(event:PaperBookCaptureEvent,book:ReadonlyResearc
   simulatedUnfilled:capacity?.modeledUnfilledContracts??null,
   actualFillVerified:false,timestampAuthority:"LOCAL_RECEIPT_ONLY"};
 }
-export async function readPaperBookCaptureCoverage(engineId:string){
+export async function readPaperBookCaptureCoverage(engineId:string,positions?:readonly CoveragePosition[]){
+ // Independent expected-event denominator: do not intersect it with the capped
+ // recent-receipt sample, which would mislabel older receipts as absent.
+ const expectedEventCoverage=positions ? await readExpectedPaperBookCoverage(engineId,positions,
+   async(scopedEngine,positionIds,limit)=>db.select({paperPositionId:forwardTestBookSnapshotTable.paperPositionId,
+     phase:forwardTestBookSnapshotTable.phase,status:forwardTestBookSnapshotTable.status})
+     .from(forwardTestBookSnapshotTable).where(and(eq(forwardTestBookSnapshotTable.engineId,scopedEngine),
+       inArray(forwardTestBookSnapshotTable.paperPositionId,positionIds))).limit(limit)) : null;
  const receipts=await db.select().from(forwardTestBookSnapshotTable)
     .where(eq(forwardTestBookSnapshotTable.engineId,engineId))
     .orderBy(desc(forwardTestBookSnapshotTable.createdAt)).limit(2500);
@@ -136,6 +144,8 @@ export async function readPaperBookCaptureCoverage(engineId:string){
    exchangeTimestampVerified:false as const,
    feeScheduleProviderVerified:false as const,
    receipts:receipts.length,captured:captured.length,missing,
+   // Preserve legacy missing while explicitly naming its narrower meaning.
+   unavailableRecordedReceipts:missing,expectedEventCoverage,
    lateBeyond2500Ms:missed,potentialPartials,potentialZero,
    entries:receipts.filter(r=>r.phase==="ENTRY").length,
    exits:receipts.filter(r=>r.phase==="EXIT").length,
