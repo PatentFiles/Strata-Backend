@@ -7,6 +7,7 @@ import {decodePolicy} from '../v13-production/ledger';
 import {computeV13LiveMoneyPolicyHash} from '../v13LiveMoneyRisk';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {createProductionPersonalSession,type PersonalSessionControl} from './personalExecutionSupervisor';
+import {readExactEmergencyFeeEvidence} from './ownerFeeEmergencyExitMarket';
 import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import {preparePdfFreeApiFeePolicyReview} from './apiFeePolicyReviewCandidate';
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from './apiFeeSourceStage';
@@ -120,7 +121,8 @@ type Scenario='partial_then_flat'|'durable_no_send'|'ambiguous_post';
 function externalFixture(scenario:Scenario){
  const started=Date.now(),market={ticker:request.market,event_ticker:request.market+'-EVENT',series_ticker:'KXBTC15M',exchange_index:2,
   status:'active',price_level_structure:'deci_cent',open_time:new Date(started-60000).toISOString(),
-  close_time:new Date(started+600000).toISOString(),latest_expiration_time:new Date(started+660000).toISOString()};
+  close_time:new Date(started+600000).toISOString(),expiration_time:new Date(started+660000).toISOString(),
+  expected_expiration_time:new Date(started+660000).toISOString(),latest_expiration_time:new Date(started+660000).toISOString()};
  let phase:'flat'|'armed'|'entry'='flat',cash=25000000,quantity=0,entryAt=0,failHistory=true;
  let unblock!:()=>void;const ready=new Promise<void>(r=>{unblock=r;});
  let balances=0,posts=0,metadataFailures=0,requests=0;
@@ -221,6 +223,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
   process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';process.env.STRATA_UNKNOWN_ENTRY_PROTECTIVE_RECOVERY_ENABLED='true';
   {
    const external=externalFixture(scenario);globalThis.fetch=external.transport;
+   const exact=await readExactEmergencyFeeEvidence(request.market);assert(exact.ok,JSON.stringify(exact));
    const probe=await probeCurrentKalshiFeeApi(globalThis.fetch,Date.now,request.market);
    const candidate=preparePdfFreeApiFeePolicyReview(probe);assert(candidate.ok,JSON.stringify(candidate));
    assert.notEqual(candidate.reviewCandidateDigest,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256);

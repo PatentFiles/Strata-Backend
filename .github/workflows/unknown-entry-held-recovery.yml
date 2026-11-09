@@ -4,6 +4,7 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/**'
       - 'artifacts/api-server/scripts/*unknown-entry*'
+      - 'artifacts/api-server/scripts/*held-recovery*'
       - 'artifacts/api-server/scripts/unknownEntryRecoveryPostgresLifecycle.mjs'
       - 'artifacts/api-server/package.json'
       - 'lib/db/**'
