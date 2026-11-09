@@ -177,7 +177,7 @@ export function personalAccountSnapshot(
       const qty = countHundredths(record.count_fp ?? record.count);
       const price = rowPriceMicros(record, order?.request.side);
       const fee = feeMicros(record.fee_cost ?? record.fee_cost_dollars);
-      const occurredAtMs = Date.parse(text(record.created_time) ?? text(record.ts) ?? "");
+      const occurredAtMs = fillOccurredAtMs(record);
       if (!order || !id || seenFills.has(id) || qty === null || qty <= 0n || price === null || fee === null ||
           !Number.isSafeInteger(occurredAtMs)) {
         return { ok: false, reason: "personal_exchange_history_unreconciled" };
@@ -514,6 +514,24 @@ function countHundredths(value: unknown): bigint | null {
 function feeMicros(value: unknown): string | null {
   const micros = dollarMicros(value);
   return micros === null ? null : String(micros);
+}
+
+/** Kalshi Fill.ts is integer Unix seconds, not a date string. The optional
+ * created_time keeps its existing date parsing, precision and precedence.
+ * An explicitly present field must not fall back to a second timestamp.
+ * This converts one signed field only; it neither changes the snapshot's
+ * observation clock nor supplies missing history, order or fill evidence.
+ */
+function fillOccurredAtMs(record: Record<string, unknown>): number {
+  if (Object.hasOwn(record, "created_time")) {
+    return typeof record.created_time === "string"
+      ? Date.parse(record.created_time) : NaN;
+  }
+  const seconds = record.ts;
+  if (typeof seconds !== "number" || !Number.isSafeInteger(seconds) || seconds <= 0) return NaN;
+  const milliseconds = seconds * 1_000;
+  return Number.isSafeInteger(milliseconds) && Number.isFinite(new Date(milliseconds).getTime())
+    ? milliseconds : NaN;
 }
 
 function payoutMicros(record: Record<string, unknown>): string | null {
