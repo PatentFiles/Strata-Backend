@@ -100,7 +100,8 @@ jobs:
           node artifacts/api-server/dist/officialFeeLeasePolicy.test.cjs
 
   held-owner-postgres-safety:
-    runs-on: ubuntu-latest
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4

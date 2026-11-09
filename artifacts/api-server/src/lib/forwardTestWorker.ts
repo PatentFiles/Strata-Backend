@@ -1,3 +1,4 @@
+import {ForwardCycleDiagnostics,diagnosticWallNow,type CycleTiming} from "./forwardCycleDiagnostics";
 import {readEntryBookQuote,assertEntrySourceFresh,quoteFromEntryBook,type EntryBookQuote} from "./forwardEntryBookQuote";
 import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
 import {readForwardCycleFeeds} from "./forwardFeedReadScope";
@@ -42,6 +43,7 @@ const PAPER_STAKE = 5;
 // No quote sharing/backlog: duplicate invocations cannot burst entry reads while
 // one cycle is awaiting its quote/final commit. Epoch/DB fencing remains authority.
 const entryBookCycles = new Map<string, symbol>();
+const cycleDiagnostics = new ForwardCycleDiagnostics(event=>logger.info(event,"Forward cycle timing (sampled diagnostic only)"));
 
 export type WorkerIdentity = {
   owner: string;
@@ -108,6 +110,13 @@ export function paperClose(
     reason = "Kalshi settled";
     settlementResult = market.result === "yes" ? "UP" : "DOWN";
   } else if (exitIntent) {
+    // Expiry is not a tradable quote or a settlement result. Retain the paper
+    // position until Kalshi publishes its result; never book a post-expiry sale.
+    // The strategy's cycle clock can precede feed acquisition. A quote decoded
+    // at/after expiry cannot become a pre-expiry sale by keeping that old clock.
+    if (market.endsAt === null || !Number.isFinite(market.endsAt.getTime()) ||
+        !Number.isFinite(now.getTime()) || !Number.isFinite(market.fetchedAt.getTime()) ||
+        market.endsAt.getTime() <= Math.max(now.getTime(), market.fetchedAt.getTime())) return null;
     const executableBid = position.direction === "UP" ? market.yesBid : market.noBid;
     if (!validOffer(executableBid)) return null;
     exitPrice = executableBid;
@@ -146,6 +155,8 @@ async function recordCycleError(identity: WorkerIdentity, reason: string) {
 export async function runForwardTestCycle(options: CycleOptions): Promise<CycleResult> {
   const { owner, epoch, engineId = FORWARD_TEST_ENGINE_ID,
     feeds = publicForwardTestFeeds, signal } = options;
+  const timing:CycleTiming={cycleObservedAtMs:diagnosticWallNow(),feedsDecodedObservedAtMs:null,
+    classifierStartedAtMs:null,classifierFinishedAtMs:null,commitReturnedAtMs:null};
   const clock = options.clock ?? Date.now;
   // The earlier timestamp is diagnostic only. Keep the strategy/source clock
   // at its original boundary AFTER the initial guarded renewal, including at
@@ -161,6 +172,8 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   const priorPosition = await getOpenPaperPosition(engineId);
   try {
     ({btc,currentMarket,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
+    timing.feedsDecodedObservedAtMs=diagnosticWallNow();
+    cycleDiagnostics.observe(engineId,btc.providerAt.getTime(),btc.receivedAt.getTime());
     if (priorPosition && market.ticker !== priorPosition.marketTicker) {
       throw new Error("Open paper position does not match the fetched market window");
     }
@@ -261,6 +274,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     // A stale preview must never let detail quotes become canonical entry authority.
     if(finalStructure&&entryCrossAvailable(persistedWindow.entryPolicyVersion,persistedWindow,true)&&!entryQuote)
       throw Error('entry_book_required_after_recheck');
+    timing.classifierStartedAtMs=diagnosticWallNow();
     const decision = evaluateV13Strategy({
       marketTicker: market.ticker, btcPrice: btc.price, target,
       previousBuffer, velocity,
@@ -270,6 +284,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
         ? { status: "open", direction: openPosition.direction === "UP" ? "up" : "down" }
         : null,
     });
+    timing.classifierFinishedAtMs=diagnosticWallNow();
     if (decision.buffer === null) throw new Error("V1.3 did not produce a signed buffer");
     const direction = sideOf(decision.buffer);
     const crossingKey = `${market.ticker}:first`;
@@ -454,6 +469,10 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     return { evaluationId, signal: currentSignal, marketTicker: market.ticker,
       positionId, error: null, researchEvent } satisfies CycleResult;
   }, engineId, LEASE_SECONDS);
+  timing.commitReturnedAtMs=diagnosticWallNow();
+  cycleDiagnostics.committed(engineId,timing,{evaluationId:result.evaluationId,evaluatedAtMs:now.getTime(),
+    btcProviderAtMs:btc.providerAt.getTime(),btcReceivedAtMs:btc.receivedAt.getTime(),
+    marketDecodedAtMs:detailMarket.fetchedAt.getTime()});
   if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM")){
     notifyCommittedForwardSignal(result.researchEvent?.phase==="ENTRY" ? {
       evaluationId:result.evaluationId,marketTicker:result.marketTicker!,evaluatedAtMs:now.getTime(),

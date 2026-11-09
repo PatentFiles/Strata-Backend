@@ -1,3 +1,4 @@
+import {standardFeePerFillMicros} from "./microLiveStandardFeeArithmetic";
 /**
  * Public, read-only live fields for the exact KXBTC15M market, combined with
  * the standing persisted fee-policy approval. Never fetch the fee page.
@@ -400,6 +401,7 @@ function feeAtPriceTick(
   tick: number,
 ): bigint | null {
   if (!Number.isSafeInteger(tick) || tick <= 0 || tick >= 10_000) return null;
+  if (m.numerator === m.denominator) return standardFeePerFillMicros(tick);
   // 0.07 * multiplier * 0.01 contracts * p * (1-p), in micro-dollars.
   const feeNumerator = 700n * m.numerator * BigInt(tick) * BigInt(10_000 - tick);
   const feeDenominator = m.denominator * 100_000_000n;
@@ -422,6 +424,18 @@ function maximumEntryTradeFee(
   limitTick: number,
   side: "yes" | "no",
 ): number | null {
+  if (m.numerator === m.denominator) {
+    // The quadratic and its upward rounding are monotone in t*(10000-t).
+    // Validate every traversed tick, but evaluate the fee only at its maximum.
+    let maximumProduct = 0, maximumTick = 0;
+    for (const tick of sidePriceTicks(marketTicks, side)) {
+      if (tick > limitTick) break;
+      if (!Number.isSafeInteger(tick) || tick <= 0 || tick >= 10000) return null;
+      const product = tick * (10000 - tick);
+      if (product > maximumProduct) { maximumProduct = product; maximumTick = tick; }
+    }
+    return maximumTick ? sumHundredWorstFills(standardFeePerFillMicros(maximumTick)!) : 0;
+  }
   let maximum = 0n;
   for (const tick of sidePriceTicks(marketTicks, side)) {
     if (tick > limitTick) break;
@@ -438,6 +452,17 @@ function maximumEntryCashDebit(
   limitTick: number,
   side: "yes" | "no",
 ): number | null {
+  if (m.numerator === m.denominator) {
+    // For every integer 1<=t<10000, 1<=ceil(.07*t*(1-t/10000))<=10000-t.
+    // Hence 0<t+fee<=10000 and the existing cent-aligned debit is exactly10000.
+    let eligible = false;
+    for (const tick of sidePriceTicks(marketTicks, side)) {
+      if (tick > limitTick) break;
+      if (!Number.isSafeInteger(tick) || tick <= 0 || tick >= 10000) return null;
+      eligible = true;
+    }
+    return eligible ? 1_000_000 : null;
+  }
   let maximumPerFill = 0n;
   for (const tick of sidePriceTicks(marketTicks, side)) {
     if (tick > limitTick) break;
@@ -486,6 +511,17 @@ function maximumExitLoss(
   limitTick: number | null,
   side: "yes" | "no",
 ): number | null {
+  if (m.numerator === m.denominator) {
+    // Fee<=t for every valid integer tick, so 0<=t-fee<10000. Existing
+    // cent-aligned proceeds are zero and lost proceeds are exactly t.
+    let maximumTick = 0;
+    for (const tick of sidePriceTicks(marketTicks, side)) {
+      if (limitTick !== null && tick < limitTick) continue;
+      if (!Number.isSafeInteger(tick) || tick <= 0 || tick >= 10000) return null;
+      if (tick > maximumTick) maximumTick = tick;
+    }
+    return maximumTick ? maximumTick * 100 : null;
+  }
   let maximumPerFill = 0n;
   for (const tick of sidePriceTicks(marketTicks, side)) {
     if (limitTick !== null && tick < limitTick) continue;
@@ -500,6 +536,14 @@ function maximumExitLoss(
 function maximumExitCashDebit(
   m: Multiplier, marketTicks: readonly number[], limit: number | null, side: "yes" | "no",
 ): number | null {
+  if (m.numerator === m.denominator) {
+    for (const tick of sidePriceTicks(marketTicks, side)) {
+      if (limit !== null && tick < limit) continue;
+      if (!Number.isSafeInteger(tick) || tick <= 0 || tick >= 10000) return null;
+    }
+    // Same nonnegative aligned proceeds proof as maximumExitLoss above.
+    return 0;
+  }
   let maximum = 0n;
   for (const tick of sidePriceTicks(marketTicks, side)) {
     if (limit !== null && tick < limit) continue;
