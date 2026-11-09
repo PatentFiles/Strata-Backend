@@ -1,3 +1,4 @@
+import { assertPaperAnalyticsAvailable, paperAnalyticsPaused, PAPER_ANALYTICS_PAUSE_MESSAGE } from "../lib/paperAnalyticsMaintenance";
 import { getAuth } from "@clerk/express";
 import {
   GetForwardTestHistoryResponse,
@@ -37,6 +38,7 @@ const requireUser: RequestHandler = (req, res, next) => {
 router.use("/forward-test", requireUser);
 
 export async function readForwardTestStatus() {
+  assertPaperAnalyticsAvailable();
   const [engine, statistics, [openPosition], [lastSettlement]] = await Promise.all([
     getEngineStatus(),
     process.env.NODE_ENV === "production"
@@ -172,6 +174,11 @@ router.get("/forward-test/settlement-reference", async (_req, res): Promise<void
 });
 
 router.get("/forward-test/status", async (_req, res): Promise<void> => {
+  if (paperAnalyticsPaused()) {
+    res.setHeader("Cache-Control", "no-store");
+    res.status(503).json({ error: PAPER_ANALYTICS_PAUSE_MESSAGE });
+    return;
+  }
   res.json(await readForwardTestStatus());
 });
 
@@ -219,6 +226,7 @@ export function buildForwardTestHistory(rows: ForwardTestPosition[]) {
 }
 
 export async function readForwardTestHistory() {
+  assertPaperAnalyticsAvailable();
   const rows = await db.select().from(forwardTestPositionTable)
     .where(eq(forwardTestPositionTable.engineId, FORWARD_TEST_ENGINE_ID))
     .orderBy(desc(forwardTestPositionTable.enteredAt), desc(forwardTestPositionTable.id));
@@ -241,6 +249,10 @@ export async function readForwardTestHistory() {
 
 router.get("/forward-test/history", async (_req, res): Promise<void> => {
   res.setHeader("Cache-Control","no-store");
+  if (paperAnalyticsPaused()) {
+    res.status(503).json({ error: PAPER_ANALYTICS_PAUSE_MESSAGE });
+    return;
+  }
   res.json(await readForwardTestHistory());
 });
 
