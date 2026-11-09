@@ -1,0 +1,40 @@
+name: Held read diagnostic candidate
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/**'
+      - 'artifacts/api-server/src/routes/heldReadDiagnosticRouter.ts'
+      - 'artifacts/api-server/scripts/run-held-read-diagnostic-postgres.mjs'
+      - 'artifacts/api-server/scripts/run-unknown-entry-recovery-offline.mjs'
+      - 'artifacts/api-server/scripts/unknownEntryRecoveryPostgresLifecycle.mjs'
+      - 'artifacts/api-server/package.json'
+      - 'lib/db/**'
+      - 'pnpm-lock.yaml'
+      - 'sql/**'
+      - '.github/workflows/held-read-diagnostic.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-and-disposable-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server run build
+      - name: Offline signed-read and recovery regressions
+        run: pnpm --filter @workspace/api-server run test:unknown-entry-held-recovery
+      - name: Install disposable PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+      - name: Native diagnostic scope, role, locking and quota mechanics
+        run: pnpm --filter @workspace/api-server run test:held-read-diagnostic-postgres
