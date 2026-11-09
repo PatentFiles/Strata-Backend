@@ -1610,16 +1610,22 @@ test('terminal position batches are bounded, use PK plan, exclude foreign rows, 
  const f=await fixture(),source=await f.source(),id=await f.executor.prepareEntry(source);
  f.exchange.now+=16001;f.exchange.evidence.observedAtMs=f.exchange.now;await f.executor.reconcile();
  await pool.query(`INSERT INTO v13_production_account SELECT (jsonb_populate_record(NULL::v13_production_account,to_jsonb(a)||'{"id":"foreign-batch-account","owner_user_id":"11111111-1111-4111-8111-111111111111"}'::jsonb)).* FROM v13_production_account a WHERE id='test-account'`);
- await pool.query(`INSERT INTO forward_test_evaluations SELECT (jsonb_populate_record(NULL::forward_test_evaluations,to_jsonb(e)||jsonb_build_object('id','batch-source-'||n))).*
-  FROM forward_test_evaluations e CROSS JOIN generate_series(1,10205)n WHERE e.id=$1`,[source]);
- await pool.query(`INSERT INTO v13_production_intent SELECT (jsonb_populate_record(NULL::v13_production_intent,to_jsonb(i)||jsonb_build_object(
+ // A FROM-function is evaluated once per generated row. Expanding (function()).*
+ // instead repeats the complete JSON conversion for every target column.
+ const seededSources=await pool.query(`INSERT INTO forward_test_evaluations SELECT seeded.*
+  FROM forward_test_evaluations e CROSS JOIN generate_series(1,10205)n
+  CROSS JOIN LATERAL jsonb_populate_record(NULL::forward_test_evaluations,to_jsonb(e)||jsonb_build_object('id','batch-source-'||n)) seeded WHERE e.id=$1`,[source]);
+ const seededIntents=await pool.query(`INSERT INTO v13_production_intent SELECT seeded.*
+  FROM v13_production_intent i CROSS JOIN generate_series(1,10205)n
+  CROSS JOIN LATERAL jsonb_populate_record(NULL::v13_production_intent,to_jsonb(i)||jsonb_build_object(
   'id','batch-intent-'||n,'account_id',CASE WHEN n<=205 THEN 'test-account' ELSE 'foreign-batch-account' END,
-  'evaluation_id','batch-source-'||n,'crossing_key','batch-cross-'||n,'client_order_id','batch-client-'||n))).*
-  FROM v13_production_intent i CROSS JOIN generate_series(1,10205)n WHERE i.id=$1`,[id]);
- await pool.query(`INSERT INTO v13_production_position SELECT (jsonb_populate_record(NULL::v13_production_position,to_jsonb(p)||jsonb_build_object(
+  'evaluation_id','batch-source-'||n,'crossing_key','batch-cross-'||n,'client_order_id','batch-client-'||n)) seeded WHERE i.id=$1`,[id]);
+ const seededPositions=await pool.query(`INSERT INTO v13_production_position SELECT seeded.*
+  FROM v13_production_position p CROSS JOIN generate_series(1,10205)n
+  CROSS JOIN LATERAL jsonb_populate_record(NULL::v13_production_position,to_jsonb(p)||jsonb_build_object(
   'id','batch-intent-'||n,'account_id',CASE WHEN n<=205 THEN 'test-account' ELSE 'foreign-batch-account' END,
-  'quantity_hundredths',CASE WHEN n<=205 THEN 0 ELSE 999 END))).*
-  FROM v13_production_position p CROSS JOIN generate_series(1,10205)n WHERE p.id=$1`,[id]);
+  'quantity_hundredths',CASE WHEN n<=205 THEN 0 ELSE 999 END)) seeded WHERE p.id=$1`,[id]);
+ assert.deepEqual([seededSources.rowCount,seededIntents.rowCount,seededPositions.rowCount],[10205,10205,10205]);
  await pool.query('ANALYZE v13_production_position');
  const plans=[];
  for(const ids of [[id,'batch-intent-1','batch-intent-2','batch-intent-3','batch-intent-4'],Array.from({length:100},(_,n)=>`batch-intent-${n+1}`)]){
