@@ -222,6 +222,26 @@ test("unavailable/stale/missing quote fail closed, retain the position, and reco
   assert.match((await getEngineStatus(engineId))!.currentReason!, /DATA ERROR/);
 });
 
+test("expired unresulted held market retains OPEN paper position and emits no sale capture", async () => {
+  const savedPrice = price;
+  try {
+    price = 83980; // Force a wrong-side recross for the existing UP position.
+    const expiryFeeds: ForwardTestFeeds = { ...feeds, async market(ticker) {
+      return { ...market(ticker ?? currentTicker), result: null,
+        endsAt: new Date(now.getTime() + 1), fetchedAt: new Date(now.getTime() + 1) };
+    } };
+    const pending = await cycle("worker-C", lease.leaseEpoch, expiryFeeds);
+    assert.equal(pending.error, null);
+    assert.equal(pending.signal, "EXIT", "classifier exit intent remains unchanged");
+    assert.equal(pending.researchEvent, undefined, "no hypothetical EXIT sale receipt");
+    const [position] = await db.select().from(forwardTestPositionTable)
+      .where(eq(forwardTestPositionTable.engineId, engineId));
+    assert.equal(position.status, "OPEN");
+    assert.equal(position.exitPrice, null);
+    assert.equal(position.pnl, null);
+  } finally { price = savedPrice; }
+});
+
 test("window rollover settles exactly once, and the new target cannot create an artificial crossing", async () => {
   currentTicker = nextTicker;
   result = "yes";
@@ -274,6 +294,15 @@ test("a required offer cannot trigger entry; exit, expiry, loss, and P&L match b
     endsAt: new Date(now.getTime() - 1) }, -10, null, now), null);
   assert.equal(paperClose(position, { ...quoted, result: null,
     endsAt: new Date(now.getTime() - 60_000) }, -10, null, now), null);
+  assert.equal(paperClose(position, { ...quoted, result: null,
+    endsAt: new Date(now.getTime() + 1), fetchedAt: new Date(now.getTime() + 1) },
+    -10, "Momentum invalidated", now), null);
+  for (const exitIntent of ["Momentum invalidated", "Wrong-side recross"]) {
+    for (const offset of [0, -1, -60_000]) {
+      assert.equal(paperClose(position, { ...quoted, result: null,
+        endsAt: new Date(now.getTime() + offset) }, -10, exitIntent, now), null);
+    }
+  }
   assert.equal(paperClose(position, quoted, -10, null, now), null);
 });
 

@@ -110,6 +110,13 @@ export function paperClose(
     reason = "Kalshi settled";
     settlementResult = market.result === "yes" ? "UP" : "DOWN";
   } else if (exitIntent) {
+    // Expiry is not a tradable quote or a settlement result. Retain the paper
+    // position until Kalshi publishes its result; never book a post-expiry sale.
+    // The strategy's cycle clock can precede feed acquisition. A quote decoded
+    // at/after expiry cannot become a pre-expiry sale by keeping that old clock.
+    if (market.endsAt === null || !Number.isFinite(market.endsAt.getTime()) ||
+        !Number.isFinite(now.getTime()) || !Number.isFinite(market.fetchedAt.getTime()) ||
+        market.endsAt.getTime() <= Math.max(now.getTime(), market.fetchedAt.getTime())) return null;
     const executableBid = position.direction === "UP" ? market.yesBid : market.noBid;
     if (!validOffer(executableBid)) return null;
     exitPrice = executableBid;
