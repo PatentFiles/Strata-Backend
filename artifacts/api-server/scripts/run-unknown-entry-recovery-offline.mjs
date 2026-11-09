@@ -7,7 +7,7 @@ import {spawnSync} from 'node:child_process';
 const api=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const root=mkdtempSync(join(tmpdir(),'strata-entry-recovery-offline-'));
 const entries=['strata/boundedUnknownEntryRecovery','strata/unknownEntryRecoveryHold','strata/boundedUnknownEntryReadRunner',
- 'strata/heldProtectiveMarketFee','strata/unknownEntryRecoveryAbort','v13-production/heldSessionSchedulerIntegration','v13-production/workerUnknownEntryRecovery','v13-production/heldReconciliationFence',
+ 'strata/ownedProductionKalshiRead','strata/heldProtectiveMarketFee','strata/unknownEntryRecoveryAbort','v13-production/heldSessionSchedulerIntegration','v13-production/workerUnknownEntryRecovery','v13-production/heldReconciliationFence',
  'v13-production/reconciliationReceiptLink','v13-production/workerProtectiveRecovery','v13-production/workerTechnicalRenewalDebt',
  'v13-production/workerSignalWake','strata/personalExecution','strata/personalExchangeReadCoverage','strata/personalFillTimestamp'];
 try{

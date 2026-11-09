@@ -231,9 +231,9 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
   // Exercise production checks, including real independent-release and owner
   // startup approval SQL. Do not use the NODE_ENV=test startup short circuit.
   process.env.NODE_ENV='production';process.env.RAILWAY_GIT_COMMIT_SHA=sha;
-  // The independent reservation reader uses the configured host rather than
-  // the supervisor's explicit host. Both still hit ONLY synthetic fetch.
-  process.env.KALSHI_API_ENVIRONMENT='production';
+  // Generic demo configuration must not redirect this production-owned
+  // supervisor's independent protective reads. All HTTP remains synthetic.
+  process.env.KALSHI_API_ENVIRONMENT='demo';
   process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';process.env.STRATA_UNKNOWN_ENTRY_PROTECTIVE_RECOVERY_ENABLED='true';
   {
    const external=externalFixture(scenario);globalThis.fetch=external.transport;
