@@ -1,0 +1,39 @@
+✔ single-use runner never overlaps or grants trading authority (2.231712ms)
+✔ authorization failure is terminal before read (1.490756ms)
+✔ clock expiry after read cannot accept snapshot (1.175972ms)
+✔ timeout abandoning abort-ignoring read never retries (1.925169ms)
+✔ concurrent invocation refused before transport (1.649929ms)
+✔ authorization consuming deadline cannot begin transport (1.098271ms)
+✔ dependency mutation cannot replace held transport (0.450648ms)
+✔ one read in flight and no order authority (9.552348ms)
+✔ successful read is not accounting or trading authority (2.341626ms)
+✔ read_failed rejects wrong attempt (1.326449ms)
+✔ read_failed rejects changed fence (0.195851ms)
+✔ read_failed rejects expired evidence (0.177409ms)
+✔ read_completed rejects wrong attempt (0.109726ms)
+✔ read_completed rejects changed fence (0.175985ms)
+✔ read_completed rejects expired evidence (0.837741ms)
+✔ stop never restarts (6.155281ms)
+✔ three failed reads maximum with backoff (3.432674ms)
+✔ regressing clock fails closed (0.228594ms)
+✔ invalid initial scope rejected (0.885266ms)
+✔ late duplicate completion fails closed rather than starting another action (0.297095ms)
+✔ hold uses account then exact lease then intent; sole update disarms (2.257159ms)
+✔ rollback on SELECT id FROM public.v13_production_account (0.363326ms)
+✔ rollback on SELECT fencing_token (0.383497ms)
+✔ rollback on SELECT id FROM public.v13_production_intent (0.252708ms)
+✔ rollback on SELECT p.policy_hash (0.207725ms)
+✔ rollback on UPDATE private (0.18056ms)
+✔ lost commit acknowledgment cannot retry or claim hold (0.403361ms)
+✔ missing/changed lease refuses before writing (0.568717ms)
+✔ invalid scope does not connect (0.585521ms)
+✔ caller mutation during connect cannot mix account scope (0.610582ms)
+✔ release failure does not erase committed outcome (0.288931ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 677.767809

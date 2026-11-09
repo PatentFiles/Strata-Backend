@@ -12,6 +12,16 @@ import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCa
 export const PERSONAL_KALSHI_HOST = "https://external-api.kalshi.com";
 export const PERSONAL_MARKET_METADATA_HOST = "https://external-api.kalshi.com/trade-api/v2";
 
+/** Personal-owned account identity is production-only. Do not let a generic
+ * client/demo environment setting redirect protective reads to a different
+ * account universe. Explicit injected readers remain available to sandboxes.
+ * Preserve original transport identity, quota owner and cancellation signal.
+ */
+export const getOwnedProductionKalshiJson:typeof getScopedKalshiJson=(
+ creds,path,query="",fetchImpl=fetch,_host,rateLimitOwnerId,externalSignal,
+)=>getScopedKalshiJson(creds,path,query,fetchImpl,PERSONAL_KALSHI_HOST,rateLimitOwnerId,externalSignal);
+
+
 const BALANCE_PATH = "/trade-api/v2/portfolio/balance";
 const ORDER_PATH = "/trade-api/v2/portfolio/orders";
 const FILL_PATH = "/trade-api/v2/portfolio/fills";
@@ -67,7 +77,7 @@ export interface OwnedKalshiRead {
 export async function readOwnedKalshiFeeds(
   creds: { keyId: string; privateKey: string },
   nowMs: number,
-  get: typeof getScopedKalshiJson = getScopedKalshiJson,
+  get: typeof getScopedKalshiJson = getOwnedProductionKalshiJson,
 ): Promise<OwnedKalshiRead | { ok: false; reason: string }> {
   let balance: unknown;
   try {

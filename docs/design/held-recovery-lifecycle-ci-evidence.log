@@ -1,0 +1,20 @@
+Source: https://github.com/PatentFiles/Strata-Backend/actions/runs/42630320411/job/129204657114
+Commit: fa6ab2e866923632844f7b24114d83d41d504671
+Tree: 26b7df608e8771dbe496bd0c3fe952802dbfd652
+Workflow passed, including typecheck/build. Selected verbatim log lines:
+2026-11-09T14:00:13.2828790Z ℹ tests 157
+2026-11-09T14:00:13.2829197Z ℹ pass 157
+2026-11-09T14:00:13.2829470Z ℹ fail 0
+2026-11-09T14:00:21.6058481Z ℹ tests 10
+2026-11-09T14:00:21.6059362Z ℹ pass 10
+2026-11-09T14:00:21.6059766Z ℹ fail 0
+2026-11-09T14:00:29.1645378Z   ✔ UNKNOWN protective lifecycle: exact 0/300 SELL fill, durable recovery, held native accounting, no duplicate (255.371208ms)
+2026-11-09T14:00:29.4004435Z   ✔ UNKNOWN protective lifecycle: exact 100/300 SELL fill, durable recovery, held native accounting, no duplicate (235.833845ms)
+2026-11-09T14:00:29.6497897Z   ✔ UNKNOWN protective lifecycle: exact 300/300 SELL fill, durable recovery, held native accounting, no duplicate (249.090741ms)
+2026-11-09T14:00:29.8380716Z   ✔ missing exact position GET keeps protective UNKNOWN and held native accounting blocked (188.093009ms)
+2026-11-09T14:00:30.0443043Z   ✔ lost protective reconciliation COMMIT acknowledgment exposes uncertainty, never a retry or financial continuation (206.17294ms)
+2026-11-09T14:00:30.2632647Z   ✔ expired markerless PREPARED exit uses original never-posted recovery, not an order or duplicate (218.902676ms)
+2026-11-09T14:00:30.4380852Z   ✔ PREPARED reservation retains its independent-activity block even when native intent has expired (174.701574ms)
+2026-11-09T14:00:30.6319090Z ℹ tests 22
+2026-11-09T14:00:30.6319995Z ℹ pass 22
+2026-11-09T14:00:30.6320385Z ℹ fail 0

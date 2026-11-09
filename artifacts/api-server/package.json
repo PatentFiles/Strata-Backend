@@ -82,7 +82,9 @@
     "test:analytics-drain-unit": "esbuild src/lib/readOnlyAnalyticsBatch.test.ts src/lib/readOnlyAnalyticsCache.test.ts --bundle --platform=node --format=cjs --outdir=dist/analytics-drain --out-extension:.js=.cjs && node --unhandled-rejections=strict --test dist/analytics-drain/readOnlyAnalyticsBatch.test.cjs dist/analytics-drain/readOnlyAnalyticsCache.test.cjs && esbuild src/lib/readOnlyAnalyticsBatch.repository.test.ts --bundle --platform=node --format=cjs --outfile=dist/analytics-drain/readOnlyAnalyticsBatch.repository.test.cjs --alias:@workspace/db=./src/lib/readOnlyAnalyticsBatch.testDb.ts && node --unhandled-rejections=strict --test dist/analytics-drain/readOnlyAnalyticsBatch.repository.test.cjs && node --test scripts/analyticsDrainPostgresLifecycle.test.mjs",
     "test:analytics-drain-postgres": "node scripts/run-analytics-drain-postgres.mjs",
     "test:owner-unknown-recovery": "node --test scripts/run-owner-unknown-recovery.test.mjs && node scripts/run-owner-unknown-recovery.mjs",
-    "test:owner-unknown-recovery-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecovery.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecoverySchema.postgres.test.ts"
+    "test:owner-unknown-recovery-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecovery.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerUnknownRecoverySchema.postgres.test.ts",
+    "test:unknown-entry-held-recovery": "node scripts/run-unknown-entry-recovery-offline.mjs",
+    "test:unknown-entry-held-recovery-postgres": "node scripts/run-unknown-entry-hold-postgres.mjs && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldReconciliationFence.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorDispatch.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorNoSend.postgres.test.ts && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/heldSupervisorAmbiguous.postgres.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",
