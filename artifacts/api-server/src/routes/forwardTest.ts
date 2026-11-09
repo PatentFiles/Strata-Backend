@@ -234,7 +234,7 @@ export async function readForwardTestHistory() {
   // Additive research evidence. Missing migration is UNAVAILABLE, never "zero
   // depth" or proof that market orders would not have filled. Preserve history.
   try{
-    const observed=await readPaperBookCaptureCoverage(FORWARD_TEST_ENGINE_ID);
+    const observed=await readPaperBookCaptureCoverage(FORWARD_TEST_ENGINE_ID,rows);
     return {...original,bookCaptureEvidence:{...observed,
       paperPositions:rows.filter(r=>r.status!=="OPEN").length,
       captureStatus:"AVAILABLE" as const}};
