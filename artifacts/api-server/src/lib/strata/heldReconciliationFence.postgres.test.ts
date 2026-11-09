@@ -1,5 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {generateKeyPairSync,createHash} from 'node:crypto';
+import {dedicatedSignerFingerprint} from './commissioning';
+import {readOwnedKalshiFeeds} from './personalExchangeRead';
+import {readAuthenticatedProtectiveExitOutcome} from './ownerFeeEmergencyExitAuthenticatedRecovery';
+import {persistAuthenticatedExitReconciliation} from './ownerFeeEmergencyExitReconciliationCommit';
+import {reconcileUnknownProtectiveExitAfterRestart} from './ownerFeeEmergencyExitRestartRecovery';
+import {reconcileOwnedProtectiveExits} from './ownerFeeEmergencyExitWorkerRecovery';
+import {recoverPreparedOwnedExitIntents} from './preparedProtectiveExitRecovery';
+import type {Account,ReconciliationIntent} from '../v13-production/ledger';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {ProductionLedger,HeldReconciliationCommitUncertain,identity,type HeldReconciliationGuard} from '../v13-production/ledger';
 import {digest,type Request,type Snapshot} from '../v13-production/types';
@@ -17,7 +26,9 @@ const db=new NativePool({connectionString:url,options:`-c role=${backendRole}`})
 const owner='11111111-1111-4111-8111-111111111111',target='22222222-2222-4222-8222-222222222222';
 const financial='33333333-3333-4333-8333-333333333333',provider='44444444-4444-4444-8444-444444444444';
 const secret='55555555-5555-4555-8555-555555555555',credential='66666666-6666-4666-8666-666666666666';
-const account='full-schema-synthetic',hash='a'.repeat(64),policy='full-schema-policy',fingerprint='b'.repeat(64);
+const account='full-schema-synthetic',hash='a'.repeat(64),policy='full-schema-policy';
+const material={keyId:'offline-ephemeral-only',privateKey:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}).toString()};
+const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
 const request:Request={market:'KXBTC15M-SYNTHETIC',side:'NO',action:'BUY',contracts:3,limitMicros:430000,
  timeInForce:'IOC',reduceOnly:false,clientOrderId:`v13p-${target}`};
 const scope={ownerId:owner,accountId:account,intentId:target,holderId:'offline-worker',fencingToken:'7',
@@ -103,6 +114,66 @@ function commitAckLossPool():Pool {
  }} as Pool;
 }
 
+const exitId='88888888-8888-4888-8888-888888888888',reservationId='99999999-9999-4999-8999-999999999999';
+const exitRequest:Request={market:request.market,side:'NO',action:'SELL',contracts:3,limitMicros:400000,
+ timeInForce:'IOC',reduceOnly:true,clientOrderId:`v13p-${exitId}`};
+const exitOrder={ticker:request.market,side:'bid',count:'3.00',price:'0.6000',client_order_id:exitRequest.clientOrderId,
+ time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,reduce_only:true,subaccount:1,exchange_index:2} as const;
+async function seedExit(state:'PREPARED'|'UNKNOWN',withMarker:boolean){
+ const at=Date.now()-500,decision={ownedEvaluation:{source:{evaluated_at:new Date(at-2000).toISOString()}},policy:{maxQuoteAgeMs:1000}};
+ const capability=digest({id:exitId,request:exitRequest,decision,policyHash:hash,fee:hash});
+ await db.query(`INSERT INTO public.v13_production_intent(id,account_id,parent_id,kind,market,side,state,
+  request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros,created_at,dispatch_at)
+  VALUES($1,$2,$3,'EXIT',$4,'NO',$5,$6::jsonb,$7::jsonb,$8,$8,$9,$10,0,0,$11,$12)`,
+  [exitId,account,target,request.market,state,JSON.stringify(exitRequest),JSON.stringify(decision),hash,capability,exitRequest.clientOrderId,
+   new Date(at),state==='UNKNOWN'?new Date(at):null]);
+ if(withMarker){
+  const raw=JSON.stringify(exitOrder),orderDigest=createHash('sha256').update(raw).digest('hex');
+  await db.query(`INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,
+   market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,
+   initial_position_fp,position_observed_at_ms,order_request_json)
+   VALUES($1,$2,$3,$4,$5,'NO',300,$6,7,'offline-worker','-3.00',$7,$8)`,
+   [reservationId,owner,account,request.market,exitRequest.clientOrderId,orderDigest,at,raw]);
+  if(state==='UNKNOWN')await db.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN',updated_at=clock_timestamp() WHERE reservation_id=$1",[reservationId]);
+ }
+ return at;
+}
+async function stillHeld(){
+ const lease=(await db.query('SELECT arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1',[account])).rows[0];
+ assert.equal(lease.arm_requested,false);
+ assert.equal((await state()).account.blocked_reason,'personal_exchange_history_unreconciled');
+ assert.equal((await db.query("SELECT count(*)::int AS n FROM public.v13_production_intent WHERE account_id=$1 AND kind='EXIT'",[account])).rows[0].n,1);
+}
+class PreparedExitTestLedger extends ProductionLedger {
+ protected override async recoverPreparedExits(tx:PoolClient,a:Account,intents:ReconciliationIntent[],snapshot:Snapshot){
+  await recoverPreparedOwnedExitIntents(tx,{ownerId:owner,account:a,intents,snapshot,
+   observe:async(kind,value)=>{await this.observe(tx,kind,value);}});
+ }
+}
+
+function recoveryPorts(filled:number,baselineAt:number,at:number,persistence:Pool=db,omitPosition=false){
+ const filledFp=(filled/100).toFixed(2),leftFp=((300-filled)/100).toFixed(2);
+ let getReads=0;
+   const ports={
+    readOutcome:(input:Parameters<typeof readAuthenticatedProtectiveExitOutcome>[0],receipt:Parameters<typeof readAuthenticatedProtectiveExitOutcome>[1])=>
+     readAuthenticatedProtectiveExitOutcome(input,receipt,{db,readFeeds:(creds,observedAt)=>readOwnedKalshiFeeds(creds,observedAt,async(_creds,path)=>{
+      getReads++;
+      if(path.endsWith('/balance'))return {balance_dollars:'25.0000',subaccount:1,exchange_index:2};
+      if(path.includes('/historical/'))return {orders:[],fills:[],cursor:''};
+      if(path.endsWith('/orders'))return {orders:[{order_id:'offline-exit-order',client_order_id:exitRequest.clientOrderId,ticker:request.market,
+       book_side:'bid',side:'no',action:'sell',subaccount_number:1,exchange_index:2,created_time:new Date(baselineAt).toISOString(),
+       yes_price_dollars:'0.6000',initial_count_fp:'3.00',fill_count_fp:filledFp,remaining_count_fp:'0.00',status:filled===300?'executed':'canceled'}],cursor:''};
+      if(path.endsWith('/fills'))return {fills:filled?[{trade_id:'offline-exit-fill',order_id:'offline-exit-order',ticker:request.market,
+       count_fp:filledFp,subaccount_number:1,exchange_index:2,created_time:new Date(at).toISOString()}]:[],cursor:''};
+      if(path.endsWith('/positions'))return {market_positions:omitPosition?[]:[{ticker:request.market,position_fp:filled===300?'0.00':'-'+leftFp}],cursor:''};
+      if(path.endsWith('/settlements'))return {settlements:[],cursor:''};
+      throw Error('unexpected_synthetic_GET_path');
+     })}),
+    persistReconciled:(input:Parameters<typeof persistAuthenticatedExitReconciliation>[0],observation:Parameters<typeof persistAuthenticatedExitReconciliation>[1])=>persistAuthenticatedExitReconciliation(input,observation,{db:persistence}),
+   };
+ return {ports,getReads:()=>getReads};
+}
+
 test('native held reconciliation uses full migrated schema and real financial writes',{timeout:120000},async t=>{
  try {
   const admin=await pool.connect();
@@ -169,6 +240,86 @@ test('native held reconciliation uses full migrated schema and real financial wr
    const ledger=new ProductionLedger(db,account),snap=await evidence(ledger),before=await state();
    await assert.rejects(ledger.reconcileHeld(snap,'7',guard()),/independent_activity_pending/);
    assert.deepEqual(await state(),before);
+  });
+  for(const filled of [0,100,300]) await t.test(`UNKNOWN protective lifecycle: exact ${filled}/300 SELL fill, durable recovery, held native accounting, no duplicate`,async()=>{
+   await reset();const ledger=new ProductionLedger(db,account),entry=await evidence(ledger);
+   await ledger.reconcileHeld(entry,'7',guard());const baselineAt=await seedExit('UNKNOWN',true);
+   await assert.rejects(db.query(`INSERT INTO public.v13_production_intent(id,account_id,parent_id,kind,market,side,state,
+    request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
+    SELECT 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',account_id,parent_id,kind,market,side,state,
+     jsonb_set(request,'{clientOrderId}','"v13p-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"'),decision,policy_hash,fee_fingerprint,
+     capability_digest,'v13p-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',0,0 FROM public.v13_production_intent WHERE id=$1`,[exitId]),
+    /v13_production_one_unresolved_exit/);
+   const before=await state();
+   await assert.rejects(ledger.reconcileHeld(entry,'8',guard()),/independent_activity_pending/);
+   assert.deepEqual(await state(),before);
+   const at=Date.now();
+   const {ports,getReads}=recoveryPorts(filled,baselineAt,at);
+   const recovered=await reconcileOwnedProtectiveExits({ownerId:owner,accountId:account,material},db,
+    {recover:(input)=>reconcileUnknownProtectiveExitAfterRestart(input,ports)});
+   assert.equal(recovered.ok,true,JSON.stringify(recovered));assert.equal(recovered.mayRetry,false);assert.equal(recovered.postAttempted,false);
+   assert.equal(getReads(),7);
+   const repeated=await reconcileOwnedProtectiveExits({ownerId:owner,accountId:account,material},db,
+    {recover:async()=>{throw Error('duplicate recovery called');}});
+   assert.equal(repeated.attempted,0);assert.equal(repeated.postAttempted,false);
+   const snap=structuredClone(entry),fee=filled?10000:0,gross=filled*4000;
+   snap.observedAtMs=Date.now();snap.cashMicros=String(23720000+gross-fee);
+   snap.orders.push({orderId:'offline-exit-order',request:exitRequest,terminal:true,filledHundredths:String(filled)});
+   if(filled)snap.fills.push({id:'offline-exit-fill',orderId:'offline-exit-order',clientOrderId:exitRequest.clientOrderId,
+    market:request.market,side:'NO',action:'SELL',quantityHundredths:String(filled),priceMicros:400000,grossMicros:String(gross),feeMicros:String(fee),occurredAtMs:at});
+   snap.positions=filled===300?[]:[{market:request.market,side:'NO',quantityHundredths:String(300-filled)}];
+   await ledger.reconcileHeld(snap,'8',guard());
+   const first=await state();assert.equal(first.position.quantity_hundredths,String(300-filled));
+   assert.equal(first.account.cash_micros,snap.cashMicros);assert.equal(first.account.reserved_micros,filled===300?'0':'50000');
+   const exit=(await db.query('SELECT state,terminal,filled_hundredths FROM public.v13_production_intent WHERE id=$1',[exitId])).rows[0];
+   assert.deepEqual(exit,{state:'TERMINAL',terminal:true,filled_hundredths:String(filled)});
+   await ledger.reconcileHeld(snap,'9',guard());const second=await state();
+   assert.deepEqual(second.position,first.position);assert.deepEqual(second.events,first.events);
+   assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[reservationId])).rows[0].n,1);
+   await stillHeld();
+  });
+  await t.test('missing exact position GET keeps protective UNKNOWN and held native accounting blocked',async()=>{
+   await reset();const ledger=new ProductionLedger(db,account),entry=await evidence(ledger);
+   await ledger.reconcileHeld(entry,'7',guard());const baselineAt=await seedExit('UNKNOWN',true),before=await state();
+   const {ports}=recoveryPorts(300,baselineAt,Date.now(),db,true);
+   const outcome=await reconcileOwnedProtectiveExits({ownerId:owner,accountId:account,material},db,
+    {recover:(input)=>reconcileUnknownProtectiveExitAfterRestart(input,ports)});
+   assert.equal(outcome.ok,false);assert.equal(outcome.mayRetry,false);assert.equal(outcome.postAttempted,false);
+   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1',[reservationId])).rows[0].state,'UNKNOWN');
+   await assert.rejects(ledger.reconcileHeld(entry,'8',guard()),/independent_activity_pending/);
+   assert.deepEqual(await state(),before);await stillHeld();
+  });
+  await t.test('lost protective reconciliation COMMIT acknowledgment exposes uncertainty, never a retry or financial continuation',async()=>{
+   await reset();const ledger=new ProductionLedger(db,account),entry=await evidence(ledger);
+   await ledger.reconcileHeld(entry,'7',guard());const baselineAt=await seedExit('UNKNOWN',true),before=await state();
+   const {ports}=recoveryPorts(300,baselineAt,Date.now(),commitAckLossPool());
+   const outcome=await reconcileUnknownProtectiveExitAfterRestart({ownerId:owner,accountId:account,reservationId,material,order:exitOrder},ports);
+   assert.equal(outcome.state,'UNKNOWN');assert.equal(outcome.reconciliationCommitState,'UNKNOWN');
+   assert.equal(outcome.mayRetry,false);assert.equal(outcome.postAttempted,false);
+   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1',[reservationId])).rows[0].state,'RECONCILED');
+   assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_reconciliations WHERE reservation_id=$1',[reservationId])).rows[0].n,1);
+   // Test deliberately stops here: uncertain outcome must not be interpreted
+   // as authority to continue accounting or to send another protective order.
+   assert.deepEqual(await state(),before);await stillHeld();
+  });
+  await t.test('expired markerless PREPARED exit uses original never-posted recovery, not an order or duplicate',async()=>{
+   await reset();const ledger=new PreparedExitTestLedger(db,account),entry=await evidence(ledger);
+   await ledger.reconcileHeld(entry,'7',guard());await seedExit('PREPARED',false);
+   const snap={...entry,observedAtMs:Date.now()};
+   await ledger.reconcileHeld(snap,'8',guard());
+   const exit=(await db.query('SELECT state,terminal,dispatch_at FROM public.v13_production_intent WHERE id=$1',[exitId])).rows[0];
+   assert.deepEqual(exit,{state:'BLOCKED',terminal:true,dispatch_at:null});
+   await ledger.reconcileHeld(snap,'9',guard());
+   assert.equal((await db.query("SELECT count(*)::int AS n FROM public.v13_production_observation WHERE account_id=$1 AND kind='PROVEN_NOT_POSTED'",[account])).rows[0].n,1);
+   assert.equal((await state()).position.quantity_hundredths,'300');await stillHeld();
+  });
+  await t.test('PREPARED reservation retains its independent-activity block even when native intent has expired',async()=>{
+   await reset();const ledger=new PreparedExitTestLedger(db,account),entry=await evidence(ledger);
+   await ledger.reconcileHeld(entry,'7',guard());await seedExit('PREPARED',true);const before=await state();
+   await assert.rejects(ledger.reconcileHeld({...entry,observedAtMs:Date.now()},'8',guard()),/independent_activity_pending/);
+   assert.deepEqual(await state(),before);
+   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1',[reservationId])).rows[0].state,'PREPARED');
+   await stillHeld();
   });
   await t.test('native COMMIT succeeds but lost acknowledgment is uncertain, not replayed',async()=>{
    await reset();const ledger=new ProductionLedger(commitAckLossPool(),account),snap=await evidence(new ProductionLedger(db,account));

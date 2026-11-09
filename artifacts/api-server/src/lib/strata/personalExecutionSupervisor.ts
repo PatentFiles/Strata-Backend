@@ -1,3 +1,4 @@
+import {readHeldProtectiveMarketFee} from "./heldProtectiveMarketFee";
 import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
 import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
 import {createBoundedUnknownEntryReadRunner} from "./boundedUnknownEntryReadRunner";
@@ -391,6 +392,7 @@ export function createProductionPersonalSession(
     let recoveryAbort:AbortController|null=null;
     const metadataScope=()=>({accountId:input.accountId,ownerId:input.userId,releaseSha:deployedGitSha(),
       holderId,fence:String(state.fencingToken),policyHash});
+    let heldRecoveryScope:RecoveryHoldScope|null=null;
     const session = openOwnedExecutionSession({
       pool: db as Pool,
       ownerUserId: input.userId,
@@ -555,7 +557,11 @@ export function createProductionPersonalSession(
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               const feeReads=createFeeVerificationTiming();
               try {
-              if(apiSource){
+              if(heldRecoveryScope){
+                feeVerifiedAt=await readHeldProtectiveMarketFee({ownerId:input.userId,accountId:input.accountId,
+                  market,sourceUrl,policyVersion,formulaVersion,digest});
+                feeCheckedAt=clock;
+              }else if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
                   sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
                     feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
@@ -619,7 +625,6 @@ export function createProductionPersonalSession(
     // Opt-in, same owning session only. Process loss never reconstitutes this
     // mode: claimWorkerLease still refuses an already-owned lease. KILL remains
     // a full halt, and no recovery callback can submit an order itself.
-    let heldRecoveryScope:RecoveryHoldScope|null=null;
     let recoveryAttempted=false;
     session.worker.heldRecoveryActive=()=>heldRecoveryScope!==null;
     session.worker.recoverUnreconciledEntry=async error=>{
