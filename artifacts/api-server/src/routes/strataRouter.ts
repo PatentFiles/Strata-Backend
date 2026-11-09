@@ -1,3 +1,4 @@
+import { paperAnalyticsPaused, PAPER_ANALYTICS_PAUSE_MESSAGE } from "../lib/paperAnalyticsMaintenance";
 import {createOwnerUnknownRecoveryRouter} from "./ownerUnknownRecoveryRouter";
 import type {OwnerUnknownRecoveryPort} from "../lib/strata/ownerUnknownRecoveryService";
 import { EmergencyStopMicroLiveBody } from "@workspace/api-zod";
@@ -192,6 +193,11 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     }));
   });
   router.get("/forward-test/status", access.requireUser, async (_req, res) => {
+    if (paperAnalyticsPaused()) {
+      res.setHeader("Cache-Control", "no-store");
+      res.status(503).json({ error: PAPER_ANALYTICS_PAUSE_MESSAGE });
+      return;
+    }
     try { res.json(await deps.forwardTestStatus()); }
     catch { res.status(503).json({ error: "Forward-test status is unavailable" }); }
   });
@@ -238,6 +244,11 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     catch{res.status(503).json({error:"Market data research diagnostics unavailable"});}
   });
   router.get("/forward-test/history", access.requireUser, async (_req, res) => {
+    if (paperAnalyticsPaused()) {
+      res.setHeader("Cache-Control", "no-store");
+      res.status(503).json({ error: PAPER_ANALYTICS_PAUSE_MESSAGE });
+      return;
+    }
     res.setHeader("Cache-Control","no-store");
     try { res.json(await deps.forwardTestHistory()); }
     catch { res.status(503).json({ error: "Forward-test history is unavailable" }); }

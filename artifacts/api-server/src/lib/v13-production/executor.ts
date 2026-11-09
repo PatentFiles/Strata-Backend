@@ -60,6 +60,9 @@ export class ProductionExecutor {
 
   /** Server-owned hooks; snapshot acquisition alone must never renew authority. */
   afterReconcile: ((snapshot: Snapshot, subtimings?:ExecutionSubtimings, scheduling?:ReconcileSchedulingContext) => Promise<ReconcileSchedulingResult>) | null = null;
+  /** Sticky same-session recovery. Server-owned closure always uses native held
+   * ledger reconciliation; presence suppresses authority renewal permanently. */
+  heldReconcile: ((snapshot:Snapshot,revision:string)=>Promise<{accountId:string;observationId:string}>)|null=null;
   /** Public-only optional scheduling hook. Never fee/account/order authority. */
   prefetchCommittedPublicMetadata: ((hint:CommittedForwardSourceHint)=>{
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
@@ -178,10 +181,12 @@ export class ProductionExecutor {
       try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot()});}
       catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
       const commit=this.startTiming("ledger_reconcile_commit");
-      try {const reconciliationReceipt=await this.ledger.reconcile(snapshot,a.revision,this.now());
+      try {const reconciliationReceipt=this.heldReconcile
+          ?await this.heldReconcile(snapshot,a.revision)
+          :await this.ledger.reconcile(snapshot,a.revision,this.now());
         commit("completed",{reconciliationReceipt});}
       catch(error){commit("rejected",{error});throw error;}
-      if(this.afterReconcile){
+      if(this.afterReconcile&&!this.heldReconcile){
         const after=this.startTiming("after_reconcile"),subtimings=new ExecutionSubtimings();
         try{schedulingResult=await this.afterReconcile(snapshot,subtimings,scheduling);after("completed",{substageTimings:subtimings.snapshot(true)});}
         catch(error){after("rejected",{error,substageTimings:subtimings.snapshot(false)});throw error;}

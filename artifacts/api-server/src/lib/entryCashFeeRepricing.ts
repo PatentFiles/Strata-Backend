@@ -84,6 +84,34 @@ export function validEntryFeePriceGrid(fee: V13VerifiedFeeEvidence, grid: unknow
  * SAME independently verified model/grid. This neither supplies depth nor
  * authorizes selection, reprices a persisted request, resets a clock or renews
  * an approval. Missing historical grid evidence is never reconstructed. */
+/** Invocation-local arithmetic only. Capture independent input bytes before
+ * returning a repricer; caller mutation cannot change the verified basis. No
+ * provider/authority result is cached and this closure never samples a clock. */
+export function prepareVerifiedEntryFeeRepricing(
+  fee: V13VerifiedFeeEvidence,
+  grid: unknown,
+): ((contracts: number, limitPrice: number) => V13VerifiedFeeEvidence | null) | null {
+  const parsed = verifiedGrid(fee, grid);
+  if (!parsed || !fee.cashRisk) return null;
+  const basis = structuredClone(fee);
+  return (contracts, limitPrice) => {
+    if (!Number.isSafeInteger(contracts) || contracts < 1 || contracts > 999999999) return null;
+    const selected = bounds(parsed, basis.cashRisk!.side, limitPrice);
+    if (!selected || selected.cash !== basis.cashRisk!.entryCashDebitPerContractMicros ||
+        selected.exit !== basis.cashRisk!.exitLossPerContractMicros) return null;
+    const cents = (per: number) => Number((BigInt(per) * BigInt(contracts) + 9999n) / 10000n);
+    const result: V13VerifiedFeeEvidence = structuredClone(basis);
+    result.contracts = contracts;
+    result.limitPrice = limitPrice;
+    result.cashRisk = { ...result.cashRisk!, entryCashDebitPerContractMicros: selected.cash,
+      entryTradeFeePerContractMicros: selected.trade, exitLossPerContractMicros: selected.exit };
+    result.reservedEntryFeeCents = cents(selected.trade);
+    result.reservedExitFeeCents = cents(selected.exit);
+    result.fingerprint = cashRiskFeeFingerprint(result);
+    return validEntryCashRisk(result) ? result : null;
+  };
+}
+
 export function repriceVerifiedEntryFee(
   fee: V13VerifiedFeeEvidence,
   grid: unknown,
@@ -91,20 +119,5 @@ export function repriceVerifiedEntryFee(
   limitPrice: number,
 ): V13VerifiedFeeEvidence | null {
   if (!Number.isSafeInteger(contracts) || contracts < 1 || contracts > 999999999) return null;
-  const parsed = verifiedGrid(fee, grid);
-  if (!parsed || !fee.cashRisk) return null;
-  const selected = bounds(parsed, fee.cashRisk.side, limitPrice);
-  if (!selected || selected.cash !== fee.cashRisk.entryCashDebitPerContractMicros ||
-      selected.exit !== fee.cashRisk.exitLossPerContractMicros) return null;
-  const cents = (per: number) => Number((BigInt(per) * BigInt(contracts) + 9999n) / 10000n);
-  // Clone, rather than mutate or retain an alias to the original grid receipt.
-  const result: V13VerifiedFeeEvidence = structuredClone(fee);
-  result.contracts = contracts;
-  result.limitPrice = limitPrice;
-  result.cashRisk = { ...result.cashRisk!, entryCashDebitPerContractMicros: selected.cash,
-    entryTradeFeePerContractMicros: selected.trade, exitLossPerContractMicros: selected.exit };
-  result.reservedEntryFeeCents = cents(selected.trade);
-  result.reservedExitFeeCents = cents(selected.exit);
-  result.fingerprint = cashRiskFeeFingerprint(result);
-  return validEntryCashRisk(result) ? result : null;
+  return prepareVerifiedEntryFeeRepricing(fee, grid)?.(contracts, limitPrice) ?? null;
 }

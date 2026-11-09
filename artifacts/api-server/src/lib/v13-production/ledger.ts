@@ -52,6 +52,25 @@ export function decodePolicy(row: Record<string, unknown>): V13ApprovedLiveMoney
   return decoded as V13ApprovedLiveMoneyPolicy;
 }
 
+/** Server-owned callbacks only, never request JSON. The lock hook must pin the
+ * exact held lease, policy, credential and independent financial writers using
+ * this client. beforeCommit revalidates that authority without renewing it.
+ * This opt-in primitive provides accounting evidence, never execution authority. */
+export type HeldReconciliationGuard = {
+  lock(tx: PoolClient, account: Account): Promise<void>;
+  beforeCommit(tx: PoolClient, account: Account): Promise<void>;
+  now(): number;
+  deadlineMs: number;
+};
+export type HeldReconciliationReceipt = {
+  accountId: string; observationId: string; receiptId: string;
+  revision: string; financialDigest: string;
+};
+export class HeldReconciliationCommitUncertain extends Error {
+  constructor() { super("production_held_reconciliation_commit_uncertain");
+    this.name = "HeldReconciliationCommitUncertain"; }
+}
+
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
   private readonly finalSnapshotIntent = new AsyncLocalStorage<{ active: boolean; entryIntentId: string | null }>();
@@ -240,10 +259,111 @@ export class ProductionLedger {
     _intents: ReconciliationIntent[], _snapshot: Snapshot): Promise<void> {}
 
   async reconcile(snapshot: Snapshot, expectedRevision: string, nowMs: number): Promise<{accountId:string;observationId:string}> {
+    return this.reconcileInternal(snapshot, expectedRevision, nowMs);
+  }
+
+  /** Same financial validation as reconcile, with no out-of-transaction freeze
+   * on failure. Caller must abandon a refused/uncertain held session, retain its
+   * entry hold and inspect durable state; it must never automatically replay. */
+  async reconcileHeld(snapshot: Snapshot, expectedRevision: string,
+    guard: HeldReconciliationGuard): Promise<HeldReconciliationReceipt> {
+    // Pin references and authenticated evidence before the first await.
+    const held = { lock: guard.lock.bind(guard), beforeCommit: guard.beforeCommit.bind(guard),
+      now: guard.now.bind(guard), deadlineMs: guard.deadlineMs };
+    const evidence = structuredClone(snapshot);
+    const started = held.now();
+    requireProof(Number.isSafeInteger(started) && Number.isSafeInteger(held.deadlineMs) &&
+      held.deadlineMs > started && held.deadlineMs - started <= 15_000,
+      "production_held_reconciliation_deadline_invalid");
+    let last = started;
+    const check = () => {
+      const now = held.now();
+      requireProof(Number.isSafeInteger(now) && now >= last && now < held.deadlineMs &&
+        evidence.observedAtMs <= now && now - evidence.observedAtMs <= 15_000,
+        "production_held_reconciliation_expired_or_clock_invalid");
+      last = now;
+      return now;
+    };
+    return this.reconcileInternal(evidence, expectedRevision, started,
+      { ...held, check }) as Promise<HeldReconciliationReceipt>;
+  }
+
+  private async heldReconciliationTransaction(
+    body: (tx: PoolClient, account: Account) => Promise<{accountId:string;observationId:string}>,
+    held: HeldReconciliationGuard & {check():number}, evidenceDigest: string,
+  ): Promise<HeldReconciliationReceipt> {
+    requireProof(!this.currentTransaction(), "production_held_reconciliation_nested_transaction");
+    held.check();
+    const tx = await this.pool.connect();
+    const connection = transactionConnectionFence(tx);
+    let discard = false, commitAttempted = false;
+    try {
+      const now = held.check();
+      connection.assertLive();
+      await tx.query("BEGIN");
+      await tx.query("SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+        ["750ms", `${held.deadlineMs - now}ms`]);
+      const {rows} = await tx.query<Account>("SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE", [this.accountId]);
+      requireProof(rows.length === 1, "production_account_missing");
+      const a = rows[0]!;
+      return await this.context.run(tx, async () => {
+        held.check(); connection.assertLive();
+        await held.lock(tx, a);
+        held.check(); connection.assertLive();
+        const result = await body(tx, a);
+        const revision = String(BigInt(a.revision) + 1n);
+        const financialDigest = digest({accountId: a.id, revision, cashMicros: a.cash_micros,
+          reservedMicros: a.reserved_micros, blockedReason: a.blocked_reason, evidenceDigest});
+        const receiptId = await this.observe(tx, "HELD_RECONCILIATION_RECEIPT",
+          {...result, revision, financialDigest, evidenceDigest});
+        held.check(); connection.assertLive();
+        await held.beforeCommit(tx, a);
+        // No asynchronous work between the final clock/liveness checks and the
+        // COMMIT send. All receipt and financial writes are still uncommitted.
+        held.check(); connection.assertLive();
+        commitAttempted = true;
+        await tx.query("COMMIT");
+        return {...result, receiptId, revision, financialDigest};
+      });
+    } catch (error) {
+      if (commitAttempted) {
+        // A rejection cannot prove the server did not commit. Never retry or
+        // issue another freeze/rollback transaction against changed ownership.
+        discard = true;
+        throw new HeldReconciliationCommitUncertain();
+      }
+      try { await tx.query("ROLLBACK"); } catch { discard = true; }
+      throw error;
+    } finally {
+      connection.close();
+      discard = discard || connection.broken();
+      // Cleanup failure after acknowledged COMMIT does not erase its receipt.
+      try { tx.release(discard ? new Error("production_held_connection_discarded") : undefined); }
+      catch { discard = true; }
+      finally { connection.cleanup(discard); }
+    }
+  }
+
+  private async reconcileInternal(snapshot: Snapshot, expectedRevision: string, nowMs: number,
+    held?: HeldReconciliationGuard & {check():number}): Promise<{accountId:string;observationId:string}> {
     try {
       // transaction() returns only after COMMIT succeeds; a rejected/uncertain
       // commit never exposes a durable reconciliation pointer.
-      return await this.transaction(async (tx, a) => {
+      const transact = held
+        ? (body: (tx: PoolClient, a: Account) => Promise<{accountId:string;observationId:string}>) =>
+          this.heldReconciliationTransaction(body, held, digest(snapshot))
+        : (body: (tx: PoolClient, a: Account) => Promise<{accountId:string;observationId:string}>) => this.transaction(body);
+      return await transact(async (tx, a) => {
+        const originalFreeze = a.blocked_reason;
+        const block = (reason: string, overwrite = true) => {
+          // Held recovery cannot certify a successful financial receipt after
+          // detecting ANY new risk, even when an old freeze would mask ??=.
+          // Roll back all accounting writes and retain the persisted freeze.
+          if (held) throw new Error(reason);
+          if (overwrite) a.blocked_reason = reason;
+          else a.blocked_reason ??= reason;
+        };
+        if (held) nowMs = held.check();
         requireProof(a.revision === expectedRevision, "production_observation_raced");
         requireProof(canonical(snapshot.identity) === canonical(identity(a)), "production_account_mismatch");
         requireProof(snapshot.authenticated && snapshot.complete && snapshot.cashExact &&
@@ -305,7 +425,7 @@ export class ProductionLedger {
             // accidental removal of both version fields cannot hide corruption.
             requireProof(i.capability_digest===digest({id:i.id,request:i.request,decision:i.decision,
               policyHash:i.policy_hash,fee:i.fee_fingerprint}),"production_entry_capability_corrupt");
-            if (i.terminal) a.blocked_reason = "late_fill_after_terminal"; // still account for owned money/contracts
+            if (i.terminal) block("late_fill_after_terminal"); // still account for owned money/contracts
             const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.id])).rows[0];
             requireProof(pos, "production_entry_position_missing");
             const cashProof=(i.decision!.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
@@ -320,19 +440,19 @@ export class ProductionLedger {
                 cashProof.limitMicros===i.request.limitMicros&&cashProof.feeFingerprint===i.fee_fingerprint,
                 "production_entry_cash_bound_corrupt");
               const oneFillCap=entryFillFeeUpperMicros(pinned,qty,f.priceMicros);
-              if(oneFillCap===null||fee>oneFillCap)a.blocked_reason??="entry_fill_fee_bound_exceeded";
+              if(oneFillCap===null||fee>oneFillCap)block("entry_fill_fee_bound_exceeded", false);
               if(!entrySpent.has(i.id)){
                 const spent=(await tx.query("SELECT coalesce(sum(-cash_delta_micros),0)::text AS amount FROM v13_production_event WHERE account_id=$1 AND intent_id=$2 AND kind='FILL'",[a.id,i.id])).rows[0];
                 entrySpent.set(i.id,money(spent.amount));
               }
               const spent=entrySpent.get(i.id)!+gross+fee;entrySpent.set(i.id,spent);
               const joint=BigInt(pinned.cashRisk.entryCashDebitPerContractMicros)*filled/100n;
-              if(spent>joint)a.blocked_reason??="entry_cash_bound_exceeded";
+              if(spent>joint)block("entry_cash_bound_exceeded", false);
             }
             delta = -(gross + fee);
             let release = gross + fee;
             if (release > money(i.reserved_micros)) {
-              a.blocked_reason ??= "entry_cost_exceeded_remaining_reservation";
+              block("entry_cost_exceeded_remaining_reservation", false);
               release = money(i.reserved_micros);
             }
             i.reserved_micros = String(money(i.reserved_micros) - release);
@@ -347,7 +467,7 @@ export class ProductionLedger {
             const basis = money(pos.basis_micros) * qty / money(pos.quantity_hundredths);
             delta = gross - fee; pnl = delta - basis;
             const release = fee < money(parent.reserved_micros) ? fee : money(parent.reserved_micros);
-            if (fee > release) a.blocked_reason = "exit_fee_exceeded_reservation";
+            if (fee > release) block("exit_fee_exceeded_reservation");
             parent.reserved_micros = String(money(parent.reserved_micros) - release);
             a.reserved_micros = String(money(a.reserved_micros) - release);
             await tx.query(`UPDATE v13_production_position SET quantity_hundredths=quantity_hundredths-$2,
@@ -364,7 +484,7 @@ export class ProductionLedger {
           const i = byClient.get(o.request.clientOrderId)!;
           // Terminal status without complete exact fill totals cannot release funds.
           requireProof(money(o.filledHundredths) === money(i.filled_hundredths), "production_order_fill_total_incomplete");
-          if (i.terminal && !o.terminal) a.blocked_reason = "terminal_order_reopened";
+          if (i.terminal && !o.terminal) block("terminal_order_reopened");
           if (o.terminal) { i.terminal = true; i.state = "TERMINAL"; }
         }
         for (const s of snapshot.settlements) {
@@ -415,7 +535,7 @@ export class ProductionLedger {
         }
         const positions = (await tx.query(`SELECT market,side,quantity_hundredths FROM v13_production_position
           WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY market,side`, [a.id])).rows;
-        if (positions.length > 1) a.blocked_reason = "overlap_ownership_after_late_fill";
+        if (positions.length > 1) block("overlap_ownership_after_late_fill");
         const actualPositions = snapshot.positions.filter(p => money(p.quantityHundredths) !== 0n)
           .map(p => ({ market: p.market, side: p.side, quantity_hundredths: String(money(p.quantityHundredths)) }))
           .sort((x, y) => x.market.localeCompare(y.market) || x.side.localeCompare(y.side));
@@ -455,6 +575,9 @@ export class ProductionLedger {
           filled_hundredths=$4,reserved_micros=$5,terminal=$6 WHERE id=$1`,
         [i.id, i.state, i.exchange_order_id, i.filled_hundredths, i.reserved_micros, i.terminal]);
         }
+        // Subclass recovery hooks must not silently change or clear a freeze.
+        if (held) requireProof(a.blocked_reason === originalFreeze,
+          "production_held_reconciliation_freeze_changed");
         await this.assertConservation(tx, a);
         const observationId = await this.observe(tx, "RECONCILIATION", reconciliationObservation(snapshot));
         // The same account row remains locked. Persist reconciliation state and
@@ -467,7 +590,7 @@ export class ProductionLedger {
         return {accountId:this.accountId,observationId};
       });
     } catch (error) {
-      if ((error as Error).message !== "production_observation_raced") await this.freeze((error as Error).message);
+      if (!held && (error as Error).message !== "production_observation_raced") await this.freeze((error as Error).message);
       throw error;
     }
   }

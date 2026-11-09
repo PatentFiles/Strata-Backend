@@ -1,4 +1,4 @@
-import {validEntryFeePriceGrid,repriceVerifiedEntryFee} from "./entryCashFeeRepricing";
+import {prepareVerifiedEntryFeeRepricing} from "./entryCashFeeRepricing";
 import {digest} from "./v13-production/types";
 import {planV13IocEntry,type V13IocEntryPlan,type V13DepthLevel,type V13ExecutionSignal,type V13ExecutionDirection} from './v13ExecutionPlanner';
 import type {V13VerifiedFeeEvidence} from './v13LiveMoneyEntryPreflight';
@@ -62,7 +62,8 @@ export function planCashBoundEntry(input:{signal:V13ExecutionSignal;direction:V1
  if(!Number.isSafeInteger(budgetCents)||budgetCents<1)return {ok:false,reason:'no_whole_contract_affordable'};
  const grid=fee.cashRisk!.gridEvidence;
  const selectedTerms=grid!==undefined;
- if(selectedTerms&&!validEntryFeePriceGrid(fee,grid))return {ok:false,reason:'cash_risk_grid_unproven'};
+ const reprice=selectedTerms?prepareVerifiedEntryFeeRepricing(fee,grid):null;
+ if(selectedTerms&&!reprice)return {ok:false,reason:'cash_risk_grid_unproven'};
  const cash=BigInt(fee.cashRisk!.entryCashDebitPerContractMicros),exit=BigInt(fee.cashRisk!.exitLossPerContractMicros),per=cash+exit;
  let max=Math.min(999999999,Number(BigInt(budgetCents)*10000n/per));
  if(!selectedTerms)max=Math.min(max,fee.contracts);
@@ -72,7 +73,7 @@ export function planCashBoundEntry(input:{signal:V13ExecutionSignal;direction:V1
  if(!plan.ok)return plan;
  // Only the same freshly verified exact grid can mint different PREPARE
  // terms. Never borrow a lower-price fee proof or alter an existing intent.
- const selectedFee=selectedTerms?repriceVerifiedEntryFee(fee,grid,plan.plan.contracts,plan.plan.limitPrice):fee;
+ const selectedFee=selectedTerms?reprice!(plan.plan.contracts,plan.plan.limitPrice):fee;
  if(!selectedFee||Math.abs(plan.plan.limitPrice-selectedFee.limitPrice)>1e-8)return {ok:false,reason:'fee_evidence_invalid_or_stale'};
  const proof=entryCashProof(selectedFee,plan.plan.contracts,budgetCents);
  if(!proof||proof.plannedAllInCents>budgetCents)return {ok:false,reason:'cash_risk_unaffordable'};
