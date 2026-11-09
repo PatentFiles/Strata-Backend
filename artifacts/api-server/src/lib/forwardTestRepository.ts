@@ -1,3 +1,4 @@
+import {observeForwardTransaction,type ForwardTransactionObserver} from "./forwardTransactionTiming";
 import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
 import { createSingleFlightAnalyticsBatch } from "./readOnlyAnalyticsBatch";
 import {
@@ -91,8 +92,11 @@ export async function withWorkerLeaseTransaction<T>(
   work: (tx: ForwardTestTransaction, engine: ForwardTestEngine) => Promise<T>,
   id = FORWARD_TEST_ENGINE_ID,
   durationSeconds = 20,
+  observe?: ForwardTransactionObserver,
 ): Promise<T> {
+  observeForwardTransaction(observe,"requested");
   return db.transaction(async (tx) => {
+    observeForwardTransaction(observe,"transaction_callback");
     // This row lock fences old owners. Acquisition and every strategy write
     // serialize on the same row, and expiry is checked using PostgreSQL time.
     const [engine] = await tx.select().from(forwardTestEngineTable).where(and(
@@ -103,7 +107,9 @@ export async function withWorkerLeaseTransaction<T>(
       sql`${forwardTestEngineTable.leaseExpiresAt} > clock_timestamp()`,
     )).for("update").limit(1);
     if (!engine) throw new WorkerLeaseLostError("Worker lease was lost before evaluation");
+    observeForwardTransaction(observe,"lease_locked");
     const result = await work(tx, engine);
+    observeForwardTransaction(observe,"work_complete");
     const [renewed] = await tx.update(forwardTestEngineTable).set({
       leaseRenewedAt: sql`clock_timestamp()`,
       leaseExpiresAt: sql`clock_timestamp() + ${leaseDuration(durationSeconds)}`,
@@ -116,6 +122,7 @@ export async function withWorkerLeaseTransaction<T>(
       sql`${forwardTestEngineTable.leaseExpiresAt} > clock_timestamp()`,
     )).returning();
     if (!renewed) throw new WorkerLeaseLostError("Worker lease expired during evaluation");
+    observeForwardTransaction(observe,"lease_renewed");
     return result;
   });
 }

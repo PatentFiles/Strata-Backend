@@ -1,6 +1,7 @@
 import { Router, type IRouter, type RequestHandler } from "express";
 import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strata/ownerApiFeePolicyMigration";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
+import { inspectRuntimeDbSession } from "../lib/strata/apiFeeRuntimeDbSession";
 import { inspectRuntimeDbIdentity } from "../lib/strata/apiFeeRuntimeDbIdentity";
 import {inspectSingleOwnerFeePreflight} from "../lib/strata/singleOwnerFeePreflight";
 import {observeDynamicKalshiFees} from "../lib/strata/dynamicOfficialFeeSchedule";
@@ -323,6 +324,10 @@ function qualificationRequest(body: unknown): Record<string, unknown> {
 
 export function createUserExecutionRouter(requireUser: RequestHandler, port: UserScopePort): IRouter {
   const router: IRouter = Router();
+  router.use("/fees/runtime-db-session-attestation", (_req, res, next) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    next();
+  });
   router.use(requireUser);
   const migrated = async (res: { status: (code: number) => { json: (body: unknown) => void } }) => {
     try {
@@ -703,6 +708,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const result=await inspectRuntimeDbIdentity(actor);
     res.status(result.ok?200:403).json(sanitizePublic(result));
+  });
+  // Metadata-only alternative: no account fingerprint or application-table scan.
+  // router.use(requireUser) enforces AAL2 before the confirmed-ADMIN DB gate.
+  router.get("/fees/runtime-db-session-attestation", async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const actor = subject(res);
+    if (!actor) return void res.status(401).json({error: "Unauthorized"});
+    const result = await inspectRuntimeDbSession(actor);
+    res.status(result.ok ? 200 : 403).json(sanitizePublic(result));
   });
   // AAL2 owner-authenticated Wallets-only V4 evidence/consent lifecycle.
   // requireUser validates JWT AAL2; never accept browser-supplied owner IDs.
