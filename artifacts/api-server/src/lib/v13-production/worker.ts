@@ -20,6 +20,10 @@ export function nextSequentialPollDelayMs(intervalMs:number,elapsedMs:number):nu
 }
 
 export class ProductionWorker {
+  /** Trusted same-session recovery only. No route/client can supply this hook.
+   * Returning false retains the normal fail-closed scheduler stop. */
+  recoverUnreconciledEntry:((error:unknown)=>Promise<boolean>)|null=null;
+  heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private recoveryOnly = false;
@@ -210,7 +214,11 @@ export class ProductionWorker {
       const tickStartedAt = Date.now();
       try { await this.tick(origin); } catch (error) {
         this.report(error);
-        if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
+        if(this.recoverUnreconciledEntry && (this.heldRecoveryActive?.() ||
+          (error instanceof Error && error.message === "personal_exchange_history_unreconciled"))){
+          try{if(!await this.recoverUnreconciledEntry(error))this.stop();}
+          catch(recoveryError){this.report(recoveryError);this.stop();}
+        }else if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
       // A committed qualifying signal already waited for this serialized tick;

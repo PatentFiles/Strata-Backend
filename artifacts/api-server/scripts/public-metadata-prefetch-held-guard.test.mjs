@@ -7,7 +7,7 @@ import {runInNewContext} from "node:vm";
 const path=fileURLToPath(new URL("../src/lib/strata/personalExecutionSupervisor.ts",import.meta.url));
 const text=await readFile(path,"utf8");
 const start=text.indexOf("    if(apiSource&&options.publicMetadataPrefetch===true){");
-const end=text.indexOf("    session.executor.afterReconcile=",start);
+const end=text.indexOf("    // Opt-in, same owning session only.",start);
 assert.ok(start>=0&&end>start,"exact reviewed hook must be present");
 // Run the actual complete hook-installation block, not a parallel test-only
 // guard. Its coordinator and scope readers are offline spies; no worker,
