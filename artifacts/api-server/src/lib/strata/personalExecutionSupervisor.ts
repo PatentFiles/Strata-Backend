@@ -1,3 +1,6 @@
+import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
+import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
+import {createBoundedUnknownEntryReadRunner} from "./boundedUnknownEntryReadRunner";
 import {FinalPublicMetadataPhases} from "./finalPublicMetadataPhases";
 import {createFeeVerificationTiming} from "./feeVerificationTiming";
 import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
@@ -212,8 +215,8 @@ export function createProductionPersonalSession(
     finalPublicMetadataPrefetch?: boolean;
   } = {},
 ): PersonalSessionControl {
-  const get = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch) =>
-    getScopedKalshiJson(creds, path, query, fetchImpl, PERSONAL_KALSHI_HOST));
+  const get:typeof getScopedKalshiJson = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch,_host,_owner,signal) =>
+    getScopedKalshiJson(creds, path, query, fetchImpl, PERSONAL_KALSHI_HOST,undefined,signal));
   const verifyFee = options.verifyFee ?? verifyCurrentFeeArtifact;
   const now = options.now ?? Date.now;
   return createOwnedTradingSupervisor(async (input) => {
@@ -384,6 +387,8 @@ export function createProductionPersonalSession(
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
     },personalProductionFetch,timingObserver,timingContext);
     let activeMetadata:MetadataPrefetchAttempt|null=null;
+    let heldReadAbort:AbortSignal|null=null;
+    let recoveryAbort:AbortController|null=null;
     const metadataScope=()=>({accountId:input.accountId,ownerId:input.userId,releaseSha:deployedGitSha(),
       holderId,fence:String(state.fencingToken),policyHash});
     const session = openOwnedExecutionSession({
@@ -471,6 +476,9 @@ export function createProductionPersonalSession(
         }
       },
       readSnapshot: async () => {
+        const abort=heldReadAbort;
+        const checkRead=()=>{abort?.throwIfAborted();if(abort&&(state.accountKill||state.globalKill))throw Error("held_recovery_read_killed");};
+        checkRead();
         // Fail closed throughout each snapshot; eligibility is restored only
         // after reconciliation plus a genuine fresh exact-SHA release check.
         technicalRelease.beginReconciliation();
@@ -502,10 +510,12 @@ export function createProductionPersonalSession(
           // intent or protective reservation observed at this wire boundary.
           if(currentEntry)throw new Error("production_other_uncertain_order");
         }
+        checkRead();
         const beat = await heartbeatLease(snapshotDb, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
         });
+        checkRead();
         if (!beat.ok) {
           state.presentedToken = -1;
           state.entriesAuthorized = false;
@@ -525,7 +535,10 @@ export function createProductionPersonalSession(
           }catch{state.entriesAuthorized=false;}
         }
         // Separate bounded diagnostics only; original signed-read clock/proof remain untouched.
-        const feedTiming=createOwnedFeedReadTiming(get,recordOwnedFeedReadTiming);
+        const scopedGet:typeof getScopedKalshiJson=async(creds,path,query,fetchImpl,host,owner,signal)=>{
+          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort??signal);checkRead();return result;
+        };
+        const feedTiming=createOwnedFeedReadTiming(scopedGet,recordOwnedFeedReadTiming);
         let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
         try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get); }
         finally { feedTiming.finish(); }
@@ -603,6 +616,87 @@ export function createProductionPersonalSession(
         }};
       };
     }
+    // Opt-in, same owning session only. Process loss never reconstitutes this
+    // mode: claimWorkerLease still refuses an already-owned lease. KILL remains
+    // a full halt, and no recovery callback can submit an order itself.
+    let heldRecoveryScope:RecoveryHoldScope|null=null;
+    let recoveryAttempted=false;
+    session.worker.heldRecoveryActive=()=>heldRecoveryScope!==null;
+    session.worker.recoverUnreconciledEntry=async error=>{
+      if(process.env.STRATA_UNKNOWN_ENTRY_PROTECTIVE_RECOVERY_ENABLED!=="true"||recoveryAttempted||
+        !(error instanceof Error)||error.message!=="personal_exchange_history_unreconciled")return false;
+      recoveryAttempted=true;
+      const episodeDeadline=now()+15000;
+      // Sticky local entry hold closes before ANY await. Public prefetch cannot
+      // reopen this latch. The persistent exact-worker STOP hold follows.
+      state.entriesAuthorized=false;
+      state.armRequested=false;
+      technicalRelease.beginReconciliation();
+      activeMetadata?.discard();activeMetadata=null;finalPublicMetadata?.discardAll();
+      const target=await db.query(`SELECT id FROM public.v13_production_intent
+        WHERE account_id=$1 AND kind='ENTRY' AND state='UNKNOWN' AND terminal=false
+        AND dispatch_at IS NOT NULL AND EXISTS (SELECT 1 FROM public.v13_production_observation o
+          WHERE o.account_id=$1 AND o.kind='POST_ATTEMPT' AND o.payload->>'id'=v13_production_intent.id
+          AND o.payload->>'outcome'='GET_RECONCILIATION_REQUIRED') ORDER BY created_at,id LIMIT 2`,[input.accountId]);
+      if(target.rows.length!==1||typeof target.rows[0].id!=="string")return false;
+      const scope:RecoveryHoldScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,
+        intentId:target.rows[0].id,holderId,fencingToken:String(claimed.fencingToken),
+        keyFingerprint:fingerprint,policyHash,...leaseIds});
+      if(!("connect" in db))return false;
+      const hold=await holdUnknownEntryRecovery(db as Pool,scope);
+      if(!hold.held||hold.uncertain)return false;
+      heldRecoveryScope=scope;
+      const fence=createUnknownEntryHeldFence(scope);
+      // Every later reconciliation (including protective outcome handling) uses
+      // native held-ledger accounting. Presence suppresses afterReconcile and
+      // thus technical renewal/entry reopening for the remainder of this session.
+      session.executor.heldReconcile=(snapshot,revision)=>session.executor.ledger.reconcileHeld(
+        snapshot,revision,{...fence,now,deadlineMs:now()+15000});
+      recoveryAbort=new AbortController();
+      const recover=createBoundedUnknownEntryReadRunner({now,deadlineMs:episodeDeadline,externalSignal:recoveryAbort.signal,
+        authorizeRead:async signal=>{
+          signal.throwIfAborted();
+          if(state.accountKill||state.globalKill||state.presentedToken!==claimed.fencingToken)
+            throw Error("held_recovery_local_fence_changed");
+          const rows=await db.query(`SELECT a.id FROM public.v13_production_account a
+            JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
+            JOIN private.kalshi_connection_credentials c ON c.owner_user_id=a.owner_user_id AND c.financial_account_id=a.kalshi_connection_id
+            JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+            JOIN public.live_execution_config g ON g.id='singleton'
+            WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.kill_switch=false AND a.execution_enabled=true
+              AND a.key_fingerprint=$3 AND w.state='owned' AND w.account_kill=false AND w.arm_requested=false
+              AND w.holder_id=$4 AND w.fencing_token=$5::bigint AND w.credential_fingerprint=$3
+              AND c.key_fingerprint=$3 AND c.revoked_at IS NULL AND c.role='restricted_execution'
+              AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
+              AND c.provider_connection_id=$6::uuid AND c.vault_secret_id=$7::uuid
+              AND p.policy_hash=$8 AND p.state='APPROVED'
+              AND g.live_execution_enabled=true AND g.manual_kill_switch=false`,
+            [scope.accountId,scope.ownerId,scope.keyFingerprint,scope.holderId,scope.fencingToken,
+              scope.providerConnectionId,scope.vaultSecretId,scope.policyHash]);
+          signal.throwIfAborted();
+          if(rows.rows.length!==1)throw Error("held_recovery_read_scope_changed");
+        },
+        read:async signal=>{
+          heldReadAbort=signal;
+          try{
+            signal.throwIfAborted();
+            const {account,earliest}=await session.executor.ledger.readReconcileAccount();
+            signal.throwIfAborted();
+            const snapshot=await session.exchange.snapshot(identity,earliest?new Date(earliest).getTime():now());
+            signal.throwIfAborted();return {snapshot,revision:account.revision};
+          }finally{if(heldReadAbort===signal)heldReadAbort=null;}
+        },
+      });
+      const result=await recover();
+      if(!result.ok)return false;
+      // Never retry ledger failure or an uncertain COMMIT. The held receipt is
+      // returned only after native commit and all freshness/fence guards pass.
+      await session.executor.ledger.reconcileHeld(result.snapshot.snapshot,result.snapshot.revision,
+        {...fence,now,deadlineMs:episodeDeadline});
+      const pending=await readUnresolvedIntentMode((sql,params)=>db.query(sql,params),input.accountId);
+      if(!pending.ok||pending.mode!=="entries")return false;
+      return true;
+    };
     session.executor.afterReconcile=async (snapshot,subtimings,scheduling)=>{
       const sha=deployedGitSha();
       const scoped=/^[a-f0-9]{40}$/.test(sha);
@@ -667,7 +761,7 @@ export function createProductionPersonalSession(
       ok: true,
       worker: session.worker,
       state,
-      disarm: (action) => {finalPublicMetadata?.discardAll();return disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString());},
+      disarm: (action) => {if(action==="KILL")recoveryAbort?.abort();finalPublicMetadata?.discardAll();return disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString());},
     };
   });
 }

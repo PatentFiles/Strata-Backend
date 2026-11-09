@@ -1,0 +1,50 @@
+The files belonging to this database system will be owned by user "agent".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C".
+The default text search configuration will be set to "english".
+
+Data page checksums are disabled.
+
+creating directory /tmp/strata-analytics-pg-hBgraQ/data ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+
+Sync to disk skipped.
+The data directory might become corrupt if the operating system crashes.
+
+Success. You can now start the database server using:
+
+    /tmp/paper-retention-tools/pg/usr/lib/postgresql/17/bin/pg_ctl -D /tmp/strata-analytics-pg-hBgraQ/data -l logfile start
+
+waiting for server to start.... stopped waiting
+pg_ctl: could not start server
+Examine the log output.
+2026-11-09 13:29:48.354 UTC [43] LOG:  starting PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-11-09 13:29:48.355 UTC [43] LOG:  could not create Unix socket for address "/tmp/strata-analytics-pg-hBgraQ/socket/.s.PGSQL.5432": Operation not permitted
+2026-11-09 13:29:48.355 UTC [43] WARNING:  could not create Unix-domain socket in directory "/tmp/strata-analytics-pg-hBgraQ/socket"
+2026-11-09 13:29:48.355 UTC [43] FATAL:  could not create any Unix-domain sockets
+2026-11-09 13:29:48.355 UTC [43] LOG:  database system is shut down
+
+file:///workspace/scratch/4397717a881a/strata-protective-recovery-candidate-20261109/artifacts/api-server/scripts/run-unknown-entry-hold-postgres.mjs:56
+    throw new Error(`Analytics cleanup unresolved; retained owned cluster directory ${root}`, { cause });
+          ^
+
+Error: Analytics cleanup unresolved; retained owned cluster directory /tmp/strata-analytics-pg-hBgraQ
+    at cleanup (file:///workspace/scratch/4397717a881a/strata-protective-recovery-candidate-20261109/artifacts/api-server/scripts/run-unknown-entry-hold-postgres.mjs:56:11)
+    at file:///workspace/scratch/4397717a881a/strata-protective-recovery-candidate-20261109/artifacts/api-server/scripts/run-unknown-entry-hold-postgres.mjs:79:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  [cause]: Error: analytics_owned_postgres_startup_uncertain
+      at cleanupOwnedAnalyticsPostgres (file:///workspace/scratch/4397717a881a/strata-data-retention-20261109/artifacts/api-server/scripts/analyticsDrainPostgresLifecycle.mjs:11:13)
+      at cleanup (file:///workspace/scratch/4397717a881a/strata-protective-recovery-candidate-20261109/artifacts/api-server/scripts/run-unknown-entry-hold-postgres.mjs:49:9)
+      at file:///workspace/scratch/4397717a881a/strata-protective-recovery-candidate-20261109/artifacts/api-server/scripts/run-unknown-entry-hold-postgres.mjs:79:3
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+}
+
+Node.js v24.22.1

@@ -436,7 +436,9 @@ export async function getScopedKalshiJson(
   fetchImpl: typeof fetch = fetch,
   host = baseUrl(),
   rateLimitOwnerId?: string,
+  externalSignal?: AbortSignal,
 ): Promise<unknown> {
+  externalSignal?.throwIfAborted();
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
   if (host !== "https://external-api.kalshi.com" && host !== "https://external-api.demo.kalshi.co") {
     throw new KalshiApiError("INVALID_CREDENTIALS");
@@ -461,6 +463,7 @@ export async function getScopedKalshiJson(
     await reserveKalshiBalanceReadSlot(creds.keyId, rateLimitOwnerId, undefined,
       dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
   }
+  externalSignal?.throwIfAborted();
   attempt = scopedReadLimit(fetchImpl).begin(readKey, endpoint);
   if (attempt.blocked) {
     emitReadRateLimitDiagnostic(attempt.blocked);
@@ -472,6 +475,7 @@ export async function getScopedKalshiJson(
   try {
     response = await fetchImpl(`${host}${path}${query}`, {
       method: "GET",
+      ...(externalSignal?{signal:externalSignal}:{}),
       cache: "no-store",
       // Never follow provider redirects with credential-bearing headers.
       redirect: "manual",
@@ -493,6 +497,7 @@ export async function getScopedKalshiJson(
     throw new KalshiApiError("HTTP_ERROR", response.status, details);
   }
   const result = await response.json() as unknown;
+  externalSignal?.throwIfAborted();
   attempt.success!();
   return result;
 }

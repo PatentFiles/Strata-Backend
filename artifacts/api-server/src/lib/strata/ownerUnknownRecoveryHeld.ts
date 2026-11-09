@@ -69,7 +69,7 @@ const INDEPENDENT_TABLES=[
  'kalshi_owner_pilot_transfers','kalshi_owner_shard_allocations','kalshi_owner_topups',
  'strata_auto_withdrawal_maintenance','strata_emergency_exit_reservations','strata_manual_profit_withdrawals',
 ] as const;
-async function lockIndependentActivity(tx:PoolClient,accountId:string){
+export async function lockIndependentActivity(tx:PoolClient,accountId:string){
  // Lock inactive rows too: completed maintenance can be reactivated without
  // changing its account FK, so counting only active rows misses that race.
  for(const table of INDEPENDENT_TABLES)await tx.query(
