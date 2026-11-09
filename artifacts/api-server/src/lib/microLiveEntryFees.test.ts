@@ -1,3 +1,4 @@
+import "./microLiveStandardFeeArithmetic.test";
 import assert from "node:assert/strict";
 import test, { after, before, beforeEach } from "node:test";
 /*

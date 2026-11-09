@@ -68,7 +68,8 @@ jobs:
           cd ../..
           node --test artifacts/api-server/dist/recovery-review/*.cjs
   full-disposable-safety:
-    runs-on: ubuntu-latest
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
