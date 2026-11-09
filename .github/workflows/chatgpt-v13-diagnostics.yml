@@ -43,7 +43,8 @@ permissions:
 
 jobs:
   static-and-unit:
-    runs-on: ubuntu-latest
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -74,6 +75,14 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Install host PostgreSQL 16 tools before disposable safety suites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+          /usr/lib/postgresql/16/bin/initdb --version
+          /usr/lib/postgresql/16/bin/pg_ctl --version
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
       - name: Typecheck workspace
         run: pnpm run typecheck
       - name: Verify legacy global account never selects an owned account
@@ -350,10 +359,6 @@ jobs:
         working-directory: artifacts/api-server
         run: |
           pnpm run test:personal-execution
-          if ! command -v initdb >/dev/null && ! test -x /usr/lib/postgresql/16/bin/initdb; then
-            sudo apt-get update -qq
-            sudo apt-get install -y postgresql-16
-          fi
           node scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts
       - name: Test private owner fee-source grant and consent readiness
         working-directory: artifacts/api-server
@@ -557,7 +562,8 @@ jobs:
 
   both-prefetch-safety:
     name: BOTH-prefetch safety (PG${{ matrix.postgres }})
-    runs-on: ubuntu-latest
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -594,6 +600,14 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Install host PostgreSQL 16 tools before disposable safety suites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+          /usr/lib/postgresql/16/bin/initdb --version
+          /usr/lib/postgresql/16/bin/pg_ctl --version
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
       - name: Typecheck workspace
         run: pnpm run typecheck
       - name: Build workspace
