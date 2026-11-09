@@ -3,6 +3,8 @@ import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'n
 import {pool} from '@workspace/db';
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
+import {conservativeExitFeeMicros} from '../v13-production/fractionalExitFee';
+import {maximumExitFeePerContractMicros} from '../microLiveEntryFees';
 import {decodePolicy} from '../v13-production/ledger';
 import {computeV13LiveMoneyPolicyHash} from '../v13LiveMoneyRisk';
 import {dedicatedSignerFingerprint} from './commissioning';
@@ -101,14 +103,23 @@ async function reset(artifact:string){
 async function acknowledgedEntry(){
  // Input boundary only: an already acknowledged BUY from the same running
  // session. Every EXIT intent and reservation must be produced by production.
- const c=await db.connect(),decision={},capability=digest({id:target,request,decision,policyHash,fee:hash});
+ const decision={},capability=digest({id:target,request,decision,policyHash,fee:hash});
  const at=Date.now()-1000;
+ // The acknowledged boundary retains the real conservative fragmented-fill
+ // exit-loss reserve, not the much smaller fee for one whole-contract fill.
+ const perContractExit=maximumExitFeePerContractMicros(1,undefined,'no');
+ assert(perContractExit!==null);
+ const reservedExitFeeCents=Math.ceil(perContractExit*request.contracts!/10000);
+ const exitReserve=Number(conservativeExitFeeMicros({contracts:request.contracts!,reservedExitFeeCents},String(request.contracts!*100)));
+ assert.equal(exitReserve,3000000);
+ assert(exitReserve+1280000<=6000000,'synthetic initial reservation covers entry and conservative exit');
+ const c=await db.connect();
  try{
   await c.query('BEGIN');await c.query('SELECT id FROM public.v13_production_account WHERE id=$1 FOR UPDATE',[account]);
   await c.query(`INSERT INTO public.v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,state,
    request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id,reserved_micros,exit_fee_micros,created_at,dispatch_at)
    VALUES($1,$2,'supervisor-source','synthetic-acknowledged-crossing','ENTRY',$3,'NO','UNKNOWN',$4,'{}',$5,$6,$7,$8,
-    'entry-order',6000000,500000,$9,$9)`,[target,account,request.market,JSON.stringify(request),policyHash,hash,capability,request.clientOrderId,new Date(at)]);
+    'entry-order',6000000,$10,$9,$9)`,[target,account,request.market,JSON.stringify(request),policyHash,hash,capability,request.clientOrderId,new Date(at),exitReserve]);
   await c.query('INSERT INTO public.v13_production_position(id,account_id,market,side) VALUES($1,$2,$3,\'NO\')',[target,account,request.market]);
   await c.query('UPDATE public.v13_production_account SET reserved_micros=6000000,revision=revision+1 WHERE id=$1',[account]);
   const payload={id:target,outcome:'GET_RECONCILIATION_REQUIRED'};
