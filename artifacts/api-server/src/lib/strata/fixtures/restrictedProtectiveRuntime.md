@@ -56,7 +56,9 @@ This adapter exists only in the test fixture, not in the application pool module
   switching is granted.
 - Exact EXECUTE on the quantity helper. No direct trace-function EXECUTE or
   sequence grants. Real telemetry inserts explicitly test identity generation.
-- Exact identity-column UPDATE on thirteen existing-RLS, lock-only relations.
+- Exact identity-column UPDATE on eighteen lock-only relations. Sixteen have RLS
+  in the source chain; two maintenance tables are explicitly enabled only in this
+  disposable fixture, as described below.
   A permissive UPDATE USING(true) policy allows the visibility needed by row
   locking; a RESTRICTIVE WITH CHECK(false) policy forbids actual updates even if
   a second permissive UPDATE policy is added. This unusual combination remains
@@ -88,10 +90,13 @@ Correction: the held supervisor DOES transitively call `lockIndependentActivity`
 `personalExecutionSupervisor.ts:656` creates `createUnknownEntryHeldFence`, whose
 `lock` method at `unknownEntryHeldFence.ts:37` invokes the six-table lock helper.
 The earlier claim that this was exclusive to standalone owner accounting was
-incorrect. The current candidate gives five maintenance tables SELECT only;
-reservations separately have UPDATE capability. Therefore the five missing
-FOR SHARE capabilities are a concrete qualification gap, even when rows are empty.
-The source fixture also lacks RLS on pilot transfers and shard allocations. A separately reported bounded production catalog observation found
+incorrect. The hosted diagnostic then confirmed SQLSTATE 42501 on SELECT of
+`private.kalshi_owner_pilot_transfers`. The revised candidate supplies the five
+maintenance lock capabilities together; reservations already have UPDATE(state,
+updated_at) and receive no new grant. The source chain lacks RLS on pilot transfers
+and shard allocations, so this fixture explicitly enables RLS on precisely those
+two before applying the restrictive denial policies. This is a documented
+fixture-only change, not a source migration or a production operation. A separately reported bounded production catalog observation found
 RLS enabled there; that is a source/fixture difference, not evidence of a current
 production RLS omission. Auth fixture rows also lack RLS, while the reported
 production auth.users has RLS and a different platform owner. public.profiles is
@@ -144,11 +149,55 @@ code catches them. No grants or runtime logic were changed by this diagnostic st
 An executable unit test verifies the exact observer's synchronous, promise and
 callback behavior and checks that sentinel secrets never appear in its output.
 
-The next permission experiment must explicitly address the transitive maintenance
-locks and fixture-only RLS differences above. It must prove direct writes remain
-denied; a restrictive policy on an RLS-disabled table provides no such protection.
-The current lifecycle success expectation is retained, rather than turning this
-known incompatibility into a skipped or expected-failure scenario.
+The subsequent maintenance experiment below addresses the transitive lock
+requirements without changing these diagnostics. The lifecycle success expectation
+is retained, rather than changing it to a skipped or expected-failure scenario.
+
+## Six-table maintenance-lock experiment
+
+`activityLockOnly` enumerates pilot transfers, shard allocations, topups, automatic
+withdrawal maintenance and manual withdrawals. The runtime gets only
+UPDATE(execution_account_id) in addition to its previous SELECT, solely to permit
+FOR SHARE. All five use the existing permissive lock policy plus the restrictive
+WITH CHECK(false) mutation barrier. The two-table `fixtureRlsAdditions` list is
+checked against the actual disposable source baseline before any alteration;
+Auth, profiles, Vault and every other relation are excluded from that list.
+
+The test compares this list plus reservations to the canonical six activity
+relations, then calls the unmodified `lockIndependentActivity` helper under the
+normal parent-account lock. Setup inserts one constraint-valid inactive synthetic
+row per read-only maintenance relation, including a disabled automatic-withdrawal
+rule. These are historical test inputs, not runtime transfers, approvals or
+provider actions. Rows stay inactive throughout the actual protective scenarios.
+
+For each of the five tables, the native probes verify:
+- A real existing row is visible and FOR SHARE succeeds.
+- Full-table UPDATE, INSERT and DELETE privileges remain absent.
+- Revoking the single column capability makes the real six-table helper reject
+  with 42501; restoring it restores the helper's success.
+- Even an added permissive UPDATE policy cannot allow a no-op identity update or
+  changed account key. Both must fail with an RLS 42501 error, not silently affect
+  zero rows. The changed key is refused before any FK validation.
+- State/owner no-op mutations, INSERT and DELETE are denied, and every stored
+  column is unchanged afterward.
+
+These probes do not independently race a competing writer on each of the five
+maintenance tables; that remains separate concurrency qualification.
+
+No synthetic reservation is seeded. Its existing operational writes remain
+qualified by the real protective lifecycle and immutable transition triggers.
+The helper also verifies actual FK constraints and their enabled INSERT/UPDATE
+triggers; none are disabled, replaced or bypassed by this experiment.
+
+The remaining exercised row-lock inventory was rechecked as a whole: account,
+lease, intent and position have their explicit operational UPDATE columns;
+policy, credential, financial/provider identity, global config, source evaluation,
+legacy fee grant/review/consent, owner-SHA and protective releases, continuous-grant
+history and standing-review history have their named lock-only columns. Final
+reserve/UNKNOWN/dispatch/no-send/reconciliation SQL uses those same relations.
+Standing successor Auth/profile/model locks and technical renewal remain separate,
+unqualified branches. Native hosted execution is still required to validate this
+new candidate; static inspection does not establish compatibility.
 
 ## Source-supported permission inventory
 

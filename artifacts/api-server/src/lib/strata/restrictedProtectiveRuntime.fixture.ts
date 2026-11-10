@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {pool,installPoolCheckoutTiming,type Pool,type PoolClient} from '@workspace/db';
 import {auditUnseenExpiredSignals,recordLiveSignalDecision} from '../v13-production/signalDecisionTrace';
 import {reserveKalshiBalanceReadSlot} from './kalshiBalanceQuota';
+import {lockIndependentActivity} from './ownerUnknownRecoveryHeld';
+import {activityTables} from './ownerUnknownRecoverySchema.fixture';
 
 // DISPOSABLE EXPERIMENT ONLY. This is a trusted service-role compatibility
 // probe, NOT tenant authorization or a deployable permission migration.
@@ -10,7 +12,19 @@ const runtimeRole='held_protective_runtime';
 // dependency, as in runtimeRoleMatrix.postgres.test.ts.
 const NativePool=pool.constructor as new(config:{connectionString:string;max:number;connectionTimeoutMillis:number})=>Pool;
 type DB=Pick<Pool,'query'>;
+const activityLockOnly=[
+ 'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
+ 'private.kalshi_owner_topups','private.strata_auto_withdrawal_maintenance',
+ 'private.strata_manual_profit_withdrawals',
+] as const;
+// Explicit fixture-only divergence from the checked-in source chain. Separate
+// bounded production catalog observations found RLS enabled on these two tables.
+// Never apply this list to a connected or production database.
+const fixtureRlsAdditions=[
+ 'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
+] as const;
 const lockOnly:Record<string,string>={
+ ...Object.fromEntries(activityLockOnly.map(table=>[table,'execution_account_id'])),
  'public.v13_live_money_policy':'id',
  'public.live_execution_config':'id',
  'public.forward_test_evaluations':'id',
@@ -36,9 +50,6 @@ const reads=[
  'private.strata_kalshi_balance_read_slots',
  'private.strata_api_fee_standing_delegations',
  'auth.users','private.role_assignments','vault.decrypted_secrets',
- 'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
- 'private.kalshi_owner_topups','private.strata_auto_withdrawal_maintenance',
- 'private.strata_manual_profit_withdrawals',
 ];
 const updates:Record<string,string[]>={
  'private.strata_kalshi_balance_read_slots':['next_slot_at'],
@@ -138,14 +149,21 @@ export async function installRestrictedProtectiveRuntime(setup:Pool){
   host(inet_server_addr()) AS host,inet_server_port() AS port`)).rows[0];
  assert.deepEqual(actual,{name:url.pathname.slice(1),user:'v13_test',host:'127.0.0.1',port:Number(url.port)});
  // installFullRecoverySchema has already checked and installed the full chain.
+ assert.deepEqual([...activityLockOnly,'private.strata_emergency_exit_reservations'].sort(),
+  activityTables.map(table=>`private.${table}`).sort(),'cover the entire real six-table lock helper');
+ for(const table of fixtureRlsAdditions){
+  assert.equal((await setup.query('SELECT relrowsecurity FROM pg_class WHERE oid=$1::regclass',[table])).rows[0].relrowsecurity,false,
+   'source baseline changed: explicitly review the fixture-only RLS addition');
+  await setup.query(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+ }
  await setup.query(`CREATE ROLE ${runtimeRole} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
   NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   GRANT USAGE ON SCHEMA public,private,auth,vault TO ${runtimeRole}`);
  for(const table of reads){
   await setup.query(`GRANT SELECT ON ${table} TO ${runtimeRole}`);
   const enabled=(await setup.query('SELECT relrowsecurity FROM pg_class WHERE oid=$1::regclass',[table])).rows[0].relrowsecurity;
-  // Do not silently enable RLS on platform/maintenance stubs. Those receive
-  // SELECT only. Every lock-only or genuinely mutable table must already use RLS.
+  // Platform stubs retain their source RLS state and receive SELECT only.
+  // The two explicit maintenance additions above are the ONLY divergence.
   if(enabled)await setup.query(`CREATE POLICY held_runtime_read ON ${table} FOR SELECT TO ${runtimeRole} USING(true)`);
  }
  for(const table of [...Object.keys(lockOnly),...Object.keys(updates),...inserts]){
@@ -196,6 +214,7 @@ export async function installRestrictedProtectiveRuntime(setup:Pool){
 }
 
 export async function assertRestrictedAuthority(setup:Pool,accountId:string,ownerId:string){
+ await assertRestrictedActivityLocks(setup,accountId,ownerId);
  const table='private.strata_owner_sha_approvals';
  const before=(await setup.query(`SELECT * FROM ${table} ORDER BY approval_id`)).rows;
  assert.equal(before.length,1,'negative UPDATE probes must match a real approval');
@@ -264,6 +283,70 @@ export async function assertRestrictedAuthority(setup:Pool,accountId:string,owne
  for(const fn of ['begin_trace_scope','capture_intent','capture_event','capture_transport']){
   assert.equal((await pool.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed',[`private.strata_v13_${fn}()`])).rows[0].allowed,false);
  }
+}
+
+async function assertRestrictedActivityLocks(setup:Pool,accountId:string,ownerId:string){
+ // Inactive synthetic historical inputs, never runtime transfers/withdrawals.
+ // Existing FK/check/timing constraints remain enabled; every row is inserted
+ // by setup, NOT by the restricted role. No provider requests occur here.
+ const identity=`FROM public.v13_production_account a JOIN private.kalshi_connection_credentials c
+  ON c.owner_user_id=a.owner_user_id AND c.financial_account_id=a.kalshi_connection_id
+  WHERE a.id=$1 AND a.owner_user_id=$2::uuid`;
+ await setup.query(`INSERT INTO private.kalshi_owner_pilot_transfers
+  (owner_user_id,execution_account_id,financial_account_id,provider_connection_id,
+   authority_credential_id,authority_fingerprint,primary_before_cents,bot_before_cents,
+   state,attempted_at,completed_at)
+  SELECT a.owner_user_id,a.id,c.financial_account_id,c.provider_connection_id,c.id,c.key_fingerprint,
+   2500,0,'completed',clock_timestamp(),clock_timestamp() ${identity}`,[accountId,ownerId]);
+ await setup.query(`INSERT INTO private.kalshi_owner_shard_allocations
+  (id,owner_user_id,execution_account_id,financial_account_id,provider_connection_id,
+   authority_credential_id,authority_fingerprint,source_before_cents,destination_before_cents,
+   bot_before_cents,state,attempted_at,completed_at,verified_at)
+  SELECT gen_random_uuid(),a.owner_user_id,a.id,c.financial_account_id,c.provider_connection_id,c.id,c.key_fingerprint,
+   2500,0,0,'completed',clock_timestamp(),clock_timestamp(),clock_timestamp() ${identity}`,[accountId,ownerId]);
+ await setup.query(`INSERT INTO private.kalshi_owner_topups
+  (owner_user_id,execution_account_id,authority_credential_id,authority_fingerprint,amount_cents,
+   source_exchange_index,state,completed_at)
+  SELECT a.owner_user_id,a.id,c.id,c.key_fingerprint,100,2,'completed',clock_timestamp() ${identity}`,[accountId,ownerId]);
+ await setup.query(`INSERT INTO private.strata_manual_profit_withdrawals
+  (owner_user_id,execution_account_id,state,amount_cents,retain_cents,bot_before_cents,cashier_before_cents,authority_fingerprint)
+  SELECT a.owner_user_id,a.id,'expired',100,0,2500,0,c.key_fingerprint ${identity}`,[accountId,ownerId]);
+ const rules=(await setup.query(`INSERT INTO private.strata_auto_profit_withdrawal_rules
+  (owner_user_id,execution_account_id,trigger_cents,withdraw_cents,retain_cents)
+  VALUES($1,$2,100,100,0) RETURNING id,enabled`,[ownerId,accountId])).rows;
+ assert.equal(rules.length,1);assert.equal(rules[0].enabled,false);
+ await setup.query(`INSERT INTO private.strata_auto_withdrawal_maintenance
+  (execution_account_id,owner_user_id,rule_id,rule_revision,state,completed_at)
+  VALUES($1,$2,$3,1,'completed',clock_timestamp())`,[accountId,ownerId,rules[0].id]);
+ const lockAll=async(client:PoolClient)=>{
+  assert.equal((await client.query('SELECT id FROM public.v13_production_account WHERE id=$1 FOR UPDATE',[accountId])).rows.length,1);
+  await lockIndependentActivity(client,accountId);
+ };
+ // The actual helper locks all six relations and validates live FK triggers.
+ await rollbackOnly(pool,lockAll);
+ for(const table of activityLockOnly){
+  const snapshot=async()=> (await setup.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE execution_account_id=$1`,[accountId])).rows;
+  const before=await snapshot();assert.equal(before.length,1,'probe a real inactive child row: '+table);
+  assert.equal((await pool.query(`SELECT execution_account_id FROM ${table} WHERE execution_account_id=$1 FOR SHARE`,[accountId])).rows.length,1);
+  assert.deepEqual((await pool.query(`SELECT has_table_privilege(current_user,$1,'UPDATE') AS update,
+   has_table_privilege(current_user,$1,'INSERT') AS insert,has_table_privilege(current_user,$1,'DELETE') AS delete,
+   has_column_privilege(current_user,$1,'execution_account_id','UPDATE') AS lock`,[table])).rows[0],
+   {update:false,insert:false,delete:false,lock:true});
+  await setup.query(`REVOKE UPDATE(execution_account_id) ON ${table} FROM ${runtimeRole}`);
+  try{await assert.rejects(rollbackOnly(pool,lockAll),{code:'42501'});}
+  finally{await setup.query(`GRANT UPDATE(execution_account_id) ON ${table} TO ${runtimeRole}`);}
+  await setup.query(`CREATE POLICY held_activity_accidental_widening ON ${table} FOR UPDATE TO ${runtimeRole} USING(true) WITH CHECK(true)`);
+  try{
+   await denied(pool,`UPDATE ${table} SET execution_account_id=execution_account_id WHERE execution_account_id=$1`,[accountId],true);
+   await denied(pool,`UPDATE ${table} SET execution_account_id=$2 WHERE execution_account_id=$1`,[accountId,accountId+'-forbidden'],true);
+   await denied(pool,`UPDATE ${table} SET state=state WHERE execution_account_id=$1`,[accountId]);
+   await denied(pool,`UPDATE ${table} SET owner_user_id=owner_user_id WHERE execution_account_id=$1`,[accountId]);
+   await denied(pool,`INSERT INTO ${table} SELECT * FROM ${table} WHERE execution_account_id=$1`,[accountId]);
+   await denied(pool,`DELETE FROM ${table} WHERE execution_account_id=$1`,[accountId]);
+  }finally{await setup.query(`DROP POLICY held_activity_accidental_widening ON ${table}`);}
+  assert.deepEqual(await snapshot(),before,'inactive maintenance values unchanged: '+table);
+ }
+ await rollbackOnly(pool,lockAll);
 }
 
 export async function assertRestrictedOutcome(setup:Pool,accountId:string){

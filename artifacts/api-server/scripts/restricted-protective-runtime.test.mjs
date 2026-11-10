@@ -36,7 +36,8 @@ test('lock-only authority experiment tests actual denial and policy composition'
  assert.match(source,/code:'22P02'/);
  assert.match(source,/code:'55P03'/);
  assert.match(source,/authority bytes unchanged/);
- assert.doesNotMatch(source,/ALTER TABLE .*ENABLE ROW LEVEL SECURITY/);
+ assert.match(source,/for\(const table of fixtureRlsAdditions\)/);
+ assert.match(source,/const fixtureRlsAdditions=\[\s*'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',\s*\] as const/);
 });
 test('real scenario suite remains wired through unchanged canonical runner',()=>{
  assert.ok(scripts['test:v13-safety-all'].includes('pnpm run test:restricted-protective-runtime'));
@@ -125,4 +126,16 @@ test('native observer preserves successful return values and callback receiver',
  const malformed={query:async()=>{throw error;}};
  observeNativeQueryErrors(malformed,[],row=>records.push(row));
  await assert.rejects(malformed.query('SELECT 1'),e=>e===error);
+});
+
+test('all six real maintenance locks are inventoried with denied mutation on five read-only tables',()=>{
+ assert.match(source,/import \{lockIndependentActivity\} from '\.\/ownerUnknownRecoveryHeld'/);
+ assert.match(source,/activityTables.map\(table=>`private.\$\{table\}`\).sort\(\)/);
+ assert.match(source,/await lockIndependentActivity\(client,accountId\)/);
+ assert.match(source,/Object.fromEntries\(activityLockOnly.map\(table=>\[table,'execution_account_id'\]\)\)/);
+ assert.match(source,/source baseline changed: explicitly review the fixture-only RLS addition/);
+ assert.match(source,/probe a real inactive child row/);
+ assert.match(source,/held_activity_accidental_widening/);
+ assert.match(source,/inactive maintenance values unchanged/);
+ assert.match(source,/assert.rejects\(rollbackOnly\(pool,lockAll\),\{code:'42501'\}/);
 });
