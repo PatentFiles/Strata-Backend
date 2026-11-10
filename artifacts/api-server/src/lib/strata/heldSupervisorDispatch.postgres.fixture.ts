@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
 import {pool} from '@workspace/db';
+import pg from 'pg';
+import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome} from './restrictedProtectiveRuntime.fixture';
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
 import {conservativeExitFeeMicros} from '../v13-production/fractionalExitFee';
@@ -37,7 +39,7 @@ async function until(check:()=>Promise<boolean>,diagnostic:()=>Promise<unknown>,
  const end=Date.now()+timeout;
  while(!await check()){if(Date.now()>end)assert.fail('native supervisor timeout: '+JSON.stringify(await diagnostic()));await pause(25);}
 }
-async function reset(artifact:string){
+async function reset(artifact:string,db:pg.Pool=pool){
  await db.query("UPDATE public.live_execution_config SET mode='V13_PRODUCTION',live_execution_enabled=true,manual_kill_switch=false WHERE id='singleton'");
  // Fresh disposable cluster only. TRUNCATE is fixture reset, not a recovery path.
  await db.query('TRUNCATE vault.decrypted_secrets,private.strata_protective_exit_release CASCADE');
@@ -100,7 +102,7 @@ async function reset(artifact:string){
   VALUES('supervisor-source',clock_timestamp(),$1,101,100,1,1,100,'current','UP','UP',false,false,'PASS','UP',false,
    'synthetic external paper feed',false,$2,$3,1,.60,.41,0,0,0)`,[request.market,V13_CHAMPION_PARAMETER_SET.id,V13_CHAMPION_PARAMETER_HASH]);
 }
-async function acknowledgedEntry(){
+async function acknowledgedEntry(db:pg.Pool=pool){
  // Input boundary only: an already acknowledged BUY from the same running
  // session. Every EXIT intent and reservation must be produced by production.
  const decision={},capability=digest({id:target,request,decision,policyHash,fee:hash});
@@ -214,20 +216,23 @@ async function diagnostics(control:PersonalSessionControl,external:ReturnType<ty
   markers:(await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1',[account])).rows};
 }
 
-export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_flat'|'durable_no_send'|'ambiguous_post'){
+export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_flat'|'durable_no_send'|'ambiguous_post',restricted=false){
  // Each caller is a separate canonical-runner process with its own database.
  // Never restore real HTTP: a failed assertion may leave an in-flight task.
 
  let active:PersonalSessionControl|null=null,sourceTimer:ReturnType<typeof setInterval>|undefined;
+ const setup=restricted?new pg.Pool({connectionString:url,max:2}):pool;
  try{
   const admin=await pool.connect();try{await installFullRecoverySchema(admin);}finally{admin.release();}
   // This test-only table is the external Vault read contract, not any trading
   // schema. It stores only this process's freshly generated ephemeral key.
   await pool.query(`CREATE TABLE vault.decrypted_secrets(id uuid PRIMARY KEY REFERENCES vault.secrets(id),decrypted_secret text NOT NULL);
    ALTER TABLE vault.decrypted_secrets OWNER TO ${backendRole}; REVOKE ALL ON vault.decrypted_secrets FROM PUBLIC`);
+  if(!restricted){
   pool.on('connect',c=>{void c.query(`SET ROLE ${backendRole}`);});
   const existing=await pool.connect();try{await existing.query(`SET ROLE ${backendRole}`);}finally{existing.release();}
   assert.equal((await db.query('SELECT current_user AS name')).rows[0].name,backendRole);
+  }
   // Exercise production checks, including real independent-release and owner
   // startup approval SQL. Do not use the NODE_ENV=test startup short circuit.
   process.env.NODE_ENV='production';process.env.RAILWAY_GIT_COMMIT_SHA=sha;
@@ -241,13 +246,14 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
    const probe=await probeCurrentKalshiFeeApi(globalThis.fetch,Date.now,request.market);
    const candidate=preparePdfFreeApiFeePolicyReview(probe);assert(candidate.ok,JSON.stringify(candidate));
    assert.notEqual(candidate.reviewCandidateDigest,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256);
-   await reset(candidate.reviewCandidateDigest);
+   await reset(candidate.reviewCandidateDigest,setup);
+   if(restricted){await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account);}
    const control=createProductionPersonalSession(db);active=control;
    external.arm();const started=await control.start({userId:owner,accountId:account,action:'START'});
    assert.equal(started.workerStarted,true,JSON.stringify(started));assert.equal(started.ok,true);
-   const at=await acknowledgedEntry();external.entry(at);
+   const at=await acknowledgedEntry(setup);external.entry(at);
    let sourceFailure:unknown;
-   sourceTimer=setInterval(()=>{void db.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch(e=>{sourceFailure=e;});},250);
+   sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch(e=>{sourceFailure=e;});},250);
    const detail=()=>diagnostics(control,external);
    const receiptCount=async()=>Number((await db.query("SELECT count(*)::int AS n FROM public.v13_production_observation WHERE account_id=$1 AND kind='HELD_RECONCILIATION_RECEIPT'",[account])).rows[0].n);
    const proveLaterCompletedTick=async()=>{
@@ -283,6 +289,14 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
     assert.equal(external.summary().posts,1);assert.equal(external.summary().requests,before,'stopped scheduler must not poll or resend');
    }
    assert.equal(sourceFailure,undefined);
+   if(restricted){
+    // Stop scheduling. An already-running optional audit may still finish.
+    const stopped=await control.stop({userId:owner,accountId:account,action:'KILL'});
+    assert.equal(stopped.workerStopped,true);assert.equal(control.isScheduled(owner,account),false);
+    assert.deepEqual((await db.query('SELECT state,account_kill,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1',[account])).rows[0],{state:'killed',account_kill:true,arm_requested:false});
+    active=null;
+    await assertRestrictedOutcome(setup,account);
+   }
    const lease=(await db.query('SELECT arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1',[account])).rows[0];assert.equal(lease.arm_requested,false);
    assert.equal((await db.query("SELECT count(*)::int AS n FROM public.v13_production_intent WHERE account_id=$1 AND kind='ENTRY'",[account])).rows[0].n,1);
    assert((await db.query("SELECT count(*)::int AS n FROM public.v13_production_observation WHERE account_id=$1 AND kind='HELD_RECONCILIATION_RECEIPT'",[account])).rows[0].n>0);
@@ -293,7 +307,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
   finally{
    // No next scenario/reset exists in this process. Keep synthetic HTTP and
    // production-mode validation settings until process exit, including failures.
-   await pool.end();
+   try{await pool.end();}finally{if(restricted)await setup.end();}
   }
  }
 }
