@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {pool,installPoolCheckoutTiming,type Pool,type PoolClient} from '@workspace/db';
 import {auditUnseenExpiredSignals,recordLiveSignalDecision} from '../v13-production/signalDecisionTrace';
+import {reserveKalshiBalanceReadSlot} from './kalshiBalanceQuota';
 
 // DISPOSABLE EXPERIMENT ONLY. This is a trusted service-role compatibility
 // probe, NOT tenant authorization or a deployable permission migration.
@@ -32,6 +33,7 @@ const reads=[
  'private.strata_protective_exit_reconciliations','private.strata_protective_exit_local_no_send',
  'private.strata_v13_signal_audit_progress','private.strata_v13_signal_decisions',
  'private.strata_v13_signal_trace_scope','public.strata_configured_stake',
+ 'private.strata_kalshi_balance_read_slots',
  'private.strata_api_fee_standing_delegations',
  'auth.users','private.role_assignments','vault.decrypted_secrets',
  'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
@@ -39,6 +41,7 @@ const reads=[
  'private.strata_manual_profit_withdrawals',
 ];
 const updates:Record<string,string[]>={
+ 'private.strata_kalshi_balance_read_slots':['next_slot_at'],
  'public.v13_production_account':['cash_micros','reserved_micros','blocked_reason','revision','reconciled_at','evidence_digest'],
  'public.v13_production_intent':['state','exchange_order_id','filled_hundredths','reserved_micros','terminal','dispatch_at'],
  'public.v13_production_position':['quantity_hundredths','basis_micros','realized_pnl_micros'],
@@ -47,6 +50,7 @@ const updates:Record<string,string[]>={
  'private.strata_v13_signal_audit_progress':['cycle_cutoff','cursor_evaluated_at','cursor_evaluation_id','cycle_started_at','last_success_at','sources_examined','decisions_inserted','last_completed_cycle_at','completed_cycles'],
 };
 const inserts=[
+ 'private.strata_kalshi_balance_read_slots',
  'public.v13_production_intent','public.v13_production_event','public.v13_production_observation',
  'private.kalshi_account_worker_lease','private.strata_emergency_exit_reservations',
  'private.strata_protective_exit_reconciliations','private.strata_protective_exit_local_no_send',
@@ -148,7 +152,7 @@ export async function installRestrictedProtectiveRuntime(setup:Pool){
  }
 }
 
-export async function assertRestrictedAuthority(setup:Pool,accountId:string){
+export async function assertRestrictedAuthority(setup:Pool,accountId:string,ownerId:string){
  const table='private.strata_owner_sha_approvals';
  const before=(await setup.query(`SELECT * FROM ${table} ORDER BY approval_id`)).rows;
  assert.equal(before.length,1,'negative UPDATE probes must match a real approval');
@@ -191,6 +195,23 @@ export async function assertRestrictedAuthority(setup:Pool,accountId:string){
   }finally{identityClient.release();}
  }finally{await setup.query(`DROP POLICY held_accidental_widening ON ${table}`);}
  assert.deepEqual((await setup.query(`SELECT * FROM ${table} ORDER BY approval_id`)).rows,before,'authority bytes unchanged');
+ // The actual signed balance reader reserves this database quota BEFORE HTTP.
+ // Prove the missing-INSERT failure directly rather than masking the production
+ // reader's kalshi_read_failed result or bypassing its normal 1.2s spacing.
+ const quota='private.strata_kalshi_balance_read_slots';
+ assert.equal((await pool.query(`SELECT count(*)::int AS n FROM ${quota}`)).rows[0].n,0);
+ await setup.query(`REVOKE INSERT ON ${quota} FROM ${runtimeRole}`);
+ try{
+  await assert.rejects(reserveKalshiBalanceReadSlot('offline-supervisor-only',ownerId),{code:'42501'});
+ }finally{await setup.query(`GRANT INSERT ON ${quota} TO ${runtimeRole}`);}
+ await reserveKalshiBalanceReadSlot('offline-supervisor-only',ownerId);
+ const first=(await pool.query(`SELECT next_slot_at FROM ${quota}`)).rows;
+ assert.equal(first.length,1,'real quota INSERT must persist');
+ await reserveKalshiBalanceReadSlot('offline-supervisor-only',ownerId);
+ const second=(await pool.query(`SELECT next_slot_at FROM ${quota}`)).rows;
+ assert.equal(second.length,1,'conflict path must update the same member bucket');
+ assert(second[0].next_slot_at.getTime()>first[0].next_slot_at.getTime(),'real quota UPDATE advances the slot');
+ await denied(pool,`UPDATE ${quota} SET budget_key='fixture-forbidden-key-change'`);
  // No blanket sequence privileges: direct access is denied while actual worker
  // and definer-trigger INSERTs must generate their identities normally.
  for(const sequence of ['private.strata_v13_execution_trace_trace_id_seq','private.strata_v13_signal_decisions_decision_id_seq']){

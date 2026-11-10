@@ -50,7 +50,8 @@ This adapter exists only in the test fixture, not in the application pool module
 - UPDATE only named accounting, intent, position, lease, reservation and audit
   progress columns. Account owner identity is not writable.
 - INSERT only intents (RLS requires EXIT), events, observations, worker lease,
-  exit reservations, outcome/no-send audit, and signal audit/progress. No account
+  exit reservations, outcome/no-send audit, signal audit/progress, and the balance
+  read quota (UPDATE only next_slot_at). No account
   or position provisioning, human-approval INSERT, DELETE, TRUNCATE, DDL or role
   switching is granted.
 - Exact EXECUTE on the quantity helper. No direct trace-function EXECUTE or
@@ -105,6 +106,27 @@ replace the shared API/worker credential without breaking unqualified API routes
 Preserve existing protective operation while proving these branches. Any runtime
 role/grant/security change requires separate review and authorization.
 
+## Signed balance quota qualification correction
+
+The first hosted run reached the restricted START boundary but returned
+`kalshi_read_failed`. Source inspection identified an omitted dependency:
+`kalshiAccountClient.ts:460-464` calls `reserveKalshiBalanceReadSlot` before
+synthetic HTTP when production mode uses the global fetch identity. That helper
+uses the global database pool to SELECT the credential owner and INSERT/upsert
+`private.strata_kalshi_balance_read_slots`, updating only `next_slot_at`.
+Migration `0027_strata_balance_quota_auto_maintenance.sql:3-9` creates the table,
+revokes PUBLIC and enables RLS. The initial candidate provided no quota access.
+This explains a concrete permission failure; it is not a provider outage finding.
+
+The fixture now includes this exact operational table in its explicit read/insert
+list and grants UPDATE only on `next_slot_at`, with ordinary test-only runtime
+policies. A native probe removes INSERT, expects SQLSTATE 42501 from the real
+quota function, restores INSERT, then calls the function twice and verifies an
+insert followed by an advancing upsert. Changing `budget_key` remains denied.
+The quota function, real spacing, signed reader and start-success expectation are
+unchanged. Hosted requalification is required; static checks alone do not prove
+the corrected native scenarios pass. No human-authority grants were broadened.
+
 ## Source-supported permission inventory
 
 References below use `S/` for `artifacts/api-server/src/lib/strata/`, `V/` for `artifacts/api-server/src/lib/v13-production/`.
@@ -133,6 +155,7 @@ All relations below need schema USAGE and the appropriate row policies if non-ow
 
 | Relation | Required use in bounded flow | Actual written columns and sources |
 |---|---|---|
+| `private.strata_kalshi_balance_read_slots` | SELECT quota key/slot; INSERT/upsert before signed balance HTTP | INSERT `budget_key,next_slot_at`; UPDATE only `next_slot_at` (`kalshiBalanceQuota.ts:40-51`). Credential owner lookup at :28-36 uses existing credential SELECT. No quota-key mutation, DELETE, table ownership or DDL. |
 | `public.v13_production_account` | SELECT all (ledger), account-first FOR UPDATE, final FOR SHARE | Worker accounting UPDATE `cash_micros,reserved_micros,blocked_reason,revision,reconciled_at,evidence_digest` (`ledger.ts:185-194,574-589`). Owner-confirmed safety fence additionally UPDATE `kill_switch,execution_enabled,revision` (`ownerUnknownRecoveryFence.ts:73-76`). No account INSERT in this held-exit lifecycle; account provisioning is separate. |
 | `public.v13_live_money_policy` | SELECT all through `OwnedAccountLedger.policy`; FOR SHARE; reads authority/fee/policy state | No policy mutation by these worker/recovery functions. `accountProductionSession.ts:89-99`, `reviewedProtectiveExitFee.ts:43-127`. Lock-only UPDATE capability is a separate issue, not policy-approval authority. |
 | `public.v13_production_intent` | SELECT all / history; FOR UPDATE and FOR SHARE | EXIT INSERT `id,account_id,parent_id,kind,market,side,request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros` (`executor.ts:352-405`). Reconciliation UPDATE `state,exchange_order_id,filled_hundredths,reserved_micros,terminal` (`ledger.ts:574-576`). UNKNOWN marker UPDATE `state,dispatch_at` (`ownerFeeEmergencyExitUnknownCommit.ts:181-188`). No-send UPDATE `state,terminal` (`ownerFeeEmergencyExitSignedDispatch.ts:169`). Generic ENTRY preparation/cancel paths have more columns and are outside a held protective-only scope. |
@@ -249,6 +272,7 @@ All three columns use `GENERATED ALWAYS AS IDENTITY`. Do not infer a blanket seq
 
 ## Pool routing and dynamic dependencies still unverified
 
+* `kalshiAccountClient.ts:460-464` reserves signed balance quota before HTTP in production mode/global fetch. `kalshiBalanceQuota.ts:18,40-51` defaults to the global pool and upserts its member bucket; missing permissions are caught as `kalshi_read_failed` by the higher-level reader.
 * `personalExecutionSupervisor.ts:445-455` calls reserve and dispatch without passing its injected `db`; reserve uses global pool (`ownerFeeEmergencyExitReserve.ts:87`), dispatch final/no-send uses global pool (`ownerFeeEmergencyExitSignedDispatch.ts:387-399`). Production forbids injected dispatcher test ports at :344, so routing cannot be changed by casually passing test dependencies in production.
 * `personalExecutionSupervisor.ts:332` API-start verifier falls back to global pool (`apiFeeSourceStage.ts:113`); its standing fallback can write via global pool (`apiFeeStandingDelegation.ts:230`). Protective fee verifier defaults global (`reviewedProtectiveExitFee.ts:137,180`).
 * `reconcileOwnedProtectiveExits(input, db)` uses `db` only for its reservation lookup; restart `:32-36` calls read/persist without passing that db. `ownerFeeEmergencyExitAuthenticatedRecovery.ts:100` and `ownerFeeEmergencyExitReconciliationCommit.ts:57` therefore default global. Immediate signed outcome read/persist likewise default global (`ownerFeeEmergencyExitSignedDispatch.ts:404,417`).

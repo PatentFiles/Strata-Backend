@@ -249,10 +249,10 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
    const candidate=preparePdfFreeApiFeePolicyReview(probe);assert(candidate.ok,JSON.stringify(candidate));
    assert.notEqual(candidate.reviewCandidateDigest,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256);
    await reset(candidate.reviewCandidateDigest,setup);
-   if(restricted){await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account);}
+   if(restricted){await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account,owner);}
    const control=createProductionPersonalSession(db);active=control;
    external.arm();const started=await control.start({userId:owner,accountId:account,action:'START'});
-   assert.equal(started.workerStarted,true,JSON.stringify(started));assert.equal(started.ok,true);
+   assert.equal(started.workerStarted,true,JSON.stringify({started,external:external.summary()}));assert.equal(started.ok,true);
    const at=await acknowledgedEntry(setup);external.entry(at);
    let sourceFailure:unknown;
    sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch((e:unknown)=>{sourceFailure=e;});},250);

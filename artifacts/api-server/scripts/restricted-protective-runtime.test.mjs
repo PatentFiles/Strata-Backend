@@ -69,3 +69,13 @@ test('fixture drivers and types come from the existing workspace dependency',()=
  assert.match(source,/runtime.on\('error',\(error:Error\)/);
  assert.match(held,/catch\(\(e:unknown\)=>\{sourceFailure=e;/);
 });
+
+test('signed balance quota is exercised without broadening authority grants',()=>{
+ assert.match(source,/import \{reserveKalshiBalanceReadSlot\} from '\.\/kalshiBalanceQuota'/);
+ assert.match(source,/'private.strata_kalshi_balance_read_slots':\['next_slot_at'\]/);
+ assert.match(source,/assert.rejects\(reserveKalshiBalanceReadSlot\('offline-supervisor-only',ownerId\),\{code:'42501'\}/);
+ assert.match(source,/real quota INSERT must persist/);
+ assert.match(source,/real quota UPDATE advances the slot/);
+ assert.match(source,/fixture-forbidden-key-change/);
+ assert.match(held,/await assertRestrictedAuthority\(setup,account,owner\)/);
+});
