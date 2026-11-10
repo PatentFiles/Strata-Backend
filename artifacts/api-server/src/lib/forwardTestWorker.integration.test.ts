@@ -242,10 +242,17 @@ test("expired unresulted held market retains OPEN paper position and emits no sa
   } finally { price = savedPrice; }
 });
 
-test("window rollover settles exactly once, and the new target cannot create an artificial crossing", async () => {
+test("rollover settles once despite unavailable next-market discovery, without an artificial crossing", async () => {
   currentTicker = nextTicker;
   result = "yes";
-  const closed = await cycle("worker-C");
+  const heldReads: Array<string | undefined> = [];
+  const closed = await cycle("worker-C", lease.leaseEpoch, { ...feeds, async market(ticker) {
+    heldReads.push(ticker);
+    if (!ticker) throw new Error("Kalshi returned no current market");
+    return market(ticker);
+  } });
+  assert.equal(closed.error, null);
+  assert.deepEqual(heldReads, [firstTicker]);
   assert.equal(closed.marketTicker, firstTicker);
   const [position] = await db.select().from(forwardTestPositionTable)
     .where(eq(forwardTestPositionTable.engineId, engineId));

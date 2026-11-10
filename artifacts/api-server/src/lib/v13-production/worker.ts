@@ -26,6 +26,8 @@ export class ProductionWorker {
   heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private lifecycle = 0;
+  private starting: Promise<void> | null = null;
   private recoveryOnly = false;
   private pendingSourceHint:CommittedForwardSourceHint|undefined;
   private mandatoryReconcileActive=false;
@@ -114,6 +116,10 @@ export class ProductionWorker {
       // 15-second replay window, determines which paper signals remain
       // executable. Newest first: do not spend a slow Kalshi/fee fetch on an
       // older crossing while a newer qualifying entry expires.
+      // A non-PREPARED intent can never dispatch again. Exclude it before the
+      // bounded result limit and provider reads; PREPARED remains eligible for
+      // its original one-use dispatch. The locked duplicate check in prepareEntry
+      // still resolves races and remains the only reservation authority.
       const query = this.executor.accountOwnerUserId
         ? `SELECT e.id,e.evaluated_at FROM forward_test_evaluations e
           JOIN v13_production_account a ON a.id=$1
@@ -123,6 +129,11 @@ export class ProductionWorker {
             AND e.fresh_cross=true AND e.signal IN ('SCOUT','CONFIRM')
             AND e.evaluated_at BETWEEN $2::timestamptz -
               (p.max_quote_age_ms * interval '1 millisecond') AND $2::timestamptz
+            AND NOT EXISTS (SELECT 1 FROM v13_production_intent i
+              WHERE i.account_id=a.id AND i.evaluation_id=e.id AND i.state<>'PREPARED')
+            AND NOT EXISTS (SELECT 1 FROM v13_production_intent i
+              WHERE i.account_id=a.id AND i.kind='ENTRY' AND i.crossing_key=e.crossing_key
+                AND i.state<>'PREPARED')
           ORDER BY e.evaluated_at DESC,e.id DESC LIMIT 100`
         : `SELECT id,evaluated_at FROM forward_test_evaluations
           WHERE evaluation_source='paper' AND qualifying_trigger=true
@@ -190,34 +201,58 @@ export class ProductionWorker {
       }
     }
   }
-  async start(): Promise<void> {
-    if (this.timer) return;
-    await this.recoverProtectiveExits();
-    await this.executor.reconcile();
-    await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
-    this.recoveryOnly = false;
-    this.schedule();
-  }
-  async startRecovery(): Promise<void> {
-    if (this.timer) return;
-    await this.executor.ledger.readAccount();
-    this.recoveryOnly = true;
-    try { await this.recoverProtectiveExits(); await this.executor.reconcile(); }
-    catch (error) { this.report(error); }
-    this.schedule();
+  start(): Promise<void> { return this.beginStart(false); }
+  startRecovery(): Promise<void> { return this.beginStart(true); }
+  private beginStart(recoveryOnly: boolean): Promise<void> {
+    if (this.timer) return Promise.resolve();
+    // Repeated START cannot install multiple loops or wake subscriptions. STOP
+    // invalidates this generation even before the first timer exists.
+    if (this.starting) return this.starting;
+    const lifecycle = this.lifecycle;
+    const current = () => lifecycle === this.lifecycle;
+    const pending = Promise.resolve().then(async () => {
+      if (!current()) return;
+      if (recoveryOnly) {
+        await this.executor.ledger.readAccount();
+        if (!current()) return;
+        try {
+          await this.recoverProtectiveExits();
+          if (!current()) return;
+          await this.executor.reconcile();
+        } catch (error) {
+          if (current()) this.report(error);
+        }
+      } else {
+        await this.recoverProtectiveExits();
+        if (!current()) return;
+        await this.executor.reconcile();
+        if (!current()) return;
+        await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
+      }
+      if (!current()) return;
+      this.recoveryOnly = recoveryOnly;
+      this.schedule();
+    }).catch(error => { if (current()) throw error; })
+      .finally(() => { if (this.starting === pending) this.starting = null; });
+    this.starting = pending;
+    return pending;
   }
   private schedule(): void {
+    const lifecycle = this.lifecycle;
+    const current = () => lifecycle === this.lifecycle;
     this.traceSweepsStopped = false;
     let active=false,pending=false;
     const loop = async (origin: "normal" | "committed_signal" = "normal") => {
+      if (!current() || !this.timer) return;
       active=true;
       const tickStartedAt = Date.now();
       try { await this.tick(origin); } catch (error) {
+        if (!current()) return;
         this.report(error);
         if(this.recoverUnreconciledEntry && (this.heldRecoveryActive?.() ||
           (error instanceof Error && error.message === "personal_exchange_history_unreconciled"))){
-          try{if(!await this.recoverUnreconciledEntry(error))this.stop();}
-          catch(recoveryError){this.report(recoveryError);this.stop();}
+          try{const recovered=await this.recoverUnreconciledEntry(error);if(current()&&!recovered)this.stop();}
+          catch(recoveryError){if(current()){this.report(recoveryError);this.stop();}}
         }else if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
@@ -227,12 +262,12 @@ export class ProductionWorker {
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
       active=false;
-      if (this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
+      if (current() && this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
     this.detachWake=onCommittedForwardSignal((hint)=>{
-      if(!this.timer||this.recoveryOnly)return;
+      if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;
         if(this.metadataAttempt&&this.metadataAttempt.source.evaluationId!==hint.evaluationId)
@@ -244,7 +279,7 @@ export class ProductionWorker {
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void { this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }

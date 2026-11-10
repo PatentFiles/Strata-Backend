@@ -169,10 +169,9 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   const now = options.now ?? new Date(clock());
   let btc: BtcObservation;
   let market: MarketObservation;
-  let currentMarket: MarketObservation;
   const priorPosition = await getOpenPaperPosition(engineId);
   try {
-    ({btc,currentMarket,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
+    ({btc,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
     timing.feedsDecodedObservedAtMs=diagnosticWallNow();
     cycleDiagnostics.observe(engineId,btc.providerAt.getTime(),btc.receivedAt.getTime());
     if (priorPosition && market.ticker !== priorPosition.marketTicker) {

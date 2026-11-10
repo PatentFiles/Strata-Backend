@@ -16,6 +16,7 @@ import {preparePdfFreeApiFeePolicyReview} from './apiFeePolicyReviewCandidate';
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from './apiFeeSourceStage';
 import {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION} from './apiFeeRateReference';
 import {backendRole,installFullRecoverySchema} from './ownerUnknownRecoverySchema.fixture';
+import {installCombinedPlatformShape,installCombinedRestrictedRuntime,assertCombinedAuthority,seedCombinedStanding,combinedHumanSnapshot,observeCombinedStatements} from './restrictedCombinedRuntime.fixture';
 
 // Full real supervisor/native-ledger integration. Only external Vault storage
 // and HTTP responses are fixture data. No executor, policy, reserve, dispatcher,
@@ -133,13 +134,14 @@ async function acknowledgedEntry(db:Pool=pool){
  return at;
 }
 type Scenario='partial_then_flat'|'durable_no_send'|'ambiguous_post';
-function externalFixture(scenario:Scenario){
+function externalFixture(scenario:Scenario,allowFlatRenewal=false,beforeFinalMetadata?:()=>Promise<void>){
  const started=Date.now(),market={ticker:request.market,event_ticker:request.market+'-EVENT',series_ticker:'KXBTC15M',exchange_index:2,
   status:'active',price_level_structure:'deci_cent',open_time:new Date(started-60000).toISOString(),
   close_time:new Date(started+600000).toISOString(),expiration_time:new Date(started+660000).toISOString(),
   expected_expiration_time:new Date(started+660000).toISOString(),latest_expiration_time:new Date(started+660000).toISOString()};
  let phase:'flat'|'armed'|'entry'='flat',cash=25000000,quantity=0,entryAt=0,failHistory=true;
  let unblock!:()=>void;const ready=new Promise<void>(r=>{unblock=r;});
+ let holdFlat=false,flatHeld!:()=>void,revocationDone=false;const flatBarrier=new Promise<void>(r=>{flatHeld=r;});
  let balances=0,posts=0,metadataFailures=0,requests=0;
  const postClients=new Set<string>(),orders:Record<string,unknown>[]=[],fills:Record<string,unknown>[]=[];
  const paths:string[]=[];
@@ -180,7 +182,7 @@ function externalFixture(scenario:Scenario){
   }
   assert.equal(method,'GET');
   if(path==='/trade-api/v2/portfolio/balance'){
-   balances++;if(balances>=3&&phase==='armed')await ready;
+   balances++;if(balances>=3&&phase==='armed'&&(!allowFlatRenewal||holdFlat)){flatHeld();await ready;}
    return response({balance_dollars:(cash/1000000).toFixed(4),subaccount:1,exchange_index:2});
   }
   if(path.includes('/historical/'))return response({orders:[],fills:[],cursor:''});
@@ -195,6 +197,10 @@ function externalFixture(scenario:Scenario){
   if(path.endsWith('/orderbook'))return response({orderbook_fp:{yes_dollars:[['0.5900','100.00']],no_dollars:[['0.4000','100.00']]}});
   if(path==='/trade-api/v2/markets')return response({markets:[market],cursor:''});
   if(path==='/trade-api/v2/markets/'+request.market){
+   if(beforeFinalMetadata&&!revocationDone&&phase==='entry'){
+    const unknown=(await db.query("SELECT count(*)::int AS n FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state='UNKNOWN'",[account])).rows[0].n;
+    if(unknown){await beforeFinalMetadata();revocationDone=true;}
+   }
    if(scenario==='durable_no_send'&&phase==='entry'){
     const unknown=(await db.query("SELECT count(*)::int AS n FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state='UNKNOWN'",[account])).rows[0].n;
     if(unknown){metadataFailures++;return response({message:'synthetic final public read outage'},503);}
@@ -207,8 +213,8 @@ function externalFixture(scenario:Scenario){
   if(path==='/trade-api/v2/events/fee_changes')return response({event_fee_changes:[],cursor:''});
   throw Error('unexpected_external_path:'+path);
  };
- return {transport,arm(){phase='armed';},entry(at:number){entryAt=at;cash=23720000;quantity=300;phase='entry';unblock();},
-  summary:()=>({balances,posts,quantity,metadataFailures,requests,paths:paths.slice(-20)})};
+ return {transport,holdFlatRead(){holdFlat=true;return flatBarrier;},arm(){phase='armed';},entry(at:number){entryAt=at;cash=23720000;quantity=300;phase='entry';unblock();},
+  summary:()=>({balances,posts,quantity,metadataFailures,requests,revocationDone,paths:paths.slice(-20)})};
 }
 async function diagnostics(control:PersonalSessionControl,external:ReturnType<typeof externalFixture>){
  return {scheduled:control.isScheduled(owner,account),external:external.summary(),runtimeQueryFailures:restrictedRuntimeDiagnostics(),
@@ -218,18 +224,27 @@ async function diagnostics(control:PersonalSessionControl,external:ReturnType<ty
   markers:(await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1',[account])).rows};
 }
 
-export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_flat'|'durable_no_send'|'ambiguous_post',restricted=false){
+export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_flat'|'durable_no_send'|'ambiguous_post',restricted=false,combined?:'success'|'revocation'){
+ assert(!combined||restricted,'combined capability mode always uses a genuine restricted login');
  // Each caller is a separate canonical-runner process with its own database.
  // Never restore real HTTP: a failed assertion may leave an in-flight task.
 
  let active:PersonalSessionControl|null=null,sourceTimer:ReturnType<typeof setInterval>|undefined;
  const setup=restricted?new NativePool({connectionString:url!,max:2}):pool;
+ const seen=new Set<string>();
+ let standing:Awaited<ReturnType<typeof seedCombinedStanding>>|undefined,humanBefore:Record<string,unknown>|undefined;
+ let heldTechnical:unknown,financialBeforeRevocation:unknown;
+ const technical=async()=>({lease:(await setup.query('SELECT * FROM private.strata_continuous_execution_technical_lease ORDER BY grant_id')).rows,
+  audit:(await setup.query('SELECT * FROM private.strata_continuous_execution_audit ORDER BY audit_id')).rows});
+ const financial=async()=>({account:(await setup.query('SELECT cash_micros,reserved_micros FROM public.v13_production_account WHERE id=$1',[account])).rows,
+  positions:(await setup.query('SELECT quantity_hundredths,basis_micros,realized_pnl_micros FROM public.v13_production_position WHERE account_id=$1 ORDER BY id',[account])).rows});
  try{
   const admin=await pool.connect();try{await installFullRecoverySchema(admin);}finally{admin.release();}
   // This test-only table is the external Vault read contract, not any trading
   // schema. It stores only this process's freshly generated ephemeral key.
   await pool.query(`CREATE TABLE vault.decrypted_secrets(id uuid PRIMARY KEY REFERENCES vault.secrets(id),decrypted_secret text NOT NULL);
    ALTER TABLE vault.decrypted_secrets OWNER TO ${backendRole}; REVOKE ALL ON vault.decrypted_secrets FROM PUBLIC`);
+  if(combined)await installCombinedPlatformShape(setup);
   if(!restricted){
   pool.on('connect',c=>{void c.query(`SET ROLE ${backendRole}`);});
   const existing=await pool.connect();try{await existing.query(`SET ROLE ${backendRole}`);}finally{existing.release();}
@@ -243,17 +258,39 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
   process.env.KALSHI_API_ENVIRONMENT='demo';
   process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';process.env.STRATA_UNKNOWN_ENTRY_PROTECTIVE_RECOVERY_ENABLED='true';
   {
-   const external=externalFixture(scenario);globalThis.fetch=external.transport;
+   const external=externalFixture(scenario,Boolean(combined),combined==='revocation'?async()=>{
+    assert(standing);assert(seen.has('successor'),'preliminary native successor read must have succeeded');
+    assert(!seen.has('successor_refused'));financialBeforeRevocation=await financial();
+    const result=await setup.query("UPDATE private.strata_standing_execution_reviews SET revoked_at=clock_timestamp(),revocation_reason='synthetic final-fence revocation' WHERE release_id=$1 RETURNING release_id",[standing.review]);
+    assert.equal(result.rows.length,1);
+   }:undefined);globalThis.fetch=external.transport;
    const exact=await readExactEmergencyFeeEvidence(request.market);assert(exact.ok,JSON.stringify(exact));
    const probe=await probeCurrentKalshiFeeApi(globalThis.fetch,Date.now,request.market);
    const candidate=preparePdfFreeApiFeePolicyReview(probe);assert(candidate.ok,JSON.stringify(candidate));
    assert.notEqual(candidate.reviewCandidateDigest,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256);
    await reset(candidate.reviewCandidateDigest,setup);
-   if(restricted){await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account,owner);}
+   if(combined){
+    standing=await seedCombinedStanding(setup,{owner,reviewer,grant,account,policyHash,sha});
+    await installCombinedRestrictedRuntime(setup,client=>observeCombinedStatements(client,seen));
+    await assertCombinedAuthority(setup);
+   }
+   if(restricted){if(!combined)await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account,owner);}
+   if(combined)humanBefore=await combinedHumanSnapshot(setup);
    if(restricted)beginRestrictedRuntimeDiagnostics();
    const control=createProductionPersonalSession(db);active=control;
    external.arm();const started=await control.start({userId:owner,accountId:account,action:'START'});
    assert.equal(started.workerStarted,true,JSON.stringify({started,external:external.summary(),runtimeQueryFailures:restrictedRuntimeDiagnostics()}));assert.equal(started.ok,true);
+   if(combined){
+    await until(async()=>seen.has('technical_renewal')&&Number((await technical()).lease[0]?.generation)===2,()=>diagnostics(control,external));
+    assert(seen.has('fee_renewal'),'expired bootstrap grant must use actual standing fee renewal');
+    const renewed=await technical();assert.equal(renewed.audit.length,1);assert.equal(renewed.audit[0].kind,'LEASE_RENEWED');
+    assert.equal(new Date(renewed.lease[0].expires_at).getTime()-new Date(renewed.lease[0].observed_at).getTime(),300000);
+    assert.equal((await setup.query('SELECT lease_expires_at>clock_timestamp() AS current FROM private.strata_api_fee_standing_delegations WHERE delegation_id=$1',[standing!.delegation])).rows[0].current,true);
+    // Block the next serialized flat read before seeding the already-acknowledged
+    // entry. This keeps the initial renewal outside held mode, as production requires.
+    await Promise.race([external.holdFlatRead(),pause(10000).then(()=>{throw Error('combined_flat_read_barrier_timeout');})]);
+    heldTechnical=await technical();
+   }
    const at=await acknowledgedEntry(setup);external.entry(at);
    let sourceFailure:unknown;
    sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch((e:unknown)=>{sourceFailure=e;});},250);
@@ -270,7 +307,16 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
     assert.equal(control.isScheduled(owner,account),true);
    };
 
-   if(scenario==='partial_then_flat'){
+   if(combined==='revocation'){
+    await until(async()=>external.summary().revocationDone&&!control.isScheduled(owner,account),detail);
+    assert(seen.has('successor_refused'),'native final successor query must refuse revoked technical review');
+    assert.equal(external.summary().posts,0);
+    assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1',[account])).rows[0].state,'UNKNOWN');
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_reconciliations WHERE execution_account_id=$1',[account])).rows[0].n,0);
+    assert.deepEqual(await financial(),financialBeforeRevocation);
+    const before=external.summary().requests;await pause(2700);
+    assert.equal(external.summary().requests,before);assert.equal(external.summary().posts,0);
+   }else if(scenario==='partial_then_flat'){
     await until(async()=>external.summary().posts===2&&(await db.query('SELECT quantity_hundredths FROM public.v13_production_position WHERE id=$1',[target])).rows[0]?.quantity_hundredths==='0',detail);
     const exits=(await db.query("SELECT request,state,filled_hundredths FROM public.v13_production_intent WHERE account_id=$1 AND kind='EXIT' ORDER BY created_at,id",[account])).rows;
     assert.equal(exits.length,2);assert.deepEqual(exits.map(r=>r.filled_hundredths),['100','200']);assert(exits.every(r=>r.state==='TERMINAL'));
@@ -292,6 +338,22 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
     assert.equal(external.summary().posts,1);assert.equal(external.summary().requests,before,'stopped scheduler must not poll or resend');
    }
    assert.equal(sourceFailure,undefined);
+   if(combined){
+    assert(seen.has('successor'),'held EXIT must actually execute native standing successor SQL');
+    assert.deepEqual(await technical(),heldTechnical,'held mode must not renew continuous entry technical evidence');
+    const after=await combinedHumanSnapshot(setup);
+    if(combined==='revocation'){
+     const before=humanBefore!['private.strata_standing_execution_reviews'] as {row:Record<string,unknown>}[];
+     const revoked=after['private.strata_standing_execution_reviews'] as {row:Record<string,unknown>}[];
+     assert.equal(before.length,1);assert.equal(revoked.length,1);assert(revoked[0]!.row.revoked_at);
+     assert.equal(revoked[0]!.row.revocation_reason,'synthetic final-fence revocation');
+     const {revoked_at:_at,revocation_reason:_reason,...original}=before[0]!.row;
+     const {revoked_at:_afterAt,revocation_reason:_afterReason,...actual}=revoked[0]!.row;
+     assert.deepEqual(actual,original);
+     after['private.strata_standing_execution_reviews']=before;
+    }
+    assert.deepEqual(after,humanBefore,'worker never changes human authority bytes');
+   }
    if(restricted){
     // Stop scheduling. An already-running optional audit may still finish.
     const stopped=await control.stop({userId:owner,accountId:account,action:'KILL'});
