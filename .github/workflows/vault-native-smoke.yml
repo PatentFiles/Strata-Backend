@@ -1,0 +1,241 @@
+name: Isolated native Vault 0.3.1 smoke
+
+# One extension-only proof. No application checkout, credentials, or deployment.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/vault-native-smoke.yml'
+
+permissions: {}
+
+jobs:
+  native-vault:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/vault-native-smoke-20261110'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify native crypto, ACLs, tamper rejection, and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='ghcr.io/supabase/postgres:17.11.0.018@sha256:74e865602c403c63bae5958ce98eed75432e49085c403bad35cae0da939255e6'
+          DB='vault-native-smoke'
+          cleanup() {
+            code=$?
+            trap - EXIT
+            if [ "$code" -ne 0 ]; then
+              docker logs --tail 100 "$DB" 2>&1 || true
+            fi
+            docker rm -fv "$DB" >/dev/null 2>&1 || true
+            exit "$code"
+          }
+          trap cleanup EXIT
+          docker version
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" --format 'Image={{.Id}} OS={{.Os}} Architecture={{.Architecture}}'
+          docker run -d --name "$DB" --network none --cpus 2 --memory 2g --pids-limit 512 \
+            -e POSTGRES_PASSWORD='FAKE_LOCAL_VAULT_SMOKE_ONLY_20261110' "$IMAGE" >/dev/null
+          test "$(docker inspect "$DB" --format '{{.HostConfig.NetworkMode}}')" = none
+          test "$(docker inspect "$DB" --format '{{len .HostConfig.PortBindings}}')" = 0
+          test "$(docker inspect "$DB" --format '{{.HostConfig.Privileged}}')" = false
+          test "$(docker inspect "$DB" --format '{{len .HostConfig.Binds}}')" = 0
+          
+          sql() {
+            docker exec -i "$DB" psql -X --no-password -v ON_ERROR_STOP=1 -v VERBOSITY=verbose \
+              -U supabase_admin -h /var/run/postgresql -d postgres "$@"
+          }
+          wait_ready() {
+            for attempt in $(seq 1 120); do
+              if [ "$(docker inspect "$DB" --format '{{.State.Running}}')" != true ]; then
+                echo 'Database container stopped before readiness' >&2
+                return 1
+              fi
+              # PID 1 becomes postgres only after the entrypoint finishes its temporary
+              # initialization server and the image's own platform migrations.
+              if docker exec "$DB" sh -c 'test "$(cat /proc/1/comm)" = postgres' &&
+                 [ "$(sql -Atc "SELECT extversion FROM pg_extension WHERE extname = 'supabase_vault'" 2>/dev/null || true)" = 0.3.1 ]; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo 'Database did not become ready within four minutes' >&2
+            return 1
+          }
+          expect_error() {
+            label=$1
+            state=$2
+            query=$3
+            set +e
+            output=$(sql -c "$query" 2>&1)
+            result=$?
+            set -e
+            if [ "$result" -eq 0 ]; then
+              printf 'FAIL: %s unexpectedly succeeded\n' "$label" >&2
+              return 1
+            fi
+            if ! printf '%s\n' "$output" | grep -F "$state:" >/dev/null; then
+              printf 'FAIL: %s did not report SQLSTATE %s\n%s\n' "$label" "$state" "$output" >&2
+              return 1
+            fi
+            printf 'PASS: %s (%s)\n' "$label" "$state"
+          }
+          wait_ready
+          sql <<'SQL'
+          CREATE FUNCTION pg_temp.assert_true(ok boolean, label text)
+          RETURNS void LANGUAGE plpgsql AS $$
+          BEGIN
+            IF ok IS DISTINCT FROM true THEN
+              RAISE EXCEPTION 'FAIL: %', label;
+            END IF;
+            RAISE NOTICE 'PASS: %', label;
+          END
+          $$;
+          SELECT pg_temp.assert_true(current_setting('server_version_num') = '170011',
+                                     'PostgreSQL is exactly 17.11');
+          SELECT pg_temp.assert_true(
+            (SELECT extversion = '0.3.1' FROM pg_extension WHERE extname = 'supabase_vault'),
+            'Vault extension is exactly 0.3.1');
+          SELECT pg_temp.assert_true(
+            (SELECT l.lanname = 'c' AND NOT p.prosecdef AND p.provolatile = 'i'
+                    AND p.probin LIKE '%supabase_vault%'
+                    AND p.prosrc = 'pgsodium_crypto_aead_det_decrypt_by_id'
+             FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+             WHERE p.oid = 'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)'::regprocedure),
+            'Real immutable security-invoker Vault C decrypt implementation');
+          SELECT pg_temp.assert_true(
+            (SELECT v.relkind = 'v' AND v.relowner = 'supabase_admin'::regrole
+                    AND t.relowner = v.relowner AND NOT t.relrowsecurity
+                    AND NOT COALESCE(v.reloptions @> ARRAY['security_invoker=true'], false)
+             FROM pg_class v CROSS JOIN pg_class t
+             WHERE v.oid = 'vault.decrypted_secrets'::regclass
+               AND t.oid = 'vault.secrets'::regclass),
+            'Ordinary supabase_admin-owned view and same-owner non-RLS base table');
+          SELECT pg_temp.assert_true(
+            EXISTS (
+              SELECT 1 FROM pg_rewrite r JOIN pg_depend d ON d.objid = r.oid
+              WHERE r.ev_class = 'vault.decrypted_secrets'::regclass
+                AND d.classid = 'pg_rewrite'::regclass
+                AND d.refclassid = 'pg_proc'::regclass
+                AND d.refobjid = 'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)'::regprocedure
+            ), 'Decrypted view depends on the native helper');
+          SELECT pg_temp.assert_true(
+            NOT EXISTS (
+              SELECT 1 FROM pg_proc p,
+                LATERAL aclexplode(COALESCE(p.proacl, acldefault('f',p.proowner))) a
+              WHERE p.oid = 'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)'::regprocedure
+                AND a.grantee = 0 AND a.privilege_type = 'EXECUTE'
+            ), 'PUBLIC has no native-helper EXECUTE');
+          SELECT current_setting('server_version') AS postgres_version,
+                 extname, extversion, extowner::regrole AS extension_owner
+          FROM pg_extension WHERE extname = 'supabase_vault';
+          SELECT p.proname, l.lanname, p.prosecdef, p.provolatile, p.probin, p.prosrc, p.proacl
+          FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+          WHERE p.oid = 'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)'::regprocedure;
+          
+          DO $$
+          BEGIN
+            PERFORM vault.create_secret('FAKE_NATIVE_VAULT_ONLY_ALPHA', 'native_smoke_alpha', 'Disposable synthetic fixture');
+            PERFORM vault.create_secret('', 'native_smoke_empty', 'Disposable empty fixture');
+            PERFORM vault.create_secret('FAKE_UNICODE_café_雪', 'native_smoke_unicode', 'Disposable Unicode fixture');
+          END $$;
+          SELECT pg_temp.assert_true(
+            (SELECT count(*) = 1 AND bool_and(decrypted_secret = 'FAKE_NATIVE_VAULT_ONLY_ALPHA'
+                                              AND secret <> decrypted_secret)
+             FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'),
+            'Fake secret encrypts and roundtrips through the real view');
+          SELECT pg_temp.assert_true(
+            (SELECT count(*) = 1 AND bool_and(decrypted_secret = '')
+             FROM vault.decrypted_secrets WHERE name = 'native_smoke_empty'),
+            'Empty string roundtrips');
+          SELECT pg_temp.assert_true(
+            (SELECT count(*) = 1 AND bool_and(decrypted_secret = 'FAKE_UNICODE_café_雪')
+             FROM vault.decrypted_secrets WHERE name = 'native_smoke_unicode'),
+            'Unicode roundtrips');
+          SELECT vault.update_secret((SELECT id FROM vault.secrets WHERE name = 'native_smoke_alpha'),
+                                     'FAKE_NATIVE_VAULT_ONLY_UPDATED');
+          SELECT pg_temp.assert_true(
+            (SELECT count(*) = 1 AND bool_and(decrypted_secret = 'FAKE_NATIVE_VAULT_ONLY_UPDATED')
+             FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'),
+            'Update roundtrips');
+          CREATE ROLE vault_smoke_reader NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+          GRANT USAGE ON SCHEMA vault TO vault_smoke_reader;
+          GRANT SELECT ON vault.decrypted_secrets TO vault_smoke_reader;
+          SELECT pg_temp.assert_true(
+            NOT has_function_privilege('vault_smoke_reader',
+              'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)', 'EXECUTE'),
+            'Probe starts without native-helper EXECUTE');
+          SELECT pg_temp.assert_true(
+            NOT has_table_privilege('vault_smoke_reader','vault.secrets','SELECT'),
+            'Probe starts without base-table SELECT');
+          SET ROLE service_role;
+          DO $$
+          BEGIN
+            IF (SELECT decrypted_secret FROM vault.decrypted_secrets
+                WHERE name = 'native_smoke_alpha') IS DISTINCT FROM 'FAKE_NATIVE_VAULT_ONLY_UPDATED' THEN
+              RAISE EXCEPTION 'FAIL: existing service_role native decryption';
+            END IF;
+            RAISE NOTICE 'PASS: existing service_role native decryption';
+          END $$;
+          RESET ROLE;
+          SQL
+          
+          expect_error 'view SELECT without native-helper EXECUTE is denied' 42501 \
+            "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
+          expect_error 'direct base-table SELECT is denied' 42501 \
+            "SET ROLE vault_smoke_reader; SELECT secret FROM vault.secrets WHERE name = 'native_smoke_alpha'"
+          expect_error 'anon cannot decrypt fixture' 42501 \
+            "SET ROLE anon; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
+          expect_error 'authenticated cannot decrypt fixture' 42501 \
+            "SET ROLE authenticated; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
+          
+          sql <<'SQL'
+          GRANT EXECUTE ON FUNCTION vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)
+          TO vault_smoke_reader;
+          SET ROLE vault_smoke_reader;
+          DO $$
+          BEGIN
+            IF (SELECT decrypted_secret FROM vault.decrypted_secrets
+                WHERE name = 'native_smoke_alpha') IS DISTINCT FROM 'FAKE_NATIVE_VAULT_ONLY_UPDATED' THEN
+              RAISE EXCEPTION 'FAIL: view plus helper EXECUTE did not decrypt';
+            END IF;
+            RAISE NOTICE 'PASS: view plus native-helper EXECUTE decrypts without base-table SELECT';
+          END $$;
+          RESET ROLE;
+          SQL
+          expect_error 'base-table SELECT stays denied after helper grant' 42501 \
+            "SET ROLE vault_smoke_reader; SELECT secret FROM vault.secrets WHERE name = 'native_smoke_alpha'"
+          sql -c "REVOKE EXECUTE ON FUNCTION vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea) FROM vault_smoke_reader"
+          expect_error 'revoking helper EXECUTE restores denial' 42501 \
+            "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
+          
+          expect_error 'ciphertext bit flip is rejected' 22000 \
+            "SELECT vault._crypto_aead_det_decrypt(set_byte(decode(secret,'base64'),0,get_byte(decode(secret,'base64'),0) # 1),convert_to(id::text,'utf8'),0,'pgsodium'::bytea,nonce) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
+          expect_error 'wrong authenticated row ID is rejected' 22000 \
+            "SELECT vault._crypto_aead_det_decrypt(decode(secret,'base64'),convert_to('00000000-0000-0000-0000-000000000000','utf8'),0,'pgsodium'::bytea,nonce) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
+          expect_error 'nonce bit flip is rejected' 22000 \
+            "SELECT vault._crypto_aead_det_decrypt(decode(secret,'base64'),convert_to(id::text,'utf8'),0,'pgsodium'::bytea,set_byte(nonce,0,get_byte(nonce,0) # 1)) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
+          
+          before=$(sql -Atc 'SELECT pg_postmaster_start_time()')
+          docker restart --time 30 "$DB" >/dev/null
+          wait_ready
+          after=$(sql -Atc 'SELECT pg_postmaster_start_time()')
+          test "$before" != "$after"
+          sql <<'SQL'
+          SET ROLE service_role;
+          DO $$
+          BEGIN
+            IF (SELECT decrypted_secret FROM vault.decrypted_secrets
+                WHERE name = 'native_smoke_alpha') IS DISTINCT FROM 'FAKE_NATIVE_VAULT_ONLY_UPDATED' THEN
+              RAISE EXCEPTION 'FAIL: decryption after real server restart';
+            END IF;
+            RAISE NOTICE 'PASS: persisted fake secret decrypts after server restart';
+          END $$;
+          RESET ROLE;
+          SQL
+          expect_error 'helper denial persists after restart' 42501 \
+            "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
+          printf 'PASS: all native Vault smoke checks completed\n'
+          printf '%s\n' 'Native Vault smoke passed: pinned PG17.11/Vault0.3.1, fake roundtrips/update, helper ACL boundary, tamper rejection, and restart persistence.' >> "$GITHUB_STEP_SUMMARY"
+          
