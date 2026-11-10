@@ -7,7 +7,7 @@ import {activityTables} from './ownerUnknownRecoverySchema.fixture';
 
 // DISPOSABLE EXPERIMENT ONLY. This is a trusted service-role compatibility
 // probe, NOT tenant authorization or a deployable permission migration.
-const runtimeRole='held_protective_runtime';
+export const runtimeRole='held_protective_runtime';
 // Native constructor and exported types come from the existing workspace DB
 // dependency, as in runtimeRoleMatrix.postgres.test.ts.
 const NativePool=pool.constructor as new(config:{connectionString:string;max:number;connectionTimeoutMillis:number})=>Pool;
@@ -23,7 +23,7 @@ const activityLockOnly=[
 const fixtureRlsAdditions=[
  'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
 ] as const;
-const lockOnly:Record<string,string>={
+export const lockOnly:Record<string,string>={
  ...Object.fromEntries(activityLockOnly.map(table=>[table,'execution_account_id'])),
  'public.v13_live_money_policy':'id',
  'public.live_execution_config':'id',
@@ -51,7 +51,7 @@ const reads=[
  'private.strata_api_fee_standing_delegations',
  'auth.users','private.role_assignments','vault.decrypted_secrets',
 ];
-const updates:Record<string,string[]>={
+export const updates:Record<string,string[]>={
  'private.strata_kalshi_balance_read_slots':['next_slot_at'],
  'public.v13_production_account':['cash_micros','reserved_micros','blocked_reason','revision','reconciled_at','evidence_digest'],
  'public.v13_production_intent':['state','exchange_order_id','filled_hundredths','reserved_micros','terminal','dispatch_at'],
@@ -144,7 +144,7 @@ async function rollbackOnly(db:Pool,work:(client:PoolClient)=>Promise<void>){
  if(errors.length>1)throw new AggregateError(errors,'restricted_probe_and_cleanup_failed');
 }
 
-export async function installRestrictedProtectiveRuntime(setup:Pool){
+export async function installRestrictedProtectiveRuntime(setup:Pool,observe?:(client:PoolClient)=>void){
  const url=canonicalUrl();
  const actual=(await setup.query(`SELECT current_database() AS name,session_user AS user,
   host(inet_server_addr()) AS host,inet_server_port() AS port`)).rows[0];
@@ -188,7 +188,7 @@ export async function installRestrictedProtectiveRuntime(setup:Pool){
  await setup.query(`GRANT EXECUTE ON FUNCTION private.strata_exit_request_quantity_hundredths(jsonb) TO ${runtimeRole}`);
  url.username=runtimeRole;
  const runtime=new NativePool({connectionString:url.toString(),max:10,connectionTimeoutMillis:10000});
- runtime.on('connect',client=>observeNativeQueryErrors(client,reads,failure=>{if(queryFailures.length<32)queryFailures.push(failure);}));
+ runtime.on('connect',client=>{observeNativeQueryErrors(client,reads,failure=>{if(queryFailures.length<32)queryFailures.push(failure);});observe?.(client);});
  let ending:Promise<void>|undefined;
  const closeRuntime=()=>ending??=runtime.end();
  installPoolCheckoutTiming(runtime);

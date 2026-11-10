@@ -156,3 +156,32 @@ test('bounded account-lock timeout leaves STOP unverified and retains recovery o
   assert.equal(stopped.workerStopped,false);assert.equal(supervisor.isScheduled(USER,ACCOUNT),true);assert.equal((await lease()).state,'owned');assert.equal(f.exchange.state.entriesAuthorized,false);
  }finally{await holder.query('ROLLBACK');holder.release();}
 });
+
+
+test('failed startup cleanup cannot release a replacement worker after STOP and re-ARM',async()=>{
+ const {releaseFailedStartLease}=await import('./failedStartLeaseCleanup');
+ const s=await tradingSession(500,[]);await exactLease(s.evidence.identity.keyFingerprint);
+ const original={executionAccountId:ACCOUNT,ownerUserId:USER,holderId:'worker',fencingToken:3,now:new Date(s.now).toISOString()};
+ // Use the real lifecycle transitions, including released_at's non-null/null
+ // invariants. The regression must not bypass the migration's constraints.
+ const {RELEASE_LEASE_SQL,ARM_LEASE_SQL,ACQUIRE_LEASE_SQL}=await import('./accountScopedExecution');
+ const released=await pool.query(RELEASE_LEASE_SQL,[ACCOUNT,USER,original.now]);
+ assert.deepEqual(released.rows,[{fencing_token:'4'}]);
+ const armed=await pool.query(ARM_LEASE_SQL,[ACCOUNT,USER,s.evidence.identity.keyFingerprint,SECRET,original.now,CON,FIN]);
+ assert.deepEqual(armed.rows,[{fencing_token:'4'}]);
+ const acquired=await pool.query(ACQUIRE_LEASE_SQL,[ACCOUNT,'replacement-worker',original.now,
+  s.evidence.identity.keyFingerprint,SECRET,CON,FIN,USER,new Date(s.now-30_000).toISOString()]);
+ assert.deepEqual(acquired.rows,[{fencing_token:'5'}]);
+ assert.equal((await releaseFailedStartLease(pool,original)).rows.length,0);
+ let current=(await pool.query('SELECT state,holder_id,arm_requested,fencing_token::text AS token FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1',[ACCOUNT])).rows[0];
+ assert.deepEqual(current,{state:'owned',holder_id:'replacement-worker',arm_requested:true,token:'5'});
+ // Reusing a holder name never makes the old token valid again.
+ await pool.query("UPDATE private.kalshi_account_worker_lease SET holder_id='worker' WHERE execution_account_id=$1",[ACCOUNT]);
+ assert.equal((await releaseFailedStartLease(pool,original)).rows.length,0);
+ assert.equal((await lease()).token,'5');
+ // The exact current acquisition is safely released once, with one new fence.
+ assert.equal((await releaseFailedStartLease(pool,{...original,fencingToken:5})).rows.length,1);
+ assert.deepEqual(await lease(),{state:'released',arm_requested:false,token:'6'});
+ assert.equal((await releaseFailedStartLease(pool,{...original,fencingToken:5})).rows.length,0);
+ assert.equal(s.posts.length,0);
+});

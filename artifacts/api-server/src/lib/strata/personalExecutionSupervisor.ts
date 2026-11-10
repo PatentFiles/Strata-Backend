@@ -1,3 +1,4 @@
+import {releaseFailedStartLease} from "./failedStartLeaseCleanup";
 import {readHeldProtectiveMarketFee} from "./heldProtectiveMarketFee";
 import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
 import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
@@ -164,12 +165,56 @@ export function createOwnedTradingSupervisor(
   >,
 ): PersonalSessionControl {
   const workers = new Map<string, RunningWorker>();
+  // An opening session already owns a lifecycle operation even before its
+  // worker is registered. Do not duplicate that operation or certify STOP
+  // while it can still install a scheduled worker after the caller returns.
+  const starts = new Map<string, {
+    ownerUserId: string;
+    result: Promise<{ ok: boolean; reason: string; workerStarted: boolean }>;
+  }>();
+  // A new START is refused while any earlier control can still disarm its
+  // account. Do not queue an automatic restart behind STOP/KILL. Counts allow
+  // KILL to close local gates immediately even when another STOP is waiting.
+  const stops = new Map<string, { ownerUserId: string; pending: number }>();
+  const ownerStops = new Map<string, number>();
+  const stopAccount = async (userId: string, accountId: string, action: LeaseAction) => {
+    const pending = starts.get(accountId), running = workers.get(accountId), stopping = stops.get(accountId);
+    if ([pending, running, stopping].some(operation => operation && operation.ownerUserId !== userId))
+      return { workerStopped: false, managingExposure: false };
+    const control = stopping ?? { ownerUserId: userId, pending: 0 };
+    control.pending++;
+    stops.set(accountId, control);
+    try {
+      if (pending) {
+        try { await pending.result; }
+        catch { return { workerStopped: false, managingExposure: false }; }
+      }
+      // Keep the existing authoritative exposure check: STOP may retain an
+      // entry-held protective worker, whereas KILL must stop it completely.
+      return await stopOne(workers, userId, accountId, action);
+    } finally {
+      control.pending--;
+      if (control.pending === 0 && stops.get(accountId) === control) stops.delete(accountId);
+    }
+  };
   return {
     isScheduled(userId, accountId) {
       const running = workers.get(accountId);
       return running?.ownerUserId === userId && running.worker.isScheduled();
     },
     async start(input) {
+      input = { ...input };
+      const stopping = stops.get(input.accountId);
+      if (stopping || ownerStops.has(input.userId)) {
+        return { ok: false, reason: stopping && stopping.ownerUserId !== input.userId
+          ? "foreign_execution_account" : "worker_control_in_progress", workerStarted: false };
+      }
+      const pending = starts.get(input.accountId);
+      if (pending) {
+        if (pending.ownerUserId !== input.userId)
+          return { ok: false, reason: "foreign_execution_account", workerStarted: false };
+        return pending.result;
+      }
       const existing = workers.get(input.accountId);
       if (existing && existing.ownerUserId !== input.userId) {
         return { ok: false, reason: "foreign_execution_account", workerStarted: false };
@@ -177,30 +222,53 @@ export function createOwnedTradingSupervisor(
       if (existing?.worker.isScheduled()) {
         return { ok: true, reason: "worker_already_running", workerStarted: true };
       }
-      const opened = await open(input);
-      if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
-      if (!opened.worker.isScheduled()) {
-        opened.worker.stop();
-        return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
-      }
-      workers.set(input.accountId, {
-        ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+      // Register before invoking open, including a synchronously completing
+      // adapter. Promise continuations then apply pending STOP before the
+      // worker's first scheduled timer can run.
+      const result = Promise.resolve().then(async () => {
+        const opened = await open(input);
+        if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if (!opened.worker.isScheduled()) {
+          opened.worker.stop();
+          return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
+        }
+        workers.set(input.accountId, {
+          ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+        });
+        return { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
-      return { ok: true, reason: "worker_scheduled", workerStarted: true };
+      starts.set(input.accountId, { ownerUserId: input.userId, result });
+      try { return await result; }
+      finally { if (starts.get(input.accountId)?.result === result) starts.delete(input.accountId); }
     },
     async stop(input) {
-      return stopOne(workers, input.userId, input.accountId, input.action ?? "STOP");
+      return stopAccount(input.userId, input.accountId, input.action ?? "STOP");
     },
     async stopOwner(userId, action = "STOP") {
-      let workerStopped = true;
-      let managingExposure = false;
-      for (const [accountId, running] of workers) {
-        if (running.ownerUserId !== userId) continue;
-        const stopped = await stopOne(workers, userId, accountId, action);
-        if (!stopped.workerStopped) workerStopped = false;
-        if (stopped.managingExposure) managingExposure = true;
+      ownerStops.set(userId, (ownerStops.get(userId) ?? 0) + 1);
+      try {
+        let workerStopped = true;
+        let managingExposure = false;
+        const accountIds = new Set([
+          ...[...workers].filter(([, running]) => running.ownerUserId === userId).map(([id]) => id),
+          ...[...starts].filter(([, pending]) => pending.ownerUserId === userId).map(([id]) => id),
+          ...[...stops].filter(([, stopping]) => stopping.ownerUserId === userId).map(([id]) => id),
+        ]);
+        // Close all available local gates immediately, then retain the owner
+        // barrier until EVERY disarm settles, including after one fails.
+        const results = await Promise.allSettled([...accountIds].map(accountId =>
+          stopAccount(userId, accountId, action)));
+        for (const result of results) {
+          if (result.status === "rejected") throw result.reason;
+          if (!result.value.workerStopped) workerStopped = false;
+          if (result.value.managingExposure) managingExposure = true;
+        }
+        return { workerStopped, managingExposure };
+      } finally {
+        const remaining = ownerStops.get(userId)! - 1;
+        if (remaining === 0) ownerStops.delete(userId);
+        else ownerStops.set(userId, remaining);
       }
-      return { workerStopped, managingExposure };
     },
   };
 }
@@ -746,7 +814,8 @@ export function createProductionPersonalSession(
       state.entriesAuthorized = false;
       state.presentedToken = -1;
       try {
-        await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
+        await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
       } finally {
         session.worker.stop();
       }
@@ -758,7 +827,8 @@ export function createProductionPersonalSession(
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
-      await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
+      await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
       session.worker.stop();
       return { ok: false, reason: scheduled.reason };
     }
@@ -843,10 +913,18 @@ async function stopOne(
     ? await running.disarm(action)
     : { entriesBlocked: !running.state, managingExposure: false };
   if (!authority.entriesBlocked) return { workerStopped: false, managingExposure: false };
-  const keepManaging = action === "STOP" && authority.managingExposure;
+  // A delayed STOP receipt cannot claim protective management after a newer
+  // KILL already halted or unregistered this worker.
+  const keepManaging = action === "STOP" && authority.managingExposure &&
+    running.state?.accountKill !== true && running.worker.isScheduled() && workers.get(accountId) === running;
   if (!keepManaging) running.worker.stop();
   if (running.worker.isScheduled() && !keepManaging) return { workerStopped: false, managingExposure: false };
-  if (!keepManaging) workers.delete(accountId);
+  const registered = workers.get(accountId);
+  // Defense in depth: stale cleanup can never erase a different generation,
+  // even if a future lifecycle path accidentally bypasses the start barrier.
+  if (registered && registered !== running)
+    return { workerStopped: false, managingExposure: false };
+  if (!keepManaging && registered === running) workers.delete(accountId);
   return { workerStopped: true, managingExposure: keepManaging };
 }
 
