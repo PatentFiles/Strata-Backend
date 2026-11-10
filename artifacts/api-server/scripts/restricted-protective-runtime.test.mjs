@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {stripTypeScriptTypes} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {dirname,resolve} from 'node:path';
 const api=resolve(dirname(fileURLToPath(import.meta.url)),'..');
@@ -78,4 +79,50 @@ test('signed balance quota is exercised without broadening authority grants',()=
  assert.match(source,/real quota UPDATE advances the slot/);
  assert.match(source,/fixture-forbidden-key-change/);
  assert.match(held,/await assertRestrictedAuthority\(setup,account,owner\)/);
+});
+
+// Execute the exact isolated observer implementation without importing DB/runtime
+// dependencies. No connection or production settings are needed by this unit test.
+const observerSource=source.split('// BEGIN QUERY ERROR OBSERVER')[1].split('// END QUERY ERROR OBSERVER')[0];
+const observeNativeQueryErrors=new Function(stripTypeScriptTypes(observerSource)+
+ ';return observeNativeQueryErrors;')();
+test('native error observer preserves promise, callback and synchronous failures without values',async()=>{
+ const error=Object.assign(new Error('NEVER_PRINT_CREDENTIAL_OR_QUERY_VALUE'),{code:'42501',detail:'NEVER_PRINT_DETAIL'});
+ const records=[],record=row=>records.push(row);
+ const relations=['private.kalshi_owner_pilot_transfers'];
+ const sql="SELECT execution_account_id FROM private.kalshi_owner_pilot_transfers WHERE execution_account_id=$1 FOR SHARE";
+ const promiseTarget={query:async()=>{throw error;}};
+ observeNativeQueryErrors(promiseTarget,relations,record);
+ await assert.rejects(promiseTarget.query(sql,['NEVER_PRINT_PARAMETER']),e=>e===error);
+ const callbackTarget={query:(_sql,_values,cb)=>{cb(error);return 'same-return';}};
+ observeNativeQueryErrors(callbackTarget,relations,record);
+ let received;
+ assert.equal(callbackTarget.query({text:sql},['NEVER_PRINT_PARAMETER'],e=>{received=e;}),'same-return');
+ assert.equal(received,error);
+ const throwingTarget={query:()=>{throw error;}};
+ observeNativeQueryErrors(throwingTarget,relations,record);
+ assert.throws(()=>throwingTarget.query(sql),e=>e===error);
+ assert.deepEqual(records,Array.from({length:3},()=>({sqlstate:'42501',operation:'SELECT',objects:relations})));
+ assert.doesNotMatch(JSON.stringify(records),/NEVER_PRINT/);
+ const recorderFailure={query:async()=>{throw error;}};
+ observeNativeQueryErrors(recorderFailure,relations,()=>{throw Error('diagnostic_failure');});
+ await assert.rejects(recorderFailure.query(sql),e=>e===error);
+});
+
+test('native observer preserves successful return values and callback receiver',async()=>{
+ const result={rows:[{synthetic:true}]},records=[];
+ const target={query:async function(){assert.equal(this,target);return result;}};
+ observeNativeQueryErrors(target,[],row=>records.push(row));
+ assert.equal(await target.query('SELECT 1'),result);
+ const receiver={synthetic:true};
+ const callbackTarget={query:(_sql,callback)=>{callback.call(receiver,null,result);return result;}};
+ observeNativeQueryErrors(callbackTarget,[],row=>records.push(row));
+ assert.equal(callbackTarget.query('SELECT 1',function(error,value){
+  assert.equal(this,receiver);assert.equal(error,null);assert.equal(value,result);
+ }),result);
+ assert.deepEqual(records,[]);
+ const error=Object.defineProperty(new Error('original'), 'code',{get(){throw Error('metadata_access_failed');}});
+ const malformed={query:async()=>{throw error;}};
+ observeNativeQueryErrors(malformed,[],row=>records.push(row));
+ await assert.rejects(malformed.query('SELECT 1'),e=>e===error);
 });

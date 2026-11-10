@@ -84,11 +84,14 @@ capability list and cannot hide a missing trigger behind an old trace row.
 
 ## Scope that remains unqualified
 
-The legacy held supervisor reads the six maintenance tables; it does not execute
-the separate owner-accounting `lockIndependentActivity` path. This test grants
-those tables SELECT only and refuses to add lock UPDATE capabilities or silently
-enable fixture RLS. The source fixture lacks RLS on pilot transfers and shard
-allocations. A separately reported bounded production catalog observation found
+Correction: the held supervisor DOES transitively call `lockIndependentActivity`:
+`personalExecutionSupervisor.ts:656` creates `createUnknownEntryHeldFence`, whose
+`lock` method at `unknownEntryHeldFence.ts:37` invokes the six-table lock helper.
+The earlier claim that this was exclusive to standalone owner accounting was
+incorrect. The current candidate gives five maintenance tables SELECT only;
+reservations separately have UPDATE capability. Therefore the five missing
+FOR SHARE capabilities are a concrete qualification gap, even when rows are empty.
+The source fixture also lacks RLS on pilot transfers and shard allocations. A separately reported bounded production catalog observation found
 RLS enabled there; that is a source/fixture difference, not evidence of a current
 production RLS omission. Auth fixture rows also lack RLS, while the reported
 production auth.users has RLS and a different platform owner. public.profiles is
@@ -126,6 +129,26 @@ insert followed by an advancing upsert. Changing `budget_key` remains denied.
 The quota function, real spacing, signed reader and start-success expectation are
 unchanged. Hosted requalification is required; static checks alone do not prove
 the corrected native scenarios pass. No human-authority grants were broadened.
+
+## Bounded test-only query diagnostics
+
+The next hosted attempt passed START but stalled before held reconciliation.
+The test now observes genuine runtime clients, including pool.query callbacks and
+checked-out promise calls. Diagnostics retain at most 32 failures containing only
+SQLSTATE, a fixed operation category, and relation names from the explicit source
+allowlist. They retain no SQL text, parameters, error message/detail, identities,
+keys or response bodies. Original errors are rethrown/rejected or passed to the
+original callback unchanged. Expected negative probes are cleared before START;
+failures remain visible in the bounded timeout/start diagnostics even if production
+code catches them. No grants or runtime logic were changed by this diagnostic step.
+An executable unit test verifies the exact observer's synchronous, promise and
+callback behavior and checks that sentinel secrets never appear in its output.
+
+The next permission experiment must explicitly address the transitive maintenance
+locks and fixture-only RLS differences above. It must prove direct writes remain
+denied; a restrictive policy on an RLS-disabled table provides no such protection.
+The current lifecycle success expectation is retained, rather than turning this
+known incompatibility into a skipped or expected-failure scenario.
 
 ## Source-supported permission inventory
 
@@ -210,7 +233,7 @@ Human writers include `recordStandingExecutionReview` / `revokeStandingExecution
 * `standingExecutionReview:75-86`: final SHARE `r=standing_execution_reviews,p=policy`; history SHARE reviews even with zero matches.
 * `continuousExecutionAuthorization:359-360`: SHARE continuous grants even if no standing history. Conditional `:162` SHARE `g,oa,r,w,l,p`; technical renewal `:300` UPDATE `g,w`, SHARE `r,oa,p,a` and `:318` UPDATE technical lease.
 * `unknownEntryRecoveryHold:27-54`: UPDATE account, lease, target intent; SHARE policy, credentials, financial account, provider connection.
-* `unknownEntryHeldFence:18-36`: UPDATE lease; SHARE policy, credentials, financial account, provider connection, live config. Native ledger already holds account UPDATE lock.
+* `unknownEntryHeldFence:18-37`: UPDATE lease; SHARE policy, credentials, financial account, provider connection, live config; then call `lockIndependentActivity` for all six maintenance relations. Native ledger already holds account UPDATE lock.
 * `ownerUnknownRecoveryHeld:76-102,108,171-174`: SHARE each of the six dynamic activity relations; SHARE policy/credential/financial/provider in locked capture; UPDATE lease and all history intents. Native ledger account UPDATE lock persists for transaction.
 * `ownerUnknownRecoveryFence:47-67`: UPDATE account, lease, target intent.
 * `accountProductionSession:89-94`: SHARE policy only; full policy SELECT. `executor.prepareExit:363-366`: UPDATE position; SHARE source evaluation. `consumer:21-42`: UPDATE position after full reads.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
 import {pool,type Pool} from '@workspace/db';
-import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome} from './restrictedProtectiveRuntime.fixture';
+import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome,restrictedRuntimeDiagnostics,beginRestrictedRuntimeDiagnostics} from './restrictedProtectiveRuntime.fixture';
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
 import {conservativeExitFeeMicros} from '../v13-production/fractionalExitFee';
@@ -211,7 +211,7 @@ function externalFixture(scenario:Scenario){
   summary:()=>({balances,posts,quantity,metadataFailures,requests,paths:paths.slice(-20)})};
 }
 async function diagnostics(control:PersonalSessionControl,external:ReturnType<typeof externalFixture>){
- return {scheduled:control.isScheduled(owner,account),external:external.summary(),
+ return {scheduled:control.isScheduled(owner,account),external:external.summary(),runtimeQueryFailures:restrictedRuntimeDiagnostics(),
   account:(await db.query('SELECT blocked_reason,revision,cash_micros FROM public.v13_production_account WHERE id=$1',[account])).rows,
   lease:(await db.query('SELECT state,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1',[account])).rows,
   intents:(await db.query('SELECT kind,state,terminal,filled_hundredths FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at',[account])).rows,
@@ -250,9 +250,10 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
    assert.notEqual(candidate.reviewCandidateDigest,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256);
    await reset(candidate.reviewCandidateDigest,setup);
    if(restricted){await installRestrictedProtectiveRuntime(setup);await assertRestrictedAuthority(setup,account,owner);}
+   if(restricted)beginRestrictedRuntimeDiagnostics();
    const control=createProductionPersonalSession(db);active=control;
    external.arm();const started=await control.start({userId:owner,accountId:account,action:'START'});
-   assert.equal(started.workerStarted,true,JSON.stringify({started,external:external.summary()}));assert.equal(started.ok,true);
+   assert.equal(started.workerStarted,true,JSON.stringify({started,external:external.summary(),runtimeQueryFailures:restrictedRuntimeDiagnostics()}));assert.equal(started.ok,true);
    const at=await acknowledgedEntry(setup);external.entry(at);
    let sourceFailure:unknown;
    sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch((e:unknown)=>{sourceFailure=e;});},250);

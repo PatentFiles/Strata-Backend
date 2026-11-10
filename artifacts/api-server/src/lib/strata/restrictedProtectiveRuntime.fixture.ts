@@ -63,6 +63,48 @@ const authority=[
  'private.strata_api_fee_standing_models','private.strata_api_fee_standing_delegations',
  'private.strata_standing_execution_reviews','private.strata_continuous_execution_grants',
 ];
+type QueryFailure={sqlstate:string;operation:string;objects:string[]};
+const queryFailures:QueryFailure[]=[];
+export function restrictedRuntimeDiagnostics(){return queryFailures.map(row=>({...row,objects:[...row.objects]}));}
+export function beginRestrictedRuntimeDiagnostics(){queryFailures.length=0;}
+// BEGIN QUERY ERROR OBSERVER
+// TEST ONLY: retain no query text, parameters, error message/detail or values.
+// Observe actual native client calls (including pool.query's callback path),
+// preserving the original thrown/rejected/callback error object unchanged.
+function observeNativeQueryErrors(target:{query:Function},relations:readonly string[],record:(failure:{sqlstate:string;operation:string;objects:string[]})=>void){
+ const original=target.query;
+ target.query=function(this:unknown,...args:unknown[]){
+  const config=args[0];
+  const sql=typeof config==='string'?config:
+   config&&typeof config==='object'&&'text' in config&&typeof config.text==='string'?config.text:'';
+  const operation=/^\s*(SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK|SET|RESET|ALTER)\b/i.exec(sql)?.[1]?.toUpperCase()??'OTHER';
+  const objects=relations.filter(name=>{
+   const bare=name.split('.').at(-1)!;
+   return new RegExp('\\b'+bare+'\\b','i').test(sql);
+  }).slice(0,6);
+  const report=(error:unknown)=>{
+   if(!error)return;
+   try{
+    const code=typeof error==='object'&&error!==null&&'code' in error?error.code:undefined;
+    const sqlstate=typeof code==='string'&&/^[0-9A-Z]{5}$/.test(code)?code:'NON_SQL_ERROR';
+    record({sqlstate,operation,objects});
+   }catch{/* Diagnostics never replace the original failure. */}
+  };
+  const callback=args.at(-1);
+  if(typeof callback==='function')args[args.length-1]=function(this:unknown,...values:unknown[]){
+   report(values[0]);return Reflect.apply(callback,this,values);
+  };
+  try{
+   const result=Reflect.apply(original,this,args);
+   if(typeof callback!=='function'&&result&&typeof result.then==='function'){
+    return result.catch((error:unknown)=>{report(error);throw error;});
+   }
+   return result;
+  }catch(error){report(error);throw error;}
+ };
+}
+// END QUERY ERROR OBSERVER
+
 function canonicalUrl(){
  const url=process.env.V13_DISPOSABLE_DATABASE_URL;
  assert.ok(url&&url===process.env.DATABASE_URL&&/^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url));
@@ -127,6 +169,7 @@ export async function installRestrictedProtectiveRuntime(setup:Pool){
  await setup.query(`GRANT EXECUTE ON FUNCTION private.strata_exit_request_quantity_hundredths(jsonb) TO ${runtimeRole}`);
  url.username=runtimeRole;
  const runtime=new NativePool({connectionString:url.toString(),max:10,connectionTimeoutMillis:10000});
+ runtime.on('connect',client=>observeNativeQueryErrors(client,reads,failure=>{if(queryFailures.length<32)queryFailures.push(failure);}));
  let ending:Promise<void>|undefined;
  const closeRuntime=()=>ending??=runtime.end();
  installPoolCheckoutTiming(runtime);
