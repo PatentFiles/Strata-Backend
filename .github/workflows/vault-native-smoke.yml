@@ -52,10 +52,10 @@ jobs:
                 echo 'Database container stopped before readiness' >&2
                 return 1
               fi
-              # PID 1 becomes postgres only after the entrypoint finishes its temporary
-              # initialization server and the image's own platform migrations.
-              if docker exec "$DB" sh -c 'test "$(cat /proc/1/comm)" = postgres' &&
-                 [ "$(sql -Atc "SELECT extversion FROM pg_extension WHERE extname = 'supabase_vault'" 2>/dev/null || true)" = 0.3.1 ]; then
+              # Use PostgreSQL's PID file, not the executable's comm name: Nix may
+              # wrap the binary. The temporary initialization postmaster is not PID 1.
+              if docker exec "$DB" sh -c 'test "$(head -n 1 /var/lib/postgresql/data/postmaster.pid 2>/dev/null)" = 1' &&
+                 [ "$(sql -Atc 'SELECT 1' 2>/dev/null || true)" = 1 ]; then
                 return 0
               fi
               sleep 2
@@ -82,6 +82,8 @@ jobs:
             printf 'PASS: %s (%s)\n' "$label" "$state"
           }
           wait_ready
+          docker exec "$DB" sh -c 'printf "Postmaster process: "; cat /proc/1/comm; printf "Postmaster PID: "; head -n 1 /var/lib/postgresql/data/postmaster.pid'
+          sql -c "SELECT current_setting('server_version') AS postgres_version, extname, extversion, extowner::regrole AS extension_owner FROM pg_extension WHERE extname = 'supabase_vault'"
           sql <<'SQL'
           CREATE FUNCTION pg_temp.assert_true(ok boolean, label text)
           RETURNS void LANGUAGE plpgsql AS $$
