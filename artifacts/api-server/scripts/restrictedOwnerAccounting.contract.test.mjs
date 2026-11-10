@@ -43,6 +43,9 @@ test('native assertions cover rollback, actual lock waits and uncertain COMMIT',
   'synthetic_commit_ack_lost','recovery_accounting_commit_outcome_unverified','recovery_kill_receipt_binding_changed'])assert.ok(source.includes(token),token);
  assert.match(source,/for\(const sql of reactivations\)/);
  assert.match(source,/new reservation INSERT waits on the parent account FK/);
+ assert.match(source,/SELECT COALESCE\(max\(trace_id\),0\)::text AS id/);
+ assert.match(source,/trace_id>\$1::bigint/);
+ assert.match(source,/assert.equal\(observedTraceRows,2\)/);
  assert.match(helper,/export async function seedRestrictedInactiveActivity/);
  assert.match(helper,/await seedRestrictedInactiveActivity\(setup,accountId,ownerId\)/);
 });

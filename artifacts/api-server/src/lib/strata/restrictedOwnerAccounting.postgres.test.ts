@@ -289,7 +289,11 @@ test('restricted owner accounting: real killed ledger recovery without execution
    }finally{await setup.query(`GRANT UPDATE(cash_micros) ON public.v13_production_account TO ${role}`);}
   });
   await t.test('final receipt failure rolls back positively observed in-transaction trace and ledger rows',async()=>{
-   await reset();const held=await frozen(),before=await financialState();let observed=false;
+   await reset();const held=await frozen(),before=await financialState();let observed=false,observedTraceRows:number|undefined;
+   // The append-only trace has no account FK, so account TRUNCATE deliberately
+   // leaves earlier committed outbox rows. Observe only this transaction's new
+   // rows while retaining the full historical snapshot for the rollback check.
+   const traceBaseline=(await setup.query('SELECT COALESCE(max(trace_id),0)::text AS id FROM private.strata_v13_execution_trace')).rows[0].id;
    try{
    await setup.query(`GRANT SELECT ON private.strata_v13_execution_trace TO ${role};
     CREATE POLICY accounting_trace_diagnostic ON private.strata_v13_execution_trace FOR SELECT TO ${role} USING(execution_account_id='full-schema-synthetic');
@@ -299,11 +303,12 @@ test('restricted owner accounting: real killed ledger recovery without execution
      FOR EACH ROW EXECUTE FUNCTION private.restricted_accounting_receipt_fault()`);
     const result=await recovery(false,wrapped(async(sql,_args,invoke,client)=>{
      if(sql.includes("'OWNER_UNKNOWN_ACCOUNTING_RECONCILIATION'")){
-      assert.equal((await client.query("SELECT count(*)::int AS n FROM private.strata_v13_execution_trace WHERE kind='EXCHANGE_EVENT'")).rows[0].n,2);observed=true;
+      observedTraceRows=(await client.query("SELECT count(*)::int AS n FROM private.strata_v13_execution_trace WHERE kind='EXCHANGE_EVENT' AND trace_id>$1::bigint",[traceBaseline])).rows[0].n;
+      assert.equal(observedTraceRows,2);observed=true;
      }
      return invoke();
     })).recover(held);
-    assert.equal(result.ok,false,detail(result));assert.equal(observed,true);assert.deepEqual(await financialState(),before);
+    assert.equal(result.ok,false,detail(result));assert.equal(observed,true,detail({result,observedTraceRows}));assert.deepEqual(await financialState(),before);
    }finally{await setup.query(`DROP TRIGGER IF EXISTS restricted_accounting_receipt_fault ON public.v13_production_observation;
     DROP FUNCTION IF EXISTS private.restricted_accounting_receipt_fault();
     REVOKE SELECT ON private.strata_v13_execution_trace FROM ${role};DROP POLICY IF EXISTS accounting_trace_diagnostic ON private.strata_v13_execution_trace`);}
