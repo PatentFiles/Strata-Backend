@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
-import {pool} from '@workspace/db';
-import pg from 'pg';
+import {pool,type Pool} from '@workspace/db';
 import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome} from './restrictedProtectiveRuntime.fixture';
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
@@ -24,6 +23,9 @@ import {backendRole,installFullRecoverySchema} from './ownerUnknownRecoverySchem
 // All approval records are SYNTHETIC and exist only in the pinned disposable DB.
 const url=process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.ok(url&&url===process.env.DATABASE_URL&&/^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url));
+// Match the workspace DB package's installed native driver; the API does not
+// directly depend on pg. No alternative driver or connection fallback.
+const NativePool=pool.constructor as new(config:{connectionString:string;max:number})=>Pool;
 const db=pool,owner='11111111-1111-4111-8111-111111111111',target='22222222-2222-4222-8222-222222222222';
 const financial='33333333-3333-4333-8333-333333333333',provider='44444444-4444-4444-8444-444444444444';
 const secret='55555555-5555-4555-8555-555555555555',credential='66666666-6666-4666-8666-666666666666';
@@ -39,7 +41,7 @@ async function until(check:()=>Promise<boolean>,diagnostic:()=>Promise<unknown>,
  const end=Date.now()+timeout;
  while(!await check()){if(Date.now()>end)assert.fail('native supervisor timeout: '+JSON.stringify(await diagnostic()));await pause(25);}
 }
-async function reset(artifact:string,db:pg.Pool=pool){
+async function reset(artifact:string,db:Pool=pool){
  await db.query("UPDATE public.live_execution_config SET mode='V13_PRODUCTION',live_execution_enabled=true,manual_kill_switch=false WHERE id='singleton'");
  // Fresh disposable cluster only. TRUNCATE is fixture reset, not a recovery path.
  await db.query('TRUNCATE vault.decrypted_secrets,private.strata_protective_exit_release CASCADE');
@@ -102,7 +104,7 @@ async function reset(artifact:string,db:pg.Pool=pool){
   VALUES('supervisor-source',clock_timestamp(),$1,101,100,1,1,100,'current','UP','UP',false,false,'PASS','UP',false,
    'synthetic external paper feed',false,$2,$3,1,.60,.41,0,0,0)`,[request.market,V13_CHAMPION_PARAMETER_SET.id,V13_CHAMPION_PARAMETER_HASH]);
 }
-async function acknowledgedEntry(db:pg.Pool=pool){
+async function acknowledgedEntry(db:Pool=pool){
  // Input boundary only: an already acknowledged BUY from the same running
  // session. Every EXIT intent and reservation must be produced by production.
  const decision={},capability=digest({id:target,request,decision,policyHash,fee:hash});
@@ -221,7 +223,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
  // Never restore real HTTP: a failed assertion may leave an in-flight task.
 
  let active:PersonalSessionControl|null=null,sourceTimer:ReturnType<typeof setInterval>|undefined;
- const setup=restricted?new pg.Pool({connectionString:url,max:2}):pool;
+ const setup=restricted?new NativePool({connectionString:url!,max:2}):pool;
  try{
   const admin=await pool.connect();try{await installFullRecoverySchema(admin);}finally{admin.release();}
   // This test-only table is the external Vault read contract, not any trading
@@ -253,7 +255,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
    assert.equal(started.workerStarted,true,JSON.stringify(started));assert.equal(started.ok,true);
    const at=await acknowledgedEntry(setup);external.entry(at);
    let sourceFailure:unknown;
-   sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch(e=>{sourceFailure=e;});},250);
+   sourceTimer=setInterval(()=>{void setup.query("UPDATE public.forward_test_evaluations SET evaluated_at=clock_timestamp() WHERE id='supervisor-source'").catch((e:unknown)=>{sourceFailure=e;});},250);
    const detail=()=>diagnostics(control,external);
    const receiptCount=async()=>Number((await db.query("SELECT count(*)::int AS n FROM public.v13_production_observation WHERE account_id=$1 AND kind='HELD_RECONCILIATION_RECEIPT'",[account])).rows[0].n);
    const proveLaterCompletedTick=async()=>{

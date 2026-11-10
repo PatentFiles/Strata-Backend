@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import pg from 'pg';
-import {pool,installPoolCheckoutTiming} from '@workspace/db';
+import {pool,installPoolCheckoutTiming,type Pool,type PoolClient} from '@workspace/db';
 import {auditUnseenExpiredSignals,recordLiveSignalDecision} from '../v13-production/signalDecisionTrace';
 
 // DISPOSABLE EXPERIMENT ONLY. This is a trusted service-role compatibility
 // probe, NOT tenant authorization or a deployable permission migration.
 const runtimeRole='held_protective_runtime';
-type DB=Pick<pg.Pool,'query'>;
+// Native constructor and exported types come from the existing workspace DB
+// dependency, as in runtimeRoleMatrix.postgres.test.ts.
+const NativePool=pool.constructor as new(config:{connectionString:string;max:number;connectionTimeoutMillis:number})=>Pool;
+type DB=Pick<Pool,'query'>;
 const lockOnly:Record<string,string>={
  'public.v13_live_money_policy':'id',
  'public.live_execution_config':'id',
@@ -72,7 +74,7 @@ async function denied(db:DB,sql:string,args:unknown[]=[],rls=false){
 
 // Preserve the original assertion/query failure and always release a checkout,
 // destroying it if ROLLBACK failed. No cleanup error may strand another client.
-async function rollbackOnly(db:pg.Pool,work:(client:pg.PoolClient)=>Promise<void>){
+async function rollbackOnly(db:Pool,work:(client:PoolClient)=>Promise<void>){
  const client=await db.connect(),errors:unknown[]=[];
  let discard=false;
  try{await client.query('BEGIN');await work(client);}catch(error){errors.push(error);}
@@ -84,7 +86,7 @@ async function rollbackOnly(db:pg.Pool,work:(client:pg.PoolClient)=>Promise<void
  if(errors.length>1)throw new AggregateError(errors,'restricted_probe_and_cleanup_failed');
 }
 
-export async function installRestrictedProtectiveRuntime(setup:pg.Pool){
+export async function installRestrictedProtectiveRuntime(setup:Pool){
  const url=canonicalUrl();
  const actual=(await setup.query(`SELECT current_database() AS name,session_user AS user,
   host(inet_server_addr()) AS host,inet_server_port() AS port`)).rows[0];
@@ -120,11 +122,11 @@ export async function installRestrictedProtectiveRuntime(setup:pg.Pool){
  }
  await setup.query(`GRANT EXECUTE ON FUNCTION private.strata_exit_request_quantity_hundredths(jsonb) TO ${runtimeRole}`);
  url.username=runtimeRole;
- const runtime=new pg.Pool({connectionString:url.toString(),max:10,connectionTimeoutMillis:10000});
+ const runtime=new NativePool({connectionString:url.toString(),max:10,connectionTimeoutMillis:10000});
  let ending:Promise<void>|undefined;
  const closeRuntime=()=>ending??=runtime.end();
  installPoolCheckoutTiming(runtime);
- runtime.on('error',error=>{throw error;});
+ runtime.on('error',(error:Error)=>{throw error;});
  try{
   const identity=(await runtime.query(`SELECT current_user AS name,session_user AS session,
    rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls
@@ -146,7 +148,7 @@ export async function installRestrictedProtectiveRuntime(setup:pg.Pool){
  }
 }
 
-export async function assertRestrictedAuthority(setup:pg.Pool,accountId:string){
+export async function assertRestrictedAuthority(setup:Pool,accountId:string){
  const table='private.strata_owner_sha_approvals';
  const before=(await setup.query(`SELECT * FROM ${table} ORDER BY approval_id`)).rows;
  assert.equal(before.length,1,'negative UPDATE probes must match a real approval');
@@ -200,7 +202,7 @@ export async function assertRestrictedAuthority(setup:pg.Pool,accountId:string){
  }
 }
 
-export async function assertRestrictedOutcome(setup:pg.Pool,accountId:string){
+export async function assertRestrictedOutcome(setup:Pool,accountId:string){
  assert.deepEqual((await pool.query('SELECT current_user AS name,session_user AS session')).rows[0],{name:runtimeRole,session:runtimeRole});
  // Exercise optional telemetry explicitly: a green exit alone can hide its
  // caught permission errors. No extra runtime sequence ACL is introduced.

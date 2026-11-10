@@ -57,3 +57,15 @@ test('native outcomes include explicit optional audit and real definer rollback'
  assert.match(held,/await assertRestrictedOutcome\(setup,account\)/);
  assert.match(held,/production-mode validation settings until process exit/);
 });
+
+test('fixture drivers and types come from the existing workspace dependency',()=>{
+ for(const text of [source,held]){
+  assert.doesNotMatch(text,/from ['"]pg['"]/);
+  assert.match(text,/type Pool/);
+  assert.match(text,/const NativePool=pool.constructor as new/);
+  assert.match(text,/new NativePool\(/);
+ }
+ assert.match(source,/type PoolClient/);
+ assert.match(source,/runtime.on\('error',\(error:Error\)/);
+ assert.match(held,/catch\(\(e:unknown\)=>\{sourceFailure=e;/);
+});
