@@ -115,6 +115,7 @@ function observeNativeQueryErrors(target:{query:Function},relations:readonly str
  };
 }
 // END QUERY ERROR OBSERVER
+export {observeNativeQueryErrors};
 
 function canonicalUrl(){
  const url=process.env.V13_DISPOSABLE_DATABASE_URL;
@@ -285,7 +286,7 @@ export async function assertRestrictedAuthority(setup:Pool,accountId:string,owne
  }
 }
 
-async function assertRestrictedActivityLocks(setup:Pool,accountId:string,ownerId:string){
+export async function seedRestrictedInactiveActivity(setup:Pool,accountId:string,ownerId:string){
  // Inactive synthetic historical inputs, never runtime transfers/withdrawals.
  // Existing FK/check/timing constraints remain enabled; every row is inserted
  // by setup, NOT by the restricted role. No provider requests occur here.
@@ -318,6 +319,10 @@ async function assertRestrictedActivityLocks(setup:Pool,accountId:string,ownerId
  await setup.query(`INSERT INTO private.strata_auto_withdrawal_maintenance
   (execution_account_id,owner_user_id,rule_id,rule_revision,state,completed_at)
   VALUES($1,$2,$3,1,'completed',clock_timestamp())`,[accountId,ownerId,rules[0].id]);
+}
+
+async function assertRestrictedActivityLocks(setup:Pool,accountId:string,ownerId:string){
+ await seedRestrictedInactiveActivity(setup,accountId,ownerId);
  const lockAll=async(client:PoolClient)=>{
   assert.equal((await client.query('SELECT id FROM public.v13_production_account WHERE id=$1 FOR UPDATE',[accountId])).rows.length,1);
   await lockIndependentActivity(client,accountId);
