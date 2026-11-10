@@ -154,8 +154,10 @@ export async function seedStandingRenewal(setup:Pool){
  const s={owner:randomUUID(),reviewer:randomUUID(),issuer:randomUUID(),financial:randomUUID(),provider:randomUUID(),
   qualification:randomUUID(),review:randomUUID(),grant:randomUUID(),feeGrant:randomUUID(),model:randomUUID(),delegation:randomUUID(),
   account:'restricted-renewal-'+randomUUID(),policy:'restricted-renewal-policy-'+randomUUID(),sha:'a'.repeat(40),hash:'b'.repeat(64)};
+ // Pin each reused parameter to UUID before converting it to an email string;
+ // a bare $n::text otherwise conflicts with the UUID id column (SQLSTATE 42P08).
  await setup.query(`INSERT INTO auth.users(id,email,email_confirmed_at) VALUES
-  ($1,$1::text||'@example.invalid',now()),($2,$2::text||'@example.invalid',now()),($3,$3::text||'@example.invalid',now());`,[s.owner,s.reviewer,s.issuer]);
+  ($1::uuid,($1::uuid)::text||'@example.invalid',now()),($2::uuid,($2::uuid)::text||'@example.invalid',now()),($3::uuid,($3::uuid)::text||'@example.invalid',now());`,[s.owner,s.reviewer,s.issuer]);
  await setup.query(`INSERT INTO private.role_assignments(email,role) VALUES($1::text||'@example.invalid','ADMIN'),($2::text||'@example.invalid','ADMIN')`,[s.reviewer,s.issuer]);
  await setup.query("INSERT INTO public.financial_accounts(id,user_id,provider) VALUES($1,$2,'kalshi')",[s.financial,s.owner]);
  await setup.query('INSERT INTO private.provider_connections(id,financial_account_id) VALUES($1,$2)',[s.provider,s.financial]);

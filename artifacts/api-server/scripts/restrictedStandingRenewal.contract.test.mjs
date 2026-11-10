@@ -10,6 +10,13 @@ const native=read('../src/lib/strata/restrictedStandingRenewal.postgres.test.ts'
 test('standing renewal fixture and native tests parse as TypeScript',()=>{
  for(const source of [fixture,native])assert.ok(stripTypeScriptTypes(source));
 });
+test('Auth seed parameters stay UUID-typed before reuse as email text',()=>{
+ const seed=fixture.split('INSERT INTO auth.users(id,email,email_confirmed_at) VALUES')[1].split('`')[0];
+ for(const parameter of [1,2,3]){
+  assert.ok(seed.includes(`($${parameter}::uuid,($${parameter}::uuid)::text||'@example.invalid',now())`));
+ }
+ assert.doesNotMatch(seed,/\$\d+::text/);
+});
 test('new role DDL is behind unchanged full-chain and actual-session fences',()=>{
  assert.ok(fixture.indexOf('await installFullRecoverySchema(bootstrap)')<fixture.indexOf('CREATE ROLE'));
  assert.ok(fixture.indexOf('assert.deepEqual(actual')<fixture.indexOf('CREATE ROLE'));
