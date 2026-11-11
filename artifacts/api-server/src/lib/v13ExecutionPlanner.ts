@@ -82,6 +82,8 @@ export function planV13IocEntry(input: {
   askLevels: V13DepthLevel[];
   /** Optional conservative whole-count cap; real depth and gross limits still apply. */
   maxContracts?: number;
+  /** Verified model's exact separately rounded per-price count cap. */
+  maxContractsAtLimit?: (priceDollars:string,direction:V13ExecutionDirection)=>number|null;
   /** Optional fee-inclusive production cash ceiling. Supply both fields or neither. */
   maxAllInCashDebitCents?: number;
   cashDebitMicrosPerContractAtLimit?: (
@@ -96,6 +98,8 @@ export function planV13IocEntry(input: {
   }
   if(input.maxContracts!==undefined&&(!Number.isSafeInteger(input.maxContracts)||input.maxContracts<1))
     return {ok:false,reason:"invalid_input"};
+  if(input.maxContractsAtLimit!==undefined&&typeof input.maxContractsAtLimit!=='function')
+    return {ok:false,reason:'cash_debit_model_invalid'};
   const cashModelConfigured = input.maxAllInCashDebitCents !== undefined ||
     input.cashDebitMicrosPerContractAtLimit !== undefined;
   if (cashModelConfigured && (
@@ -146,7 +150,13 @@ export function planV13IocEntry(input: {
         input.maxAllInCashDebitCents! * 10_000 / cashDebitPerContractMicros!,
       );
     }
-    const contracts = Math.min(visible, grossBudget, cashBudget, input.maxContracts??Number.MAX_SAFE_INTEGER);
+    let exactModelCount=Number.MAX_SAFE_INTEGER;
+    if(input.maxContractsAtLimit){
+      const count=input.maxContractsAtLimit(level.price.toFixed(4),input.direction);
+      if(count===null||!Number.isSafeInteger(count)||count<0)return {ok:false,reason:'cash_debit_model_invalid'};
+      exactModelCount=count;
+    }
+    const contracts = Math.min(visible, grossBudget, cashBudget, exactModelCount,input.maxContracts??Number.MAX_SAFE_INTEGER);
     if (contracts >= 1 && (selected === null || contracts > selected.contracts)) {
       selected = { contracts, limitPrice: level.price, visible, cashDebitPerContractMicros };
     }

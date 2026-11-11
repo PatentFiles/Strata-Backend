@@ -688,7 +688,14 @@ test("owner exchange qualification distinguishes signed GET rejection and 429 wi
   assert.equal(calls,2,"failure must abort first history page without retries");
  }
 });
-test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
+test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async (t) => {
+  // This unit fixture has mocked SQL/transport, not genuine release approvals.
+  // Explicitly select the existing isolated-test startup path so this test
+  // exercises cash mismatch rather than an unrelated missing release gate.
+  const keys=["NODE_ENV","RAILWAY_PROJECT_ID","RAILWAY_SERVICE_ID","RAILWAY_ENVIRONMENT_ID","RAILWAY_GIT_COMMIT_SHA"];
+  const saved=new Map(keys.map(key=>[key,process.env[key]]));
+  t.after(()=>{for(const [key,value] of saved){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  process.env.NODE_ENV="test";for(const key of keys.slice(1))delete process.env[key];
   const queries: string[] = [];
   const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
     queries.push(`${path}${query}`);

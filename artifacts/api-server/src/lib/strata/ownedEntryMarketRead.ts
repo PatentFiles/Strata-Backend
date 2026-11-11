@@ -1,3 +1,4 @@
+import type {DirectAccountRoundingEvidence,DirectAccountRoundingIdentity} from './directAccountRoundingEvidence';
 import type {EntryPrepareMarketContext,MarketEvidence} from "../v13-production/types";
 import type {MetadataPrefetchAttempt,MetadataPrefetchScope,PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import type {MetadataCaptureManifest} from "./metadataCapture";
@@ -20,6 +21,7 @@ export async function readOwnedEntryMarket(input:{
   finalPublicMetadata?:()=>PrefetchedPublicMetadata|undefined;
   verifyFee:(clock:number,readMetadata:PublicReader|undefined,captureMetadata:(()=>MetadataCaptureManifest)|undefined)=>Promise<number>;
   readBook:()=>Promise<unknown>;readPublic:(path:string)=>Promise<unknown>;publicFetch?:typeof fetch;
+  readDirectRounding?:()=>Promise<{evidence:Readonly<DirectAccountRoundingEvidence>;currentScope:DirectAccountRoundingIdentity}>;
   configuredStakeCents:number;policyVersion:string;sourceUrl:string;formulaVersion:string;artifactDigest:string;policyHash:string;
 }):Promise<MarketEvidence>{
   const clock=input.now(),{market,side,context,activeMetadata}=input;
@@ -34,7 +36,10 @@ export async function readOwnedEntryMarket(input:{
     readBook:input.readBook,readPublic:metadataSnapshot?.read??input.readPublic,
   });
   const {bookPayload,seriesPayload,marketPayload,eventPayload,seriesChangesPayload,eventChangesPayload}=gathered;
+  // Current authority read occurs after market reads; it never restamps quote time.
+  const directRounding=input.readDirectRounding?await input.readDirectRounding():undefined;
   return attachMarketEvidenceReadTiming(ownedMarketEvidence({
+    ...(input.readDirectRounding?{directRounding}:{}),
     market,side,bookPayload,seriesPayload,marketPayload,eventPayload,seriesChangesPayload,eventChangesPayload,
     observedAtMs:clock,nowMs:input.now(),configuredStakeCents:input.configuredStakeCents,
     policyVersion:input.policyVersion,sourceUrl:input.sourceUrl,formulaVersion:input.formulaVersion,

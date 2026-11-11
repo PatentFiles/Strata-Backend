@@ -1,6 +1,8 @@
+import {prepareDirectPrecisionBounds} from "../directPrecisionCashBounds";
+import {currentDirectAccountRoundingEvidence,type DirectAccountRoundingIdentity} from "./directAccountRoundingEvidence";
 import type {MetadataCaptureManifest} from "./metadataCapture";
 import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
-import {ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
+import {ENTRY_CASH_RISK_VERSION,DIRECT_ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "../v13-production/requestQuantity";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
@@ -347,6 +349,11 @@ export function ownedMarketEvidence(input: {
   policyHash: string;
   verifiedAtMs: number;
   metadataCapture?: MetadataCaptureManifest;
+  /** Internal-only optional reviewed authority. The runtime caller must bind
+   * currentScope independently to this account, credential, generation and
+   * active documentation review; client JSON or a shape check is not authority.
+   * No production caller supplies this until that collector is qualified. */
+  directRounding?: {evidence:unknown;currentScope:DirectAccountRoundingIdentity};
 }): MarketEvidence {
   // All fee metadata is bound to the SAME market used for the book and the
   // final POST re-read. Never rely on series multiplier alone.
@@ -386,13 +393,21 @@ export function ownedMarketEvidence(input: {
   const count = plan.ok ? plan.plan.contracts : 1;
   const limit = plan.ok ? plan.plan.limitPrice : Number(bestAsk);
   const side = input.side.toLowerCase() as "yes" | "no";
-  const entry = maximumEntryFeePerContractMicros(1, limit.toFixed(4), ticks ?? undefined, side);
-  const exit = maximumExitFeePerContractMicros(1, ticks ?? undefined, side);
+  const rounding=input.directRounding;
+  if(Object.hasOwn(input,"directRounding")&&(!rounding||typeof rounding!=="object"))
+    throw new Error("direct_account_rounding_authority_unproven");
+  if(rounding&&!currentDirectAccountRoundingEvidence(rounding.evidence,rounding.currentScope,input.nowMs))
+    throw new Error("direct_account_rounding_authority_unproven");
+  const direct=rounding?prepareDirectPrecisionBounds(ticks??[],input.side)?.(limit):null;
+  if(rounding&&!direct)throw new Error("direct_account_rounding_grid_unproven");
+  const entry = direct?.trade??maximumEntryFeePerContractMicros(1, limit.toFixed(4), ticks ?? undefined, side);
+  const exit = direct?.exit??maximumExitFeePerContractMicros(1, ticks ?? undefined, side);
   requireProof(entry !== null && exit !== null && Number.isSafeInteger(input.verifiedAtMs), "fee_evidence_missing");
   const ranges=metadata.price_ranges??[{start:"0.0000",end:"1.0000",step:"0.0001"}];
-  const cash=maximumEntryCashDebitPerContractMicros(1,limit.toFixed(4),ranges,side);
+  const cash=direct?.cash??maximumEntryCashDebitPerContractMicros(1,limit.toFixed(4),ranges,side);
   requireProof(cash!==null,"fee_cash_bound_unproven");
-  const identity={version:ENTRY_CASH_RISK_VERSION,marketTicker:input.market,side:input.side,
+  const identity={version:rounding?DIRECT_ENTRY_CASH_RISK_VERSION:ENTRY_CASH_RISK_VERSION,
+    ...(rounding&&currentDirectAccountRoundingEvidence(rounding.evidence,rounding.currentScope,input.nowMs)?{roundingEvidence:structuredClone(rounding.evidence)}:{}),marketTicker:input.market,side:input.side,
     policyHash:input.policyHash,artifactDigest:input.artifactDigest,feeMetadataDigest:feeProof.fingerprint,
     seriesDigest:digest(series),gridDigest:digest({structure,ranges})};
   const cashRisk={...identity,gridEvidence:{structure:structure as 'deci_cent'|'tapered_deci_cent',ranges:structuredClone(ranges) as Array<{start:string;end:string;step:string}>},modelFingerprint:cashRiskModelFingerprint(identity),

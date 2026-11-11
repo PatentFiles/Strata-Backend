@@ -1,9 +1,10 @@
+import {prepareDirectPrecisionBounds} from './directPrecisionCashBounds';
 import {
   maximumEntryCashDebitPerContractMicros,
   maximumEntryFeePerContractMicros,
   maximumExitFeePerContractMicros,
 } from "./microLiveEntryFees";
-import { cashRiskFeeFingerprint, validEntryCashRisk } from "./v13EntryCashRisk";
+import { DIRECT_ENTRY_CASH_RISK_VERSION, cashRiskFeeFingerprint, validEntryCashRisk } from "./v13EntryCashRisk";
 import { digest } from "./v13-production/types";
 import type { V13VerifiedFeeEvidence } from "./v13LiveMoneyEntryPreflight";
 
@@ -54,7 +55,8 @@ function priceText(price: number): string | null {
       Math.abs(price * 10000 - Math.round(price * 10000)) > 1e-8) return null;
   return price.toFixed(4);
 }
-function bounds(grid: ParsedGrid, side: "YES" | "NO", price: number): Bounds | null {
+function bounds(grid: ParsedGrid, side: "YES" | "NO", price: number, direct=false): Bounds | null {
+  if(direct)return prepareDirectPrecisionBounds(grid.ticks,side)?.(price)??null;
   const limit = priceText(price);
   if (limit === null) return null;
   const selectedSide = side === "YES" ? "yes" : "no";
@@ -69,7 +71,7 @@ function verifiedGrid(fee: V13VerifiedFeeEvidence, value: unknown): ParsedGrid |
   if (!parsed || digest(parsed.evidence) !== fee.cashRisk.gridDigest) return null;
   // A matching checksum alone is insufficient. Recompute the OLD basis first;
   // never borrow an internally consistent but under-reserved fee receipt.
-  const original = bounds(parsed, fee.cashRisk.side, fee.limitPrice);
+  const original = bounds(parsed, fee.cashRisk.side, fee.limitPrice,fee.cashRisk.version===DIRECT_ENTRY_CASH_RISK_VERSION);
   if (!original || original.cash !== fee.cashRisk.entryCashDebitPerContractMicros ||
       original.trade !== fee.cashRisk.entryTradeFeePerContractMicros ||
       original.exit !== fee.cashRisk.exitLossPerContractMicros) return null;
@@ -94,10 +96,13 @@ export function prepareVerifiedEntryFeeRepricing(
   const parsed = verifiedGrid(fee, grid);
   if (!parsed || !fee.cashRisk) return null;
   const basis = structuredClone(fee);
+  const direct=basis.cashRisk!.version===DIRECT_ENTRY_CASH_RISK_VERSION;
+  const directBounds=direct?prepareDirectPrecisionBounds(parsed.ticks,basis.cashRisk!.side):null;
+  if(direct&&!directBounds)return null;
   return (contracts, limitPrice) => {
     if (!Number.isSafeInteger(contracts) || contracts < 1 || contracts > 999999999) return null;
-    const selected = bounds(parsed, basis.cashRisk!.side, limitPrice);
-    if (!selected || selected.cash !== basis.cashRisk!.entryCashDebitPerContractMicros ||
+    const selected = direct?directBounds!(limitPrice):bounds(parsed, basis.cashRisk!.side, limitPrice);
+    if (!selected || (!direct&&selected.cash !== basis.cashRisk!.entryCashDebitPerContractMicros) ||
         selected.exit !== basis.cashRisk!.exitLossPerContractMicros) return null;
     const cents = (per: number) => Number((BigInt(per) * BigInt(contracts) + 9999n) / 10000n);
     const result: V13VerifiedFeeEvidence = structuredClone(basis);

@@ -1,3 +1,5 @@
+import {createDirectRoundingRuntime} from './directRoundingRuntime';
+import {createDirectRoundingOwnedAdapters} from './directRoundingOwnedAdapters';
 import {releaseFailedStartLease} from "./failedStartLeaseCleanup";
 import {readHeldProtectiveMarketFee} from "./heldProtectiveMarketFee";
 import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
@@ -282,6 +284,8 @@ export function createProductionPersonalSession(
     /** LOCAL prototype opt-in. Production construction leaves this disabled. */
     publicMetadataPrefetch?: boolean;
     finalPublicMetadataPrefetch?: boolean;
+    /** Inactive candidate; no production caller supplies this option. Requires reviewed registry. */
+    directPrecisionSizing?: boolean;
   } = {},
 ): PersonalSessionControl {
   const get:typeof getScopedKalshiJson = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch,_host,_owner,signal) =>
@@ -442,6 +446,11 @@ export function createProductionPersonalSession(
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
+      createDirectRoundingOwnedAdapters({query:(sql,values)=>{
+        const tx=finalLedger?.currentTransaction();
+        return tx?tx.query(sql,values):db.query(sql,values);
+      }},input.userId)):null;
     const timingObserver:TimingObserver=event=>logger.info({event:"strata_execution_stage",...event});
     const timingContext={accountId:input.accountId,mode:"LIVE" as const};
     let finalPublicMetadata:FinalPublicMetadataPhases|null=null;
@@ -449,6 +458,7 @@ export function createProductionPersonalSession(
     const clockCheckedTransport=createEntryWireClockFetch(()=>{
       if(!finalLedger)throw new Error("production_final_wire_clock_missing");
       finalLedger.assertFinalWireClock();
+      directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
     return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
@@ -617,9 +627,12 @@ export function createProductionPersonalSession(
         if (!("identity" in proven)) throw new Error(proven.reason);
         // Authority remains closed here. Only committed ledger reconciliation
         // or the final transactional account proof can reopen it.
+        // Refresh out of band after exposure proof, never delay protective reconciliation.
+        if(directRounding&&!proofTx)void directRounding.refresh();
         return proven;
       },
-      readMarket: (market,side,context)=>readOwnedEntryMarket({
+      readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({
+        ...(directRounding&&purpose!=="EXIT"&&!heldRecoveryScope?{readDirectRounding:()=>directRounding.read(finalLedger?.currentWireScopeToken()??undefined)}:{}),
         market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),
         verifyFee:async(clock,readMetadata,captureMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);

@@ -49,3 +49,12 @@ test("detached async descendants cannot retain a completed final snapshot exempt
     release();await descendant;
   });
 });
+
+test('wire identity is unique even when the same pooled client serves later transactions',async()=>{
+ const client=await pool.connect();const ledger=new ProductionLedger({connect:async()=>client} as never,'account');
+ let first:Readonly<object>|null=null;
+ assert.equal(ledger.currentWireScopeToken(),null);
+ await ledger.transaction(async()=>{first=ledger.currentWireScopeToken();assert.ok(first);assert.equal(ledger.currentWireScopeToken(),first);assert.ok(Object.isFrozen(first));});
+ assert.equal(ledger.currentWireScopeToken(),null);
+ await ledger.transaction(async()=>{assert.equal(ledger.currentTransaction(),client);assert.notEqual(ledger.currentWireScopeToken(),first);});
+});

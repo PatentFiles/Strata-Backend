@@ -47,7 +47,7 @@ export type V13LiveMoneyEntryPreflightInput = {
   openPositions: number;
   realizedDailyLossCents: number;
   realizedTotalLossCents: number;
-  /** Operator target. The approved policy maximum stays the hard ceiling. */
+  /** Configured gross ceiling, not a minimum fill or fee-inclusive cash budget. */
   configuredStakeCents?: number;
   requireCashRisk?: boolean;
 };
