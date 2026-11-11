@@ -84,6 +84,13 @@ export class ProductionLedger {
   }) as Pool["query"];
   /** Trusted transport may borrow the current final fence, never commit it. */
   currentTransaction(): PoolClient|null {return this.context.getStore()??null;}
+  private readonly wireTokens=new WeakMap<object,Readonly<object>>();
+  /** Opaque identity unique to one active transaction, never the reusable pooled client. */
+  currentWireScopeToken():Readonly<object>|null {
+    const scope=this.wireContext.getStore();
+    if(!this.currentTransaction()||!scope?.active)return null;
+    let token=this.wireTokens.get(scope);if(!token){token=Object.freeze({});this.wireTokens.set(scope,token);}return token;
+  }
   /** Synchronous freshness check for the LAST HTTP boundary, after fee reads.
    * Evidence is pinned by this transaction, not reusable authority or a lease.
    */

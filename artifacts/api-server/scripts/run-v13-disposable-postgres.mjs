@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 // Never read ambient DATABASE_URL, Kalshi secrets, or runtime account settings.
 // A new cluster/database and credential-stripped child exist only for this run.
 const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const rounding = process.argv[2] === "--rounding-authority";
 const auditCursor = process.argv[2] === "--audit-cursor";
 const renewal = process.argv[2] === "--renewal";
 const recovery = process.argv[2] === "--recovery";
@@ -95,9 +96,11 @@ try {
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  if (!recovery && !restore && !renewal && !auditCursor) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  if (!rounding && !recovery && !restore && !renewal && !auditCursor) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
     ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
-  if (process.argv[2] === "--full-suite") {
+  if (rounding) {
+    run(process.execPath, ["scripts/direct-rounding-postgres.cjs"]);
+  } else if (process.argv[2] === "--full-suite") {
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
   } else {
     const testFile = auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";

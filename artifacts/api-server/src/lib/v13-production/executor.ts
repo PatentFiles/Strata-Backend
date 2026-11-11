@@ -1,3 +1,4 @@
+import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
 import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
@@ -198,11 +199,11 @@ export class ProductionExecutor {
 
   async prepareEntry(evaluationId: string): Promise<string> {
     const done=this.startTiming("prepare_entry",{evaluationId});
-    const diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
-    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
-    catch(error){done("rejected",{error,entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
+    const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
+    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
+    catch(error){done("rejected",{error,entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
   }
-  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
+  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
     const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
     const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
     requireProof(source && source.evaluation_source === "paper" &&
@@ -301,7 +302,7 @@ export class ProductionExecutor {
       requireProof(capital >= 0n, "production_capital_exhausted");
       const stake = await this.readConfiguredStake(tx);
       requireProof(stake.cents <= p.maxEntryStakeCents, "configured_stake_above_approved_maximum");
-      const pf = preflightV13LiveMoneyEntry({
+      const preflightInput = {
         policy: p, strategyParameterSetId: source.strategy_parameter_set_id, strategyParameterHash: source.strategy_parameter_hash,
         signal: source.signal, direction: source.direction, referenceOffer: source.entry_offer,
         bestAskDollars: book.bestAskDollars, askLevels: book.asks,
@@ -311,7 +312,9 @@ export class ProductionExecutor {
         realizedDailyLossCents: Math.ceil(Number(money(b.daily_loss)) / 10_000),
         realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
         configuredStakeCents: stake.cents, requireCashRisk:this.exchange.mode==="LIVE",
-      });
+      };
+      const pf=preflightV13LiveMoneyEntry(preflightInput);
+      diagnostics.sizing=captureEntrySizingDiagnostics(preflightInput,pf);
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
       if(pf.cashRisk)requireProof(book.fee.cashRisk&&book.fee.cashRisk.marketTicker===source.market_ticker&&book.fee.cashRisk.side===side&&
         book.fee.cashRisk.policyHash===p.policyHash,"production_cash_risk_identity_invalid");
@@ -352,7 +355,7 @@ export class ProductionExecutor {
   async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {
     const parent = (await this.ledger.pool.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2", [parentId, this.ledger.accountId])).rows[0];
     requireProof(parent?.kind === "ENTRY", "production_exit_parent_missing");
-    const book = await this.exchange.market(parent.market, parent.side);
+    const book = await this.exchange.market(parent.market, parent.side, undefined, "EXIT");
     return this.ledger.transaction(async (tx, a) => {
       await this.gate(tx, a, true);
       const p = await this.ledger.policy(tx, a);
@@ -472,8 +475,8 @@ export class ProductionExecutor {
           "production_capability_or_policy_changed");
           const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
           const book = phaseContext&&this.finalPublicMetadata
-            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side))
-            :await this.exchange.market(i.market, i.side);
+            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side,undefined,i.kind))
+            :await this.exchange.market(i.market, i.side,undefined,i.kind);
           finalMarketReads=getMarketEvidenceReadTiming(book);
           const stored = i.decision.book as MarketEvidence;
           const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;

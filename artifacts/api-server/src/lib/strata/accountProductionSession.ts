@@ -111,15 +111,15 @@ export class AccountScopedExchange implements Exchange {
     readonly readSnapshot: ((identity: Identity, historyFromMs: number) => Promise<Snapshot>) | null = null,
     readonly fetchImpl: typeof fetch | null = null,
     readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
-    readonly readMarket: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext) => Promise<MarketEvidence>) | null = null,
+    readonly readMarket: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT") => Promise<MarketEvidence>) | null = null,
     readonly entriesOpen: (() => boolean) | null = null,
   ) {}
   readonly #spent = new WeakSet<() => Promise<void>>();
-  async market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext): Promise<MarketEvidence> {
+  async market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT"): Promise<MarketEvidence> {
     if (!this.readMarket) throw new Error("operation_not_enabled");
     requireProof(/^KXBTC15M[A-Za-z0-9._-]+$/.test(market), "production_market_invalid");
     requireProof(side === "YES" || side === "NO", "production_market_side_invalid");
-    const evidence = await this.readMarket(market, side, context);
+    const evidence = await this.readMarket(market, side, context, purpose);
     validateMarketEvidence(evidence);
     return evidence;
   }
@@ -269,7 +269,7 @@ export function openOwnedExecutionSession(input: {
   state: AccountDispatchState;
   material?: { keyId: string; privateKey: string } | null;
   readSnapshot?: ((identity: Identity, historyFromMs: number) => Promise<Snapshot>) | null;
-  readMarket?: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext) => Promise<MarketEvidence>) | null;
+  readMarket?: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT") => Promise<MarketEvidence>) | null;
   fetchImpl?: typeof fetch | null;
   now?: () => number;
   intervalMs?: number;
