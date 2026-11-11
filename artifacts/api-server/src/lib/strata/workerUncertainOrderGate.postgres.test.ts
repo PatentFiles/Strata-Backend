@@ -63,7 +63,7 @@ test("final snapshot heartbeat reuses the held worker-lease transaction instead 
     // Exercise the real helper above; also pin the supervisor routing so a
     // future refactor cannot silently put the final heartbeat back on db.
     const source=readFileSync("src/lib/strata/personalExecutionSupervisor.ts","utf8");
-    const start=source.indexOf("readSnapshot: async () => {"),end=source.indexOf("readMarket: (market,side,context)=>readOwnedEntryMarket({");
+    const start=source.indexOf("readSnapshot: async () => {"),end=source.indexOf("readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({");
     assert.ok(start>=0&&end>start,"pin only the actual signed-snapshot callback, not the rest of the supervisor");
     const body=source.slice(start,end);
     assert.match(body,/heartbeatLease\(snapshotDb,/);
