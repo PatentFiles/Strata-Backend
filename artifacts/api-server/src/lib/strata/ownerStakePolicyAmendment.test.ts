@@ -87,6 +87,13 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="
   if(sql.includes("INSERT INTO public.v13_live_money_policy")){policyInsertArgs.push(args);return {rows:[{id:"new-policy"}]};}
   if(sql.includes("UPDATE public.v13_production_account SET policy_id"))return {rows:[{id:ACCOUNT}]};
   if(sql.includes("INSERT INTO public.strata_configured_stake"))return {rows:[{revision:2}]};
+  // A saved policy amendment now atomically advances the exact owner consent
+  // generation and writes an audit tombstone before revoking old approval.
+  if(sql.includes("INSERT INTO private.strata_owner_consent_heads"))return {rows:[]};
+  if(sql.includes("SELECT generation::text FROM private.strata_owner_consent_heads"))
+   return {rows:[{generation:"1"}]};
+  if(sql.includes("UPDATE private.strata_owner_consent_heads SET generation=generation+1"))
+   return {rows:[{generation:"2"}]};
   if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[{approval_id:"revoked-owner-release"}]};
   if(sql.includes("SELECT EXISTS(SELECT 1 FROM public.v13_production_observation"))return {rows:[{requested:false}]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};

@@ -57,6 +57,13 @@ function fixture(
    if(normalized.startsWith("SELECT p.*,s.configured_stake_cents"))return {rows:[a]};
    if(normalized.startsWith("SELECT g.authority_id FROM private.strata_wallet_v4_fee_authority"))
      return {rows:[{authority_id:authority}]};
+   // New consent-generation DML is included in the same simulated repair
+   // transaction; the production DB owns the real atomicity and triggers.
+   if(normalized.includes("INSERT INTO private.strata_owner_consent_heads"))return {rows:[]};
+   if(normalized.includes("SELECT generation::text FROM private.strata_owner_consent_heads"))
+     return {rows:[{generation:"1"}]};
+   if(normalized.includes("UPDATE private.strata_owner_consent_heads SET generation=generation+1"))
+     return {rows:[{generation:"2"}]};
    if(normalized.startsWith("UPDATE public.v13_production_account"))return {rows:[{id:a.id}]};
    return {rows:[]};
   },release(){}};

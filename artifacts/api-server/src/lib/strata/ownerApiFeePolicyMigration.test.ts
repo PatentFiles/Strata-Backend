@@ -254,6 +254,13 @@ test("versioned migration atomically replaces ONLY the fee source, retains risk 
   if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:POLICY}]};
   if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
   if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:accountId}]};
+  // The generation-fenced migration now records a separate transactional
+  // consent tombstone before revoking the prior owner SHA receipt.
+  if(sql.includes("INSERT INTO private.strata_owner_consent_heads"))return {rows:[]};
+  if(sql.includes("SELECT generation::text FROM private.strata_owner_consent_heads"))
+   return {rows:[{generation:"1"}]};
+  if(sql.includes("UPDATE private.strata_owner_consent_heads SET generation=generation+1"))
+   return {rows:[{generation:"2"}]};
   if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   throw Error("unexpected SQL in migration test");

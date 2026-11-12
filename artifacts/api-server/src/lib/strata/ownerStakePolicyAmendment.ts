@@ -1,3 +1,4 @@
+import {advanceOwnerConsent} from './ownerConsentGeneration';
 import { randomUUID } from "node:crypto";
 import { computeV13LiveMoneyPolicyHash, V13_MAX_ENTRY_STAKE_CENTS, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
 import { digest as v13Digest } from "../v13-production/types";
@@ -335,6 +336,7 @@ export async function amendOwnedStakePolicy(
     // Any edited gross stake/policy envelope changes the owner's risk consent.
     // An earlier exact-SHA release is NOT authority for the new amount.
     // Exposure and worker zero-checks above make the revocation safe.
+  await advanceOwnerConsent(tx,ownerId,accountId,'policy_scope_changed');
     const revokedOwnerRelease=await tx.query(`UPDATE private.strata_owner_sha_approvals
       SET revoked_at=now()
       WHERE owner_user_id=$1::uuid AND execution_account_id=$2

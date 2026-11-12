@@ -161,6 +161,17 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   if(sql.includes("UPDATE public.v13_live_money_policy SET state='REVOKED'"))return {rows:[{id:POLICY}]};
   if(sql.includes("INSERT INTO public.v13_live_money_policy"))return {rows:[{id:"new-policy"}]};
   if(sql.includes("UPDATE public.v13_production_account"))return {rows:[{id:accountId}]};
+  // Model the new transactional consent-generation SQL; keep unrecognized SQL fatal.
+  if(sql.includes("INSERT INTO private.strata_owner_consent_heads")){
+   assert.deepEqual(params,[OWNER,accountId]);return {rows:[]};
+  }
+  if(sql.includes("SELECT generation::text FROM private.strata_owner_consent_heads")){
+   assert.deepEqual(params,[OWNER,accountId]);assert.match(sql,/FOR UPDATE/);
+   return {rows:[{generation:"1"}]};
+  }
+  if(sql.includes("UPDATE private.strata_owner_consent_heads SET generation=generation+1")){
+   assert.deepEqual(params,[OWNER,accountId]);return {rows:[{generation:"2"}]};
+  }
   if(sql.includes("UPDATE private.strata_owner_sha_approvals"))return {rows:[]};
   if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
   throw Error("unexpected SQL in migration test");
@@ -248,6 +259,14 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
  // whole-contract IOC sizing is legitimate when all fees fit that ceiling.
  assert.deepEqual(evaluateV13LiveMoneyRisk({...riskInput,plannedGrossCents:499}),
    {ok:true,plannedAllInCents:624});
+ const advanceIndex=statements.findIndex(x=>x.sql.includes("UPDATE private.strata_owner_consent_heads SET generation=generation+1"));
+ const consentAuditIndex=statements.findIndex(x=>x.sql.includes("'OWNER_CODE_CONSENT_REVOKED'"));
+ const revokeIndex=statements.findIndex(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals"));
+ assert.ok(advanceIndex>=0 && consentAuditIndex>advanceIndex && revokeIndex>consentAuditIndex);
+ assert.ok(statements.findIndex(x=>x.sql==="COMMIT")>revokeIndex);
+ assert.deepEqual(JSON.parse(String(statements[consentAuditIndex]?.params?.[2])),{
+  ownerId:OWNER,accountId,reason:"policy_scope_changed",generation:"2",
+ });
  assert.ok(statements.some(x=>x.sql.includes("UPDATE private.strata_owner_sha_approvals")));
  assert.ok(statements.some(x=>x.sql.includes("OWNER_V3_FEE_POLICY_MIGRATION")));
  assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);

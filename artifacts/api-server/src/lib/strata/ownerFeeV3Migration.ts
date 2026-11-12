@@ -1,3 +1,4 @@
+import {advanceOwnerConsent} from './ownerConsentGeneration';
 /** #165 V3 owner-scoped transactional migration. Default disabled; exchange proof
  * and safe stopped/fenced worker required; NEVER clears active nonhistorical blocks.
  * No legacy reviewed V2 human signatures are invented or updated.
@@ -361,6 +362,7 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
       AND (blocked_reason IS NULL OR ($7::boolean AND blocked_reason='awaiting_account_commissioning'))
     RETURNING id`,[policyId,fresh.identity.sourceDigest,commissioningDigest,id,ownerId,old.id,repairing]);
   if(linked.rows.length!==1)return fail("account_policy_switch_conflict");
+  await advanceOwnerConsent(tx,ownerId,id,'policy_scope_changed');
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);
