@@ -59,6 +59,18 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
     fee_formula_version:DYNAMIC_FEE_POLICY_VERSION_V4,
     policy_hash:"f".repeat(64),
   }:{})}]};
+  // Generic qualification now pins immutable account/policy scope and a
+  // consent generation both before and after authenticated provider reads.
+  // This is a synthetic SQL fixture only; production must still enforce
+  // the real locked scope, generation, triggers and audit transaction.
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("AS account_xmin"))
+    return {rows:[{id:account.id,account_xmin:"101",policy_id:account.policy_id,
+      policy_hash:input.v4Source?"f".repeat(64):"e".repeat(64),
+      key_fingerprint:account.key_fingerprint}]};
+  if(sql.includes("SELECT generation::text FROM private.strata_owner_consent_heads"))
+    return {rows:[{generation:"0"}]};
+  if(sql.includes("INSERT INTO private.strata_owner_consent_heads"))return {rows:[]};
+  if(sql.includes("INSERT INTO private.strata_owner_consent_bindings"))return {rows:[]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
       feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
@@ -136,7 +148,10 @@ test("PRODUCTION qualifier performs only owned GET and stores a digest, not a tr
  assert.equal(result.ok,true,JSON.stringify(result));
  assert.equal(reads,1);
  assert.equal(result.ordersSubmitted,false);
- assert.equal(h.executed.filter(s=>s.includes("INSERT INTO")).length,1);
+ // The qualification, consent-head initialization and fresh binding are
+ // persisted together; none of these writes can enable an order or worker.
+ assert.equal(h.executed.filter(s=>s.includes("INSERT INTO")).length,3);
+ assert.equal(h.executed.some(s=>/UPDATE (?:public\.v13_production_account|private\.kalshi_account_worker_lease)/.test(s)),false);
  assert.equal(h.executed.some(s=>/INSERT INTO (?:public\.v13_production_intent|private\.strata_protective_exit_release)/.test(s)),false);
 });
 for(const coverage of [false,"missing"] as const){
