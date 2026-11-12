@@ -127,7 +127,7 @@ const state=async()=>({account:(await db.query('SELECT * FROM public.v13_product
  observations:(await db.query("SELECT * FROM public.v13_production_observation WHERE kind<>'OWNER_SHA_RELEASE_AUTHORIZATION' ORDER BY id")).rows});
 const policyId='12121212-1212-4212-8212-121212121212',authority='34343434-3434-4434-8434-343434343434',attestation='56565656-5656-4565-8565-565656565656';
 test('actual fee migration SQL workflow preserves consent generation',async t=>{try{
- await setup();await db.query(readFileSync(resolve(process.cwd(),'consent-generation.sql'),'utf8'));
+ await setup();await db.query(readFileSync(resolve(process.cwd(),'../../docs/stopped-account-approval-cutover-20261112/consent-generation.sql'),'utf8'));
  await db.query(`ALTER TABLE public.v13_live_money_policy ADD COLUMN version int DEFAULT1,ADD COLUMN supersedes_policy_id text,
  ADD COLUMN strategy_version text DEFAULT 'V1.3',ADD COLUMN strategy_parameter_set_id text DEFAULT 'synthetic',ADD COLUMN strategy_parameter_hash text DEFAULT repeat('d',64),
  ADD COLUMN entry_policy_version text,ADD COLUMN champion_selection_review_id text,ADD COLUMN champion_selection_evidence_hash text,ADD COLUMN champion_selected_by text,ADD COLUMN champion_selected_at timestamptz,

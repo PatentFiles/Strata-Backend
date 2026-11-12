@@ -121,7 +121,7 @@ const state=async()=>({account:(await db.query('SELECT * FROM public.v13_product
  markers:(await db.query('SELECT * FROM private.strata_emergency_exit_reservations ORDER BY execution_account_id,state')).rows,
  observations:(await db.query("SELECT * FROM public.v13_production_observation WHERE kind<>'OWNER_SHA_RELEASE_AUTHORIZATION' ORDER BY id")).rows});
 test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{try{await setup();
- await db.query(readFileSync(resolve(process.cwd(),'consent-generation.sql'),'utf8'));
+ await db.query(readFileSync(resolve(process.cwd(),'../../docs/stopped-account-approval-cutover-20261112/consent-generation.sql'),'utf8'));
  await db.query('ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN released_at timestamptz');
  assert.equal(await readConsentGeneration(db,owner,'a'),'1','migration epoch invalidates pre-cutover unbound qualifications');
  for(const sql of ["UPDATE private.strata_owner_consent_heads SET generation=generation","UPDATE private.strata_owner_consent_heads SET generation=generation-1","UPDATE private.strata_owner_consent_heads SET generation=generation+2",`UPDATE private.strata_owner_consent_heads SET generation=generation+1,owner_user_id='${reviewer}'`,"UPDATE private.strata_owner_consent_heads SET generation=generation+1,execution_account_id='foreign'"]){await assert.rejects(db.query(sql),/owner_renewal_head_transition_invalid/);}
