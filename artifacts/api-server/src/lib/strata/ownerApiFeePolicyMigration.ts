@@ -1,3 +1,4 @@
+import {advanceOwnerConsent} from './ownerConsentGeneration';
 import {createHash,randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
@@ -304,6 +305,7 @@ export async function migrateOwnedApiFeePolicy(ownerId:string,raw:unknown,deps:I
       AND (blocked_reason IS NULL OR ($7::boolean AND blocked_reason='awaiting_account_commissioning'))
     RETURNING id`,[policyId,fresh.identity.digest,commissioningDigest,id,ownerId,old.id,repairing]);
   if(linked.rows.length!==1)return fail("account_policy_switch_conflict");
+  await advanceOwnerConsent(tx,ownerId,id,'policy_scope_changed');
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);

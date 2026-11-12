@@ -1,3 +1,4 @@
+import {disabledKilledApprovalStatus,disabledStoppedApprovalStatus} from '../lib/strata/ownerNeverPostedReleaseRenewal';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
@@ -40,10 +41,15 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   if(statusSha)try{standingHistory=await hasContinuousGrantHistory(pool,target,statusSha);}catch{standingHistory=true;}
   const ownerRestore=target===actor.subject&&statusSha
     ?await ownerRestoreStatus(target,statusSha):{available:false,reason:"owner_restore_owner_only"};
+  const disabledStoppedApproval=target===actor.subject&&statusSha
+    ?await disabledStoppedApprovalStatus(pool,target,statusSha)
+    :{available:false,reason:"owner_approval_only_owner_only"};
+  const killed=target===actor.subject&&statusSha?await disabledKilledApprovalStatus(pool,target,statusSha):null;
   let pendingOwners:string[]=[];
   if(isOperator(actor.role))try{pendingOwners=await pendingReleaseOwners()}catch{}
   res.status(state.ok?200:409).json(sanitizePublic({...state,
-    standingGrantActive,standingTechnicalLeaseCurrent,ownerRestore,
+    standingGrantActive,standingTechnicalLeaseCurrent,ownerRestore,disabledStoppedApproval,disabledKilledApproval:killed,disabledKilledApprovalReceipt:killed&&'receipt' in killed?killed.receipt:null,
+    ...(killed&&'workerState' in killed?{workerState:'killed',workerKill:true,armRequested:false,accountExecutionEnabled:false,accountKillOn:true}:{}),
     ...(standingHistory?{releaseMode:'STANDING_V1',releaseActive:standingGrantActive,releaseExpiresAt:null}:{}),
     pendingOwners,viewerIsOperator:isOperator(actor.role),
     viewerIsOwner:target===actor.subject}));
@@ -53,7 +59,9 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   if(!actor)return void res.status(401).json({reason:"unauthorized"});
   const requested=(req.body as {ownerUserId?:unknown}|undefined)?.ownerUserId;
   const target=isOperator(actor.role)&&typeof requested==="string"?requested:actor.subject;
-  const result=await qualifyProtectiveRelease(target);
+  const b=req.body??{};
+  if(b.approvalOnlyMode!==undefined&&(target!==actor.subject||b.approvalOnlyMode!=='DISABLED_KILLED_APPROVAL_ONLY'))return void res.status(409).json({reason:'owner_renewal_consent_pin_invalid'});
+  const result=await qualifyProtectiveRelease(target,b.approvalOnlyMode?{killedConsentPin:b}:{});
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
  router.post("/review",async(req,res)=>{
@@ -143,3 +151,4 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
  });
  return router;
 }
+

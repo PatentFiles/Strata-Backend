@@ -1,3 +1,4 @@
+import {genericConsentScope,validateKilledConsentScope,type KilledConsentPin} from './ownerConsentGeneration';
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitSha";
@@ -21,7 +22,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
 type Db=Query & {connect():Promise<Query&{release():void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
+type Deps={killedConsentPin?:KilledConsentPin;db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -185,6 +186,8 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const v=await readReleaseOwner(db,ownerId);
   if(!v.ok)return deny(v.reason);
   const account=v.account;
+  const consentScope=await genericConsentScope(db,ownerId,String(account.id));
+  if(deps.killedConsentPin)await validateKilledConsentScope(db,ownerId,sha,deps.killedConsentPin);
   if(account.blocked_reason!==null&&account.blocked_reason!==undefined&&
      account.blocked_reason!=="awaiting_account_commissioning")
     return deny("account_risk_freeze_requires_independent_remediation");
@@ -327,16 +330,35 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
    cash:feeds.cashMicros,orders:feeds.orders,fills:feeds.fills,
    positions:feeds.positions,settlements:feeds.settlements,
    fee:account.fee_artifact_digest,freshFeeDigest,v4FeeBinding,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
-  const recorded=await db.query(`
+  const consentTx=await db.connect();let consentCommitted=false;
+  try {
+   const write=consentTx??db;
+   if(consentTx){await consentTx.query('BEGIN');await consentTx.query("SET LOCAL lock_timeout='1500ms'");await consentTx.query("SET LOCAL statement_timeout='12000ms'");
+    const locked=await genericConsentScope(consentTx,ownerId,String(account.id),true);
+    if(deps.killedConsentPin)await validateKilledConsentScope(consentTx,ownerId,sha,deps.killedConsentPin,true);
+    if(JSON.stringify(locked)!==JSON.stringify(consentScope))return deny('owner_renewal_consent_scope_changed');
+   }
+  const recorded=await write.query(`
  INSERT INTO private.strata_protective_release_qualification
  (release_commit_sha,owner_user_id,execution_account_id,evidence_digest)
  VALUES($1,$2::uuid,$3,$4)
  RETURNING qualification_id::text AS id,expires_at`,
  [sha,ownerId,account.id,evidence]);
   if(recorded.rows.length!==1)return deny("production_read_qualification_not_recorded");
+  {const p=deps.killedConsentPin;
+   await write.query(`INSERT INTO private.strata_owner_consent_bindings
+   (qualification_id,owner_user_id,execution_account_id,release_commit_sha,generation,mode,policy_id,policy_hash,credential_fingerprint,account_xmin)
+   VALUES($1::uuid,$2::uuid,$3,$4,$5::bigint,$6,$7,$8,$9,$10)`,
+   [recorded.rows[0]?.id,ownerId,account.id,sha,consentScope.consentGeneration,p?'DISABLED_KILLED_APPROVAL_ONLY':'STANDARD',String(account.policy_id),String(account.policy_hash),String(account.key_fingerprint),consentScope.account_xmin]);
+   await write.query('COMMIT');consentCommitted=true;
+  }
   return {ok:true,reason:"authenticated_production_read_only_qualified",
    qualificationId:recorded.rows[0]?.id,expiresAt:recorded.rows[0]?.expires_at,
-   sha,ordersSubmitted:false as const};
+   sha,ordersSubmitted:false as const,...(deps.killedConsentPin?{
+    accountId:account.id,policyId:deps.killedConsentPin.expectedPolicyId,policyHash:deps.killedConsentPin.expectedPolicyHash,
+    signerFingerprint:deps.killedConsentPin.expectedCredentialFingerprint,consentGeneration:deps.killedConsentPin.consentGeneration}:{} )};
+  }finally{if(consentTx){if(!consentCommitted)try{await consentTx.query('ROLLBACK')}catch{};consentTx.release();}}
+
  }catch{return deny("authenticated_production_qualification_unavailable");}
 }
 export async function attestProtectiveReleaseReview(

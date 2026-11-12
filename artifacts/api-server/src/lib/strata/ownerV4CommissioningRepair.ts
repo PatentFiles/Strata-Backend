@@ -1,3 +1,4 @@
+import {advanceOwnerConsent} from './ownerConsentGeneration';
 /**
  * Explicit AAL2 owner-only repair for an existing V4 provisional commissioning hold.
  * A real V4 monetary grant, an unchanged official issuer PDF+API observation,
@@ -242,6 +243,7 @@ export async function repairOwnerV4CommissioningHold(ownerId:string,raw:unknown,
    "AND blocked_reason='awaiting_account_commissioning' RETURNING id"
   ].join(" "),[a.id,ownerId,b.expectedPolicyId,b.expectedRevision]);
   if(updated.rows.length!==1)return no("account_repair_concurrency_conflict");
+  await advanceOwnerConsent(tx,ownerId,String(a.id),'policy_scope_changed');
   await tx.query([
    "UPDATE private.strata_owner_sha_approvals SET revoked_at=now()",
    "WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND revoked_at IS NULL"

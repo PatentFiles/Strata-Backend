@@ -1,3 +1,5 @@
+import {advanceOwnerConsent,readConsentGeneration} from './ownerConsentGeneration';
+import {disabledKilledApprovalStatus,disabledStoppedApprovalStatus} from './ownerNeverPostedReleaseRenewal';
 import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
 // Keep the new proof-unit matrix on the existing credential-fenced PG16/17
 // renewal CI path, without requiring a separate unconfigured workflow.
@@ -6,7 +8,7 @@ import {readFileSync} from 'node:fs';import {resolve} from 'node:path';
 import {getTableColumns} from 'drizzle-orm';import {v13ProductionEventTable} from '@workspace/db';
 import test from 'node:test';import assert from 'node:assert/strict';import {generateKeyPairSync,randomUUID} from 'node:crypto';
 import {pool as db} from '@workspace/db';import {digest} from '../v13-production/types';
-import {authorizeOwnerShaRelease,OWNER_SHA_RELEASE_CONFIRM} from './ownerShaRelease';
+import {authorizeOwnerShaRelease,revokeOwnerShaRelease,OWNER_SHA_REVOKE_CONFIRM,OWNER_SHA_RELEASE_CONFIRM} from './ownerShaRelease';
 import {inspectOwnerSignedExchangeReleaseProof} from './ownerSignedExchangeReleaseProof';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {qualifyProtectiveRelease} from './inAppProtectiveRelease';
@@ -37,6 +39,11 @@ const feeds=async(_m:unknown,observedAtMs:number)=>{await beforeRead();await aft
 const run=(id=owner)=>authorizeOwnerShaRelease(id,body,{db:db as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
 const diagnostic=()=>inspectOwnerSignedExchangeReleaseProof(owner,{db:db as never,now:()=>clock(),read:feeds as never,
  feeProbe:async()=>({ok:true}) as never,v4:async()=>({ok:true,checks:{protectiveExitRelease:false,ownerShaApproval:false}}) as never});
+async function fixtureChange(sql:string){
+ if(/UPDATE private\.strata_owner_sha_approvals SET revoked_at=now\(\)/.test(sql)){
+  const c=await db.connect();try{await c.query('BEGIN');await c.query("SELECT id FROM public.v13_production_account WHERE id='a' FOR UPDATE");await advanceOwnerConsent(c,owner,'a','test_prior_revocation');await c.query(sql);await c.query('COMMIT');}finally{c.release();}
+ }else await db.query(sql);
+}
 async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault;
  CREATE TABLE public.v13_production_account(id text PRIMARY KEY,owner_user_id uuid,subaccount int,exchange_index int,
  policy_id text,kalshi_connection_id uuid,key_fingerprint text,blocked_reason text,commissioned boolean,cash_precision_verified boolean,
@@ -83,7 +90,7 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
  await db.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('activation','a','OWNER_ACTIVATION_REQUEST','{}',$1)`,[
  digest({accountId:'a',policyId:'p',feeDigest:hash,stakeCents:500,commissioningDigest:hash,minimumExitMicros:10000})]);
 }
-async function reset(){beforeRead=async()=>{};afterRead=async()=>{};extraFeeds={};clock=()=>Date.now();
+async function reset(){await db.query('DELETE FROM private.strata_owner_consent_bindings;DELETE FROM private.strata_owner_consent_heads');beforeRead=async()=>{};afterRead=async()=>{};extraFeeds={};clock=()=>Date.now();
  await db.query(`DELETE FROM private.strata_owner_sha_approvals WHERE approval_id<>'${oldApproval}';UPDATE private.strata_owner_sha_approvals SET revoked_at=NULL,qualification_digest='${hash}';
  UPDATE private.strata_standing_execution_reviews SET revoked_at=NULL,policy_hash='${hash}';UPDATE private.strata_continuous_execution_grants SET revoked_at=NULL,policy_hash='${hash}';
  UPDATE public.v13_production_account SET owner_user_id='${owner}',execution_enabled=true,kill_switch=false,blocked_reason=NULL,reserved_micros=0,cash_micros=25000000,key_fingerprint='${fingerprint}',revision=1;
@@ -114,6 +121,16 @@ const state=async()=>({account:(await db.query('SELECT * FROM public.v13_product
  markers:(await db.query('SELECT * FROM private.strata_emergency_exit_reservations ORDER BY execution_account_id,state')).rows,
  observations:(await db.query("SELECT * FROM public.v13_production_observation WHERE kind<>'OWNER_SHA_RELEASE_AUTHORIZATION' ORDER BY id")).rows});
 test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{try{await setup();
+ await db.query(readFileSync(resolve(process.cwd(),'consent-generation.sql'),'utf8'));
+ await db.query('ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN released_at timestamptz');
+ assert.equal(await readConsentGeneration(db,owner,'a'),'1','migration epoch invalidates pre-cutover unbound qualifications');
+ for(const sql of ["UPDATE private.strata_owner_consent_heads SET generation=generation","UPDATE private.strata_owner_consent_heads SET generation=generation-1","UPDATE private.strata_owner_consent_heads SET generation=generation+2",`UPDATE private.strata_owner_consent_heads SET generation=generation+1,owner_user_id='${reviewer}'`,"UPDATE private.strata_owner_consent_heads SET generation=generation+1,execution_account_id='foreign'"]){await assert.rejects(db.query(sql),/owner_renewal_head_transition_invalid/);}
+ await assert.rejects(db.query(`INSERT INTO private.strata_owner_consent_heads VALUES('${reviewer}','a',1)`),/owner_renewal_head_initial_generation_invalid/);
+ assert.equal(await readConsentGeneration(db,owner,'a'),'1');
+ await assert.rejects(db.query(`INSERT INTO private.strata_owner_sha_approvals(owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest) VALUES($1,'a',$2,$3,$4)`,[owner,sha,qualification,hash]),/owner_renewal_fresh_consent_binding_required/);
+ await assert.rejects(db.query('UPDATE private.strata_owner_sha_approvals SET revoked_at=now() WHERE approval_id=$1',[oldApproval]),/owner_renewal_revocation_generation_advance_required/);
+ // Legacy gen0 tests below are intentionally separate from seeded-cutover tests.
+ await db.query('DELETE FROM private.strata_owner_consent_heads');
  await t.test('disabled ordinary bootstrap rejects retained history and an owned armed worker',async()=>{
   await reset();await db.query("UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true;UPDATE private.kalshi_account_worker_lease SET state='owned',arm_requested=true");
   let signedReads=0;beforeRead=async()=>{signedReads++;};
@@ -139,6 +156,29 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   await db.query("DELETE FROM public.v13_production_observation WHERE id<>'activation';DELETE FROM public.v13_production_intent;DELETE FROM private.kalshi_account_worker_lease;UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true");
   assert.equal((await run()).ok,true,'first-ever empty account has no lease before ARM');
   const columns=Object.keys(lease);await db.query(`INSERT INTO private.kalshi_account_worker_lease(${columns.join(',')}) VALUES(${columns.map((_,i)=>'$'+(i+1)).join(',')})`,Object.values(lease));
+ });
+ await t.test('generic empty bootstrap and existing approval restore remain usable after migration epoch',async()=>{
+  await reset();await db.query(`DELETE FROM public.v13_production_observation WHERE id<>'activation';DELETE FROM public.v13_production_intent;
+   UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true;
+   UPDATE public.v13_live_money_policy SET fee_source_url='https://kalshi.com/docs/kalshi-fee-schedule.pdf';
+   ALTER TABLE private.strata_protective_release_qualification ALTER COLUMN qualification_id SET DEFAULT gen_random_uuid(),ALTER COLUMN observed_at SET DEFAULT now(),ALTER COLUMN expires_at SET DEFAULT now()+interval '15 minutes';
+   INSERT INTO private.strata_owner_consent_heads VALUES('${owner}','a',0);UPDATE private.strata_owner_consent_heads SET generation=generation+1;`);
+  assert.equal((await run()).ok,false,'pre-epoch unbound bootstrap qualification cannot insert');
+  const qualify=()=>qualifyProtectiveRelease(owner,{db:db as never,sha:()=>sha,readFeeds:feeds as never,verifyFee:async()=>({ok:true,sourceDigest:hash}) as never});
+  const q=await qualify();assert.equal(q.ok,true,JSON.stringify(q));
+  const bootstrap=await authorizeOwnerShaRelease(owner,{...body,qualificationId:'qualificationId' in q?q.qualificationId:null},{db:db as never,sha:()=>sha,readFeeds:feeds as never});
+  assert.equal(bootstrap.ok,true,JSON.stringify(bootstrap));assert.equal(await count(),1);
+  assert.deepEqual((await db.query('SELECT execution_enabled,kill_switch FROM public.v13_production_account')).rows,[{execution_enabled:true,kill_switch:false}]);
+  const originalApproval='approvalId' in bootstrap?bootstrap.approvalId:null;
+  const leaseBefore=(await db.query('SELECT * FROM private.kalshi_account_worker_lease')).rows;
+  // Deliberate local fixture STOP, not a consent revocation: existing approval stays valid.
+  await db.query('UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true,revision=revision+1');
+  const rq=await qualify();assert.equal(rq.ok,true,JSON.stringify(rq));
+  const restored=await authorizeOwnerShaRelease(owner,{...body,qualificationId:'qualificationId' in rq?rq.qualificationId:null,
+   restoreExistingApproval:true,expectedSha:sha,expectedAccountId:'a',expectedPolicyId:'p',expectedPolicyHash:hash},{db:db as never,sha:()=>sha,readFeeds:feeds as never});
+  assert.equal(restored.ok,true,JSON.stringify(restored));assert.equal('approvalId' in restored?restored.approvalId:null,originalApproval);
+  assert.equal(await count(),1);assert.equal(await readConsentGeneration(db,owner,'a'),'1');
+  assert.deepEqual((await db.query('SELECT * FROM private.kalshi_account_worker_lease')).rows,leaseBefore);
  });
  await t.test('genuine settled history qualifies and renews only through complete financial proof',async()=>{
   await reset();
@@ -201,7 +241,9 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
    [policyHash,oldQualification,reviewDigest,reviewUrl,note,STANDING_REVIEW_CONFIRM]);
   const qualified=await qualifyProtectiveRelease(owner,{db:db as never,sha:()=>sha,readFeeds:feeds as never,verifyFee:async()=>({ok:true,sourceDigest:hash}) as never});
   assert.equal(qualified.ok,true,JSON.stringify(qualified));assert.ok('qualificationId' in qualified);
-  const renewalBody={...body,qualificationId:'qualificationId' in qualified?qualified.qualificationId:null};
+  await db.query("UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true");
+  const renewalBody={...body,releaseMode:"DISABLED_STOPPED_APPROVAL_ONLY",
+   expectedSha:sha,expectedAccountId:"a",expectedPolicyId:(await db.query("SELECT policy_id FROM public.v13_production_account WHERE id='a'")).rows[0].policy_id,expectedPolicyHash:policyHash,qualificationId:'qualificationId' in qualified?qualified.qualificationId:null};
   const candidate=(candidateDb:unknown=db)=>authorizeOwnerShaRelease(owner,renewalBody,{db:candidateDb as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
   // Invented mixed history exercises both no-send classes alongside a settled ENTRY.
   for(let n=0;n<11;n++){
@@ -216,14 +258,126 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
    await db.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES($1,'a','PROVEN_NOT_POSTED',$2,$3)",['retained-'+n,payload,digest(payload)]);
   }
   await db.query('ALTER TABLE public.v13_production_intent ADD COLUMN dispatch_at timestamptz,ADD COLUMN exit_fee_micros bigint DEFAULT 0');
+  const routing=await disabledStoppedApprovalStatus(db,owner,sha);
+  assert.equal(routing.available,true,JSON.stringify(routing));
+  assert.equal('mode' in routing?routing.mode:null,'DISABLED_STOPPED_APPROVAL_ONLY');
+  assert.equal(await count(),0,'status projection must not authorize');
   const before=await state();let outsideLocks=false;
   beforeRead=async()=>{const rival=await db.connect();try{await rival.query('BEGIN');await rival.query("SELECT id FROM public.v13_production_account WHERE id='a' FOR UPDATE NOWAIT");await rival.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id='a' FOR UPDATE NOWAIT");outsideLocks=true;}finally{await rival.query('ROLLBACK');rival.release();}};
   const r=await candidate();assert.equal(outsideLocks,true);
   assert.deepEqual(await state(),before,'renewal must not mutate financial history, controls, worker, grants or reviews');
   beforeRead=async()=>{};
 
-  assert.equal(r.ok,true,JSON.stringify(r));assert.equal(await count(),1);
+  assert.equal(r.ok,true,JSON.stringify(r));assert.equal(r.reason,'owner_sha_approved_account_disabled_worker_stopped');assert.equal(await count(),1);
   const clearApproval=async()=>{await db.query('DELETE FROM private.strata_owner_sha_approvals WHERE release_commit_sha=$1',[sha]);await db.query("DELETE FROM public.v13_production_observation WHERE kind='OWNER_SHA_RELEASE_AUTHORIZATION'");};
+  await clearApproval();
+  for(const [field,value] of [
+   ['expectedSha','f'.repeat(40)],['expectedAccountId','foreign'],
+   ['expectedPolicyId','foreign'],['expectedPolicyHash','f'.repeat(64)]
+  ] as const){
+   let signedReads=0;beforeRead=async()=>{signedReads++;};
+   const mismatch=await authorizeOwnerShaRelease(owner,{...renewalBody,[field]:value},
+    {db:db as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
+   assert.equal(mismatch.reason,field==='expectedSha'?'owner_approval_only_exact_sha_required':'owner_approval_only_account_policy_scope_changed');
+   assert.equal(signedReads,0);assert.equal(await count(),0);
+  }
+  beforeRead=async()=>{};
+  await db.query("UPDATE private.kalshi_account_worker_lease SET account_kill=true");
+  const killed=await candidate();
+  assert.equal(killed.reason,'owner_renewal_worker_must_be_released_and_disarmed');
+  assert.equal((await disabledStoppedApprovalStatus(db,owner,sha)).available,false);
+  assert.equal(await count(),0);
+  assert.equal((await db.query("SELECT account_kill FROM private.kalshi_account_worker_lease")).rows[0].account_kill,true);
+  await db.query("UPDATE private.kalshi_account_worker_lease SET account_kill=false");
+  const revokedGrant='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  await db.query(`INSERT INTO private.strata_continuous_execution_grants
+   SELECT $1::uuid,owner_user_id,execution_account_id,release_commit_sha,policy_hash,independent_reviewer_id,
+   reviewed_release_id,now(),owner_confirmation,now()
+   FROM private.strata_continuous_execution_grants WHERE grant_id=$2::uuid`,[revokedGrant,grant]);
+  assert.equal((await candidate()).reason,'owner_renewal_prior_authority_revoked_or_scope_changed');
+  assert.equal(await count(),0);
+  await db.query("DELETE FROM private.strata_continuous_execution_grants WHERE grant_id=$1::uuid",[revokedGrant]);
+  afterRead=async()=>{await db.query("UPDATE public.v13_production_account SET execution_enabled=true");};
+  assert.equal((await candidate()).reason,'owner_renewal_account_mode_or_scope_changed');
+  assert.equal(await count(),0);
+  afterRead=async()=>{};
+  await db.query("UPDATE public.v13_production_account SET execution_enabled=false");
+  assert.equal((await candidate()).ok,true,'valid disabled scope remains accepted after mode/race tests');
+  await clearApproval();
+  // Real killed receipt and durable revocation generation, all financial fixtures retained.
+  await db.query("UPDATE private.kalshi_account_worker_lease SET state='killed',account_kill=true,arm_requested=false,released_at=clock_timestamp()");
+  const initialGeneration=await readConsentGeneration(db,owner,'a');assert.equal(initialGeneration,'0');
+  let gen='0';
+  const makePin=()=>({approvalOnlyMode:'DISABLED_KILLED_APPROVAL_ONLY' as const,expectedSha:sha,expectedAccountId:'a',expectedPolicyId:'p',expectedPolicyHash:policyHash,expectedCredentialFingerprint:fingerprint,consentGeneration:gen});
+  const qualifyKilled=()=>qualifyProtectiveRelease(owner,{db:db as never,sha:()=>sha,readFeeds:feeds as never,verifyFee:async()=>({ok:true,sourceDigest:hash}) as never,killedConsentPin:makePin()});
+  const approveKilled=(qid:unknown)=>authorizeOwnerShaRelease(owner,{...body,...makePin(),releaseMode:'DISABLED_KILLED_APPROVAL_ONLY',qualificationId:qid},{db:db as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
+  const controls=async()=>JSON.stringify((await db.query(`SELECT to_jsonb(a) a,to_jsonb(w) w,to_jsonb(g) g FROM public.v13_production_account a CROSS JOIN private.kalshi_account_worker_lease w CROSS JOIN public.live_execution_config g`)).rows);
+  let q=await qualifyKilled();assert.equal(q.ok,true,JSON.stringify(q));
+  const beforeControls=await controls();
+  let outcome=await approveKilled('qualificationId' in q?q.qualificationId:null);assert.equal(outcome.ok,true,JSON.stringify(outcome));
+  assert.equal(await controls(),beforeControls);assert.equal('consentGeneration' in outcome&&outcome.consentGeneration,'0');
+  const status=await disabledKilledApprovalStatus(db,owner,sha);assert.equal('receipt' in status&&status.receipt?.approvalId,'approvalId' in outcome?outcome.approvalId:null);
+  const repeated=await approveKilled('qualificationId' in q?q.qualificationId:null);assert.equal(repeated.reason,'owner_renewal_killed_receipt_already_exists_readback_required');
+  await clearApproval();
+  // Explicit revoke with NO current approval is durable and advances generation.
+  const revoked=await revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:db as never,sha:()=>sha});
+  assert.equal(revoked.ok,true,JSON.stringify(revoked));assert.equal(revoked.reason,'owner_code_consent_revoked_no_active_approval');
+  assert.equal(await readConsentGeneration(db,owner,'a'),'1');assert.equal(await controls(),beforeControls);
+  assert.equal((await approveKilled('qualificationId' in q?q.qualificationId:null)).reason,'owner_renewal_consent_generation_changed');
+  // Old unpinned generic INSERT path cannot revive after tombstone.
+  await assert.rejects(db.query(`INSERT INTO private.strata_owner_sha_approvals(owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
+   VALUES($1,'a',$2,$3,$4)`,[owner,sha,qualification,hash]),/owner_renewal_fresh_consent_binding_required/);
+  gen='1';q=await qualifyKilled();assert.equal(q.ok,true,JSON.stringify(q));
+  outcome=await approveKilled('qualificationId' in q?q.qualificationId:null);assert.equal(outcome.ok,true,JSON.stringify(outcome));await clearApproval();
+  // Revocation while qualification signed reads are in flight invalidates capture.
+  afterRead=async()=>{await revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:db as never,sha:()=>sha});};
+  const staleQualification=await qualifyKilled();assert.equal(staleQualification.ok,false);afterRead=async()=>{};
+  gen=await readConsentGeneration(db,owner,'a');assert.equal(gen,'2');
+  q=await qualifyKilled();assert.equal(q.ok,true,JSON.stringify(q));
+  afterRead=async()=>{await revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:db as never,sha:()=>sha});};
+  const staleReceipt=await approveKilled('qualificationId' in q?q.qualificationId:null);assert.equal(staleReceipt.reason,'owner_renewal_consent_generation_changed');afterRead=async()=>{};
+  assert.equal(await count(),0);assert.equal(await controls(),beforeControls);
+  gen=await readConsentGeneration(db,owner,'a');q=await qualifyKilled();assert.equal(q.ok,true,JSON.stringify(q));
+  const qid='qualificationId' in q?q.qualificationId:null;
+  let releaseInsert!:()=>void;let insertionReached!:()=>void;
+  const reached=new Promise<void>(resolve=>insertionReached=resolve),proceed=new Promise<void>(resolve=>releaseInsert=resolve);
+  const wrapped={query:db.query.bind(db),connect:async()=>{const c=await db.connect();return {release:()=>c.release(),query:async(sql:string,params?:unknown[])=>{
+   if(sql.includes('INSERT INTO private.strata_owner_sha_approvals')){insertionReached();await proceed;}return c.query(sql,params);
+  }};}};
+  const approvalPromise=authorizeOwnerShaRelease(owner,{...body,...makePin(),releaseMode:'DISABLED_KILLED_APPROVAL_ONLY',qualificationId:qid},{db:wrapped as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
+  await reached;let revokeFinished=false;
+  const revokePromise=revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:db as never,sha:()=>sha}).then(r=>{revokeFinished=true;return r;});
+  await new Promise(resolve=>setTimeout(resolve,40));assert.equal(revokeFinished,false,'revoke waits on account lock');releaseInsert();
+  const [approvedThenRevoked,revokedAfter]=await Promise.all([approvalPromise,revokePromise]);assert.equal(approvedThenRevoked.ok,true);assert.equal(revokedAfter.ok,true);
+  assert.equal((await db.query('SELECT count(*)::int n FROM private.strata_owner_sha_approvals WHERE release_commit_sha=$1 AND revoked_at IS NULL',[sha])).rows[0].n,0,'later revoke removes active receipt');
+  await clearApproval();
+  // No-row revocation audit failure rolls back head; lost COMMIT ack is uncertain.
+  const decorate=(hook:(sql:string,run:()=>Promise<unknown>)=>Promise<unknown>)=>({query:db.query.bind(db),connect:async()=>{const c=await db.connect();return {release:()=>c.release(),query:(sql:string,p?:unknown[])=>hook(sql,()=>c.query(sql,p))};}});
+  const generationBeforeAudit=await readConsentGeneration(db,owner,'a');
+  const revokeAuditFailure=await revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:decorate(async(sql,run)=>{if(sql.includes("'OWNER_CODE_CONSENT_REVOKED'"))throw Error('synthetic_audit_failure');return run();}) as never,sha:()=>sha});
+  assert.equal(revokeAuditFailure.ok,false);assert.equal(await readConsentGeneration(db,owner,'a'),generationBeforeAudit);
+  const revokeLostAck=await revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:decorate(async(sql,run)=>{const r=await run();if(sql==='COMMIT')throw Error('synthetic_lost_ack');return r;}) as never,sha:()=>sha});
+  assert.equal(revokeLostAck.ok,false);assert.equal('uncertain' in revokeLostAck&&revokeLostAck.uncertain,true);
+  assert.equal(BigInt(await readConsentGeneration(db,owner,'a')),BigInt(generationBeforeAudit)+1n);
+  // Two distinct fresh qualifications of the same generation compete for one receipt.
+  gen=await readConsentGeneration(db,owner,'a');const qa=await qualifyKilled(),qb=await qualifyKilled();assert.equal(qa.ok,true);assert.equal(qb.ok,true);
+  const competing=await Promise.all([approveKilled('qualificationId' in qa?qa.qualificationId:null),approveKilled('qualificationId' in qb?qb.qualificationId:null)]);
+  assert.equal(competing.filter(r=>r.ok).length,1);assert.equal(competing.find(r=>!r.ok)?.reason,'owner_renewal_killed_receipt_already_exists_readback_required');
+  const winner=competing.find(r=>r.ok)!;const winnerStatus=await disabledKilledApprovalStatus(db,owner,sha);
+  assert.equal('receipt' in winnerStatus&&winnerStatus.receipt?.qualificationId,'qualificationId' in winner?winner.qualificationId:null);await clearApproval();
+  // Revoke acquires account/head first; pending older approval must not win after it.
+  gen=await readConsentGeneration(db,owner,'a');q=await qualifyKilled();assert.equal(q.ok,true);
+  let revokeAtCommit!:()=>void,finishRevoke!:()=>void;
+  const revokedReady=new Promise<void>(r=>revokeAtCommit=r),allowRevoke=new Promise<void>(r=>finishRevoke=r);
+  const revoking=revokeOwnerShaRelease(owner,{confirmation:OWNER_SHA_REVOKE_CONFIRM},{db:decorate(async(sql,run)=>{if(sql==='COMMIT'){revokeAtCommit();await allowRevoke;}return run();}) as never,sha:()=>sha});
+  await revokedReady;const pending=approveKilled('qualificationId' in q?q.qualificationId:null);await new Promise(r=>setTimeout(r,40));finishRevoke();
+  assert.equal((await revoking).ok,true);assert.equal((await pending).reason,'owner_renewal_consent_generation_changed');assert.equal(await count(),0);
+  // Generic enabled renewal can requalify after tombstone, no permanent lockout.
+  await db.query("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false;UPDATE private.kalshi_account_worker_lease SET state='released',account_kill=false");
+  const generic=await qualifyProtectiveRelease(owner,{db:db as never,sha:()=>sha,readFeeds:feeds as never,verifyFee:async()=>({ok:true,sourceDigest:hash}) as never});assert.equal(generic.ok,true,JSON.stringify(generic));
+  const genericRenew=await authorizeOwnerShaRelease(owner,{...body,qualificationId:'qualificationId' in generic?generic.qualificationId:null},{db:db as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});assert.equal(genericRenew.ok,true,JSON.stringify(genericRenew));await clearApproval();
+  // Restore legacy regression setup explicitly in disposable fixture only.
+  await db.query("DELETE FROM private.strata_owner_consent_bindings;DELETE FROM private.strata_owner_consent_heads;UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true");
   const negatives:[string,string,string][]=[
    ['UNKNOWN terminal entry',"UPDATE public.v13_production_intent SET state='UNKNOWN' WHERE id='settled-parent'","UPDATE public.v13_production_intent SET state='TERMINAL' WHERE id='settled-parent'"],
    ['nonterminal entry',"UPDATE public.v13_production_intent SET terminal=false WHERE id='settled-parent'","UPDATE public.v13_production_intent SET terminal=true WHERE id='settled-parent'"],
@@ -247,11 +401,12 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
    ['posted entry no-send contradiction',"INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('contradiction','a','PROVEN_NOT_POSTED',jsonb_build_object('id','settled-parent'),repeat('0',64))","DELETE FROM public.v13_production_observation WHERE id='contradiction'"],
   ];
   for(const [name,change,restore] of negatives){
-   await clearApproval();await db.query(change);const denied=await candidate();assert.equal(denied.ok,false,name+': '+JSON.stringify(denied));assert.equal(await count(),0,name);
+   await clearApproval();await fixtureChange(change);const denied=await candidate();assert.equal(denied.ok,false,name+': '+JSON.stringify(denied));assert.equal(await count(),0,name);
    if(restore)await db.query(restore);
    else if(name==='entry capability changed')await db.query('UPDATE public.v13_production_intent SET capability_digest=$1 WHERE id=$2',[digest({id,request,decision:{},policyHash:hash,fee:hash}),id]);
    else if(name==='event payload mismatch')await db.query("UPDATE public.v13_production_event SET payload=$1 WHERE kind='FILL'",[mapped.fills[0]]);
    else await db.query('UPDATE private.strata_standing_execution_reviews SET evidence_digest=$1',[reviewDigest]);
+   if(name==='revoked prior owner consent')await db.query('DELETE FROM private.strata_owner_consent_heads');
   }
   for(const [name,patch] of [['incomplete archive',{historicalCoverageComplete:false}],['cash mismatch',{cashMicros:'24999999'}],['open position',{positions:[{ticker:market,position_fp:'1.00'}]}]] as const){
    await clearApproval();const original=extraFeeds;extraFeeds={...extraFeeds,...patch};assert.equal((await candidate()).ok,false,name);assert.equal(await count(),0);extraFeeds=original;
@@ -279,7 +434,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   const auditFailure=wrap(async sql=>{if(sql.includes("VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION'"))throw Error('synthetic audit unavailable');});
   assert.equal((await candidate(auditFailure)).ok,false);assert.equal(await count(),0);assert.deepEqual(await state(),beforeFailure);
   const ambiguous={query:db.query.bind(db),connect:async()=>{const c=await db.connect();return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{const result=await c.query(sql,args);if(sql==='COMMIT')throw Error('synthetic committed acknowledgement lost');return result;}};}};
-  assert.equal((await candidate(ambiguous)).ok,false);assert.equal(await count(),1);assert.equal((await candidate()).ok,true);assert.equal(await count(),1);
+  const lostAck=await candidate(ambiguous);assert.equal(lostAck.ok,false);assert.equal('uncertain' in lostAck&&lostAck.uncertain,true);assert.equal(await count(),1);assert.equal((await candidate()).ok,true);assert.equal(await count(),1);
   await clearApproval();const parallel=await Promise.all([candidate(),candidate()]);assert.ok(parallel.every(r=>r.ok),JSON.stringify(parallel));assert.equal(await count(),1);
   for(const delta of [15001,-1]){await clearApproval();let moved=false;const start=Date.now();clock=()=>start+(moved?delta:0);afterRead=async()=>{moved=true;};assert.equal((await candidate()).ok,false);assert.equal(await count(),0);clock=()=>Date.now();afterRead=async()=>{};}
   await clearApproval();
@@ -364,7 +519,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
  ['stale qualification',`UPDATE private.strata_protective_release_qualification SET expires_at=now()+interval '30 seconds' WHERE qualification_id='${qualification}'`],
  ['foreign qualification',`UPDATE private.strata_protective_release_qualification SET owner_user_id='${reviewer}' WHERE qualification_id='${qualification}'`],
  ];
- for(const [name,sql] of mutations)await t.test(name+' rejects without approval',async()=>{await reset();await db.query(sql);const r=await run();assert.equal(r.ok,false,JSON.stringify(r));assert.equal(await count(),0);
+ for(const [name,sql] of mutations)await t.test(name+' rejects without approval',async()=>{await reset();await fixtureChange(sql);const r=await run();assert.equal(r.ok,false,JSON.stringify(r));assert.equal(await count(),0);
   if(name==='foreign qualification')await db.query(`UPDATE private.strata_protective_release_qualification SET owner_user_id=$1 WHERE qualification_id=$2`,[owner,qualification]);});
  await t.test('missing prior grant cannot fall back to bootstrap',async()=>{await reset();const c=await db.query('SELECT * FROM private.strata_continuous_execution_grants');await db.query('DELETE FROM private.strata_continuous_execution_grants');const r=await run();assert.equal(r.ok,false);assert.match(r.reason,/prior_grant/);assert.equal(await count(),0);const g=c.rows[0];await db.query('INSERT INTO private.strata_continuous_execution_grants SELECT * FROM json_populate_record(NULL::private.strata_continuous_execution_grants,$1::json)',[JSON.stringify(g)]);});
  await t.test('foreign owner cannot read signer or renew',async()=>{await reset();let reads=0;beforeRead=async()=>{reads++;};assert.equal((await run(reviewer)).ok,false);assert.equal(reads,0);assert.equal(await count(),0);});
@@ -412,3 +567,4 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
  });
  await t.test('diagnostic catches history changed after its signed read',async()=>{await reset();afterRead=async()=>{await db.query("DELETE FROM public.v13_production_observation WHERE id='proof-0'");};const r=await diagnostic();assert.equal(r.ok,false);assert.equal(await count(),0);});
  }finally{await db.end();}});
+

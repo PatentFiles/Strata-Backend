@@ -1,3 +1,4 @@
+import {advanceOwnerConsent,type KilledConsentPin} from './ownerConsentGeneration';
 import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
@@ -85,6 +86,12 @@ export async function authorizeOwnerShaRelease(
  const args=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)(),db=deps.db??pool;
  const restoring=args.restoreExistingApproval===true;
+ const killedOnly=args.releaseMode==="DISABLED_KILLED_APPROVAL_ONLY";
+ const approvalOnly=args.releaseMode==="DISABLED_STOPPED_APPROVAL_ONLY"||killedOnly;
+ if(args.releaseMode!==undefined&&!approvalOnly)return reject("owner_approval_only_mode_invalid");
+ if(approvalOnly&&(restoring||args.provisionalRepairConfirmation!==undefined))
+  return reject("owner_approval_only_mode_conflict");
+ if(approvalOnly&&args.expectedSha!==sha)return reject("owner_approval_only_exact_sha_required");
  if(args.restoreExistingApproval!==undefined&&args.restoreExistingApproval!==true)
   return reject("owner_restore_mode_invalid");
  if(restoring&&args.expectedSha!==sha)return reject("owner_restore_exact_sha_required");
@@ -103,6 +110,16 @@ export async function authorizeOwnerShaRelease(
   const a=visible.account;
   if(restoring&&(args.expectedAccountId!==a.id||args.expectedPolicyId!==a.policy_id||
     args.expectedPolicyHash!==a.policy_hash))return reject("owner_restore_account_policy_scope_changed");
+  if(approvalOnly){
+   if(args.expectedAccountId!==a.id||args.expectedPolicyId!==a.policy_id||
+      args.expectedPolicyHash!==a.policy_hash)return reject("owner_approval_only_account_policy_scope_changed");
+   if(a.execution_enabled!==false||a.kill_switch!==true||a.blocked_reason!==null)
+    return reject("owner_approval_only_disabled_stopped_account_required");
+   return await authorizeReconciledHistoryReleaseRenewal(ownerId,String(args.qualificationId),sha,
+    {db,sha:deps.sha??deployedGitSha,now:deps.now??Date.now,readFeeds:deps.readFeeds??readOwnedKalshiFeeds},
+    {mode:killedOnly?'DISABLED_KILLED_APPROVAL_ONLY':'DISABLED_STOPPED_APPROVAL_ONLY',accountId:String(a.id),policyId:String(a.policy_id),policyHash:String(a.policy_hash),
+     ...(killedOnly?{consentPin:{approvalOnlyMode:'DISABLED_KILLED_APPROVAL_ONLY',expectedSha:String(args.expectedSha),expectedAccountId:String(args.expectedAccountId),expectedPolicyId:String(args.expectedPolicyId),expectedPolicyHash:String(args.expectedPolicyHash),expectedCredentialFingerprint:String(args.expectedCredentialFingerprint),consentGeneration:String(args.consentGeneration)} as KilledConsentPin}:{})});
+  }
   const repair=a.blocked_reason==="awaiting_account_commissioning";
   const alreadyEnabled=isTrue(a.execution_enabled)&&!isTrue(a.kill_switch);
   // A provisioned account may have durable eligibility but be stopped.
@@ -350,7 +367,7 @@ export async function revokeOwnerShaRelease(ownerId:string,raw:unknown,deps:Depe
  const sha=(deps.sha??deployedGitSha)(),db=deps.db??pool;
  if(!UUID.test(ownerId)||!SHA.test(sha)||args.confirmation!==OWNER_SHA_REVOKE_CONFIRM)
   return reject("owner_sha_revoke_confirmation_required");
- let tx:Client|null=null,done=false;
+ let tx:Client|null=null,done=false,commitAttempted=false;let consentGeneration:string|null=null;
  try {
   tx=await db.connect();await tx.query("BEGIN");
   const a=await tx.query(`SELECT id FROM public.v13_production_account
@@ -364,16 +381,19 @@ export async function revokeOwnerShaRelease(ownerId:string,raw:unknown,deps:Depe
   const c=counts.rows[0]!;
   if(counts.rows.length!==1||Number(c.positions)!==0||Number(c.unresolved)!==0||Number(c.running)!==0)
     return reject("cannot_revoke_protection_while_exposure_or_worker_active");
+  consentGeneration=await advanceOwnerConsent(tx,ownerId,accountId,'owner_authenticated_revocation');
   const affected=await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2
     AND release_commit_sha=$3 AND revoked_at IS NULL RETURNING approval_id`,[ownerId,accountId,sha]);
-  if(affected.rows.length!==1)return reject("active_owner_sha_approval_not_found");
+  if(affected.rows.length>1)return reject("active_owner_sha_approval_not_unique");
+  if(affected.rows.length===0){commitAttempted=true;await tx.query('COMMIT');done=true;return {ok:true,reason:'owner_code_consent_revoked_no_active_approval',consentGeneration,ordersSubmitted:false as const};}
   const stopped=await tx.query(`UPDATE public.v13_production_account
     SET execution_enabled=false,kill_switch=true,revision=revision+1
     WHERE id=$1 AND owner_user_id=$2::uuid RETURNING id`,[accountId,ownerId]);
   if(stopped.rows.length!==1)return reject("account_kill_not_set");
-  await tx.query("COMMIT");done=true;
+  commitAttempted=true;await tx.query("COMMIT");done=true;
   return {ok:true,reason:"owner_sha_revoked_entries_disabled",ordersSubmitted:false as const};
- }catch{return reject("owner_sha_revoke_transaction_failed");}
+ }catch{return {...reject("owner_sha_revoke_transaction_failed"),...(commitAttempted?{uncertain:true,readbackRequired:true,consentGeneration}:{})};}
  finally{if(tx){if(!done)try{await tx.query("ROLLBACK");}catch{} tx.release();}}
 }
+

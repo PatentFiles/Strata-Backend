@@ -1,3 +1,4 @@
+import {readConsentGeneration,requireKilledConsentBinding,type KilledConsentPin} from './ownerConsentGeneration';
 import {logger} from '../logger';
 import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
 import {randomUUID,createHash} from 'node:crypto';
@@ -34,13 +35,60 @@ const SCOPE=`SELECT a.*,a.owner_user_id::text AS owner_id,p.policy_hash,
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
  AND w.financial_account_id=fa.id AND w.provider_connection_id=pc.id
  AND w.credential_fingerprint=a.key_fingerprint AND w.vault_secret_id=c.vault_secret_id LIMIT 2`;
-async function scope(db:Query,owner:string,lock=false){
+export type DisabledStoppedApprovalScope={
+ mode:"DISABLED_STOPPED_APPROVAL_ONLY"|"DISABLED_KILLED_APPROVAL_ONLY";accountId:string;policyId:string;policyHash:string;consentPin?:KilledConsentPin;
+};
+async function scope(db:Query,owner:string,lock=false,approvalOnly?:DisabledStoppedApprovalScope){
  const r=await db.query(SCOPE+(lock?' FOR UPDATE OF a,w FOR SHARE OF p,c,fa,pc':''),[owner]);
  requireProof(r.rows.length===1,'owner_renewal_account_credential_scope_unverified');const a=r.rows[0]!;
- requireProof(a.commissioned===true&&a.execution_enabled===true&&a.cash_precision_verified===true&&a.blocked_reason===null&&
+ requireProof(approvalOnly
+  ? (approvalOnly.mode==="DISABLED_STOPPED_APPROVAL_ONLY"||approvalOnly.mode==="DISABLED_KILLED_APPROVAL_ONLY")&&a.execution_enabled===false&&a.kill_switch===true&&
+    a.id===approvalOnly.accountId&&a.policy_id===approvalOnly.policyId&&a.policy_hash===approvalOnly.policyHash
+  : a.execution_enabled===true,approvalOnly?'owner_renewal_account_mode_or_scope_changed':'owner_renewal_commissioned_unfrozen_flat_account_required');
+ requireProof(a.commissioned===true&&a.cash_precision_verified===true&&a.blocked_reason===null&&
   String(a.reserved_micros)==='0','owner_renewal_commissioned_unfrozen_flat_account_required');
- requireProof(a.worker_state==='released'&&a.arm_requested===false&&a.worker_kill===false,
+ requireProof(approvalOnly?.mode==='DISABLED_KILLED_APPROVAL_ONLY'
+  ? a.worker_state==='killed'&&a.arm_requested===false&&a.worker_kill===true
+  : a.worker_state==='released'&&a.arm_requested===false&&a.worker_kill===false,
   'owner_renewal_worker_must_be_released_and_disarmed');return a;
+}
+/** Read-only routing hint, never approval or live readiness. The POST repeats
+ * every proof under locks and obtains fresh complete signed exchange history. */
+export async function disabledStoppedApprovalStatus(db:Query,owner:string,sha:string){
+ const no=(reason:string)=>({available:false,reason});
+ if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(owner)||
+    !/^[a-f0-9]{40}$/.test(sha))return no("owner_approval_only_identity_invalid");
+ try{
+  const initial=await readReleaseOwner(db,owner);
+  if(!initial.ok)return no(initial.reason);
+  const a=initial.account;
+  const expected:DisabledStoppedApprovalScope={mode:"DISABLED_STOPPED_APPROVAL_ONLY",
+   accountId:String(a.id),policyId:String(a.policy_id),policyHash:String(a.policy_hash)};
+  const current=await scope(db,owner,false,expected);
+  await priorAuthority(db,owner,current);
+  return {available:true,reason:"owner_approval_only_explicit_consent_and_fresh_proof_required",
+   sha,...expected};
+ }catch{return no("owner_approval_only_historical_scope_unavailable");}
+}
+export async function disabledKilledApprovalStatus(db:Query,owner:string,sha:string){
+ try {
+  const v=await readReleaseOwner(db,owner);if(!v.ok)return {available:false,reason:v.reason};
+  const a=v.account;
+  const expected:DisabledStoppedApprovalScope={mode:'DISABLED_KILLED_APPROVAL_ONLY',accountId:String(a.id),policyId:String(a.policy_id),policyHash:String(a.policy_hash)};
+  const current=await scope(db,owner,false,expected);await priorAuthority(db,owner,current);
+  const consentGeneration=await readConsentGeneration(db,owner,String(a.id));
+  const rows=await db.query(`SELECT oa.approval_id::text,b.qualification_id::text FROM private.strata_owner_sha_approvals oa
+   JOIN private.strata_owner_consent_bindings b ON b.qualification_id=oa.qualification_id
+   WHERE oa.owner_user_id=$1::uuid AND oa.execution_account_id=$2 AND oa.release_commit_sha=$3 AND oa.revoked_at IS NULL
+   AND b.owner_user_id=oa.owner_user_id AND b.execution_account_id=oa.execution_account_id AND b.release_commit_sha=oa.release_commit_sha
+   AND b.mode='DISABLED_KILLED_APPROVAL_ONLY' AND b.generation=$4::bigint AND b.account_xmin=$5 AND b.policy_id=$6 AND b.policy_hash=$7 AND b.credential_fingerprint=$8 LIMIT 2`,
+   [owner,a.id,sha,consentGeneration,(current.hold_revision as Record<string,unknown>).account,a.policy_id,a.policy_hash,a.key_fingerprint]);
+  const allActive=await db.query('SELECT approval_id FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3 AND revoked_at IS NULL LIMIT 2',[owner,a.id,sha]);
+  const pin={sha,...expected,signerFingerprint:String(a.key_fingerprint),consentGeneration};
+  return {...pin,available:allActive.rows.length===0,reason:allActive.rows.length>0?'owner_killed_code_approval_already_active_readback_required':'owner_killed_code_approval_fresh_consent_required',
+   accountExecutionEnabled:false,accountKillOn:true,workerState:'killed',workerKill:true,armRequested:false,
+   receipt:rows.rows.length===1?{...pin,qualificationId:rows.rows[0]!.qualification_id,approvalId:rows.rows[0]!.approval_id,ordersSubmitted:false}:null};
+ }catch{return {available:false,reason:'owner_killed_code_approval_scope_unavailable'};}
 }
 async function priorAuthority(db:Query,owner:string,a:Row,lock=false){
  // Inspect the latest grant INCLUDING revocations. Never fall back to an older
@@ -118,25 +166,30 @@ export async function authorizeNeverPostedReleaseRenewal(owner:string,qualificat
  * all prior-authority, stopped scope, freshness and atomic approval fences;
  * never changes controls, historical evidence, grants or reviewer authority. */
 export async function authorizeReconciledHistoryReleaseRenewal(owner:string,qualification:string,sha:string,
- deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds}){
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},approvalOnly?:DisabledStoppedApprovalScope){
  try{
   const initial=await readReleaseOwner(deps.db,owner);
   if(!initial.ok)return fail(initial.reason);
   const retained=await deps.db.query("SELECT id FROM public.v13_production_intent WHERE account_id=$1 AND (kind='EXIT' OR state='TERMINAL') LIMIT 1",[initial.account.id]);
   // Existing ENTRY-only never-posted renewals keep their original contract.
   // This classification grants nothing; either core path revalidates history.
-  return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,retained.rows.length>0);
+  return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,retained.rows.length>0,approvalOnly);
  }catch{return fail('owner_renewal_history_classification_unavailable');}
 }
 async function authorizeRetainedReleaseRenewal(owner:string,qualification:string,sha:string,
- deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},reconciled:boolean){
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},reconciled:boolean,approvalOnly?:DisabledStoppedApprovalScope){
  let tx:Client|null=null,committed=false;let phase="preflight_authority";
  try{
   const initial=await readReleaseOwner(deps.db,owner);requireProof(initial.ok,'owner_renewal_activation_unverified');
   if(!initial.ok)return fail(initial.reason);
-  const a=await scope(deps.db,owner),account=String(a.id);
+  const a=await scope(deps.db,owner,false,approvalOnly),account=String(a.id);
   const authority=await priorAuthority(deps.db,owner,a);
   const authorityProof=reconciled?await reconciledAuthorityProof(deps.db,owner,a,authority):null;
+  if(approvalOnly?.mode==='DISABLED_KILLED_APPROVAL_ONLY'){
+   requireProof(approvalOnly.consentPin,'owner_renewal_consent_pin_invalid');
+   // Preliminary generation only; actual binding verified under locks below.
+   requireProof(await readConsentGeneration(deps.db,owner,account)===approvalOnly.consentPin!.consentGeneration,'owner_renewal_consent_generation_changed');
+  }
   const qualified=await currentQualification(deps.db,qualification,owner,account,sha);
   phase="preflight_history";
   if(!reconciled)await noFinancialHistory(deps.db,account);
@@ -165,8 +218,9 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
   phase="transaction_begin";
   tx=await deps.db.connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
   phase="locked_authority";
-  const locked=await scope(tx,owner,true);
+  const locked=await scope(tx,owner,true,approvalOnly);
   requireProof(digest(locked)===digest(a),'owner_renewal_account_policy_credential_or_worker_changed');
+  if(approvalOnly?.mode==='DISABLED_KILLED_APPROVAL_ONLY')await requireKilledConsentBinding(tx,owner,sha,qualification,approvalOnly.consentPin!);
   const current=await readReleaseOwner(tx,owner);
   requireProof(current.ok&&digest(current.account)===digest(initial.account),'owner_renewal_activation_or_policy_changed');
   const lockedAuthority=await priorAuthority(tx,owner,locked,true);
@@ -202,6 +256,7 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
   const approvals=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid
    AND execution_account_id=$2 AND release_commit_sha=$3 AND revoked_at IS NULL FOR UPDATE`,[owner,account,sha]);
   requireProof(approvals.rows.length<=1,'duplicate_owner_sha_approval');
+  if(approvalOnly?.mode==='DISABLED_KILLED_APPROVAL_ONLY')requireProof(approvals.rows.length===0,'owner_renewal_killed_receipt_already_exists_readback_required');
   requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');
   let approvalId=String(approvals.rows[0]?.approval_id??'');
   if(!approvalId){const saved=await tx.query(`INSERT INTO private.strata_owner_sha_approvals
@@ -212,6 +267,8 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
    requireProof(saved.rows.length===1,'owner_renewal_final_signed_proof_stale');approvalId=String(saved.rows[0]!.approval_id);}
   phase="audit_write";
   const record={ownerId:owner,accountId:account,sha,approvalId,qualificationId:qualification,
+   approvalMode:approvalOnly?.mode??'ENABLED_STOPPED_RENEWAL',
+   ...(approvalOnly?.consentPin?{consentGeneration:approvalOnly.consentPin.consentGeneration}:{}),
    renewalMode:reconciled?'COMMISSIONED_RECONCILED_SETTLED_HISTORY_V1':'COMMISSIONED_PROVEN_NEVER_POSTED_V1',priorAuthority:authority,policyHash:a.policy_hash,
    credentialFingerprint:a.key_fingerprint,historyDigest:history.historyDigest,
    ...(reconciled?{reconciliationDigest:(history as ReconciledReleaseHistory).reconciliationDigest}:{}),neverPosted:history.neverPosted,providerReadAtMs:started};
@@ -220,11 +277,17 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
   requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');
   phase="commit";
   await tx.query('COMMIT');committed=true;
-  return {ok:true as const,reason:'owner_sha_approved_account_enabled_worker_stopped',sha,approvalId,ordersSubmitted:false as const};
+  return {ok:true as const,reason:approvalOnly?'owner_sha_approved_account_disabled_worker_stopped':'owner_sha_approved_account_enabled_worker_stopped',sha,approvalId,ordersSubmitted:false as const,...(approvalOnly?.mode==='DISABLED_KILLED_APPROVAL_ONLY'?{
+    qualificationId:qualification,consentGeneration:approvalOnly.consentPin!.consentGeneration,
+    accountId:account,policyId:a.policy_id,policyHash:a.policy_hash,signerFingerprint:a.key_fingerprint,
+    accountExecutionEnabled:false,accountKillOn:true,workerState:'killed',workerKill:true,armRequested:false,
+    statusScope:'TRANSACTION_COMMIT',readbackRequired:true}:{} )};
  }catch(e){
   const recognized=e instanceof Error&&/^(owner_renewal_|release_|financial_intent_|fresh_authenticated_|global_execution_|approved_stake_|duplicate_owner_)/.test(e.message);
   if(!recognized)try{logger.warn({ownerRenewalFailure:ownerRenewalFailureDiagnostics(e,phase)},'Owner release renewal failed closed');}catch{/* Diagnostics never change admission. */}
-  return fail(recognized?(e as Error).message:'owner_renewal_transaction_or_evidence_unavailable');
+  return {...fail(recognized?(e as Error).message:'owner_renewal_transaction_or_evidence_unavailable'),
+   ...(phase==='commit'?{uncertain:true as const}:{})};
  }
  finally{if(tx){if(!committed)try{await tx.query('ROLLBACK');}catch{}tx.release();}}
 }
+
