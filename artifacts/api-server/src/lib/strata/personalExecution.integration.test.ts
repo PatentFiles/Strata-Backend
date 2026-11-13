@@ -1239,7 +1239,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
  const fixtureOpen=new Date(Date.now()-60000).toISOString(),fixtureClose=new Date(Date.now()+900000).toISOString();
  const savedEnv={node:process.env.NODE_ENV,sha:process.env.RAILWAY_GIT_COMMIT_SHA,release:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
  process.env.NODE_ENV='production';process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
- try{for(const enabled of [false,true])for(const failure of ['none','wire-stale','wire-revoked','after-claim-hold','A-429','B-429','B-bad-body','B-429-authority-closed','A-429-authority-closed','credential-replaced','owner-replaced','rollover','B-stop-queued','deadline-stress','production-shaped','slower-stress']){
+ try{for(const enabled of [false,true])for(const failure of ['none','wire-stale','real-clock-stale','wire-revoked','after-claim-hold','A-429','B-429','B-bad-body','B-429-authority-closed','A-429-authority-closed','credential-replaced','owner-replaced','rollover','B-stop-queued','deadline-stress','production-shaped','slower-stress']){
   const posts:string[]=[],s=await tradingSession(500,posts),market='KXBTC15M-TEST-000',event='KXBTC15M-TEST';
   const observedStages:any[]=[];s.executor.timingObserver=stage=>{observedStages.push(stage);};
   const sourceUrl='strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555';
@@ -1249,9 +1249,15 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   const sensitivity=['deadline-stress','production-shaped','slower-stress'].includes(failure);
   const delays=failure==='production-shaped'?{db:26,root:60,event:180,signed:500}:failure==='slower-stress'?{db:35,root:80,event:240,signed:650}:failure==='deadline-stress'?{db:16,root:50,event:150,signed:300}:{db:8,root:30,event:75,signed:180};
   if(sensitivity)await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=228 WHERE id=$1',[evaluationId]);
-  let clockOffset=0;const dbDelay=delays.db;
-  const time=()=>{const at=originalAt+clockOffset+Math.floor(performance.now()-anchor);if(at>s.now)s.advance(at-s.now);return s.now;};
-  const delay=async(ms:number)=>{await new Promise<void>(r=>setTimeout(r,ms));time();};
+  let clockOffset=0,modeledElapsedMs=0;const dbDelay=delays.db;
+  // This is a synthetic latency budget, not a host-speed benchmark. Only the
+  // declared provider/ledger waits advance the injected source clock. Real
+  // timers still exercise overlap, but CI scheduling/fixture SQL do not age a
+  // synthetic quote unpredictably. Concurrent waits share their start clock.
+  // Source timestamps and the production 5,000ms gates remain untouched.
+  // Separate real-clock-stale arms retain host-clock fail-closed coverage.
+  const time=()=>{const at=originalAt+clockOffset+(failure==='real-clock-stale'?Math.floor(performance.now()-anchor):modeledElapsedMs);if(at>s.now)s.advance(at-s.now);return s.now;};
+  const delay=async(ms:number)=>{const due=modeledElapsedMs+ms;await new Promise<void>(r=>setTimeout(r,ms));modeledElapsedMs=Math.max(modeledElapsedMs,due);time();};
   let authorityClockCalls=0;Object.defineProperty(s.executor,'now',{value:()=>{authorityClockCalls++;return time();}});
   const close=fixtureClose,open=fixtureOpen;
   const pages:Record<string,unknown>={
@@ -1266,7 +1272,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   const mark=(event:string)=>timeline.push({event,atMs:performance.now()-anchor});
   const fetchPublic=(async(input,init)=>{const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');assert.equal(init?.method,'GET');assert.ok(path in pages);calls.push({path,at:time()});const callNumber=calls.length;if(dispatching)await delay(path.startsWith('/events/')?delays.event:delays.root);if(dispatching&&((failure.startsWith('A-429')&&callNumber===6)||(failure.startsWith('B-429')&&callNumber===11)))return new Response('{}',{status:429,headers:{'content-type':'application/json','retry-after':'1'}});if(failure==='B-bad-body'&&callNumber===11)return Response.json(null);return Response.json(pages[path]);}) as typeof fetch;
   const binding={accountId:ACCOUNT,ownerId:USER,holderId:'phase-fixture',releaseSha:'a'.repeat(40),fence:'3',policyHash:approved.policyHash!};
-  const coordinator=new CommittedPublicMetadataCoordinator(fetchPublic,time,()=>performance.now());
+  const coordinator=new CommittedPublicMetadataCoordinator(fetchPublic,time,()=>modeledElapsedMs);
   const phases=enabled?new FinalPublicMetadataPhases(coordinator,()=>binding,()=>allowed):null;
   s.executor.finalPublicMetadata=phases;
   if(phases){const startPhase=phases.start.bind(phases);phases.start=(phase,context)=>{mark(`${phase}_start`);startPhase(phase,context);};const consumeA=phases.consumeFinalMarket.bind(phases);phases.consumeFinalMarket=(ticker)=>{mark('FINAL_MARKET_consume');return consumeA(ticker);};const consumeB=phases.consumeWire.bind(phases);phases.consumeWire=(id,ticker)=>{mark('WIRE_FEE_consume');return consumeB(id,ticker);};}
@@ -1278,7 +1284,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
     readPublic:async()=>{throw Error('unexpected_public_fallback');},configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:'d'.repeat(64),policyHash:approved.policyHash!});
    if(dispatching&&result.publicMetadataCapture)captures.push(result.publicMetadataCapture);if(dispatching&&failure==='credential-replaced')s.exchange.state.credentialFingerprint='e'.repeat(64);return result;
   }});
-  const snapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof snapshot>)=>{signed++;if(dispatching){mark('signed_account_start');if(failure==='owner-replaced')await s.executor.ledger.currentTransaction()!.query('UPDATE v13_production_account SET owner_user_id=$2 WHERE id=$1',[ACCOUNT,OTHER]);if(failure==='rollover')(pages[`/markets/${market}`] as any).market.ticker='KXBTC15M-OTHER';if(failure==='B-stop-queued'){allowed=false;phases?.discardAll();}await delay(delays.signed);mark('signed_account_complete');}return snapshot(...args);}});
+  const snapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof snapshot>)=>{signed++;if(dispatching){mark('signed_account_start');if(failure==='owner-replaced')await s.executor.ledger.currentTransaction()!.query('UPDATE v13_production_account SET owner_user_id=$2 WHERE id=$1',[ACCOUNT,OTHER]);if(failure==='rollover')(pages[`/markets/${market}`] as any).market.ticker='KXBTC15M-OTHER';if(failure==='B-stop-queued'){allowed=false;phases?.discardAll();}await delay(failure==='real-clock-stale'?5100:delays.signed);mark('signed_account_complete');}return snapshot(...args);}});
   s.executor.authorizeFinalEntry=async()=>{if(!allowed)throw Error('production_entry_release_not_current');};
   const originalTx=s.executor.ledger.transaction.bind(s.executor.ledger);
   Object.defineProperty(s.executor.ledger,'transaction',{value:async(fn:any)=>originalTx(async(tx:any,a:any)=>{
@@ -1299,7 +1305,15 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   dispatching=true;if(sensitivity)clockOffset=3650;let shouldPost=failure==='none'||(failure==='deadline-stress'&&enabled);const start=performance.now();
   let refusal:string|null=null;
   if(sensitivity&&failure!=='deadline-stress'){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
-  else if(shouldPost)await s.executor.dispatch(intent);else await assert.rejects(s.executor.dispatch(intent),error=>{refusal=String(error);if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
+  else if(shouldPost){
+   try{await s.executor.dispatch(intent);}catch(error){
+    // Preserve
+    // the failure and the five-second gate; report which scenario actually failed.
+    // Read only already-recorded values: do not advance the fixture clock here.
+    console.error('TWO_PHASE_UNEXPECTED_DISPATCH_FAILURE',JSON.stringify({enabled,failure,refusal:String(error),sourceAgeMs:s.now-originalAt,effectiveBtcAgeMs:s.now-originalAt+(sensitivity?228:0),clockOffset,elapsedMs:performance.now()-start,wireAt,publicCalls:calls.length,books,signed,feeReviews,wireReviews,timeline,observedStages}));
+    throw error;
+   }
+  }else await assert.rejects(s.executor.dispatch(intent),error=>{refusal=String(error);if(failure==='real-clock-stale'){assert.ok(s.now-originalAt>5000,'real monotonic elapsed time must exceed the unchanged deadline');assert.match(String(error),/production_final_(evidence_expired|source_changed_or_expired)/);}if(failure==='B-429-authority-closed')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);if(failure==='A-429-authority-closed'||failure==='B-stop-queued')assert.match(String(error),/production_entry_release_not_current/);if(failure==='credential-replaced')assert.match(String(error),/credential_fingerprint_mismatch/);if(failure==='owner-replaced')assert.match(String(error),/api_fee_final_entry_exit_release_owner_or_account_closed/);return true;});
   const elapsed=performance.now()-start;phases?.discardAll();const drainDeadline=performance.now()+2000;while(coordinator.diagnostics().accounts&&performance.now()<drainDeadline)await new Promise(r=>setTimeout(r,5));
   const final=(await pool.query('SELECT state,decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
   assert.equal(new Date(final.decision.source.evaluated_at).getTime(),originalAt);assert.deepEqual(final.request,before.request);assert.equal(final.decision.preflight.plannedAllInCents,before.decision.preflight.plannedAllInCents);
@@ -1313,7 +1327,7 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   // Lease/grant SQL here is an explicit read-only fixture port; no assertion of
   // production private-schema authorization or lease/grant persistence is made.
 
-  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe: '+JSON.stringify({enabled,failure,shouldPost,sourceAgeMs:clockOffset+Math.floor(performance.now()-anchor),wireAt,wireReviews,refusal,timeline}));assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
+  if(['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(calls.length,15,'prepare5 + distinctfinal5 + distinctwire5, including real wire probe: '+JSON.stringify({enabled,failure,shouldPost,sourceAgeMs:clockOffset+modeledElapsedMs,wireAt,wireReviews,refusal,timeline}));assert.equal(books,2);assert.equal(feeReviews,2);assert.equal(signed,1);assert.equal(wireReviews,1);}
   else if(failure==='after-claim-hold'||failure==='A-429-authority-closed'){assert.ok(calls.length<=10,'at most five extra advisory A reads after a later gate failure');assert.equal(books,1);assert.equal(wireReviews,0);}
   else {assert.ok(calls.length<=15,'started phase failures never launch a replacement five-GET attempt');if(['B-429-authority-closed','owner-replaced','credential-replaced','B-stop-queued'].includes(failure))assert.equal(wireReviews,0);}
   if(enabled&&['none','wire-stale','wire-revoked','deadline-stress'].includes(failure)){assert.equal(captures.length,2);assert.ok(captures[1].observedAtMs>captures[0].observedAtMs,'WIRE must be a newly captured invocation, never FINAL bytes');assert.notEqual(captures[0].fingerprint,captures[1].fingerprint);}
@@ -1326,11 +1340,11 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
    if(wireAt+228>4800)console.info('TWO_PHASE_DEADLINE_RESERVE_FAILURE',JSON.stringify({wireAt,effectiveBtcAge:wireAt+228,remainingMs:5000-(wireAt+228),headroomAbove200Ms:4800-(wireAt+228),elapsed,clockOffset,authorityClockCalls,sqlQueries:sqlCalls.length,publicCalls:calls.length,books,signed,feeReviews,wireReviews,timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),observedStages}));
    assert.ok(wireAt+228<=4800,'controlled enabled raw wire retains at least 200ms margin');
   }
-  if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'synthetic timing stress, no historical wire-probe assumption or fill evidence'}));}
-  if(failure==='none'){const dispatch=observedStages.filter(e=>e.stage==='dispatch');assert.equal(dispatch.length,1);const groups=dispatch[0].feeAuthorityReads.stages;const group=(op:string)=>groups.find((x:any)=>x.purpose==='WIRE_FEE'&&x.operation===op);assert.equal(group('standing_history_query').attempted,1);assert.equal(group('standing_eligibility_query').attempted,0);assert.equal(group('final_account_fence_query').attempted,1);assert.equal(group('final_account_fence_query').rejected,0);assert.ok(wireAt<5000);results.push({enabled,elapsedMs:elapsed,wireAgeMs:wireAt,publicCalls:calls.length,books,signed,feeReviews,wireReviews,authorityClockCalls,sqlQueries:sqlCalls.length,request:JSON.stringify({...final.request,clientOrderId:null}),cashModel:final.decision.book.fee.cashRisk.modelFingerprint});}
+  if(sensitivity){if(shouldPost)assert.ok(wireAt+228<=5000);console.info('TWO_PHASE_DEADLINE_STRESS',JSON.stringify({scenario:failure,enabled,shouldPost,refusal,wireAt,effectiveBtcAge:wireAt?wireAt+228:null,elapsed,clockOffset,assumedDelays:{dbRequestMs:dbDelay,publicRootMs:delays.root,publicEventMs:delays.event,signedAccountMs:delays.signed,feeRemainderMs:40},timeline,captures:captures.map(c=>({startedSourceAgeMs:c.observedAtMs-originalAt,readySourceAgeMs:c.capturedThroughMs-originalAt})),publicCalls:calls.length,scope:'declared synthetic wait budget; host scheduling and unmodeled SQL latency excluded; no production latency or fill evidence'}));}
+  if(failure==='none'){const dispatch=observedStages.filter(e=>e.stage==='dispatch');assert.equal(dispatch.length,1);const groups=dispatch[0].feeAuthorityReads.stages;const group=(op:string)=>groups.find((x:any)=>x.purpose==='WIRE_FEE'&&x.operation===op);assert.equal(group('standing_history_query').attempted,1);assert.equal(group('standing_eligibility_query').attempted,0);assert.equal(group('final_account_fence_query').attempted,1);assert.equal(group('final_account_fence_query').rejected,0);assert.ok(wireAt<5000);results.push({enabled,elapsedMs:elapsed,modeledElapsedMs,wireAgeMs:wireAt,publicCalls:calls.length,books,signed,feeReviews,wireReviews,authorityClockCalls,sqlQueries:sqlCalls.length,request:JSON.stringify({...final.request,clientOrderId:null}),cashModel:final.decision.book.fee.cashRisk.modelFingerprint});}
   assert.equal(coordinator.diagnostics().accounts,0);
  }
- assert.equal(results[0].publicCalls,results[1].publicCalls);assert.equal(results[0].authorityClockCalls,results[1].authorityClockCalls);assert.equal(results[0].sqlQueries,results[1].sqlQueries);assert.equal(results[0].request,results[1].request);assert.equal(results[0].cashModel,results[1].cashModel);assert.ok(results[1].elapsedMs<results[0].elapsedMs,'actual asynchronous scheduling must hide public work');
+ assert.equal(results[0].publicCalls,results[1].publicCalls);assert.equal(results[0].authorityClockCalls,results[1].authorityClockCalls);assert.equal(results[0].sqlQueries,results[1].sqlQueries);assert.equal(results[0].request,results[1].request);assert.equal(results[0].cashModel,results[1].cashModel);assert.ok(results[1].modeledElapsedMs<results[0].modeledElapsedMs,'overlap must reduce the declared synthetic wait budget');
  console.info('TWO_PHASE_PUBLIC_METADATA_REPLAY',JSON.stringify({assumedDelays:{publicRootMs:30,publicEventMs:75,feeRemainderMs:40,signedAccountMs:180,dbRequestMs:8},results,scope:'actual owned ledger/executor/readers/wire guards; mocked provider/private fee authority; not historical replay or fill proof'}));
  }finally{for(const [key,value] of [['NODE_ENV',savedEnv.node],['RAILWAY_GIT_COMMIT_SHA',savedEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',savedEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
 });
