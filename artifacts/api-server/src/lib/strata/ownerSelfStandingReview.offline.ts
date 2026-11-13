@@ -1,9 +1,10 @@
+import {standingExecutionStatus} from './standingExecutionReview';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {pool as db} from '@workspace/db';
 import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview,OWNER_SELF_REVOKE_CONFIRM} from './ownerSelfStandingReview';
 import {OWNER_SELF_REVIEW_CONFIRM,standingAuthorityMatches} from './ownerSelfReviewMode';
-import {enrollContinuousGrant,CONTINUOUS_OWNER_CONFIRM,checkContinuousEligibility} from './continuousExecutionAuthorization';
+import {enrollContinuousGrant,CONTINUOUS_OWNER_CONFIRM,checkContinuousEligibility,checkContinuousBootstrap} from './continuousExecutionAuthorization';
 if(process.env.DATABASE_URL!=='postgresql://agent@127.0.0.1:55469/owner_self_disposable')throw Error('disposable_only');
 const owner='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222',qid='33333333-3333-4333-8333-333333333333',sha='a'.repeat(40),policy='b'.repeat(64);
 (async()=>{try{
@@ -36,6 +37,8 @@ assert.equal((await recordOwnerSelfStandingReview(owner,body,deps)).ok,false);
 await db.query("UPDATE private.strata_protective_release_qualification SET expires_at=now()+interval '4 minutes'");
 const result=await recordOwnerSelfStandingReview(owner,body,deps);assert.equal(result.ok,true,JSON.stringify(result));
 const row=(await db.query('SELECT * FROM private.strata_standing_execution_reviews')).rows[0];
+const status=await standingExecutionStatus(owner,deps);assert.equal(status.ok,true);assert.equal('ownerSelfAvailable' in status&&status.ownerSelfAvailable,true);assert.equal('reviewQualificationId' in status&&status.reviewQualificationId,qid);
+const disabledStatus=await standingExecutionStatus(owner,{...deps,scope:()=>undefined});assert.equal('ownerSelfAvailable' in disabledStatus&&disabledStatus.ownerSelfAvailable,false);
 assert.equal(row.independent_reviewer_id,null);assert.equal(row.owner_authorizer_id,owner);assert.equal(row.review_authority,'OWNER_SELF_V1');assert.equal(standingAuthorityMatches(row,owner),true);assert.equal(standingAuthorityMatches(row,other),false);
 await assert.rejects(db.query('UPDATE private.strata_standing_execution_reviews SET owner_authorizer_id=$1',[other]),/immutable/);
 const grantBody={expectedSha:sha,accountId:'acct',policyHash:policy,confirmation:CONTINUOUS_OWNER_CONFIRM};
@@ -43,6 +46,7 @@ assert.equal((await enrollContinuousGrant(owner,grantBody,{...deps,scope:()=>und
 assert.equal((await enrollContinuousGrant(owner,grantBody,{...deps,scope:()=>({ownerId:owner,accountId:'foreign'})})).reason,'owner_self_account_not_enabled');
 const grant=await enrollContinuousGrant(owner,{expectedSha:sha,accountId:'acct',policyHash:policy,confirmation:CONTINUOUS_OWNER_CONFIRM},deps);assert.equal(grant.ok,true,JSON.stringify(grant));
 const g=(await db.query('SELECT * FROM private.strata_continuous_execution_grants')).rows[0];assert.equal(g.review_authority,'OWNER_SELF_V1');assert.equal(g.independent_reviewer_id,null);assert.equal(g.owner_authorizer_id,owner);
+assert.equal(await checkContinuousBootstrap(db,owner,sha),true);
 assert.equal(await checkContinuousEligibility(db,owner,sha),false);
 await db.query("UPDATE private.kalshi_account_worker_lease SET state='owned',arm_requested=true,heartbeat_at=now()");
 await db.query("INSERT INTO private.strata_continuous_execution_technical_lease VALUES($1,'acct',now(),now()+interval '4 minutes',$2,7,1)",[g.grant_id,policy]);

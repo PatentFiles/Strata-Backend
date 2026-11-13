@@ -27,3 +27,10 @@ The owner can revoke their own explicit review with AAL2 POST `/production/prote
 The REVIEWED_API_V2 standing fee successor still requires its separate independently signed fee model. Existing owner-approved V3/V4 fee modes are not selected or altered by this patch. Actual account/provider compatibility must be verified before proposing a fee-mode change.
 
 Removing enrollment configuration prevents new self reviews and grants; it does not silently revoke an existing durable grant or disable protective exits. Use explicit owner revocation/STOP controls when that is the intended action.
+
+## Independent-review option retired
+Per the owner's explicit decision, new independent execution-review issuance is retired, not retained as a parallel optional UI path. `/review`, `/standing-review`, and the old finite `/authorize` API return HTTP410 with no database work. The two review-issuance services cannot create records. Existing immutable historical evidence and genuine revocation mechanisms remain; nothing is relabeled as owner consent. The owner-self approval workflow is the only new execution-review enrollment route. Monetary fee-model policy is separate and has not been forged or silently replaced.
+
+`continuous-status.ownerSelfAvailable` is an account-scoped display hint, not authorization: it is true only for the server-configured exact authenticated owner/account pair.
+
+The retired finite authorization service is also an unconditional no-DB refusal. Its former global enable/kill-clear, account enable/kill-clear, worker-lease reset, freeze-clear and finite approval insertion implementation has been removed, not merely hidden by routing. Read-only status/owner-scope checks and genuine signed technical qualification remain unchanged.

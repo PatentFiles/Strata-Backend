@@ -52,11 +52,15 @@ test('standing authorization, transactional crash traces and concurrent revocati
   await pool.query(readFileSync(resolve('../../lib/db/drizzle',file),'utf8'));
  const body={ownerUserId:owner,qualificationId:qid,accountId:'acct',policyHash:policy,expectedSha:sha,
   confirmation:STANDING_REVIEW_CONFIRM,reviewUrl:'https://github.com/PatentFiles/Strata-Backend/pull/246',note:'Independently reviewed exact release, owner scope, reduction-only exits, revocation and recovery evidence. '.repeat(3)};
- await t.test('explicit independent review and owner scope cannot be substituted',async()=>{
+ await t.test('independent enrollment is retired while historical review revocation and owner scope stay enforced',async()=>{
   assert.equal((await recordStandingExecutionReview(owner,'ADMIN',body,{db:pool,sha:()=>sha})).ok,false);
   assert.equal((await recordStandingExecutionReview(reviewer,'USER',body,{db:pool,sha:()=>sha})).ok,false);
   assert.equal((await recordStandingExecutionReview(reviewer,'ADMIN',{...body,expectedSha:'c'.repeat(40)},{db:pool,sha:()=>sha})).ok,false);
-  assert.equal((await recordStandingExecutionReview(reviewer,'ADMIN',body,{db:pool,sha:()=>sha})).ok,true);
+  assert.equal((await recordStandingExecutionReview(reviewer,'ADMIN',body,{db:pool,sha:()=>sha})).reason,'independent_review_enrollment_retired_use_owner_self');
+  // Historical fixture only: new runtime enrollment is deliberately unavailable.
+  await pool.query(`INSERT INTO private.strata_standing_execution_reviews
+   (owner_user_id,execution_account_id,release_commit_sha,policy_hash,independent_reviewer_id,qualification_id,evidence_digest,review_url,review_note,confirmation)
+   VALUES($1,'acct',$2,$3,$4,$5,$3,$6,$7,$8)`,[owner,sha,policy,reviewer,qid,body.reviewUrl,body.note,STANDING_REVIEW_CONFIRM]);
   const consent={expectedSha:sha,accountId:'acct',policyHash:policy,confirmation:CONTINUOUS_OWNER_CONFIRM};
   assert.equal((await enrollContinuousGrant(owner,{...consent,policyHash:'c'.repeat(64)},{db:pool,sha:()=>sha})).ok,false);
   assert.equal((await enrollContinuousGrant(owner,consent,{db:pool,sha:()=>sha})).ok,true);
