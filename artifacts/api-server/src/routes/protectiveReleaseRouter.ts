@@ -1,3 +1,4 @@
+import {recordOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
@@ -99,6 +100,7 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   res.status(result.ok?200:409).json(sanitizePublic({...result,technicalLeaseCurrent:eligible,
     viewerIsOwner:owner===actor.subject,viewerIsOperator:isOperator(actor.role)}));
  });
+ router.post('/owner-standing-review',async(req,res)=>{const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});const result=await recordOwnerSelfStandingReview(actor.subject,req.body);res.status(result.ok?200:409).json(result);});
  router.post('/standing-review',async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});

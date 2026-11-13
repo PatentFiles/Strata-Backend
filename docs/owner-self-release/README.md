@@ -1,0 +1,20 @@
+# Explicit owner standing authorization (candidate, not deployed)
+
+This is a product-policy alternative to the separate machine-attestation candidate. It uses existing signed technical qualification and owner AAL2 authentication. No independent person, fabricated reviewer, or machine issuer is needed to record the owner's own standing execution authorization.
+
+`OWNER_SELF_V1` stores `independent_reviewer_id = NULL` and the authenticated owner's UUID in `owner_authorizer_id`. Legacy `INDEPENDENT_V1` records retain distinct-reviewer requirements; existing rows are never converted. Account, exact deployed SHA, policy, qualification, confirmation and evidence digest remain bound and immutable. Review and grant modes must match at startup, renewal, entry and protective-exit checks. Fee-model/source authorization is unchanged.
+
+## Candidate owner steps after verified deployment
+1. Sign in with existing AAL2 authentication and select the commissioned account.
+2. Complete existing signed technical qualification. It must be current, with no unresolved account freeze.
+3. POST `/production/protective-release/owner-standing-review` with exactly `expectedSha`, `accountId`, `policyHash`, `qualificationId`, and confirmation `I_AUTHORIZE_OWNER_ONLY_STANDING_EXECUTION_FOR_THIS_EXACT_SHA_ACCOUNT_POLICY_V1`.
+4. Complete existing exact-SHA owner authorization and continuous execution grant. This patch does not click ARM or START.
+5. Complete existing readiness checks and manually ARM/START only when those checks succeed.
+
+These are API integration steps, not a claim that the current dashboard exposes the new action. Frontend integration remains required. This change cannot clear unresolved accounting, UNKNOWN orders, incorrect credentials, unprotected exposure, fee-model authorization or access failures. An unknown commit response must be inspected before repeating the action.
+
+## Deployment requirements
+Apply `lib/db/owner-self-release/001_explicit_owner_authority.sql` in the controlled stopped-account deployment only after confirming actual prerequisite schema and permissions. The migration is deliberately not automatic. Verify old and new consumer compatibility, deployed SHA, owner UI, fresh exchange orders/positions, and account blockers before calling this live-ready. No production credentials or reads are used by these tests.
+
+## Local verification
+`bash artifacts/api-server/scripts/test-owner-self-release.sh` creates an isolated disposable PostgreSQL database on loopback port 55469. It applies the actual old grant migration and candidate owner-mode migration, then exercises owner review, grant, and eligibility with fixture evidence only. These fixtures are not production qualification. Focused unit tests cover authority-type confusion, foreign owner, malformed consent, unknown COMMIT, and final-entry mode selection.

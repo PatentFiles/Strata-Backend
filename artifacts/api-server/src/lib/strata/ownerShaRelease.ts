@@ -1,3 +1,4 @@
+import {standingAuthorityMatches} from './ownerSelfReviewMode';
 import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
@@ -48,12 +49,13 @@ export async function ownerShaApprovalStatus(ownerId:string,sha:string,db:Query=
 // may reuse existing consent after fresh signed proof and locked revalidation.
 async function restoreReviewCurrent(db:Query,owner:string,account:string,sha:string,policyHash:unknown,lock=false,required=false){
  const reviews=await db.query(`SELECT release_id,state,revoked_at,policy_hash,independent_reviewer_id,
-  (created_at<=now()) AS created_current FROM private.strata_standing_execution_reviews
+  to_jsonb(r)->>'review_authority' AS review_authority,to_jsonb(r)->>'owner_authorizer_id' AS owner_authorizer_id,
+  (created_at<=now()) AS created_current FROM private.strata_standing_execution_reviews r
   WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
   ${lock?"FOR SHARE":""}`,[owner,account,sha]);
  if(!reviews.rows.length)return !required;
  return reviews.rows.filter(r=>r.state==="approved"&&r.revoked_at===null&&r.policy_hash===policyHash&&
-  r.created_current===true&&UUID.test(String(r.independent_reviewer_id))&&r.independent_reviewer_id!==owner).length===1;
+  r.created_current===true&&standingAuthorityMatches(r,owner)).length===1;
 }
 export async function ownerRestoreStatus(ownerId:string,sha:string,db:Query=pool){
  let scope:Record<string,string>={sha};
