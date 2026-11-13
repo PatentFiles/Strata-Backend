@@ -18,6 +18,7 @@ function fixture(){
    for (const [prefix, rows] of responses) if(sql.startsWith(prefix)) return {rows};
    if(sql==='COMMIT'&&failCommit)throw Error('socket lost');
    if(sql.startsWith('SELECT e.cash'))return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
+   if(sql.startsWith('UPDATE v13_production_account SET cash_micros=')&&sql.endsWith('RETURNING revision::text AS revision'))return {rows:[{revision:String(BigInt(account.revision)+1n)}]};
    if(sql.startsWith('SELECT * FROM v13_production_account'))return {rows:[account]};
    return {rows:[]};
   },release(){if(releaseFails)throw Error('release failed');}});

@@ -64,7 +64,7 @@ const COUNTS_SQL=`SELECT
   (SELECT count(*) FROM private.kalshi_owner_pilot_transfers WHERE execution_account_id=$1 AND state<>'completed')+
   (SELECT count(*) FROM private.kalshi_owner_shard_allocations WHERE execution_account_id=$1 AND state<>'completed'))::text AS transfers`;
 const NORMAL_ACCOUNT_PERSISTENCE=`UPDATE v13_production_account SET cash_micros=$2,reserved_micros=$3,
- blocked_reason=$4,revision=revision+1,reconciled_at=$5,evidence_digest=$6 WHERE id=$1`.replace(/\s+/g,' ').trim();
+ blocked_reason=$4,revision=revision+1,reconciled_at=$5,evidence_digest=$6 WHERE id=$1 RETURNING revision::text AS revision`.replace(/\s+/g,' ').trim();
 const INDEPENDENT_TABLES=[
  'kalshi_owner_pilot_transfers','kalshi_owner_shard_allocations','kalshi_owner_topups',
  'strata_auto_withdrawal_maintenance','strata_emergency_exit_reservations','strata_manual_profit_withdrawals',
