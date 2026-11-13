@@ -125,6 +125,8 @@
         "atomic changed_during_read rolls back finances, authority, release and receipt",
         "real provider adapter SQL composes with atomic disarmed recovery using simulated provider",
         "revoked provider identity refuses before authority consumption or release",
+        "strict runtime diagnostic composes identity and signed flat-history reads without state change",
+        "runtime diagnostic refuses revoked identity despite simulated flat account",
         "atomic commit rejected before send remains uncertain without retry and discards connection",
         "atomic lost acknowledgment after commit remains uncertain without retry and discards connection",
         "enrolled lifecycle refuses DELETE FROM private.kalshi_account_worker_lease",
@@ -173,6 +175,20 @@
         "provider adapter refuses scope",
         "provider adapter refuses stale",
         "provider adapter refuses revoked"
+      ]
+    },
+    {
+      "fixture": "runtimeRoleProbe.offline.ts",
+      "resolveDir": "artifacts/api-server/src/lib/strata",
+      "port": 55458,
+      "expectedPassLabels": [
+        "role probe refuses missing required schema objects rather than claiming healthy",
+        "synthetic read-only runtime role has no modeled privilege hazards; not production qualification",
+        "role probe explicitly reports nonexistent runtime role",
+        "role probe identifies truncate schema-create and enrollment-mutation grants",
+        "role probe identifies inherited BYPASSRLS privilege",
+        "role probe identifies runtime-owned protected table",
+        "role probe identifies trigger-bypass parameter privilege"
       ]
     }
   ],

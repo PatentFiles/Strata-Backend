@@ -43,6 +43,8 @@
     "machine-qualification/behavioral-suite/fixtures/ownerBarrierActualWriters.offline.ts",
     "machine-qualification/behavioral-suite/fixtures/ownerConsentCandidate.offline.ts",
     "machine-qualification/behavioral-suite/fixtures/ownerRecoveryProviderIdentityCandidate.test.ts",
+    "machine-qualification/behavioral-suite/fixtures/recovery-runtime-permissions-readonly.sql",
+    "machine-qualification/behavioral-suite/fixtures/runtimeRoleProbe.offline.ts",
     "machine-qualification/behavioral-suite/plan.json",
     "machine-qualification/behavioral-suite/run.py"
   ],
@@ -73,7 +75,7 @@
       "--pg-bin",
       "/usr/lib/postgresql/16/bin",
       "--manifest-sha256",
-      "d3582e209a3402e7f76424c6592b6679baf497e5b48b9c86ab9f28eb67ef0122"
+      "04c362fd0b81143036203d143cac78ef16e6efddd38894f33c3b17be9aa0cbcb"
     ]
   ],
   "completeOwnerRecoveryQualification": false,

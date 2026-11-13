@@ -1,7 +1,7 @@
 {
   "schema": "strata.protected-producer-files.v1",
   "files": {
-    "machine-qualification/behavioral-suite/files.json": "d3582e209a3402e7f76424c6592b6679baf497e5b48b9c86ab9f28eb67ef0122",
+    "machine-qualification/behavioral-suite/files.json": "04c362fd0b81143036203d143cac78ef16e6efddd38894f33c3b17be9aa0cbcb",
     "machine-qualification/behavioral-suite/fixtures/account-scoped-exposure-barrier.sql": "fa97837567c1b1c1ac5c4fc96c810014cc9cd9ebb8208167cee203aa63ce9fb7",
     "machine-qualification/behavioral-suite/fixtures/account-scoped-lifecycle-barrier.sql": "838615e000c97306ad24020e60d7e5cb53d6ee38d9fa8909ed3119c3f76b37a1",
     "machine-qualification/behavioral-suite/fixtures/admission-outcome-schema.sql": "869f3403e92160245e3370c8ea6f24ba2576f6acc8232e5402d78b35fec2a43c",
@@ -26,14 +26,16 @@
     "machine-qualification/behavioral-suite/fixtures/heldReaderNative.offline.ts": "c8968d14aaf415bd037c524bb8b8ecb8ef49ccea304ca89fe635eafab003aa38",
     "machine-qualification/behavioral-suite/fixtures/owner-consent-schema.sql": "b75adfca167e44678ba7a0fe33a8d1b36257fcb16e8a2c9f9f777e019929c3bf",
     "machine-qualification/behavioral-suite/fixtures/owner-lease-consent-epoch.sql": "6fbfef91cddbca6cd69c7fdbae74c2093707926a68765a72df3fd8b1235b92d0",
-    "machine-qualification/behavioral-suite/fixtures/ownerAtomicRecovery.offline.ts": "6419e8c135d0912fc1b04dfe4e4668a27fe264d2dba63cb83f6f6f89ca59719b",
+    "machine-qualification/behavioral-suite/fixtures/ownerAtomicRecovery.offline.ts": "1af8d559d2b6c061ce3789807043d40a713abaceac2d78b750673c0fc4bae161",
     "machine-qualification/behavioral-suite/fixtures/ownerBarrierActualWriters.offline.ts": "6f3307a7c8c119226021ab947946fde7e803ada176a6e1940cdd06f8a904a92e",
     "machine-qualification/behavioral-suite/fixtures/ownerConsentCandidate.offline.ts": "732540976f6510c178eaba6c91e4ccfd1c3da43f5f165cee927ca2f35bae648b",
     "machine-qualification/behavioral-suite/fixtures/ownerRecoveryProviderIdentityCandidate.test.ts": "ba8c738f59ffa203380ea808d695842d5a4c942bd5598291f204467f205d27c2",
-    "machine-qualification/behavioral-suite/plan.json": "c8ab23d5dc6ca9f551d016dbcb9950da37a94cc57c310af016cfa8f95bc0c398",
+    "machine-qualification/behavioral-suite/fixtures/recovery-runtime-permissions-readonly.sql": "780a39cc4b9883119d42d75e4ea1335fe3e836781133e3a5e3eedea6da1c7a3e",
+    "machine-qualification/behavioral-suite/fixtures/runtimeRoleProbe.offline.ts": "2d5b8864e3398725e3ad14fd4cd6f16604eecaaa8f9fcd011444e8b427beba7f",
+    "machine-qualification/behavioral-suite/plan.json": "a109d062bc102fa32bc03b69ebdd438120fe5bcfbd668859b2c6afdec84d1771",
     "machine-qualification/behavioral-suite/run.py": "5bed5441db35cc1a83b990b62f675e52a633dd04f9f12c54f4eacbfe24c20335",
     "machine-qualification/check-strata-bundle.cjs": "dfc2331ad34cf9529076a46803f453e213b69365cd612d7414d0ae24e0c91c35",
-    "machine-qualification/policy.json": "0fbd27845362c7feac4eded493eb23c4f19076c3ba3efb5df123caad80d47e71",
+    "machine-qualification/policy.json": "9f06dd5e7be6aecc0b76a0c79c0d04bc3a192c37d5497e9ac4f650d5422aefa8",
     "machine-qualification/producer.cjs": "884ff628a65a70754eb774e71a41be651de6733996e1fa8cef9eb31cc116e077"
   }
 }
