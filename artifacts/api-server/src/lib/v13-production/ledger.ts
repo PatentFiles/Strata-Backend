@@ -295,9 +295,32 @@ export class ProductionLedger {
       { ...held, check }) as Promise<HeldReconciliationReceipt>;
   }
 
+  /** Disabled opt-in candidate: collect complete signed history while holding
+   * the actual account/guard locks, then reuse full existing reconciliation.
+   * No release, approval, gate reset or entry authority is granted here. */
+  async reconcileHeldReaderCandidate(expectedRevision:string,guard:HeldReconciliationGuard,
+    reader:(tx:PoolClient,a:Account)=>Promise<Snapshot>,enabled=false):Promise<HeldReconciliationReceipt>{
+    requireProof(enabled===true,"production_held_reader_candidate_disabled");
+    const clock=guard.now.bind(guard),deadlineMs=guard.deadlineMs;
+    let evidence:Snapshot|null=null,last=clock();
+    const held={lock:guard.lock.bind(guard),beforeCommit:guard.beforeCommit.bind(guard),now:clock,deadlineMs,
+      check:()=>{const n=clock();requireProof(Number.isSafeInteger(n)&&n>=last&&n<deadlineMs,"production_held_reader_deadline");if(evidence)requireProof(evidence.observedAtMs<=n&&n-evidence.observedAtMs<5000,"production_held_reader_evidence_stale");last=n;return n;}};
+    requireProof(Number.isSafeInteger(last)&&Number.isSafeInteger(held.deadlineMs)&&held.deadlineMs>last&&held.deadlineMs-last<=5000,"production_held_reader_deadline");
+    return this.reconcileInternal(null as unknown as Snapshot,expectedRevision,last,held,async(tx,a)=>{
+      requireProof(a.revision===expectedRevision,"production_observation_raced");
+      // Refuse large retained accounts before the existing complete accounting
+      // pass. Bound positions/events too: conservation covers their full history.
+      for(const table of ["v13_production_intent","v13_production_position","v13_production_event"]){
+        const rows=await tx.query(`SELECT 1 FROM ${table} WHERE account_id=$1 LIMIT 1001`,[a.id]);
+        requireProof(rows.rows.length<=1000,"production_held_reader_history_budget");
+      }
+      held.check();evidence=structuredClone(await reader(tx,a));held.check();return evidence;
+    }) as Promise<HeldReconciliationReceipt>;
+  }
+
   private async heldReconciliationTransaction(
     body: (tx: PoolClient, account: Account) => Promise<{accountId:string;observationId:string}>,
-    held: HeldReconciliationGuard & {check():number}, evidenceDigest: string,
+    held: HeldReconciliationGuard & {check():number}, evidenceDigest: string | (()=>string),
   ): Promise<HeldReconciliationReceipt> {
     requireProof(!this.currentTransaction(), "production_held_reconciliation_nested_transaction");
     held.check();
@@ -318,11 +341,14 @@ export class ProductionLedger {
         await held.lock(tx, a);
         held.check(); connection.assertLive();
         const result = await body(tx, a);
-        const revision = String(BigInt(a.revision) + 1n);
+        const actualEvidenceDigest=typeof evidenceDigest==='function'?evidenceDigest():evidenceDigest;
+        const revision = (result as {persistedRevision?:string}).persistedRevision;
+        requireProof(typeof revision === 'string' && /^(0|[1-9][0-9]*)$/.test(revision) &&
+          BigInt(revision) > BigInt(a.revision), "production_held_persisted_revision_unverified");
         const financialDigest = digest({accountId: a.id, revision, cashMicros: a.cash_micros,
-          reservedMicros: a.reserved_micros, blockedReason: a.blocked_reason, evidenceDigest});
+          reservedMicros: a.reserved_micros, blockedReason: a.blocked_reason, evidenceDigest:actualEvidenceDigest});
         const receiptId = await this.observe(tx, "HELD_RECONCILIATION_RECEIPT",
-          {...result, revision, financialDigest, evidenceDigest});
+          {...result, revision, financialDigest, evidenceDigest:actualEvidenceDigest});
         held.check(); connection.assertLive();
         await held.beforeCommit(tx, a);
         // No asynchronous work between the final clock/liveness checks and the
@@ -330,7 +356,7 @@ export class ProductionLedger {
         held.check(); connection.assertLive();
         commitAttempted = true;
         await tx.query("COMMIT");
-        return {...result, receiptId, revision, financialDigest};
+        return {accountId:result.accountId,observationId:result.observationId,receiptId,revision,financialDigest};
       });
     } catch (error) {
       if (commitAttempted) {
@@ -352,15 +378,16 @@ export class ProductionLedger {
   }
 
   private async reconcileInternal(snapshot: Snapshot, expectedRevision: string, nowMs: number,
-    held?: HeldReconciliationGuard & {check():number}): Promise<{accountId:string;observationId:string}> {
+    held?: HeldReconciliationGuard & {check():number},reader?: (tx:PoolClient,a:Account)=>Promise<Snapshot>): Promise<{accountId:string;observationId:string}> {
     try {
       // transaction() returns only after COMMIT succeeds; a rejected/uncertain
       // commit never exposes a durable reconciliation pointer.
       const transact = held
         ? (body: (tx: PoolClient, a: Account) => Promise<{accountId:string;observationId:string}>) =>
-          this.heldReconciliationTransaction(body, held, digest(snapshot))
+          this.heldReconciliationTransaction(body, held, ()=>digest(snapshot))
         : (body: (tx: PoolClient, a: Account) => Promise<{accountId:string;observationId:string}>) => this.transaction(body);
       return await transact(async (tx, a) => {
+        if(reader)snapshot=await reader(tx,a);
         const originalFreeze = a.blocked_reason;
         const block = (reason: string, overwrite = true) => {
           // Held recovery cannot certify a successful financial receipt after
@@ -495,6 +522,7 @@ export class ProductionLedger {
           if (o.terminal) { i.terminal = true; i.state = "TERMINAL"; }
         }
         for (const s of snapshot.settlements) {
+          requireProof(Number.isSafeInteger(s.occurredAtMs)&&s.occurredAtMs>=0&&s.occurredAtMs<=snapshot.observedAtMs, "production_settlement_time_invalid");
           const old = await tx.query("SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2", [a.id, `settlement:${s.id}`]);
           if (old.rows.length) { requireProof(old.rows[0].digest === digest(s), "production_changed_settlement"); continue; }
           const pos = (await tx.query(`SELECT * FROM v13_production_position WHERE account_id=$1 AND market=$2
@@ -590,10 +618,11 @@ export class ProductionLedger {
         // The same account row remains locked. Persist reconciliation state and
         // its evidence together: no check/read separated these adjacent writes.
         // Keep the single revision increment and observation-before-write order.
-        await tx.query(`UPDATE v13_production_account SET cash_micros=$2,reserved_micros=$3,
-          blocked_reason=$4,revision=revision+1,reconciled_at=$5,evidence_digest=$6 WHERE id=$1`,
+        const persisted=await tx.query<{revision:string}>(`UPDATE v13_production_account SET cash_micros=$2,reserved_micros=$3,
+          blocked_reason=$4,revision=revision+1,reconciled_at=$5,evidence_digest=$6 WHERE id=$1 RETURNING revision::text AS revision`,
           [a.id, a.cash_micros, a.reserved_micros, a.blocked_reason,
             new Date(snapshot.observedAtMs), digest(snapshot)]);
+        if(held){requireProof(persisted.rows.length===1,"production_held_persisted_revision_unverified");return {accountId:this.accountId,observationId,persistedRevision:persisted.rows[0]!.revision};}
         return {accountId:this.accountId,observationId};
       });
     } catch (error) {

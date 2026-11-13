@@ -47,7 +47,7 @@ function fixture(){
   if(sql.startsWith('INSERT INTO v13_production_observation'))return {rows:[]};
   if(sql.startsWith('UPDATE v13_production_account SET cash_micros=')){
    assert(staged);staged.cash_micros=String(args[1]);staged.reserved_micros=String(args[2]);
-   staged.blocked_reason=args[3] as string;staged.revision=String(BigInt(staged.revision)+1n);staged.reconciled_at=args[4] as Date;return {rows:[]};
+   staged.blocked_reason=args[3] as string;staged.revision=String(BigInt(staged.revision)+1n);staged.reconciled_at=args[4] as Date;return {rows:sql.includes('RETURNING revision')?[{revision:staged.revision}]:[]};
   }
   if(sql.includes('WITH uncertain AS MATERIALIZED'))return {rows:[{has_uncertain_order:false,owner_user_id:owner}]};
   if(sql==='SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config')return {rows:[{manual_kill_switch:false,live_execution_enabled:true}]};

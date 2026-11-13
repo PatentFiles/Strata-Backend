@@ -1,3 +1,4 @@
+import type {OwnerRecoveryRuntimeDependencies} from '../lib/strata/ownerRecoveryRuntimeCandidate';
 import { paperAnalyticsPaused, PAPER_ANALYTICS_PAUSE_MESSAGE } from "../lib/paperAnalyticsMaintenance";
 import {createOwnerUnknownRecoveryRouter} from "./ownerUnknownRecoveryRouter";
 import type {OwnerUnknownRecoveryPort} from "../lib/strata/ownerUnknownRecoveryService";
@@ -43,6 +44,8 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   commissioning?: CommissioningPort;
   userScope?: UserScopePort;
   unknownAccountingRecovery?: OwnerUnknownRecoveryPort;
+  /** Server bootstrap only; never populated from HTTP owner input. */
+  ownerRecovery?: OwnerRecoveryRuntimeDependencies;
 }
 
 function blockedCommissioningPort(): CommissioningPort {
@@ -172,7 +175,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
-  router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));
+  router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser,deps.ownerRecovery));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
     const result = await userScope.enableOwnedExecution(req.body ?? {});
     res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
