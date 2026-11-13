@@ -48,3 +48,11 @@ jobs:
         run: |
           pnpm exec esbuild src/routes/retiredIndependentReview.test.ts src/lib/strata/inAppProtectiveRelease.test.ts --bundle --platform=node --format=cjs --outdir=dist/retired-review-tests --out-extension:.js=.cjs --external:pg-native --external:express --external:pino --external:pino-pretty --external:pdfjs-dist
           node --test dist/retired-review-tests/routes/*.cjs dist/retired-review-tests/lib/strata/*.cjs
+      - name: Existing owner monetary alternatives preserve actual safeguards
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFeeV3Authority.test.ts src/lib/strata/ownerFeeV3Migration.test.ts src/lib/strata/walletV4OwnerConsent.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-fee-alternatives --out-extension:.js=.cjs --external:pg-native --external:pino --external:pino-pretty --external:pdfjs-dist
+          node --test dist/owner-fee-alternatives/*.cjs
