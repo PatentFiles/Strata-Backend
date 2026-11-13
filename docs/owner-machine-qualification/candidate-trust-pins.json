@@ -1,0 +1,10 @@
+{
+  "producerManifestSha256": "7a4e3075c8f461bad611fdd79dde2e6a1c52055956f1d67198d3caa0584c64eb",
+  "qualificationPolicySha256": "0eb24e6700f51e550c4a1af4fe048e195c5df2ab518d46ed8bd20a3887541148",
+  "behavioralSuiteSha256": "fa9fe9bb6fa2f1a3ef4e1a76507b3ce8337610c662f5400195c83df21e7c1e7e",
+  "workflowSha256": "008f67b0a9daf8b64a9fafd622939d1e91112099ac489786a8d384a49a24db8f",
+  "remoteWorkflowId": null,
+  "repositoryId": null,
+  "productionEnabled": false,
+  "completeOwnerRecoveryQualification": false
+}
