@@ -59,7 +59,11 @@ test('lock inventory matches the real verifier relation-lock union and grants no
   'private.strata_api_fee_rate_reviews','private.strata_api_fee_owner_consents','private.strata_api_fee_standing_delegations',
   'private.strata_api_fee_standing_models','private.strata_standing_execution_reviews','auth.users','private.role_assignments','public.profiles',
  ].sort());
- assert.match(verifier,/LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,reviewer,g,issuer,issuer_role/);
+ assert.match(verifier,/LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,g,issuer,issuer_role/);
+ // Independent execution reviewers are now conditionally locked inside EXISTS;
+ // owner-self has no unrelated profile row. Monetary reviewers remain outer-locked.
+ assert.match(verifier,/EXISTS\(SELECT 1 FROM public\.profiles reviewer WHERE reviewer\.id=e\.independent_reviewer_id AND reviewer\.role IN \('ADMIN','DEVELOPER'\) FOR SHARE\)/);
+ assert.match(verifier,/m\.reviewer_admin_id<>a\.owner_user_id/);
  assert.match(fixture,/GRANT UPDATE\(\$\{column\}\) ON \$\{table\}/);
  assert.match(fixture,/AS RESTRICTIVE FOR UPDATE TO \$\{platformRuntimeRole\} USING\(true\) WITH CHECK\(false\)/);
  assert.doesNotMatch(fixture,/GRANT INSERT|GRANT DELETE|GRANT UPDATE\(lease_expires_at\)/);
