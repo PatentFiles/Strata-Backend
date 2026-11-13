@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {pool as db} from '@workspace/db';
-import {recordOwnerSelfStandingReview} from './ownerSelfStandingReview';
+import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview,OWNER_SELF_REVOKE_CONFIRM} from './ownerSelfStandingReview';
 import {OWNER_SELF_REVIEW_CONFIRM,standingAuthorityMatches} from './ownerSelfReviewMode';
 import {enrollContinuousGrant,CONTINUOUS_OWNER_CONFIRM,checkContinuousEligibility} from './continuousExecutionAuthorization';
 if(process.env.DATABASE_URL!=='postgresql://agent@127.0.0.1:55469/owner_self_disposable')throw Error('disposable_only');
@@ -23,8 +23,10 @@ INSERT INTO private.strata_owner_sha_approvals VALUES('${qid}','${owner}','acct'
 const root=process.env.OWNER_RECOVERY_SOURCE_ROOT!;
 await db.query(readFileSync(root+'/lib/db/drizzle/0043_strata_continuous_execution_grants.sql','utf8'));
 await db.query(readFileSync(root+'/lib/db/owner-self-release/001_explicit_owner_authority.sql','utf8'));
-const body={expectedSha:sha,accountId:'acct',policyHash:policy,qualificationId:qid,confirmation:OWNER_SELF_REVIEW_CONFIRM},deps={db,sha:()=>sha};
+const body={expectedSha:sha,accountId:'acct',policyHash:policy,qualificationId:qid,confirmation:OWNER_SELF_REVIEW_CONFIRM},deps={db,sha:()=>sha,scope:()=>({ownerId:owner,accountId:'acct'})};
+assert.equal((await recordOwnerSelfStandingReview(owner,body,{...deps,scope:()=>undefined})).reason,'owner_self_account_not_enabled');
 assert.equal((await recordOwnerSelfStandingReview(other,body,deps)).ok,false);
+assert.equal((await recordOwnerSelfStandingReview(owner,body,{...deps,scope:()=>({ownerId:owner,accountId:'foreign'})})).reason,'owner_self_account_not_enabled');
 assert.equal((await recordOwnerSelfStandingReview(owner,{...body,confirmation:'yes'},deps)).ok,false);
 await db.query("UPDATE public.v13_production_account SET blocked_reason='unreconciled'");
 assert.equal((await recordOwnerSelfStandingReview(owner,body,deps)).ok,false);
@@ -44,6 +46,10 @@ await db.query("INSERT INTO private.strata_continuous_execution_technical_lease 
 assert.equal(await checkContinuousEligibility(db,owner,sha),true);
 await db.query("UPDATE public.v13_production_account SET blocked_reason='unreconciled'");assert.equal(await checkContinuousEligibility(db,owner,sha),false);
 await db.query('UPDATE public.v13_production_account SET blocked_reason=NULL');
-await db.query("UPDATE private.strata_standing_execution_reviews SET revoked_at=now(),revocation_reason='owner revoked'");assert.equal(await checkContinuousEligibility(db,owner,sha),false);
+const revoke={expectedSha:sha,accountId:'acct',reviewId:row.release_id,confirmation:OWNER_SELF_REVOKE_CONFIRM};
+assert.equal((await revokeOwnerSelfStandingReview(other,revoke,deps)).ok,false);
+assert.equal((await revokeOwnerSelfStandingReview(owner,{...revoke,accountId:'foreign'},deps)).ok,false);
+assert.equal((await revokeOwnerSelfStandingReview(owner,revoke,deps)).ok,true);
+assert.equal((await revokeOwnerSelfStandingReview(owner,revoke,deps)).ok,false);assert.equal(await checkContinuousEligibility(db,owner,sha),false);
 console.log('PASS: actual migrations + owner review + owner grant + live eligibility SQL; wrong owner, missing consent, stale qualification, frozen account, immature lease, immutable actor and revoked authority refuse (disposable PostgreSQL only)');
 }finally{await db.end()}})().catch(e=>{console.error(e);process.exitCode=1});

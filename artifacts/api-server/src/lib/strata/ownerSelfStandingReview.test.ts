@@ -19,7 +19,14 @@ test('unknown review commit discards session, forbids retry and never claims suc
  if(sql==='COMMIT')throw Error('lost acknowledgment');
  if(sql.startsWith('SELECT'))return {rows:[{id:'acct',policy_hash:hash,evidence_digest:hash}]};
  if(sql.startsWith('INSERT'))return {rows:[{release_id:owner}]};return {rows:[]};}})};
- const r=await recordOwnerSelfStandingReview(owner,body,{db,sha:()=>sha});
+ const r=await recordOwnerSelfStandingReview(owner,body,{db,sha:()=>sha,scope:()=>({ownerId:owner,accountId:'acct'})});
  assert.equal(r.ok,false);assert.equal(r.reason,'owner_self_review_outcome_unknown');assert.equal(discarded?.message,'owner_self_commit_unknown');assert.equal(calls.includes('ROLLBACK'),false);
  assert.equal(r.workerStarted,false);assert.equal(r.ordersSubmitted,false);
+});
+
+test('unset or foreign server enrollment scope refuses before database activity',async()=>{
+ const db={connect:async()=>{throw Error('must not connect')}};
+ for(const scope of [undefined,{ownerId:other,accountId:'acct'},{ownerId:owner,accountId:'foreign'}]){
+  const r=await recordOwnerSelfStandingReview(owner,body,{db,sha:()=>sha,scope:()=>scope});assert.equal(r.reason,'owner_self_account_not_enabled');
+ }
 });

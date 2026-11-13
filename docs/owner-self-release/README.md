@@ -18,3 +18,10 @@ Apply `lib/db/owner-self-release/001_explicit_owner_authority.sql` in the contro
 
 ## Local verification
 `bash artifacts/api-server/scripts/test-owner-self-release.sh` creates an isolated disposable PostgreSQL database on loopback port 55469. It applies the actual old grant migration and candidate owner-mode migration, then exercises owner review, grant, and eligibility with fixture evidence only. These fixtures are not production qualification. Focused unit tests cover authority-type confusion, foreign owner, malformed consent, unknown COMMIT, and final-entry mode selection.
+
+## Account-only rollout and revocation
+Enrollment is disabled unless server configuration contains one verified pair: `STRATA_OWNER_SELF_RELEASE_OWNER_ID` and `STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID`. Both must exactly match the authenticated owner and requested account. These are server-owned deployment values, never request input; no values are assumed or provisioned by this draft.
+
+The owner can revoke their own explicit review with AAL2 POST `/production/protective-release/owner-standing-review-revoke`, exactly `{expectedSha, accountId, reviewId, confirmation: "I_REVOKE_MY_OWNER_ONLY_STANDING_EXECUTION_REVIEW_V1"}`. Revocation remains available if enrollment configuration is removed. It affects that review, including downstream entry/exit review checks; it does not close positions, cancel orders or send STOP. Independent reviews cannot be revoked through this endpoint. `continuous-status.reviewQualificationId` identifies the exact qualification behind the active review, rather than the latest unrelated qualification, for uncertain-response readback.
+
+The REVIEWED_API_V2 standing fee successor still requires its separate independently signed fee model. Existing owner-approved V3/V4 fee modes are not selected or altered by this patch. Actual account/provider compatibility must be verified before proposing a fee-mode change.

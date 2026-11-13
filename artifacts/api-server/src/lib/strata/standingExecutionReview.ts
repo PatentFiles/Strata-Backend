@@ -100,7 +100,7 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
    WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 AND p.state='APPROVED'`,[owner]);
   if(a.rows.length!==1)return deny('standing_account_policy_unavailable');
   const account=a.rows[0]!;
-  const reviews=await db.query(`SELECT release_id,independent_reviewer_id,to_jsonb(r)->>'review_authority' AS review_authority,to_jsonb(r)->>'owner_authorizer_id' AS owner_authorizer_id FROM private.strata_standing_execution_reviews r
+  const reviews=await db.query(`SELECT release_id,qualification_id,independent_reviewer_id,to_jsonb(r)->>'review_authority' AS review_authority,to_jsonb(r)->>'owner_authorizer_id' AS owner_authorizer_id FROM private.strata_standing_execution_reviews r
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
    AND policy_hash=$4 AND revoked_at IS NULL AND created_at<=now()`,[owner,account.id,sha,account.policy_hash]);
   const grants=await db.query(`SELECT grant_id,revoked_at,policy_hash,reviewed_release_id FROM private.strata_continuous_execution_grants
@@ -111,6 +111,7 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
    AND expires_at>now()+interval '60 seconds' ORDER BY observed_at DESC LIMIT 1`,[owner,account.id,sha]);
   return {ok:true as const,reason:'standing_status',sha,ownerId:owner,accountId:account.id,policyHash:account.policy_hash,
    reviewId:reviews.rows.length===1?reviews.rows[0]?.release_id:null,
+   reviewQualificationId:reviews.rows.length===1?reviews.rows[0]?.qualification_id:null,
    reviewerId:reviews.rows.length===1?reviews.rows[0]?.independent_reviewer_id:null,
    reviewAuthority:reviews.rows.length===1?(reviews.rows[0]?.review_authority??'INDEPENDENT_V1'):null,
    ownerAuthorizerId:reviews.rows.length===1?reviews.rows[0]?.owner_authorizer_id:null,
