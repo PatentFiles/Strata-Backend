@@ -1,0 +1,28 @@
+name: Owner qualification package integrity (not release authority)
+on:
+  pull_request:
+    paths:
+      - 'machine-qualification/**'
+      - '.github/workflows/owner-machine-qualification.yml'
+      - '.github/workflows/owner-package-integrity.yml'
+      - 'docs/owner-machine-qualification/**'
+permissions:
+  contents: read
+jobs:
+  package-integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install Node 24 for strict measured-launch tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Verify draft package consistency only
+        run: python3 machine-qualification/check-package-integrity.py
+      - name: Test runtime permission collector with synthetic database fixtures
+        run: node --test machine-qualification/runtime-permissions/collect-runtime-permissions.test.cjs
+      - name: Test signer and scoped issuer with synthetic credentials and evidence
+        run: node --test machine-qualification/assurance/qualification/*.test.cjs
