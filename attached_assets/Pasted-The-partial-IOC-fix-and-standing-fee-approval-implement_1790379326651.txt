@@ -1,0 +1,63 @@
+The partial-IOC fix and standing fee-approval implementation are complete.
+
+Next, remove the remaining arbitrary time-based blockers so the MICRO_LIVE system can remain operational continuously, potentially 24/7, without weakening any per-order safety checks.
+
+Keep real-money execution DISABLED. Do not publish, arm, approve fees, change the kill switch, or submit/cancel any real Kalshi order. Development/local implementation and tests only.
+
+The objective is to replace time-expiring fee approval and the separate 24-hour runtime limit with condition-based validity.
+
+1. Treat the administrator-approved Kalshi fee schedule as a versioned artifact. Store enough immutable evidence to identify exactly what was approved, preferably:
+    * official source URL,
+    * SHA-256/content hash,
+    * approval timestamp,
+    * approved coefficient/formula version,
+    * administrator identity,
+    * approval version.
+2. Add a read-only monitor for the authoritative Kalshi fee-schedule source. Periodically retrieve it without making any exchange mutation.
+3. Approval must remain valid indefinitely while the authoritative artifact matches the approved hash/version. Do not expire approval merely because 30 minutes, 24 hours, or another arbitrary period has elapsed.
+4. If the authoritative fee schedule changes, its hash changes, its URL/source becomes unavailable, parsing/verification becomes uncertain, or the system cannot prove that the approved fee formula still applies, immediately fail closed:
+    * block new POSTs,
+    * preserve existing state,
+    * require explicit administrator review and reapproval,
+    * never silently adopt a new coefficient.
+5. Preserve the existing per-submission freshness barrier. Every entry and exit must still independently obtain and validate current Kalshi market/series/event/scheduled-fee data. Keep the existing 10-second read-completion and ≤15-second final fee-evidence freshness requirements unless a stricter requirement is already implemented.
+6. Market-specific fee data always overrides/generalizes beyond the global schedule where applicable. Never assume one global coefficient proves the fee for every market.
+7. Preserve the exact $5 all-in reservation/cap. Entry cost + all applicable fees + reserved permitted exit cost/fees must fit before submission. Do not loosen this.
+8. Audit the existing separate 24-hour MICRO_LIVE runtime/authorization expiration. Replace any purely elapsed-time shutdown requiring manual reapproval with continuous validity based on:
+    * approved fee-schedule artifact still matching,
+    * current fee evidence valid,
+    * lease/current-owner valid,
+    * reconciliation current,
+    * kill switch and execution gates valid,
+    * account/position/order state consistent,
+    * all existing one-entry/one-exit and recovery invariants satisfied.
+9. A process restart must not automatically invalidate a still-valid standing approval. It must first reconcile all live state using authenticated GETs and revalidate the approved fee-schedule artifact before any future POST could become eligible.
+10. If any required evidence is unavailable or contradictory, freeze rather than infer.
+
+Add focused tests for:
+
+* approval surviving 30 minutes,
+* approval surviving 24 hours,
+* approval surviving restart after successful reconciliation,
+* unchanged authoritative fee artifact allowing continued eligibility,
+* changed fee-artifact hash blocking execution,
+* unreachable fee artifact blocking execution,
+* market-specific fee change blocking/recomputing correctly,
+* stale >15-second submission evidence blocking POST,
+* $5 fee-inclusive cap enforcement after many hours of runtime,
+* no second POST after uncertain submission,
+* partial IOC/restart recovery remaining unchanged.
+
+Then run the focused fee-policy tests, complete MICRO_LIVE/recovery suite, trading-client tests, typecheck, build, and schema/diff checks.
+
+Report exactly:
+
+* how the approved authoritative fee artifact is identified,
+* monitoring/revalidation cadence,
+* what conditions invalidate approval,
+* what happened to the old 24-hour limit,
+* whether restart preserves approval,
+* final test counts,
+* all files/schema changed.
+
+Stop after local verification. Do not publish or enable execution.

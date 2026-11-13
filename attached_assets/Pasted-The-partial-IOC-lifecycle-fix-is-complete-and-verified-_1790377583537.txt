@@ -1,0 +1,67 @@
+The partial-IOC lifecycle fix is complete and verified. Keep all current execution settings unchanged: execution flags OFF, kill switch ON, no API restart, no publish, and no real orders.
+
+Now implement the standing MICRO_LIVE fee-policy architecture to replace the current time-limited fee approval.
+
+Requirements:
+
+1. Standing administrator approval must not expire after 30 minutes or 24 hours.
+2. Persist the standing approval with:
+    * approved status
+    * approved_at
+    * approving admin reference
+    * policy version
+    * approved maximum fee-inclusive exposure
+3. Standing approval does not authorize stale fees. Before every entry and every exit, independently obtain/recompute the currently applicable Kalshi fee information.
+4. Define and enforce an explicit fee-data freshness rule at the final submission barrier.
+5. Recalculate complete worst-case debit immediately before every POST.
+6. Preserve the existing hard $5 all-in cap. Do not increase it or reinterpret it.
+7. Any stale, unavailable, malformed, inconsistent, or unverifiable fee information must fail closed with zero POSTs.
+8. If current fees make the intended action exceed the $5 all-in cap, block it.
+9. Restart must load the existing standing approval; restart must never create or renew authorization.
+10. Increasing the cap or relaxing the policy invalidates the existing approval and requires explicit administrator reapproval.
+11. Revocation must immediately prevent new submissions.
+12. Preserve all existing protections:
+    * V1.3 unchanged
+    * one-entry claim
+    * one-exit claim
+    * reduce-only IOC exits
+    * corrected partial-IOC semantics
+    * residual-position freeze
+    * uncertain-submission freeze
+    * GET-only recovery
+    * restart reconciliation
+    * kill switch
+    * lease/fencing
+    * account/cap identity checks
+13. Add regression tests proving:
+    * approval survives restart
+    * approval has no time expiration
+    * fresh fee validation happens for every entry
+    * fresh fee validation happens for every exit
+    * changed fee data between orders is detected
+    * stale fee data blocks
+    * unavailable fee data blocks
+    * malformed fee data blocks
+    * $5 all-in blocks
+    * revoked approval blocks
+    * policy-version mismatch blocks
+    * upward cap change invalidates approval
+    * retries cannot bypass the fee barrier
+    * all fee-barrier failures produce zero POSTs
+14. Run the full existing lifecycle suite after the focused tests. The current baseline is 115 micro-live integration tests plus 16 trading-client tests; do not regress that coverage.
+
+Do not publish, restart the production API, arm execution, remove the hold, alter production data, or submit/cancel any real order.
+
+At the end report:
+
+* schema changes
+* exact standing-approval mechanism
+* exact fee source
+* exact freshness rule
+* exact final submission barriers
+* files changed
+* focused test results
+* complete suite results
+* remaining blockers to unattended 24/7 operation.
+
+Stop after local verification.

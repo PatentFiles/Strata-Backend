@@ -1,0 +1,59 @@
+MICRO_LIVE readiness hardening — development/local only.
+
+Keep real-money execution disabled. Do not publish, approve fees, arm a run, disable the kill switch, modify production records, or submit/cancel/amend any Kalshi order.
+
+Fix the readiness blockers found in the production audit without changing V1.3 strategy decisions.
+
+1. Resolve execution-flag ambiguity
+    * Audit every environment/database flag used by the trading client, MICRO_LIVE executor, startup reconciliation, and final POST guard.
+    * Missing, conflicting, or unknown execution flags must fail closed.
+    * Database execution flags and kill switch must be authoritative at the final submission barrier.
+    * The low-level trading client must not be able to POST merely because environment flags are true or because a caller supplies a permissive guard object.
+    * Add tests proving direct/internal calls cannot bypass the database kill switch, execution flags, run state, reconciliation state, fee gate, or exposure cap.
+2. Persist the account binding
+    * Add a reviewed transition that records:
+        account_mode = primary_nonexclusive
+        selected_subaccount = 0
+    * Do not persist this to production yet.
+    * Startup reconciliation must refuse readiness if the persisted binding and configured KALSHI_BOT_SUBACCOUNT disagree.
+3. Add primary-account cash reconciliation
+    * Establish a durable baseline for available cash when a pristine MICRO_LIVE run becomes ready.
+    * Track bot-attributable debits/credits from authenticated orders, fills, fees, cancellations, and settlements.
+    * Before entry and exit eligibility, compare actual Kalshi cash against the expected attributable range.
+    * Any unexplained balance movement must freeze MICRO_LIVE in primary_nonexclusive mode.
+    * Do not attribute unrelated historical activity to the bot.
+    * Add restart/recovery tests and tests for manual deposits, withdrawals, and unrelated manual trades changing cash.
+4. Close the ownership-preflight race
+    * Perform the freshest possible authenticated GET-only account/ownership reconciliation immediately before the irreversible POST boundary.
+    * After that reconciliation, acquire the local database lock and recheck all gates, claims, fee evidence, persisted order provenance, exposure, run identity, and account binding.
+    * If state changed or evidence is stale, abort without POST.
+    * Do not retry uncertain submissions.
+    * Add concurrency tests simulating another actor changing the primary account between the first preflight and final submission.
+5. Startup reconciliation
+    * Make primary_nonexclusive startup reconciliation independently prove:
+        * configured subaccount matches persisted subaccount,
+        * complete current and historical order/fill evidence was obtained,
+        * there is no unexplained bot-market order or position,
+        * cash reconciliation is within the attributable range,
+        * no unresolved prior MICRO_LIVE submission exists.
+    * Only then may readiness become true.
+6. Preserve existing protections
+    * One entry claim and one exit claim remain durable and one-use.
+    * Exact fee-inclusive run cap remains unchanged.
+    * Current fee-evidence freshness requirements remain unchanged.
+    * Partial IOC and GET-only restart recovery behavior remain unchanged.
+    * Preserve V1.3 evaluator and paper/shadow behavior exactly.
+
+Run focused regressions first, then the complete MICRO_LIVE suite, trading-client tests, typecheck, build, and diff check.
+
+At the end, report:
+
+* exact files changed,
+* new schema changes, if any,
+* all test counts,
+* whether the low-level POST path can still bypass database gates,
+* whether unexplained cash movement now freezes execution,
+* whether startup reconciliation can reach ready: true in a mocked primary_nonexclusive / subaccount 0 scenario,
+* the exact remaining blockers.
+
+Stop before production migration or publish.

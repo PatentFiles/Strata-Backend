@@ -1,0 +1,30 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "x61Ov8PfHxodH-0ee8J1C"
+uri = "file://docs/phase5/PHASE5-REVIEW.html"
+type = "html"
+title = "Phase 5 safety and ownership review"
+description = "Updated exit/restart development results and the exact account-control evidence still required. Execution remains disabled."
+logical_id = "e9a43c04-7928-465f-864a-52389af663c8"
+content_hash = "sha256:47a460db20b977966da6ee0bc2cac8bde35c6ed977a61b0d09a604946cdd8b01"
+size = 119650
+mtime_ms = 1790341812008
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0ec74697-fb81-4242-a6a3-32689c2c3f79/e9a43c04-7928-465f-864a-52389af663c8/2c1e0b49-0f6e-487f-817d-6d8c97cbffa1"
+storage_version_token = "1790341901281490"
+content_type = "text/html"
+
+[[outputs]]
+id = "Dtjw19dwFG5CHxIfx8LAa"
+uri = "file://btc-source.zip"
+type = "unspecified"
+title = "Download btc-source.zip"
+description = "Sanitized source snapshot (351 files): app and API sources, tests, Drizzle schemas, manifests, pnpm lockfile, and setup notes. Credential-pattern scan passed; no dependencies, builds, exports, or secrets included."
+logical_id = "7699c80e-0093-428e-bb28-6ecf1995cc2e"
+content_hash = "sha256:ce2daf1e196b5817b508adfe0a69a42ea05c30b91e0397ade700faa50631f898"
+size = 548927
+mtime_ms = 1790337212404
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0ec74697-fb81-4242-a6a3-32689c2c3f79/7699c80e-0093-428e-bb28-6ecf1995cc2e/adf11921-5088-470a-847e-08d880eb17dd"
+storage_version_token = "1790337221070772"
+content_type = "application/octet-stream"

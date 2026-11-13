@@ -1,0 +1,41 @@
+name: Protective recovery deadline
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/scripts/run-protective-recovery-deadline*'
+      - 'artifacts/api-server/package.json'
+      - 'artifacts/api-server/build.mjs'
+      - 'lib/db/**'
+      - 'lib/v13-strategy/**'
+      - 'sql/strata_emergency_exit_*.sql'
+      - 'sql/strata_protective_exit_*.sql'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/protective-recovery-deadline.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-and-disposable-postgres:
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server run build
+      - name: Verify deadline, incomplete history, uncertain commits and runner guards
+        run: pnpm --filter @workspace/api-server run test:protective-recovery-deadline
+      - name: Install PostgreSQL tooling for a new disposable cluster
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+      - name: Verify actual SQL boundaries and commit uncertainty
+        run: pnpm --filter @workspace/api-server run test:protective-recovery-deadline-postgres

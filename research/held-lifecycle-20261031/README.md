@@ -1,0 +1,48 @@
+# Held lifecycle runtime qualification contract
+
+2026-10-31. Implemented locally for review; not deployed, not activated, no exchange connection opened.
+
+## Minimal real runtime candidate
+
+Add a production boot hook `startHeldLifecycleShadowProbe()` beside `startHeldExchangeLatencyProbe()` in `src/index.ts`. Default off and no DB/network calls when off. Explicit configuration binds owner UUID, main execution-account ID, exact release SHA, immediately next 15-minute boundary and bounded expiry (startup exactly on a boundary targets the following one). A finite run covers at most one boundary; hard stop no later than boundary+30s and within 18min. Six handshake attempts maximum. It creates only a lifecycle metadata subscription on fixed official host/path with existing restricted execution signer. No private channels, REST polling, trading APIs or authority mutations.
+
+Initial and serialized 2.5-second watchdog DB checks require released/unarmed worker lease, exact account ownership, subaccount1/exchange_index2, no open local position or nonterminal/uncertain intent, current nonrevoked verified restricted credential, same fingerprint/generation. Revalidate before handshake through the bounded authorization cache; the final summary is historical diagnostic evidence, not current authorization. Expire authorization cache promptly on watchdog failure/timeout; stop socket on hold loss, revocation, rotation, clock failure, target expiry or detected cancellation. Process termination closes the socket but graceful final-summary delivery is not guaranteed. A delayed watchdog must not leave authorization true indefinitely. Existing signed REST reconciliation remains separate evidence of flat provider account; local database checks alone cannot prove exchange flatness.
+
+Load signer only after successful held preflight. Keep key within process/injected fixed-host signer; never log IDs/headers/signatures/rawframes. Use testable transport dependency adapter. One compact summary per run (plus one terminal status log); bounded diagnostics and at most two candidate ticker observations in memory. No schema migration or raw-payload storage.
+
+## Comparison observation
+
+An in-process read-only subscriber on existing `rolloverStrikeDiagnostics` events compares ordinary producer exact-REST strike availability against authenticated lifecycle arrival. Subscriber exceptions are contained and cannot affect producer decisions. No additional GETs. First invalid REST event and first ready event already provide provider RTT/field evidence. Correlation requires exact ticker and canonical window; unrelated events count only, not storage. Summarize subscription receipt, first complete strike metadata receipt, sequence/generation, gaps/reconnects, canonical-window and exchange-index presence, REST agreement/conflict and observed timing deltas. Subscription ack does not establish sequence baseline; never initialize seq=0 or call prototype resync with invented trusted evidence.
+
+Do not label first event as lossless snapshot. It establishes only a shadow observation. Reconnect and gap invalidate comparison continuity. A run may legitimately finish with no complete event: result inconclusive, not success.
+
+## Live benefit and promotion boundary
+
+Current global `startServerForwardTestWorker()` uses singleton `publicForwardTestFeeds`; live workers consume its persisted paper evaluations. The owner-bound observer cannot silently alter this shared global source. A later reviewed promotion may use PUBLIC metadata through an explicitly configured source owner/account binding and provenance generation, never importing account authority. Public cache would contain only ticker/window/strike/provenance, no credentials/private fields. The configuration and source semantics must be part of exact-release review, and evaluation provenance must identify source origin. An owner-specific producer lane instead requires broader strategy/schema design.
+
+`personalExecutionSupervisor.readMarket` retains signed orderbook and fresh REST market/event/series fee checks. `ownedMarketEvidence` checks ticker, exchange_index=2, active status, grid and fee metadata, but does not depend on floor_strike. Therefore lifecycle strike may remove a producer-only gate if other REST fields already exist. It cannot bypass these final checks or promise fills. Producer quote timestamps and five-second source freshness are never restamped by metadata arrival.
+
+Promotion requires: authenticated handshake/subscription verified using exact scoped credential; complete actual metadata schema and exact canonical window verified; defensible initial-baseline and gap/reconnect resync policy established without treating REST+WS as atomic; strike agrees with eventual authoritative REST; evidence demonstrates useful earlier arrival; unavailable/partial/conflicting/reordered/gapped data falls back to existing REST path without extra polls or guessed strike. Final quote, fee, status, policy and account authorization gates remain unchanged. Until that evidence exists, runtime candidate stays shadow-only.
+
+## Tests before review
+
+Default-off zero side effects; invalid owner/account/SHA/target rejected before credentials; wrong exchange_index/legacy account/cross-owner rejected; revoked/rotated signer denied; held lease lost/rearm/positions/uncertain intent/DB timeout closes observer; stale async watchdog cannot resurrect authorization; delayed signing cannot open after stop; exact bounded duration/attempt budget; no REST/order method calls; one summary and bounded events; quote/source/admission invariance; exact ticker/window comparison; partial/full metadata, duplicates/out-of-order/gap/reconnect; ack without seq and absent snapshot remain observational only. Production acceptance occurs held, after user STOP and verified reconciliation, against exact reviewed SHA.
+
+## Explicit activation configuration (values must be supplied from current reviewed deployment)
+
+`STRATA_HELD_LIFECYCLE_PROBE_ENABLED=true`, `STRATA_HELD_LIFECYCLE_PROBE_OWNER`, `STRATA_HELD_LIFECYCLE_PROBE_ACCOUNT`, `STRATA_HELD_LIFECYCLE_PROBE_SHA`, and `STRATA_HELD_LIFECYCLE_PROBE_BOUNDARY_MS` (canonical next boundary Unix milliseconds). No example owner/account/SHA is a valid authorization. The user must stop first; operator must establish held/flat status and approve this exact deployment/configuration. One attempt per process; no automatic repeating schedule. Disable/remove probe configuration after qualification.
+
+The probe makes no extra REST requests and cannot confirm provider account flatness itself. Require existing fresh authenticated reconciliation before held qualification. The watchdog uses a single consistent DB statement for held state and current credential; two-second DB timeout terminates the run. Cached authorization expires within five seconds even if an asynchronous check stalls. Socket checks that cache before signing/frames and on its bounded timer; no remote snapshot can atomically prevent a START in a later instant. Therefore this remains metadata-only with no order capability, and operator must keep the account held throughout the probe.
+
+Quote availability and age are explicitly `NOT_MEASURED`/null: a faster strike receipt alone cannot prove earlier execution or fill. No sequence baseline is invented and no reducer resync is asserted. Missing metadata, unmatched ticker, absent comparison, gaps or failed transport remain inconclusive.
+
+## Production evidence and promotion decision checklist
+
+1. Before running: user STOP, flat signed account reconciliation, released/unarmed local lease, no unresolved intent/position, exact main account and verified restricted credential, exact reviewed SHA and target boundary. No approvals are created/changed by this probe.
+2. Handshake/subscription: actual authenticated connection and correct lifecycle acknowledgment, not REST credential verification alone. Record receipt and generation. Missing/error/timeout means keep REST.
+3. At target rollover: exact ticker must join the existing current-window REST observation. Capture complete numeric positive floor strike with correct strike type and no unsupported cap; record actual window/exchange-index field presence. Missing identity needs independent documented mapping before promotion; do not assume it.
+4. Compare arrival times with provider source timestamps, source ages and clock sanity. Positive raw receipt lead is a candidate benefit, not proof of executable-price availability. Missing quote readiness remains NOT_MEASURED, not green.
+5. Eventual REST strike must agree. Conflict, missing match, sequence gap/reorder, reconnect or absent defensible baseline require investigation and keep REST authoritative. First frame after acknowledgment does not establish a lossless snapshot.
+6. Establish actual protocol baseline/reconnect semantics before enabling an authoritative source. Test source revocation, expiry, duplicate and cross-window rejection. No sequence or replay guarantee may be inferred from one clean run.
+7. If evidence supports a useful and defensible source: build/review promotion interface with persisted source provenance and approved source config hash, run full tests, deploy while still held, refresh only final exact-SHA/source-policy approvals, then user START. One maintenance window may contain multiple builds/deployments; no one-deployment guarantee.
+8. After START: separately prove qualifying signal-to-decision age, final status/grid/fee/book admission, authenticated order acknowledgment/fill/protective exit. Held metadata evidence cannot certify these or profitability.

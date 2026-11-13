@@ -1,0 +1,1219 @@
+import {planCashBoundEntry} from "../v13EntryCashRisk";
+import "./ownedCashPrecision.test";
+import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import test from "node:test";
+import { V13_ENTRY_POLICY_VERSION, V13_LEGACY_ENTRY_POLICY } from "@workspace/v13-strategy";
+import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
+import type { Pool } from "@workspace/db";
+import {
+  AccountScopedExchange,
+  accountOrderTransmission,
+  openOwnedExecutionSession,
+  scheduleOwnedAccountWorker,
+  type AccountDispatchState,
+} from "./accountProductionSession";
+import { dedicatedSignerFingerprint } from "./commissioning";
+import { persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION } from "./personalCashReconciliation";
+import { marketEvidenceFromBook, parseKalshiOrderBook, readSubaccountSpendableCash } from "./personalMarketAdapter";
+import { authorizeOwnedPolicy, createOwnedPolicyDraft, persistOwnedPolicyApproval, APPROVE_OWNED_POLICY_CONFIRMATION } from "./personalPolicyApproval";
+import { createOwnedTradingSupervisor, createProductionPersonalSession, productionPersonalSession, classifyStopExposureRow, verifiedStartCash } from "./personalExecutionSupervisor";
+import {
+  approveOwnedPolicyForUser,
+  readOwnedApprovedFeeEvidence,
+  commissionOwnedAccount,
+  COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
+  enableOwnedAccountExecution,
+  ENABLE_OWNED_EXECUTION_CONFIRMATION,
+  reconcileOwnedSubaccountCash,
+  REQUEST_OWNED_ACTIVATION_CONFIRMATION,
+  requestOwnedAccountActivation,
+  reportOwnedActivation,
+} from "./personalAccountActivation";
+import { emptySnapshot, ownedMarketEvidence, personalAccountSnapshot, readOwnedKalshiFeeds, classifyOwnedKalshiReadFailure } from "./personalExchangeRead";
+import { KalshiApiError, getScopedKalshiJson } from "../kalshiAccountClient";
+import type { MarketEvidence, Request } from "../v13-production/types";
+
+const USER = "11111111-1111-4111-8111-111111111111";
+const OTHER = "22222222-2222-4222-8222-222222222222";
+const NOW = Date.parse("2026-10-13T18:00:00.000Z");
+
+test("readiness joins TEXT policy owner to UUID account and reports blockers rather than hiding them", async () => {
+  const seen: string[] = [];
+  const db = { query: async (sql: string, params?: unknown[]) => {
+    seen.push(sql);
+    if (sql.includes("personal-activation:readiness")) {
+      assert.match(sql, /p\.created_by\s*=\s*a\.owner_user_id::text/);
+      assert.deepEqual(params, [USER]);
+      return { rows: [{ id: "owner-1", subaccount: 1, exchange_index: 2,
+        key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
+        policy_id: null, policy_state: null, configured_stake_cents: null,
+        cash_precision_verified: false, minimum_exit_micros: null, fee_artifact_digest: null,
+        commissioned: false, execution_enabled: false, kill_switch: true, activation_requests: 0 }] };
+    }
+    if (sql.includes("live_execution_config")) {
+      return { rows: [{ live_execution_enabled: false, manual_kill_switch: true }] };
+    }
+    throw new Error("unexpected readiness query");
+  }};
+  const readiness = await reportOwnedActivation(db, USER);
+  assert.equal(readiness.accountId, "owner-1");
+  assert.equal(readiness.readyForCommissioning, false);
+  assert.equal(readiness.readyForLive, false);
+  for (const blocker of ["policy_not_approved", "configured_stake_missing",
+    "cash_not_reconciled", "minimum_exit_missing", "fee_evidence_missing",
+    "account_not_commissioned", "execution_not_enabled", "account_kill_switch",
+    "global_kill_switch", "live_execution_not_enabled"]) {
+    assert.ok(readiness.blockers.includes(blocker), blocker);
+  }
+  assert.equal(seen.length, 2);
+  const failure = await reportOwnedActivation({ query: async () => {
+    throw new Error("postgres_error");
+  } }, USER);
+  assert.deepEqual(failure.blockers, ["activation_status_unproven"]);
+  assert.equal(failure.readyForLive, false);
+});
+
+test("commissioning readiness rejects stale pre-transfer zero-cash verification", async () => {
+  const owner = {
+    id: "owner-1", subaccount: 1, exchange_index: 2,
+    key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
+    policy_id: "policy-1", policy_state: "APPROVED", configured_stake_cents: 100,
+    cash_precision_verified: true, cash_micros: "0",
+    reconciled_at: "2026-10-15T16:26:22.935Z",
+    verified_funding_at: "2026-10-15T17:52:26.418Z",
+    minimum_exit_micros: 10000, fee_artifact_digest: "a".repeat(64),
+    commissioned: false, execution_enabled: false, kill_switch: true,
+    activation_requests: 0,
+  };
+  const db = { query: async (sql: string) =>
+    ({ rows: sql.includes("personal-activation:readiness")
+      ? [owner] : [{ live_execution_enabled: false, manual_kill_switch: true }] }) };
+  const stale = await reportOwnedActivation(db, USER);
+  assert.ok(stale.blockers.includes("cash_not_reconciled"));
+  assert.equal(stale.readyForCommissioning, false);
+  owner.cash_micros = "25000000";
+  const stillStale = await reportOwnedActivation(db, USER);
+  assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
+  owner.reconciled_at = "2026-10-15T17:53:00.000Z";
+  const fresh = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
+  assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
+  const tooOld = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T18:10:00.000Z"));
+  assert.equal(tooOld.blockers.includes("cash_not_reconciled"), true);
+  assert.equal(tooOld.readyForCommissioning, false);
+  const tooEarly = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:52:00.000Z"));
+  assert.equal(tooEarly.blockers.includes("cash_not_reconciled"), true);
+  assert.equal(fresh.readyForCommissioning, true); // commissioning still requires separate owner consent
+});
+
+test("order book evidence fails closed without a fee, depth, or a fresh clock", () => {
+  const book = parseKalshiOrderBook({
+    orderbook_fp: { yes_dollars: [["0.4500", "12.00"]], no_dollars: [["0.5000", "8.00"]] },
+  });
+  assert.equal(book.yesBids[0]?.priceDollars, "0.4500");
+  assert.throws(() => marketEvidenceFromBook({
+    market: "KXBTC15M-TEST", side: "YES", book, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000, fee: null,
+  }), /fee_evidence_missing/);
+  assert.throws(() => marketEvidenceFromBook({
+    market: "KXBTC15M-TEST", side: "YES", book, observedAtMs: NOW - 16_000, nowMs: NOW, maxAgeMs: 15_000, fee: fee(),
+  }), /market_evidence_stale/);
+  assert.throws(() => parseKalshiOrderBook({ orderbook_fp: { yes_dollars: "bad", no_dollars: [] } }), /market_book_malformed/);
+  assert.throws(() => marketEvidenceFromBook({
+    market: "NOT-BTC", side: "YES", book, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000, fee: fee(),
+  }), /production_market_invalid/);
+  const evidence = marketEvidenceFromBook({
+    market: "KXBTC15M-TEST", side: "YES", book, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000, fee: fee(),
+  });
+  assert.equal(evidence.bestAskDollars, "0.5000");
+  assert.equal(evidence.bestBidDollars, "0.4500");
+  assert.equal(evidence.asks[0]?.availableContracts, "8.00");
+});
+
+test("spendable cash is the subaccount balance, not portfolio value or the primary account", () => {
+  const read = readSubaccountSpendableCash({
+    subaccount: 1,
+    exchangeIndex: 2,
+    observedAtMs: NOW,
+    nowMs: NOW,
+    maxAgeMs: 15_000,
+    subaccountBalance: { balance_dollars: "1000.00", portfolio_value_dollars: "50.00" },
+    primaryBalance: { balance_dollars: "25000.00" },
+  });
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  assert.equal(read.cashCents, 100_000);
+  assert.equal(read.cashMicros, "1000000000");
+  assert.equal(read.portfolioValueCents, 5_000);
+  assert.equal(read.primaryCashCents, 2_500_000);
+  const wrongPair = readSubaccountSpendableCash({
+    subaccount: 0, exchangeIndex: 2, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000,
+    subaccountBalance: { balance: 100 }, primaryBalance: { balance: 100 },
+  });
+  assert.equal(wrongPair.ok, false);
+  if (!wrongPair.ok) assert.equal(wrongPair.reason, "account_target_pair_mismatch");
+  const stale = readSubaccountSpendableCash({
+    subaccount: 1, exchangeIndex: 2, observedAtMs: NOW - 20_000, nowMs: NOW, maxAgeMs: 15_000,
+    subaccountBalance: { balance: 100 }, primaryBalance: {},
+  });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.equal(stale.reason, "cash_evidence_stale");
+  const missing = readSubaccountSpendableCash({
+    subaccount: 1, exchangeIndex: 2, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000,
+    subaccountBalance: {}, primaryBalance: { balance: 100 },
+  });
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.reason, "cash_unproven");
+});
+
+test("policy approval requires the owner, fee evidence, and explicit limits below the ceiling", async () => {
+  const limits = {
+    capitalLimitCents: 5_000_000,
+    maxEntryStakeCents: 2_500_000,
+    maxEntryAllInCents: 5_000_000,
+    maxDailyLossCents: 100_000,
+    maxTotalLossCents: 250_000,
+    maxQuoteAgeMs: 15_000,
+    maxFeeEvidenceAgeMs: 15_000,
+  };
+  const unconfirmed = authorizeOwnedPolicy({ ...policyInput(limits), confirmation: "no" });
+  assert.equal(unconfirmed.ok, false);
+  if (!unconfirmed.ok) assert.equal(unconfirmed.reason, "explicit_authorization_required");
+  const missingFee = authorizeOwnedPolicy({ ...policyInput(limits), fee: null });
+  assert.equal(missingFee.ok, false);
+  if (!missingFee.ok) assert.equal(missingFee.reason, "fee_artifact_unverified");
+  const aboveCeiling = authorizeOwnedPolicy({ ...policyInput({ ...limits, maxEntryStakeCents: 2_500_001 }) });
+  assert.equal(aboveCeiling.ok, false);
+  if (!aboveCeiling.ok) assert.equal(aboveCeiling.reason, "policy_limits_invalid");
+  const approved = authorizeOwnedPolicy(policyInput(limits));
+  assert.equal(approved.ok, true);
+  if (!approved.ok) return;
+  assert.equal(approved.policy.maxEntryStakeCents, 2_500_000);
+  assert.equal(approved.policy.state, "APPROVED");
+  assert.equal(approved.policy.entryPolicyVersion, V13_ENTRY_POLICY_VERSION);
+  assert.match(approved.policy.policyHash ?? "", /^[0-9a-f]{64}$/);
+  const tamperedVersion = { ...approved.policy, entryPolicyVersion: V13_LEGACY_ENTRY_POLICY };
+  assert.notEqual(computeV13LiveMoneyPolicyHash(tamperedVersion), approved.policy.policyHash);
+  const tampered = await persistOwnedPolicyApproval({
+    query: async () => { throw new Error("tampered_policy_must_not_write"); },
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: tamperedVersion });
+  assert.equal(tampered.ok, false);
+  if (!tampered.ok) assert.equal(tampered.reason, "policy_hash_mismatch");
+  const rehashedLegacy = {
+    ...tamperedVersion,
+    policyHash: computeV13LiveMoneyPolicyHash(tamperedVersion),
+  };
+  const legacy = await persistOwnedPolicyApproval({
+    query: async () => { throw new Error("legacy_policy_must_not_write"); },
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: rehashedLegacy });
+  assert.equal(legacy.ok, false);
+  if (!legacy.ok) assert.equal(legacy.reason, "production_entry_policy_revision_not_approved");
+  const calls: string[] = [];
+  const stored = await persistOwnedPolicyApproval({
+    query: async () => { throw new Error("autocommit_not_allowed"); },
+    transaction: async (work) => work(async (text, params) => {
+      calls.push(text);
+      if (text.includes("owned-policy:approve")) {
+        assert.match(text, /entry_policy_version = \$22/);
+        assert.match(text, /AND version = \$23/);
+        assert.equal(params?.[21], V13_ENTRY_POLICY_VERSION);
+        assert.equal(params?.[22], approved.policy.version);
+      }
+      assert.equal(text.includes("execution_enabled"), false);
+      assert.equal(text.includes("kill_switch"), false);
+      assert.equal(text.includes("id = 'production'"), false);
+      return { rows: [{ id: "policy-a" }], rowCount: 1 };
+    }),
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(stored.ok, true);
+  assert.equal(calls.length, 2);
+  const foreign = await persistOwnedPolicyApproval({
+    query: async () => ({ rows: [], rowCount: 0 }),
+  }, { ownerUserId: OTHER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(foreign.ok, false);
+  if (!foreign.ok) assert.equal(foreign.reason, "policy_not_owned");
+  const split = await persistOwnedPolicyApproval({
+    query: async () => ({ rows: [{ id: "policy-a" }], rowCount: 1 }),
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(split.ok, false);
+  if (!split.ok) assert.equal(split.reason, "policy_approval_not_transactional");
+  let approvedRows = 0;
+  const linked = await persistOwnedPolicyApproval({
+    query: async () => ({ rows: [], rowCount: 0 }),
+    transaction: async (work) => work(async (text) => {
+      if (text.includes("owned-policy:link")) return { rows: [], rowCount: 0 };
+      approvedRows += 1;
+      return { rows: [{ id: "policy-a" }], rowCount: 1 };
+    }),
+  }, { ownerUserId: USER, executionAccountId: "acct-a", policy: approved.policy });
+  assert.equal(linked.ok, false);
+  if (!linked.ok) assert.equal(linked.reason, "policy_not_linked");
+  assert.equal(approvedRows, 1);
+});
+
+test("approved-policy fee evidence is read-only and rejects foreign or mismatched policy identity", async () => {
+  let calls = 0;
+  const absent = await readOwnedApprovedFeeEvidence({
+    query: async (_sql, params) => {
+      calls++;
+      assert.deepEqual(params, [USER]);
+      return { rows: [] };
+    },
+  }, USER);
+  assert.equal(absent.ok, false);
+  assert.equal(absent.reason, "policy_not_approved");
+
+  const outdated = await readOwnedApprovedFeeEvidence({
+    query: async (_sql, params) => {
+      calls++;
+      assert.deepEqual(params, [USER]);
+      return { rows: [{
+        id: "old-policy", version: 1, state: "APPROVED",
+        entry_policy_version: V13_LEGACY_ENTRY_POLICY,
+        strategy_parameter_hash: "a".repeat(64),
+      }] };
+    },
+  }, USER);
+  assert.equal(outdated.ok, false);
+  assert.equal(outdated.reason, "production_entry_policy_revision_not_approved");
+  assert.equal(calls, 2);
+});
+
+test("cash reconciliation records the subaccount read and does not transfer or enable execution", async () => {
+  let sql = "";
+  const recorded = await persistOwnedCashReconciliation({
+    query: async (text, params = []) => {
+      sql = text;
+      assert.equal(params[0], "acct-a");
+      assert.equal(params[1], USER);
+      assert.equal(params[2], "1000000000");
+      return { rows: [{ id: "acct-a" }], rowCount: 1 };
+    },
+  }, {
+    ownerUserId: USER,
+    executionAccountId: "acct-a",
+    confirmation: RECORD_OWNED_CASH_CONFIRMATION,
+    subaccount: 1,
+    exchangeIndex: 2,
+    observedAtMs: NOW,
+    nowMs: NOW,
+    maxAgeMs: 15_000,
+    subaccountBalance: { balance_dollars: "1000.00" },
+    primaryBalance: { balance_dollars: "25000.00" },
+  });
+  assert.equal(recorded.ok, true);
+  assert.equal(recorded.cashCents, 100_000);
+  assert.equal(recorded.transferAttempted, false);
+  assert.equal(sql.includes("execution_enabled"), false);
+  assert.equal(sql.includes("kill_switch"), false);
+  const skipped = await persistOwnedCashReconciliation({
+    query: async () => { throw new Error("write_not_allowed"); },
+  }, {
+    ownerUserId: USER, executionAccountId: "acct-a", confirmation: "no",
+    subaccount: 1, exchangeIndex: 2, observedAtMs: NOW, nowMs: NOW, maxAgeMs: 15_000,
+    subaccountBalance: { balance: 100 }, primaryBalance: {},
+  });
+  assert.equal(skipped.reason, "explicit_authorization_required");
+});
+
+test("the market adapter stays disabled until a reader is bound, and global fetch cannot submit", async () => {
+  const closed = new AccountScopedExchange(state(false));
+  await assert.rejects(() => closed.market("KXBTC15M-TEST", "YES"), /operation_not_enabled/);
+  const opened = new AccountScopedExchange(state(false), null, null, null, null, async () => evidence());
+  assert.equal((await opened.market("KXBTC15M-TEST", "YES")).bestAskDollars, "0.5000");
+  await assert.rejects(() => opened.market("OTHER", "YES"), /production_market_invalid/);
+  await assert.rejects(() => opened.snapshot(
+    { subaccount: 0, exchangeIndex: 2, keyFingerprint: "ab".repeat(32) }, 0,
+  ), /account_target_pair_mismatch/);
+  await assert.rejects(() => opened.snapshot(
+    { subaccount: 1, exchangeIndex: 2, keyFingerprint: "cd".repeat(32) }, 0,
+  ), /credential_fingerprint_mismatch/);
+  const key = keyMaterial();
+  const wire = accountOrderTransmission(key, order());
+  assert.equal(wire.body.includes("\"subaccount\":1"), true);
+  assert.equal(wire.body.includes("\"exchange_index\":2"), true);
+  assert.equal(wire.body.includes("immediate_or_cancel"), true);
+  assert.equal(wire.body.includes(key.privateKey), false);
+  const globalTransport = new AccountScopedExchange(state(true), key, null, fetch);
+  const blocked = await scheduleOwnedAccountWorker({ worker: fakeWorker(), exchange: globalTransport }, "entries");
+  assert.equal(blocked.reason, "personal_submission_not_authorized");
+  assert.equal(blocked.workerStarted, false);
+  assert.equal(productionPersonalSession().isScheduled(USER, "acct-a"), false);
+  const production = await productionPersonalSession().start({ userId: USER, accountId: "acct-a", action: "START" });
+  assert.equal(production.workerStarted, false);
+  assert.equal(production.reason, "personal_signer_unavailable");
+  const worker = fakeWorker();
+  await worker.start();
+  const supervisor = createOwnedTradingSupervisor(async () => ({ ok: true, worker }));
+  const started = await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  assert.equal(started.reason, "worker_scheduled");
+  assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  assert.equal(supervisor.isScheduled(OTHER, "acct-a"), false);
+  const halted = await supervisor.stopOwner(USER);
+  assert.equal(halted.workerStopped, true);
+  assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+});
+
+for (const ownerWide of [false, true]) {
+  for (const action of ["STOP", "KILL"] as const) {
+    test(`${ownerWide ? "owner-wide" : "account"} ${action} waits for an in-flight START before reporting completion`, async () => {
+      let release!: () => void;
+      const waiting = new Promise<void>(resolve => { release = resolve; });
+      const worker = fakeWorker();
+      const dispatch = state(true);
+      const disarmed: string[] = [];
+      const supervisor = createOwnedTradingSupervisor(async () => {
+        await waiting;
+        await worker.start();
+        return { ok: true, worker, state: dispatch, disarm: async (command) => {
+          disarmed.push(command);
+          return { entriesBlocked: true, managingExposure: false };
+        } };
+      });
+      const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+      let completed = false;
+      const stopping = (ownerWide ? supervisor.stopOwner(USER, action)
+        : supervisor.stop({ userId: USER, accountId: "acct-a", action }))
+        .then(result => { completed = true; return result; });
+      try {
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(completed, false, "a pending START is not evidence that the worker is stopped");
+        release();
+        await starting;
+        assert.equal((await stopping).workerStopped, true);
+        assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+        assert.equal(worker.isScheduled(), false);
+        assert.equal(dispatch.entriesAuthorized, false);
+        assert.deepEqual(disarmed, [action]);
+        if (action === "KILL") {
+          assert.equal(dispatch.accountKill, true);
+          assert.equal(dispatch.presentedToken, -1);
+        }
+      } finally {
+        release();
+        await Promise.allSettled([starting, stopping]);
+        worker.stop();
+      }
+    });
+  }
+}
+
+test("concurrent owner START requests share one opening worker", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  let opens = 0;
+  const worker = fakeWorker();
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    opens++;
+    await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  const first = supervisor.start(input), second = supervisor.start(input);
+  try {
+    release();
+    const results = await Promise.all([first, second]);
+    assert.equal(opens, 1);
+    assert.equal(worker.starts, 1);
+    assert.ok(results.every(result => result.workerStarted));
+  } finally { worker.stop(); }
+});
+
+test("pending START retains its owner and cannot be stopped or joined by another owner", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  let opens = 0;
+  const worker = fakeWorker();
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    opens++;
+    if (opens === 1) await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const first = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  try {
+    const foreign = await supervisor.start({ userId: OTHER, accountId: "acct-a", action: "START" });
+    assert.deepEqual(foreign, { ok: false, reason: "foreign_execution_account", workerStarted: false });
+    const stopped = await supervisor.stop({ userId: OTHER, accountId: "acct-a" });
+    assert.equal(stopped.workerStopped, false);
+    assert.equal(opens, 1);
+    release();
+    assert.equal((await first).workerStarted, true);
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  } finally { release(); await first; worker.stop(); }
+});
+
+test("STOP during pending START preserves protective management when exposure exists", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const worker = fakeWorker(), dispatch = state(true);
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await waiting;
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async () =>
+      ({ entriesBlocked: true, managingExposure: true }) };
+  });
+  const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  const stopping = supervisor.stop({ userId: USER, accountId: "acct-a", action: "STOP" });
+  try {
+    release();
+    await starting;
+    assert.deepEqual(await stopping, { workerStopped: true, managingExposure: true });
+    assert.equal(dispatch.entriesAuthorized, false);
+    assert.equal(dispatch.accountKill, false);
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  } finally { worker.stop(); }
+});
+
+test("pending START failure does not report a verified STOP or poison a later START", async () => {
+  let reject!: (error: Error) => void;
+  const waiting = new Promise<void>((_resolve, fail) => { reject = fail; });
+  const worker = fakeWorker();
+  let opens = 0;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    if (++opens === 1) await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  const stopping = supervisor.stop({ userId: USER, accountId: "acct-a" });
+  reject(new Error("opening_failed"));
+  await assert.rejects(starting, /opening_failed/);
+  assert.equal((await stopping).workerStopped, false);
+  try {
+    const retried = await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+    assert.equal(retried.workerStarted, true);
+    assert.equal(opens, 2);
+  } finally { worker.stop(); }
+});
+
+test("owner-wide KILL closes every local entry gate before awaiting the first disarm", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const first = fakeWorker(), second = fakeWorker();
+  const states = [state(true), state(true)];
+  const supervisor = createOwnedTradingSupervisor(async input => {
+    const index = input.accountId === "acct-a" ? 0 : 1;
+    const worker = index === 0 ? first : second;
+    await worker.start();
+    return { ok: true, worker, state: states[index], disarm: async () => {
+      if (index === 0) await waiting;
+      return { entriesBlocked: true, managingExposure: false };
+    } };
+  });
+  await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  await supervisor.start({ userId: USER, accountId: "acct-b", action: "START" });
+  const stopping = supervisor.stopOwner(USER, "KILL");
+  try {
+    assert.ok(states.every(dispatch => dispatch.entriesAuthorized === false));
+    assert.ok(states.every(dispatch => dispatch.accountKill === true));
+    release();
+    assert.equal((await stopping).workerStopped, true);
+    assert.equal(first.isScheduled(), false);
+    assert.equal(second.isScheduled(), false);
+  } finally { release(); await stopping; first.stop(); second.stop(); }
+});
+
+test("entry scheduling starts one worker and a second start does not", async () => {
+  const calls: string[] = [];
+  const worker = fakeWorker();
+  const exchange = new AccountScopedExchange(state(true), null, null, async () => new Response("{}", { status: 200 }));
+  const first = await scheduleOwnedAccountWorker({ worker, exchange }, "entries");
+  calls.push(first.reason);
+  const second = await scheduleOwnedAccountWorker({ worker, exchange }, "entries");
+  assert.equal(first.workerStarted, true);
+  assert.equal(first.executionActive, false);
+  assert.equal(second.reason, "worker_already_running");
+  assert.equal(worker.starts, 1);
+  worker.stop();
+  const liveOff = new AccountScopedExchange(state(false), null, null, async () => new Response("{}", { status: 200 }));
+  const refused = await scheduleOwnedAccountWorker({ worker: fakeWorker(), exchange: liveOff }, "entries");
+  assert.equal(refused.reason, "live_execution_not_enabled");
+  assert.equal(calls[0], "worker_scheduled");
+  const pool = { query: async () => { throw new Error("pool_not_used"); }, connect: async () => { throw new Error("pool_not_used"); } } as unknown as Pool;
+  const bound = openOwnedExecutionSession({
+    pool, ownerUserId: USER, executionAccountId: "acct-a", state: state(false), intervalMs: 60_000,
+  });
+  assert.equal(bound.workerStarted, false);
+  assert.equal(bound.executionActive, false);
+  assert.equal(bound.worker.isScheduled(), false);
+  assert.equal(bound.exchange.state.liveExecutionEnabled, false);
+});
+
+function fee() {
+  return {
+    policyVersion: "test-fees", sourceUrl: "https://invalid.test/fees", formulaVersion: "test-v1",
+    fingerprint: "fee-evidence-fingerprint", verifiedAtMs: NOW, contracts: 2, limitPrice: 0.5,
+    reservedEntryFeeCents: 1, reservedExitFeeCents: 1,
+  };
+}
+
+function evidence(): MarketEvidence {
+  return {
+    observedAtMs: NOW, bestAskDollars: "0.5000", asks: [{ priceDollars: "0.5000", availableContracts: "8" }],
+    bestBidDollars: "0.4500", bids: [{ priceDollars: "0.4500", availableContracts: "12" }], fee: fee(),
+  };
+}
+
+function policyInput(limits: {
+  capitalLimitCents: number; maxEntryStakeCents: number; maxEntryAllInCents: number;
+  maxDailyLossCents: number; maxTotalLossCents: number; maxQuoteAgeMs: number; maxFeeEvidenceAgeMs: number;
+}) {
+  return {
+    ownerUserId: USER,
+    executionAccountId: "acct-a",
+    policyId: "policy-a",
+    version: 1,
+    confirmation: APPROVE_OWNED_POLICY_CONFIRMATION,
+    limits,
+    fee: { policyVersion: "test-fees", sourceUrl: "https://invalid.test/fees", formulaVersion: "test-v1" },
+    champion: {
+      reviewId: "review-1",
+      evidenceHash: "a".repeat(64),
+      selectedBy: USER,
+      selectedAt: new Date(NOW - 1_000),
+    },
+    approvedAt: new Date(NOW),
+  };
+}
+
+function state(live: boolean): AccountDispatchState {
+  return {
+    leaseState: "owned", armRequested: true, accountKill: false, globalKill: false,
+    fencingToken: 2, presentedToken: 2, workerActuallyScheduled: false,
+    authenticatedUserId: USER, ownerUserId: USER,
+    credentialFingerprint: "ab".repeat(32), presentedFingerprint: "ab".repeat(32),
+    uncertainOrderCount: 0, duplicateClientOrder: false, liveExecutionEnabled: live,
+  };
+}
+
+function order(): Request {
+  return {
+    market: "KXBTC15M-TEST", side: "YES", action: "BUY", contracts: 1, limitMicros: 500_000,
+    timeInForce: "IOC", reduceOnly: false, clientOrderId: `v13p-${USER}`,
+  };
+}
+
+test("production START requires exact fresh cash parity regardless of historical settled orders",()=>{
+  const base={
+    ledgerMicros:"25000000",
+    exchangeMicros:"25000000",
+    reservedMicros:"0",
+    reconciledAt:new Date(NOW).toISOString(),
+    observedAtMs:NOW,
+  };
+  assert.deepEqual(verifiedStartCash(base),{ok:true});
+  // A former order and settled fill never exempt a cash mismatch. This
+  // predicate intentionally does not depend on the order-history length.
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"24900000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reservedMicros:"26000000"}),{
+    ok:false,reason:"cash_evidence_mismatch",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW-16*60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:null}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,reconciledAt:new Date(NOW+60_000).toISOString()}),{
+    ok:false,reason:"fresh_cash_reconciliation_required",
+  });
+  assert.deepEqual(verifiedStartCash({...base,exchangeMicros:"oops"}),{
+    ok:false,reason:"cash_evidence_unverified",
+  });
+});
+
+test("signed Kalshi portfolio GET rejects redirects before forwarding credentials",async()=>{
+ let requests=0,policy:string|undefined;
+ const transport=(async(_url:string,init?:RequestInit)=>{
+  requests++;
+  policy=init?.redirect;
+  return new Response("",{status:302,
+   headers:{location:"https://attacker.invalid/collect"}});
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",transport,"https://external-api.kalshi.com"),
+  (error:unknown)=>error instanceof KalshiApiError&&error.type==="HTTP_ERROR"&&error.status===302,
+ );
+ assert.equal(policy,"manual");
+ assert.equal(requests,1);
+});
+test("signed Kalshi transport failures are typed, secret-free, and never retried",async()=>{
+ let sent=0;
+ const failing=(async()=>{
+  sent++;
+  throw new Error("internal connection error with private_key=must_not_surface");
+ }) as typeof fetch;
+ await assert.rejects(
+  getScopedKalshiJson(keyMaterial(),"/trade-api/v2/portfolio/balance",
+   "?subaccount=1&exchange_index=2",failing,"https://external-api.kalshi.com"),
+  (err:unknown)=>err instanceof KalshiApiError&&err.type==="NETWORK_ERROR"&&
+    !/private_key|must_not_surface/.test(err.message),
+ );
+ assert.equal(sent,1);
+});
+test("owner exchange qualification distinguishes signed GET rejection and 429 without retries or secret leakage",async()=>{
+ const variants=[
+  {error:new KalshiApiError("HTTP_ERROR",401),reason:"kalshi_read_authentication_rejected"},
+  {error:new KalshiApiError("HTTP_ERROR",403),reason:"kalshi_read_permission_denied"},
+  {error:new KalshiApiError("HTTP_ERROR",429),reason:"kalshi_read_rate_limited"},
+  {error:new KalshiApiError("HTTP_ERROR",503),reason:"kalshi_read_provider_unavailable"},
+  {error:new KalshiApiError("INVALID_CREDENTIALS"),reason:"kalshi_read_signer_invalid"},
+  {error:new KalshiApiError("NOT_CONFIGURED"),reason:"kalshi_read_signer_not_configured"},
+  {error:new KalshiApiError("NETWORK_ERROR"),reason:"kalshi_read_network_unavailable"},
+  {error:new Error("api_key_id=never-log private_key=secret"),reason:"kalshi_read_failed"},
+ ];
+ for(const row of variants){
+  assert.equal(classifyOwnedKalshiReadFailure(row.error),row.reason);
+  let calls=0;
+  const res=await readOwnedKalshiFeeds(keyMaterial(),NOW,async()=>{
+    calls++;throw row.error;
+  });
+  assert.deepEqual(res,{ok:false,reason:row.reason});
+  assert.equal(calls,1,"never retry a failed signed read in one attempt");
+  assert.doesNotMatch(JSON.stringify(res),/api_key_id|private_key|secret/);
+ }
+ for(const row of variants.slice(0,4)){
+  let calls=0;
+  const res=await readOwnedKalshiFeeds(keyMaterial(),NOW,async(_creds,path)=>{
+    calls++;
+    if(path.includes("balance"))return {balance_dollars:"25.0000",subaccount:1,exchange_index:2};
+    throw row.error;
+  });
+  assert.deepEqual(res,{ok:false,reason:row.reason});
+  assert.equal(calls,2,"failure must abort first history page without retries");
+ }
+});
+test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async (t) => {
+  // This unit fixture has mocked SQL/transport, not genuine release approvals.
+  // Explicitly select the existing isolated-test startup path so this test
+  // exercises cash mismatch rather than an unrelated missing release gate.
+  const keys=["NODE_ENV","RAILWAY_PROJECT_ID","RAILWAY_SERVICE_ID","RAILWAY_ENVIRONMENT_ID","RAILWAY_GIT_COMMIT_SHA"];
+  const saved=new Map(keys.map(key=>[key,process.env[key]]));
+  t.after(()=>{for(const [key,value] of saved){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  process.env.NODE_ENV="test";for(const key of keys.slice(1))delete process.env[key];
+  const queries: string[] = [];
+  const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
+    queries.push(`${path}${query}`);
+    if (path.includes("balance")) return { balance_dollars: "1.0000", subaccount: 1, exchange_index: 2 };
+    if (path.includes("orders")) return { orders: [], cursor: "more" };
+    if (path.includes("positions")) return { market_positions: [] };
+    if (path.includes("fills")) return { fills: [] };
+    return { settlements: [] };
+  });
+  assert.equal(paged.ok, false);
+  if (!paged.ok) assert.equal(paged.reason, "personal_exchange_history_unreconciled");
+  assert.equal(queries.some((query) => query.includes("exchange_index=2") && query.includes("balance")), true);
+  const followed = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
+    if (!query.includes("exchange_index=2")) throw new Error("missing_exchange_index");
+    if (path.includes("balance")) return { balance_dollars: "1.0000", subaccount: 1, exchange_index: 1 };
+    if (path.includes("orders")) return { orders: [] };
+    if (path.includes("positions")) return { market_positions: [] };
+    if (path.includes("fills")) return { fills: [] };
+    return { settlements: [] };
+  });
+  assert.equal(followed.ok, false);
+  if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
+  const material = keyMaterial();
+  const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
+  let feeChecks = 0;
+  const session = createProductionPersonalSession({
+    async query(text: string) {
+      if (text.includes("personal-session:signer")) {
+        return { rows: [{
+          key_fingerprint: fingerprint, credential_fingerprint: fingerprint,
+          decrypted_secret: JSON.stringify({ api_key_id: material.keyId, private_key: material.privateKey }),
+          commissioned: true, execution_enabled: true, kill_switch: false, cash_precision_verified: true,
+          cash_micros: "1000000", reserved_micros: "0", reconciled_at: new Date(NOW).toISOString(),
+           fee_artifact_digest: "ab".repeat(32), policy_hash: "cd".repeat(32),
+          fee_policy_version: "standing", fee_source_url: "https://kalshi.com/fees", fee_formula_version: "quadratic",
+          policy_state: "APPROVED", configured_stake_cents: "100", subaccount: 1, exchange_index: 2,
+        }] };
+      }
+      if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      return { rows: [] };
+    },
+  }, {
+    now: () => NOW,
+    verifyFee: async () => {
+      feeChecks += 1;
+      return {
+        status: "verified" as const, valid: true, sourceUrl: "https://kalshi.com/fees",
+        digest: "ab".repeat(32), formulaVersion: "quadratic", verifiedAt: NOW, reason: null,
+      };
+    },
+    kalshiGet: async (_creds, path) => {
+      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("orders")) return { orders: [] };
+      if (path.includes("positions")) return { market_positions: [] };
+      if (path.includes("fills")) return { fills: [] };
+      return { settlements: [] };
+    },
+  });
+  const refused = await session.start({ userId: USER, accountId: "acct-a", action: "START" });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "cash_evidence_mismatch");
+  assert.equal(feeChecks, 0);
+  assert.equal(session.isScheduled(USER, "acct-a"), false);
+  const open = emptySnapshot(
+    { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
+    { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
+  );
+  assert.equal("reason" in open && open.reason, "personal_exchange_history_unreconciled");
+  const request = order();
+  const mapped = personalAccountSnapshot(
+    { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
+    {
+      ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "900000",
+      orders: [{
+        order_id: "ord-1", client_order_id: request.clientOrderId, ticker: request.market,
+        status: "executed", side: "bid", price: "0.5000", initial_count_fp: "1.00", fill_count_fp: "1.00",
+        subaccount: 1, exchange_index: 2,
+      }],
+      fills: [{
+        trade_id: "fill-1", order_id: "ord-1", ticker: request.market, count_fp: "1.00",
+        yes_price_dollars: "0.500000", fee_cost: "0.010000", created_time: new Date(NOW).toISOString(),
+        subaccount: 1, exchange_index: 2,
+      }],
+      positions: [{ ticker: request.market, position_fp: "1.00", subaccount: 1, exchange_index: 2 }],
+      settlements: [],
+    },
+    [request],
+  );
+  assert.equal("orders" in mapped && mapped.orders.length, 1);
+  if ("orders" in mapped) assert.equal(mapped.orders[0]?.request, request);
+  const halted = createOwnedTradingSupervisor(async () => ({
+    ok: true,
+    worker: { isScheduled: () => true, async start() {}, async startRecovery() {}, stop() {} },
+    disarm: async () => ({ entriesBlocked: false, managingExposure: false }),
+  }));
+  assert.equal((await halted.start({ userId: USER, accountId: "acct-a", action: "START" })).workerStarted, true);
+  const blocked = await halted.stop({ userId: USER, accountId: "acct-a" });
+  assert.equal(blocked.workerStopped, false);
+  assert.equal(halted.isScheduled(USER, "acct-a"), true);
+});
+
+test("risk-frozen commissioned account cannot START even with account/global flags permissive",async()=>{
+ const material=keyMaterial();
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey);
+ let exchangeCalls=0;
+ const session=createProductionPersonalSession({
+  async query(sql:string){
+   if(sql.includes("personal-session:signer")){
+    assert.ok(sql.includes("a.blocked_reason"));
+    return {rows:[{
+     key_fingerprint:fingerprint,credential_fingerprint:fingerprint,
+     decrypted_secret:JSON.stringify({api_key_id:material.keyId,private_key:material.privateKey}),
+     commissioned:true,execution_enabled:true,kill_switch:false,
+     blocked_reason:"awaiting_account_commissioning",
+     cash_precision_verified:true,cash_micros:"25000000",
+     subaccount:1,exchange_index:2,
+     fee_artifact_digest:"ab".repeat(32),policy_hash:"cd".repeat(32),
+     fee_policy_version:"standing",fee_source_url:"https://kalshi.com/fees",
+     fee_formula_version:"quadratic",policy_state:"APPROVED",configured_stake_cents:"500"
+    }]};
+   }
+   throw Error("risk freeze must prevent subsequent database and lease operations");
+  },
+ },{
+  now:()=>NOW,
+  verifyFee:async()=>{exchangeCalls++;throw Error("fee check must not run");},
+  kalshiGet:async()=>{exchangeCalls++;throw Error("exchange request must not run");},
+ });
+ const result=await session.start({userId:USER,accountId:"frozen-owner",action:"START"});
+ assert.equal(result.ok,false);
+ assert.equal(result.reason,"execution_account_risk_freeze_requires_reconciliation");
+ assert.equal(result.workerStarted,false);
+ assert.equal(session.isScheduled(USER,"frozen-owner"),false);
+ assert.equal(exchangeCalls,0);
+});
+
+test("cash and commissioning writes require explicit confirmation", async () => {
+  const db = { query: async () => { throw new Error("no_write"); } };
+  const cash = await reconcileOwnedSubaccountCash(db, { ownerUserId: USER, confirmation: "no", nowMs: NOW });
+  assert.equal(cash.reason, "explicit_authorization_required");
+  assert.equal(cash.transferAttempted, false);
+  const commission = await commissionOwnedAccount(db, {
+    ownerUserId: USER, confirmation: "no", feeArtifactDigest: "ab".repeat(32), minimumExitMicros: 1,
+  });
+  assert.equal(commission.reason, "explicit_authorization_required");
+  assert.equal(COMMISSION_OWNED_ACCOUNT_CONFIRMATION.includes("COMMISSION_OWNED_STRATA_ACCOUNT"), true);
+});
+
+test("owned market evidence uses the configured stake and rejects an unproven fee grid", () => {
+  const book = { orderbook_fp: { yes_dollars: [["0.4500", "100"]], no_dollars: [["0.5000", "100"]] } };
+  const series = { series: { ticker: "KXBTC15M", exchange_index: 2, fee_type: "quadratic", fee_multiplier: "1" } };
+  const eventTicker = "KXBTC15M-TEST-EVENT";
+  const close = new Date(NOW + 15*60_000).toISOString();
+  const expires = new Date(NOW + 16*60_000).toISOString();
+  const eventPayload = { event: { event_ticker: eventTicker, series_ticker: "KXBTC15M",
+    exchange_index: 2, fee_type_override: null, fee_multiplier_override: null } };
+  const seriesChangesPayload = { series_fee_change_arr: [], cursor: "" };
+  const eventChangesPayload = { event_fee_changes: [], cursor: "" };
+  const market = { market: { ticker: "KXBTC15M-TEST", event_ticker: eventTicker,
+    close_time: close, expiration_time: expires, latest_expiration_time: expires,
+    expected_expiration_time: expires, exchange_index: 2, status: "active", price_level_structure: "deci_cent" } };
+  const evidence = ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series, marketPayload: market,
+    eventPayload, seriesChangesPayload, eventChangesPayload,
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  });
+  assert.equal(evidence.bestAskDollars, "0.5000");
+  assert.equal(evidence.fee.contracts >= 1, true);
+  const tapered = ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book, seriesPayload: series,
+    marketPayload: {
+      market: {
+        ticker: "KXBTC15M-TEST", event_ticker: eventTicker, exchange_index: 2, status: "active",
+        close_time: close, expiration_time: expires, latest_expiration_time: expires,
+        expected_expiration_time: expires, price_level_structure: "tapered_deci_cent",
+        price_ranges: [
+          { start: "0.0000", end: "0.1000", step: "0.0010" },
+          { start: "0.1000", end: "0.9000", step: "0.0100" },
+          { start: "0.9000", end: "1.0000", step: "0.0010" },
+        ],
+      },
+    },
+    eventPayload, seriesChangesPayload, eventChangesPayload,
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  });
+  assert.equal(tapered.fee.contracts, evidence.fee.contracts);
+  // Actual verified reader -> cash-sized plan: only the affordable top three
+  // contracts are needed, and deeper/higher-priced liquidity is not invented.
+  for(const quantity of ["3.00","3.99","100.00"]){
+    const actual=ownedMarketEvidence({market:"KXBTC15M-TEST",side:"YES",
+      bookPayload:{orderbook_fp:{yes_dollars:[["0.5100","100"]],no_dollars:[["0.4800",quantity],["0.4700","100"]]}},
+      seriesPayload:series,marketPayload:market,eventPayload,seriesChangesPayload,eventChangesPayload,
+      observedAtMs:NOW,nowMs:NOW,configuredStakeCents:500,policyVersion:"standing",sourceUrl:"https://kalshi.com/fees",
+      formulaVersion:"quadratic",artifactDigest:"ab".repeat(32),policyHash:"cd".repeat(32),verifiedAtMs:NOW});
+    const planned=planCashBoundEntry({signal:"SCOUT",direction:"UP",referenceOffer:.52,maxStakeCents:500,
+      bestAskDollars:actual.bestAskDollars,askLevels:actual.asks,fee:actual.fee,budgetCents:625});
+    assert.ok(planned.ok);assert.equal(planned.plan.contracts,3);assert.equal(planned.plan.limitPrice,.52);
+    assert.equal(planned.cashRisk.plannedAllInCents,600);
+  }
+  assert.throws(() => ownedMarketEvidence({
+    market: "KXBTC15M-TEST", side: "YES", bookPayload: book,
+    seriesPayload: { series: { ticker: "OTHER", fee_type: "quadratic", fee_multiplier: "1" } },
+    marketPayload: market, eventPayload, seriesChangesPayload, eventChangesPayload,
+    observedAtMs: NOW, nowMs: NOW, configuredStakeCents: 100,
+    policyVersion: "standing", sourceUrl: "https://kalshi.com/fees", formulaVersion: "quadratic",
+    artifactDigest: "ab".repeat(32), policyHash: "cd".repeat(32), verifiedAtMs: NOW,
+  }), /production_event_fee_evidence_unverified/);
+});
+
+test("commissioning requires an explicit minimum exit and activation does not change flags", async () => {
+  const missingExit = await commissionOwnedAccount(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      confirmation: COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
+      feeArtifactDigest: "ab".repeat(32),
+      minimumExitMicros: 0,
+    },
+  );
+  assert.equal(missingExit.reason, "minimum_exit_missing");
+  const oversized = await createOwnedPolicyDraft(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      executionAccountId: "acct-a",
+      limits: {
+        capitalLimitCents: 100,
+        maxEntryStakeCents: 2_500_001,
+        maxEntryAllInCents: 100,
+        maxDailyLossCents: 100,
+        maxTotalLossCents: 100,
+        maxQuoteAgeMs: 1_000,
+        maxFeeEvidenceAgeMs: 1_000,
+      },
+    },
+  );
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) assert.equal(oversized.reason, "policy_limits_invalid");
+  const mismatch = await approveOwnedPolicyForUser(
+    { query: async () => { throw new Error("no_write"); } },
+    {
+      ownerUserId: USER,
+      executionAccountId: "acct-a",
+      verifyFee: async () => { throw new Error("fee_called"); },
+      body: {
+        confirmation: APPROVE_OWNED_POLICY_CONFIRMATION,
+        policyId: "policy-1",
+        version: 1,
+        feeArtifactDigest: "ab".repeat(32),
+        limits: {
+          capitalLimitCents: 2_500_000, maxEntryStakeCents: 500, maxEntryAllInCents: 500,
+          maxDailyLossCents: 100, maxTotalLossCents: 100, maxQuoteAgeMs: 1_000, maxFeeEvidenceAgeMs: 1_000,
+        },
+        champion: {
+          reviewId: "not-the-reviewed-release",
+          evidenceHash: "ab".repeat(32),
+          selectedBy: USER,
+          selectedAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    },
+  );
+  assert.equal(mismatch.reason, "champion_evidence_mismatch");
+  const writes: string[] = [];
+  const ready = {
+    id: "acct-a", subaccount: 1, exchange_index: 2,
+    key_fingerprint: "aa".repeat(32), credential_fingerprint: "aa".repeat(32),
+    policy_state: "APPROVED", policy_id: "policy-1", configured_stake_cents: 100,
+    cash_precision_verified: true, cash_micros: "25000000",
+    reconciled_at: "2026-10-13T18:00:00.000Z",
+    verified_funding_at: "2026-10-13T17:59:00.000Z",
+    minimum_exit_micros: 1_000,
+    fee_artifact_digest: "bb".repeat(32), commissioned: true, execution_enabled: false,
+    kill_switch: true, commissioning_digest: "cc".repeat(32), activation_requests: 0,
+  };
+  const requested = await requestOwnedAccountActivation({
+    query: async (sql) => {
+      writes.push(sql);
+      if (sql.includes("UPDATE")) throw new Error("activation_request_wrote_state");
+      if (sql.includes("WITH unresolved_intents")) return { rows: [{ n: "0" }] };
+      if (sql.includes("INSERT INTO v13_production_observation")) return { rows: [], rowCount: 1 };
+      return { rows: [ready] };
+    },
+  }, { ownerUserId: USER, confirmation: REQUEST_OWNED_ACTIVATION_CONFIRMATION });
+  assert.equal(requested.ok, true);
+  assert.equal(requested.executionEnabled, false);
+  assert.equal(requested.killSwitchCleared, false);
+  assert.equal(requested.liveEnabled, false);
+  assert.equal(writes.some((sql) => sql.includes("UPDATE")), false);
+  const legacy = await enableOwnedAccountExecution(
+    { query: async () => ({ rows: [] }) },
+    { executionAccountId: "legacy-account", confirmation: ENABLE_OWNED_EXECUTION_CONFIRMATION },
+  );
+  assert.equal(legacy.ok, false);
+  assert.equal(legacy.accountsTouched, 0);
+  assert.equal(legacy.globalFlagsChanged, false);
+});
+
+function keyMaterial() {
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const material = { keyId: "user-key", privateKey: pair.privateKey.export({ type: "pkcs1", format: "pem" }).toString() };
+  assert.ok(dedicatedSignerFingerprint(material.keyId, material.privateKey));
+  return material;
+}
+
+function fakeWorker() {
+  let scheduled = false;
+  return {
+    starts: 0,
+    isScheduled() { return scheduled; },
+    async start() { this.starts += 1; scheduled = true; },
+    async startRecovery() { this.starts += 1; scheduled = true; },
+    stop() { scheduled = false; },
+  };
+}
+
+test("STOP keeps exit worker for positions, nonterminal orders and UNKNOWN intents",()=>{
+ for(const state of [
+   {positions:"1",orders:"0",unresolved:"0"},
+   {positions:"0",orders:"1",unresolved:"0"},
+   {positions:"0",orders:"0",unresolved:"1"},
+ ])assert.deepEqual(classifyStopExposureRow(state),{ok:true,managingExposure:true});
+ assert.deepEqual(classifyStopExposureRow({positions:"0",orders:"0",unresolved:"0"}),{ok:true,managingExposure:false});
+});
+
+test("STOP fails closed when position or order evidence is absent, invalid or unsafe",()=>{
+ for(const row of [
+   undefined,{positions:"0",orders:"0"},
+   {positions:null,orders:"0",unresolved:"0"},
+   {positions:"0",orders:"0",unresolved:"NaN"},
+   {positions:"0",orders:"0",unresolved:"-1"},
+   {positions:"0",orders:"0",unresolved:"9007199254740993"},
+   {positions:"0",orders:0.5,unresolved:"0"},
+ ])assert.deepEqual(classifyStopExposureRow(row),{ok:false,reason:"stop_exposure_unverified"});
+});
+
+test("a currently closed signed technical entry gate refuses before order transport or signer access", async () => {
+ const fingerprint="a".repeat(64);
+ const state:AccountDispatchState={
+  leaseState:"owned",armRequested:true,accountKill:false,globalKill:false,
+  fencingToken:1,presentedToken:1,workerActuallyScheduled:true,
+  authenticatedUserId:USER,ownerUserId:USER,
+  credentialFingerprint:fingerprint,presentedFingerprint:fingerprint,
+  uncertainOrderCount:0,duplicateClientOrder:false,
+  liveExecutionEnabled:true,entriesAuthorized:true,
+ };
+ const exchange=new AccountScopedExchange(state,null,null,null,null,null,()=>false);
+ let finalCalls=0;
+ await assert.rejects(exchange.submit({reduceOnly:false} as Request,async()=>{finalCalls++;}),
+   /entries_stopped/);
+ assert.equal(finalCalls,0);
+ assert.equal(exchange.fetchCalls,0);
+ // A renewed release must not override a persisted STOP even if technically valid.
+ const restored=new AccountScopedExchange({...state,entriesAuthorized:false},
+  null,null,null,null,null,()=>true);
+ await assert.rejects(restored.submit({reduceOnly:false} as Request,async()=>{finalCalls++;}),
+   /entries_stopped/);
+ assert.equal(finalCalls,0);
+});
+
+test("START compares fractional-cent cash exactly and retains freshness and reserve gates",()=>{
+ const proof={ledgerMicros:"24482500",exchangeMicros:"24482500",reservedMicros:"1",reconciledAt:new Date(NOW),observedAtMs:NOW};
+ assert.deepEqual(verifiedStartCash(proof),{ok:true});
+ assert.deepEqual(verifiedStartCash({...proof,exchangeMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
+ assert.deepEqual(verifiedStartCash({...proof,reservedMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
+ assert.deepEqual(verifiedStartCash({...proof,observedAtMs:NOW+900001}),{ok:false,reason:"fresh_cash_reconciliation_required"});
+});
+
+
+test("failed-start cleanup pins holder and token and refuses an unverified acquisition", async () => {
+  const { releaseFailedStartLease } = await import("./failedStartLeaseCleanup");
+  const calls: Array<{ sql: string; args: unknown[] | undefined }> = [];
+  const db = { query: async (sql: string, args?: unknown[]) => {
+    calls.push({ sql, args }); return { rows: [] };
+  } };
+  const input = { executionAccountId: "acct-a", ownerUserId: USER,
+    holderId: "opening-worker", fencingToken: 7, now: new Date(NOW).toISOString() };
+  await releaseFailedStartLease(db, input);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /holder_id = \$4 AND fencing_token = \$5::bigint/);
+  assert.match(calls[0]!.sql, /state = 'owned' AND account_kill = false/);
+  assert.deepEqual(calls[0]!.args, ["acct-a", USER, input.now, "opening-worker", 7]);
+  for (const invalid of [{ holderId: "" }, { fencingToken: NaN }, { fencingToken: 0 },
+    { fencingToken: Number.MAX_SAFE_INTEGER + 1 }]) {
+    assert.throws(() => releaseFailedStartLease(db, { ...input, ...invalid }),
+      /failed_start_lease_identity_unverified/);
+  }
+  assert.equal(calls.length, 1);
+});
+
+
+for (const ownerWide of [false, true]) {
+  test(`${ownerWide ? "owner-wide" : "account"} overlapping STOP cannot orphan a replacement after an older disarm completes`, async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const first = fakeWorker(), replacement = fakeWorker();
+    let opens = 0, disarms = 0;
+    const supervisor = createOwnedTradingSupervisor(async () => {
+      const worker = ++opens === 1 ? first : replacement;
+      await worker.start();
+      return { ok: true, worker, state: state(true), disarm: async () => {
+        if (++disarms === 1) await waiting;
+        return { entriesBlocked: true, managingExposure: false };
+      } };
+    });
+    const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+    await supervisor.start(input);
+    const slowStop = ownerWide ? supervisor.stopOwner(USER) : supervisor.stop({ ...input, action: "STOP" });
+    try {
+      assert.equal((await supervisor.stop({ ...input, action: "STOP" })).workerStopped, true);
+      assert.equal(first.isScheduled(), false);
+      assert.deepEqual(await supervisor.start(input),
+        { ok: false, reason: "worker_control_in_progress", workerStarted: false });
+      assert.equal(opens, 1, "old disarm must finish before any successor acquisition");
+      assert.deepEqual(await supervisor.start({ ...input, userId: OTHER }),
+        { ok: false, reason: "foreign_execution_account", workerStarted: false });
+      release();
+      assert.equal((await slowStop).workerStopped, true);
+      assert.equal((await supervisor.start(input)).workerStarted, true);
+      assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+      assert.equal(replacement.isScheduled(), true);
+      assert.equal((await supervisor.stop({ ...input, action: "KILL" })).workerStopped, true);
+      assert.equal(replacement.isScheduled(), false, "successor remains tracked and killable");
+    } finally { release(); await slowStop; first.stop(); replacement.stop(); }
+  });
+}
+
+test("overlapping STOP preserves exposure management and KILL is never queued behind a slow STOP", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const worker = fakeWorker(), dispatch = state(true);
+  let disarms = 0;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async action => {
+      if (++disarms === 1) await waiting;
+      return { entriesBlocked: true, managingExposure: action === "STOP" };
+    } };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  await supervisor.start(input);
+  const slowStop = supervisor.stop({ ...input, action: "STOP" });
+  try {
+    assert.deepEqual(await supervisor.stop({ ...input, action: "STOP" }), { workerStopped: true, managingExposure: true });
+    assert.equal(worker.isScheduled(), true);
+    assert.equal(dispatch.entriesAuthorized, false);
+    assert.equal((await supervisor.start(input)).reason, "worker_control_in_progress");
+    const killed = supervisor.stop({ ...input, action: "KILL" });
+    assert.equal(dispatch.accountKill, true, "KILL local fence closes synchronously");
+    assert.equal((await killed).workerStopped, true);
+    assert.equal(worker.isScheduled(), false);
+    release();
+    assert.deepEqual(await slowStop, { workerStopped: true, managingExposure: false },
+      "late STOP must not claim protective management after KILL");
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+    assert.equal(worker.isScheduled(), false, "old STOP cannot revive a killed worker");
+  } finally { release(); await slowStop; worker.stop(); }
+});
+
+test("failed asynchronous disarm releases the lifecycle barrier without authorizing entries", async () => {
+  const worker = fakeWorker(), dispatch = state(true);
+  let fail = true;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async () => {
+      if (fail) throw new Error("disarm_failed");
+      return { entriesBlocked: true, managingExposure: false };
+    } };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  await supervisor.start(input);
+  try {
+    await assert.rejects(supervisor.stop({ ...input, action: "STOP" }), /disarm_failed/);
+    assert.equal(dispatch.entriesAuthorized, false);
+    fail = false;
+    assert.equal((await supervisor.stop({ ...input, action: "KILL" })).workerStopped, true);
+    assert.equal((await supervisor.start(input)).reason, "worker_scheduled");
+    assert.equal(dispatch.entriesAuthorized, false, "lifecycle cleanup is not an entry grant");
+  } finally { worker.stop(); }
+});
+
+for (const failing of [false, true]) {
+  test(`owner-wide STOP blocks new same-owner accounts until every disarm settles, failure=${failing}`, async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const opened = new Map<string, ReturnType<typeof fakeWorker>>();
+    const supervisor = createOwnedTradingSupervisor(async input => {
+      const worker = fakeWorker(); opened.set(input.accountId, worker); await worker.start();
+      return { ok: true, worker, state: state(true), disarm: async () => {
+        if (input.accountId === "acct-a" && failing) throw new Error("first_disarm_failed");
+        if (input.accountId === "acct-b") await waiting;
+        return { entriesBlocked: true, managingExposure: false };
+      } };
+    });
+    const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+    await supervisor.start(input);
+    await supervisor.start({ ...input, accountId: "acct-b" });
+    let settled = false;
+    const stopping = supervisor.stopOwner(USER).then(
+      result => { settled = true; return { result }; },
+      error => { settled = true; return { error }; },
+    );
+    try {
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      assert.equal(settled, false);
+      assert.equal((await supervisor.start({ ...input, accountId: "acct-new" })).reason, "worker_control_in_progress");
+      assert.equal(opened.has("acct-new"), false);
+      assert.equal((await supervisor.start({ ...input, userId: OTHER, accountId: "foreign-account" })).workerStarted, true);
+      release();
+      const result = await stopping;
+      if (failing) assert.match(String("error" in result ? result.error : ""), /first_disarm_failed/);
+      else assert.equal("result" in result && result.result.workerStopped, true);
+      assert.equal((await supervisor.start({ ...input, accountId: "acct-new" })).workerStarted, true);
+      assert.equal(supervisor.isScheduled(OTHER, "foreign-account"), true, "owner STOP never changes another owner's worker");
+    } finally { release(); await stopping; for (const worker of opened.values()) worker.stop(); }
+  });
+}

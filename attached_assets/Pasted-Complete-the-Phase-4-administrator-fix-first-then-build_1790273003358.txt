@@ -1,0 +1,167 @@
+Complete the Phase 4 administrator fix first, then build Phase 5 MICRO_LIVE.
+
+FIRST — PHASE 4 AUTHORIZATION:
+
+1. Verify that production PHASE4_ADMIN_USER_ID matches the Clerk user ID presented by my currently signed-in production session. Do not display either ID in logs or output.
+2. Verify the previously completed Phase 4 route fix is present: production GET /phase4/account must use the same Clerk administrator authorization check as GET /phase4/state.
+3. Anonymous requests must return 401.
+4. Authenticated non-admin requests must return 403.
+5. My configured admin account must receive 200 from BOTH /phase4/state and /phase4/account.
+6. Verify the production dashboard no longer displays “Private Ledger Access Required” for the configured administrator.
+7. Do not change V1.3 strategy logic, the existing paper worker, historical paper data, or shadow records.
+
+Do not proceed to Phase 5 until all seven checks pass.
+
+THEN — PHASE 5 MICRO_LIVE IMPLEMENTATION:
+
+Build a completely separate real-money execution layer around the existing V1.3 strategy. Do NOT modify evaluateV13Strategy, Scout rules, Confirm rules, crossing logic, exit logic, pricing calculations, or paper testing.
+
+Keep the live executor DISABLED by default.
+
+Add explicit production gates:
+
+MICRO_LIVE_PRODUCTION_ENABLED=false
+
+LIVE_EXECUTION_ENABLED=false
+
+Require BOTH flags to be exactly true before an order can ever be submitted.
+
+The existing manual kill switch must also be OFF before submission. Any missing setting, API error, stale quote, stale BTC observation, database error, lease problem, authentication problem, or ambiguous state must fail closed and submit nothing.
+
+LIVE RISK RULES:
+
+* Starting live bankroll: $25
+* Scout initial stake: $2.50
+* Confirm/additional stake: maximum additional $2.50
+* Maximum total exposure in one market: $5
+* Maximum one open live position
+* No martingale
+* Never increase stake because of a loss
+* Never borrow, use margin, or exceed available Kalshi cash
+* Never place duplicate orders for the same market/crossing/trigger
+
+ARCHITECTURE:
+
+Preserve the existing PAPER_ONLY worker and SHADOW_LIVE observer exactly as separate systems.
+
+Add a new MICRO_LIVE execution service that consumes an already-qualified V1.3 trigger. It must NOT run another V1.3 evaluator.
+
+Before a live order:
+
+1. Re-read the current Kalshi orderbook.
+2. Verify the market ticker matches the qualifying evaluation.
+3. Verify side and trigger match.
+4. Verify quote freshness.
+5. Verify the offer still satisfies the existing V1.3 Scout/Confirm price ceiling.
+6. Verify remaining live bankroll.
+7. Verify the one-position limit.
+8. Verify no previous live order exists for that action key.
+9. Verify the kill switch.
+10. Verify both production execution flags.
+
+Add an idempotent live_orders ledger with:
+
+* internal order ID
+* market ticker
+* crossing/action key
+* Scout/Confirm
+* UP/DOWN
+* signal timestamp
+* BTC signal price
+* target
+* orderbook quote
+* requested limit price
+* requested contracts
+* requested stake
+* Kalshi external order ID
+* submission timestamp
+* accepted/rejected status
+* fills
+* average fill price
+* remaining quantity
+* cancellation status
+* close timestamp
+* realized P&L
+* failure reason
+
+Use database uniqueness constraints so process restarts or duplicate HTTP requests cannot submit the same live action twice.
+
+Add an authenticated admin-only MICRO_LIVE panel showing:
+
+* execution enabled/disabled
+* kill-switch state
+* live bankroll
+* available Kalshi balance
+* open exposure
+* realized live P&L
+* unrealized live P&L
+* live wins/losses
+* current live position
+* last attempted order
+* last accepted order
+* last rejection/error
+* current V1.3 signal
+
+Add an emergency administrator control that immediately disables new order submission. It must not depend on the frontend remaining open.
+
+LIVE ORDER CLIENT:
+
+Expand the Kalshi client only with the minimum documented endpoints required for:
+
+* submit limit order
+* read order
+* read fills
+* cancel an existing order
+
+Do not add transfers, withdrawals, deposits, portfolio transfers, account-management mutations, or unrelated mutation endpoints.
+
+All live orders must be LIMIT orders. Never use market orders.
+
+Add explicit request logging that does NOT log API private keys or authentication signatures.
+
+EXIT HANDLING:
+
+Use the same V1.3 exit/invalidating logic already used by the paper worker. When V1.3 says the position should close, use the current orderbook to generate a limit exit. Record partial fills accurately. Never assume an order filled merely because it was submitted.
+
+RESTART SAFETY:
+
+On server restart, reconcile:
+
+* open local live positions
+* Kalshi resting orders
+* Kalshi fills
+* available cash
+
+before permitting any new submission.
+
+If local state and Kalshi disagree, freeze new execution and surface an admin alert.
+
+TESTS:
+
+Build mock integration tests proving:
+
+* execution flags off = zero submissions
+* kill switch on = zero submissions
+* stale quote = zero submissions
+* excessive price = zero submissions
+* insufficient balance = zero submissions
+* duplicate action = exactly one submission
+* one-position cap works
+* restart reconciliation works
+* partial fills work
+* rejected orders do not consume phantom exposure
+* Scout cannot exceed $2.50 initial exposure
+* total exposure cannot exceed $5
+
+Rerun the V1.3 self-test and all 23 parity cases and prove they remain unchanged.
+
+IMPORTANT:
+
+Do NOT enable MICRO_LIVE.
+Do NOT turn LIVE_EXECUTION_ENABLED true.
+Do NOT submit a real Kalshi order.
+Do NOT initialize or alter live bankroll records in production yet.
+
+Build and test the live-money capability completely, create a checkpoint, and stop for my explicit approval before activation.
+
+Report exactly which files changed, all test results, the final production gates, and any remaining blockers.

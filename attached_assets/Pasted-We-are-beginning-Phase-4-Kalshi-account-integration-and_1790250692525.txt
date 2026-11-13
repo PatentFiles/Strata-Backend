@@ -1,0 +1,37 @@
+We are beginning Phase 4: Kalshi account integration and MICRO_LIVE architecture.
+
+Do NOT place real orders yet. Do NOT modify V1.3 or the existing PAPER_ONLY worker.
+
+Build a server-side, read-only Kalshi account integration using the current official Kalshi API. Credentials must exist only in production/development secrets and must never be returned to the frontend or logged.
+
+Phase 4A requirements:
+
+* Add Kalshi authenticated API client support.
+* Validate API authentication using read-only account endpoints.
+* Retrieve and expose, through our authenticated backend only:
+    * account connection status;
+    * available cash/balance;
+    * open orders;
+    * positions;
+    * recent fills/trades.
+* Do not implement or call order creation, cancellation, amendment, deposit or withdrawal endpoints yet.
+* Add a disabled-by-default MICRO_LIVE configuration model containing:
+    * live_execution_enabled = false
+    * live_capital_limit
+    * live_capital_remaining
+    * max_stake_per_trade
+    * max_daily_loss
+    * max_total_experiment_loss
+    * max_open_positions
+    * max_entry_price / slippage guard
+    * manual kill switch
+* Design the live executor so V1.3 PAPER_ONLY remains the authoritative research engine and continues regardless of live execution state.
+* Design idempotency so a market/crossing/trigger can never generate more than one live order.
+* Add a SHADOW_LIVE mode that consumes real Kalshi account/orderbook data and records the exact proposed order but cannot submit it.
+* Create separate tables for live execution configuration, proposed orders, real orders/fills, and live P&L. Do not mix these with forward_test_positions or account paper_history.
+* Add a notification-event framework for bankroll limit, kill switch, API failure, feed failure, live entry and live exit.
+* Add UI states: PAPER_ONLY, SHADOW_LIVE, MICRO_LIVE, LIVE PAUSED.
+
+Use official current Kalshi API documentation and report the exact authenticated endpoints and authentication method selected.
+
+Implement and test Phase 4A in development only. Do not publish, do not request my API credentials in chat, and do not enable real-order submission. Stop and show me the architecture, schema, security controls and tests before continuing.

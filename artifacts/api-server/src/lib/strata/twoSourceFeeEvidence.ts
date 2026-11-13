@@ -1,0 +1,282 @@
+import {validateMetadataCapture,type MetadataCaptureManifest,type ValidatedMetadataCapture} from "./metadataCapture";
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
+import {beginPublicMetadataRead} from "./publicMetadataReadRateLimit";
+/**
+ * Commissioning DIAGNOSTIC ONLY: independent Kalshi API market-fee evidence.
+ *
+ * The reviewed July 7 PDF is the reference for the existing 0.07 formula and
+ * rounding. This module deliberately never returns an approved fee artifact,
+ * modifies a risk policy, signs an order, or invokes C52/C53 execution.
+ * Full current-document provenance and reviewed operator approval are separate
+ * gates; a correct live API response alone must NEVER satisfy them.
+ *
+ * Live order fees remain enforced by microLiveEntryFees.ts, unchanged.
+ */
+import { createHash } from "node:crypto";
+
+export const KALSHI_SERIES = "KXBTC15M";
+export const KALSHI_API_ORIGIN = "https://external-api.kalshi.com/trade-api/v2";
+export const REVIEWED_REFERENCE_PDF_SHA256 =
+  "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601";
+const MAX_BYTES = 256_000;
+const TIMEOUT_MS = 10_000;
+// Bound issuer pagination to prevent unbounded scans during live preflight.
+const MAX_MARKET_PAGES = 8;
+const MARKET_PAGE_SIZE = 100;
+const SERIES = KALSHI_SERIES;
+const tickerPattern = /^KXBTC15M-[A-Za-z0-9-]+$/;
+
+type JsonObject = Record<string, unknown>;
+export type KalshiMarketFeeReadOnly = {
+  ok: boolean;
+  reason: string;
+  series: typeof KALSHI_SERIES;
+  exchangeIndex: 2;
+  referenceDigest: string;
+  liveVerifiedAt?: string;
+  marketTicker?: string;
+  eventTicker?: string;
+  feeType?: "quadratic";
+  feeMultiplier?: "1";
+  metadataDigest?: string;
+  /** Original public capture provenance; not a semantic fee model or authority. */
+  metadataCapture?: ValidatedMetadataCapture;
+  selectionMode?: "exact_market_detail"|"complete_open_inventory";
+  pdfProvenanceApproved: false;
+  ownerPolicyApproved: false;
+  commissioningApproved: false;
+  tradingEnabled: false;
+};
+const plain = (value: unknown): JsonObject | null =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonObject : null;
+const fail = (reason: string,source?:unknown): KalshiMarketFeeReadOnly => annotateFeeFailure({
+  ok: false, reason, series: SERIES, exchangeIndex: 2,
+  referenceDigest: REVIEWED_REFERENCE_PDF_SHA256,
+  pdfProvenanceApproved: false, ownerPolicyApproved: false,
+  commissioningApproved: false, tradingEnabled: false,
+},{phase:"provider_validation",reason},source);
+const canonicalTime = (value: unknown): number | null =>
+  typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    ? (Number.isFinite(Date.parse(value)) ? Date.parse(value) : null) : null;
+
+/** Read ONLY fixed Kalshi URLs; fail closed on redirect, malformed types or size. */
+async function getJson(path: string, fetchImpl: typeof fetch): Promise<JsonObject> {
+  let response:Response|undefined;
+  let failureReason="provider_request_failed";
+  const signal=AbortSignal.timeout(TIMEOUT_MS);
+  try {
+  const attempt=beginPublicMetadataRead(fetchImpl,path);
+  const url = KALSHI_API_ORIGIN + path;
+  response = await fetchImpl(url, {
+    method: "GET", redirect: "error", cache: "no-store",
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  attempt.response(response);
+  failureReason=response.status!==200?"provider_http_rejected":"provider_response_invalid";
+  if (response.status !== 200 || response.url && response.url !== url ||
+      response.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
+    void response.body?.cancel().catch(()=>{});
+    throw Error("official_api_source_unavailable");
+  }
+  const size = Number(response.headers.get("content-length") ?? "0");
+  if (!Number.isSafeInteger(size) || size > MAX_BYTES) throw Error("official_api_response_invalid");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 2 || bytes.length > MAX_BYTES) throw Error("official_api_response_invalid");
+  const result = plain(JSON.parse(new TextDecoder().decode(bytes)));
+  if (!result) throw Error("official_api_response_invalid");
+  attempt.success();
+  return result;
+  }catch(error){
+    try{void response?.body?.cancel().catch(()=>{});}catch{}
+    throw annotateFeeFailure(new Error("official_api_source_unavailable"),
+    {phase:"provider_transport",reason:signal.aborted?"provider_read_timeout":failureReason,path,httpStatus:response?.status},error);}
+}
+function exactStandard(type: unknown, multiplier: unknown): boolean {
+  // Do not coerce unrecognized numbers, alternative fee types or zero fees.
+  return type === "quadratic" &&
+    (multiplier === 1 || multiplier === "1" || multiplier === "1.0");
+}
+function noOverrides(event: JsonObject): boolean {
+  const t = event.fee_type_override;
+  const m = event.fee_multiplier_override;
+  return (t === null || t === undefined) && (m === null || m === undefined);
+}
+function safeChanges(data: JsonObject, key: string, windowEnd: number): boolean {
+  // Do not silently ignore cursors, malformed rows, or scheduled fee changes
+  // before the target market closes. Changes after that are checked at order time.
+  if ((key === "event_fee_changes" ? data.cursor !== "" : (data.cursor !== undefined && data.cursor !== "")) || !Array.isArray(data[key]) ||
+      data[key].length > 100) return false;
+  return data[key].every((value: unknown) => {
+    const row = plain(value);
+    const ts = canonicalTime(row?.scheduled_ts);
+    return !!row && typeof row.id === "string" && row.id.length > 0 &&
+      ts !== null && ts > windowEnd;
+  });
+}
+
+/**
+ * Kalshi /markets is cursor-paginated. A nonempty cursor on page one does
+ * NOT mean the response is invalid; it means all remaining pages must be
+ * read before choosing an exact market. Reject a missing/looping cursor,
+ * duplicate market, malformed response, or a scan beyond its fixed limit.
+ * This only supplies a READ-ONLY fee diagnostic, never trading authority.
+ */
+async function completeOpenMarketListing(fetchImpl:typeof fetch):
+  Promise<{ok:true;markets:JsonObject[]}|{ok:false;reason:string}> {
+  const markets:JsonObject[]=[];
+  const visited=new Set<string>();
+  const tickers=new Set<string>();
+  let cursor="";
+  for(let pageNumber=0;pageNumber<MAX_MARKET_PAGES;pageNumber++){
+    const query="/markets?series_ticker=KXBTC15M&status=open&limit="+MARKET_PAGE_SIZE+
+      (cursor?"&cursor="+encodeURIComponent(cursor):"");
+    const listing=await getJson(query,fetchImpl);
+    if(!Array.isArray(listing.markets)||listing.markets.length>MARKET_PAGE_SIZE||
+       typeof listing.cursor!=="string"||listing.cursor.length>2048||
+       (listing.markets.length===0&&listing.cursor!==""))
+      return {ok:false,reason:"market_listing_incomplete"};
+    for(const candidate of listing.markets){
+      const market=plain(candidate);
+      if(!market||typeof market.ticker!=="string"||
+         !tickerPattern.test(market.ticker)||tickers.has(market.ticker))
+        return {ok:false,reason:"market_listing_incomplete"};
+      tickers.add(market.ticker);
+      markets.push(market);
+    }
+    if(listing.cursor==="")return markets.length?{ok:true,markets}:
+      {ok:false,reason:"no_current_open_kxbtc15m_market"};
+    if(visited.has(listing.cursor))return {ok:false,reason:"market_listing_incomplete"};
+    visited.add(listing.cursor);
+    cursor=listing.cursor;
+  }
+  return {ok:false,reason:"market_listing_incomplete"};
+}
+
+/** A positive result is an API observation, NOT authorization of the PDF. */
+export async function probeCurrentKalshiFeeApi(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  clock: () => number = Date.now,
+  expectedMarketTicker?: string,
+  readMetadata?: (path:string)=>Promise<JsonObject>,
+  captureMetadata?: () => MetadataCaptureManifest,
+): Promise<KalshiMarketFeeReadOnly> {
+  // Order-time calls MUST bind evidence to the exact order market.
+  // An ambiguous/absent ticker cannot fall back to another open market.
+  if(expectedMarketTicker!==undefined && !tickerPattern.test(expectedMarketTicker))
+    return fail("exact_market_identity_invalid");
+  if(captureMetadata && expectedMarketTicker===undefined)return fail("exact_market_identity_invalid");
+  const started = clock();
+  try {
+    const metadata=readMetadata??((path:string)=>getJson(path,fetchImpl));
+    let target:JsonObject;
+    let exactPayload:JsonObject|undefined;
+    if(expectedMarketTicker!==undefined){
+      // ORDER_ENTRY already has an exact source identity. Inventory pagination
+      // is discovery, not proof of that specific contract's current eligibility.
+      exactPayload=await metadata("/markets/"+encodeURIComponent(expectedMarketTicker));
+      const detail=plain(exactPayload.market);
+      const now=clock(),openAt=canonicalTime(detail?.open_time),closeAt=canonicalTime(detail?.close_time);
+      if(!detail||detail.ticker!==expectedMarketTicker||detail.exchange_index!==2||
+         (detail.series_ticker!==undefined&&detail.series_ticker!==SERIES)||
+         (detail.status!=="active"&&detail.status!=="open")||
+         openAt===null||closeAt===null||openAt>now||closeAt<=now||openAt>=closeAt)
+        return fail("exact_market_detail_not_current");
+      target=detail;
+    }else{
+      const listing=await completeOpenMarketListing(fetchImpl);
+      if(!listing.ok)return fail(listing.reason);
+      const now=clock();
+      const open=listing.markets.filter((m):m is JsonObject=>
+        (m.status==="open"||m.status==="active")&&canonicalTime(m.close_time)!==null&&
+        canonicalTime(m.close_time)!>now&&(m.exchange_index===undefined||m.exchange_index===2)&&
+        tickerPattern.test(String(m.ticker??""))).sort((a,b)=>canonicalTime(a.close_time)!-canonicalTime(b.close_time)!);
+      if(!open[0]||(open[1]&&open[0].close_time===open[1].close_time))return fail("market_target_ambiguous");
+      target=open[0];
+    }
+    const ticker=String(target.ticker),eventTicker=target.event_ticker;
+    if(typeof eventTicker!=="string"||!tickerPattern.test(eventTicker))return fail("market_event_identity_invalid");
+    const reads = [
+      exactPayload?Promise.resolve(exactPayload):metadata("/markets/" + encodeURIComponent(ticker)),
+      metadata("/events/" + encodeURIComponent(eventTicker)),
+      metadata("/series/KXBTC15M"),
+      // Kalshi's documented getSeriesFeeChanges takes series_ticker and
+      // show_historical; it does NOT declare a limit argument. The event
+      // counterpart accepts event_ticker/limit/cursor, NOT show_historical.
+      // Unsupported query parameters can make the entire V4 evidence path
+      // fail at HTTP 400 even when the series has the standard fee.
+      metadata("/series/fee_changes?series_ticker=KXBTC15M&show_historical=false"),
+      metadata("/events/fee_changes?event_ticker=" + encodeURIComponent(eventTicker) +
+        "&limit=100"),
+    ] as const;
+    // Every started evidence read settles before this attempt returns, including
+    // event waiters on an invocation-local market snapshot after another failure.
+    const [m,e,s,sc,ec]=await Promise.all(reads).catch(async error=>{
+      await Promise.allSettled(reads);throw error;
+    });
+    const market = plain(m.market), event = plain(e.event), series = plain(s.series);
+    if (!market || !event || !series || market.ticker !== ticker ||
+        market.event_ticker !== eventTicker || market.close_time !== target.close_time ||
+        event.event_ticker !== eventTicker || event.series_ticker !== SERIES ||
+        series.ticker !== SERIES || series.exchange_index !== 2 ||
+        (market.exchange_index !== undefined && market.exchange_index !== 2) ||
+        (event.exchange_index !== undefined && event.exchange_index !== 2) ||
+        !exactStandard(series.fee_type, series.fee_multiplier))
+      return fail("series_event_fee_mismatch");
+    if (!noOverrides(event) || Object.keys(market).some(k =>
+      /fee|rebate/i.test(k) && market[k] !== null && market[k] !== false && market[k] !== undefined))
+      return fail("market_or_event_fee_override_unreviewed");
+
+    const closeAt = canonicalTime(market.close_time);
+    // expiration_time is deprecated and expected_expiration_time is
+    // nullable/optional in Kalshi's market schema. Check all supplied values
+    // but do not require ALL aliases to exist. latest_expiration_time remains
+    // the authoritative mandatory upper bound for fee-change evaluation.
+    const latest = canonicalTime(market.latest_expiration_time);
+    const optionalExpiry = [market.expiration_time, market.expected_expiration_time]
+      .filter(value => value !== undefined && value !== null)
+      .map(canonicalTime);
+    if (closeAt === null || closeAt <= clock() ||
+        latest === null || latest < closeAt ||
+        optionalExpiry.some(t => t === null || t < closeAt))
+      return fail("market_lifecycle_unverified");
+    const lifecycleEnd = Math.max(closeAt,latest,...optionalExpiry as number[]);
+    if (!safeChanges(sc,"series_fee_change_arr",lifecycleEnd) ||
+        !safeChanges(ec,"event_fee_changes",lifecycleEnd))
+      return fail("fee_change_schedule_unverified");
+
+    const verifiedAt = clock();
+    if (verifiedAt < started || verifiedAt - started > 15_000 || verifiedAt >= closeAt)
+      return fail("market_fee_evidence_stale");
+    // Prefetched public bodies retain original transport time. The callback is
+    // deliberately consulted only at the existing validation point, after all
+    // mandatory reads, and uses the clock already sampled above.
+    const metadataCapture=captureMetadata ? validateMetadataCapture({
+      manifest:captureMetadata(),marketTicker:ticker,eventTicker,nowMs:verifiedAt,
+      marketPayload:m,eventPayload:e,seriesPayload:s,seriesChangesPayload:sc,eventChangesPayload:ec,
+    }):undefined;
+    if(captureMetadata && !metadataCapture)return fail("market_fee_capture_invalid_or_stale");
+    const observedAt=metadataCapture?.observedAtMs ?? verifiedAt;
+    const facts = JSON.stringify({
+      series: SERIES, ticker, eventTicker,
+      seriesFeeType: series.fee_type, seriesMultiplier: series.fee_multiplier,
+      seriesChanges: sc.series_fee_change_arr, eventChanges: ec.event_fee_changes,
+      observedAt,
+      ...(metadataCapture?{captureFingerprint:metadataCapture.fingerprint}:{}),
+    });
+    return {
+      ok: true, reason: "live_series_event_fee_metadata_verified_read_only",
+      series: SERIES, exchangeIndex: 2, referenceDigest: REVIEWED_REFERENCE_PDF_SHA256,
+      liveVerifiedAt: new Date(observedAt).toISOString(),
+      ...(metadataCapture?{metadataCapture}:{}),
+      selectionMode:expectedMarketTicker===undefined?"complete_open_inventory":"exact_market_detail",
+      marketTicker: ticker, eventTicker, feeType: "quadratic", feeMultiplier: "1",
+      metadataDigest: createHash("sha256").update(facts).digest("hex"),
+      pdfProvenanceApproved: false, ownerPolicyApproved: false,
+      commissioningApproved: false, tradingEnabled: false,
+    };
+  } catch(error) {
+    return fail("official_api_metadata_unavailable",error);
+  }
+}

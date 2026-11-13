@@ -1,0 +1,80 @@
+Complete only the two pre-creation prerequisites. Do not make any Kalshi mutation and do not modify production.
+
+Work from frozen checkpoint:
+n2-index2-precreation-pass-20260926
+commit afd5185c5e957157dbda71c740bccdb2112564ad
+
+1. Durable index-2 subaccount-creation attempt
+
+Add a development-only durable record specifically for the one-shot creation operation.
+
+It must persist before network I/O:
+
+* unique attempt ID;
+* target exchange index = 2;
+* pre-POST balance/netting inventory digest;
+* timestamp;
+* state such as reserved, response_received, verified, uncertain;
+* returned N only after a definitive response;
+* non-secret response/audit metadata.
+
+Once the attempt reaches the network-attempt boundary, never automatically POST again.
+
+A timeout/lost response must become uncertain. Recovery is GET-only and may resolve success only if the new (N,2) account can be identified unambiguously against the persisted pre-POST inventory.
+
+Test restart before POST, restart after reservation, definitive 201, timeout after possible submission, malformed response, contradictory inventory, multiple new index-2 accounts, and repeated operator submission.
+
+2. Decouple the clean $0 boundary from restricted-key creation
+
+Apply micro_live_pair_boundary to the development database only.
+
+The initial boundary must be capturable immediately after Kalshi creates (N,2), before its restricted trading key exists.
+
+Initial boundary requirements:
+
+* authoritative (N,2);
+* $0 balance;
+* $0 portfolio value;
+* no orders;
+* no positions;
+* no fills;
+* no settlements;
+* captured timestamp;
+* evidence digest;
+* provenance tying it to the verified creation attempt.
+
+Do not weaken the later trading requirement for a restricted key.
+
+Instead, model this as two stages:
+
+CREATED_CLEAN — (N,2) exists and its prospective zero boundary is proven.
+
+KEY_BOUND_VERIFIED — subsequently generated restricted key is independently proven to bind to that same N with exactly read + write::trade.
+
+Funding and run initialization must require KEY_BOUND_VERIFIED; neither is allowed merely from CREATED_CLEAN.
+
+Verification
+
+Rerun the complete database-backed arbitrary-N lifecycle and all focused suites against the actual development schema.
+
+Confirm:
+
+* no N=0/N=1 assumption;
+* creation attempt survives restart;
+* zero boundary can precede restricted-key creation;
+* wrong key/N/index cannot advance;
+* $25 funding cannot occur before verified key binding;
+* execution remains OFF;
+* kill switches remain engaged;
+* historical FROZEN runs unchanged.
+
+Do not modify production.
+Do not send a Kalshi POST/DELETE/transfer/order.
+
+Return either:
+
+READY FOR CREATE — one controlled POST /portfolio/subaccounts {"exchange_index":2} can now be authorized
+
+or
+
+BLOCKED — exact remaining prerequisite.

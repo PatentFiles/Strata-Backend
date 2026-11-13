@@ -1,0 +1,25 @@
+Do not implement this proposal.
+
+The proposed micro_live_pair_run would create a second run architecture that is intentionally disconnected from the already-tested execution, uncertain-response, reconciliation, settlement, and restart machinery. The stated 2–4 days for inert initialization plus 2–4+ weeks for execution integration is outside scope.
+
+Reassess from a simplification/refactor perspective instead.
+
+The objective is to preserve and reuse the already-tested execution/recovery machinery while eliminating obsolete commissioning assumptions that prevent the verified (1,2) account from using it.
+
+Specifically identify:
+
+1. Which singleton fields/invariants are genuinely required by the execution and recovery engine once a run is active.
+2. Which fields exist only because of the historical commissioning flow ($5 successor, historical standing fee approval, old funding/snapshot assumptions, funding-ticker coupling).
+3. Whether the historical FROZEN run can be preserved immutably in its existing archive/snapshot and the singleton safely repurposed for a new UNARMED $1 (1,2) run without altering historical ledger evidence.
+4. Whether the approved (1,2) fee policy can become the commissioning authority while retaining the existing fresh runtime market-fee barrier immediately before any order.
+5. What is the minimum change necessary for the existing tested execution/reconciliation path to identify (subaccount=1, exchange_index=2, INDEX2 credential) as the active run identity.
+
+Do not design another run table or parallel execution architecture.
+
+Give me two estimates before changing code:
+A. Minimum refactor to reuse the existing tested execution/recovery engine for (1,2).
+B. Clean simplification/refactor of the current commissioning architecture.
+
+For each, list files/functions/schema fields changed, tests affected, safety invariants preserved, and estimated engineering time.
+
+No implementation, database mutation, initialization, arming, execution, transfer, order, or cancellation.

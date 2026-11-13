@@ -1,0 +1,65 @@
+Upgrade the BTC Paper Testing Dashboard so forward-test and live-test history is stored persistently on the server instead of relying on browser localStorage.
+
+IMPORTANT: Do not change any V1.3 trading thresholds, signal logic, market-data logic, or paper-trade calculations. This task is storage/persistence only.
+
+Requirements:
+
+1. Add persistent database storage for all completed paper forward tests and manual live-test records. Use the persistent database available in this Replit project, preferably PostgreSQL/Replit Database.
+2. Persist each paper forward test with at least:
+
+* unique trade/test ID
+* Kalshi market ticker
+* market target
+* direction UP/DOWN
+* model signal that caused entry
+* entry timestamp
+* entry BTC price
+* entry Kalshi percentage/price
+* signed buffer at entry
+* BTC velocity at entry
+* exit/settlement timestamp
+* exit/settlement percentage
+* final outcome
+* hypothetical stake
+* trade P&L
+
+3. Persist manual live-test records separately with:
+
+* entry/add/exit data
+* actual dollars wagered
+* actual entry and exit percentages
+* fees
+* realized P&L
+
+4. On dashboard startup, load the complete persisted history from the server and recalculate:
+
+* completed forward tests
+* wins
+* losses
+* cumulative paper P&L
+* win rate
+* average win
+* average loss
+* expectancy per trade
+* live bankroll and live P&L
+
+5. Republishing or restarting the application MUST NOT erase historical results.
+6. Opening the dashboard from another device MUST show the same forward-test history.
+7. Keep localStorage only as an optional temporary cache. The database must be the source of truth.
+8. Add an “Export history” button that downloads all paper/live history as JSON or CSV.
+9. Add an “Import legacy local history” function. If the current browser contains old localStorage forward-test records, allow them to be imported into the database once, without creating duplicates.
+10. Do not automatically delete the existing localStorage data during migration.
+11. Add a small diagnostics field showing:
+
+* DATABASE: CONNECTED / ERROR
+* number of persisted paper tests
+* last database sync timestamp
+
+12. Run tests proving that:
+
+* a completed paper trade survives a page refresh
+* it survives an application restart
+* it is still present after a production build
+* duplicate trade IDs are not inserted twice
+
+Do not add real-money order execution or Kalshi private credentials.

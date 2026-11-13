@@ -1,0 +1,87 @@
+Corrected create-subaccount attempt — Content-Type correction only.
+
+Previous attempt:
+
+* fresh eligibility preflight passed;
+* exactly one bodyless POST was sent;
+* HTTP 400 invalid_content_type;
+* no numbered subaccount was created;
+* post-attempt inventory remained unchanged.
+
+Treat the previous attempt as definitively rejected.
+
+Fresh preflight
+
+Immediately before mutation:
+
+* GET /account/limits and require usage_tier: advanced;
+* require permanent Advanced event_contract grant;
+* verify provisioning credential remains unrestricted read + write;
+* enumerate numbered subaccounts and require none currently exist.
+
+Save the preflight outside MICRO_LIVE.
+
+Correct exactly one variable
+
+Revalidate the current POST /trade-api/v2/portfolio/subaccounts schema.
+
+If the request body remains documented as optional, send exactly one:
+
+POST /trade-api/v2/portfolio/subaccounts
+
+with:
+
+Content-Type: application/json
+
+and a zero-byte request body.
+
+Do not send {} unless the current documentation explicitly establishes that an empty JSON object is accepted.
+
+Sign the request according to the current Kalshi authentication specification. Do not include credential material in logs.
+
+Exactly one POST. No automatic retry.
+
+Outcome handling
+
+If 201/other documented success:
+
+* persist the complete sanitized response immediately;
+* preserve assigned subaccount number;
+* independently enumerate subaccounts through authenticated GETs;
+* require exactly one new numbered subaccount in range 1–63;
+* require the GET identity to match the creation response;
+* verify it has zero cash, zero positions, zero resting orders and zero fills;
+* then stop.
+
+If 400 invalid_content_type again:
+
+* do not experiment with additional bodies/headers;
+* stop and report it.
+
+If another definitive 4xx occurs:
+
+* preserve the sanitized code/message;
+* GET the subaccount inventory;
+* do not retry.
+
+If response is uncertain:
+
+* do not retry;
+* compare post-attempt subaccount inventory against the saved baseline;
+* stop if attribution is not unique.
+
+Do not
+
+* fund any subaccount;
+* create an API key;
+* move the existing $0.01;
+* change KALSHI_BOT_SUBACCOUNT;
+* change MICRO_LIVE account mode;
+* modify MICRO_LIVE;
+* submit another market order;
+* retry the Advanced upgrade.
+
+Report:
+fresh tier → POST status → sanitized response → resulting subaccount inventory → empty-state verification.
+
+Then stop.

@@ -1,0 +1,123 @@
+name: Commissioning fee evidence diagnostics
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/commissioningFeeEvidenceDiagnostic.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerFiveGateReleaseAudit.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerAccountOnboardingReadiness.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerApiFeePolicyMigration.test.ts'
+      - 'artifacts/api-server/src/lib/strata/expiredExitNoSendEvidence*'
+      - 'artifacts/api-server/src/lib/strata/neverPostedReleaseHistory.ts'
+      - 'artifacts/api-server/src/lib/strata/preparedProtectiveExitRecovery.ts'
+      - 'sql/strata_emergency_exit_reservation_private.sql'
+      - 'sql/strata_protective_exit_request_snapshot_private.sql'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerV4CommissioningRepair.test.ts'
+      - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.ts'
+      - 'artifacts/api-server/src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts'
+      - 'artifacts/api-server/src/lib/strata/independentOfficialFeeV5.ts'
+      - 'artifacts/api-server/src/lib/strata/independentOfficialFeeV5.test.ts'
+      - 'lib/db/drizzle/0040_independent_official_fee_v5_capture.sql'
+      - 'lib/db/drizzle/0039_official_fee_provider_result_provenance.sql'
+      - 'supabase/functions/strata-official-fee-source/index.ts'
+      - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.ts'
+      - 'supabase/functions/strata-official-fee-source/providerRetryPolicy.test.ts'
+      - 'supabase/functions/strata-official-fee-source/cachePolicy.ts'
+      - 'supabase/functions/strata-official-fee-source/cachePolicy.test.ts'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact.ts'
+      - 'artifacts/api-server/src/lib/microLiveFeeArtifact.test.ts'
+      - 'artifacts/api-server/src/lib/strata/dynamicOfficialFeeSchedule.ts'
+      - 'artifacts/api-server/src/lib/strata/dynamicOfficialFeeSchedule.test.ts'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
+      - '.github/workflows/commissioning-fee-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server exec esbuild src/lib/strata/twoSourceFeeEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/twoSourceFeeEvidence.test.cjs
+      - run: node artifacts/api-server/dist/twoSourceFeeEvidence.test.cjs
+      - name: Verify all five owner release evidence gates fail closed with no Kalshi requests or orders
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerFiveGateReleaseAudit.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerFiveGateReleaseAudit.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerFiveGateReleaseAudit.test.cjs
+      - name: Validate all account-setup states without modifying financial records
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerAccountOnboardingReadiness.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerAccountOnboardingReadiness.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerAccountOnboardingReadiness.test.cjs
+      - name: Verify owner fee-policy migration preflight truth, expiry, and MFA-safe release
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerApiFeePolicyMigration.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerApiFeePolicyMigration.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerApiFeePolicyMigration.test.cjs
+      - name: Verify owner signed Kalshi preflight never grants financial authority
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerSignedExchangeReleaseProof.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerSignedExchangeReleaseProof.test.cjs
+      - name: Verify expired exit producer and diagnostic fail-closed cases
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/expiredExitNoSendEvidence.test.ts --bundle --platform=node --format=cjs --outfile=dist/expiredExitNoSendEvidence.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/expiredExitNoSendEvidence.test.cjs
+      - name: Verify V4 owner issuer-backed repair never bypasses signed flatness or kill switch
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/ownerV4CommissioningRepair.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerV4CommissioningRepair.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/ownerV4CommissioningRepair.test.cjs
+      - name: Audit isolated issuer PDF source without fetching or granting trading permission
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/isolatedIssuerFeeSourceStatus.test.ts --bundle --platform=node --format=cjs --outfile=dist/isolatedIssuerFeeSourceStatus.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/isolatedIssuerFeeSourceStatus.test.cjs
+      - name: Verify exact issuer Retry-After handling without provider network calls
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/providerRetryPolicy.test.ts --bundle --platform=node --format=cjs --outfile=dist/providerRetryPolicy.test.cjs
+          node artifacts/api-server/dist/providerRetryPolicy.test.cjs
+      - name: Validate owner-only alternate canonical issuer PDF ingestion (no network)
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild src/lib/strata/independentOfficialFeeV5.test.ts --bundle --platform=node --format=cjs --outfile=dist/independentOfficialFeeV5.test.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/*
+          NODE_ENV=test DATABASE_URL=postgres://isolated:isolated@127.0.0.1:5432/never_connect node artifacts/api-server/dist/independentOfficialFeeV5.test.cjs
+      - name: Bundle fee bridge source for Deno syntax validation
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/index.ts --bundle --platform=browser --format=esm --external:npm:* --outfile=dist/officialFeeBridge.syntax.mjs
+      - name: Test versioned official issuer original-capture lease invariants
+        run: |
+          pnpm --filter @workspace/api-server exec esbuild ../../supabase/functions/strata-official-fee-source/cachePolicy.test.ts --bundle --platform=node --format=cjs --outfile=dist/officialFeeLeasePolicy.test.cjs
+          node artifacts/api-server/dist/officialFeeLeasePolicy.test.cjs
+
+  held-owner-postgres-safety:
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: pnpm install --frozen-lockfile
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+      - name: Verify signed diagnostic scope races without authority writes
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerSignedExchangeReleaseProof.postgres.test.ts
+      - name: Verify expired exit marker SQL, decoding, index and concurrent history changes
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/expiredExitNoSendEvidence.postgres.test.ts

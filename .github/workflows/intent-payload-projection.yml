@@ -1,0 +1,70 @@
+name: Intent payload projection PostgreSQL proof
+
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
+      - 'artifacts/api-server/src/lib/v13-production/reconciliationIntentPersistence.ts'
+      - 'artifacts/api-server/src/lib/v13-production/acceptance.test.ts'
+      - 'artifacts/api-server/src/lib/v13-production/finalAccountProofProjection.test.ts'
+      - 'artifacts/api-server/src/lib/v13-production/reconciliationProjection.postgres.test.ts'
+      - 'artifacts/api-server/src/lib/strata/accountProductionSession.ts'
+      - 'artifacts/api-server/src/lib/strata/preparedProtectiveExitRecovery.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerTransientFreezeRecovery.test.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts'
+      - 'artifacts/api-server/scripts/run-v13-disposable-postgres.mjs'
+      - 'artifacts/api-server/scripts/protective-exit-roundtrip.test.mjs'
+      - 'lib/db/src/schema/v13Production.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/intent-payload-projection.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  projection-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install selected isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}
+          sudo systemctl stop postgresql
+          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+      - name: Verify selected PostgreSQL binary
+        run: |
+          test "$(command -v postgres)" = "/usr/lib/postgresql/${{ matrix.postgres }}/bin/postgres"
+          postgres --version
+          postgres --version | grep -E 'PostgreSQL\) ${{ matrix.postgres }}\.'
+      - name: Verify projection, reconciliation, lock rechecks and rollback
+        run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/acceptance.test.ts
+      - name: Verify transient recovery with the projected account proof
+        run: |
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerTransientFreezeRecovery.test.ts
+          node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs --recovery
+      - name: Verify offline protective no-send recovery
+        run: node artifacts/api-server/scripts/protective-exit-roundtrip.test.mjs

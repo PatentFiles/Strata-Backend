@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "BTC Paper Testing Dashboard"
+description = "A phone-friendly live dashboard for paper-testing a BTC/Kalshi short-term strategy with public market data, local trade history, and no authentication or order submission."
+version = "1.0.0"
+id = "artifacts/btc-paper-dashboard"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20652
+
+[services.development]
+run = "pnpm --filter @workspace/btc-paper-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/btc-paper-dashboard", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/btc-paper-dashboard/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20652"
+BASE_PATH = "/"

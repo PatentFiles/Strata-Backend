@@ -1,0 +1,151 @@
+{
+  "kind": "OFFLINE_CONDITIONAL_FEASIBILITY_ONLY",
+  "assumptions": [
+    "Baseline poll grid is synthetic: 0..10 seconds then five-second polls; production offsets differ.",
+    "Push arrives 100ms after the strike actually exists; this has NOT been measured in production.",
+    "Existing REST reads separately retain a valid, executable, exact-market quote even while strike is null.",
+    "A future event-driven evaluation wake can use that unchanged quote timestamp; no extra network reads.",
+    "Authenticated stream ordering, exact scope, current connection and all remaining production gates pass.",
+    "Rows quantify potential, not actual Kalshi latency, order submission, a fill, or profit."
+  ],
+  "rows": [
+    {
+      "strikeActuallyReadyMs": 0,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 0,
+      "pushFeasibilityMs": 100,
+      "firstFeasibleMs": 0,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 0,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 5000,
+      "pushFeasibilityMs": 100,
+      "firstFeasibleMs": 100,
+      "simulatedImprovementMs": 4900
+    },
+    {
+      "strikeActuallyReadyMs": 1000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 1000,
+      "pushFeasibilityMs": 1100,
+      "firstFeasibleMs": 1000,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 1000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 6000,
+      "pushFeasibilityMs": 1100,
+      "firstFeasibleMs": 1100,
+      "simulatedImprovementMs": 4900
+    },
+    {
+      "strikeActuallyReadyMs": 5000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 5000,
+      "pushFeasibilityMs": 5100,
+      "firstFeasibleMs": 5000,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 5000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 10000,
+      "pushFeasibilityMs": 5100,
+      "firstFeasibleMs": 5100,
+      "simulatedImprovementMs": 4900
+    },
+    {
+      "strikeActuallyReadyMs": 11000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 15000,
+      "pushFeasibilityMs": 11100,
+      "firstFeasibleMs": 11100,
+      "simulatedImprovementMs": 3900
+    },
+    {
+      "strikeActuallyReadyMs": 11000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 20000,
+      "pushFeasibilityMs": 11100,
+      "firstFeasibleMs": 11100,
+      "simulatedImprovementMs": 8900
+    },
+    {
+      "strikeActuallyReadyMs": 15000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 15000,
+      "pushFeasibilityMs": 15100,
+      "firstFeasibleMs": 15000,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 15000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 20000,
+      "pushFeasibilityMs": 15100,
+      "firstFeasibleMs": 15100,
+      "simulatedImprovementMs": 4900
+    },
+    {
+      "strikeActuallyReadyMs": 20000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 20000,
+      "pushFeasibilityMs": 20100,
+      "firstFeasibleMs": 20000,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 20000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 25000,
+      "pushFeasibilityMs": 20100,
+      "firstFeasibleMs": 20100,
+      "simulatedImprovementMs": 4900
+    },
+    {
+      "strikeActuallyReadyMs": 30000,
+      "assumedRestVisibilityLagMs": 0,
+      "restFirstValidMs": 30000,
+      "pushFeasibilityMs": 30100,
+      "firstFeasibleMs": 30000,
+      "simulatedImprovementMs": 0
+    },
+    {
+      "strikeActuallyReadyMs": 30000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 35000,
+      "pushFeasibilityMs": 30100,
+      "firstFeasibleMs": 30100,
+      "simulatedImprovementMs": 4900
+    }
+  ],
+  "controls": {
+    "noPush": {
+      "strikeActuallyReadyMs": 11000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 20000,
+      "pushFeasibilityMs": null,
+      "firstFeasibleMs": 20000,
+      "simulatedImprovementMs": 0
+    },
+    "staleQuote": {
+      "strikeActuallyReadyMs": 11000,
+      "assumedRestVisibilityLagMs": 5000,
+      "restFirstValidMs": 20000,
+      "pushFeasibilityMs": null,
+      "firstFeasibleMs": 20000,
+      "simulatedImprovementMs": 0
+    },
+    "immediatePushRest15sLag": {
+      "strikeActuallyReadyMs": 0,
+      "assumedRestVisibilityLagMs": 15000,
+      "restFirstValidMs": 15000,
+      "pushFeasibilityMs": 100,
+      "firstFeasibleMs": 100,
+      "simulatedImprovementMs": 14900
+    }
+  }
+}

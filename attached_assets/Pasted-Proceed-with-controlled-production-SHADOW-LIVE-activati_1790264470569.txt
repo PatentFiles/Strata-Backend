@@ -1,0 +1,48 @@
+Proceed with controlled production SHADOW_LIVE activation only.
+
+The Kalshi API key currently configured for this project has now been manually verified in the Kalshi account as Read only.
+
+Do not add, implement, or enable any Kalshi POST, PUT, PATCH, DELETE, order-submission, cancellation, amendment, transfer, or other mutation functionality.
+
+Preserve the existing V1.3 paper worker and evaluator exactly. Do not modify V1.3 thresholds, Scout/Confirm rules, first-crossing logic, settlement rules, bankroll calculations, paper history, or existing production records.
+
+Configure production SHADOW_LIVE with:
+
+* mode = SHADOW_LIVE
+* shadow capital = $25
+* maximum simulated stake per proposal = $5
+* maximum open simulated positions = 1
+* maximum simulated reserved loss = $25
+* live_execution_enabled = false
+* manual kill switch = true
+
+Add/set the production configuration:
+SHADOW_LIVE_PRODUCTION_ENABLED=true
+
+Keep:
+FORWARD_TEST_PRODUCTION_WORKER_ENABLED=true
+
+The shadow observer must consume the existing persisted V1.3 qualifying evaluations. It must not run a second V1.3 evaluator or compete for the paper-worker lease.
+
+Before activation, verify:
+
+1. Production Kalshi authentication succeeds using GET-only requests.
+2. The configured key is usable for balance/account/orderbook reads.
+3. No Kalshi mutation path exists in the application.
+4. The production database constraints still require live_execution_enabled=false.
+5. MICRO_LIVE remains rejected.
+6. Existing production paper records remain untouched.
+
+Then activate the production shadow observer and verify that:
+
+* its heartbeat/scan loop is running,
+* the normal V1.3 paper worker is still running with one valid lease,
+* there is no duplicate evaluator,
+* qualifying Scout/Confirm events can create SHADOW proposals using actual Kalshi orderbook quotes,
+* proposals remain simulated only,
+* the $25 / $5 / 1 position / $25 loss limits are enforced,
+* no real Kalshi order is submitted.
+
+Do not copy the development database to production and do not overwrite production data.
+
+After activation, report the production configuration, observer status, paper-worker status, proposal count, remaining simulated capital, and any errors. Do not expose credentials or private-key contents.

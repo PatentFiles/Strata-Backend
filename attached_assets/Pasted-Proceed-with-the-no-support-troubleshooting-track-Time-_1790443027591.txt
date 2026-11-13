@@ -1,0 +1,86 @@
+Proceed with the no-support troubleshooting track. Time-box this investigation.
+
+Objective: determine a safe path for operating MICRO_LIVE on KXBTC15M / exchange index 2 without contacting Kalshi support and without making an undocumented live mutation.
+
+Track 1 — Exhaust non-mutating evidence
+
+Investigate the current official Kalshi OpenAPI specification, official SDK implementations/types, sharding documentation, and our authenticated GET-only account evidence.
+
+Specifically trace how subaccount_number and exchange_index are represented throughout:
+
+* subaccount creation;
+* balances;
+* netting;
+* transfers;
+* API-key restrictions;
+* order creation;
+* order/fill/settlement responses.
+
+Determine whether any official schema/code establishes whether subaccount numbering is global or per exchange instance.
+
+Track 2 — Determine whether we actually need (subaccount 1, index 2)
+
+Do not assume our existing architecture is required.
+
+Analyze whether the cleaner architecture is:
+
+* create a new dedicated subaccount directly on exchange index 2;
+* accept whatever subaccount number Kalshi assigns;
+* generate a new restricted read + write::trade key specifically bound to that assigned subaccount;
+* use that new subaccount exclusively for MICRO_LIVE;
+* leave existing subaccount 1/index 0 unused.
+
+This is important: our actual security requirement is an isolated dedicated crypto trading account, not specifically the number 1.
+
+Determine from documented behavior whether this architecture eliminates the unresolved cross-shard problem.
+
+Track 3 — Prepare migration implications
+
+If a newly assigned index-2 subaccount is the documented/safest architecture, identify every place currently hardcoded or persisted as subaccount 1 and design the migration so the actual returned subaccount number becomes the authoritative configured identity.
+
+It must fail closed if:
+
+* configured number differs from the restricted key binding;
+* account/index differs from the funding anchor;
+* market shard differs from the configured exchange index;
+* startup cannot prove all three identities agree.
+
+Do not create that subaccount yet.
+
+Track 4 — Keep building downstream
+
+While investigating, finish mocked lifecycle coverage assuming a generic dedicated pair (N, exchange_index 2), where N is not hardcoded:
+
+* $25 funding-anchor reconciliation;
+* activity checkpoint;
+* restart reconciliation;
+* unexplained-transfer detection;
+* $1 fee-inclusive entry cap;
+* partial fill;
+* exit/cancel;
+* uncertain submission;
+* late-fill recovery;
+* final balance/fill/fee reconciliation.
+
+The system should work identically for any valid dedicated subaccount N.
+
+Hard boundaries
+
+Do not:
+
+* contact Kalshi support;
+* create another subaccount;
+* transfer money;
+* generate another key;
+* enable execution;
+* arm MICRO_LIVE;
+* place/cancel an order;
+* modify existing provisioning history.
+
+Give me a recommendation after this investigation:
+
+A — Existing subaccount 1 can be safely used on index 2, with proof, or
+B — Create a fresh dedicated index-2 subaccount and use whatever number Kalshi assigns, with proof this removes the ambiguity, or
+C — neither path is sufficiently established without an experimental mutation.
+
+If B is supported, include the exact one-shot sequence we would use, but stop before executing it.

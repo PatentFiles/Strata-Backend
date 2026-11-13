@@ -1,0 +1,25 @@
+Stop. Do not patch the three blockers individually and do not modify the existing historical initializer.
+
+We now have a clean, independently established commissioning boundary for (1,2): verified restricted INDEX2 credential, exactly one reconciled $25 funding transfer, current $25 cash / $0 portfolio, no orders/positions/fills/settlements, an approved $1 fee-inclusive pair policy, execution OFF, and both kill switches engaged.
+
+The diagnosis shows the legacy singleton initializer has requirements that belong to the historical commissioning architecture and cannot be satisfied honestly from the new (1,2) boundary without creating artificial state or a $5 successor.
+
+Before writing code, propose the smallest clean replacement commissioning path for (1,2) only. It should initialize a new UNARMED $1 pair-bound run from the already-established pair boundary rather than adapting the historical singleton transition.
+
+Requirements:
+
+* Historical FROZEN run and its ledger remain immutable and preserved.
+* No $5 successor.
+* Approved (1,2) $1 pair policy remains the authoritative commissioning policy.
+* Runtime market-specific Kalshi fee verification remains mandatory and fail-closed immediately before execution.
+* Funding-boundary evidence and runtime market ticker must remain separate concepts; do not manufacture a ticker match.
+* INDEX2 credential/pair binding remains mandatory.
+* $1 is the hard all-in exposure/fee cap.
+* Initialization creates UNARMED state only.
+* Execution remains OFF and both kill switches remain engaged.
+* Initialization cannot place/cancel orders or transfer funds.
+* Preserve idempotency, uncertain-response handling, reconciliation and restart recovery already tested for execution.
+
+Prefer removing dependency on legacy singleton commissioning fields rather than copying them into the new pair path.
+
+Do not implement yet. Report the exact tables/fields/functions that would be added, changed, reused, or retired; the invariants preserved; and the minimum tests required. Estimate implementation scope before proceeding.

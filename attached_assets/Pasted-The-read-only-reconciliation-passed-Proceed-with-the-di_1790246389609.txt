@@ -1,0 +1,45 @@
+The read-only reconciliation passed. Proceed with the display fix, but preserve the server forward-test ledger as the single source of truth for server-generated paper positions.
+
+Do NOT copy or backfill forward_test_positions into paper_history. Do not modify existing production records. Do not change V1.3 strategy logic, worker behavior, thresholds, bankroll rules, settlement/exit logic, or market calculations.
+
+Build a read-only Server Forward-Test History feature sourced directly from forward_test_positions.
+
+Requirements:
+
+1. Add an authenticated read-only API endpoint, preferably GET /api/forward-test/history, that reads forward_test_positions.
+2. Return positions newest-first and include:
+    * market ticker
+    * strategy version
+    * Scout/Confirm trigger
+    * UP/DOWN direction
+    * entry timestamp
+    * entry BTC price
+    * target
+    * entry offer
+    * stake
+    * contracts
+    * status
+    * closed timestamp
+    * exit price if available
+    * close reason
+    * settlement result if available
+    * payout
+    * stored P&L
+3. Generate server-history summary values from the SAME server records:
+    * total completed/closed positions
+    * wins
+    * losses
+    * total stake
+    * total P&L
+    * open position count
+4. On Saved History, preserve the existing browser Paper history, but add a clearly separate section/tab called Server Forward-Test History.
+5. Clearly label every server record SERVER · PAPER_ONLY.
+6. Explicitly distinguish CLOSED from SETTLED. Do not display a CLOSED position as market-settled when settlement_result is NULL.
+7. Use the stored server pnl value as the authoritative displayed P&L. Do not independently recalculate P&L in the browser.
+8. The Server Forward-Test History total must reconcile with the Server Forward Test summary on the dashboard.
+9. Diagnostic persistence records must never appear as forward-test trades.
+10. Do not add trading-account authentication or real-order functionality.
+
+Implement and test this in development first. Verify against the existing production-shaped records/test fixtures, run the existing V1.3 parity tests, typechecks, builds, and forward-test tests.
+
+Do NOT publish yet. Report exactly what changed, show the expected UI/data flow, and stop for my approval before production deployment.

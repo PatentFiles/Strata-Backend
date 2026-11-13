@@ -1,0 +1,41 @@
+name: Owner UNKNOWN accounting recovery
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/src/lib/v13-production/**'
+      - 'artifacts/api-server/src/routes/**'
+      - 'artifacts/api-server/scripts/run-owner-unknown-recovery*'
+      - 'artifacts/api-server/scripts/run-v13-disposable-postgres.mjs'
+      - 'artifacts/api-server/package.json'
+      - 'lib/db/**'
+      - 'sql/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/owner-unknown-recovery.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-and-disposable-postgres:
+    # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server run build
+      - name: Verify owner authentication, exact evidence and unchanged denial guards
+        run: pnpm --filter @workspace/api-server run test:owner-unknown-recovery
+      - name: Install PostgreSQL tooling for new disposable clusters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+      - name: Verify real accounting, concurrency, migrations and access boundaries
+        run: pnpm --filter @workspace/api-server run test:owner-unknown-recovery-postgres

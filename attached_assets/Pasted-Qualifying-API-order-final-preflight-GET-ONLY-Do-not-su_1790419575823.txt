@@ -1,0 +1,50 @@
+Qualifying API-order final preflight — GET ONLY. Do not submit or cancel an order yet.
+
+We will not contact Kalshi support.
+
+Find one currently open Predictions market suitable for a single controlled API-created qualifying-order experiment.
+
+Requirements:
+
+* use authenticated/public GETs only,
+* market must currently accept orders,
+* determine its exact V2 order schema/price representation,
+* determine minimum permitted quantity,
+* determine permitted price increments,
+* inspect the current orderbook,
+* select the lowest valid YES bid that is strictly non-crossing,
+* verify post_only is supported for this exact order path,
+* determine the exact applicable fee schedule,
+* calculate the maximum principal, maximum modeled fees, and maximum all-in cash exposure if the order unexpectedly fills,
+* verify available primary cash,
+* verify there are currently no open orders or positions that could be confused with this experiment.
+
+Also validate the exact proposed V2 payload against the current schema. Do not assume "count": "1.00" or "price": "0.0100" is valid merely from an example.
+
+Design a unique provisioning-only client_order_id namespace so this order cannot be mistaken for MICRO_LIVE.
+
+Define the execution protocol but DO NOT execute it:
+
+1. Persist client-order identity locally before POST.
+2. Exactly one POST using the existing read + write::trade credential.
+3. No automatic POST retry.
+4. On confirmed creation, GET the exact order and fills.
+5. If resting quantity remains, issue exactly one cancellation for that proven order identity.
+6. GET current/historical order and fill state until its final observable state is established.
+7. Any unexpected fill is treated as a genuine position and stops the experiment for manual review.
+8. Never submit another order to offset an unexpected fill automatically.
+9. Keep all evidence completely outside MICRO_LIVE ledgers and metrics.
+10. Only if order identity and final state are fully reconciled would a subsequent, separately authorized Advanced-upgrade POST be considered.
+
+Report:
+
+* selected ticker,
+* current market state/orderbook,
+* exact validated order payload,
+* maximum principal,
+* maximum fee,
+* maximum all-in exposure,
+* cancellation/recovery procedure,
+* and any remaining blocker.
+
+No mutations. Stop after preflight.

@@ -1,0 +1,54 @@
+name: Protective final-send PostgreSQL proof
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/src/lib/v13-production/**'
+      - 'lib/v13-strategy/**'
+      - 'sql/**'
+      - 'pnpm-lock.yaml'
+      - 'artifacts/api-server/scripts/protective-exit-roundtrip.test.mjs'
+      - 'artifacts/api-server/scripts/run-protective-fee-disposable.mjs'
+      - 'artifacts/api-server/package.json'
+      - '.github/workflows/protective-final-send.yml'
+permissions:
+  contents: read
+jobs:
+  final-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}
+          sudo systemctl stop postgresql
+          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+      - name: Verify selected PostgreSQL version
+        run: |
+          postgres --version
+          postgres --version | grep -E 'PostgreSQL\) ${{ matrix.postgres }}\.'
+      - name: Actual round trip, unit checks and disposable PostgreSQL predicates, locks and rollback
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://synthetic@127.0.0.1:1/offline
+        run: pnpm --filter @workspace/api-server run test:protective-exit-proof

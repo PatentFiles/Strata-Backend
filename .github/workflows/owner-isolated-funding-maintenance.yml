@@ -1,0 +1,47 @@
+name: Owner-isolated Kalshi funding maintenance
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "artifacts/api-server/src/lib/strata/ownerShardAllocation.ts"
+      - "artifacts/api-server/src/lib/strata/ownerShardAllocation.test.ts"
+      - "artifacts/api-server/src/lib/strata/ownedPilotTransfer.ts"
+      - "artifacts/api-server/src/lib/strata/ownedPilotTransfer.test.ts"
+      - ".github/workflows/owner-isolated-funding-maintenance.yml"
+  push:
+    branches: [fix/owner-isolated-funding-maintenance-20261027]
+permissions:
+  contents: read
+jobs:
+  isolated-funding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      CI: "true"
+      # Module-load configuration only. Injected mock GET/POST transports never
+      # connect to this non-existent database or perform live financial actions.
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/unreachable_ci_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+      - name: Owner shard allocation no-transfer and one-shot tests
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerShardAllocation.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownerShardAllocation.test.cjs
+          node --test dist/ownerShardAllocation.test.cjs
+      - name: Owner pilot transfer no-transfer and one-shot tests
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownedPilotTransfer.test.ts --bundle --platform=node --format=cjs --outfile=dist/ownedPilotTransfer.test.cjs
+          node --test dist/ownedPilotTransfer.test.cjs

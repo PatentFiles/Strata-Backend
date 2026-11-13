@@ -1,0 +1,46 @@
+name: Incident fee operator release candidate safety
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/functions/strata-fee-release-candidate/**'
+      - 'lib/db/drizzle/0024_strata_fee_operator_release_candidates.sql'
+      - '.github/workflows/fee-operator-release-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-candidate-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Typecheck release candidate Edge Function
+        run: deno check --node-modules-dir=auto supabase/functions/strata-fee-release-candidate/index.ts
+      - name: Test explicit reviewer and expiry guards
+        run: deno test supabase/functions/strata-fee-release-candidate/releaseCandidateValidation.test.ts
+      - name: Assert no production approval/execution writes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('supabase/functions/strata-fee-release-candidate/index.ts').read_text()
+          sql=Path('lib/db/drizzle/0024_strata_fee_operator_release_candidates.sql').read_text()
+          assert s.count('.insert(') == 1
+          assert 'server.from(RELEASES).insert(' in s
+          assert '.upload(' not in s and '.update(' not in s and '.upsert(' not in s
+          assert 'ownerPolicyApproved: false' in s and 'tradingAuthorized: false' in s
+          assert 'commissioningAuthorized: false' in s
+          assert 'strata_two_operator_fee_reviews_valid' in s
+          assert 'canonical_claim' not in s
+          assert 'operator_attested_commissioning_candidate' in s
+          assert 'ALTER TABLE public.strata_fee_operator_release_candidates ENABLE ROW LEVEL SECURITY' in sql
+          assert 'REVOKE ALL ON public.strata_fee_operator_release_candidates FROM PUBLIC, anon, authenticated' in sql
+          assert 'strata_official_fee_captures' not in sql
+          print('Release candidate isolation checks passed')
+          PY

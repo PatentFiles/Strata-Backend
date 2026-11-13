@@ -1,0 +1,246 @@
+PHASE 3 — SERVER-SIDE ALWAYS-ON PAPER FORWARD-TEST WORKER
+
+Phase 2 is complete at checkpoint 5ce8045.
+
+Build the server-side forward-test worker so V1.3 paper forward testing continues when the browser/app is closed.
+
+IMPORTANT:
+This is PAPER TESTING ONLY.
+Do not connect a brokerage or Kalshi trading account.
+Do not place real orders.
+Do not add any live-trading capability.
+Do not change V1.3 strategy thresholds, decision rules, pricing calculations, Scout/Confirm rules, settlement rules, or bankroll logic.
+
+Before making changes:
+1. Create a new checkpoint.
+2. Verify the current V1.3 self-test and 23-case parity test pass.
+3. Report the checkpoint ID.
+
+ARCHITECTURE
+
+The browser must no longer be responsible for keeping the forward test alive.
+
+Create ONE authoritative server-side worker that:
+
+1. Runs independently of any browser session.
+2. Polls the required Coinbase and Kalshi market data.
+3. Builds the exact same strategy input currently used by V1.3.
+4. Calls the existing authoritative evaluateV13Strategy function.
+5. Does NOT implement a second copy of the strategy rules.
+6. Persists evaluations, windows, crossings, positions, and settlements into the existing Phase 2 PostgreSQL tables.
+7. Restores state from PostgreSQL after restart.
+8. Continues the same forward-test ledger after restart.
+9. Uses database-level duplicate protection already built in Phase 2.
+
+CRITICAL SINGLETON PROTECTION
+
+The deployment may run more than one server process or restart unexpectedly.
+
+The worker MUST NOT rely on JavaScript process memory to guarantee one active engine.
+
+Implement a PostgreSQL-backed worker lease / leader lock.
+
+Requirements:
+- only one worker may own the V1.3 engine at a time
+- lease has an owner ID
+- lease has acquired/renewed timestamps
+- lease expires if the owning process dies
+- another worker may safely acquire it after expiration
+- heartbeat renews the lease
+- every evaluation verifies that this process still owns the lease
+- loss of lease immediately stops evaluation/writes
+- database constraints remain the final duplicate-action defense
+
+Do not use an in-memory-only lock.
+
+SERVER LOOP
+
+Use a conservative recurring loop appropriate for the existing market polling cadence.
+
+Each cycle should:
+
+A. Confirm worker lease
+B. Fetch current Coinbase market data
+C. Fetch current Kalshi 15-minute market data
+D. Validate data freshness
+E. Determine/currently restore the active 15-minute market window
+F. Persist the market snapshot/window state
+G. Run evaluateV13Strategy with the same inputs used by the browser implementation
+H. Persist the strategy evaluation
+I. Atomically claim any qualifying fresh crossing
+J. If Scout/Confirm qualifies, create/update the PAPER position only
+K. If an existing paper position qualifies for exit or settlement, process it exactly once
+L. Persist results
+M. Update worker heartbeat/status
+N. Record any error without corrupting engine state
+
+FAIL CLOSED
+
+If any required data is:
+- unavailable
+- malformed
+- stale
+- inconsistent
+- missing target
+- missing offer
+- from the wrong market/window
+
+the server worker must NOT create a paper position.
+
+Record the evaluation/error state and continue on a later cycle.
+
+Do not invent substitute market values.
+
+RESTART RECOVERY
+
+On worker startup:
+
+1. Read forward_test_engine.
+2. Read current/open forward_test_window.
+3. Read any open forward_test_position.
+4. Read previously consumed crossings/actions.
+5. Recover the last successful evaluation.
+6. Resume without treating old crossings as new.
+7. Never duplicate a Scout, Confirm, exit, or settlement because of restart.
+
+SERVER STATUS
+
+Extend GET /api/forward-test/status to include server-authoritative fields:
+
+- engine enabled
+- worker running
+- worker owner/instance ID (safe shortened ID)
+- lease acquired time
+- last heartbeat
+- last successful cycle
+- last attempted cycle
+- cycle count
+- worker uptime
+- current market ticker
+- current 15-minute window
+- current BTC price
+- current Kalshi target
+- signed buffer
+- UP offer
+- DOWN offer
+- current V1.3 state
+- current favored side
+- current reason
+- last trigger type
+- last trigger time
+- open paper position
+- paper entry side
+- paper stake
+- entry offer
+- add/confirm status
+- current unrealized paper result if applicable
+- completed positions
+- wins
+- losses
+- cumulative paper P&L
+- last settlement
+- last error
+- database connection status
+
+DASHBOARD
+
+Update the existing Live Progress / Forward Test Activity panel.
+
+Clearly separate:
+
+SERVER FORWARD TEST
+from
+THIS BROWSER SESSION
+
+The server section should continue advancing even if I close Safari and return later.
+
+Show:
+
+SERVER ENGINE: RUNNING / STOPPED / ERROR
+LAST HEARTBEAT
+LAST EVALUATION
+ACTIVE WINDOW
+SERVER EVALUATIONS
+SCOUT TRIGGERS
+CONFIRM TRIGGERS
+OPEN PAPER POSITION
+COMPLETED TESTS
+SERVER PAPER P&L
+LAST ERROR
+
+Add a clear indicator:
+
+“SERVER TESTING — continues when this browser is closed”
+
+Do NOT imply the browser itself is keeping the engine alive.
+
+CONTROL
+
+Do not add an unrestricted public start/stop endpoint.
+
+If a control endpoint is required, it must:
+- require authentication
+- be owner/account scoped
+- be safe/idempotent
+
+For this phase, preferably enable/disable the worker through server configuration/database state rather than a public button.
+
+TESTS REQUIRED BEFORE COMPLETION
+
+Test all of the following:
+
+1. Existing V1.3 self-test still passes.
+2. Existing 23-case parity test still passes.
+3. Server evaluator output equals browser evaluator output for fixed inputs.
+4. Worker writes evaluations to PostgreSQL.
+5. Browser can close without stopping server evaluations.
+6. Server restart restores state.
+7. Restart does not duplicate Scout.
+8. Restart does not duplicate Confirm.
+9. Restart does not duplicate settlement.
+10. Two simulated worker instances cannot both own the engine.
+11. Expired worker lease can be safely recovered.
+12. Competing crossing claims create at most one position/action.
+13. Stale/missing market data fails closed.
+14. Database reconnect resumes safely.
+15. Current open position survives restart.
+16. 15-minute market rollover is handled once.
+17. Paper P&L remains deterministic.
+18. No real order path exists.
+
+Do not leave test fixtures in PostgreSQL.
+
+DEVELOPMENT FIRST
+
+Implement and test this only in development first.
+
+DO NOT:
+- publish
+- modify production database
+- change deployment visibility
+- start real/live trading
+- modify V1.3 logic
+
+until I explicitly approve Phase 3 production deployment.
+
+FINAL REPORT
+
+When development Phase 3 is complete, stop and report:
+
+- checkpoint ID
+- exact files changed
+- worker architecture
+- worker cadence
+- lease/leader-lock implementation
+- restart recovery behavior
+- API endpoint changes
+- database schema changes, if any
+- all test results
+- number of rows currently in each forward-test table
+- whether the worker is currently running
+- whether any paper position was created during testing
+- confirmation V1.3 behavior is unchanged
+- confirmation no real trading capability exists
+- exact next step needed to deploy the worker to production
+
+Do not publish until I approve.

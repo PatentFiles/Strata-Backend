@@ -1,0 +1,1131 @@
+import {createDirectRoundingRuntime} from './directRoundingRuntime';
+import {createDirectRoundingOwnedAdapters} from './directRoundingOwnedAdapters';
+import {releaseFailedStartLease} from "./failedStartLeaseCleanup";
+import {readHeldProtectiveMarketFee} from "./heldProtectiveMarketFee";
+import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
+import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
+import {createBoundedUnknownEntryReadRunner} from "./boundedUnknownEntryReadRunner";
+import {FinalPublicMetadataPhases} from "./finalPublicMetadataPhases";
+import {createFeeVerificationTiming} from "./feeVerificationTiming";
+import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
+import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
+import {processCommittedPublicMetadata,type MetadataPrefetchAttempt} from "./committedPublicMetadata";
+import {lockStopAccount,readStopExposure} from "./stopExposure";
+export {classifyStopExposureRow} from "./stopExposure";
+import {reconcileOwnedProtectiveExitOutcome} from "./ownedProtectiveExitOutcome";
+import {annotateFeeFailure} from "./feeFailureDiagnostics";
+import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
+import {beginExecutionStage,timedFinalFetch,type TimingObserver} from "../v13-production/stageTiming";
+import {logger} from "../logger";
+import {createEntryWireClockFetch} from "./entryWireClock";
+import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
+import {reconciledFlatEntryEvidence} from "./reconciledFlatEntryEvidence";
+import { randomUUID } from "node:crypto";
+import type { Pool } from "@workspace/db";
+import { getScopedKalshiJson } from "../kalshiAccountClient";
+import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
+import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
+import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
+import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSourceStage";
+import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
+import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
+import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
+import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
+import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
+import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
+import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
+import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
+import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
+import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
+import {deployedGitSha} from "./deployedGitSha";
+import {
+  openOwnedExecutionSession,
+  scheduleOwnedAccountWorker,
+  type AccountDispatchState,
+  type SchedulableWorker,
+} from "./accountProductionSession";
+import {
+  ACCOUNT_WORKER_LEASE_TTL_MS,
+  ACQUIRE_LEASE_SQL,
+  ARM_LEASE_SQL,
+  HEARTBEAT_LEASE_SQL,
+  HOLD_LEASE_SQL,
+  INSERT_LEASE_SQL,
+  KILL_LEASE_SQL,
+  RELEASE_LEASE_SQL,
+} from "./accountScopedExecution";
+import { dedicatedSignerFingerprint } from "./commissioning";
+import {
+  emptySnapshot,
+  PERSONAL_KALSHI_HOST,
+  PERSONAL_MARKET_METADATA_HOST,
+  readOwnedKalshiFeeds,
+} from "./personalExchangeRead";
+import type { Identity, Request } from "../v13-production/types";
+
+type LeaseAction = "STOP" | "KILL";
+
+export interface PersonalSessionControl {
+  isScheduled(userId: string, accountId: string): boolean;
+  start(input: {
+    userId: string;
+    accountId: string;
+    action: "START" | "ARM";
+  }): Promise<{ ok: boolean; reason: string; workerStarted: boolean }>;
+  stop(input: { userId: string; accountId: string; action?: LeaseAction }): Promise<{
+    workerStopped: boolean;
+    managingExposure?: boolean;
+  }>;
+  stopOwner(userId: string, action?: LeaseAction): Promise<{ workerStopped: boolean; managingExposure?: boolean }>;
+}
+
+interface RunningWorker {
+  ownerUserId: string;
+  worker: SchedulableWorker;
+  state?: AccountDispatchState;
+  disarm?: (action: LeaseAction) => Promise<{ entriesBlocked: boolean; managingExposure: boolean }>;
+}
+
+/**
+ * Production cash is authoritative only after the authenticated Kalshi
+ * Subaccount 1 / Exchange Index 2 balance has been reconciled to the ledger.
+ * A previously traded but fully settled account must be treated identically
+ * to a never-traded account: neither may skip the cash comparison.
+ *
+ * This function neither modifies a balance nor changes a release decision.
+ */
+export function verifiedStartCash(input: {
+  ledgerMicros: unknown;
+  exchangeMicros: unknown;
+  reservedMicros: unknown;
+  reconciledAt: unknown;
+  observedAtMs: number;
+}): {ok:true}|{ok:false;reason:string}{
+  const money=/^\d+$/;
+  const ledger=typeof input.ledgerMicros==="string"?input.ledgerMicros:"";
+  const exchange=typeof input.exchangeMicros==="string"?input.exchangeMicros:"";
+  const reserved=typeof input.reservedMicros==="string"?input.reservedMicros:"";
+  if(!money.test(ledger)||!money.test(exchange)||!money.test(reserved))
+    return {ok:false,reason:"cash_evidence_unverified"};
+  if(BigInt(reserved)>BigInt(ledger)||BigInt(ledger)!==BigInt(exchange))
+    return {ok:false,reason:"cash_evidence_mismatch"};
+  const reconciled=Date.parse(String(input.reconciledAt??""));
+  const observed=input.observedAtMs;
+  if(!Number.isFinite(reconciled)||!Number.isFinite(observed)||
+     reconciled>observed+10_000||observed-reconciled>15*60_000)
+    return {ok:false,reason:"fresh_cash_reconciliation_required"};
+  return {ok:true};
+}
+
+const SIGNER_SQL = `
+  -- personal-session:signer
+  SELECT a.key_fingerprint, a.cash_micros::text AS cash_micros,
+         a.reconciled_at, a.reserved_micros::text AS reserved_micros,
+         a.commissioned, a.execution_enabled, a.kill_switch, a.blocked_reason, a.fee_artifact_digest,
+         a.cash_precision_verified, a.subaccount, a.exchange_index,
+         c.key_fingerprint AS credential_fingerprint,
+         c.financial_account_id::text AS financial_account_id,
+         c.provider_connection_id::text AS provider_connection_id,
+         c.vault_secret_id::text AS vault_secret_id,
+         s.decrypted_secret,
+         p.policy_hash, p.fee_policy_version, p.fee_source_url, p.fee_formula_version, p.state AS policy_state,
+         stake.configured_stake_cents
+  FROM v13_production_account a
+  JOIN private.kalshi_connection_credentials c
+    ON c.owner_user_id = a.owner_user_id
+   AND c.financial_account_id = a.kalshi_connection_id
+   AND c.key_fingerprint = a.key_fingerprint
+  JOIN vault.decrypted_secrets s ON s.id = c.vault_secret_id
+  LEFT JOIN v13_live_money_policy p
+    ON p.id = a.policy_id AND p.execution_account_id = a.id AND p.state = 'APPROVED'
+  LEFT JOIN strata_configured_stake stake ON stake.execution_account_id = a.id
+  WHERE a.owner_user_id = $1::uuid
+    AND a.id = $2
+    AND a.owner_user_id IS NOT NULL
+    AND c.role = 'restricted_execution'
+    AND c.revoked_at IS NULL
+    AND c.verified_at IS NOT NULL
+    AND c.verification_reason = 'credential_verified'
+    AND a.subaccount = 1
+    AND a.exchange_index = 2
+`;
+
+/** Distinct from global fetch, so a deployment cannot submit through the unbound global client. */
+export async function personalProductionFetch(
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  return fetch(input, init);
+}
+
+export function createOwnedTradingSupervisor(
+  open: (input: { userId: string; accountId: string; action: "START" | "ARM" }) => Promise<
+    | { ok: true; worker: SchedulableWorker; state?: AccountDispatchState; disarm?: RunningWorker["disarm"] }
+    | { ok: false; reason: string }
+  >,
+): PersonalSessionControl {
+  const workers = new Map<string, RunningWorker>();
+  // An opening session already owns a lifecycle operation even before its
+  // worker is registered. Do not duplicate that operation or certify STOP
+  // while it can still install a scheduled worker after the caller returns.
+  const starts = new Map<string, {
+    ownerUserId: string;
+    result: Promise<{ ok: boolean; reason: string; workerStarted: boolean }>;
+  }>();
+  // A new START is refused while any earlier control can still disarm its
+  // account. Do not queue an automatic restart behind STOP/KILL. Counts allow
+  // KILL to close local gates immediately even when another STOP is waiting.
+  const stops = new Map<string, { ownerUserId: string; pending: number }>();
+  const ownerStops = new Map<string, number>();
+  const stopAccount = async (userId: string, accountId: string, action: LeaseAction) => {
+    const pending = starts.get(accountId), running = workers.get(accountId), stopping = stops.get(accountId);
+    if ([pending, running, stopping].some(operation => operation && operation.ownerUserId !== userId))
+      return { workerStopped: false, managingExposure: false };
+    const control = stopping ?? { ownerUserId: userId, pending: 0 };
+    control.pending++;
+    stops.set(accountId, control);
+    try {
+      if (pending) {
+        try { await pending.result; }
+        catch { return { workerStopped: false, managingExposure: false }; }
+      }
+      // Keep the existing authoritative exposure check: STOP may retain an
+      // entry-held protective worker, whereas KILL must stop it completely.
+      return await stopOne(workers, userId, accountId, action);
+    } finally {
+      control.pending--;
+      if (control.pending === 0 && stops.get(accountId) === control) stops.delete(accountId);
+    }
+  };
+  return {
+    isScheduled(userId, accountId) {
+      const running = workers.get(accountId);
+      return running?.ownerUserId === userId && running.worker.isScheduled();
+    },
+    async start(input) {
+      input = { ...input };
+      const stopping = stops.get(input.accountId);
+      if (stopping || ownerStops.has(input.userId)) {
+        return { ok: false, reason: stopping && stopping.ownerUserId !== input.userId
+          ? "foreign_execution_account" : "worker_control_in_progress", workerStarted: false };
+      }
+      const pending = starts.get(input.accountId);
+      if (pending) {
+        if (pending.ownerUserId !== input.userId)
+          return { ok: false, reason: "foreign_execution_account", workerStarted: false };
+        return pending.result;
+      }
+      const existing = workers.get(input.accountId);
+      if (existing && existing.ownerUserId !== input.userId) {
+        return { ok: false, reason: "foreign_execution_account", workerStarted: false };
+      }
+      if (existing?.worker.isScheduled()) {
+        return { ok: true, reason: "worker_already_running", workerStarted: true };
+      }
+      // Register before invoking open, including a synchronously completing
+      // adapter. Promise continuations then apply pending STOP before the
+      // worker's first scheduled timer can run.
+      const result = Promise.resolve().then(async () => {
+        const opened = await open(input);
+        if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if (!opened.worker.isScheduled()) {
+          opened.worker.stop();
+          return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
+        }
+        workers.set(input.accountId, {
+          ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+        });
+        return { ok: true, reason: "worker_scheduled", workerStarted: true };
+      });
+      starts.set(input.accountId, { ownerUserId: input.userId, result });
+      try { return await result; }
+      finally { if (starts.get(input.accountId)?.result === result) starts.delete(input.accountId); }
+    },
+    async stop(input) {
+      return stopAccount(input.userId, input.accountId, input.action ?? "STOP");
+    },
+    async stopOwner(userId, action = "STOP") {
+      ownerStops.set(userId, (ownerStops.get(userId) ?? 0) + 1);
+      try {
+        let workerStopped = true;
+        let managingExposure = false;
+        const accountIds = new Set([
+          ...[...workers].filter(([, running]) => running.ownerUserId === userId).map(([id]) => id),
+          ...[...starts].filter(([, pending]) => pending.ownerUserId === userId).map(([id]) => id),
+          ...[...stops].filter(([, stopping]) => stopping.ownerUserId === userId).map(([id]) => id),
+        ]);
+        // Close all available local gates immediately, then retain the owner
+        // barrier until EVERY disarm settles, including after one fails.
+        const results = await Promise.allSettled([...accountIds].map(accountId =>
+          stopAccount(userId, accountId, action)));
+        for (const result of results) {
+          if (result.status === "rejected") throw result.reason;
+          if (!result.value.workerStopped) workerStopped = false;
+          if (result.value.managingExposure) managingExposure = true;
+        }
+        return { workerStopped, managingExposure };
+      } finally {
+        const remaining = ownerStops.get(userId)! - 1;
+        if (remaining === 0) ownerStops.delete(userId);
+        else ownerStops.set(userId, remaining);
+      }
+    },
+  };
+}
+
+export function createProductionPersonalSession(
+  db: Pool | { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    kalshiGet?: typeof getScopedKalshiJson;
+    verifyFee?: typeof verifyCurrentFeeArtifact;
+    now?: () => number;
+    /** LOCAL prototype opt-in. Production construction leaves this disabled. */
+    publicMetadataPrefetch?: boolean;
+    finalPublicMetadataPrefetch?: boolean;
+    /** Inactive candidate; no production caller supplies this option. Requires reviewed registry. */
+    directPrecisionSizing?: boolean;
+  } = {},
+): PersonalSessionControl {
+  const get:typeof getScopedKalshiJson = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch,_host,_owner,signal) =>
+    getScopedKalshiJson(creds, path, query, fetchImpl, PERSONAL_KALSHI_HOST,undefined,signal));
+  const verifyFee = options.verifyFee ?? verifyCurrentFeeArtifact;
+  const now = options.now ?? Date.now;
+  return createOwnedTradingSupervisor(async (input) => {
+    const loaded = await loadSigner(db, input.userId, input.accountId);
+    if (!loaded.ok) return loaded;
+    const material = parseSecret(loaded.row.decrypted_secret);
+    if (!material) return { ok: false, reason: "personal_signer_unavailable" };
+    const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
+    if (!fingerprint || fingerprint !== text(loaded.row.key_fingerprint) || fingerprint !== text(loaded.row.credential_fingerprint)) {
+      return { ok: false, reason: "credential_fingerprint_mismatch" };
+    }
+    // Independent worker-level guard: outstanding cashier transfers must settle
+    // before a live worker can acquire a lease, even if the controller races.
+    if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
+      try {
+        const withdrawals = await db.query(
+          "SELECT id FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1",
+          [input.accountId, input.userId],
+        );
+        if (withdrawals.rows.length > 0) return { ok: false, reason: "withdrawal_in_progress" };
+      } catch {
+        return { ok: false, reason: "withdrawal_safety_unavailable" };
+      }
+    }
+    if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+      try {
+        const hold=await db.query(
+          "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+          [input.userId,input.accountId],
+        );
+        if(hold.rows.length)return {ok:false,reason:"automatic_withdrawal_maintenance_active"};
+      }catch{return {ok:false,reason:"automatic_maintenance_safety_unavailable"};}
+    }
+    // A historical commissioning marker or any other account risk hold must
+    // be resolved using the authenticated owner reconciliation/repair workflow.
+    // Commissioned=true and switches OFF are not sufficient to clear a hold.
+    // Never create a worker lease, call Kalshi, or submit an order while held.
+    if (loaded.row.blocked_reason !== null &&
+        loaded.row.blocked_reason !== undefined) {
+      return { ok: false, reason: "execution_account_risk_freeze_requires_reconciliation" };
+    }
+    if (!flag(loaded.row.commissioned)) return { ok: false, reason: "user_execution_account_not_commissioned" };
+    if (flag(loaded.row.kill_switch) || !flag(loaded.row.execution_enabled)) {
+      return { ok: false, reason: "account_kill_switch" };
+    }
+    const live = await db.query(
+      "SELECT live_execution_enabled, manual_kill_switch FROM live_execution_config WHERE id = 'singleton'",
+    );
+    const gate = live.rows[0];
+    const killOff = gate?.manual_kill_switch === false || gate?.manual_kill_switch === "f" || gate?.manual_kill_switch === "false";
+    if (!gate || !killOff) return { ok: false, reason: "global_kill_switch" };
+    if (!(gate.live_execution_enabled === true || gate.live_execution_enabled === "t" || gate.live_execution_enabled === "true")) {
+      return { ok: false, reason: "live_execution_not_enabled" };
+    }
+    if (!flag(loaded.row.cash_precision_verified)) return { ok: false, reason: "cash_not_reconciled" };
+    // New exposure is forbidden until the exact Railway build has a genuine,
+    // unexpired independently reviewed protective EXIT release. The earlier
+    // implementation only checked this when the EXIT itself was attempted,
+    // which was too late for an already-opened position.
+    const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
+    // A standing grant can bootstrap START, but cannot admit ANY entry
+    // until a new signed exchange snapshot renews its short technical lease.
+    const startupSha=deployedGitSha();
+    let standingMode=false;
+    if(/^[a-f0-9]{40}$/.test(startupSha)){
+      try {standingMode=await hasContinuousGrantHistory(db,input.userId,startupSha);}
+      catch {return {ok:false,reason:"standing_authority_unavailable"};}
+    }
+    if(standingMode ? !(await checkContinuousBootstrap(db,input.userId,startupSha)) : !exitRelease.ok)
+      return {ok:false,reason:standingMode?"standing_grant_not_current":exitRelease.reason};
+    if(standingMode && process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true")
+      return {ok:false,reason:"protective_exit_release_disabled"};
+    const configuredStake = number(loaded.row.configured_stake_cents);
+    if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
+    const digest = text(loaded.row.fee_artifact_digest);
+    const policyHash = text(loaded.row.policy_hash);
+    const policyVersion = text(loaded.row.fee_policy_version);
+    const sourceUrl = text(loaded.row.fee_source_url);
+    const formulaVersion = text(loaded.row.fee_formula_version);
+    if (!digest || !policyHash || !policyVersion || !sourceUrl || !formulaVersion || loaded.row.policy_state !== "APPROVED") {
+      return { ok: false, reason: "fee_evidence_missing" };
+    }
+    const observedAt = now();
+    const feeds = await readOwnedKalshiFeeds(material, observedAt, get);
+    if (!feeds.ok) return feeds;
+    const identity: Identity = { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint };
+    const requests = await loadRequests(db, input.accountId);
+    const snapshot = emptySnapshot(identity, feeds, requests);
+    if (!("identity" in snapshot)) return snapshot;
+    // Never bypass cash reconciliation just because the account has historical
+    // settled fills. A non-empty history is not permission to spend stale cash.
+    const cashProof=verifiedStartCash({
+      ledgerMicros:loaded.row.cash_micros,
+      exchangeMicros:feeds.cashMicros,
+      reservedMicros:loaded.row.reserved_micros,
+      reconciledAt:loaded.row.reconciled_at,
+      observedAtMs:observedAt,
+    });
+    if(!cashProof.ok)return cashProof;
+    const alternate=parseOwnerFeeSource(sourceUrl);
+    const apiSource=parseReviewedApiSource(sourceUrl);
+    if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
+       formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
+      return {ok:false,reason:"source_policy_identity_invalid"};
+    if(apiSource && (policyVersion!==API_SOURCE_POLICY_VERSION ||
+       formulaVersion!==API_SOURCE_FORMULA_VERSION))
+      return {ok:false,reason:"api_source_policy_identity_invalid"};
+    const operatorAtStart=alternate?
+      await verifyOwnerFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
+    if(alternate && (!operatorAtStart?.ok || operatorAtStart.identity.digest!==digest))
+      return {ok:false,reason:"operator_source_release_unavailable"};
+    const apiAtStart=apiSource?
+      await verifyReviewedApiFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
+    if(apiSource && (!apiAtStart?.ok || apiAtStart.identity.grantId!==apiSource.grantId))
+      return {ok:false,reason:"reviewed_api_source_release_unavailable"};
+    // The commissioning digest is a historical observation. Refresh the API
+    // source for the exact target market at every readMarket and final POST.
+    // The direct owner's standing policy has no human reviewer requirement,
+    // but must prove authoritative monetary schedule + current Kalshi market.
+    // Isolated test-injected fee verifiers never invoke the production source.
+    const monetaryAtStart=!apiSource&&!alternate&&!options.verifyFee?
+      await verifyMonetaryFeeContract("STEP_11"):null;
+    if(monetaryAtStart && (!monetaryAtStart.ok||
+       !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
+      return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
+    const artifact=apiSource && apiAtStart?.ok?
+      {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
+      alternate && operatorAtStart?.ok?
+      {valid:true,digest:operatorAtStart.identity.digest,
+       verifiedAt:operatorAtStart.identity.verifiedAtMs}:
+      monetaryAtStart?.ok?
+      {valid:true,digest,
+       verifiedAt:Date.parse(monetaryAtStart.verifiedAt??"")}:
+      await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
+    if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
+      return { ok: false, reason: "fee_evidence_missing" };
+    }
+    const holderId = `personal-${randomUUID()}`;
+    const leaseIds = leaseIdentity(loaded.row);
+    if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
+    const claimed = await claimWorkerLease(db, {
+      ...leaseIds, ownerUserId: input.userId, executionAccountId: input.accountId,
+      holderId, fingerprint, now: new Date(observedAt).toISOString(),
+      staleBefore: new Date(observedAt - ACCOUNT_WORKER_LEASE_TTL_MS).toISOString(),
+    });
+    if (!claimed.ok) return claimed;
+    const state = dispatchState(input.userId, fingerprint, claimed.fencingToken);
+    let feeVerifiedAt = artifact.verifiedAt;
+    let feeCheckedAt = observedAt;
+    // This short-lived technical release may be renewed while the owner worker
+    // keeps reconciling. Keep its eligibility separate from the *sticky*
+    // entriesAuthorized latch used for STOP, fencing, uncertain orders,
+    // maintenance and protective-exit failures. A fresh, independently reviewed
+    // signed release can reopen this ONE transient gate, never a terminal hold.
+    const technicalRelease = new TechnicalReleaseEntryGate();
+    let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
+      createDirectRoundingOwnedAdapters({query:(sql,values)=>{
+        const tx=finalLedger?.currentTransaction();
+        return tx?tx.query(sql,values):db.query(sql,values);
+      }},input.userId)):null;
+    const timingObserver:TimingObserver=event=>logger.info({event:"strata_execution_stage",...event});
+    const timingContext={accountId:input.accountId,mode:"LIVE" as const};
+    let finalPublicMetadata:FinalPublicMetadataPhases|null=null;
+    const measuredFetch=timedFinalFetch(raw=>{
+    const clockCheckedTransport=createEntryWireClockFetch(()=>{
+      if(!finalLedger)throw new Error("production_final_wire_clock_missing");
+      finalLedger.assertFinalWireClock();
+      directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
+    },raw);
+    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+      alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
+      !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
+        fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
+    },personalProductionFetch,timingObserver,timingContext);
+    let activeMetadata:MetadataPrefetchAttempt|null=null;
+    let heldReadAbort:AbortSignal|null=null;
+    let recoveryAbort:AbortController|null=null;
+    const metadataScope=()=>({accountId:input.accountId,ownerId:input.userId,releaseSha:deployedGitSha(),
+      holderId,fence:String(state.fencingToken),policyHash});
+    let heldRecoveryScope:RecoveryHoldScope|null=null;
+    const session = openOwnedExecutionSession({
+      pool: db as Pool,
+      ownerUserId: input.userId,
+      executionAccountId: input.accountId,
+      material,
+      now,
+      state,
+      timingObserver,
+      entriesOpen: () => technicalRelease.mayEnter(state.entriesAuthorized, state.accountKill),
+      // This is the only LIVE exit producer. The source selection comes from
+      // the unchanged strategy and owned PostgreSQL position, NOT a browser.
+      // The signer and lease are captured from this authenticated vault session.
+      dispatchProtectiveExit: async selection => {
+        if (process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE !== "true") {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_release_disabled");
+        }
+        if (state.accountKill || state.globalKill || state.presentedToken !== claimed.fencingToken) {
+          state.entriesAuthorized = false;
+          throw new Error("protective_exit_worker_lease_or_kill_changed");
+        }
+        try {
+          // Fresh entries are halted as soon as an outbound EXIT intent is
+          // prepared. Never initiate a second entry when exit evidence is
+          // uncertain or the exchange account is being reduced.
+          technicalRelease.beginReconciliation();
+          // A normal exit is a transient exposure hold, not an owner STOP.
+          // Only committed, fully flat reconciliation can reopen eligibility.
+          // Financial preparation commits an accountable V13 SELL intent but
+          // DOES NOT send an order. It independently rechecks position,
+          // strategy, approved policy/fees, book, stake and exit floor.
+          const financialId = await session.executor.prepareExit(
+            selection.positionId,selection.minimumExitMicros/1_000_000,
+          );
+          const financialRows = await db.query(
+            "SELECT request FROM public.v13_production_intent "+
+            "WHERE id=$1 AND account_id=$2 AND parent_id=$3 "+
+            "AND kind='EXIT' AND state='PREPARED' AND terminal=false",
+            [financialId,input.accountId,selection.positionId],
+          );
+          const value=financialRows.rows[0]?.request;
+          const request=(typeof value==="string"?JSON.parse(value):value) as Request;
+          if(financialRows.rows.length!==1||!request||
+             typeof request!=="object"||Array.isArray(request))
+            throw Error("protective_exit_v13_intent_unverified");
+          const market = await session.executor.exchange.market(selection.market, selection.side);
+          const order = sealedFinancialProtectiveExitOrder(selection,request,market);
+          const lease = { holderId, fencingToken: claimed.fencingToken };
+          const reservation = await reserveOwnedEmergencyExitProof(
+            input.userId, input.accountId, material, order, lease,
+          );
+          if (!reservation.reservationPrepared || !reservation.reservationId) {
+            throw new Error(reservation.reason);
+          }
+          // Marker PREPARED -> UNKNOWN must COMMIT before a one-use signed POST;
+          // all transport failures require exchange GET recovery, never retry.
+          const outcome = await dispatchReviewedProtectiveExitOnce({
+            ownerId: input.userId, accountId: input.accountId,
+            reservationId: reservation.reservationId, material, order, lease,
+          });
+          // Preserve a known local no-send as a temporary reconciliation hold,
+          // never as entry authority. UNKNOWN and failed reads remain sticky.
+          await reconcileOwnedProtectiveExitOutcome({
+            outcome,ownerId:input.userId,accountId:input.accountId,reservationId:reservation.reservationId,
+            technicalRelease,state,reconcile:()=>session.executor.reconcile(),
+          });
+        } catch (error) {
+          // Exposure after an ambiguous IOC is never replaced by a new entry.
+          state.entriesAuthorized = false;
+          throw error;
+        }
+      },
+      // Only the backend-held, authenticated vault signer can read UNKNOWN
+      // protective-exit history. Browser routes never receive this callback
+      // or the signer. No order submission is possible from this function.
+      recoverProtectiveExits: async () => {
+        const recovery=await reconcileOwnedProtectiveExits({
+          ownerId:input.userId,accountId:input.accountId,material,
+        },db);
+        if(!recovery.ok){
+          state.entriesAuthorized=false;
+          throw new Error(recovery.reason);
+        }
+      },
+      readSnapshot: async () => {
+        const abort=heldReadAbort;
+        const checkRead=()=>{abort?.throwIfAborted();if(abort&&(state.accountKill||state.globalKill))throw Error("held_recovery_read_killed");};
+        checkRead();
+        // Fail closed throughout each snapshot; eligibility is restored only
+        // after reconciliation plus a genuine fresh exact-SHA release check.
+        technicalRelease.beginReconciliation();
+        // A protective reservation may become PREPARED/UNKNOWN while this
+        // worker is already scheduled. Gate EVERY subsequent snapshot, not
+        // just START, so another entry cannot race an unresolved exit.
+        // Dispatch has already committed its one-use claim. During ONLY its
+        // locked final account proof, that exact DISPATCHED ENTRY is expected,
+        // not a different uncertain order. UNKNOWN and protective exits never
+        // receive this exemption; ordinary snapshots still count everything.
+        const currentEntry=finalLedger?.currentFinalSnapshotEntry()??null;
+        const proofTx=finalLedger?.currentTransaction()??null;
+        const snapshotDb: { query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}> } = {
+          query:(sql,params)=>proofTx?proofTx.query(sql,params):db.query(sql,params),
+        };
+        const unresolvedNow=await readUnresolvedIntentMode(
+          (sql,params)=>snapshotDb.query(sql,params),input.accountId,currentEntry,
+        );
+        if(!unresolvedNow.ok){
+          state.entriesAuthorized=false;
+          throw new Error("unresolved_intent_count_unverified");
+        }
+        // Normal acknowledged dispatch is durably UNKNOWN until signed GET
+        // reconciliation. Keep this transient gate closed, without poisoning
+        // the sticky STOP/fence/failure latch for the rest of the session.
+        if(unresolvedNow.mode==="recovery"){
+          technicalRelease.beginReconciliation();
+          // Final authority refresh must never override a different unresolved
+          // intent or protective reservation observed at this wire boundary.
+          if(currentEntry)throw new Error("production_other_uncertain_order");
+        }
+        checkRead();
+        const beat = await heartbeatLease(snapshotDb, {
+          executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
+          fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
+        });
+        checkRead();
+        if (!beat.ok) {
+          state.presentedToken = -1;
+          state.entriesAuthorized = false;
+          throw new Error(beat.reason);
+        }
+        if (!beat.armRequested) state.entriesAuthorized = false;
+        // If a process died between persisting a cash maintenance hold and
+        // requesting STOP, the next heartbeat still disables new entries.
+        // Protective reduce-only exit management is left to the worker.
+        if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+          try {
+            const maintenance=await snapshotDb.query(
+              "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
+              [input.userId,input.accountId],
+            );
+            if(maintenance.rows.length)state.entriesAuthorized=false;
+          }catch{state.entriesAuthorized=false;}
+        }
+        // Separate bounded diagnostics only; original signed-read clock/proof remain untouched.
+        const scopedGet:typeof getScopedKalshiJson=async(creds,path,query,fetchImpl,host,owner,signal)=>{
+          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort??signal);checkRead();return result;
+        };
+        const feedTiming=createOwnedFeedReadTiming(scopedGet,recordOwnedFeedReadTiming);
+        let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
+        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get); }
+        finally { feedTiming.finish(); }
+        if (!latest.ok) throw new Error(latest.reason);
+        const proven = emptySnapshot(identity, latest, await loadRequests(snapshotDb, input.accountId));
+        if (!("identity" in proven)) throw new Error(proven.reason);
+        // Authority remains closed here. Only committed ledger reconciliation
+        // or the final transactional account proof can reopen it.
+        // Refresh out of band after exposure proof, never delay protective reconciliation.
+        if(directRounding&&!proofTx)void directRounding.refresh();
+        return proven;
+      },
+      readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({
+        ...(directRounding&&purpose!=="EXIT"&&!heldRecoveryScope?{readDirectRounding:()=>directRounding.read(finalLedger?.currentWireScopeToken()??undefined)}:{}),
+        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),
+        verifyFee:async(clock,readMetadata,captureMetadata)=>{
+              const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
+              const feeReads=createFeeVerificationTiming();
+              try {
+              if(heldRecoveryScope){
+                feeVerifiedAt=await readHeldProtectiveMarketFee({ownerId:input.userId,accountId:input.accountId,
+                  market,sourceUrl,policyVersion,formulaVersion,digest});
+                feeCheckedAt=clock;
+              }else if(apiSource){
+                const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
+                    feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
+                if(!checked.ok||checked.identity.marketTicker!==market)
+                  throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
+                    {phase:"authorization",reason:"api_fee_order_market_mismatch"},checked);
+                feeVerifiedAt=checked.identity.verifiedAtMs;
+                feeCheckedAt=clock;
+              }else if(alternate){
+                const checked=await verifyOwnerFeeSourceStage(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market);
+                if(!checked.ok || checked.identity.digest!==digest)
+                  throw new Error("owner_operator_fee_source_unavailable");
+                feeVerifiedAt=checked.identity.verifiedAtMs;
+                feeCheckedAt=clock;
+              }else if(!options.verifyFee){
+                const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
+                if(!monetary.ok||!monetary.monetaryFeeAuthorized||
+                   monetary.marketTicker!==market||monetary.sourceDigest!==digest)
+                  throw Error("monetary_fee_exact_market_unverified");
+                feeVerifiedAt=Date.parse(monetary.verifiedAt??"");
+                feeCheckedAt=clock;
+              }else if (clock - feeCheckedAt > 10_000) {
+                const refreshed = await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
+                if (!refreshed.valid || refreshed.digest !== digest || !refreshed.verifiedAt)
+                  throw new Error("fee_evidence_missing");
+                feeVerifiedAt = refreshed.verifiedAt;
+                feeCheckedAt = clock;
+              }
+              feeTiming("completed",{feeVerificationReads:feeReads.snapshot()});
+              return feeVerifiedAt;
+              }catch(error){feeTiming("rejected",{error,feeVerificationReads:feeReads.snapshot()});throw error;}
+
+        },
+        readBook:()=>get(material,`/trade-api/v2/markets/${encodeURIComponent(market)}/orderbook`,"?depth=100"),
+        readPublic:publicKalshiObject,configuredStakeCents:configuredStake,
+        policyVersion,sourceUrl,formulaVersion,artifactDigest:digest,policyHash,
+      }),
+      fetchImpl: measuredFetch,
+    });
+    finalLedger=session.executor.ledger;
+    if(apiSource&&options.finalPublicMetadataPrefetch===true){
+      finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
+        ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
+        ()=>{activeMetadata?.discard();activeMetadata=null;});
+      session.executor.finalPublicMetadata=finalPublicMetadata;
+    }
+    if(apiSource&&options.publicMetadataPrefetch===true){
+      session.executor.prefetchCommittedPublicMetadata=hint=>{
+        if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
+          state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
+        const attempt=processCommittedPublicMetadata.start(metadataScope(),hint);
+        if(!attempt)return null;
+        activeMetadata=attempt;
+        return {source:attempt.source,drained:attempt.drained,pause:attempt.pause,discard(reason){
+          attempt.discard(reason);
+          void attempt.drained.then(()=>{if(activeMetadata===attempt)activeMetadata=null;});
+        }};
+      };
+    }
+    // Opt-in, same owning session only. Process loss never reconstitutes this
+    // mode: claimWorkerLease still refuses an already-owned lease. KILL remains
+    // a full halt, and no recovery callback can submit an order itself.
+    let recoveryAttempted=false;
+    session.worker.heldRecoveryActive=()=>heldRecoveryScope!==null;
+    session.worker.recoverUnreconciledEntry=async error=>{
+      if(process.env.STRATA_UNKNOWN_ENTRY_PROTECTIVE_RECOVERY_ENABLED!=="true"||recoveryAttempted||
+        !(error instanceof Error)||error.message!=="personal_exchange_history_unreconciled")return false;
+      recoveryAttempted=true;
+      const episodeDeadline=now()+15000;
+      // Sticky local entry hold closes before ANY await. Public prefetch cannot
+      // reopen this latch. The persistent exact-worker STOP hold follows.
+      state.entriesAuthorized=false;
+      state.armRequested=false;
+      technicalRelease.beginReconciliation();
+      activeMetadata?.discard();activeMetadata=null;finalPublicMetadata?.discardAll();
+      const target=await db.query(`SELECT id FROM public.v13_production_intent
+        WHERE account_id=$1 AND kind='ENTRY' AND state='UNKNOWN' AND terminal=false
+        AND dispatch_at IS NOT NULL AND EXISTS (SELECT 1 FROM public.v13_production_observation o
+          WHERE o.account_id=$1 AND o.kind='POST_ATTEMPT' AND o.payload->>'id'=v13_production_intent.id
+          AND o.payload->>'outcome'='GET_RECONCILIATION_REQUIRED') ORDER BY created_at,id LIMIT 2`,[input.accountId]);
+      if(target.rows.length!==1||typeof target.rows[0].id!=="string")return false;
+      const scope:RecoveryHoldScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,
+        intentId:target.rows[0].id,holderId,fencingToken:String(claimed.fencingToken),
+        keyFingerprint:fingerprint,policyHash,...leaseIds});
+      if(!("connect" in db))return false;
+      const hold=await holdUnknownEntryRecovery(db as Pool,scope);
+      if(!hold.held||hold.uncertain)return false;
+      heldRecoveryScope=scope;
+      const fence=createUnknownEntryHeldFence(scope);
+      // Every later reconciliation (including protective outcome handling) uses
+      // native held-ledger accounting. Presence suppresses afterReconcile and
+      // thus technical renewal/entry reopening for the remainder of this session.
+      session.executor.heldReconcile=(snapshot,revision)=>session.executor.ledger.reconcileHeld(
+        snapshot,revision,{...fence,now,deadlineMs:now()+15000});
+      recoveryAbort=new AbortController();
+      const recover=createBoundedUnknownEntryReadRunner({now,deadlineMs:episodeDeadline,externalSignal:recoveryAbort.signal,
+        authorizeRead:async signal=>{
+          signal.throwIfAborted();
+          if(state.accountKill||state.globalKill||state.presentedToken!==claimed.fencingToken)
+            throw Error("held_recovery_local_fence_changed");
+          const rows=await db.query(`SELECT a.id FROM public.v13_production_account a
+            JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
+            JOIN private.kalshi_connection_credentials c ON c.owner_user_id=a.owner_user_id AND c.financial_account_id=a.kalshi_connection_id
+            JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+            JOIN public.live_execution_config g ON g.id='singleton'
+            WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.kill_switch=false AND a.execution_enabled=true
+              AND a.key_fingerprint=$3 AND w.state='owned' AND w.account_kill=false AND w.arm_requested=false
+              AND w.holder_id=$4 AND w.fencing_token=$5::bigint AND w.credential_fingerprint=$3
+              AND c.key_fingerprint=$3 AND c.revoked_at IS NULL AND c.role='restricted_execution'
+              AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
+              AND c.provider_connection_id=$6::uuid AND c.vault_secret_id=$7::uuid
+              AND p.policy_hash=$8 AND p.state='APPROVED'
+              AND g.live_execution_enabled=true AND g.manual_kill_switch=false`,
+            [scope.accountId,scope.ownerId,scope.keyFingerprint,scope.holderId,scope.fencingToken,
+              scope.providerConnectionId,scope.vaultSecretId,scope.policyHash]);
+          signal.throwIfAborted();
+          if(rows.rows.length!==1)throw Error("held_recovery_read_scope_changed");
+        },
+        read:async signal=>{
+          heldReadAbort=signal;
+          try{
+            signal.throwIfAborted();
+            const {account,earliest}=await session.executor.ledger.readReconcileAccount();
+            signal.throwIfAborted();
+            const snapshot=await session.exchange.snapshot(identity,earliest?new Date(earliest).getTime():now());
+            signal.throwIfAborted();return {snapshot,revision:account.revision};
+          }finally{if(heldReadAbort===signal)heldReadAbort=null;}
+        },
+      });
+      const result=await recover();
+      if(!result.ok)return false;
+      // Never retry ledger failure or an uncertain COMMIT. The held receipt is
+      // returned only after native commit and all freshness/fence guards pass.
+      await session.executor.ledger.reconcileHeld(result.snapshot.snapshot,result.snapshot.revision,
+        {...fence,now,deadlineMs:episodeDeadline});
+      const pending=await readUnresolvedIntentMode((sql,params)=>db.query(sql,params),input.accountId);
+      if(!pending.ok||pending.mode!=="entries")return false;
+      return true;
+    };
+    session.executor.afterReconcile=async (snapshot,subtimings,scheduling)=>{
+      const sha=deployedGitSha();
+      const scoped=/^[a-f0-9]{40}$/.test(sha);
+      subtimings?.mark("grant_history");
+      const hasGrant=scoped?await hasContinuousGrantHistory(db,input.userId,sha):false;
+      let eligible=false;
+      let technicalRenewal: "deferred" | "settled" | undefined;
+      if(hasGrant){
+        if(!("connect" in db))throw new Error("standing_transactional_database_required");
+        subtimings?.mark("technical_lease");
+        const renewed=await renewContinuousTechnicalLease({
+          ownerId:input.userId,accountId:input.accountId,releaseSha:sha,policyHash,
+          observedAtMs:snapshot.observedAtMs,cashMicros:snapshot.cashMicros,
+          fencingToken:String(state.fencingToken),authenticated:snapshot.authenticated,
+          complete:snapshot.complete,unexplainedCashActivity:snapshot.unexplainedCashActivity,
+          providerEvidence:snapshot,
+          allowEarlyRotationDeferral:scheduling?.origin==="committed_signal"&&scheduling.allowEarlyTechnicalLeaseReuse===true,
+        },{db,now});
+        if(renewed.ok){technicalRenewal=renewed.earlyRotationDeferred?"deferred":"settled";subtimings?.mark("continuous_eligibility");eligible=await checkContinuousEligibility(db,input.userId,sha);}
+      }else {subtimings?.mark("legacy_protective_release");eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;}
+      subtimings?.mark("flat_entry_evidence");
+      const flat=await reconciledFlatEntryEvidence(db,{
+        accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),
+      });
+      technicalRelease.completeReconciliation(eligible&&flat);
+      return technicalRenewal?{technicalRenewal}:undefined;
+    };
+    session.executor.authorizeFinalEntry=async tx=>{
+      const sha=deployedGitSha();
+      const hasGrant=/^[a-f0-9]{40}$/.test(sha)
+        ?await hasContinuousGrantHistory(tx,input.userId,sha):false;
+      const eligible=hasGrant
+        ?await checkContinuousEligibility(tx,input.userId,sha)
+        :(await verifyProtectiveExitStartupRelease(tx,input.userId)).ok;
+      technicalRelease.completeReconciliation(eligible);
+      if(!eligible)throw new Error("production_entry_release_not_current");
+    };
+    const unresolved = await readUnresolvedIntentMode(
+      (sql, params) => db.query(sql, params), input.accountId,
+    );
+    if (!unresolved.ok) {
+      state.entriesAuthorized = false;
+      state.presentedToken = -1;
+      try {
+        await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
+      } finally {
+        session.worker.stop();
+      }
+      return {ok:false,reason:unresolved.reason};
+    }
+    const recovery = unresolved.mode === "recovery";
+    if (recovery) state.entriesAuthorized = false;
+    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
+    if (!scheduled.workerStarted) {
+      state.entriesAuthorized = false;
+      state.presentedToken = -1;
+      await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
+      session.worker.stop();
+      return { ok: false, reason: scheduled.reason };
+    }
+    return {
+      ok: true,
+      worker: session.worker,
+      state,
+      disarm: (action) => {if(action==="KILL")recoveryAbort?.abort();finalPublicMetadata?.discardAll();return disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString());},
+    };
+  });
+}
+
+export function productionPersonalSession(): PersonalSessionControl {
+  return createOwnedTradingSupervisor(async () => ({ ok: false, reason: "personal_signer_unavailable" }));
+}
+
+function dispatchState(ownerUserId: string, fingerprint: string, fencingToken: number): AccountDispatchState {
+  return {
+    leaseState: "owned",
+    armRequested: true,
+    accountKill: false,
+    globalKill: false,
+    entriesAuthorized: true,
+    fencingToken,
+    presentedToken: fencingToken,
+    workerActuallyScheduled: true,
+    authenticatedUserId: ownerUserId,
+    ownerUserId,
+    credentialFingerprint: fingerprint,
+    presentedFingerprint: fingerprint,
+    uncertainOrderCount: 0,
+    duplicateClientOrder: false,
+    liveExecutionEnabled: true,
+  };
+}
+
+async function loadSigner(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  userId: string,
+  accountId: string,
+): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; reason: string }> {
+  try {
+    const found = await db.query(SIGNER_SQL, [userId, accountId]);
+    if (found.rows.length !== 1) return { ok: false, reason: "personal_signer_unavailable" };
+    return { ok: true, row: found.rows[0] ?? {} };
+  } catch {
+    return { ok: false, reason: "personal_signer_unavailable" };
+  }
+}
+
+function parseSecret(secret: unknown): { keyId: string; privateKey: string } | null {
+  if (typeof secret !== "string" || !secret) return null;
+  try {
+    const parsed = JSON.parse(secret) as Record<string, unknown>;
+    const keyId = parsed.api_key_id;
+    const privateKey = parsed.private_key;
+    if (typeof keyId !== "string" || typeof privateKey !== "string" || !keyId || !privateKey) return null;
+    return { keyId, privateKey };
+  } catch {
+    return null;
+  }
+}
+
+async function stopOne(
+  workers: Map<string, RunningWorker>,
+  userId: string,
+  accountId: string,
+  action: LeaseAction,
+): Promise<{ workerStopped: boolean; managingExposure: boolean }> {
+  const running = workers.get(accountId);
+  if (!running) return { workerStopped: true, managingExposure: false };
+  if (running.ownerUserId !== userId) return { workerStopped: false, managingExposure: false };
+  if (running.state) {
+    running.state.entriesAuthorized = false;
+    if (action === "KILL") {
+      running.state.accountKill = true;
+      running.state.armRequested = false;
+      running.state.presentedToken = -1;
+    }
+  }
+  const authority = running.disarm
+    ? await running.disarm(action)
+    : { entriesBlocked: !running.state, managingExposure: false };
+  if (!authority.entriesBlocked) return { workerStopped: false, managingExposure: false };
+  // A delayed STOP receipt cannot claim protective management after a newer
+  // KILL already halted or unregistered this worker.
+  const keepManaging = action === "STOP" && authority.managingExposure &&
+    running.state?.accountKill !== true && running.worker.isScheduled() && workers.get(accountId) === running;
+  if (!keepManaging) running.worker.stop();
+  if (running.worker.isScheduled() && !keepManaging) return { workerStopped: false, managingExposure: false };
+  const registered = workers.get(accountId);
+  // Defense in depth: stale cleanup can never erase a different generation,
+  // even if a future lifecycle path accidentally bypasses the start barrier.
+  if (registered && registered !== running)
+    return { workerStopped: false, managingExposure: false };
+  if (!keepManaging && registered === running) workers.delete(accountId);
+  return { workerStopped: true, managingExposure: keepManaging };
+}
+
+async function loadRequests(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  accountId: string,
+): Promise<Request[]> {
+  const found = await db.query(
+    "SELECT request FROM v13_production_intent WHERE account_id = $1",
+    [accountId],
+  );
+  return found.rows.flatMap((row) => {
+    const request = typeof row.request === "string" ? JSON.parse(row.request) as Request : row.request as Request;
+    return request && typeof request === "object" ? [request] : [];
+  });
+}
+
+function leaseIdentity(row: Record<string, unknown>): {
+  financialAccountId: string; providerConnectionId: string; vaultSecretId: string;
+} | null {
+  const financialAccountId = text(row.financial_account_id);
+  const providerConnectionId = text(row.provider_connection_id);
+  const vaultSecretId = text(row.vault_secret_id);
+  if (!financialAccountId || !providerConnectionId || !vaultSecretId) return null;
+  return { financialAccountId, providerConnectionId, vaultSecretId };
+}
+
+async function claimWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;
+    financialAccountId: string; providerConnectionId: string; vaultSecretId: string;
+    now: string; staleBefore: string;
+  },
+): Promise<{ ok: true; fencingToken: number } | { ok: false; reason: string }> {
+  try {
+    const present = await db.query("SELECT to_regclass('private.kalshi_account_worker_lease') AS name");
+    if (!present.rows[0]?.name) return { ok: false, reason: "worker_lease_unavailable" };
+    const current = await db.query(
+      `SELECT state, account_kill FROM private.kalshi_account_worker_lease WHERE execution_account_id = $1`,
+      [input.executionAccountId],
+    );
+    if (current.rows[0]?.state === "killed" || current.rows[0]?.account_kill === true) {
+      return { ok: false, reason: "account_kill_switch" };
+    }
+    if (current.rows.length === 0) {
+      await db.query(INSERT_LEASE_SQL, [
+        input.executionAccountId, input.ownerUserId, input.financialAccountId, input.providerConnectionId,
+        input.holderId, 1, "released", input.now, input.now, false, false, input.fingerprint, input.vaultSecretId,
+      ]);
+    }
+    if (current.rows[0]?.state === "owned") {
+      // Never turn on an old worker's arm_requested flag or steal the token
+      // because its heartbeat is stale. Owner must explicitly reconcile and
+      // fence it using a signed flat-exchange recovery first.
+      return {ok:false,reason:"owned_worker_lease_requires_fenced_recovery"};
+    } else {
+      const armed = await db.query(ARM_LEASE_SQL, [
+        input.executionAccountId, input.ownerUserId, input.fingerprint, input.vaultSecretId, input.now,
+        input.providerConnectionId, input.financialAccountId,
+      ]);
+      if (armed.rows.length !== 1) return { ok: false, reason: "worker_lease_unavailable" };
+    }
+    const acquired = await db.query(ACQUIRE_LEASE_SQL, [
+      input.executionAccountId, input.holderId, input.now, input.fingerprint, input.vaultSecretId,
+      input.providerConnectionId, input.financialAccountId, input.ownerUserId, input.staleBefore,
+    ]);
+    if (acquired.rows.length !== 1) return { ok: false, reason: "worker_lease_held" };
+    const fencingToken = Number(acquired.rows[0]?.fencing_token);
+    if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) return { ok: false, reason: "worker_lease_unavailable" };
+    return { ok: true, fencingToken };
+  } catch {
+    return { ok: false, reason: "worker_lease_unavailable" };
+  }
+}
+
+export async function heartbeatLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    executionAccountId: string; ownerUserId: string; holderId: string;
+    fencingToken: number; fingerprint: string; now: string;
+  },
+): Promise<{ ok: true; armRequested: boolean } | { ok: false; reason: string }> {
+  try {
+    const beat = await db.query(HEARTBEAT_LEASE_SQL, [
+      input.executionAccountId, input.ownerUserId, input.now, input.holderId,
+      input.fencingToken, input.fingerprint,
+    ]);
+    if (beat.rows.length !== 1) return { ok: false, reason: "stale_worker_fence" };
+    const lease = await db.query(
+      `SELECT arm_requested, account_kill, state FROM private.kalshi_account_worker_lease
+       WHERE execution_account_id = $1 AND holder_id = $2 AND fencing_token = $3`,
+      [input.executionAccountId, input.holderId, input.fencingToken],
+    );
+    const row = lease.rows[0];
+    if (!row || row.state !== "owned" || row.account_kill === true) return { ok: false, reason: "stale_worker_fence" };
+    return { ok: true, armRequested: row.arm_requested === true || row.arm_requested === "t" || row.arm_requested === "true" };
+  } catch {
+    return { ok: false, reason: "stale_worker_fence" };
+  }
+}
+
+/** STOP retains position/UNKNOWN management. Missing or malformed DB evidence is
+ * never interpreted as a flat account and can NEVER release the worker lease.
+ * KILL is deliberately a full halt (not an automatic guaranteed liquidation).
+ */
+export async function disarmWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  ownerUserId: string,
+  executionAccountId: string,
+  action: LeaseAction,
+  now: string,
+): Promise<{ entriesBlocked: boolean; managingExposure: boolean }> {
+  try {
+    if (action === "KILL") {
+      const killed = await db.query(KILL_LEASE_SQL, [executionAccountId, ownerUserId, now]);
+      return { entriesBlocked: killed.rows.length === 1, managingExposure: false };
+    }
+    // A query-only port cannot guarantee a single transaction/connection.
+    // Refuse rather than issue BEGIN through a pool or release from stale reads.
+    if (!("connect" in db) || typeof db.connect !== "function")
+      return {entriesBlocked:false,managingExposure:false};
+    const client=await (db as Pool).connect();
+    let discard:Error|undefined;
+    try {
+      await client.query("BEGIN");
+      await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+      await client.query("SET LOCAL lock_timeout='750ms'");
+      await client.query("SET LOCAL statement_timeout='5000ms'");
+      await lockStopAccount(client,ownerUserId,executionAccountId);
+      const managingExposure=await readStopExposure(client,executionAccountId);
+      const updated=managingExposure
+        ? await client.query(HOLD_LEASE_SQL,[executionAccountId,ownerUserId])
+        : await releaseWorkerLease(client,ownerUserId,executionAccountId,false,now);
+      if(updated.rows.length!==1)throw Error("stop_lease_commit_unverified");
+      await client.query("COMMIT");
+      return {entriesBlocked:true,managingExposure};
+    } catch(error) {
+      try {await client.query("ROLLBACK");}catch(rollbackError){discard=rollbackError instanceof Error?rollbackError:new Error("stop_rollback_failed");}
+      throw error;
+    } finally {client.release(discard);}
+  } catch {
+    return { entriesBlocked: false, managingExposure: false };
+  }
+}
+async function releaseWorkerLease(
+  db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
+  ownerUserId: string,
+  executionAccountId: string,
+  _unused: boolean,
+  now: string,
+): Promise<{ rows: Array<Record<string, unknown>> }> {
+  return db.query(RELEASE_LEASE_SQL, [executionAccountId, ownerUserId, now]);
+}
+
+async function publicKalshiObject(path: string): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`${PERSONAL_MARKET_METADATA_HOST}${path}`, {
+      method: "GET", redirect: "error", cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+  } catch {
+    throw new Error("production_market_metadata_unavailable");
+  }
+  if (response.status !== 200 ||
+      response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
+      (response.url && response.url !== `${PERSONAL_MARKET_METADATA_HOST}${path}`)) {
+    throw new Error("production_market_metadata_unavailable");
+  }
+  const length = Number(response.headers.get("content-length") ?? "0");
+  if (!Number.isSafeInteger(length) || length > 256_000) throw new Error("production_market_metadata_unavailable");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 2 || bytes.length > 256_000) throw new Error("production_market_metadata_unavailable");
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  catch { throw new Error("production_market_metadata_unavailable"); }
+}
+
+function number(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+function text(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function flag(value: unknown): boolean {
+  return value === true || value === "t" || value === "true";
+}
