@@ -18,3 +18,5 @@ jobs:
           persist-credentials: false
       - name: Verify draft package consistency only
         run: python3 machine-qualification/check-package-integrity.py
+      - name: Test runtime permission collector with synthetic database fixtures
+        run: node --test machine-qualification/runtime-permissions/collect-runtime-permissions.test.cjs
