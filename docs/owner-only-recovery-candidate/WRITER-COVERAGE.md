@@ -55,3 +55,11 @@ an intentionally incomplete disposable schema, rather than claiming it healthy.
 No production pins or account enrollment were manufactured. The supplemental SQL
 is inactive and is not part of automatic startup/migration application. There is
 no independent-human-review requirement in this candidate path.
+
+The additional `account-scoped-generation-barrier.sql` prevents enrolled account
+owner/identity reassignment, revision rewind, DELETE and TRUNCATE. Native tests
+verify all refusals and successful atomic disarmed release afterward. It does not
+blindly increment the financial revision on every control/audit write: doing so
+would invalidate the reconciliation receipt's own persisted revision. Same-row
+serialization and the explicit lease/control epochs remain required. Account
+identity changes for unenrolled accounts are outside this singleton scope.
