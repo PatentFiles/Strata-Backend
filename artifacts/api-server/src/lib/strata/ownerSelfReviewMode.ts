@@ -15,3 +15,12 @@ export function standingAuthoritySql(alias:string,owner:string){
 export function sameStandingAuthoritySql(review='r',grant='g'){
  return `${review}.independent_reviewer_id IS NOT DISTINCT FROM ${grant}.independent_reviewer_id AND COALESCE(to_jsonb(${review})->>'review_authority','INDEPENDENT_V1')=COALESCE(to_jsonb(${grant})->>'review_authority','INDEPENDENT_V1') AND ${standingAuthoritySql(review,grant+'.owner_user_id')} AND ${standingAuthoritySql(grant,grant+'.owner_user_id')}`;
 }
+
+export type OwnerSelfEnrollmentScope={ownerId:string;accountId:string};
+export function configuredOwnerSelfScope():OwnerSelfEnrollmentScope|undefined{
+ const ownerId=process.env.STRATA_OWNER_SELF_RELEASE_OWNER_ID,accountId=process.env.STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID;
+ return ownerId&&accountId?{ownerId,accountId}:undefined;
+}
+export function ownerSelfEnrollmentAllowed(owner:string,account:unknown,scope:OwnerSelfEnrollmentScope|undefined){
+ return !!scope&&uuid.test(scope.ownerId)&&!!scope.accountId&&scope.ownerId===owner&&scope.accountId===account;
+}

@@ -38,6 +38,9 @@ const result=await recordOwnerSelfStandingReview(owner,body,deps);assert.equal(r
 const row=(await db.query('SELECT * FROM private.strata_standing_execution_reviews')).rows[0];
 assert.equal(row.independent_reviewer_id,null);assert.equal(row.owner_authorizer_id,owner);assert.equal(row.review_authority,'OWNER_SELF_V1');assert.equal(standingAuthorityMatches(row,owner),true);assert.equal(standingAuthorityMatches(row,other),false);
 await assert.rejects(db.query('UPDATE private.strata_standing_execution_reviews SET owner_authorizer_id=$1',[other]),/immutable/);
+const grantBody={expectedSha:sha,accountId:'acct',policyHash:policy,confirmation:CONTINUOUS_OWNER_CONFIRM};
+assert.equal((await enrollContinuousGrant(owner,grantBody,{...deps,scope:()=>undefined})).reason,'owner_self_account_not_enabled');
+assert.equal((await enrollContinuousGrant(owner,grantBody,{...deps,scope:()=>({ownerId:owner,accountId:'foreign'})})).reason,'owner_self_account_not_enabled');
 const grant=await enrollContinuousGrant(owner,{expectedSha:sha,accountId:'acct',policyHash:policy,confirmation:CONTINUOUS_OWNER_CONFIRM},deps);assert.equal(grant.ok,true,JSON.stringify(grant));
 const g=(await db.query('SELECT * FROM private.strata_continuous_execution_grants')).rows[0];assert.equal(g.review_authority,'OWNER_SELF_V1');assert.equal(g.independent_reviewer_id,null);assert.equal(g.owner_authorizer_id,owner);
 assert.equal(await checkContinuousEligibility(db,owner,sha),false);
