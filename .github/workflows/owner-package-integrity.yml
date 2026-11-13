@@ -16,6 +16,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Install Node 24 for strict measured-launch tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
       - name: Verify draft package consistency only
         run: python3 machine-qualification/check-package-integrity.py
       - name: Test runtime permission collector with synthetic database fixtures
