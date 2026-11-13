@@ -4,7 +4,7 @@ This branch stages a manually dispatched qualification workflow and protected be
 
 The workflow deliberately fails before dependency installation while completeOwnerRecoveryQualification and candidateApplicationPublished are false or unqualified coverage remains. No success or release evidence can be claimed from this draft. Source implementing the new owner-only path is not included in this tooling-only branch.
 
-Locally verified against a separate candidate checkout: 96 behavioral scenarios (60 consent/router/readback, 26 native-ledger, 10 atomic recovery), including before-send COMMIT failure and after-commit lost acknowledgment. These are synthetic provider/authority fixtures using disposable databases, not current account evidence.
+Locally verified against a separate candidate checkout: 134 behavioral scenarios (60 consent/router/readback, 26 native-ledger, 26 atomic credential/lifecycle recovery, 13 actual-writer cases, 9 provider-identity adapter cases), including before-send COMMIT failure and after-commit lost acknowledgment. These are synthetic provider/authority fixtures using disposable databases, not current account evidence.
 
 Before a genuine run: add completed candidate implementation and protected assertions for all real writers, production-equivalent roles/schema/migration lifecycle, and mounted release behavior; freeze an exact revision; adopt workflow/policy pins outside candidate-controlled configuration; verify clean CI dependencies and the actual run/artifact. Then separately verify deployed bytes and current account state through permitted access. Do not merely change flags to true.
 

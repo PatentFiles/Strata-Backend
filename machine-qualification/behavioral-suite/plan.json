@@ -116,8 +116,61 @@
         "atomic wrong_authority rolls back finances, authority, release and receipt",
         "atomic bad_cash rolls back finances, authority, release and receipt",
         "atomic receipt_failure rolls back finances, authority, release and receipt",
+        "atomic pending_key rolls back finances, authority, release and receipt",
+        "atomic unknown_key rolls back finances, authority, release and receipt",
+        "atomic missing_identity rolls back finances, authority, release and receipt",
+        "atomic stale_identity rolls back finances, authority, release and receipt",
+        "atomic wrong_identity rolls back finances, authority, release and receipt",
+        "atomic inactive_identity rolls back finances, authority, release and receipt",
+        "atomic changed_during_read rolls back finances, authority, release and receipt",
         "atomic commit rejected before send remains uncertain without retry and discards connection",
-        "atomic lost acknowledgment after commit remains uncertain without retry and discards connection"
+        "atomic lost acknowledgment after commit remains uncertain without retry and discards connection",
+        "enrolled lifecycle refuses DELETE FROM private.kalshi_account_worker_lease",
+        "enrolled lifecycle refuses UPDATE private.kalshi_account_worker_lease SET",
+        "enrolled lifecycle refuses UPDATE private.kalshi_account_worker_lease SET",
+        "enrolled lifecycle refuses TRUNCATE private.kalshi_account_worker_lease",
+        "enrolled lifecycle refuses DELETE FROM private.owner_recovery_barrier_scope",
+        "enrolled lifecycle refuses TRUNCATE private.owner_recovery_barrier_scope",
+        "actual atomic release remains valid with lifecycle barriers",
+        "actual ARM and HOLD advance epoch without lifecycle reset",
+        "unenrolled account lease lifecycle unaffected"
+      ]
+    },
+    {
+      "fixture": "ownerBarrierActualWriters.offline.ts",
+      "resolveDir": "artifacts/api-server/src/lib/strata",
+      "port": 55458,
+      "expectedPassLabels": [
+        "actual supervisor STOP waits for adapter account lock then releases acquired lease",
+        "actual delayed failed-start cleanup cannot release replacement holder/fence",
+        "actual STOP preserves owned protective manager with exposure while disarming entries",
+        "actual STOP with adapter sequence update rejects old admission and stopped-current sequence without lease mutation",
+        "separate synthetic new-owner-command sequence permits fresh admission; older sequence still refused",
+        "actual KILL via adapter blocks on account lock, atomically fences head/lease, rejects stale admission and foreign owner",
+        "proposed STOP adapter writes tombstone for released, absent and repeated STOP; stale admission refuses",
+        "proposed STOP adapter injected error/missing head rolls back without partial lease mutation",
+        "proposed KILL adapter persists tombstone without lease; legacy response does not falsely claim a killed worker",
+        "proposed STOP adapter rejects malformed terminal kill/arm/fence/owner without mutation",
+        "durable outcome distinguishes committed lost-ack from absent rollback without authorizing retry or current trading",
+        "schema-faithful text creator and DB evidence expiration after receipt insertion cause atomic rollback despite longer verifier deadline",
+        "repo candidate module disabled/missing-verifier/stale-generation/proof-denial gates; synthetic verified claim uses real lease SQL without trading authority"
+      ]
+    },
+    {
+      "fixture": "ownerRecoveryProviderIdentityCandidate.test.ts",
+      "resolveDir": "artifacts/api-server/src/lib/strata",
+      "port": 55459,
+      "reporter": "node-test",
+      "expectedPassLabels": [
+        "real probe adapter derives identity with three bounded signed-GET paths; fixtures simulated",
+        "provider adapter refuses missing",
+        "provider adapter refuses duplicate",
+        "provider adapter refuses fingerprint",
+        "provider adapter refuses error",
+        "provider adapter refuses wrong_pair",
+        "provider adapter refuses scope",
+        "provider adapter refuses stale",
+        "provider adapter refuses revoked"
       ]
     }
   ],

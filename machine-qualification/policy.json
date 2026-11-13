@@ -16,6 +16,7 @@
     "machine-qualification/policy.json",
     "machine-qualification/behavioral-suite/files.json",
     "machine-qualification/behavioral-suite/fixtures/account-scoped-exposure-barrier.sql",
+    "machine-qualification/behavioral-suite/fixtures/account-scoped-lifecycle-barrier.sql",
     "machine-qualification/behavioral-suite/fixtures/admission-outcome-schema.sql",
     "machine-qualification/behavioral-suite/fixtures/consumption-test.sql",
     "machine-qualification/behavioral-suite/fixtures/consumption.sql",
@@ -39,7 +40,9 @@
     "machine-qualification/behavioral-suite/fixtures/owner-consent-schema.sql",
     "machine-qualification/behavioral-suite/fixtures/owner-lease-consent-epoch.sql",
     "machine-qualification/behavioral-suite/fixtures/ownerAtomicRecovery.offline.ts",
+    "machine-qualification/behavioral-suite/fixtures/ownerBarrierActualWriters.offline.ts",
     "machine-qualification/behavioral-suite/fixtures/ownerConsentCandidate.offline.ts",
+    "machine-qualification/behavioral-suite/fixtures/ownerRecoveryProviderIdentityCandidate.test.ts",
     "machine-qualification/behavioral-suite/plan.json",
     "machine-qualification/behavioral-suite/run.py"
   ],
@@ -70,7 +73,7 @@
       "--pg-bin",
       "/usr/lib/postgresql/16/bin",
       "--manifest-sha256",
-      "fa9fe9bb6fa2f1a3ef4e1a76507b3ce8337610c662f5400195c83df21e7c1e7e"
+      "59b46395735736c73d9cd01231dea39f9418050358012292460bab88c56f652a"
     ]
   ],
   "completeOwnerRecoveryQualification": false,
