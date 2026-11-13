@@ -1,3 +1,4 @@
+import {createOwnerRecoveryPools} from '@workspace/db/owner-recovery-pools';
 import type {Pool} from '@workspace/db';
 import type {JWTVerifyGetKey} from 'jose';
 import type {OwnerRecoveryRuntimeDependencies} from './ownerRecoveryRuntimeCandidate';
@@ -14,4 +15,12 @@ export function assembleOwnerRecoveryRuntime(config:{accountPool:Pool;sessionPoo
  return {enabled:true,db:config.accountPool,sessionDb:config.sessionPool,supabaseUrl:config.supabaseUrl,keys:config.keys,
  resolveMachineBinding:config.resolveMachineBinding,
  release:{db:config.accountPool,supabaseUrl:config.supabaseUrl,keys:config.keys,verifyLockedQualification:config.verifyLockedQualification}};
+}
+
+/** Called by server initialization only after actual protected verifiers are
+ * installed. URLs are explicit server secrets, never request body/env fallback. */
+export function bootstrapOwnerRecoveryRuntime(config:Omit<Parameters<typeof assembleOwnerRecoveryRuntime>[0],'accountPool'|'sessionPool'>&Parameters<typeof createOwnerRecoveryPools>[0]){
+ if(typeof config.resolveMachineBinding!=='function'||typeof config.verifyLockedQualification!=='function')throw Error('protected_owner_recovery_verifiers_required');
+ const pools=createOwnerRecoveryPools(config);
+ return {dependencies:assembleOwnerRecoveryRuntime({...config,...pools}),close:pools.close};
 }

@@ -106,3 +106,13 @@ Tests exercise successful atomic release using explicitly synthetic disposable
 fixtures, plus production-boundary refusal before provider access when genuine
 qualification is absent. They do not prove genuine production identity, role
 coverage, deployed bytes, or a successful production recovery.
+
+The main Strata router now forwards its server-only `ownerRecovery` dependency.
+`createConfiguredStrataRouter` can receive the assembled configuration; its default
+export remains unconfigured, not silently enabled by an environment switch.
+`bootstrapOwnerRecoveryRuntime` constructs dedicated explicit account/session pools
+with one connection each, 1-second checkout and bounded statements. The session
+pool defaults to read-only transactions. Remote URLs require verifying TLS modes;
+no production credentials, grants or config values are created. Actual database
+privileges and same-barrier writer coverage still require authentic qualification,
+not merely pool construction or matching usernames.

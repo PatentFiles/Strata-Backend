@@ -12,6 +12,6 @@ D=$(mktemp -d /tmp/owner-recovery-disposable-XXXXXX)
 trap '"$PG_BIN_DIR/pg_ctl" -D "$D" stop -m fast >/dev/null' EXIT
 "$PG_BIN_DIR/createdb" -h127.0.0.1 -p55461 -U agent compatible_disposable
 cd "$ROOT/artifacts/api-server"
-node_modules/.bin/esbuild src/lib/strata/ownerAtomicRecovery.offline.ts src/lib/strata/ownerRecoveryProviderIdentityCandidate.test.ts src/routes/ownerOnlyRecoveryAdmission.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-only-candidate --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist '--external:pdfjs-dist/*' --external:pino --external:pino-pretty >/dev/null
+node_modules/.bin/esbuild src/lib/strata/ownerAtomicRecovery.offline.ts src/lib/strata/ownerRecoveryProviderIdentityCandidate.test.ts src/routes/ownerOnlyRecoveryAdmission.test.ts src/lib/strata/ownerRecoveryPoolsCandidate.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-only-candidate --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist '--external:pdfjs-dist/*' --external:pino --external:pino-pretty >/dev/null
 node dist/owner-only-candidate/lib/strata/ownerAtomicRecovery.offline.cjs
-node --test dist/owner-only-candidate/lib/strata/ownerRecoveryProviderIdentityCandidate.test.cjs dist/owner-only-candidate/routes/ownerOnlyRecoveryAdmission.test.cjs
+node --test dist/owner-only-candidate/lib/strata/ownerRecoveryProviderIdentityCandidate.test.cjs dist/owner-only-candidate/routes/ownerOnlyRecoveryAdmission.test.cjs dist/owner-only-candidate/lib/strata/ownerRecoveryPoolsCandidate.test.cjs

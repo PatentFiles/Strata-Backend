@@ -1,3 +1,4 @@
+import type {OwnerRecoveryRuntimeDependencies} from '../lib/strata/ownerRecoveryRuntimeCandidate';
 import {createOwnerUnknownRecoveryService} from "../lib/strata/ownerUnknownRecoveryService";
 import {loadedMaterial} from "../lib/strata/inAppProtectiveRelease";
 import {readOwnedKalshiFeeds} from "../lib/strata/personalExchangeRead";
@@ -37,7 +38,9 @@ async function roleOf(subject: string): Promise<string | null> {
 
 const supervisor = () => getLiveProductionSupervisor();
 
-export default createStrataRouter({
+export function createConfiguredStrataRouter(ownerRecovery?:OwnerRecoveryRuntimeDependencies){
+return createStrataRouter({
+  ownerRecovery,
   verifyToken: async (token) => {
     const url = process.env.SUPABASE_URL;
     if (!url) throw new Error("supabase_url_missing");
@@ -69,3 +72,6 @@ export default createStrataRouter({
     material: loadedMaterial, readFeeds: readOwnedKalshiFeeds,
   }),
 });
+}
+// Default installation stays unavailable until trusted bootstrap supplies proof.
+export default createConfiguredStrataRouter();
