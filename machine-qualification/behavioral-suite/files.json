@@ -25,11 +25,11 @@
     "fixtures/heldReaderNative.offline.ts": "c8968d14aaf415bd037c524bb8b8ecb8ef49ccea304ca89fe635eafab003aa38",
     "fixtures/owner-consent-schema.sql": "b75adfca167e44678ba7a0fe33a8d1b36257fcb16e8a2c9f9f777e019929c3bf",
     "fixtures/owner-lease-consent-epoch.sql": "6fbfef91cddbca6cd69c7fdbae74c2093707926a68765a72df3fd8b1235b92d0",
-    "fixtures/ownerAtomicRecovery.offline.ts": "23b1191a8dcdd7f26311d17b817d07ee917b4806a0b867b438c2fe7bcdeb7a7b",
+    "fixtures/ownerAtomicRecovery.offline.ts": "6419e8c135d0912fc1b04dfe4e4668a27fe264d2dba63cb83f6f6f89ca59719b",
     "fixtures/ownerBarrierActualWriters.offline.ts": "6f3307a7c8c119226021ab947946fde7e803ada176a6e1940cdd06f8a904a92e",
     "fixtures/ownerConsentCandidate.offline.ts": "732540976f6510c178eaba6c91e4ccfd1c3da43f5f165cee927ca2f35bae648b",
     "fixtures/ownerRecoveryProviderIdentityCandidate.test.ts": "ba8c738f59ffa203380ea808d695842d5a4c942bd5598291f204467f205d27c2",
-    "plan.json": "1c2c406c4c32e6a7eeeb53f28223405263af50c73ed6cc73896d1f9893e466c9",
+    "plan.json": "c8ab23d5dc6ca9f551d016dbcb9950da37a94cc57c310af016cfa8f95bc0c398",
     "run.py": "5bed5441db35cc1a83b990b62f675e52a633dd04f9f12c54f4eacbfe24c20335"
   }
 }

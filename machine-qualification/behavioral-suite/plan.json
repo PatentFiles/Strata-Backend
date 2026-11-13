@@ -123,6 +123,8 @@
         "atomic wrong_identity rolls back finances, authority, release and receipt",
         "atomic inactive_identity rolls back finances, authority, release and receipt",
         "atomic changed_during_read rolls back finances, authority, release and receipt",
+        "real provider adapter SQL composes with atomic disarmed recovery using simulated provider",
+        "revoked provider identity refuses before authority consumption or release",
         "atomic commit rejected before send remains uncertain without retry and discards connection",
         "atomic lost acknowledgment after commit remains uncertain without retry and discards connection",
         "enrolled lifecycle refuses DELETE FROM private.kalshi_account_worker_lease",

@@ -73,7 +73,7 @@
       "--pg-bin",
       "/usr/lib/postgresql/16/bin",
       "--manifest-sha256",
-      "59b46395735736c73d9cd01231dea39f9418050358012292460bab88c56f652a"
+      "d3582e209a3402e7f76424c6592b6679baf497e5b48b9c86ab9f28eb67ef0122"
     ]
   ],
   "completeOwnerRecoveryQualification": false,
