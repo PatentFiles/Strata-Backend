@@ -8,3 +8,9 @@ test('dedicated pools are bounded, separate and lazy; session defaults read-only
 test('no URL fallback, cross-database role substitution, shared roles or unverified remote TLS',()=>{
  for(const [a,s] of [['',''],['postgresql://a@remote/db','postgresql://b@remote/db'],['postgresql://a@127.0.0.1/one','postgresql://b@127.0.0.1/two'],['postgresql://a@127.0.0.1/db','postgresql://a@127.0.0.1/db']])assert.throws(()=>createOwnerRecoveryPools({accountConnectionString:a,sessionConnectionString:s}));
 });
+
+test('optional issuer pool is separately bounded and cannot reuse either login role',async()=>{
+ const base={accountConnectionString:'postgresql://recovery@127.0.0.1:55462/disposable',sessionConnectionString:'postgresql://session_reader@127.0.0.1:55462/disposable'};
+ assert.throws(()=>createOwnerRecoveryPools({...base,issuerConnectionString:base.accountConnectionString}));
+ const p=createOwnerRecoveryPools({...base,issuerConnectionString:'postgresql://issuer@127.0.0.1:55462/disposable'});assert.equal(p.issuerPool?.options.max,1);assert.equal(p.issuerPool?.totalCount,0);await p.close();
+});

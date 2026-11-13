@@ -116,3 +116,25 @@ pool defaults to read-only transactions. Remote URLs require verifying TLS modes
 no production credentials, grants or config values are created. Actual database
 privileges and same-barrier writer coverage still require authentic qualification,
 not merely pool construction or matching usernames.
+
+## Automatic issuer-to-recovery orchestration
+
+With the protected issuer configured, the existing `/owner-only/recover` request
+now stages authority using a dedicated issuer pool, commits it, and only after an
+acknowledged COMMIT invokes the separately privileged recovery consumer. The owner
+need not manually issue evidence. Current owner session and exact durable consent
+are verified under locks; request JSON supplies no proof, signer or role config.
+The issuer callback is the protected verifier-backed stage implementation, not a
+consent-only signature. Bootstrap rejects partial issuer config/shared pool roles.
+
+Issuer-stage failure rolls back/destroys the transaction and never reaches
+recovery. An unknown issuer COMMIT acknowledgment returns `issuer_outcome_unknown`,
+`released:null`, `readbackRequired:true`, `retryAuthorized:false`; it is not retried
+and no recovery is initiated. Existing outcome readback must not label missing
+release evidence as proof that issuance failed. Atomic recovery still separately
+verifies genuine qualification, provider history and unexpired one-use authority.
+
+Native tests use an explicitly simulated issuer stage to verify rollback,
+acknowledged handoff, and lost-COMMIT acknowledgment. They prove orchestration, not
+production signing, deployment identity, or live release authority. The authentic
+issuer/verifier/roles remain unconfigured in the default server installation.
