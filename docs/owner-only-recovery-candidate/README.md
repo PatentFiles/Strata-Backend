@@ -55,3 +55,54 @@ facts with request flags, local fixtures or a user report that an account is fla
 
 A successful eventual recovery must leave execution disabled. Owner START is a
 separate action, not a side effect of approving recovery.
+
+## Server composition and explicit schema candidate
+
+`createProtectiveReleaseRouter(requireUser, ownerRecovery?)` now composes the
+existing owner consent and outcome/held-inspection paths at `/owner-only` when
+server bootstrap supplies `OwnerRecoveryRuntimeDependencies`. The existing user
+middleware remains first. Without those dependencies, every subpath returns 503
+without DB/provider access. Dependencies are not request fields or a public
+qualification flag. This does **not** wire production atomic release or START.
+The server bootstrap still must supply genuine protected machine binding and
+separately bounded account/session pools before these consent-only paths operate.
+
+`lib/db/owner-only-candidate/001_owner_recovery_evidence.sql` is an explicit,
+transactional schema candidate, deliberately outside the automatic migration
+journal. It packages consent, machine authority and immutable release receipt
+storage. It refuses if the control-head and lease-epoch prerequisites are absent,
+grants nobody issuer/consumer rights, and does not install or qualify writer
+barriers. Reapplication refuses rather than hiding schema drift. Do not treat
+creating these tables as evidence of trusted issuer or runtime role qualification.
+
+Run `scripts/test-owner-recovery-migration.sh` from any working directory with
+`PG_BIN_DIR` pointing to native PostgreSQL tools. This uses a fresh disposable
+localhost cluster on port 55462 and tests prerequisite rollback, schema creation,
+absence of public authority, receipt/authority truncate rejection, and duplicate
+migration refusal. It never uses an ambient database URL.
+
+## Production transaction composition (not configured or deployed)
+
+`recoverOwnerAtomicallyCandidate` now has a production composition. It accepts
+only token, accountId and requestId, authenticates the owner, loads durable consent
+scope, then uses the same atomic account-held transaction with real signed
+snapshot/credential readers and machine-store authority consumption. No fixture
+transport or synthetic authority selector is exposed by this production entry.
+It rechecks the actual approved policy and commissioned credential. Release stays
+DISARMED with execution disabled; COMMIT uncertainty requires historical readback.
+
+`assembleOwnerRecoveryRuntime` supplies the existing router's optional server
+configuration, including a separately bounded session pool. It requires a
+server-installed `verifyLockedQualification(tx, scope, phase)` verifier, called at
+`lock`, `before_release`, and `before_commit`. That verifier must authenticate the
+protected source/deployment and actual role/barrier proof; the last phase must
+account for the transaction's own expected lease changes while rechecking trust
+freshness. A callback that merely returns, owner consent, the Ed25519 signing
+primitive alone, or a configuration boolean is **not** a valid production verifier.
+No such genuine verifier is installed by this patch. Missing configuration fails
+before a DB connection. `/owner-only/recover` accepts only `{accountId,requestId}`.
+
+Tests exercise successful atomic release using explicitly synthetic disposable
+fixtures, plus production-boundary refusal before provider access when genuine
+qualification is absent. They do not prove genuine production identity, role
+coverage, deployed bytes, or a successful production recovery.

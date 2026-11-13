@@ -1,9 +1,11 @@
+import {deployedGitSha} from '../lib/strata/deployedGitSha';
+import {createOwnerRecoveryRuntimeRouter,type OwnerRecoveryRuntimeDependencies} from '../lib/strata/ownerRecoveryRuntimeCandidate';
 import {ownerOnlyRecoveryAdmission} from '../lib/strata/ownerOnlyRecoveryAdmission';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
-  authorizeProtectiveRelease,attestProtectiveReleaseReview,
+  authorizeProtectiveRelease,attestProtectiveReleaseReview,readReleaseOwner,
   pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease,ownerRestoreStatus} from "../lib/strata/ownerShaRelease";
@@ -11,7 +13,7 @@ import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
 import {enrollContinuousGrant,revokeContinuousGrant,checkContinuousBootstrap,checkContinuousEligibility,hasContinuousGrantHistory} from "../lib/strata/continuousExecutionAuthorization";
 import {personalTradingSession} from "../lib/strata/sharedPersonalTradingControls";
 import {sanitizePublic} from "../lib/v13-production/sanitize";
-import {pool} from "@workspace/db";
+import {pool,type PoolClient} from "@workspace/db";
 
 type Identity={subject:string;role:string|null};
 const identify=(locals:Record<string,unknown>):Identity|null=>{
@@ -22,9 +24,24 @@ const isOperator=(role:string|null)=>role==="DEVELOPER"||role==="ADMIN";
 /** All paths pass through the existing Supabase AAL2 identity and live role
  * middleware. No client-supplied actor id, key, digest or trade POST accepted.
  */
-export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRouter{
+export function createProtectiveReleaseRouter(requireUser:RequestHandler,ownerRecovery?:OwnerRecoveryRuntimeDependencies):IRouter{
  const router=Router();
  router.use(requireUser);
+ router.get('/owner-only/scope',async(req,res)=>{
+  res.setHeader('Cache-Control','private, no-store');
+  const actor=identify(res.locals);if(!actor)return void res.status(401).json({status:'authenticated_owner_required'});
+  if(Object.keys(req.query??{}).length)return void res.status(400).json({status:'owner_scope_takes_no_parameters'});
+  let tx:PoolClient|undefined,discard:Error|undefined;
+  try{
+   tx=await pool.connect();await tx.query('BEGIN READ ONLY');await tx.query("SET LOCAL statement_timeout='1500ms'");await tx.query("SET LOCAL lock_timeout='500ms'");
+   const result=await readReleaseOwner(tx,actor.subject);await tx.query('ROLLBACK');
+   const releaseSha=deployedGitSha();
+   if(!result.ok||!/^[a-f0-9]{40}$/.test(releaseSha))return void res.status(409).json({status:result.ok?'deployed_commit_unverified':result.reason,recoveryAuthorized:false,tradingAuthorized:false});
+   res.json({status:'owner_scope_verified',accountId:result.account.id,ownerId:actor.subject,releaseSha,recoveryAuthorized:false,tradingAuthorized:false});
+  }catch{discard=Error('owner_scope_unavailable');if(tx)try{await tx.query('ROLLBACK');}catch{}res.status(503).json({status:'owner_scope_unavailable',recoveryAuthorized:false,tradingAuthorized:false});}
+  finally{tx?.release(discard);}
+ });
+ router.use('/owner-only',createOwnerRecoveryRuntimeRouter(ownerRecovery));
  router.get("/status",async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:"unauthorized"});
