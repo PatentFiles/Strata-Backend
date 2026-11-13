@@ -1,3 +1,4 @@
+import {sameStandingAuthoritySql,standingAuthorityMatches,OWNER_SELF_MODE,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
 import {logger} from '../logger';
 import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
 import {randomUUID,createHash} from 'node:crypto';
@@ -53,8 +54,7 @@ async function priorAuthority(db:Query,owner:string,a:Row,lock=false){
   (g.revoked_at IS NULL AND g.policy_hash=$3 AND g.consented_at<=now()
    AND g.owner_confirmation='I_AUTHORIZE_REVOCABLE_CONTINUOUS_EXECUTION_FOR_MY_REVIEWED_EXACT_SHA_V1'
    AND r.state='approved' AND r.revoked_at IS NULL AND r.policy_hash=g.policy_hash
-   AND r.created_at<=g.consented_at AND r.independent_reviewer_id=g.independent_reviewer_id
-   AND r.independent_reviewer_id<>g.owner_user_id AND oa.confirmed_at<=g.consented_at
+   AND r.created_at<=g.consented_at AND ${sameStandingAuthoritySql()} AND oa.confirmed_at<=g.consented_at
    AND oa.confirmed_at>=q.observed_at AND oa.confirmed_at<q.expires_at
    AND oa.qualification_digest=q.evidence_digest) AS valid_prior
   FROM private.strata_continuous_execution_grants g
@@ -97,12 +97,14 @@ async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{r
  requireProof(reviews.rows.length===1,'owner_renewal_prior_review_proof_unverified');const r=reviews.rows[0]!;
  const when=(x:unknown)=>x instanceof Date?x.getTime():Date.parse(String(x));
  const at=when(r.created_at),start=when(r.qualification_observed_at),end=when(r.qualification_expires_at);
- const expected=createHash('sha256').update(JSON.stringify({actor:r.independent_reviewer_id,owner,sha:authority.sha,qid:r.qualification_id,
-  account:a.id,policy:r.policy_hash,qualification:r.qualification_digest,note:r.review_note,url:r.review_url,scope:STANDING_REVIEW_CONFIRM})).digest('hex');
- requireProof(r.state==='approved'&&r.revoked_at===null&&r.policy_hash===a.policy_hash&&r.independent_reviewer_id!==owner&&
-  r.confirmation===STANDING_REVIEW_CONFIRM&&Number.isFinite(at)&&Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<end&&
+ const confirmation=r.review_authority===OWNER_SELF_MODE?OWNER_SELF_REVIEW_CONFIRM:STANDING_REVIEW_CONFIRM;
+ const actor=r.review_authority===OWNER_SELF_MODE?r.owner_authorizer_id:r.independent_reviewer_id;
+ const expected=createHash('sha256').update(JSON.stringify({actor,owner,sha:authority.sha,qid:r.qualification_id,
+  account:a.id,policy:r.policy_hash,qualification:r.qualification_digest,note:r.review_note,url:r.review_url,scope:confirmation})).digest('hex');
+ requireProof(r.state==='approved'&&r.revoked_at===null&&r.policy_hash===a.policy_hash&&standingAuthorityMatches(r,owner)&&
+  r.confirmation===confirmation&&Number.isFinite(at)&&Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<end&&
   typeof r.review_note==='string'&&r.review_note.length>=120&&r.review_note.length<=2500&&
-  /^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/.test(String(r.review_url))&&r.evidence_digest===expected,
+  (r.review_authority===OWNER_SELF_MODE?r.review_url===`https://github.com/PatentFiles/Strata-Backend/commit/${authority.sha}`:/^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/.test(String(r.review_url)))&&r.evidence_digest===expected,
   'owner_renewal_prior_review_proof_unverified');
  return digest({policy:policy.rows[0],review:r});
 }

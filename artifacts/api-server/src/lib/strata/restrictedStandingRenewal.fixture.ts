@@ -24,12 +24,17 @@ export const renewalLockOnly:Record<string,string>={
  'private.strata_standing_execution_reviews':'release_id',
  'private.strata_owner_sha_approvals':'approval_id',
 };
+// Separate fee authority locks: no new write authority, fixture-only RLS denial.
+export const feeLockOnly:Record<string,string>={
+ 'private.strata_api_fee_standing_models':'model_id',
+ 'private.strata_api_fee_source_grants':'grant_id',
+ 'private.strata_api_fee_owner_consents':'grant_id',
+ 'private.strata_api_fee_rate_reviews':'owner_user_id',
+ 'auth.users':'id','private.role_assignments':'email',
+};
 export const renewalReads=[
- ...Object.keys(renewalLockOnly),technicalLease,
+ ...Object.keys(renewalLockOnly),...Object.keys(feeLockOnly),technicalLease,
  'private.strata_emergency_exit_reservations',feeDelegation,
- 'private.strata_api_fee_standing_models','private.strata_api_fee_source_grants',
- 'private.strata_api_fee_owner_consents','private.strata_api_fee_rate_reviews',
- 'auth.users','private.role_assignments',
 ];
 export const technicalLeaseInsertColumns=['grant_id','execution_account_id','observed_at','expires_at','evidence_digest','fencing_token','generation'];
 export const technicalLeaseUpdateColumns=['observed_at','expires_at','evidence_digest','fencing_token','generation'];
@@ -75,7 +80,7 @@ export async function openRestrictedStandingRenewal(){
    await setup.query(`GRANT SELECT ON ${table} TO ${standingRuntimeRole};
     CREATE POLICY standing_renewal_read ON ${table} FOR SELECT TO ${standingRuntimeRole} USING(true)`);
   }
-  for(const [table,column] of Object.entries(renewalLockOnly)){
+  for(const [table,column] of Object.entries({...renewalLockOnly,...feeLockOnly})){
    await setup.query(`GRANT UPDATE(${column}) ON ${table} TO ${standingRuntimeRole};
     CREATE POLICY standing_renewal_lock ON ${table} FOR UPDATE TO ${standingRuntimeRole} USING(true) WITH CHECK(true);
     CREATE POLICY standing_renewal_no_mutation ON ${table} AS RESTRICTIVE FOR UPDATE TO ${standingRuntimeRole} USING(true) WITH CHECK(false)`);

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource } from "./apiFeeSourceStage";
+import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, READ_API_FEE_STAGE_SQL } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION }
  from "./apiFeeRateReference";
 import type {KalshiMarketFeeReadOnly} from "./twoSourceFeeEvidence";
@@ -127,7 +127,7 @@ test("issue154: after 15min/2h bootstrap expiration fresh provider metadata rene
  const db={query:async(sql:string,params?:unknown[])=>{
   calls++;
   if(sql.includes("SELECT g.grant_id"))return {rows:[]};
-  if(sql.startsWith("UPDATE private.strata_api_fee_standing_delegations")){
+  if(sql.startsWith("WITH authority AS MATERIALIZED")){
    atomic=sql;
    assert.deepEqual(params?.slice(0,4),[owner,gid,"a".repeat(40),"ORDER_ENTRY"]);
    return {rows:[{delegation_id:"77777777-7777-4777-8777-777777777777",
@@ -176,4 +176,9 @@ test("DB and standing renewal failures remain distinguishable safe diagnostics",
  assert.equal(missing.ok,false);
  assert.equal(getFeeFailureDiagnostics(missing)?.reason,"standing_model_consent_or_live_policy_missing");
  assert.equal(getFeeFailureDiagnostics(missing)?.phase,"authorization");
+});
+
+test("finite legacy authority locks include issuer identity and role",()=>{
+ assert.ok(READ_API_FEE_STAGE_SQL.includes("FOR SHARE OF u,role"));
+ assert.ok(READ_API_FEE_STAGE_SQL.includes("FOR SHARE OF g,c,r1"));
 });

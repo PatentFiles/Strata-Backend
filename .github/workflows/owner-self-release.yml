@@ -1,0 +1,58 @@
+name: Owner self release candidate
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/ownerSelf*'
+      - 'artifacts/api-server/src/lib/strata/continuousExecutionAuthorization*'
+      - 'artifacts/api-server/src/lib/strata/standingExecutionReview*'
+      - 'artifacts/api-server/src/lib/strata/walletV4FinalSignedAdmission*'
+      - 'artifacts/api-server/src/lib/strata/reviewedProtectiveExitFee*'
+      - 'artifacts/api-server/src/routes/protectiveReleaseRouter.ts'
+      - 'lib/db/owner-self-release/**'
+      - 'artifacts/api-server/scripts/test-owner-self-release.sh'
+      - '.github/workflows/owner-self-release.yml'
+permissions:
+  contents: read
+jobs:
+  disposable-owner-authorization:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-16
+      - name: Native disposable owner review, grant and refusal checks
+        env:
+          PG_BIN_DIR: /usr/lib/postgresql/16/bin
+        run: bash artifacts/api-server/scripts/test-owner-self-release.sh
+      - name: Focused owner authority regressions
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerSelfStandingReview.test.ts src/lib/strata/continuousExecutionAuthorization.test.ts src/lib/strata/ownerShaRelease.test.ts src/lib/strata/reviewedProtectiveExitFee.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-self-tests --out-extension:.js=.cjs --external:pg-native --external:pino --external:pino-pretty --external:pdfjs-dist
+          pnpm exec esbuild src/lib/strata/walletV4FinalSignedAdmission.test.ts --bundle --platform=node --format=cjs --outfile=dist/owner-self-tests/walletV4FinalSignedAdmission.test.cjs --define:import.meta.url=\"file://$PWD/src/lib/strata/walletV4FinalSignedAdmission.test.ts\" --external:pg-native --external:pino --external:pino-pretty --external:pdfjs-dist
+          node --test dist/owner-self-tests/*.cjs
+      - name: Retired independent approval APIs cannot create new approvals
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/routes/retiredIndependentReview.test.ts src/lib/strata/inAppProtectiveRelease.test.ts --bundle --platform=node --format=cjs --outdir=dist/retired-review-tests --out-extension:.js=.cjs --external:pg-native --external:express --external:pino --external:pino-pretty --external:pdfjs-dist
+          node --test dist/retired-review-tests/routes/*.cjs dist/retired-review-tests/lib/strata/*.cjs
+      - name: Existing owner monetary alternatives preserve actual safeguards
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerFeeV3Authority.test.ts src/lib/strata/ownerFeeV3Migration.test.ts src/lib/strata/walletV4OwnerConsent.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-fee-alternatives --out-extension:.js=.cjs --external:pg-native --external:pino --external:pino-pretty --external:pdfjs-dist
+          node --test dist/owner-fee-alternatives/*.cjs

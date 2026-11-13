@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
- signStandingFeeModel,consentStandingFeeDelegation,
+ CONTINUE_SQL,signStandingFeeModel,consentStandingFeeDelegation,
  renewStandingFeeObservationLease,revokeStandingFeeDelegation,
  inspectStandingFeeReadiness,STANDING_MODEL_CONFIRM,STANDING_OWNER_CONFIRM
 } from "./apiFeeStandingDelegation";
@@ -49,7 +49,7 @@ test("issue154: atomic observation renewal checks reviewer, consent, grant revoc
   db:db as never,sha:()=>SHA,
  });
  assert.equal(result.ok,true);
- assert.ok(sql.startsWith("UPDATE private.strata_api_fee_standing_delegations"));
+ assert.ok(sql.startsWith("WITH authority AS MATERIALIZED"));
  for(const part of ["lease_expires_at","model_id","revoked_at IS NULL",
   "p.policy_hash=d.policy_hash","m.release_commit_sha=$3",
   "reviewed_role.role='ADMIN'","issuer_role.role='ADMIN'",
@@ -248,4 +248,12 @@ test("global digest availability cannot grant reviewer privileges; verified ADMI
   assert.equal(calls.includes('COMMIT'),authorized);
   assert.equal(calls.some(sql=>sql.includes('standing_delegations')||sql.includes('continuous_execution_grants')),false);
  }
+});
+
+test("standing legacy authority locks remain distinct and transaction held",()=>{
+ assert.ok(CONTINUE_SQL.includes("m.reviewer_admin_id<>d.owner_user_id"));
+ assert.ok(CONTINUE_SQL.includes("original.signed_at<=g.issued_at FOR SHARE"));
+ assert.ok(CONTINUE_SQL.includes("FOR UPDATE OF d FOR SHARE OF m,g,con,a,p,reviewed_user,reviewed_role,issuer_user,issuer_role"));
+ assert.equal(CONTINUE_SQL.includes("OWNER_SELF_V1"),false);
+ assert.ok(CONTINUE_SQL.includes("now()+interval '15 minutes'"));
 });

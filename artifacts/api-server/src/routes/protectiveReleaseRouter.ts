@@ -1,8 +1,8 @@
+import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
-import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
+import {revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
-  authorizeProtectiveRelease,attestProtectiveReleaseReview,
   pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease,ownerRestoreStatus} from "../lib/strata/ownerShaRelease";
@@ -56,19 +56,11 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const result=await qualifyProtectiveRelease(target);
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
- router.post("/review",async(req,res)=>{
-  const actor=identify(res.locals);
-  if(!actor)return void res.status(401).json({reason:"unauthorized"});
-  if(!isOperator(actor.role))return void res.status(403).json({reason:"independent_operator_role_required"});
-  const result=await attestProtectiveReleaseReview(actor.subject,actor.role??"",req.body);
-  res.status(result.ok?200:409).json(sanitizePublic(result));
- });
- router.post("/authorize",async(req,res)=>{
-  const actor=identify(res.locals);
-  if(!actor)return void res.status(401).json({reason:"unauthorized"});
-  const result=await authorizeProtectiveRelease(actor.subject,req.body);
-  res.status(result.ok?200:409).json(sanitizePublic(result));
- });
+ // Retired new independent approvals. Returning an explicit terminal response
+ // avoids presenting a hidden alternative or touching historical evidence.
+ const retired:RequestHandler=(_req,res)=>{res.status(410).json({ok:false,reason:'independent_review_enrollment_retired_use_owner_self',ordersSubmitted:false});};
+ router.post('/review',retired);
+ router.post('/authorize',retired);
  // Issue #155: explicit signed read-only Kalshi flat proof, short CAS lease
  // fence and post-fence qualification. Never ARM, START or clear a freeze.
  router.post("/owner-stale-lease-recover",async(req,res)=>{
@@ -99,13 +91,9 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   res.status(result.ok?200:409).json(sanitizePublic({...result,technicalLeaseCurrent:eligible,
     viewerIsOwner:owner===actor.subject,viewerIsOperator:isOperator(actor.role)}));
  });
- router.post('/standing-review',async(req,res)=>{
-  const actor=identify(res.locals);
-  if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
-  const result=await recordStandingExecutionReview(actor.subject,actor.role!,req.body);
-  res.setHeader('Cache-Control','private, no-store');
-  res.status(result.ok?200:409).json(sanitizePublic(result));
- });
+ router.post('/owner-standing-review',async(req,res)=>{const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});const result=await recordOwnerSelfStandingReview(actor.subject,req.body);res.status(result.ok?200:409).json(result);});
+ router.post('/owner-standing-review-revoke',async(req,res)=>{const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});const result=await revokeOwnerSelfStandingReview(actor.subject,req.body);res.status(result.ok?200:409).json(result);});
+ router.post('/standing-review',retired);
  router.post('/standing-review-revoke',async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});

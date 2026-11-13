@@ -173,12 +173,10 @@ for(const coverage of [false,"missing"] as const){
    readFeeds:(async()=>{reads++;return feed;}) as never,
   });
   assert.equal(r.ok,false);
-  assert.equal(r.reason,"commissioning_repair_live_exposure_unverified");
+  assert.equal(r.reason,"independent_review_release_activation_retired_use_owner_self");
   assert.equal(r.ordersSubmitted,false);
-  assert.equal(reads,1);
-  assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
-  assert.equal(h.executed.includes("COMMIT"),false);
-  assert.ok(h.executed.includes("ROLLBACK"));
+  assert.equal(reads,0);
+  assert.equal(h.executed.length,0);
  });
 }
 test("Step 12 reports sanitized provider source reasons and still refuses missing or changed PDF digest",async()=>{
@@ -359,207 +357,29 @@ test("reviewer cannot impersonate account owner or use ordinary user role",async
  assert.equal((await attestProtectiveReleaseReview(REVIEWER,"STANDARD",data,{db:h.db,sha:()=>SHA})).ok,false);
  assert.equal(h.executed.length,0);
 });
-test("authenticated distinct reviewer persists immutable evidence in transaction",async()=>{
+test("new independent reviewer enrollment is retired without database activity",async()=>{
  const h=fakeDb(),data={ownerUserId:OWNER,qualificationId:QID,
   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/107",
   note:"Reviewed the exact release SHA, official fee inputs, full provider history, cash and position reconciliation, signed exits, and no-retry crashes.",
   confirmation:REVIEW_CONFIRM};
  const r=await attestProtectiveReleaseReview(REVIEWER,"DEVELOPER",data,{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.ok(h.executed.indexOf("BEGIN")<h.executed.indexOf("COMMIT"));
- assert.equal(h.executed.some(s=>s.includes("UPDATE public.live_execution_config")),false);
+ assert.equal(r.ok,false);
+ assert.equal(r.reason,"independent_review_enrollment_retired_use_owner_self");
+ assert.equal(h.executed.length,0);
 });
-test("owner acceptance is rejected if missing distinct reviewer or authenticated confirmation",async()=>{
- const h=fakeDb({review:false});
- const body={reviewId:RID,confirmation:OWNER_CONFIRM};
- assert.equal((await authorizeProtectiveRelease(OWNER,{...body,confirmation:"wrong"},{db:h.db,sha:()=>SHA})).ok,false);
- assert.equal((await authorizeProtectiveRelease(OWNER,body,{db:h.db,sha:()=>SHA})).ok,false);
- assert.equal(h.executed.some(s=>s.includes("UPDATE public.live_execution_config")),false);
- assert.ok(h.executed.includes("ROLLBACK"));
-});
-test("independently approved owner release fences killed terminal lease without ARM or START",async()=>{
- const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,leaseState:"killed"});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.ok(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease") &&
-   x.includes("fencing_token=fencing_token+1") &&
-   x.includes("state='released'") &&
-   x.includes("account_kill=false") &&
-   x.includes("arm_requested=false")));
- assert.ok(h.executed.some(x=>x.includes("'OWNER_RELEASE_FENCED_TERMINAL_LEASE'")));
- assert.equal(h.executed.some(x=>/productionStart|productionArm|kalshiPost|submitOrder/.test(x)),false);
- assert.ok(h.executed.includes("COMMIT"));
-});
-test("terminal lease transition refuses missing review, armed lease, exposure and owned worker",async()=>{
- for(const input of [
-   {leaseState:"killed" as const,review:false},
-   {leaseState:"killed" as const,leaseArmed:true},
-   {leaseState:"killed" as const,leaseExposure:true},
-   {leaseState:"owned" as const},
- ]){
-   const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,...input});
-   const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
-   assert.equal(r.ok,false,JSON.stringify(input));
-   assert.equal(h.executed.includes("COMMIT"),false,JSON.stringify(input));
-   assert.equal(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease")),false,JSON.stringify(input));
+test("retired finite activation refuses every legacy route without reading provider, DB or clearing flags",async()=>{
+ const variants=[{}, {review:false}, {freeze:'awaiting_account_commissioning',fresh:false},
+  {freeze:'personal_exchange_history_unreconciled'}, {executionEnabled:false,kill:true},
+  {leaseState:'owned',leaseArmRequested:true}, {globalEnabled:false,globalKill:true},
+  {globalEnabled:true,globalKill:false}];
+ for(const fixture of variants){
+  const h=fakeDb(fixture as never);let reads=0;
+  const result=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:(async()=>{reads++;throw Error('must not read');}) as never});
+  assert.equal(result.ok,false);assert.equal(result.reason,'independent_review_release_activation_retired_use_owner_self');
+  assert.equal(result.ordersSubmitted,false);assert.equal(result.workerStarted,false);
+  assert.equal(reads,0);assert.equal(h.executed.length,0);
  }
 });
-test("owner consent inserts exact signed release then atomically enables account and global live flag",async()=>{
- const h=fakeDb();
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.equal(r.ordersSubmitted,false);
- assert.equal("workerStarted" in r && r.workerStarted,false);
- const insert=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
- const accountUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.v13_production_account"));
- const globalUpdate=h.executed.findIndex(s=>s.includes("UPDATE public.live_execution_config"));
- assert.ok(insert>0&&accountUpdate>insert&&globalUpdate>accountUpdate);
- assert.ok(h.executed.indexOf("COMMIT")>globalUpdate);
-});
-
-
-test("eligible but killed owner remains stopped until genuine reviewed release",async()=>{
- const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.equal(r.ordersSubmitted,false);
- assert.ok(h.executed.some(q=>q.includes("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false")));
- assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false);
-});
-test("eligible but killed owner cannot bypass independent technical review",async()=>{
- const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,review:false});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,false);
- assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
-});
-test("owner's independently qualified stopped account can release when shared master is already enabled",async()=>{
- const h=fakeDb({globalLive:true});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
-  db:h.db,sha:()=>SHA,
- });
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.equal(r.ordersSubmitted,false);
- const technical=h.executed.findIndex(q=>q.includes("FROM private.strata_protective_release_reviews r"));
- const owned=h.executed.findIndex(q=>q.includes("UPDATE public.v13_production_account"));
- const release=h.executed.findIndex(q=>q.includes("INSERT INTO private.strata_protective_exit_release"));
- assert.ok(technical>0&&release>technical&&owned>release);
- assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false,
-  "an already live global gate must NEVER be rewritten to qualify another account");
- assert.ok(h.executed.includes("COMMIT"));
-});
-
-test("already enabled account cannot outrun a globally stopped or inconsistent master",async()=>{
- for(const [name,input,reason] of [
-  ["account active/global stopped",{accountLive:true,globalLive:false},
-   "account_global_release_state_mismatch"],
-  ["inconsistent global kill",{globalLive:true,globalInconsistent:true},
-   "global_execution_kill_state_inconsistent"],
- ] as const){
-  const h=fakeDb(input);
-  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
-   db:h.db,sha:()=>SHA,
-  });
-  assert.equal(r.ok,false,name);
-  assert.equal(r.reason,reason,name);
-  assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false,name);
-  assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false,name);
-  assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false,name);
-  assert.ok(h.executed.includes("ROLLBACK"),name);
- }
-});
-
-test("globally enabled master still cannot bypass absent independent reviewer",async()=>{
- const h=fakeDb({globalLive:true,review:false});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
-  db:h.db,sha:()=>SHA,
- });
- assert.equal(r.ok,false);
- assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false);
- assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
- assert.ok(h.executed.includes("ROLLBACK"));
-});
-
-test("provisional freeze cannot be cleared without distinct explicit owner consent",async()=>{
- const h=fakeDb({freeze:"awaiting_account_commissioning"});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
- assert.equal(r.ok,false);
- assert.equal(r.reason,"explicit_commissioning_repair_confirmation_required");
- assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
- assert.equal(h.executed.includes("COMMIT"),false);
-});
-test("any genuine freeze is immutable through commissioning recovery",async()=>{
- const h=fakeDb({freeze:"unknown_exchange_order"});
- const r=await authorizeProtectiveRelease(OWNER,{
-  reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
- },{db:h.db,sha:()=>SHA});
- assert.equal(r.reason,"account_risk_freeze_requires_independent_remediation");
- assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
-});
-test("owner-authorized recovery denies stale signed source, mismatched cash and any exchange exposure",async()=>{
- const cases=[
-  {name:"stale exchange feed",feed:emptySignedFeed({observedAtMs:Date.now()-60_000}),
-   reason:"commissioning_repair_live_cash_or_freshness_unverified"},
-  {name:"cash mismatch",feed:emptySignedFeed({cashMicros:"24000000"}),
-   reason:"commissioning_repair_live_cash_or_freshness_unverified"},
-  {name:"exchange orders",feed:emptySignedFeed({orders:[{order_id:"unknown"}]}),
-   reason:"commissioning_repair_live_exposure_unverified"},
-  {name:"exchange open positions",feed:emptySignedFeed({positions:[{ticker:"KXBTC15M-TEST",position_fp:"1.00"}]}),
-   reason:"commissioning_repair_live_exposure_unverified"},
-  {name:"provider failure",feed:{ok:false as const,reason:"kalshi_read_failed"},
-   reason:"commissioning_repair_live_exchange_read_unavailable"},
- ];
- for(const row of cases){
-  const h=fakeDb({freeze:"awaiting_account_commissioning"});
-  const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
-   db:h.db,sha:()=>SHA,
-   // Avoid preconstructing stale transport timestamps for otherwise valid evidence.
-   readFeeds:(async (_material:unknown,observedAtMs:number)=>{
-    const feed=row.feed;
-    return feed.ok
-      ? {...feed,observedAtMs:row.name==="stale exchange feed"?feed.observedAtMs:observedAtMs}
-      : feed;
-   }) as never,
-  });
-  assert.equal(r.ok,false,row.name);
-  assert.equal(r.reason,row.reason,row.name);
-  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false,row.name);
-  assert.ok(h.executed.includes("ROLLBACK"),row.name);
- }
- const h=fakeDb({freeze:"awaiting_account_commissioning",unresolved:true});
- const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
-  db:h.db,sha:()=>SHA,readFeeds:(async()=>emptySignedFeed()) as never,
- });
- assert.equal(r.reason,"commissioning_repair_fresh_zero_exposure_unverified");
- assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
-});
-test("explicit owner reviewed repair refreshes real Kalshi evidence inside transaction even with old worker reconciliation",async()=>{
- const h=fakeDb({freeze:"awaiting_account_commissioning",fresh:false});
- // The signed provider read and the expected qualification clock refer to
- // ONE observation. Sampling Date.now() twice made this positive-path test
- // nondeterministic across millisecond boundaries.
- const observedAtMs=Date.now();
- let signedReads=0;
- const r=await authorizeProtectiveRelease(OWNER,repairRequest,{
-  db:h.db,sha:()=>SHA,now:()=>observedAtMs,
-  readFeeds:(async()=>{
-   signedReads++;
-   return emptySignedFeed({observedAtMs});
-  }) as never,
- });
- assert.equal(r.ok,true,JSON.stringify(r));
- assert.equal(signedReads,1);
- assert.equal("provisionalFreezeRepaired" in r && r.provisionalFreezeRepaired,true);
- const providerMaterial=h.executed.findIndex(s=>s.includes("FROM private.kalshi_connection_credentials c"));
- const release=h.executed.findIndex(s=>s.includes("INSERT INTO private.strata_protective_exit_release"));
- const repair=h.executed.findIndex(s=>s.includes("SET blocked_reason=NULL"));
- const audit=h.executed.findIndex(s=>s.includes("OWNER_COMMISSIONING_FREEZE_REPAIR"));
- assert.ok(providerMaterial>=0&&release>providerMaterial&&repair>release&&audit>repair);
- assert.ok(h.executed.indexOf("COMMIT")>audit);
- assert.equal(h.executed.some(s=>s.includes("INSERT INTO public.v13_production_intent")),false);
- assert.ok(h.executed.some(s=>s.includes("statement_timestamp()-interval '15 seconds'")));
- assert.equal(h.executed.some(s=>s.includes("AND reconciled_at>now()-interval '15 seconds'")),false);
-});
-
 test("release account lookup binds the policy to both execution account and owner",async()=>{
   let sqlText="";
   const db={query:async(sql:string)=>{

@@ -1,3 +1,4 @@
+import { standingAuthoritySql, OWNER_SELF_REVIEW_CONFIRM } from './ownerSelfReviewMode.js';
 import { createHash } from "node:crypto";
 import { deployedGitSha } from "./deployedGitSha";
 import { pool } from "@workspace/db";
@@ -106,7 +107,7 @@ export const SUCCESSOR_SQL=`SELECT d.delegation_id::text,m.model_id::text,e.rele
    AND e.execution_account_id=a.id AND e.policy_hash=p.policy_hash AND e.release_commit_sha=$7
  JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL
  JOIN private.role_assignments role ON lower(btrim(role.email))=lower(btrim(u.email)) AND role.role='ADMIN'
- JOIN public.profiles reviewer ON reviewer.id=e.independent_reviewer_id AND reviewer.role IN ('ADMIN','DEVELOPER')
+
  WHERE a.id=$1 AND a.owner_user_id=$2::uuid
    AND p.state='APPROVED' AND p.fee_policy_version=$3 AND p.fee_formula_version=$4
    AND p.fee_source_url='strata-api-reviewed://kxbtc15m/'||$8::text
@@ -118,13 +119,17 @@ export const SUCCESSOR_SQL=`SELECT d.delegation_id::text,m.model_id::text,e.rele
    AND m.release_commit_sha=$7 AND m.rate_decision_digest=$5 AND m.fee_model_version=$6
    AND m.scope='KXBTC15M:INDEX2' AND m.reviewer_admin_id<>a.owner_user_id
    AND m.revoked_at IS NULL AND m.signed_at<=d.granted_at AND m.valid_until>clock_timestamp()
-   AND e.confirmation='I_INDEPENDENTLY_APPROVE_STANDING_ENTRIES_AND_REDUCE_ONLY_EXITS_FOR_THIS_EXACT_SHA_ACCOUNT_POLICY_V1'
-   AND e.independent_reviewer_id<>a.owner_user_id AND e.state='approved'
+   AND ${standingAuthoritySql('e','a.owner_user_id')}
+   AND ((COALESCE(to_jsonb(e)->>'review_authority','INDEPENDENT_V1')='INDEPENDENT_V1'
+     AND e.confirmation='I_INDEPENDENTLY_APPROVE_STANDING_ENTRIES_AND_REDUCE_ONLY_EXITS_FOR_THIS_EXACT_SHA_ACCOUNT_POLICY_V1'
+     AND EXISTS(SELECT 1 FROM public.profiles reviewer WHERE reviewer.id=e.independent_reviewer_id AND reviewer.role IN ('ADMIN','DEVELOPER') FOR SHARE))
+    OR (to_jsonb(e)->>'review_authority'='OWNER_SELF_V1' AND e.confirmation='${OWNER_SELF_REVIEW_CONFIRM}'))
+   AND e.state='approved'
    AND e.revoked_at IS NULL AND e.created_at<=clock_timestamp()
    AND (SELECT count(*) FROM private.strata_api_fee_standing_models competing
      WHERE competing.release_commit_sha=$7 AND competing.rate_decision_digest=$5
        AND competing.revoked_at IS NULL AND competing.valid_until>clock_timestamp())=1
- LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,reviewer,g,issuer,issuer_role`;
+ LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,g,issuer,issuer_role`;
 export type ProtectiveFeeAuthority={ok:boolean;reason:string;proofKind?:"legacy"|"standing_successor";authorityFingerprint?:string;validForMs?:number};
 /** Read-only monetary authority. Inside a caller-owned transaction the SHARE
  * locks are retained until COMMIT, including model/delegation revocation rows.
