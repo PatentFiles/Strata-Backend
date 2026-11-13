@@ -20,3 +20,5 @@ jobs:
         run: python3 machine-qualification/check-package-integrity.py
       - name: Test runtime permission collector with synthetic database fixtures
         run: node --test machine-qualification/runtime-permissions/collect-runtime-permissions.test.cjs
+      - name: Test signer and scoped issuer with synthetic credentials and evidence
+        run: node --test machine-qualification/assurance/qualification/*.test.cjs
