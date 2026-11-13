@@ -1,3 +1,4 @@
+import {readReleaseOwner} from './inAppProtectiveRelease';
 import {consumeOwnerMachineAuthorityCandidate,assertConsumedMachineAuthorityFresh} from './ownerMachineAuthorityCandidate';
 import {recoveryCredentialGuard,type RecoveryProviderIdentity} from './ownerRecoveryCredentialGuardCandidate';
 import {ProductionLedger,type Account,HeldReconciliationCommitUncertain} from '../v13-production/ledger';
@@ -57,6 +58,8 @@ async function runAtomicRecovery(input:Parameters<typeof exerciseAtomicRecoveryI
   lock:async(tx,a)=>{
    if(qualification){
     await qualification(tx,s,'lock');
+    const resolved=await readReleaseOwner(tx,s.ownerId);
+    if(!resolved.ok||resolved.account.id!==s.accountId)throw Error('commissioned_owner_activation_unverified');
     if(a.key_fingerprint!==s.credentialFingerprint||a.commissioned!==true)throw Error('commissioned_credential_scope_changed');
     const policy=await tx.query("SELECT policy_hash FROM public.v13_live_money_policy WHERE id=$1 AND execution_account_id=$2 AND created_by=$3 AND state='APPROVED' FOR SHARE",[a.policy_id,s.accountId,s.ownerId]);
     if(policy.rows.length!==1||policy.rows[0].policy_hash!==s.policyHash)throw Error('approved_policy_scope_changed');

@@ -31,4 +31,7 @@ END $$;
 SQL
 # Reapplication must refuse rather than silently accept incompatible old objects.
 if "${PSQL[@]}" -f "$M" >"$D/duplicate.log" 2>&1; then echo 'duplicate migration unexpectedly accepted'; exit 1; fi
+{ printf 'PREPARE recovery_probe(text) AS '; cat "$ROOT/docs/owner-only-recovery-candidate/recovery-runtime-permissions-readonly.sql"; printf "\nEXECUTE recovery_probe('agent');\n"; } | "${PSQL[@]}" >"$D/permission-findings.log"
+grep -q required_object_missing "$D/permission-findings.log"
+grep -q reachable_privileged_role "$D/permission-findings.log"
 echo 'PASS: prerequisite rollback, complete schema, no public authority, immutable receipts/authority, duplicate refusal (disposable PostgreSQL only)'
