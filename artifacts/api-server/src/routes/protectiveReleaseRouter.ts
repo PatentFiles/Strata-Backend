@@ -1,3 +1,4 @@
+import {ownerOnlyRecoveryAdmission} from '../lib/strata/ownerOnlyRecoveryAdmission';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
@@ -47,6 +48,13 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
     ...(standingHistory?{releaseMode:'STANDING_V1',releaseActive:standingGrantActive,releaseExpiresAt:null}:{}),
     pendingOwners,viewerIsOperator:isOperator(actor.role),
     viewerIsOwner:target===actor.subject}));
+ });
+ router.post('/owner-only-recover',(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=ownerOnlyRecoveryAdmission(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.reason==='exact_owner_recovery_request_required'?400:409).json(result);
  });
  router.post("/qualify",async(req,res)=>{
   const actor=identify(res.locals);
