@@ -1,3 +1,4 @@
+import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitSha";
@@ -22,7 +23,11 @@ type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number}>};
 type Db=Query & {connect():Promise<Query&{release():void}>};
 type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
-const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
+const deny=(reason:string,feeSource?:unknown)=>{
+ const feeDiagnostics=getFeeFailureDiagnostics(feeSource);
+ return {ok:false,reason,ordersSubmitted:false as const,
+  ...(feeDiagnostics?{feeDiagnostics}:{})};
+};
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const truth=(v:unknown)=>v===true||v==="t";
@@ -286,7 +291,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     if(!verified.ok){
       const reason=/^[a-z][a-z0-9_]{2,95}$/.test(verified.reason)
         ?verified.reason:"fee_source_unavailable";
-      return deny("release_api_fee_"+reason);
+      return deny("release_api_fee_"+reason,verified);
     }
     const nowFee=(deps.now??Date.now)();
     if(verified.identity.grantId!==reviewedApi.grantId||
