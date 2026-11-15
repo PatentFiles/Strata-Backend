@@ -84,6 +84,7 @@ export const READ_API_FEE_STAGE_SQL=`
        ON lower(btrim(u.email))=lower(btrim(role.email))
      WHERE u.id=g.issuer_admin_id AND role.role='ADMIN'
        AND u.email_confirmed_at IS NOT NULL
+     FOR SHARE OF u,role
    )
  FOR SHARE OF g,c,r1
  LIMIT 2

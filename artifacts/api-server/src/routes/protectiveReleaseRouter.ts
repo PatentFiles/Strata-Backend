@@ -1,3 +1,4 @@
+import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
 import {heldHistoryConsentOutcome} from '../lib/strata/ownerNeverPostedReleaseRenewal';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
@@ -104,6 +105,22 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const actor=identify(res.locals);
   if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
   const result=await recordStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // New owner-only authority is separate from immutable historical independent reviews.
+ // Require signed AAL2 owner session and server-configured exact owner/account scope.
+ router.post('/owner-standing-review',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await recordOwnerSelfStandingReview(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/owner-standing-review-revoke',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await revokeOwnerSelfStandingReview(actor.subject,req.body);
   res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });

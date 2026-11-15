@@ -95,7 +95,8 @@ test("V3 policy switch SQL must lock authority AND consent, and require exact st
  assert.doesNotMatch(source,/UPDATE private\.strata_api_fee_source_grants/);
 });
 
-test("V3 policy migration preserves champion and owner risk, invalidates previous approvals without fabricating reviewer",async()=>{
+for(const priorFeeMode of ['legacy','reviewed-api-v2'] as const){
+test(`V3 migration from ${priorFeeMode} preserves approved scope without creating reviewer evidence`,async()=>{
  const accountId="strata-kalshi-owner-opaque-v13-account";
  const now=Date.now();
  const old:V13ApprovedLiveMoneyPolicy={
@@ -104,10 +105,10 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
   strategyParameterHash:V13_CHAMPION_PARAMETER_HASH,entryPolicyVersion:V13_ENTRY_POLICY_VERSION,
   championSelectionReviewId:"independent-champion",championSelectionEvidenceHash:"b".repeat(64),
   championSelectedBy:OWNER,championSelectedAt:new Date("2026-10-01T00:00:00Z"),
-  capitalLimitCents:2500,maxEntryStakeCents:150,maxEntryAllInCents:200,maxOpenPositions:1,
-  maxDailyLossCents:500,maxTotalLossCents:1500,maxQuoteAgeMs:5000,maxFeeEvidenceAgeMs:15000,
-  feePolicyVersion:"micro-live-standing-fee-policy-v1",
-  feeSourceUrl:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
+  capitalLimitCents:2500,maxEntryStakeCents:priorFeeMode==='legacy'?150:500,maxEntryAllInCents:priorFeeMode==='legacy'?200:625,maxOpenPositions:1,
+  maxDailyLossCents:priorFeeMode==='legacy'?500:1000,maxTotalLossCents:1500,maxQuoteAgeMs:5000,maxFeeEvidenceAgeMs:15000,
+  feePolicyVersion:priorFeeMode==='legacy'?'micro-live-standing-fee-policy-v1':'strata_api_fee_source_signed_review_v2',
+  feeSourceUrl:priorFeeMode==='legacy'?'https://kalshi.com/docs/kalshi-fee-schedule.pdf':`strata-api-reviewed://kxbtc15m/${GRANT}`,
   feeFormulaVersion:V3_FEE_FORMULA_VERSION,requireFullDepth:true,
   entryTimeInForce:"IOC",entryLimitSource:"SIGNAL_REFERENCE_OFFER",
   policyHash:null,createdBy:OWNER,approvedBy:OWNER,approvedAt:new Date("2026-10-01T01:00:00Z"),
@@ -225,6 +226,8 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
  assert.doesNotMatch(create.sql,/p\.max_entry_all_in_cents/);
  assert.match(create.sql,/\$11::int,\$12::int,\$13::int/);
  assert.deepEqual(create.params?.slice(10),[2500,500,625,1000,1500,5000,15000]);
+ assert.equal(statements.some(x=>/^(?:INSERT INTO|UPDATE|DELETE FROM) private\.strata_api_fee_(?:rate_reviews|standing_models|source_grants)/.test(x.sql.trim())),false);
+ if(priorFeeMode==='reviewed-api-v2')assert.deepEqual(create.params?.slice(10),[old.capitalLimitCents,old.maxEntryStakeCents,old.maxEntryAllInCents,old.maxDailyLossCents,old.maxTotalLossCents,old.maxQuoteAgeMs,old.maxFeeEvidenceAgeMs]);
  assert.equal(create.params?.[2],V3_FEE_POLICY_VERSION);
  assert.equal(create.params?.[4],V3_FEE_FORMULA_VERSION);
  const persisted={...old,id:create.params?.[0] as string,version:2,
@@ -252,6 +255,8 @@ test("V3 policy migration preserves champion and owner risk, invalidates previou
  assert.ok(statements.some(x=>x.sql.includes("OWNER_V3_FEE_POLICY_MIGRATION")));
  assert.equal(statements.some(x=>/UPDATE public\.live_execution_config|INSERT INTO public\.v13_production_intent/.test(x.sql)),false);
 });
+}
+
 
 
 test("V3 $5 preset proof is exact-versioned and bounded by authenticated cash",()=>{

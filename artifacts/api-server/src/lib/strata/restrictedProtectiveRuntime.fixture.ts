@@ -3,7 +3,7 @@ import {pool,installPoolCheckoutTiming,type Pool,type PoolClient} from '@workspa
 import {auditUnseenExpiredSignals,recordLiveSignalDecision} from '../v13-production/signalDecisionTrace';
 import {reserveKalshiBalanceReadSlot} from './kalshiBalanceQuota';
 import {lockIndependentActivity} from './ownerUnknownRecoveryHeld';
-import {activityTables} from './ownerUnknownRecoverySchema.fixture';
+import {activityTables,backendRole} from './ownerUnknownRecoverySchema.fixture';
 
 // DISPOSABLE EXPERIMENT ONLY. This is a trusted service-role compatibility
 // probe, NOT tenant authorization or a deployable permission migration.
@@ -23,7 +23,13 @@ const activityLockOnly=[
 const fixtureRlsAdditions=[
  'private.kalshi_owner_pilot_transfers','private.kalshi_owner_shard_allocations',
 ] as const;
+// These platform tables are synthetic stubs, not production catalog evidence.
+// auth.users alone needs a fixture RLS addition; role_assignments is already
+// RLS-enabled in the checked-in platform stub. No production shape is implied.
+const fixturePlatformRlsAdditions=['auth.users','private.role_assignments'] as const;
 export const lockOnly:Record<string,string>={
+ 'auth.users':'id',
+ 'private.role_assignments':'email',
  ...Object.fromEntries(activityLockOnly.map(table=>[table,'execution_account_id'])),
  'public.v13_live_money_policy':'id',
  'public.live_execution_config':'id',
@@ -49,7 +55,7 @@ const reads=[
  'private.strata_v13_signal_trace_scope','public.strata_configured_stake',
  'private.strata_kalshi_balance_read_slots',
  'private.strata_api_fee_standing_delegations',
- 'auth.users','private.role_assignments','vault.decrypted_secrets',
+ 'vault.decrypted_secrets',
 ];
 export const updates:Record<string,string[]>={
  'private.strata_kalshi_balance_read_slots':['next_slot_at'],
@@ -157,14 +163,25 @@ export async function installRestrictedProtectiveRuntime(setup:Pool,observe?:(cl
    'source baseline changed: explicitly review the fixture-only RLS addition');
   await setup.query(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
  }
+ for(const table of fixturePlatformRlsAdditions){
+  const shape=(await setup.query('SELECT relrowsecurity,pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid=$1::regclass',[table])).rows[0];
+  if(table==='private.role_assignments'){
+   assert.deepEqual(shape,{relrowsecurity:true,owner:backendRole},'role stub must retain exact source RLS baseline');
+  }else if(shape.relrowsecurity){
+   assert.equal(shape.owner,'combined_auth_owner','only the explicit combined platform fixture may pre-enable auth RLS');
+  }else{
+   assert.equal(shape.owner,backendRole,'unexpected auth stub owner');
+   await setup.query(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+  }
+ }
  await setup.query(`CREATE ROLE ${runtimeRole} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
   NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   GRANT USAGE ON SCHEMA public,private,auth,vault TO ${runtimeRole}`);
  for(const table of reads){
   await setup.query(`GRANT SELECT ON ${table} TO ${runtimeRole}`);
   const enabled=(await setup.query('SELECT relrowsecurity FROM pg_class WHERE oid=$1::regclass',[table])).rows[0].relrowsecurity;
-  // Platform stubs retain their source RLS state and receive SELECT only.
-  // The two explicit maintenance additions above are the ONLY divergence.
+  // RLS additions above are explicit disposable fixture divergences only.
+  // Other platform stubs retain their source RLS state.
   if(enabled)await setup.query(`CREATE POLICY held_runtime_read ON ${table} FOR SELECT TO ${runtimeRole} USING(true)`);
  }
  for(const table of [...Object.keys(lockOnly),...Object.keys(updates),...inserts]){
@@ -215,6 +232,7 @@ export async function installRestrictedProtectiveRuntime(setup:Pool,observe?:(cl
 }
 
 export async function assertRestrictedAuthority(setup:Pool,accountId:string,ownerId:string){
+ await assertRestrictedPlatformAuthorityLocks(setup);
  await assertRestrictedActivityLocks(setup,accountId,ownerId);
  const table='private.strata_owner_sha_approvals';
  const before=(await setup.query(`SELECT * FROM ${table} ORDER BY approval_id`)).rows;
@@ -283,6 +301,43 @@ export async function assertRestrictedAuthority(setup:Pool,accountId:string,owne
  }
  for(const fn of ['begin_trace_scope','capture_intent','capture_event','capture_transport']){
   assert.equal((await pool.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed',[`private.strata_v13_${fn}()`])).rows[0].allowed,false);
+ }
+}
+
+async function assertRestrictedPlatformAuthorityLocks(setup:Pool){
+ for(const table of fixturePlatformRlsAdditions){
+  const key=lockOnly[table];
+  const before=(await setup.query(`SELECT to_jsonb(t) AS row FROM ${table} t ORDER BY ${key}`)).rows;
+  assert(before.length>0,table+' must contain actual fixture authority rows');
+  const value=before[0].row[key];
+  assert.equal((await pool.query(`SELECT ${key} FROM ${table} WHERE ${key}=$1`,[value])).rows.length,1);
+  assert.deepEqual((await pool.query(`SELECT has_table_privilege(current_user,$1,'UPDATE') AS update,
+   has_table_privilege(current_user,$1,'INSERT') AS insert,has_table_privilege(current_user,$1,'DELETE') AS delete,
+   has_column_privilege(current_user,$1,$2,'UPDATE') AS lock`,[table,key])).rows[0],
+   {update:false,insert:false,delete:false,lock:true});
+  await setup.query(`REVOKE UPDATE(${key}) ON ${table} FROM ${runtimeRole}`);
+  try{await denied(pool,`SELECT ${key} FROM ${table} WHERE ${key}=$1 FOR SHARE`,[value]);}
+  finally{await setup.query(`GRANT UPDATE(${key}) ON ${table} TO ${runtimeRole}`);}
+  await rollbackOnly(pool,async c=>{
+   assert.equal((await c.query(`SELECT ${key} FROM ${table} WHERE ${key}=$1 FOR SHARE`,[value])).rows.length,1);
+   await rollbackOnly(setup,async writer=>{
+    await writer.query("SET LOCAL lock_timeout='100ms'");
+    await assert.rejects(writer.query(`UPDATE ${table} SET ${key}=${key} WHERE ${key}=$1`,[value]),{code:'55P03'});
+   });
+  });
+  await setup.query(`CREATE POLICY held_platform_accidental_widening ON ${table} FOR UPDATE TO ${runtimeRole} USING(true) WITH CHECK(true)`);
+  try{
+   await denied(pool,`UPDATE ${table} SET ${key}=${key} WHERE ${key}=$1`,[value],true);
+   const changed=table==='auth.users'?'99999999-9999-4999-8999-999999999999':'forbidden@example.invalid';
+   await denied(pool,`UPDATE ${table} SET ${key}=$2 WHERE ${key}=$1`,[value,changed],true);
+   if(table==='auth.users'){
+    await denied(pool,`UPDATE ${table} SET email='forbidden@example.invalid' WHERE id=$1`,[value]);
+    await denied(pool,`UPDATE ${table} SET email_confirmed_at=NULL WHERE id=$1`,[value]);
+   }else await denied(pool,`UPDATE ${table} SET role='ADMIN' WHERE email=$1`,[value]);
+   await denied(pool,`DELETE FROM ${table} WHERE ${key}=$1`,[value]);
+   await denied(pool,`INSERT INTO ${table} SELECT * FROM ${table} WHERE ${key}=$1`,[value]);
+  }finally{await setup.query(`DROP POLICY held_platform_accidental_widening ON ${table}`);}
+  assert.deepEqual((await setup.query(`SELECT to_jsonb(t) AS row FROM ${table} t ORDER BY ${key}`)).rows,before,'platform authority bytes unchanged');
  }
 }
 

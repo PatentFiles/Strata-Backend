@@ -1,4 +1,6 @@
 import {createHash} from 'node:crypto';
+import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
+import {standingAuthoritySql} from './ownerSelfReviewMode';
 import {pool} from '@workspace/db';
 import {deployedGitSha} from './deployedGitSha';
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -78,7 +80,7 @@ export const STANDING_EXIT_REVIEW_SQL=`SELECT r.release_id
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  WHERE r.owner_user_id=$1::uuid AND r.execution_account_id=$2 AND r.release_commit_sha=$3
    AND r.policy_hash=p.policy_hash AND p.state='APPROVED'
-   AND r.independent_reviewer_id<>r.owner_user_id AND r.state='approved'
+   AND ${standingAuthoritySql('r','r.owner_user_id')} AND r.state='approved'
    AND r.created_at<=now() AND r.revoked_at IS NULL
  LIMIT 2 FOR SHARE OF r,p`;
 export async function hasStandingReviewHistory(db:Query,owner:string,account:string,sha:string){
@@ -89,7 +91,7 @@ export async function hasStandingReviewHistory(db:Query,owner:string,account:str
 export async function checkStandingExitReview(db:Query,owner:string,account:string,sha:string){
  const r=await db.query(STANDING_EXIT_REVIEW_SQL,[owner,account,sha]);return r.rows.length===1;
 }
-export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:()=>string}={}){
+export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:()=>string;scope?:()=>OwnerSelfEnrollmentScope|undefined}={}){
  const sha=(deps.sha??deployedGitSha)();
  if(!UUID.test(owner)||!SHA.test(sha))return deny('standing_scope_unavailable');
  const db=deps.db??pool;
@@ -99,7 +101,7 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
    WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 AND p.state='APPROVED'`,[owner]);
   if(a.rows.length!==1)return deny('standing_account_policy_unavailable');
   const account=a.rows[0]!;
-  const reviews=await db.query(`SELECT release_id,independent_reviewer_id FROM private.strata_standing_execution_reviews
+  const reviews=await db.query(`SELECT release_id,qualification_id,independent_reviewer_id,to_jsonb(r)->>'review_authority' AS review_authority,to_jsonb(r)->>'owner_authorizer_id' AS owner_authorizer_id FROM private.strata_standing_execution_reviews r
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
    AND policy_hash=$4 AND revoked_at IS NULL AND created_at<=now()`,[owner,account.id,sha,account.policy_hash]);
   const grants=await db.query(`SELECT grant_id,revoked_at,policy_hash,reviewed_release_id FROM private.strata_continuous_execution_grants
@@ -109,8 +111,12 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
    AND expires_at>now()+interval '60 seconds' ORDER BY observed_at DESC LIMIT 1`,[owner,account.id,sha]);
   return {ok:true as const,reason:'standing_status',sha,ownerId:owner,accountId:account.id,policyHash:account.policy_hash,
+   ownerSelfAvailable:ownerSelfEnrollmentAllowed(owner,account.id,(deps.scope??configuredOwnerSelfScope)()),
    reviewId:reviews.rows.length===1?reviews.rows[0]?.release_id:null,
+   reviewQualificationId:reviews.rows.length===1?reviews.rows[0]?.qualification_id:null,
    reviewerId:reviews.rows.length===1?reviews.rows[0]?.independent_reviewer_id:null,
+   reviewAuthority:reviews.rows.length===1?(reviews.rows[0]?.review_authority??'INDEPENDENT_V1'):null,
+   ownerAuthorizerId:reviews.rows.length===1?reviews.rows[0]?.owner_authorizer_id:null,
    grantExists:grants.rows.length===1&&grants.rows[0]?.revoked_at===null,
    grantActive:grants.rows.length===1&&grants.rows[0]?.revoked_at===null&&grants.rows[0]?.policy_hash===account.policy_hash&&
     reviews.rows.length===1&&grants.rows[0]?.reviewed_release_id===reviews.rows[0]?.release_id,

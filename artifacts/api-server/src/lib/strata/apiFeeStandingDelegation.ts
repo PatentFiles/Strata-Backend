@@ -177,9 +177,8 @@ export async function consentStandingFeeDelegation(
  * revocations, policy hash and deployed SHA on every snapshot / ORDER ENTRY.
  */
 export const CONTINUE_SQL = [
- "UPDATE private.strata_api_fee_standing_delegations d",
- "SET lease_expires_at=LEAST(d.valid_until,now()+interval '15 minutes')",
- "FROM private.strata_api_fee_standing_models m,",
+ "WITH authority AS MATERIALIZED (SELECT d.delegation_id",
+ "FROM private.strata_api_fee_standing_delegations d, private.strata_api_fee_standing_models m,",
  "private.strata_api_fee_source_grants g,",
  "private.strata_api_fee_owner_consents con,",
  "public.v13_production_account a,public.v13_live_money_policy p,",
@@ -197,7 +196,7 @@ export const CONTINUE_SQL = [
  "AND original.reviewer_user_id=g.issuer_admin_id",
  "AND original.rate_decision_digest=g.rate_decision_digest",
  "AND original.fee_model_version=g.fee_model_version",
- "AND original.revoked_at IS NULL AND original.signed_at<=g.issued_at)",
+ "AND original.revoked_at IS NULL AND original.signed_at<=g.issued_at FOR SHARE)",
  "AND g.policy_version=$5 AND g.fee_model_version=$6",
  "AND g.rate_decision_digest=$7 AND g.scope='KXBTC15M:INDEX2'",
  "AND m.rate_decision_digest=g.rate_decision_digest AND m.fee_model_version=g.fee_model_version",
@@ -215,6 +214,10 @@ export const CONTINUE_SQL = [
  "AND lower(btrim(reviewed_role.email))=lower(btrim(reviewed_user.email)) AND reviewed_role.role='ADMIN'",
  "AND issuer_user.id=g.issuer_admin_id AND issuer_user.email_confirmed_at IS NOT NULL",
  "AND lower(btrim(issuer_role.email))=lower(btrim(issuer_user.email)) AND issuer_role.role='ADMIN'",
+ "FOR UPDATE OF d FOR SHARE OF m,g,con,a,p,reviewed_user,reviewed_role,issuer_user,issuer_role)",
+ "UPDATE private.strata_api_fee_standing_delegations d",
+ "SET lease_expires_at=LEAST(d.valid_until,now()+interval '15 minutes')",
+ "WHERE d.delegation_id IN (SELECT delegation_id FROM authority)",
  "RETURNING d.delegation_id::text,d.valid_until,d.lease_expires_at"
 ].join(" ");
 
