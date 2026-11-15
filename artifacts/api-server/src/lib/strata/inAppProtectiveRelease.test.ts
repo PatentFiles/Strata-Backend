@@ -9,7 +9,7 @@ import { computeDynamicFeeModelDigest, type DynamicFeeModel } from "./dynamicOff
 import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
-  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
+  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,lookupProtectiveReleaseAuthorization,
   REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -738,4 +738,29 @@ test('fresh independently reviewed release accepts durable prior-qualification S
  assert.equal(h.executed.some(s=>/UPDATE private.strata_owner_sha_approvals/.test(s)),false);
  assert.ok(h.executed.some(s=>s.includes('FOR SHARE OF u,p')));
  assert.ok(h.executed.some(s=>s.includes('OWNER_RELEASE_SIGNED_RECHECK')));
+});
+
+test('final release lookup returns the complete historical receipt without granting current readiness',async()=>{
+ const expires=new Date('2026-10-20T06:00:00Z');
+ for(const revoked_at of [null,new Date('2026-10-20T05:00:00Z')]){
+  const queries:string[]=[];
+  const db={query:async(sql:string,params?:unknown[])=>{
+   queries.push(sql);assert.deepEqual(params,[RID,OWNER]);
+   return {rows:[{release_id:QID,execution_account_id:account.id,release_commit_sha:SHA,revoked_at,expires_at:expires}]};
+  },connect:async()=>{throw Error('receipt lookup must not open a transaction');}};
+  const result=await lookupProtectiveReleaseAuthorization(OWNER,RID,{db});
+  assert.deepEqual(JSON.parse(JSON.stringify(result)),{
+   outcome:'RECORDED',releaseId:QID,accountId:account.id,reviewId:RID,sha:SHA,
+   revoked:revoked_at!==null,expiresAt:expires.toISOString(),currentReadinessVerified:false,
+   ordersSubmitted:false,workerStarted:false,
+  });
+  assert.equal(queries.length,1);assert.match(queries[0]!,/^SELECT /);
+ }
+});
+test('final release lookup keeps absent or ambiguous receipts unknown and performs no writes',async()=>{
+ for(const rows of [[],[{},{}]]){
+  const db={query:async(sql:string)=>{assert.match(sql,/^SELECT /);return {rows};},
+   connect:async()=>{throw Error('no transaction');}};
+  assert.deepEqual(await lookupProtectiveReleaseAuthorization(OWNER,RID,{db}),{outcome:'UNKNOWN'});
+ }
 });
