@@ -40,10 +40,12 @@ Unlike the earlier candidate, this integrated branch intentionally does not
 retire historical finite-review API handlers or delete their implementation.
 Their security, revocation, protective and financial safeguards remain intact.
 
-**Known activation limitation:** Owner-self review registration requires an
-existing `released`, disarmed lease with `account_kill=false` and current
-signed qualification. It cannot repair a `killed` worker, unlock a disabled
-account or clear an execution KILL on its own. PR334's held-consent and
+**Known activation limitation:** Owner-self review can now record consent
+for a **genuinely disabled, killed and disarmed** account or a properly
+released/disarmed account, but only with current qualified signed evidence.
+It does **not** change execution eligibility, worker leases, cash, policy or
+account/global KILL. Continuous grant enrollment still requires separately
+verified, released and enabled account scope. PR334's held-consent and
 protected final release requirements remain separate. Do not mistake an
 owner-self review receipt for signed final release or permission to Start.
 
