@@ -37,7 +37,7 @@ const feeds=async(_m:unknown,observedAtMs:number)=>{await beforeRead();await aft
 const run=(id=owner)=>authorizeOwnerShaRelease(id,body,{db:db as never,sha:()=>sha,now:()=>clock(),readFeeds:feeds as never});
 const diagnostic=()=>inspectOwnerSignedExchangeReleaseProof(owner,{db:db as never,now:()=>clock(),read:feeds as never,
  feeProbe:async()=>({ok:true}) as never,v4:async()=>({ok:true,checks:{protectiveExitRelease:false,ownerShaApproval:false}}) as never});
-async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault;
+async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault;CREATE SCHEMA auth;CREATE TABLE auth.users(id uuid PRIMARY KEY);CREATE ROLE anon NOLOGIN;CREATE ROLE authenticated NOLOGIN;
  CREATE TABLE public.v13_production_account(id text PRIMARY KEY,owner_user_id uuid,subaccount int,exchange_index int,
  policy_id text,kalshi_connection_id uuid,key_fingerprint text,blocked_reason text,commissioned boolean,cash_precision_verified boolean,
  reserved_micros bigint,cash_micros bigint,revision bigint,execution_enabled boolean,kill_switch boolean,
@@ -58,7 +58,7 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
  policy_hash text,fee_fingerprint text,capability_digest text,client_order_id text UNIQUE);
  CREATE TABLE public.v13_production_position(id text,account_id text REFERENCES public.v13_production_account(id),quantity_hundredths bigint,basis_micros bigint,realized_pnl_micros bigint);
  ${eventDdl}
- CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text REFERENCES public.v13_production_account(id),state text);
+ CREATE TABLE private.strata_emergency_exit_reservations(reservation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),execution_account_id text REFERENCES public.v13_production_account(id),state text);
  CREATE TABLE public.v13_production_observation(id text PRIMARY KEY,account_id text REFERENCES public.v13_production_account(id),kind text,payload jsonb,digest text,observed_at timestamptz DEFAULT now());
  CREATE TABLE private.strata_protective_release_qualification(qualification_id uuid PRIMARY KEY,owner_user_id uuid,execution_account_id text,release_commit_sha text,evidence_digest text,observed_at timestamptz,expires_at timestamptz);
  CREATE TABLE private.strata_owner_sha_approvals(approval_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),owner_user_id uuid,execution_account_id text,release_commit_sha text,
@@ -79,6 +79,8 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
  INSERT INTO private.strata_standing_execution_reviews VALUES('${review}','${owner}','a','${oldSha}','${hash}','${reviewer}','approved',NULL,now()-interval '23 hours 54 minutes');
  INSERT INTO private.strata_continuous_execution_grants VALUES('${grant}','${owner}','a','${oldSha}','${hash}','${reviewer}','${review}',NULL,'I_AUTHORIZE_REVOCABLE_CONTINUOUS_EXECUTION_FOR_MY_REVIEWED_EXACT_SHA_V1',now()-interval '23 hours 53 minutes');
  INSERT INTO private.strata_protective_release_qualification VALUES('${qualification}','${owner}','a','${sha}','${hash}',now(),now()+interval '15 minutes');`);
+ // Use actual immutable receipt DDL and validated account FK/internal triggers.
+ await db.query(readFileSync(resolve(process.cwd(),'../../sql/strata_protective_exit_reconciliation_private.sql'),'utf8'));
  await db.query('INSERT INTO vault.decrypted_secrets VALUES($1,$2)',[secret,JSON.stringify({api_key_id:keyId,private_key:privateKey})]);
  await db.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('activation','a','OWNER_ACTIVATION_REQUEST','{}',$1)`,[
  digest({accountId:'a',policyId:'p',feeDigest:hash,stakeCents:500,commissioningDigest:hash,minimumExitMicros:10000})]);
@@ -142,6 +144,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
  });
  await t.test('genuine settled history qualifies and renews only through complete financial proof',async()=>{
   await reset();
+  try{
   await db.query("DELETE FROM public.v13_production_observation WHERE id<>'activation';DELETE FROM public.v13_production_intent");
   const id='settled-parent',market='KXBTC15M-TEST',clientOrderId='v13p-'+id;
   const request={market,side:'YES',action:'BUY',contracts:2,limitMicros:500000,reduceOnly:false,timeInForce:'IOC',clientOrderId};
@@ -189,7 +192,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
    ADD COLUMN strategy_parameter_set_id text DEFAULT 'synthetic',ADD COLUMN strategy_parameter_hash text DEFAULT repeat('d',64),
    ADD COLUMN require_full_depth boolean DEFAULT true,ADD COLUMN entry_time_in_force text DEFAULT 'IOC',ADD COLUMN entry_limit_source text DEFAULT 'book';
    ALTER TABLE private.strata_standing_execution_reviews ADD COLUMN qualification_id uuid,ADD COLUMN evidence_digest text,ADD COLUMN review_url text,ADD COLUMN review_note text,ADD COLUMN confirmation text;
-   ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN reservation_id uuid,ADD COLUMN owner_user_id uuid,ADD COLUMN client_order_id text,
+   ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN owner_user_id uuid,ADD COLUMN client_order_id text,
    ADD COLUMN trading_authorized boolean,ADD COLUMN market_ticker text,ADD COLUMN reducing_side text,ADD COLUMN quantity_hundredths bigint,ADD COLUMN order_request_json text,ADD COLUMN order_digest text`);
   const policy=approvedFromRow((await db.query('SELECT * FROM public.v13_live_money_policy')).rows[0])!;
   const policyHash=computeV13LiveMoneyPolicyHash(policy),note='Synthetic independent review fixture. '.repeat(5),reviewUrl='https://github.com/PatentFiles/Strata-Backend/pull/1';
@@ -218,7 +221,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   await db.query('ALTER TABLE public.v13_production_intent ADD COLUMN dispatch_at timestamptz,ADD COLUMN exit_fee_micros bigint DEFAULT 0');
   const before=await state();let outsideLocks=false;
   beforeRead=async()=>{const rival=await db.connect();try{await rival.query('BEGIN');await rival.query("SELECT id FROM public.v13_production_account WHERE id='a' FOR UPDATE NOWAIT");await rival.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id='a' FOR UPDATE NOWAIT");outsideLocks=true;}finally{await rival.query('ROLLBACK');rival.release();}};
-  const r=await candidate();assert.equal(outsideLocks,true);
+  const r=await candidate();assert.equal(outsideLocks,true,JSON.stringify(r));
   assert.deepEqual(await state(),before,'renewal must not mutate financial history, controls, worker, grants or reviews');
   beforeRead=async()=>{};
 
@@ -294,16 +297,18 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   await db.query("INSERT INTO public.v13_production_position(id,account_id,quantity_hundredths,basis_micros,realized_pnl_micros,market,side) VALUES($1,'a',0,0,0,$2,'YES')",[zeroId,market]);
   const postedExit={...zeroRequest,action:'SELL',reduceOnly:true};
   await db.query("UPDATE public.v13_production_intent SET kind='EXIT',parent_id='settled-parent',request=$1,capability_digest=$2 WHERE id=$3",[postedExit,digest({id:zeroId,request:postedExit,decision:{},policyHash:hash,fee:hash}),zeroId]);
-  assert.equal((await candidate()).ok,false,'posted EXIT intentionally unsupported');assert.equal(await count(),0);
+  assert.equal((await candidate()).ok,false,'EXIT request contradicting signed BUY order cannot reconcile');assert.equal(await count(),0);
   await db.query('DELETE FROM public.v13_production_position WHERE id=$1',[zeroId]);await db.query('DELETE FROM public.v13_production_intent WHERE id=$1',[zeroId]);extraFeeds=originalFeeds;
   await clearApproval();assert.equal((await candidate()).ok,true,'clean history remains accepted after adversarial probes');
 
 
   console.info('CANDIDATE_SETTLED_HISTORY_RESULT',{qualified:qualified.ok,retainedIntents:12,adversarialCases:29,lockedRowsChecked:8,rollbackAndAmbiguousCommit:true,concurrentIdempotency:true,approvalCount:await count()});
 
-  await db.query('UPDATE public.v13_live_money_policy SET fee_source_url=NULL');
-  await reset();
-  await db.query('ALTER TABLE public.v13_production_account DROP COLUMN initial_cash_micros;ALTER TABLE public.v13_production_position DROP COLUMN market;ALTER TABLE public.v13_production_position DROP COLUMN side');
+  }finally{
+   await db.query('UPDATE public.v13_live_money_policy SET fee_source_url=NULL');
+   await reset();
+   await db.query('ALTER TABLE public.v13_production_account DROP COLUMN IF EXISTS initial_cash_micros;ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS market;ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS side');
+  }
  });
  await t.test('unexpected SQLSTATE diagnostic is bounded and contains no raw error fields',()=>{
   const error=Object.assign(new Error('secret SQL and credentials'),{code:'42703',detail:'secret value',query:'SELECT secret',account:'private'});
@@ -348,8 +353,8 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
  ['financial event',"INSERT INTO public.v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at) SELECT 'a','fill',id,'FILL',repeat('a',64),'{}',0,0,now() FROM public.v13_production_intent LIMIT 1"],
  ['nonzero position',"INSERT INTO public.v13_production_position VALUES('pos','a',1,0,0)"],
  ['closed position with historical pnl',"INSERT INTO public.v13_production_position VALUES('pos','a',0,0,1)"],
- ['protective UNKNOWN',"INSERT INTO private.strata_emergency_exit_reservations VALUES('a','UNKNOWN')"],
- ['protective VOID history unsupported',"INSERT INTO private.strata_emergency_exit_reservations VALUES('a','VOID')"],
+ ['protective UNKNOWN',"INSERT INTO private.strata_emergency_exit_reservations(execution_account_id,state) VALUES('a','UNKNOWN')"],
+ ['protective VOID history unsupported',"INSERT INTO private.strata_emergency_exit_reservations(execution_account_id,state) VALUES('a','VOID')"],
  ['reserved account',"UPDATE public.v13_production_account SET reserved_micros=1"],
  ['risk freeze',"UPDATE public.v13_production_account SET blocked_reason='risk_freeze'"],
  ['changed policy',"UPDATE public.v13_live_money_policy SET policy_hash=repeat('e',64)"],

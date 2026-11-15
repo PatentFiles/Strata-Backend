@@ -1,3 +1,5 @@
+import {authorizeHeldHistoryConsent} from './ownerNeverPostedReleaseRenewal';
+import {HELD_CONSENT_CONFIRM} from './heldConsentPolicy';
 import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
@@ -85,12 +87,17 @@ export async function authorizeOwnerShaRelease(
  const args=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)(),db=deps.db??pool;
  const restoring=args.restoreExistingApproval===true;
+ const held=args.heldConsentOnly===true;
+ if(args.heldConsentOnly!==undefined&&!held)return reject('held_consent_mode_invalid');
+ if(held&&(restoring||args.provisionalRepairConfirmation!==undefined||args.expectedSha!==sha||typeof args.expectedAccountId!=='string'))return reject('held_consent_scope_invalid');
  if(args.restoreExistingApproval!==undefined&&args.restoreExistingApproval!==true)
   return reject("owner_restore_mode_invalid");
  if(restoring&&args.expectedSha!==sha)return reject("owner_restore_exact_sha_required");
  if(!UUID.test(ownerId)||!SHA.test(sha)||args.qualificationId==null||
-    !UUID.test(String(args.qualificationId))||args.confirmation!==OWNER_SHA_RELEASE_CONFIRM)
+    !UUID.test(String(args.qualificationId))||args.confirmation!==(held?HELD_CONSENT_CONFIRM:OWNER_SHA_RELEASE_CONFIRM))
    return reject("owner_identity_sha_qualification_or_confirmation_invalid");
+ if(held)return authorizeHeldHistoryConsent(ownerId,String(args.qualificationId),sha,String(args.expectedAccountId),
+  {db,sha:deps.sha??deployedGitSha,now:deps.now??Date.now,readFeeds:deps.readFeeds??readOwnedKalshiFeeds});
  // Preflight the owner and, if necessary, obtain signed exchange evidence
  // BEFORE opening the 12-second write transaction. The old implementation
  // performed multiple paginated Kalshi GETs while holding FOR UPDATE,

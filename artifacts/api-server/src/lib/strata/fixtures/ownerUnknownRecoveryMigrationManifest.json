@@ -60,5 +60,6 @@
   "lib/db/drizzle/0043_strata_continuous_execution_grants.sql",
   "lib/db/drizzle/0044_v13_signal_decision_trace.sql",
   "lib/db/drizzle/0045_v13_bounded_signal_audit.sql",
-  "docs/reviews/maintenance-hardening-20261028.sql"
+  "docs/reviews/maintenance-hardening-20261028.sql",
+  "sql/held-consent-deadlines.sql"
 ]

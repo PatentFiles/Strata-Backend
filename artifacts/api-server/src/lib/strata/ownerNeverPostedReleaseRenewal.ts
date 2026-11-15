@@ -1,3 +1,4 @@
+import {heldConsentScope,exactConsentReceipt,HELD_CONSENT_RESULT} from './heldConsentPolicy';
 import {logger} from '../logger';
 import {ownerRenewalFailureDiagnostics} from './ownerRenewalFailureDiagnostics';
 import {randomUUID,createHash} from 'node:crypto';
@@ -14,7 +15,7 @@ import type {Pool,PoolClient} from '@workspace/db';
 import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
-type Client=Query&{release():void};type Db=Query&{connect():Promise<Client>};
+type Client=Query&{release(error?:Error):void};type Db=Query&{connect():Promise<Client>};
 const fail=(reason:string)=>({ok:false as const,reason,ordersSubmitted:false as const});
 const requireProof=(v:unknown,reason:string)=>{if(!v)throw Error(reason);};
 const fresh=(start:number,now:number)=>Number.isSafeInteger(start)&&Number.isSafeInteger(now)&&now>=start&&now-start<=15000;
@@ -34,9 +35,10 @@ const SCOPE=`SELECT a.*,a.owner_user_id::text AS owner_id,p.policy_hash,
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
  AND w.financial_account_id=fa.id AND w.provider_connection_id=pc.id
  AND w.credential_fingerprint=a.key_fingerprint AND w.vault_secret_id=c.vault_secret_id LIMIT 2`;
-async function scope(db:Query,owner:string,lock=false){
+async function scope(db:Query,owner:string,lock=false,held=false){
  const r=await db.query(SCOPE+(lock?' FOR UPDATE OF a,w FOR SHARE OF p,c,fa,pc':''),[owner]);
  requireProof(r.rows.length===1,'owner_renewal_account_credential_scope_unverified');const a=r.rows[0]!;
+ if(held){requireProof(heldConsentScope(a),'held_consent_disabled_killed_disarmed_scope_required');return a;}
  requireProof(a.commissioned===true&&a.execution_enabled===true&&a.cash_precision_verified===true&&a.blocked_reason===null&&
   String(a.reserved_micros)==='0','owner_renewal_commissioned_unfrozen_flat_account_required');
  requireProof(a.worker_state==='released'&&a.arm_requested===false&&a.worker_kill===false,
@@ -82,7 +84,7 @@ async function noFinancialHistory(db:Query,account:string){
  requireProof(r.rows.length===1&&['events','positions','exits'].every(k=>r.rows[0]![k]==='0'),
   'owner_renewal_actual_financial_or_exit_history_unsupported');
 }
-async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{releaseId:string;sha:string},lock=false){
+async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{releaseId:string;sha:string},lock=false,held=false){
  const policy=await db.query(`SELECT p.*,p.xmin::text AS row_revision FROM public.v13_live_money_policy p
   WHERE id=$1 AND execution_account_id=$2 AND created_by=$3 AND state='APPROVED' ${lock?'FOR SHARE':''}`,[a.policy_id,a.id,owner]);
  requireProof(policy.rows.length===1,'owner_renewal_policy_unverified');
@@ -104,6 +106,12 @@ async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{r
   typeof r.review_note==='string'&&r.review_note.length>=120&&r.review_note.length<=2500&&
   /^https:\/\/github\.com\/PatentFiles\/Strata-Backend\/pull\/\d+$/.test(String(r.review_url))&&r.evidence_digest===expected,
   'owner_renewal_prior_review_proof_unverified');
+ if(held){
+  const role=await db.query(`SELECT u.id FROM auth.users u JOIN public.profiles p ON p.id=u.id
+   WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND p.role IN ('ADMIN','DEVELOPER')
+   ${lock?'FOR SHARE OF u,p':''}`,[r.independent_reviewer_id]);
+  requireProof(role.rows.length===1,'held_consent_historical_reviewer_authority_unverified');
+ }
  return digest({policy:policy.rows[0],review:r});
 }
 /** Narrow owner-consent renewal for a previously authorized commissioned account
@@ -128,15 +136,37 @@ export async function authorizeReconciledHistoryReleaseRenewal(owner:string,qual
   return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,retained.rows.length>0);
  }catch{return fail('owner_renewal_history_classification_unavailable');}
 }
+/** Existing approval table, explicit held receipt only. Final current-SHA review/release is separate. */
+export async function authorizeHeldHistoryConsent(owner:string,qualification:string,sha:string,expectedAccount:string,
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds}){
+ return authorizeRetainedReleaseRenewal(owner,qualification,sha,deps,true,true,expectedAccount);
+}
+export async function heldHistoryConsentOutcome(owner:string,qualification:string,sha:string,db:Query,expectedAccount?:string){
+ try{
+  // A receipt is historical fact; deployment or later controls must not erase readback.
+  const a=expectedAccount?null:await scope(db,owner,false,true);
+  const account=expectedAccount??String(a!.id);
+  const found=await db.query(`SELECT approval_id::text,qualification_id::text,revoked_at,confirmed_at
+   FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+   AND release_commit_sha=$3 ${expectedAccount?'AND qualification_id=$4::uuid':'AND revoked_at IS NULL'} ORDER BY confirmed_at DESC LIMIT 2`,expectedAccount?[owner,account,sha,qualification]:[owner,account,sha]);
+  const outcome=exactConsentReceipt(found.rows,qualification);
+  return {ok:true,ownerId:owner,accountId:account,sha,qualificationId:qualification,outcome,
+   approvalId:outcome==='RECORDED'?String(found.rows[0]!.approval_id):null,
+   recordedQualificationId:found.rows.length===1?String(found.rows[0]!.qualification_id):null,
+   currentHeldEligible:a?heldConsentScope(a):false,
+   controlsChanged:false,tradingAuthorized:false,ordersSubmitted:false};
+ }catch{return {ok:false,outcome:'UNKNOWN',reason:'held_consent_readback_unavailable',ordersSubmitted:false};}
+}
 async function authorizeRetainedReleaseRenewal(owner:string,qualification:string,sha:string,
- deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},reconciled:boolean){
- let tx:Client|null=null,committed=false;let phase="preflight_authority";
+ deps:{db:Db;now:()=>number;sha:()=>string;readFeeds:typeof readOwnedKalshiFeeds},reconciled:boolean,held=false,expectedAccount?:string){
+ let tx:Client|null=null,committed=false,commitAttempted=false,discard:Error|undefined;let phase="preflight_authority";
  try{
   const initial=await readReleaseOwner(deps.db,owner);requireProof(initial.ok,'owner_renewal_activation_unverified');
   if(!initial.ok)return fail(initial.reason);
-  const a=await scope(deps.db,owner),account=String(a.id);
+  const a=await scope(deps.db,owner,false,held),account=String(a.id);
+  if(held)requireProof(account===expectedAccount,'held_consent_expected_account_changed');
   const authority=await priorAuthority(deps.db,owner,a);
-  const authorityProof=reconciled?await reconciledAuthorityProof(deps.db,owner,a,authority):null;
+  const authorityProof=reconciled?await reconciledAuthorityProof(deps.db,owner,a,authority,false,held):null;
   const qualified=await currentQualification(deps.db,qualification,owner,account,sha);
   phase="preflight_history";
   if(!reconciled)await noFinancialHistory(deps.db,account);
@@ -151,7 +181,7 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
   requireProof(material&&dedicatedSignerFingerprint(material.keyId,material.privateKey)===a.key_fingerprint,
    'owner_renewal_restricted_signer_unverified');
   const started=deps.now();const feeds=await deps.readFeeds(material!,started);
-  requireProof(feeds.ok&&feeds.historicalCoverageComplete===true&&feeds.observedAtMs===started&&fresh(started,deps.now()),
+  requireProof(feeds.ok&&feeds.historicalCoverageComplete===true&&feeds.observedAtMs===started&&(held?(deps.now()>=started&&deps.now()-started<5000):fresh(started,deps.now())),
    'owner_renewal_fresh_complete_signed_history_required');
   if(!feeds.ok)return fail('owner_renewal_fresh_complete_signed_history_required');
   const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
@@ -164,14 +194,22 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
    'owner_renewal_signed_history_conflicts_or_cash_changed');
   phase="transaction_begin";
   tx=await deps.db.connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  if(held){
+   const guard=await tx.query(`SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE t.tgrelid='public.v13_production_observation'::regclass AND t.tgname='held_consent_signed_deadline'
+    AND t.tgenabled='O' AND t.tgdeferrable AND t.tginitdeferred
+    AND n.nspname='private' AND p.proname='enforce_held_consent_signed_deadline' AND NOT p.prosecdef`);
+   requireProof(guard.rows.length===1,'held_consent_deadline_migration_required');
+  }
   phase="locked_authority";
-  const locked=await scope(tx,owner,true);
+  const locked=await scope(tx,owner,true,held);
   requireProof(digest(locked)===digest(a),'owner_renewal_account_policy_credential_or_worker_changed');
   const current=await readReleaseOwner(tx,owner);
   requireProof(current.ok&&digest(current.account)===digest(initial.account),'owner_renewal_activation_or_policy_changed');
   const lockedAuthority=await priorAuthority(tx,owner,locked,true);
   requireProof(digest(lockedAuthority)===digest(authority),'owner_renewal_prior_authority_changed');
-  if(reconciled)requireProof(await reconciledAuthorityProof(tx,owner,locked,lockedAuthority,true)===authorityProof,'owner_renewal_prior_review_or_policy_changed');
+  if(reconciled)requireProof(await reconciledAuthorityProof(tx,owner,locked,lockedAuthority,true,held)===authorityProof,'owner_renewal_prior_review_or_policy_changed');
   phase="locked_history";
   if(!reconciled)await noFinancialHistory(tx,account);
   const finalHistory=reconciled?await readReconciledReleaseRenewalHistory(tx,account,owner,true):await readNeverPostedReleaseHistory(tx,account,true);
@@ -199,15 +237,22 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
   const proof=await currentQualification(tx,qualification,owner,account,sha,true);
   requireProof(digest(proof.rows)===digest(qualified.rows),'owner_renewal_qualification_changed');
   phase="authorization_write";
-  const approvals=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid
-   AND execution_account_id=$2 AND release_commit_sha=$3 AND revoked_at IS NULL FOR UPDATE`,[owner,account,sha]);
+  const approvals=await tx.query(`SELECT approval_id::text,qualification_id::text,revoked_at FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid
+   AND execution_account_id=$2 AND release_commit_sha=$3 ${held?'':'AND revoked_at IS NULL'} FOR UPDATE`,[owner,account,sha]);
   requireProof(approvals.rows.length<=1,'duplicate_owner_sha_approval');
-  requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');
+  if(held&&approvals.rows.length){
+   const outcome=exactConsentReceipt(approvals.rows,qualification);
+   requireProof(outcome==='RECORDED','held_consent_existing_receipt_'+outcome.toLowerCase());
+   await tx.query('ROLLBACK');committed=true;
+   return {...HELD_CONSENT_RESULT,sha,accountId:account,qualificationId:qualification,
+    approvalId:String(approvals.rows[0]!.approval_id),outcome:'RECORDED',reused:true};
+  }
+  requireProof(deps.sha()===sha&&(held?(deps.now()>=started&&deps.now()-started<5000):fresh(started,deps.now())),'owner_renewal_final_sha_or_signed_proof_stale');
   let approvalId=String(approvals.rows[0]?.approval_id??'');
   if(!approvalId){const saved=await tx.query(`INSERT INTO private.strata_owner_sha_approvals
    (owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
    SELECT $1::uuid,$2,$3,$4::uuid,$5 WHERE clock_timestamp() BETWEEN to_timestamp($6::double precision/1000)
-    AND to_timestamp($6::double precision/1000)+interval '15 seconds' RETURNING approval_id::text`,
+    AND to_timestamp($6::double precision/1000)+interval '${held?'5':'15'} seconds' RETURNING approval_id::text`,
    [owner,account,sha,qualification,proof.rows[0]!.evidence_digest,started]);
    requireProof(saved.rows.length===1,'owner_renewal_final_signed_proof_stale');approvalId=String(saved.rows[0]!.approval_id);}
   phase="audit_write";
@@ -216,15 +261,16 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
    credentialFingerprint:a.key_fingerprint,historyDigest:history.historyDigest,
    ...(reconciled?{reconciliationDigest:(history as ReconciledReleaseHistory).reconciliationDigest}:{}),neverPosted:history.neverPosted,providerReadAtMs:started};
   await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
-   VALUES($1,$2,'OWNER_SHA_RELEASE_AUTHORIZATION',$3::jsonb,$4)`,[randomUUID(),account,JSON.stringify(record),digest(record)]);
-  requireProof(deps.sha()===sha&&fresh(started,deps.now()),'owner_renewal_final_sha_or_signed_proof_stale');
-  phase="commit";
+   VALUES($1,$2,'${held?'OWNER_HELD_SHA_CONSENT':'OWNER_SHA_RELEASE_AUTHORIZATION'}',$3::jsonb,$4)`,[randomUUID(),account,JSON.stringify(record),digest(record)]);
+  requireProof(deps.sha()===sha&&(held?(deps.now()>=started&&deps.now()-started<5000):fresh(started,deps.now())),'owner_renewal_final_sha_or_signed_proof_stale');
+  phase="commit";commitAttempted=true;
   await tx.query('COMMIT');committed=true;
-  return {ok:true as const,reason:'owner_sha_approved_account_enabled_worker_stopped',sha,approvalId,ordersSubmitted:false as const};
+  return held?{...HELD_CONSENT_RESULT,sha,accountId:account,qualificationId:qualification,approvalId,outcome:'RECORDED',reused:false}:{ok:true as const,reason:'owner_sha_approved_account_enabled_worker_stopped',sha,approvalId,ordersSubmitted:false as const};
  }catch(e){
+  if(held&&commitAttempted){discard=new Error('held_consent_commit_outcome_unknown');return {ok:false,reason:'held_consent_outcome_unknown',outcome:'UNKNOWN',uncertain:true,ordersSubmitted:false};}
   const recognized=e instanceof Error&&/^(owner_renewal_|release_|financial_intent_|fresh_authenticated_|global_execution_|approved_stake_|duplicate_owner_)/.test(e.message);
   if(!recognized)try{logger.warn({ownerRenewalFailure:ownerRenewalFailureDiagnostics(e,phase)},'Owner release renewal failed closed');}catch{/* Diagnostics never change admission. */}
   return fail(recognized?(e as Error).message:'owner_renewal_transaction_or_evidence_unavailable');
  }
- finally{if(tx){if(!committed)try{await tx.query('ROLLBACK');}catch{}tx.release();}}
+ finally{if(tx){if(!committed&&!discard)try{await tx.query('ROLLBACK');}catch{discard=new Error('consent_rollback_failed');}tx.release(discard);}}
 }
