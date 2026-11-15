@@ -27,7 +27,7 @@ test('owner and historical review routes authenticate and reject unsupported iss
    });
    assert.ok(denied.status===400||denied.status===403||denied.status===409||denied.status===410,
     `${path}: ${denied.status}`);
-   const body=await denied.json();
+   const body=await denied.json() as Record<string,unknown>;
    assert.notEqual(body.ok,true,path);
    assert.notEqual(body.tradingAuthorized,true,path);
   }
