@@ -25,7 +25,12 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
    JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
    WHERE a.owner_user_id=$1::uuid AND a.id=$2 AND a.subaccount=1 AND a.exchange_index=2
    AND a.commissioned=true AND a.blocked_reason IS NULL AND p.state='APPROVED'
-   AND w.state='released' AND w.arm_requested=false AND w.account_kill=false
+   AND w.arm_requested=false
+   AND (
+    (w.state='released' AND w.account_kill=false AND a.kill_switch=false)
+    OR
+    (w.state='killed' AND w.account_kill=true AND a.kill_switch=true AND a.execution_enabled=false)
+   )
    AND q.qualification_id=$3::uuid AND q.release_commit_sha=$4 AND q.observed_at<=now() AND q.expires_at>now()+interval '60 seconds'
    FOR SHARE OF a,p,q,w`,[owner,b.accountId,b.qualificationId,sha]);
   if(r.rows.length!==1||r.rows[0].policy_hash!==b.policyHash)return no('owner_self_fresh_qualification_or_stopped_scope_required');
