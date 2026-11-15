@@ -1,3 +1,4 @@
+import { standingAuthoritySql } from './ownerSelfReviewMode.js';
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 /**
  * #165: final V4 order-admission component for the EXISTING V13 executor.
@@ -124,6 +125,7 @@ export async function verifyWalletV4FinalSignedAdmission(
   const sql=standing?FINAL_V4_ADMISSION_SQL
    .replace('private.strata_protective_exit_release x','private.strata_standing_execution_reviews x')
    .replace(" AND x.expires_at>now()+interval '20 minutes'",' AND x.execution_account_id=a.id AND x.owner_user_id=a.owner_user_id AND x.policy_hash=p.policy_hash')
+   .replace(' AND x.independent_reviewer_id<>a.owner_user_id',' AND '+standingAuthoritySql('x','a.owner_user_id'))
    .replace(' AND x.operator_approver_id<>x.independent_reviewer_id',''):FINAL_V4_ADMISSION_SQL;
   rows=(await tx.query(sql,
     [ctx.accountId,ctx.ownerId,ctx.policyHash,ctx.stakeRevision,sha,r.market])).rows;}

@@ -144,7 +144,8 @@ test("revoked, expired, mismatched policy, unsigned receipt and fee drift fail c
 test("executor calls gate inside final callback and retains fail-safe UNKNOWN reconciliation",()=>{
  const code=readFileSync(new URL("../v13-production/executor.ts",import.meta.url),"utf8");
  assert.match(code,/verifyWalletV4FinalSignedAdmission\(tx,/);
- assert.match(code,/await this\.exchange\.submit\(i\.request, final\)/);
+ assert.match(code,/withFeeAuthorityTimingPurpose\("FINAL_MARKET",\(\)=>this\.exchange\.submit\(i\.request,final\)\)/);
+ assert.match(code,/withoutFeeAuthorityTiming\(\(\)=>this\.exchange\.submit\(i\.request, final\)\)/);
  assert.match(code,/UPDATE v13_production_intent SET state='DISPATCHED'/);
  assert.match(code,/POST_UNCERTAIN/);
  assert.match(code,/ProductionExecutor\.\#fences\.add\(final\)/);
@@ -157,4 +158,21 @@ process.on("exit",()=>{
  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=oldFlag;
  if(oldMode===undefined)delete process.env.NODE_ENV;
  else process.env.NODE_ENV=oldMode;
+});
+
+test("standing final admission uses explicit owner authority without changing finite release policy",async()=>{
+ let finalSql='';
+ const c={query:async(sql:string)=>{
+  if(sql.includes('SELECT grant_id FROM private.strata_continuous_execution_grants'))return {rows:[{grant_id:'g'}]};
+  if(sql.includes('SELECT g.grant_id'))return {rows:[{grant_id:'g'}]};
+  finalSql=sql;return {rows:[row]};
+ }};
+ const v=await verifyWalletV4FinalSignedAdmission(c,ctx,testPorts);
+ assert.equal(v.ok,true);
+ assert.match(finalSql,/strata_standing_execution_reviews x/);
+ assert.match(finalSql,/OWNER_SELF_V1/);
+ assert.match(finalSql,/x.independent_reviewer_id IS NULL/);
+ assert.match(finalSql,/owner_authorizer_id/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/AND x.independent_reviewer_id<>a.owner_user_id/);
+ assert.doesNotMatch(FINAL_V4_ADMISSION_SQL,/OWNER_SELF_V1/);
 });

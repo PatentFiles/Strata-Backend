@@ -1,3 +1,5 @@
+import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
+import {standingAuthoritySql,sameStandingAuthoritySql,OWNER_SELF_MODE} from './ownerSelfReviewMode';
 import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
@@ -23,7 +25,7 @@ const truth=(v:unknown)=>v===true||v==="t";
  * are immutable scope boundaries of the standing grant.
  */
 export async function enrollContinuousGrant(ownerId:string,raw:unknown,
- deps:{db?:Db;sha?:()=>string}={}){
+ deps:{db?:Db;sha?:()=>string;scope?:()=>OwnerSelfEnrollmentScope|undefined}={}){
  const d=raw&&typeof raw==="object"?raw as Row:{};
  const sha=(deps.sha??deployedGitSha)();
  if(!UUID.test(ownerId)||!SHA.test(sha)||d.confirmation!==CONTINUOUS_OWNER_CONFIRM||d.expectedSha!==sha)
@@ -56,16 +58,18 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
     [ownerId,a.id,sha]);
   if(authorized.rows.length!==1)return denied("standing_owner_exact_sha_approval_missing");
   const technical=await c.query(`
-   SELECT r.release_id,r.independent_reviewer_id
+   SELECT r.release_id,r.independent_reviewer_id,to_jsonb(r)->>'review_authority' AS review_authority,to_jsonb(r)->>'owner_authorizer_id' AS owner_authorizer_id
    FROM private.strata_standing_execution_reviews r
    WHERE r.release_commit_sha=$1 AND r.state='approved'
      AND r.revoked_at IS NULL AND r.created_at<=now()
-     AND r.independent_reviewer_id<>$2::uuid
+     AND ${standingAuthoritySql('r','$2::uuid')}
      AND r.owner_user_id=$2::uuid AND r.execution_account_id=$3 AND r.policy_hash=$4
    ORDER BY r.created_at DESC LIMIT 2 FOR SHARE`,[sha,ownerId,a.id,a.policy_hash]);
   if(technical.rows.length!==1)return denied("standing_independent_release_not_current");
-  const reviewer=String(technical.rows[0]?.independent_reviewer_id);
-  if(!UUID.test(reviewer))return denied("standing_independent_reviewer_identity_invalid");
+  const self=technical.rows[0]?.review_authority===OWNER_SELF_MODE;
+  if(self&&!ownerSelfEnrollmentAllowed(ownerId,a.id,(deps.scope??configuredOwnerSelfScope)()))return denied('owner_self_account_not_enabled');
+  const reviewer=self?null:String(technical.rows[0]?.independent_reviewer_id);
+  if(self?technical.rows[0]?.owner_authorizer_id!==ownerId:!UUID.test(reviewer!))return denied("standing_independent_reviewer_identity_invalid");
   const prior=await c.query(`
    SELECT grant_id FROM private.strata_continuous_execution_grants
    WHERE owner_user_id=$1::uuid AND execution_account_id=$2
@@ -77,8 +81,8 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
   const added=await c.query(`
    INSERT INTO private.strata_continuous_execution_grants
     (grant_id,owner_user_id,execution_account_id,release_commit_sha,policy_hash,
-     reviewed_release_id,independent_reviewer_id,owner_confirmation)
-   VALUES ($1,$2::uuid,$3,$4,$5,$6::uuid,$7::uuid,$8)
+     reviewed_release_id,independent_reviewer_id,owner_confirmation${self?',review_authority,owner_authorizer_id':''})
+   VALUES ($1,$2::uuid,$3,$4,$5,$6::uuid,$7::uuid,$8${self?",'OWNER_SELF_V1',$2::uuid":''})
    RETURNING grant_id`,
    [grantId,ownerId,a.id,sha,a.policy_hash,technical.rows[0]?.release_id,
     reviewer,CONTINUOUS_OWNER_CONFIRM]);
@@ -152,8 +156,7 @@ export const CONTINUOUS_ENTRY_AUTHORIZATION_SQL=`
    AND r.created_at<=now()
    AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
    AND r.policy_hash=g.policy_hash
-   AND r.independent_reviewer_id=g.independent_reviewer_id
-   AND g.independent_reviewer_id<>g.owner_user_id
+   AND ${sameStandingAuthoritySql()}
    AND a.commissioned=true AND a.execution_enabled=true
    AND a.kill_switch=false AND a.blocked_reason IS NULL
    AND w.state='owned' AND w.arm_requested=true AND w.account_kill=false
@@ -209,8 +212,7 @@ export const CONTINUOUS_STARTUP_GRANT_SQL=`
    AND r.created_at<=now()
    AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
    AND r.policy_hash=g.policy_hash
-   AND r.independent_reviewer_id=g.independent_reviewer_id
-   AND g.independent_reviewer_id<>g.owner_user_id
+   AND ${sameStandingAuthoritySql()}
    AND a.commissioned=true AND a.execution_enabled=true
    AND a.kill_switch=false AND a.blocked_reason IS NULL
  LIMIT 2`;
@@ -287,8 +289,7 @@ export async function renewContinuousTechnicalLease(input:{
      AND g.revoked_at IS NULL AND oa.revoked_at IS NULL
      AND r.state='approved' AND r.revoked_at IS NULL
      AND r.release_commit_sha=g.release_commit_sha
-     AND r.independent_reviewer_id=g.independent_reviewer_id
-     AND r.independent_reviewer_id<>g.owner_user_id
+     AND ${sameStandingAuthoritySql()}
      AND r.created_at<=now()
    AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
    AND r.policy_hash=g.policy_hash
