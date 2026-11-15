@@ -31,14 +31,16 @@ Removing enrollment configuration prevents new self reviews and grants; it does 
 ## Backward-compatible owner-self integration on current main
 
 This integration preserves production's newer held-consent and reconciled-history
-pathways from PR334. Historical INDEPENDENT_V1 reviewer/issuer APIs remain
-available to already-enrolled accounts; no reviewer identity is rewritten or
-fabricated. The owner-self path is a separate opt-in route guarded by the
-server-configured exact owner/account pair and by real AAL2 qualification.
+pathways from PR334, including existing independent **historical** authority
+and its genuine revocation and audit receipts. Existing immutable
+`INDEPENDENT_V1` evidence is never converted or relabeled.
 
-Unlike the earlier candidate, this integrated branch intentionally does not
-retire historical finite-review API handlers or delete their implementation.
-Their security, revocation, protective and financial safeguards remain intact.
+New independent standing-execution review and finite authorization issuance
+remains **retired** in this owner-only product mode. The legacy technical
+issuance endpoints refuse rather than manufacture an unrelated reviewer.
+Previously issued standing/execution authority retains its real original
+reviewer identity; genuine revocation remains operational. Monetary
+REVIEWED_API_V2 fee-model review is a separate system and is unchanged.
 
 **Known activation limitation:** Owner-self review can now record consent
 for a **genuinely disabled, killed and disarmed** account or a properly
