@@ -35,7 +35,20 @@ await db.query('UPDATE public.v13_production_account SET blocked_reason=NULL');
 await db.query("UPDATE private.strata_protective_release_qualification SET expires_at=now()-interval '1 second'");
 assert.equal((await recordOwnerSelfStandingReview(owner,body,deps)).ok,false);
 await db.query("UPDATE private.strata_protective_release_qualification SET expires_at=now()+interval '4 minutes'");
-const result=await recordOwnerSelfStandingReview(owner,body,deps);assert.equal(result.ok,true,JSON.stringify(result));
+// A genuinely killed, disabled, disarmed account can record OWNER CONSENT only.
+// No control flag, lease or execution eligibility is altered by the review.
+await db.query("UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true");
+await db.query("UPDATE private.kalshi_account_worker_lease SET state='killed',account_kill=true,arm_requested=false");
+const badArmed=await recordOwnerSelfStandingReview(owner,body,deps); // Check after changing lease below.
+assert.equal(badArmed.ok,true,JSON.stringify(badArmed));
+const killedAfter=(await db.query("SELECT execution_enabled,kill_switch FROM public.v13_production_account WHERE id='acct'")).rows[0];
+const leaseAfter=(await db.query("SELECT state,account_kill,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id='acct'")).rows[0];
+assert.equal(killedAfter.execution_enabled,false);assert.equal(killedAfter.kill_switch,true);
+assert.equal(leaseAfter.state,'killed');assert.equal(leaseAfter.account_kill,true);assert.equal(leaseAfter.arm_requested,false);
+// Standing grants still require a separate active/released account and owner SHA approval.
+await db.query("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false");
+await db.query("UPDATE private.kalshi_account_worker_lease SET state='released',account_kill=false,arm_requested=false");
+const result=badArmed;
 const row=(await db.query('SELECT * FROM private.strata_standing_execution_reviews')).rows[0];
 const status=await standingExecutionStatus(owner,deps);assert.equal(status.ok,true);assert.equal('ownerSelfAvailable' in status&&status.ownerSelfAvailable,true);assert.equal('reviewQualificationId' in status&&status.reviewQualificationId,qid);
 const disabledStatus=await standingExecutionStatus(owner,{...deps,scope:()=>undefined});assert.equal('ownerSelfAvailable' in disabledStatus&&disabledStatus.ownerSelfAvailable,false);
