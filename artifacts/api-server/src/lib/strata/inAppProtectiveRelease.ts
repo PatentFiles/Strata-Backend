@@ -493,7 +493,8 @@ export async function lookupProtectiveReleaseAuthorization(ownerId:string,review
  if(!valid(row.release_id)||typeof row.execution_account_id!=='string'||!SHA.test(String(row.release_commit_sha)))return {outcome:'UNKNOWN' as const};
  const sha=String(row.release_commit_sha);
  return {outcome:'RECORDED' as const,releaseId:String(row.release_id),accountId:String(row.execution_account_id),reviewId,sha,
-   revoked:row.revoked_at!==null,expiresAt:row.expires_at,currentReadinessVerified:false as const};
+   revoked:row.revoked_at!==null,expiresAt:row.expires_at,currentReadinessVerified:false as const,
+    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return {outcome:'UNKNOWN' as const};}
 }
 
