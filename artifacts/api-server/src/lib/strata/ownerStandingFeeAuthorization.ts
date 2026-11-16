@@ -16,6 +16,8 @@ import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfRe
 import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,
  V3_FEE_PUBLICATION_URL,V3_FEE_AUTHORITY_SCOPE,V3_FEE_GRANT_CONFIRM} from './ownerFeeV3Authority';
 import {verifyMonetaryFeeContract} from './monetaryFeeContract';
+import {observeDynamicKalshiFees} from './dynamicOfficialFeeSchedule';
+import {CANONICAL_FEE_SCHEDULE_URL} from '../microLiveFeeArtifact';
 import type {ApiFeeStage} from './apiFeeGrantEligibility';
 
 export const OWNER_STANDING_FEE_CONFIRM='I_AUTHORIZE_MY_OWN_STANDING_OFFICIAL_KALSHI_FEE_MODEL_V1';
@@ -46,6 +48,34 @@ const getSha=(deps:Deps)=>(deps.sha??deployedGitSha)().toLowerCase();
 const clock=(deps:Deps)=>(deps.clock??Date.now)();
 const checked=(deps:Deps,stage:ApiFeeStage,ticker?:string)=>
  (deps.verify??verifyMonetaryFeeContract)(stage,ticker);
+
+/** The initial consent still requires current official issuer PDF bytes.
+ * Routine market/POST checks may use only the versioned <=55-minute genuine
+ * issuer capture plus a FRESH first-party exact market fee API observation.
+ * This reduces repeated PDF 429s without caching grants, fabricating source
+ * timestamps or permitting changed/overridden fee formulas.
+ */
+async function currentOfficialMarketProof(deps:Deps,stage:ApiFeeStage,ticker:string,
+ expectedDigest:string):Promise<{ok:true;sourceDigest:string;marketTicker:string;verifiedAt:string}|{ok:false}>{
+ if(deps.verify){
+  const legacy=await checked(deps,stage,ticker);
+  return legacy.ok&&legacy.monetaryFeeAuthorized&&legacy.marketTicker===ticker&&
+    legacy.sourceDigest===expectedDigest&&typeof legacy.verifiedAt==='string'
+   ?{ok:true,sourceDigest:legacy.sourceDigest,marketTicker:ticker,verifiedAt:legacy.verifiedAt}
+   :{ok:false};
+ }
+ const observed=await observeDynamicKalshiFees(ticker,expectedDigest);
+ if(!observed.ok||observed.providerContentChanged||
+  observed.model.issuer!==CANONICAL_FEE_SCHEDULE_URL||
+  observed.model.publicationDigest!==expectedDigest||
+  observed.model.marketTicker!==ticker||
+  observed.model.feeType!=='quadratic'||observed.model.feeMultiplier!=='1'||
+  observed.model.tradingAuthorized!==false||
+  observed.model.requiresVersionedReview!==true)
+  return {ok:false};
+ return {ok:true,sourceDigest:observed.model.publicationDigest,
+  marketTicker:ticker,verifiedAt:observed.model.observedAt};
+}
 const sourceConfirmation=(owner:string,account:string,sha:string,policy:string,id:string,bytes:string)=>
  digest({kind:'OWNER_STANDING_FEE_V1',owner,account,sha,policy,id,bytes,
   confirmation:OWNER_STANDING_FEE_CONFIRM});
@@ -125,11 +155,13 @@ export async function verifyOwnerStandingFee(
    return fail('owner_standing_fee_record_integrity_unverified');
   const began=clock(deps);
   if(!Number.isSafeInteger(began)||began<=0)return fail('owner_standing_fee_clock_invalid');
-  const actual=await checked(deps,stage,marketTicker);
-  const ended=clock(deps),observedAt=time(actual.verifiedAt);
-  if(!actual.ok||actual.monetaryFeeAuthorized!==true||
-    actual.sourceDigest!==bytes||actual.stage!==stage||
-    !MARKET.test(txt(actual.marketTicker))||
+  const marketProof=stage==='ORDER_ENTRY'&&marketTicker
+    ?await currentOfficialMarketProof(deps,stage,marketTicker,bytes):null;
+  const actual=marketProof??await checked(deps,stage,marketTicker);
+  const ended=clock(deps),observedAt=time(actual.ok?actual.verifiedAt:undefined);
+  if(!actual.ok||
+    !('sourceDigest' in actual)||actual.sourceDigest!==bytes||
+    !('marketTicker' in actual)||!MARKET.test(txt(actual.marketTicker))||
     (marketTicker!==undefined&&actual.marketTicker!==marketTicker)||
     !Number.isSafeInteger(ended)||ended<began||ended-began>15_000||
     !Number.isFinite(observedAt)||observedAt>ended+1000||ended-observedAt>15_000)
@@ -184,10 +216,9 @@ export async function verifyOwnerV3ProtectiveFee(
   const bytes=txt(rows.rows[0]?.source_digest);
   if(!HEX.test(bytes))return fail('owner_protective_issuer_digest_invalid');
   const started=clock(deps);
-  const actual=await checked(deps,'ORDER_ENTRY',ticker);
-  const ended=clock(deps),observed=time(actual.verifiedAt);
-  if(!actual.ok||!actual.monetaryFeeAuthorized||actual.stage!=='ORDER_ENTRY'||
-    actual.sourceDigest!==bytes||actual.marketTicker!==ticker||
+  const actual=await currentOfficialMarketProof(deps,'ORDER_ENTRY',ticker,bytes);
+  const ended=clock(deps),observed=time(actual.ok?actual.verifiedAt:undefined);
+  if(!actual.ok||actual.sourceDigest!==bytes||actual.marketTicker!==ticker||
     ended<started||ended-started>15_000||
     !Number.isFinite(observed)||observed>ended+1000||ended-observed>15_000)
    return fail('owner_protective_current_issuer_fee_unverified');
