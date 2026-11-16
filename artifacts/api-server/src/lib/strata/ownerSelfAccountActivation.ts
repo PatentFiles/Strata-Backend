@@ -68,7 +68,7 @@ export async function ownerSelfActivationOutcome(owner:string,sha:string,db:Quer
     LEFT JOIN private.kalshi_account_worker_lease l ON l.execution_account_id=a.id
     AND l.owner_user_id=a.owner_user_id
     WHERE o.kind='OWNER_SELF_ACCOUNT_ACTIVATED'
-    AND o.payload->>'sha'=$2 AND o.payload->>'ownerId'=$1
+    AND o.payload->>'sha'=$2 AND o.payload->>'ownerId'=$1::text
     ORDER BY o.observed_at DESC LIMIT 2`,[owner,sha]);
   if(r.rows.length!==1)return {outcome:'UNKNOWN' as const};
   const a=r.rows[0]!;
@@ -212,7 +212,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   if(grants.rows.length>0)return no('owner_self_existing_standing_grant_requires_reconciliation');
   // Same signed, authoritative ledger proof as the legacy final release.
   const ledger=new ProductionLedger(db as unknown as Pool,raw.accountId);
-  await ledger.finalAccountProof(tx as unknown as PoolClient,local.rows[0] as Account,evidence.snapshot,now());
+  await ledger.finalAccountProof(tx as unknown as PoolClient,local.rows[0] as unknown as Account,evidence.snapshot,now());
   await ledger.assertConservation(tx as unknown as PoolClient,local.rows[0] as Account);
   const approvals=await tx.query(`SELECT approval_id::text,revoked_at FROM private.strata_owner_sha_approvals
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
