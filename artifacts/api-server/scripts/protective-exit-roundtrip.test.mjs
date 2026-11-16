@@ -100,6 +100,16 @@ function fixture(value,{api=true,old='false'}={}){
  const query=async(sql,args=[])=>{
   f.sql.push({sql,args});
   if(f.queryHook){const answer=await f.queryHook(sql,args);if(answer!==undefined)return answer;}
+  // The real dispatcher now chooses monetary mode from the owner's
+  // persisted approved policy, not a client-supplied V2/V3 switch. Preserve
+  // this legitimate V2 fixture's exact issuer mode under the same account.
+  if(sql.includes('SELECT p.fee_policy_version,p.fee_formula_version,')&&
+    sql.includes("p.state='APPROVED'")){
+   const record=ownedRow(args[1],args[0]);
+   return {rows:[{fee_policy_version:record.fee_policy_version,
+      fee_formula_version:record.fee_formula_version,
+      fee_source_url:record.fee_source_url,policy_hash:record.policy_hash}]};
+  }
   if(sql.includes('-- personal-session:signer'))return {rows:[ownedRow(args[1],args[0])]};
   if(sql.includes("FROM live_execution_config WHERE id = 'singleton'"))return {rows:[{live_execution_enabled:true,manual_kill_switch:false}]};
   if(sql==='SELECT request FROM v13_production_intent WHERE account_id = $1')return {rows:[]};
