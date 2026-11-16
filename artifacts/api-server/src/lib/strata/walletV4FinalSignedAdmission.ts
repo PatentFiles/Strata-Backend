@@ -1,3 +1,5 @@
+import {protectiveAuthoritySql} from './ownerFinalReleaseAuthority';
+const explicitProtectiveAuthority=protectiveAuthoritySql('x','a.owner_user_id','a.id','p.policy_hash');
 import { standingAuthoritySql } from './ownerSelfReviewMode.js';
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 /**
@@ -75,8 +77,7 @@ export const FINAL_V4_ADMISSION_SQL=[
  " AND 'ORDER_ENTRY'=ANY(g.authorized_stages) AND oa.revoked_at IS NULL",
  " AND x.state='approved' AND x.revoked_at IS NULL AND x.created_at<=now()",
  " AND x.expires_at>now()+interval '20 minutes'",
- " AND x.independent_reviewer_id<>a.owner_user_id",
- " AND x.operator_approver_id<>x.independent_reviewer_id",
+ " AND "+explicitProtectiveAuthority,
  " FOR SHARE OF a,p,s,live,lease,c,g,e,oa,x",
 ].join("\n");
 const deny=(reason:string)=>({ok:false as const,reason,tradingAuthorized:false as const});
@@ -125,8 +126,7 @@ export async function verifyWalletV4FinalSignedAdmission(
   const sql=standing?FINAL_V4_ADMISSION_SQL
    .replace('private.strata_protective_exit_release x','private.strata_standing_execution_reviews x')
    .replace(" AND x.expires_at>now()+interval '20 minutes'",' AND x.execution_account_id=a.id AND x.owner_user_id=a.owner_user_id AND x.policy_hash=p.policy_hash')
-   .replace(' AND x.independent_reviewer_id<>a.owner_user_id',' AND '+standingAuthoritySql('x','a.owner_user_id'))
-   .replace(' AND x.operator_approver_id<>x.independent_reviewer_id',''):FINAL_V4_ADMISSION_SQL;
+   .replace(' AND '+explicitProtectiveAuthority,' AND '+standingAuthoritySql('x','a.owner_user_id')):FINAL_V4_ADMISSION_SQL;
   rows=(await tx.query(sql,
     [ctx.accountId,ctx.ownerId,ctx.policyHash,ctx.stakeRevision,sha,r.market])).rows;}
  catch{return deny("wallet_v4_final_sql_fence_unavailable");}

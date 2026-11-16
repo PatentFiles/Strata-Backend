@@ -874,6 +874,10 @@ test("main owned financial seal/reserve/UNKNOWN uses exact .01/.50/1.50 without 
 
 async function actualOwnedFinalFence(f:Awaited<ReturnType<typeof protectiveFixture>>) {
  await pool.query(`CREATE TABLE IF NOT EXISTS private.strata_standing_execution_reviews(release_id uuid,owner_user_id uuid,execution_account_id text,release_commit_sha text);
+ ALTER TABLE private.strata_standing_execution_reviews
+ ADD COLUMN IF NOT EXISTS policy_hash text,ADD COLUMN IF NOT EXISTS state text,
+ ADD COLUMN IF NOT EXISTS revoked_at timestamptz,ADD COLUMN IF NOT EXISTS confirmation text,
+ ADD COLUMN IF NOT EXISTS created_at timestamptz,ADD COLUMN IF NOT EXISTS independent_reviewer_id uuid;
  CREATE TABLE IF NOT EXISTS private.strata_protective_exit_release(release_commit_sha text,state text,created_at timestamptz,expires_at timestamptz,revoked_at timestamptz,independent_reviewer_id uuid,operator_approver_id uuid);
  DELETE FROM private.strata_standing_execution_reviews;DELETE FROM private.strata_protective_exit_release;
  INSERT INTO private.strata_protective_exit_release VALUES('${'a'.repeat(40)}','approved',now()-interval '1 minute',now()+interval '1 hour',NULL,'33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444');`);

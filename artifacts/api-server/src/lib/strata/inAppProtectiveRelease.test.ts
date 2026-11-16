@@ -1,3 +1,4 @@
+import {OWNER_FINAL_RELEASE_CONFIRM} from './ownerFinalReleaseAuthority';
 import {createJoinedSigner} from './signedTransport.local.fixture';
 import {dedicatedSignerFingerprint} from './commissioning';
 import test from "node:test";
@@ -9,7 +10,7 @@ import { computeDynamicFeeModelDigest, type DynamicFeeModel } from "./dynamicOff
 import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
-  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,lookupProtectiveReleaseAuthorization,
+  authorizeProtectiveRelease,authorizeOwnerSelfFinalRelease,readReleaseOwner,protectiveReleaseStatus,lookupProtectiveReleaseAuthorization,
   REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -43,14 +44,14 @@ const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
  provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
 const fixtureSigner=createJoinedSigner('25.0000');
 const fixtureFingerprint=dedicatedSignerFingerprint(fixtureSigner.material.keyId,fixtureSigner.material.privateKey)!;
-const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
+const account={policy_hash:DIGEST,id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
  cash_micros:"25000000",key_fingerprint:fixtureFingerprint,
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{consent?:boolean;review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
+function fakeDb(input:{ownerReview?:boolean;consent?:boolean;review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
  const executed:string[]=[];let signedReads=0;
  const readFeeds=async(material:typeof fixtureSigner.material,at:number)=>{signedReads++;return fixtureSigner.read(material,at,[],true);};
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
@@ -123,6 +124,9 @@ function fakeDb(input:{consent?:boolean;review?:boolean;duplicate?:boolean;permi
   if(sql.includes("FROM public.v13_production_intent WHERE account_id"))return {rows:[]};
   if(sql.includes("INSERT INTO private.strata_protective_release_qualification"))
    return {rows:[{id:QID,expires_at:"2026-10-20T06:00:00Z"}]};
+  if(sql.includes('FROM private.strata_standing_execution_reviews r'))return {rows:input.ownerReview===true?[{
+    review_id:RID,reviewer_user_id:null,review_url:`https://github.com/PatentFiles/Strata-Backend/commit/${SHA}`,
+    evidence_digest:DIGEST,qualification_id:QID,qualification_digest:DIGEST}]:[]};
   if(sql.includes("FROM private.strata_protective_release_qualification"))
    return {rows:[{qualification_id:QID,evidence_digest:DIGEST}]};
   if(sql.includes("FROM private.strata_protective_release_reviews")&&
@@ -623,7 +627,7 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
       if(sql.includes("FROM private.strata_protective_release_reviews v")){
         return {rows:[]};
       }
-      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+      if(sql.includes("SELECT v.release_id::text,v.expires_at FROM private.strata_protective_exit_release")){
         technicalSql=sql;
         return {rows:[]};
       }
@@ -638,8 +642,8 @@ test("owner SHA consent alone never reports a live technical protective-exit rel
   assert.equal(status.codeApprovalActive,true);
   assert.equal(status.releaseActive,false);
   assert.match(technicalSql,/expires_at>now\(\)\+interval '20 minutes'/);
-  assert.match(technicalSql,/independent_reviewer_id<>\$2::uuid/);
-  assert.match(technicalSql,/operator_approver_id<>independent_reviewer_id/);
+  assert.match(technicalSql,/v\.independent_reviewer_id<>a\.owner_user_id/);
+  assert.match(technicalSql,/v\.operator_approver_id<>v\.independent_reviewer_id/);
 });
 
 test("OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent and technical exit approval",async()=>{
@@ -659,7 +663,7 @@ test("OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent 
       if(sql.includes("FROM private.strata_protective_release_reviews v")){
         return {rows:[]};
       }
-      if(sql.includes("SELECT release_id::text,expires_at FROM private.strata_protective_exit_release")){
+      if(sql.includes("SELECT v.release_id::text,v.expires_at FROM private.strata_protective_exit_release")){
         return {rows:Array.from({length:scenario.technical},()=>({
           release_id:RID,expires_at:new Date(Date.now()+60*60_000).toISOString(),
         }))};
@@ -763,4 +767,46 @@ test('final release lookup keeps absent or ambiguous receipts unknown and perfor
    connect:async()=>{throw Error('no transaction');}};
   assert.deepEqual(await lookupProtectiveReleaseAuthorization(OWNER,RID,{db}),{outcome:'UNKNOWN'});
  }
+});
+
+const ownerFinalBody={reviewId:RID,qualificationId:QID,accountId:account.id,policyHash:DIGEST,expectedSha:SHA,confirmation:OWNER_FINAL_RELEASE_CONFIRM};
+const ownerFinalDeps=(h:ReturnType<typeof fakeDb>)=>({db:h.db,sha:()=>SHA,readFeeds:h.readFeeds as never,ownerFinalEnabled:()=>true,ownerFinalScope:()=>({ownerId:OWNER,accountId:account.id})});
+test('explicit owner final release preserves signed transaction and never invents reviewer',async()=>{
+ const h=fakeDb({ownerReview:true,globalLive:true,leaseState:'killed'});
+ const r=await authorizeOwnerSelfFinalRelease(OWNER,ownerFinalBody,ownerFinalDeps(h));
+ assert.equal(r.ok,true,JSON.stringify(r));assert.equal(r.ordersSubmitted,false);assert.equal('workerStarted' in r&&r.workerStarted,false);
+ assert.ok(h.signedReads>0);assert.ok(h.executed.includes('COMMIT'));
+ const insert=h.executed.find(s=>s.includes('INSERT INTO private.strata_protective_exit_release'))!;
+ assert.match(insert,/OWNER_SELF_V1/);assert.match(insert,/VALUES\(\$1,NULL/);
+ assert.equal(h.executed.some(s=>s.includes('FROM auth.users u JOIN public.profiles p')),false);
+ assert.equal(h.executed.some(s=>s.includes('UPDATE public.live_execution_config')),false);
+ assert.ok(h.executed.some(s=>s.includes('FOR SHARE OF r,q')));
+ assert.ok(h.executed.some(s=>s.includes('OWNER_RELEASE_SIGNED_RECHECK')));
+});
+test('owner final mode fails closed for missing review, consent, exposure, live account or shared global authority',async()=>{
+ for(const patch of [{ownerReview:false},{consent:false},{leaseExposure:true},{accountLive:true},{globalLive:false}]){
+  const h=fakeDb({ownerReview:true,globalLive:true,leaseState:'killed',...patch});
+  const r=await authorizeOwnerSelfFinalRelease(OWNER,ownerFinalBody,ownerFinalDeps(h));
+  assert.equal(r.ok,false,JSON.stringify(patch));assert.equal(h.executed.includes('COMMIT'),false);
+ }
+});
+test('owner final route accepts neither legacy consent nor arbitrary reviewer or repair fields',async()=>{
+ for(const patch of [{confirmation:OWNER_CONFIRM},{expectedSha:'c'.repeat(40)},{accountId:'foreign'},
+ {policyHash:'c'.repeat(64)},{reviewerId:REVIEWER},{provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM}]){
+  const h=fakeDb({ownerReview:true,globalLive:true,leaseState:'killed'});
+  const r=await authorizeOwnerSelfFinalRelease(OWNER,{...ownerFinalBody,...patch},ownerFinalDeps(h));
+  assert.equal(r.ok,false,JSON.stringify(patch));assert.equal(h.executed.includes('COMMIT'),false);
+ }
+ const h=fakeDb({ownerReview:true,globalLive:true,leaseState:'killed'});
+ assert.equal((await authorizeOwnerSelfFinalRelease(OWNER,ownerFinalBody,{...ownerFinalDeps(h),ownerFinalEnabled:()=>false})).ok,false);
+ assert.equal(h.executed.length,0);
+});
+
+
+test('owner final preflight refusal proves exact scope without transaction or signed read',async()=>{
+ const h=fakeDb({ownerReview:true,globalLive:false,leaseState:'killed'});
+ const r=await authorizeOwnerSelfFinalRelease(OWNER,ownerFinalBody,ownerFinalDeps(h));
+ assert.equal(r.ok,false);assert.equal('outcome' in r&&r.outcome,'PROVEN_NOT_COMMITTED');
+ const {confirmation,...scope}=ownerFinalBody;assert.deepEqual('requestScope' in r&&r.requestScope,scope);
+ assert.equal(h.signedReads,0);assert.equal(h.executed.includes('BEGIN'),false);
 });

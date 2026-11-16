@@ -1,3 +1,4 @@
+import {protectiveAuthoritySql} from './ownerFinalReleaseAuthority';
 import {beginFeeAuthorityTiming,withFeeAuthorityTimingPurpose} from "./feeAuthorityTiming";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
 import type {PrefetchedPublicMetadata} from "./committedPublicMetadata";
@@ -77,8 +78,7 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
         WHERE x.release_commit_sha=$9 AND x.state='approved'
           AND x.revoked_at IS NULL AND x.created_at<=now()
           AND x.expires_at>now()+interval '20 minutes'
-          AND x.independent_reviewer_id<>a.owner_user_id
-          AND x.operator_approver_id<>x.independent_reviewer_id
+    AND ${protectiveAuthoritySql('x','a.owner_user_id','a.id','p.policy_hash')}
         FOR SHARE OF x
       ))
    ))

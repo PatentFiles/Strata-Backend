@@ -97,7 +97,10 @@
     "test:producer-worker-recovery-replay": "node scripts/run-producer-worker-recovery-replay.mjs",
     "test:producer-commit-wake": "node --test scripts/producerCommitWake.contract.test.mjs && node scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/producerCommitWake.postgres.test.ts",
     "test:worker-discovery": "node scripts/run-v13-disposable-postgres.mjs src/lib/v13-production/workerDiscovery.postgres.test.ts",
-    "test:direct-rounding-postgres": "node scripts/run-v13-disposable-postgres.mjs --rounding-authority"
+    "test:direct-rounding-postgres": "node scripts/run-v13-disposable-postgres.mjs --rounding-authority",
+    "test:owner-final-release-unit": "esbuild src/lib/strata/inAppProtectiveRelease.test.ts src/lib/strata/protectiveExitStartupRelease.test.ts src/lib/strata/apiFeeRuntimeDbSession.test.ts src/routes/ownerFinalReleaseRouter.test.ts src/routes/runtimeDbSession.test.ts --bundle --platform=node --format=cjs --outdir=dist/owner-final-release-unit --out-extension:.js=.cjs --external:pg-native --external:express --external:pino --external:pino-pretty --external:pdfjs-dist && esbuild src/lib/strata/walletV4FinalSignedAdmission.test.ts --bundle --platform=node --format=cjs --outfile=dist/owner-final-release-unit/lib/strata/walletV4FinalSignedAdmission.test.cjs --define:import.meta.url=\\\"file://$PWD/src/lib/strata/walletV4FinalSignedAdmission.test.ts\\\" --external:pg-native --external:pino --external:pino-pretty --external:pdfjs-dist && node --test dist/owner-final-release-unit/lib/strata/*.test.cjs dist/owner-final-release-unit/routes/*.test.cjs",
+    "test:owner-final-release-postgres": "bash ../../docs/owner-final-release-candidate/run-native-tests.sh",
+    "test:owner-final-consumers-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/personalExecution.integration.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",

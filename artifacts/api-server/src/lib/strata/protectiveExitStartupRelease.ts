@@ -1,7 +1,8 @@
+import {protectiveAuthoritySql} from './ownerFinalReleaseAuthority';
 /**
  * Safe, read-only first fence for personal production START. A worker must
  * never open NEW inventory unless its ONE-USE signed protective EXIT path
- * is available and independently released for the exact deployed binary.
+ * is available under explicit reviewed authority for the exact deployed binary.
  *
  * This verifies no human claims: it consumes existing immutable review rows.
  * The last signed POST repeats a stronger transactional check.
@@ -9,13 +10,14 @@
 export const PROTECTIVE_STARTUP_RELEASE_SQL = `
  SELECT v.release_id
  FROM private.strata_protective_exit_release v
+ JOIN public.v13_production_account a ON a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  WHERE v.release_commit_sha=$1::text
    AND v.state='approved'
    AND v.revoked_at IS NULL
    AND v.created_at<=now() AND v.expires_at>now()+interval '20 minutes'
-   AND v.independent_reviewer_id <> $2::uuid
-   AND v.operator_approver_id <> v.independent_reviewer_id
- LIMIT 2 FOR SHARE OF v`;
+   AND ${protectiveAuthoritySql('v','a.owner_user_id','a.id','p.policy_hash')}
+ LIMIT 2 FOR SHARE OF v,a,p`;
 /** Owner-scoped durable code approval for the exact deployed commit. */
 export const OWNER_SHA_STARTUP_RELEASE_SQL = `
  SELECT oa.approval_id::text AS release_id
@@ -56,8 +58,9 @@ export async function verifyProtectiveExitStartupRelease(
  if(!UUID.test(ownerId))return {ok:false,reason:"protective_exit_owner_unverified"};
  try{
   // Step 12 owner AAL2 consent is a MANDATORY account-specific START gate.
-  // It is separate from, and cannot substitute for, independent technical
-  // approval of the protective-exit implementation at this exact SHA.
+  // It is separate from the explicit protective authority at this exact SHA.
+  // Owner-self mode requires its account-scoped review; legacy mode retains
+  // independent reviewer segregation. Owner approval alone satisfies neither.
   // A missing schema, missing approval or query outage is NOT legacy authority.
   let own:{rows:Record<string,unknown>[]};
   try { own=await db.query(OWNER_SHA_STARTUP_RELEASE_SQL,[sha,ownerId]); }

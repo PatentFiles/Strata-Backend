@@ -1,0 +1,43 @@
+name: Owner final release candidate
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/src/routes/protectiveReleaseRouter.ts'
+      - 'artifacts/api-server/src/routes/ownerFinalReleaseRouter.test.ts'
+      - 'artifacts/api-server/src/routes/runtimeDbSession.test.ts'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
+      - 'artifacts/api-server/package.json'
+      - 'docs/owner-final-release-candidate/**'
+      - 'lib/db/owner-self-release/**'
+      - 'sql/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/owner-final-release.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-final-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Explicit owner authority and real AAL2 route regressions
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: pnpm --filter @workspace/api-server run test:owner-final-release-unit
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-16
+      - name: Native signed-fixture concurrency, rollback and uncertain commit
+        env:
+          PG_BIN: /usr/lib/postgresql/16/bin
+          PG_SHARE: /usr/share/postgresql/16
+        run: pnpm --filter @workspace/api-server run test:owner-final-release-postgres
+      - name: Native final-send, fractional protective exit and recovery consumers
+        run: PATH="/usr/lib/postgresql/16/bin:$PATH" pnpm --filter @workspace/api-server run test:owner-final-consumers-postgres

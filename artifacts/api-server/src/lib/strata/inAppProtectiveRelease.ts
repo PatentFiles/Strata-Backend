@@ -1,3 +1,5 @@
+import {protectiveAuthoritySql,OWNER_FINAL_RELEASE_CONFIRM} from './ownerFinalReleaseAuthority';
+import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot} from './reconciledReleaseRenewalHistory';
@@ -26,7 +28,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number;ownerFinalEnabled?:()=>boolean;ownerFinalScope?:typeof configuredOwnerSelfScope};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -114,11 +116,12 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  WHERE v.owner_user_id=$1::uuid AND v.release_commit_sha=$2 AND v.expires_at>now()
  AND q.expires_at>now() ORDER BY v.approved_at DESC LIMIT 1`,[ownerId,sha]);
   const active=await db.query(`
- SELECT release_id::text,expires_at FROM private.strata_protective_exit_release
- WHERE release_commit_sha=$1 AND state='approved' AND revoked_at IS NULL
- AND expires_at>now()+interval '20 minutes'
- AND independent_reviewer_id<>$2::uuid
- AND operator_approver_id<>independent_reviewer_id
+ SELECT v.release_id::text,v.expires_at FROM private.strata_protective_exit_release v
+ JOIN public.v13_production_account a ON a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+ WHERE v.release_commit_sha=$1 AND v.state='approved' AND v.revoked_at IS NULL
+ AND v.expires_at>now()+interval '20 minutes'
+ AND ${protectiveAuthoritySql('v','a.owner_user_id','a.id','p.policy_hash')}
  LIMIT 2`,[sha,ownerId]);
   // New owner SHA releases are account-specific and durable until revoked.
   // Missing staged schema retains the legacy status without granting authority.
@@ -150,6 +153,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    const cashReconciliationStale=!Number.isFinite(observedCash)||
      observedCash>observedNow+10_000||observedNow-observedCash>15*60_000;
   return {ok:true,reason:owner.ok?"status_verified":owner.reason,sha,ownerId,
+   ownerFinalReleaseEnabled:actorId===ownerId&&typeof account?.id==='string'&&(deps.ownerFinalEnabled??(()=>process.env.STRATA_OWNER_FINAL_RELEASE_ENABLED==='true'))()&&ownerSelfEnrollmentAllowed(ownerId,account.id,(deps.ownerFinalScope??configuredOwnerSelfScope)()),
    qualificationId:qualification.rows[0]?.qualification_id??null,
    qualificationExpiresAt:qualification.rows[0]?.expires_at??null,
    reviewerId:review.rows.length===1?review.rows[0]?.reviewer_user_id:null,
@@ -158,7 +162,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    releaseMode:ownerMode?'OWNER_SHA_V1':'LEGACY_TWO_HOUR',
    codeApprovalActive:ownerApproved,codeApprovalId:ownerApprovalId,
    // Owner-only approval is not sufficient: the frontend releaseActive signal
-    // must require BOTH owner exact-SHA consent and independent technical exit
+    // must require BOTH owner exact-SHA consent and explicit technical exit
     // release, matching START. Legacy mode retains its technical release gate.
     releaseActive:active.rows.length===1&&(!ownerMode||ownerApproved),
    releaseExpiresAt:active.rows[0]?.expires_at??null,
@@ -498,36 +502,85 @@ export async function lookupProtectiveReleaseAuthorization(ownerId:string,review
  }catch{return {outcome:'UNKNOWN' as const};}
 }
 
-export async function authorizeProtectiveRelease(
- ownerId:string,raw:unknown,deps:Deps={}
+const OWNER_FINAL_REVIEW_SQL=`SELECT r.release_id::text AS review_id,NULL::text AS reviewer_user_id,r.review_url,r.evidence_digest,
+ q.qualification_id::text,q.evidence_digest AS qualification_digest
+ FROM private.strata_standing_execution_reviews r
+ JOIN private.strata_protective_release_qualification q ON q.qualification_id=r.qualification_id
+ WHERE r.release_id=$1::uuid AND r.owner_user_id=$2::uuid AND r.release_commit_sha=$3
+ AND r.execution_account_id=$4 AND r.policy_hash=$6 AND r.state='approved' AND r.revoked_at IS NULL
+ AND r.review_authority='OWNER_SELF_V1' AND r.owner_authorizer_id=$2::uuid AND r.independent_reviewer_id IS NULL
+ AND r.confirmation='${OWNER_SELF_REVIEW_CONFIRM}'
+ AND q.qualification_id=$5::uuid AND q.owner_user_id=$2::uuid AND q.execution_account_id=$4 AND q.release_commit_sha=$3
+ AND q.observed_at<=now() AND q.expires_at>now()+interval '60 seconds'`;
+export async function lookupOwnerFinalReleaseAuthorization(ownerId:string,reviewId:string,accountId:string,deps:Deps={}){
+ if(!valid(ownerId)||!valid(reviewId)||!accountId)return {outcome:'UNKNOWN' as const};
+ try{
+ const rows=await(deps.db??pool).query(`SELECT release_id::text,execution_account_id,release_commit_sha,revoked_at,expires_at
+ FROM private.strata_protective_exit_release WHERE release_authority='OWNER_SELF_V1'
+ AND owner_authorizer_id=$1::uuid AND operator_approver_id=$1::uuid AND execution_account_id=$2
+ AND standing_review_id=$3::uuid AND independent_reviewer_id IS NULL LIMIT 2`,[ownerId,accountId,reviewId]);
+ if(rows.rows.length!==1)return {outcome:'UNKNOWN' as const};
+ const row=rows.rows[0]!;
+ if(!valid(row.release_id)||!SHA.test(String(row.release_commit_sha)))return {outcome:'UNKNOWN' as const};
+ return {outcome:'RECORDED' as const,releaseId:String(row.release_id),accountId,reviewId,sha:String(row.release_commit_sha),
+ revoked:row.revoked_at!==null,expiresAt:row.expires_at,currentReadinessVerified:false as const,ordersSubmitted:false as const,workerStarted:false as const};
+ }catch{return {outcome:'UNKNOWN' as const};}
+}
+export async function authorizeOwnerSelfFinalRelease(ownerId:string,raw:unknown,deps:Deps={}){
+ return authorizeProtectiveReleaseInternal(ownerId,raw,deps,true);
+}
+export async function authorizeProtectiveRelease(ownerId:string,raw:unknown,deps:Deps={}){
+ return authorizeProtectiveReleaseInternal(ownerId,raw,deps,false);
+}
+async function authorizeProtectiveReleaseInternal(
+ ownerId:string,raw:unknown,deps:Deps={},ownerSelf=false
 ){
  const db=deps.db??pool,sha=(deps.sha??deployedGitSha)();
  const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as DbRow:{};
- if(!valid(ownerId)||!valid(b.reviewId)||b.confirmation!==OWNER_CONFIRM||!SHA.test(sha))
-   return deny("explicit_authenticated_owner_release_confirmation_required");
- const repairing=b.provisionalRepairConfirmation===PROVISIONAL_REPAIR_CONFIRM;
- if(b.provisionalRepairConfirmation!==undefined&&!repairing)
-   return deny("explicit_commissioning_repair_confirmation_invalid");
  let client:Awaited<ReturnType<Db["connect"]>>|null=null,committed=false,commitAttempted=false;
+ // Only a preflight refusal proves this invocation never entered a write transaction.
+ // Never convert transaction failures, absent receipts or lost COMMIT acks to this outcome.
+ const refuse=(reason:string)=>{
+  const requestScope={expectedSha:b.expectedSha,accountId:b.accountId,policyHash:b.policyHash,qualificationId:b.qualificationId,reviewId:b.reviewId};
+  const exactScope=SHA.test(String(b.expectedSha))&&typeof b.accountId==='string'&&b.accountId.length>0&&b.accountId.length<=200&&/^[a-f0-9]{64}$/.test(String(b.policyHash))&&valid(b.qualificationId)&&valid(b.reviewId);
+  return ownerSelf&&client===null&&!commitAttempted&&exactScope
+   ?{...deny(reason),outcome:'PROVEN_NOT_COMMITTED' as const,requestScope}:deny(reason);
+ };
+ if(!valid(ownerId)||!valid(b.reviewId)||b.confirmation!==(ownerSelf?OWNER_FINAL_RELEASE_CONFIRM:OWNER_CONFIRM)||!SHA.test(sha))
+   return refuse("explicit_authenticated_owner_release_confirmation_required");
+ if(ownerSelf){
+  const allowed=['expectedSha','accountId','policyHash','qualificationId','reviewId','confirmation'];
+  if(Object.keys(b).length!==allowed.length||Object.keys(b).some(k=>!allowed.includes(k))||b.expectedSha!==sha||
+    !valid(b.qualificationId)||!/^[a-f0-9]{64}$/.test(String(b.policyHash))||
+    !(deps.ownerFinalEnabled??(()=>process.env.STRATA_OWNER_FINAL_RELEASE_ENABLED==='true'))()||
+    !ownerSelfEnrollmentAllowed(ownerId,b.accountId,(deps.ownerFinalScope??configuredOwnerSelfScope)()))
+   return refuse('owner_final_explicit_scope_feature_or_confirmation_required');
+ }
+ const repairing=!ownerSelf&&b.provisionalRepairConfirmation===PROVISIONAL_REPAIR_CONFIRM;
+ if(b.provisionalRepairConfirmation!==undefined&&!repairing)
+   return refuse("explicit_commissioning_repair_confirmation_invalid");
  try{
-  const previous=await lookupProtectiveReleaseAuthorization(ownerId,String(b.reviewId),deps);
+  const previous=ownerSelf?await lookupOwnerFinalReleaseAuthorization(ownerId,String(b.reviewId),String(b.accountId),deps):await lookupProtectiveReleaseAuthorization(ownerId,String(b.reviewId),deps);
   if(previous.outcome==='RECORDED')return {...deny('release_review_already_used_lookup_only'),outcome:'LOOKUP_ONLY' as const};
   if(!repairing){
-   const initial=await readReleaseOwner(db,ownerId);if(!initial.ok)return deny(initial.reason);
+   const initial=await readReleaseOwner(db,ownerId);if(!initial.ok)return refuse(initial.reason);
    const a=initial.account;
-   if(a.blocked_reason==='awaiting_account_commissioning')return deny('explicit_commissioning_repair_confirmation_required');
-   if(a.blocked_reason!==null&&a.blocked_reason!==undefined)return deny('account_risk_freeze_requires_independent_remediation');
+   if(a.blocked_reason==='awaiting_account_commissioning')return refuse('explicit_commissioning_repair_confirmation_required');
+   if(a.blocked_reason!==null&&a.blocked_reason!==undefined)return refuse('account_risk_freeze_requires_independent_remediation');
    const g=await db.query("SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton'");
-   if(g.rows.length!==1||g.rows[0]?.mode!=='V13_PRODUCTION'||truth(g.rows[0]?.live_execution_enabled)===truth(g.rows[0]?.manual_kill_switch))return deny('global_execution_kill_state_inconsistent');
-   if(!truth(a.kill_switch)&&!truth(g.rows[0]?.live_execution_enabled))return deny('account_global_release_state_mismatch');
-   const review=await db.query(`-- release:preflight-review
+   if(g.rows.length!==1||g.rows[0]?.mode!=='V13_PRODUCTION'||truth(g.rows[0]?.live_execution_enabled)===truth(g.rows[0]?.manual_kill_switch))return refuse('global_execution_kill_state_inconsistent');
+   if(!truth(a.kill_switch)&&!truth(g.rows[0]?.live_execution_enabled))return refuse('account_global_release_state_mismatch');
+   if(ownerSelf&&(a.id!==b.accountId||a.policy_hash!==b.policyHash))return refuse('owner_final_account_policy_changed');
+   if(ownerSelf&&a.kill_switch!==true)return refuse('owner_final_stopped_account_required');
+   if(ownerSelf&&!truth(g.rows[0]?.live_execution_enabled))return refuse('owner_final_shared_global_release_requires_separate_authority');
+   const review=ownerSelf?await db.query(OWNER_FINAL_REVIEW_SQL,[b.reviewId,ownerId,sha,a.id,b.qualificationId,b.policyHash]):await db.query(`-- release:preflight-review
  SELECT r.review_id FROM private.strata_protective_release_reviews r
  JOIN private.strata_protective_release_qualification q ON q.qualification_id=r.qualification_id
  WHERE r.review_id=$1::uuid AND r.owner_user_id=$2::uuid AND r.release_commit_sha=$3
  AND r.reviewer_user_id<>$2::uuid AND r.expires_at>now()+interval '60 seconds'
  AND q.owner_user_id=$2::uuid AND q.execution_account_id=$4 AND q.release_commit_sha=$3
  AND q.expires_at>now()+interval '60 seconds'`,[b.reviewId,ownerId,sha,a.id]);
-   if(review.rows.length!==1)return deny('independent_review_or_qualification_expired');
+   if(review.rows.length!==1)return refuse('independent_review_or_qualification_expired');
   }
   const evidence=repairing?null:await collectFinalReleaseEvidence(ownerId,deps);
   client=await db.connect();
@@ -536,8 +589,9 @@ export async function authorizeProtectiveRelease(
   await client.query("SET LOCAL statement_timeout='12000ms'");
   // Serialize against worker admission, account kill and concurrent grants.
   const v=await readReleaseOwner(client,ownerId);
-  if(!v.ok)return deny(v.reason);
+  if(!v.ok)return refuse(v.reason);
   const a=v.account,accountId=String(a.id);
+  if(ownerSelf&&(a.id!==b.accountId||a.policy_hash!==b.policyHash))return refuse('owner_final_account_policy_changed');
   const locked=await client.query(`
  SELECT id,execution_enabled,kill_switch,cash_micros::text,
    blocked_reason,reserved_micros::text,reconciled_at,
@@ -549,60 +603,62 @@ export async function authorizeProtectiveRelease(
   // only (false,false) is a contradictory live-but-ineligible state.
   if(locked.rows.length!==1||!current||
      (!truth(current.execution_enabled)&&!truth(current.kill_switch)))
-    return deny("account_inconsistent_execution_kill_state");
+    return refuse("account_inconsistent_execution_kill_state");
   const frozen=current.blocked_reason;
   if(frozen!==null&&frozen!==undefined&&frozen!=="awaiting_account_commissioning")
-    return deny("account_risk_freeze_requires_independent_remediation");
+    return refuse("account_risk_freeze_requires_independent_remediation");
   if(frozen==="awaiting_account_commissioning"&&!repairing)
-    return deny("explicit_commissioning_repair_confirmation_required");
+    return refuse("explicit_commissioning_repair_confirmation_required");
   if(frozen!=="awaiting_account_commissioning"&&repairing)
-    return deny("commissioning_repair_not_applicable");
+    return refuse("commissioning_repair_not_applicable");
   const accountNeedsEnable=truth(current.kill_switch);
+  if(ownerSelf&&!accountNeedsEnable)return refuse('owner_final_stopped_account_required');
   const global=await client.query(`
  SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config
  WHERE id='singleton' FOR UPDATE`);
   if(global.rows.length!==1||global.rows[0]?.mode!=="V13_PRODUCTION"||
      truth(global.rows[0]?.live_execution_enabled)===truth(global.rows[0]?.manual_kill_switch))
-   return deny("global_execution_kill_state_inconsistent");
+   return refuse("global_execution_kill_state_inconsistent");
   const globalNeedsEnable=!truth(global.rows[0]?.live_execution_enabled);
+  if(ownerSelf&&globalNeedsEnable)return refuse('owner_final_shared_global_release_requires_separate_authority');
   // Global admission may already be enabled for another commissioned owner.
   // It must not force an unrelated account's kill switch off, nor prevent
   // independently qualified activation of THIS owner. Do not re-enable an
   // account that is already on while the shared gate is killed: that remains
   // a privileged global release, not an account authorization.
   if(!accountNeedsEnable&&globalNeedsEnable)
-    return deny("account_global_release_state_mismatch");
+    return refuse("account_global_release_state_mismatch");
   if(accountNeedsEnable&&!repairing){
-    if(!evidence||evidence.account!==accountId)return deny('release_fresh_signed_evidence_required');
+    if(!evidence||evidence.account!==accountId)return refuse('release_fresh_signed_evidence_required');
     const guard=await client.query(`SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid='public.v13_production_observation'::pg_catalog.regclass
       AND tgname='final_release_signed_deadline' AND tgenabled='O' AND tgdeferrable AND tginitdeferred`);
-    if(guard.rows.length!==1)return deny('release_signed_deadline_migration_required');
+    if(guard.rows.length!==1)return refuse('release_signed_deadline_migration_required');
     const lockedScope=await finalReleaseScope(client,ownerId,accountId,true);
     // Baseline credential contract: mapping/revocation rows locked, re-decrypt and
     // compare captured signer; no assertion of physical Vault/root-key fencing.
     const material=await loadedMaterial(client,a);
     if(!material||dedicatedSignerFingerprint(material.keyId,material.privateKey)!==String(evidence.scope.key_fingerprint))
-      return deny('release_restricted_signer_changed');
+      return refuse('release_restricted_signer_changed');
     const activation=await readReleaseOwner(client,ownerId);
-    if(hash(lockedScope)!==hash(evidence.scope)||!activation.ok||hash(activation.account)!==hash(evidence.activation))return deny('release_scope_changed_during_signed_read');
+    if(hash(lockedScope)!==hash(evidence.scope)||!activation.ok||hash(activation.account)!==hash(evidence.activation))return refuse('release_scope_changed_during_signed_read');
     const history=await finalReleaseHistory(client,accountId,ownerId,true);
-    if(history.reconciliationDigest!==evidence.history.reconciliationDigest)return deny('release_history_changed_during_signed_read');
+    if(history.reconciliationDigest!==evidence.history.reconciliationDigest)return refuse('release_history_changed_during_signed_read');
     finalReleaseSnapshot(history,evidence.snapshot);
     const ledgerAccount=await client.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid',[accountId,ownerId]);
-    if(ledgerAccount.rows.length!==1)return deny('release_ledger_account_missing');
+    if(ledgerAccount.rows.length!==1)return refuse('release_ledger_account_missing');
     const ledger=new ProductionLedger(db as Pool,accountId);
     await ledger.finalAccountProof(client as PoolClient,ledgerAccount.rows[0] as unknown as Account,evidence.snapshot,(deps.now??Date.now)());
     await ledger.assertConservation(client as PoolClient,ledgerAccount.rows[0] as unknown as Account);
   }
   const unresolved=await readUnresolvedIntentMode((sql,p)=>client!.query(sql,p),accountId);
-  if(!unresolved.ok||unresolved.mode!=="entries")return deny("release_unresolved_order");
+  if(!unresolved.ok||unresolved.mode!=="entries")return refuse("release_unresolved_order");
   if(!Number.isSafeInteger(Number(a.configured_stake_cents))||
      Number(a.configured_stake_cents)<=0||
      Number(a.configured_stake_cents)>Number(a.max_entry_stake_cents)||
      Number(a.configured_stake_cents)>Number(a.max_entry_all_in_cents)||
      Number(a.configured_stake_cents)*10000>Number(a.cash_micros))
-    return deny("approved_stake_or_cash_not_ready");
-  const review=await client.query(`
+    return refuse("approved_stake_or_cash_not_ready");
+  const review=ownerSelf?await client.query(OWNER_FINAL_REVIEW_SQL+' FOR SHARE OF r,q',[b.reviewId,ownerId,sha,accountId,b.qualificationId,b.policyHash]):await client.query(`
  SELECT r.review_id::text,r.reviewer_user_id::text,r.review_url,r.evidence_digest,q.qualification_id::text,
         q.evidence_digest AS qualification_digest
  FROM private.strata_protective_release_reviews r
@@ -612,7 +668,7 @@ export async function authorizeProtectiveRelease(
    AND q.owner_user_id=$2::uuid AND q.execution_account_id=$4 AND q.release_commit_sha=$3
    AND q.expires_at>now()+interval '60 seconds'
  FOR SHARE OF r,q`,[b.reviewId,ownerId,sha,accountId]);
-  if(review.rows.length!==1)return deny("independent_review_or_qualification_expired");
+  if(review.rows.length!==1)return refuse("independent_review_or_qualification_expired");
   // Durable SHA consent retains its original qualification. A fresh review may
   // use a newer qualification; never relabel the historical owner receipt.
   if(accountNeedsEnable&&!repairing){
@@ -624,16 +680,16 @@ export async function authorizeProtectiveRelease(
     AND oa.revoked_at IS NULL AND oa.qualification_digest=oq.evidence_digest
     AND oa.confirmed_at>=oq.observed_at AND oa.confirmed_at<oq.expires_at
     FOR SHARE OF oa,oq`,[ownerId,accountId,sha]);
-   if(consent.rows.length!==1)return deny('owner_exact_sha_consent_required');
+   if(consent.rows.length!==1)return refuse('owner_exact_sha_consent_required');
   }
-  const used=await client.query('SELECT release_id FROM private.strata_protective_exit_release WHERE release_commit_sha=$1 AND operator_approver_id=$2::uuid AND release_evidence_digest=$3 LIMIT 2',[sha,ownerId,review.rows[0]!.evidence_digest]);
+  const used=ownerSelf?await client.query("SELECT release_id FROM private.strata_protective_exit_release WHERE release_authority='OWNER_SELF_V1' AND release_commit_sha=$1 AND owner_authorizer_id=$2::uuid AND execution_account_id=$3 AND standing_review_id=$4::uuid LIMIT 2",[sha,ownerId,accountId,b.reviewId]):await client.query('SELECT release_id FROM private.strata_protective_exit_release WHERE release_commit_sha=$1 AND operator_approver_id=$2::uuid AND release_evidence_digest=$3 LIMIT 2',[sha,ownerId,review.rows[0]!.evidence_digest]);
   if(used.rows.length)return {...deny('release_review_already_used_lookup_only'),outcome:'LOOKUP_ONLY' as const};
-  const reviewer=String(review.rows[0]?.reviewer_user_id);
-  const role=await client.query(`
+  const reviewer=ownerSelf?null:String(review.rows[0]?.reviewer_user_id);
+  const role=ownerSelf?{rows:[{}]}:await client.query(`
  SELECT 1 FROM auth.users u JOIN public.profiles p ON p.id=u.id
  WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL
  AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1 FOR SHARE OF u,p`,[reviewer]);
-  if(role.rows.length!==1)return deny("reviewer_authority_expired");
+  if(role.rows.length!==1)return refuse("reviewer_authority_expired");
   let repairEvidence:{observedAtMs:number;exchangeDigest:string}|null=null;
   if(repairing){
     const rec=await client.query(`
@@ -650,7 +706,7 @@ export async function authorizeProtectiveRelease(
        String(current.reserved_micros)!=="0"||
        !current.reconciled_at||
        !Number.isFinite(Date.parse(String(current.reconciled_at))))
-      return deny("commissioning_repair_fresh_zero_exposure_unverified");
+      return refuse("commissioning_repair_fresh_zero_exposure_unverified");
 
     // The reconciliation previously required a worker-maintained DB timestamp
     // younger than 15s. That timestamp cannot stay fresh during a genuinely
@@ -659,16 +715,16 @@ export async function authorizeProtectiveRelease(
     // Kalshi balance/order/fill/position/settlement history NOW, while the
     // financial row is locked and before making the owner-approved transition.
     const material=await loadedMaterial(client,a);
-    if(!material)return deny("commissioning_repair_restricted_signer_unavailable");
+    if(!material)return refuse("commissioning_repair_restricted_signer_unavailable");
     const observedAtMs=(deps.now??Date.now)();
     const feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,observedAtMs);
-    if(!feeds.ok)return deny("commissioning_repair_live_exchange_read_unavailable");
+    if(!feeds.ok)return refuse("commissioning_repair_live_exchange_read_unavailable");
     if(!Number.isSafeInteger(feeds.observedAtMs)||
        feeds.observedAtMs!==observedAtMs||
        Date.now()-observedAtMs>15_000||
        observedAtMs-Date.now()>2000||
        String(feeds.cashMicros)!==String(current.cash_micros))
-      return deny("commissioning_repair_live_cash_or_freshness_unverified");
+      return refuse("commissioning_repair_live_cash_or_freshness_unverified");
     const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
     const snapshot=personalAccountSnapshot(identity,feeds,[]);
     if(!("identity" in snapshot)||
@@ -676,7 +732,7 @@ export async function authorizeProtectiveRelease(
        snapshot.positions.length!==0||snapshot.settlements.length!==0||
        feeds.orders.length!==0||feeds.fills.length!==0||
        feeds.settlements.length!==0)
-      return deny("commissioning_repair_live_exposure_unverified");
+      return refuse("commissioning_repair_live_exposure_unverified");
     repairEvidence={observedAtMs,exchangeDigest:hash({
       accountId,sha,observedAtMs,cashMicros:feeds.cashMicros,
       orders:feeds.orders,fills:feeds.fills,
@@ -686,8 +742,9 @@ export async function authorizeProtectiveRelease(
   const prior=await client.query(`
  SELECT release_id::text FROM private.strata_protective_exit_release
  WHERE release_commit_sha=$1 AND revoked_at IS NULL AND expires_at>now()
- FOR UPDATE`,[sha]);
-  if(prior.rows.length>1)return deny("active_release_duplicate_or_unverified");
+ AND ${ownerSelf?"release_authority='OWNER_SELF_V1' AND owner_authorizer_id=$2::uuid AND execution_account_id=$3":"COALESCE(to_jsonb(strata_protective_exit_release)->>'release_authority','INDEPENDENT_V1')='INDEPENDENT_V1'"}
+ FOR UPDATE`,ownerSelf?[sha,ownerId,accountId]:[sha]);
+  if(prior.rows.length>1)return refuse("active_release_duplicate_or_unverified");
   if(prior.rows.length===1){
     // Renewal is atomic: revoke the old release only inside the transaction
     // that commits a fresh independent review and replacement release.
@@ -695,16 +752,22 @@ export async function authorizeProtectiveRelease(
       UPDATE private.strata_protective_exit_release SET revoked_at=now()
       WHERE release_id=$1::uuid AND revoked_at IS NULL RETURNING release_id`,
       [prior.rows[0]?.release_id]);
-    if(revoked.rows.length!==1)return deny("prior_release_revocation_failed");
+    if(revoked.rows.length!==1)return refuse("prior_release_revocation_failed");
   }
-  const inserted=await client.query(`
+  const inserted=ownerSelf?await client.query(`
+ INSERT INTO private.strata_protective_exit_release
+ (release_commit_sha,independent_reviewer_id,operator_approver_id,review_url,release_evidence_digest,state,expires_at,
+ release_authority,owner_authorizer_id,execution_account_id,policy_hash,standing_review_id,qualification_id)
+ VALUES($1,NULL,$2::uuid,$3,$4,'approved',now()+interval '2 hours','OWNER_SELF_V1',$2::uuid,$5,$6,$7::uuid,$8::uuid)
+ RETURNING release_id::text AS id,expires_at`,[sha,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest,
+ accountId,b.policyHash,b.reviewId,b.qualificationId]):await client.query(`
  INSERT INTO private.strata_protective_exit_release
  (release_commit_sha,independent_reviewer_id,operator_approver_id,
  review_url,release_evidence_digest,state,expires_at)
  VALUES($1,$2::uuid,$3::uuid,$4,$5,'approved',now()+interval '2 hours')
  RETURNING release_id::text AS id,expires_at`,
  [sha,reviewer,ownerId,review.rows[0]?.review_url,review.rows[0]?.evidence_digest]);
-  if(inserted.rows.length!==1)return deny("release_not_recorded");
+  if(inserted.rows.length!==1)return refuse("release_not_recorded");
   if(repairing){
     const clear=await client.query(`
  UPDATE public.v13_production_account SET blocked_reason=NULL,revision=revision+1
@@ -722,8 +785,8 @@ export async function authorizeProtectiveRelease(
    AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1)
  RETURNING id`,[accountId,ownerId,
      repairEvidence?new Date(repairEvidence.observedAtMs).toISOString():null]);
-    if(clear.rows.length!==1)return deny("commissioning_repair_transactional_guard_failed");
-    if(!repairEvidence)return deny("commissioning_repair_fresh_exchange_evidence_missing");
+    if(clear.rows.length!==1)return refuse("commissioning_repair_transactional_guard_failed");
+    if(!repairEvidence)return refuse("commissioning_repair_fresh_exchange_evidence_missing");
     const audit={accountId,ownerId,releaseSha:sha,reviewId:String(b.reviewId),
       reviewerId:reviewer,priorReason:"awaiting_account_commissioning",
       newReason:null,confirmation:PROVISIONAL_REPAIR_CONFIRM,
@@ -740,14 +803,14 @@ export async function authorizeProtectiveRelease(
  WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
  AND execution_enabled=$3 AND kill_switch=true RETURNING id`,
     [accountId,ownerId,truth(current.execution_enabled)]);
-    if(updated.rows.length!==1)return deny("account_enable_failed");
+    if(updated.rows.length!==1)return refuse("account_enable_failed");
   }
   if(globalNeedsEnable){
     const master=await client.query(`
  UPDATE public.live_execution_config SET live_execution_enabled=true,manual_kill_switch=false,updated_at=now()
  WHERE id='singleton' AND mode='V13_PRODUCTION'
  AND live_execution_enabled=false AND manual_kill_switch=true RETURNING id`);
-    if(master.rows.length!==1)return deny("shared_live_enable_failed");
+    if(master.rows.length!==1)return refuse("shared_live_enable_failed");
   }
   // The final authenticated release must also reconcile a TERMINAL killed
   // worker lease. Without this, the account becomes live-eligible while ARM
@@ -759,12 +822,12 @@ export async function authorizeProtectiveRelease(
  FROM private.kalshi_account_worker_lease
  WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,
     [accountId,ownerId]);
-  if(leases.rows.length>1)return deny("release_worker_lease_not_unique");
+  if(leases.rows.length>1)return refuse("release_worker_lease_not_unique");
   if(leases.rows.length===1){
     const lease=leases.rows[0]!;
     if(lease.state==="killed"){
       if(lease.account_kill!==true||lease.arm_requested!==false)
-        return deny("release_killed_lease_state_inconsistent");
+        return refuse("release_killed_lease_state_inconsistent");
       // Re-check complete absence of persisted financial or exit exposure
       // under the same transaction before fencing an old terminated worker.
       const flat=await client.query(`
@@ -779,7 +842,7 @@ export async function authorizeProtectiveRelease(
          Number(flat.rows[0]?.positions)!==0 ||
          Number(flat.rows[0]?.intents)!==0 ||
          Number(flat.rows[0]?.exits)!==0)
-        return deny("release_killed_lease_exposure_unverified");
+        return refuse("release_killed_lease_exposure_unverified");
       const fenced=await client.query(`
  UPDATE private.kalshi_account_worker_lease
  SET state='released',account_kill=false,arm_requested=false,
@@ -798,7 +861,7 @@ export async function authorizeProtectiveRelease(
      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
  RETURNING fencing_token::text AS fencing_token`,
         [accountId,ownerId,lease.fencing_token]);
-      if(fenced.rows.length!==1)return deny("release_killed_lease_fence_failed");
+      if(fenced.rows.length!==1)return refuse("release_killed_lease_fence_failed");
       const evidence={ownerId,accountId,sha,reviewId:String(b.reviewId),
         oldFencingToken:String(lease.fencing_token),
         nextFencingToken:String(fenced.rows[0]?.fencing_token),
@@ -809,27 +872,27 @@ export async function authorizeProtectiveRelease(
         [randomUUID(),accountId,JSON.stringify(evidence),v13Digest(evidence)]);
     } else if(lease.state==="released"){
       if(lease.account_kill!==false)
-        return deny("release_released_lease_kill_state_inconsistent");
+        return refuse("release_released_lease_kill_state_inconsistent");
     } else if(lease.state==="owned"){
       // An already-enabled account may renew technical evidence without
       // changing a running worker. A newly released account must be idle.
-      if(accountNeedsEnable)return deny("release_owned_worker_requires_recovery");
-    } else return deny("release_worker_lease_state_unverified");
+      if(accountNeedsEnable)return refuse("release_owned_worker_requires_recovery");
+    } else return refuse("release_worker_lease_state_unverified");
   }
   if(evidence){
     const at=(deps.now??Date.now)();
-    if((deps.sha??deployedGitSha)()!==sha||at<evidence.started||at-evidence.started>5000)return deny('release_signed_evidence_stale');
+    if((deps.sha??deployedGitSha)()!==sha||at<evidence.started||at-evidence.started>5000)return refuse('release_signed_evidence_stale');
     const fresh=await client.query(`SELECT clock_timestamp()>=to_timestamp($1::double precision/1000)
       AND clock_timestamp()<to_timestamp($1::double precision/1000)+interval '5 seconds' AS fresh`,[evidence.started]);
-    if(fresh.rows[0]?.fresh!==true)return deny('release_signed_evidence_stale');
+    if(fresh.rows[0]?.fresh!==true)return refuse('release_signed_evidence_stale');
     const audit={ownerId,accountId,sha,reviewId:String(b.reviewId),observedAtMs:evidence.started,historyDigest:evidence.history.reconciliationDigest,exchangeDigest:hash(evidence.snapshot),ordersSubmitted:false};
     await client.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES($1,$2,'OWNER_RELEASE_SIGNED_RECHECK',$3,$4)",[randomUUID(),accountId,audit,v13Digest(audit)]);
   }
   commitAttempted=true;await client.query("COMMIT");committed=true;
-  return {ok:true,reason:"owner_approved_release_account_and_shared_live_enabled",
+  return {ok:true,reason:ownerSelf?"owner_approved_account_final_release_without_start":"owner_approved_release_account_and_shared_live_enabled",
    releaseId:inserted.rows[0]?.id,expiresAt:inserted.rows[0]?.expires_at,
    provisionalFreezeRepaired:repairing,
    ordersSubmitted:false as const,workerStarted:false as const};
- }catch{return commitAttempted?{ok:false,reason:"owner_release_outcome_unknown",outcome:"UNKNOWN" as const,ordersSubmitted:false as const}:deny("owner_release_transaction_refused")}
+ }catch{return commitAttempted?{ok:false,reason:"owner_release_outcome_unknown",outcome:"UNKNOWN" as const,ordersSubmitted:false as const}:refuse("owner_release_transaction_refused")}
  finally{if(client){let discard=commitAttempted&&!committed;if(!committed&&!commitAttempted)try{await client.query("ROLLBACK")}catch{discard=true;}client.release(discard)}}
 }

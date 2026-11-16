@@ -4,7 +4,7 @@ import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRec
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
-  authorizeProtectiveRelease,attestProtectiveReleaseReview,
+  authorizeProtectiveRelease,authorizeOwnerSelfFinalRelease,lookupOwnerFinalReleaseAuthorization,attestProtectiveReleaseReview,
   pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,lookupProtectiveReleaseAuthorization,
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease,ownerRestoreStatus} from "../lib/strata/ownerShaRelease";
@@ -64,6 +64,17 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   if(!isOperator(actor.role))return void res.status(403).json({reason:"independent_operator_role_required"});
   const result=await attestProtectiveReleaseReview(actor.subject,actor.role??"",req.body);
   res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/owner-final-authorize',async(req,res)=>{
+  const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await authorizeOwnerSelfFinalRelease(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.get('/owner-final-outcome',async(req,res)=>{
+  const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await lookupOwnerFinalReleaseAuthorization(actor.subject,String(req.query.reviewId??''),String(req.query.accountId??''));
+  res.setHeader('Cache-Control','private, no-store');res.json(sanitizePublic(result));
  });
  router.post("/authorize",async(req,res)=>{
   const actor=identify(res.locals);

@@ -1,3 +1,4 @@
+import {protectiveAuthoritySql} from './ownerFinalReleaseAuthority';
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 /**
  * Issue #165: Wallets-only, authenticated owner-scoped V4 release diagnostics.
@@ -72,8 +73,7 @@ const AUTH_SQL=`
   WHERE pr.release_commit_sha=$3 AND pr.state='approved'
     AND pr.revoked_at IS NULL AND pr.created_at<=now()
     AND pr.expires_at>now()+interval '20 minutes'
-    AND pr.independent_reviewer_id<>$1::uuid
-    AND pr.operator_approver_id<>pr.independent_reviewer_id) AS protective_exit_release
+    AND ${protectiveAuthoritySql('pr','$1::uuid','$2::text','$4::text')}) AS protective_exit_release
 `;
 /** Only the JWT-supplied subject may be passed; no request-body account IDs. */
 export async function inspectWalletV4Readiness(
