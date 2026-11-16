@@ -5,6 +5,7 @@ import {annotateFeeFailure,getFeeFailureDiagnostics} from "./feeFailureDiagnosti
 import {hasContinuousGrantHistory,checkContinuousEligibility} from './continuousExecutionAuthorization';
 import { pool,type PoolClient } from "@workspace/db";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
 import {
  parseReviewedApiSource, verifyReviewedApiFeeSourceStage, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION
 } from "./apiFeeSourceStage";
@@ -84,6 +85,19 @@ export const FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL = `
    ))
  FOR SHARE OF a,p,live,c,lease
 `;
+/** Versioned owner V3 policy uses the same signed order schema and final
+ * account/exchange/lease/entry-protection gate as V2. Only the *source*
+ * lineage differs: an AAL2 owner grant backed by genuine Kalshi publication
+ * and exact-market API metadata instead of a fictitious second reviewer.
+ */
+export const FINAL_OWNER_V3_ACCOUNT_FENCE_SQL=FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL
+ .replace("p.fee_policy_version='"+API_SOURCE_POLICY_VERSION+"'",
+          "p.fee_policy_version='"+V3_FEE_POLICY_VERSION+"'")
+ .replace("p.fee_formula_version='"+API_SOURCE_FORMULA_VERSION+"'",
+          "p.fee_formula_version='"+V3_FEE_FORMULA_VERSION+"'")
+ .replace(" WHERE a.owner_user_id=$1::uuid",
+          " WHERE a.fee_artifact_digest=$11 AND a.owner_user_id=$1::uuid");
+
 export function createGuardedReviewedApiFeeFetch(
  ownerUserId:string,executionAccountId:string,sourceUrl:string,transport:typeof fetch,
  expectedPolicyHash:string,expectedSignerFingerprint:string,
@@ -92,10 +106,14 @@ export function createGuardedReviewedApiFeeFetch(
    borrowTransaction?:()=>Pick<PoolClient,"query">|null;
    consumePublicMetadata?:(clientOrderId:string,market:string)=>PrefetchedPublicMetadata|undefined;
    verify?:typeof verifyReviewedApiFeeSourceStage;
+   verifyV3?:typeof verifyOwnerV3FeeAuthority;
+   ownerV3Mode?:boolean;
    verifyMonetary?:typeof verifyMonetaryFeeContract}={},
 ):typeof fetch {
- if(!parseReviewedApiSource(sourceUrl))
-  throw new Error("reviewed_api_source_url_invalid");
+ const ownerV3=deps.ownerV3Mode===true;
+ const v3Source=ownerV3?parseV3FeeSource(sourceUrl):null;
+ if(ownerV3?!v3Source:!parseReviewedApiSource(sourceUrl))
+  throw new Error(ownerV3?"owner_v3_source_url_invalid":"reviewed_api_source_url_invalid");
  if(!executionAccountId || !/^[a-f0-9]{64}$/i.test(expectedPolicyHash) ||
     !/^[a-f0-9]{64}$/i.test(expectedSignerFingerprint) ||
     !Number.isSafeInteger(expectedFencingToken) || expectedFencingToken<=0 ||
@@ -185,13 +203,33 @@ export function createGuardedReviewedApiFeeFetch(
    }
    const standingMode=isEntry&&await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>hasContinuousGrantHistory(client,ownerUserId,deployedSha!));
    const standingAllowed=standingMode&&await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>checkContinuousEligibility(client,ownerUserId,deployedSha!));
-   if(standingMode&&!standingAllowed)throw new Error('standing_final_fee_wire_authority_closed');
+   if((standingMode&&!standingAllowed)||(ownerV3&&isEntry&&!standingAllowed))
+     throw new Error('standing_final_fee_wire_authority_closed');
+   // A V3 source must remain provider/owner/SHA valid under row-share locks
+   // on the ACTUAL executor transaction until the single exchange POST ends.
+   // Its official PDF+market verifier never trusts a client-provided rate.
+   const v3Verified=ownerV3?
+     await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>(
+      deps.verifyV3??verifyOwnerV3FeeAuthority)(ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{
+       db:{connect:async()=>({
+         query:(q:string,p?:unknown[])=>client.query(q,p),release:()=>{},
+       })},sha:()=>deployedSha!,
+     })):null;
+   if(ownerV3&&(!v3Verified?.ok||v3Verified.identity.authorityId!==v3Source||
+      v3Verified.identity.sourceUrl!==sourceUrl||
+      v3Verified.identity.marketTicker!==ticker||
+      v3Verified.identity.feePolicyVersion!==V3_FEE_POLICY_VERSION||
+      v3Verified.identity.formulaVersion!==V3_FEE_FORMULA_VERSION||
+      v3Verified.identity.releaseCommitSha!==deployedSha))
+     throw new Error('owner_v3_current_fee_authority_or_market_closed');
    let finalAccount:{rows:Record<string,unknown>[]};
    const accountDone=withFeeAuthorityTimingPurpose("WIRE_FEE",()=>beginFeeAuthorityTiming("final_account_fence_query"));let accountOk=false;
-   try{finalAccount=await client.query(FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
+   try{finalAccount=await client.query(
+     ownerV3?FINAL_OWNER_V3_ACCOUNT_FENCE_SQL:FINAL_REVIEWED_API_ACCOUNT_FENCE_SQL,[
     ownerUserId,executionAccountId,expectedSignerFingerprint,expectedPolicyHash,sourceUrl,
     expectedFencingToken,expectedLeaseHolderId,isEntry,
     isEntry?deployedSha:null,standingAllowed,
+    ...(ownerV3&&v3Verified?.ok?[v3Verified.identity.sourceDigest]:[]),
    ]);accountOk=true;}finally{accountDone(accountOk?"fulfilled":"rejected");}
    if(finalAccount.rows.length!==1)
     throw new Error(isEntry?
@@ -201,19 +239,19 @@ export function createGuardedReviewedApiFeeFetch(
    // monetary model for this market. Requiring a separate PDF fetch here
    // makes the approved PDF-free alternative impossible during HTTP 429.
    // Preserve the additional verifier for explicit test/legacy callers.
-   if(deps.verifyMonetary){
+   if(deps.verifyMonetary&&!ownerV3){
     const monetary=await deps.verifyMonetary("ORDER_ENTRY",ticker);
     if(!monetary.ok || monetary.marketTicker!==ticker)
      throw new Error("api_fee_final_order_monetary_source_closed");
    }
    const publicMetadata=isEntry?deps.consumePublicMetadata?.(clientOrderId,ticker):undefined;
-   const checked=await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>(deps.verify??verifyReviewedApiFeeSourceStage)(
+   const checked=ownerV3?null:await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>(deps.verify??verifyReviewedApiFeeSourceStage)(
     ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{db:client,...(publicMetadata?{probe:(fetchImpl:typeof fetch,clock:()=>number,exactMarket?:string)=>probeCurrentKalshiFeeApi(fetchImpl,clock,exactMarket,publicMetadata.read,publicMetadata.capture)}:{})}));
-   if(!checked.ok || checked.identity.marketTicker!==ticker ||
+   if(!ownerV3&&(!checked?.ok || checked.identity.marketTicker!==ticker ||
       checked.identity.sourceUrl!==sourceUrl ||
       checked.identity.feePolicyVersion!==API_SOURCE_POLICY_VERSION ||
       checked.identity.formulaVersion!==API_SOURCE_FORMULA_VERSION ||
-      !/^[a-f0-9]{64}$/.test(checked.identity.digest))
+      !/^[a-f0-9]{64}$/.test(checked.identity.digest)))
     throw annotateFeeFailure(new Error("api_fee_final_order_grant_or_market_closed"),
       {phase:"authorization",reason:"api_fee_source_identity_mismatch"},checked);
    // Flip synchronously before calling: even a synchronous transport throw
