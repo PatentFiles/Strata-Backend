@@ -47,3 +47,31 @@ test('actual protective verifier accepts fresh protective model without reading 
  for(const sql of queries){assert.doesNotMatch(sql,/\b(INSERT|UPDATE|DELETE)\b/);assert.doesNotMatch(sql,/strata_api_fee_observation_leases/);}
  assert.doesNotMatch(queries[0]!,/g\.expires_at\s*>/);
 });
+
+test('owner V3 held risk-reducing exit accepts only fresh actual issuer-backed evidence',async()=>{
+ const at=Date.now(),actualDigest='c'.repeat(64),market='KXBTC15M-TEST';
+ const v3={ownerId:'11111111-1111-4111-8111-111111111111',
+  accountId:'owner-account',market,
+  sourceUrl:'strata-owner-fee-v3://kxbtc15m/44444444-4444-4444-8444-444444444444',
+  policyVersion:'strata_owner_official_monetary_fee_v3',
+  formulaVersion:'standard-quadratic-0.07-v1',digest:actualDigest};
+ const result={ok:true as const,reason:'owner_protective_issuer_fee_verified' as const,
+  sourceDigest:actualDigest,verifiedAtMs:at,monetaryFeeAuthorized:true as const,
+  tradingAuthorized:false as const,ordersSubmitted:false as const,workerStarted:false as const};
+ const passed=await readHeldProtectiveMarketFee(v3,{
+  verifyV3:async(owner,account,source,ticker)=>{
+   assert.deepEqual([owner,account,source,ticker],
+    [v3.ownerId,v3.accountId,v3.sourceUrl,v3.market]);return result;
+  },clock:()=>at+1000
+ });
+ assert.equal(passed,at);
+ await assert.rejects(readHeldProtectiveMarketFee(v3,{
+  verifyV3:async()=>result,clock:()=>at+5000
+ }),/current_issuer_unverified/);
+ await assert.rejects(readHeldProtectiveMarketFee({...v3,digest:'d'.repeat(64)},{
+  verifyV3:async()=>result,clock:()=>at
+ }),/current_issuer_unverified/);
+ await assert.rejects(readHeldProtectiveMarketFee({...v3,policyVersion:'wrong'},{
+  verifyV3:async()=>{throw Error('should_not_call')},clock:()=>at
+ }),/policy_identity_invalid/);
+});

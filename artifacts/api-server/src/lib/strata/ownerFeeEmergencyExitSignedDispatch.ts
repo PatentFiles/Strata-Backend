@@ -5,6 +5,8 @@ import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
 import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority,isReviewedProtectiveExitFeeFresh} from "./reviewedProtectiveExitFee";
+import {readOwnerV3ProtectiveSource,verifyOwnerV3ProtectiveFee,
+  verifyOwnerV3ProtectiveFeeAuthority} from "./ownerStandingFeeAuthorization";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
@@ -185,7 +187,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * The one-use UNKNOWN marker remains durable; DB-relative evidence lifetimes
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
-async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:typeof verifyReviewedProtectiveExitFeeAuthority;providerFresh:()=>boolean}):
+async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
  let c:DBClient|null=null,committed=false,eligible=false;
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
@@ -264,7 +266,12 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  AND pos.quantity_hundredths >= $8::bigint
 
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
-   WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
+   WHERE o.account_id=a.id
+     AND (o.kind='OWNER_ACTIVATION_REQUEST'
+       OR (o.kind='OWNER_SELF_ACCOUNT_ACTIVATED'
+         AND o.payload->>'sha'=$1::text
+         AND o.payload->>'ownerId'=$3::text
+         AND o.payload->>'accountId'=$4::text)))
  AND i.market=r.market_ticker AND i.kind='EXIT'
    AND i.state='DISPATCHED' AND i.terminal=false
    AND i.exchange_order_id IS NULL AND i.filled_hundredths=0
@@ -356,12 +363,25 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
   return fail("protective_exit_identity_invalid");
  // Production recovery is a trusted server-only implementation; tests may inject a reader.
- // The reviewed owner-pinned API fee model remains usable for narrowly
- // scoped protective exits when an entry/fee-source grant expires. It still
- // requires a fresh official exact-market fee/override read, and the exact
- // independently approved code SHA at the signed POST fence.
- const checkFee=ports.verifyFee??((_stage:"ORDER_ENTRY",market:string)=>
-   verifyReviewedProtectiveExitFee(ownerId,accountId,market));
+ // Determine the approved monetary authority from the REAL owner/account
+ // database record, never from request/strategy input. Historical V2 and
+ // owner-consented V3 retain distinct issuer evidence and final locks.
+ const policy=await (testMode&&ports.verifyFee?Promise.resolve({mode:'OTHER' as const}):
+   readOwnerV3ProtectiveSource(ownerId,accountId));
+ if(policy.mode==='UNAVAILABLE')return fail('protective_exit_owner_policy_not_verified');
+ const ownerV3=policy.mode==='OWNER_V3';
+ const ownerV3Source=ownerV3?policy.sourceUrl:null;
+ const checkFee=ports.verifyFee??(ownerV3
+   ?async(_stage:"ORDER_ENTRY",market:string)=>{
+     const evidence=await verifyOwnerV3ProtectiveFee(ownerId,accountId,ownerV3Source!,market);
+     if(!evidence.ok)return {ok:false,monetaryFeeAuthorized:false,
+       marketTicker:market,verifiedAt:undefined,authorityFingerprint:undefined};
+     const auth=await verifyOwnerV3ProtectiveFeeAuthority(ownerId,accountId,releaseSha);
+     return {ok:auth.ok,monetaryFeeAuthorized:auth.ok,
+       marketTicker:market,verifiedAt:new Date(evidence.verifiedAtMs).toISOString(),
+       authorityFingerprint:auth.ok?auth.authorityFingerprint:undefined};
+    }
+   :(_stage:"ORDER_ENTRY",market:string)=>verifyReviewedProtectiveExitFee(ownerId,accountId,market));
  // Only explicit local test fee doubles may omit the new private proof.
  // Hosted processes reject all injected ports above, even under NODE_ENV=test.
  const enforceFeeAuthority=!(testMode&&ports.verifyFee&&!ports.verifyFeeAuthority);
@@ -390,12 +410,23 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker||
     (enforceFeeAuthority&&currentAuthority!==initialAuthority))
   return refuseNeverSent(input,"final_fee_rejected",ports.db??(pool as unknown as DB));
+ const isCurrentProviderFee=()=>{
+   if(ownerV3){
+     const observedAt=Date.parse(String(current.verifiedAt??''));
+     const now=Date.now();
+     return Number.isFinite(observedAt)&&observedAt<=now&&
+       now-observedAt<5000;
+   }
+   return isReviewedProtectiveExitFeeFresh(current as Awaited<ReturnType<typeof verifyReviewedProtectiveExitFee>>);
+ };
  const outcome=await withFinalReleaseFence(input,releaseSha,
   beforeSend=>{
    if(ports.post){beforeSend();return ports.post(material,order);}
    return signedPost(material,order,beforeSend);
   },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),
-    enforceFeeAuthority?{fingerprint:initialAuthority as string,verify:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority,providerFresh:()=>isReviewedProtectiveExitFeeFresh(current)}:undefined);
+    enforceFeeAuthority?{fingerprint:initialAuthority as string,
+      verify:(ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
+      providerFresh:isCurrentProviderFee}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
  if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);

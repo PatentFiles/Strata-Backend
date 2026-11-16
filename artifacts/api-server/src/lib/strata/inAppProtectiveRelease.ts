@@ -15,6 +15,8 @@ import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
+import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -26,7 +28,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyV3StandingFee?:typeof verifyOwnerStandingFee;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -224,6 +226,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     return deny("commissioning_repair_requires_empty_exchange_and_ledger_history");
   const sourceUrl=String(account.fee_source_url??"");
   const reviewedApi=parseReviewedApiSource(sourceUrl);
+  const ownerV3=parseV3FeeSource(sourceUrl);
   let freshFeeDigest:string;
   let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
     authorityId:string}=null;
@@ -279,6 +282,25 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     freshFeeDigest=m.publicationDigest;
     v4FeeBinding={marketTicker:ticker,modelDigest:m.modelDigest,
       metadataDigest:m.metadataDigest,authorityId:String(g.authority_id)};
+  }else if(ownerV3){
+    // Genuine owner-authorized publication and current Kalshi market proof,
+    // separate from the legacy V2 independent-reviewer identity.
+    if(account.fee_policy_version!==V3_FEE_POLICY_VERSION||
+       account.fee_formula_version!==V3_FEE_FORMULA_VERSION)
+      return deny("release_owner_v3_policy_identity_invalid");
+    const feeStarted=(deps.now??Date.now)();
+    const verified=await(deps.verifyV3StandingFee??verifyOwnerStandingFee)(
+      ownerId,"STEP_11",sourceUrl);
+    const feeNow=(deps.now??Date.now)();
+    if(!verified.ok||verified.identity.sourceAuthorityId!==ownerV3||
+       verified.identity.sha!==sha||
+       verified.identity.sourceUrl!==sourceUrl||
+       verified.identity.sourceDigest!==account.fee_artifact_digest||
+       verified.identity.policyHash!==account.policy_hash||
+       !Number.isSafeInteger(feeStarted)||!Number.isSafeInteger(feeNow)||
+       feeNow<feeStarted||feeNow-feeStarted>15000)
+      return deny("release_owner_v3_current_provider_fee_unverified");
+    freshFeeDigest=verified.identity.sourceDigest;
   }else if(reviewedApi){
     // This reviewed API-source grant is an independently signed model, NOT
     // evidence that Kalshi's PDF was fetched. Verify the exact owner/source
@@ -396,7 +418,7 @@ export async function attestProtectiveReleaseReview(
 // Local candidate: collect outside the transaction, then bind every observed
 // account/credential/history row under locks before an enabling transition.
 // Live technical renewal retains its existing behavior and does not require flatness.
-async function finalReleaseScope(db:Query,owner:string,account:string,lock=false):Promise<DbRow & {worker:DbRow[]}>{
+export async function finalReleaseScope(db:Query,owner:string,account:string,lock=false):Promise<DbRow & {worker:DbRow[]}>{
  const q=await db.query(`SELECT a.xmin::text AS account_revision,p.xmin::text AS policy_revision,
  s.xmin::text AS stake_revision,c.xmin::text AS credential_revision,
  fa.xmin::text AS financial_revision,pc.xmin::text AS provider_revision,
@@ -443,7 +465,7 @@ async function finalReleaseScope(db:Query,owner:string,account:string,lock=false
  }
  return {...row,worker:leases.rows};
 }
-async function finalReleaseHistory(db:Query,account:string,owner:string,lock=false){
+export async function finalReleaseHistory(db:Query,account:string,owner:string,lock=false){
  const initial=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
  if(initial.rows.length)return {mode:'retained' as const,...await readReconciledReleaseRenewalHistory(db,account,owner,lock)};
  const suffix=lock?' FOR SHARE':'';
@@ -453,12 +475,12 @@ async function finalReleaseHistory(db:Query,account:string,owner:string,lock=fal
  if(events.rows.length||positions.rows.length||exits.rows.length)throw Error('release_empty_history_financial_records_present');
  return {mode:'empty' as const,...initial,reconciliationDigest:hash({emptyAccount:account,history:initial.historyDigest})};
 }
-function finalReleaseSnapshot(history:Awaited<ReturnType<typeof finalReleaseHistory>>,snapshot:Parameters<typeof verifyReconciledReleaseRenewalSnapshot>[1]){
+export function finalReleaseSnapshot(history:Awaited<ReturnType<typeof finalReleaseHistory>>,snapshot:Parameters<typeof verifyReconciledReleaseRenewalSnapshot>[1]){
  if(history.mode==='retained')verifyReconciledReleaseRenewalSnapshot(history,snapshot);
  else if(snapshot.orders.length||snapshot.fills.length||snapshot.positions.length||snapshot.settlements.length)throw Error('release_empty_history_signed_exposure');
 }
 
-async function collectFinalReleaseEvidence(owner:string,deps:Deps){
+export async function collectFinalReleaseEvidence(owner:string,deps:Deps={}){
  const db=deps.db??pool,v=await readReleaseOwner(db,owner);
  if(!v.ok)throw Error('release_owner_scope_unverified');
  if(v.account.kill_switch!==true)return null;
