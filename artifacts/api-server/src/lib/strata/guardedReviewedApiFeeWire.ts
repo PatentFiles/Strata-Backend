@@ -211,9 +211,12 @@ export function createGuardedReviewedApiFeeFetch(
    const v3Verified=ownerV3?
      await withFeeAuthorityTimingPurpose("WIRE_FEE",()=>(
       deps.verifyV3??verifyOwnerV3FeeAuthority)(ownerUserId,"ORDER_ENTRY",sourceUrl,ticker,{
-       db:{connect:async()=>({
-         query:(q:string,p?:unknown[])=>client.query(q,p),release:()=>{},
-       })},sha:()=>deployedSha!,
+       db:{
+         query:(q:string,p?:unknown[])=>client.query(q,p),
+         connect:async()=>({
+           query:(q:string,p?:unknown[])=>client.query(q,p),release:()=>{},
+         }),
+       },sha:()=>deployedSha!,
      })):null;
    if(ownerV3&&(!v3Verified?.ok||v3Verified.identity.authorityId!==v3Source||
       v3Verified.identity.sourceUrl!==sourceUrl||
