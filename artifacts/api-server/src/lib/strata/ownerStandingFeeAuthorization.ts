@@ -229,6 +229,84 @@ export async function verifyOwnerV3ProtectiveFee(
  }catch{return fail('owner_protective_fee_provider_or_database_unavailable');}
 }
 
+/** Actual persisted owner V3 fee policy selector; never accept a browser mode.
+ * Only the exact authenticated owner/account and approved policy may select
+ * the owner-only emergency fee verifier. Caller must separately verify the
+ * protective order, code approval, worker and zero-new-exposure conditions.
+ */
+export async function readOwnerV3ProtectiveSource(owner:string,account:string,db:Query=pool){
+ if(!UUID.test(owner)||!account)return {mode:'UNAVAILABLE' as const};
+ try{
+  const r=await db.query(`SELECT p.fee_policy_version,p.fee_formula_version,
+      p.fee_source_url,p.policy_hash
+    FROM public.v13_production_account a
+    JOIN public.v13_live_money_policy p
+      ON p.id=a.policy_id AND p.execution_account_id=a.id
+    WHERE a.owner_user_id=$1::uuid AND a.id=$2
+      AND a.commissioned=true AND a.subaccount=1 AND a.exchange_index=2
+      AND p.state='APPROVED' LIMIT 2`,[owner,account]);
+  if(r.rows.length!==1)return {mode:'UNAVAILABLE' as const};
+  const x=r.rows[0]!,source=txt(x.fee_source_url);
+  const id=parseV3FeeSource(source);
+  if(x.fee_policy_version!==V3_FEE_POLICY_VERSION)return {mode:'OTHER' as const};
+  if(!id||x.fee_formula_version!==V3_FEE_FORMULA_VERSION||
+    !HEX.test(txt(x.policy_hash)))return {mode:'UNAVAILABLE' as const};
+  return {mode:'OWNER_V3' as const,sourceUrl:source,sourceAuthorityId:id,
+    policyHash:txt(x.policy_hash)};
+ }catch{return {mode:'UNAVAILABLE' as const};}
+}
+
+/** Lock unchanged genuine issuer source provenance through final protective
+ * qualification. The short fee/standing ENTRY grant may expire or be
+ * explicitly revoked; neither is automatically extended or replaced. A
+ * checked, risk-reducing exit still requires current Kalshi issuer proof
+ * outside this function and the exact code/position/ledger/lease final fence.
+ */
+export async function verifyOwnerV3ProtectiveFeeAuthority(
+ owner:string,account:string,sha:string,db:Query=pool,
+){
+ if(!UUID.test(owner)||!SHA.test(sha)||!account)return {ok:false as const};
+ try{
+  const r=await db.query(`SELECT p.policy_hash,p.fee_source_url,
+    g.authority_id::text,g.official_source_digest,
+    e.attestation_id::text
+   FROM private.strata_owner_fee_authority_v3 g
+   JOIN private.strata_owner_fee_evidence_v3 e
+    ON e.attestation_id=g.attestation_id AND e.owner_user_id=g.owner_user_id
+    AND e.execution_account_id=g.execution_account_id
+    AND e.release_commit_sha=g.release_commit_sha
+    AND e.source_digest=g.official_source_digest
+   JOIN public.v13_production_account a
+    ON a.id=g.execution_account_id AND a.owner_user_id=g.owner_user_id
+   JOIN public.v13_live_money_policy p
+    ON p.id=a.policy_id AND p.execution_account_id=a.id
+   WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2
+    AND g.release_commit_sha=$3
+    AND p.state='APPROVED' AND p.fee_policy_version=$4
+    AND p.fee_formula_version=$5 AND p.fee_source_url=
+      ('strata-owner-fee-v3://kxbtc15m/'||g.authority_id::text)
+    AND a.fee_artifact_digest=g.official_source_digest
+    AND a.subaccount=1 AND a.exchange_index=2 AND a.commissioned=true
+    AND g.confirmation=$6 AND g.official_source_url=$7
+    AND e.owner_confirmation='I_AUTHORIZE_MY_OWN_OFFICIAL_KALSHI_FEE_EVIDENCE_V3'
+    LIMIT 2 FOR SHARE OF g,e,a,p`,
+   [owner,account,sha,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,
+    V3_FEE_GRANT_CONFIRM,V3_FEE_PUBLICATION_URL]);
+  if(r.rows.length!==1)return {ok:false as const};
+  const x=r.rows[0]!,bytes=txt(x.official_source_digest);
+  if(!HEX.test(bytes)||!HEX.test(txt(x.policy_hash))||
+    !UUID.test(txt(x.authority_id))||!UUID.test(txt(x.attestation_id)))
+    return {ok:false as const};
+  const authorityFingerprint=digest({kind:'OWNER_V3_REDUCE_ONLY_SOURCE',
+    owner,account,sha,policyHash:x.policy_hash,sourceUrl:x.fee_source_url,
+    feeAuthorityId:x.authority_id,evidenceId:x.attestation_id,digest:bytes});
+  return {ok:true as const,authorityFingerprint,
+    // A second live provider proof is performed before the final IOC.
+    // This short synchronous deadline is NOT a fee publication lease.
+    validForMs:5000};
+ }catch{return {ok:false as const};}
+}
+
 export async function ownerStandingFeeStatus(owner:string,deps:Deps={}){
  const sha=getSha(deps);
  if(!UUID.test(owner)||!SHA.test(sha))return fail('owner_standing_fee_identity_invalid');
