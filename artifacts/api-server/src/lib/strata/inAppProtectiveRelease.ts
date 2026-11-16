@@ -11,6 +11,9 @@ import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
 import { observeDynamicKalshiFees, computeDynamicFeeModelDigest, type DynamicFeeResult } from "./dynamicOfficialFeeSchedule";
 import { DYNAMIC_FEE_POLICY_VERSION_V4 } from "./dynamicFeeOrderRiskV4";
+import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
+import {OWNER_SELF_REVIEW_CONFIRM,configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
+import {OWNER_SELF_REVIEW_NOTE} from './ownerSelfStandingReview';
 import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
@@ -26,7 +29,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyOwnerV3Fee?:typeof verifyOwnerV3FeeAuthority;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -140,6 +143,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
     ? account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4
        ? approvedSource===CANONICAL_FEE_SCHEDULE_URL
           ? "DYNAMIC_PROVIDER_V4" : "UNRECOGNIZED"
+       : account.fee_policy_version===V3_FEE_POLICY_VERSION&&parseV3FeeSource(approvedSource) ? "OWNER_V3"
        : parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2"
        : approvedSource===CANONICAL_FEE_SCHEDULE_URL
           ? "LEGACY_PDF_V1" : "UNRECOGNIZED"
@@ -224,6 +228,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     return deny("commissioning_repair_requires_empty_exchange_and_ledger_history");
   const sourceUrl=String(account.fee_source_url??"");
   const reviewedApi=parseReviewedApiSource(sourceUrl);
+  const ownerV3Id=parseV3FeeSource(sourceUrl);
   let freshFeeDigest:string;
   let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
     authorityId:string}=null;
@@ -279,6 +284,25 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     freshFeeDigest=m.publicationDigest;
     v4FeeBinding={marketTicker:ticker,modelDigest:m.modelDigest,
       metadataDigest:m.metadataDigest,authorityId:String(g.authority_id)};
+  }else if(ownerV3Id){
+    // A versioned owner-authenticated fee source is an alternative to V2
+    // human ADMIN issuance, never a fabricated V2 independent signature.
+    // Check actual official monetary publication and current market metadata,
+    // owner/account/SHA scope, revocation and the saved policy source.
+    if(account.fee_policy_version!==V3_FEE_POLICY_VERSION||
+       account.fee_formula_version!==V3_FEE_FORMULA_VERSION)
+      return deny("release_owner_v3_policy_or_formula_mismatch");
+    const fee=await(deps.verifyOwnerV3Fee??verifyOwnerV3FeeAuthority)(
+      ownerId,"STEP_11",sourceUrl);
+    if(!fee.ok)return deny("release_owner_v3_"+fee.reason);
+    if(fee.identity.authorityId!==ownerV3Id||
+       fee.identity.releaseCommitSha!==sha||
+       fee.identity.sourceUrl!==sourceUrl||
+       fee.identity.feePolicyVersion!==V3_FEE_POLICY_VERSION||
+       fee.identity.formulaVersion!==V3_FEE_FORMULA_VERSION||
+       fee.identity.sourceDigest!==String(account.fee_artifact_digest??""))
+      return deny("release_owner_v3_source_sha_or_digest_mismatch");
+    freshFeeDigest=fee.identity.sourceDigest;
   }else if(reviewedApi){
     // This reviewed API-source grant is an independently signed model, NOT
     // evidence that Kalshi's PDF was fetched. Verify the exact owner/source
@@ -832,4 +856,236 @@ export async function authorizeProtectiveRelease(
    ordersSubmitted:false as const,workerStarted:false as const};
  }catch{return commitAttempted?{ok:false,reason:"owner_release_outcome_unknown",outcome:"UNKNOWN" as const,ordersSubmitted:false as const}:deny("owner_release_transaction_refused")}
  finally{if(client){let discard=commitAttempted&&!committed;if(!committed&&!commitAttempted)try{await client.query("ROLLBACK")}catch{discard=true;}client.release(discard)}}
+}
+
+
+/**
+ * OWNER_SELF_V1 is a distinct product authority, never a claimed independent
+ * review. An AAL2-authenticated owner may release ONLY their own commissioned,
+ * DISABLED, KILLED, DISARMED account after real Kalshi-signed *complete*
+ * orders/fills/positions/settlements/cash reconciliation and a valid exact
+ * SHA/policy technical review. The existing standing-grant route still requires
+ * a separate owner confirmation after this operation.
+ *
+ * This never turns on the shared global execution gate and never ARM/STARTs
+ * a worker or sends a venue order. If COMMIT is ambiguous it NEVER advises retry.
+ */
+export const OWNER_SELF_ACCOUNT_ACTIVATE_CONFIRM =
+ "I_AUTHORIZE_MY_OWN_SIGNED_AND_RECONCILED_ACCOUNT_RELEASE_WITHOUT_A_SECOND_ADMIN_V1";
+
+export async function activateOwnerSelfStandingAccount(
+ ownerId:string,raw:unknown,deps:Deps={}
+){
+ const fail=(reason:string)=>({ok:false as const,reason,ordersSubmitted:false as const,
+   workerStarted:false as const,tradingAuthorized:false as const});
+ const b=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as DbRow:{};
+ const sha=(deps.sha??deployedGitSha)();
+ if(!valid(ownerId)||!valid(b.reviewId)||!valid(b.qualificationId)||
+    !SHA.test(sha)||b.expectedSha!==sha||
+    typeof b.accountId!=="string"||typeof b.policyHash!=="string"||
+    !/^[a-f0-9]{64}$/.test(b.policyHash)||
+    b.confirmation!==OWNER_SELF_ACCOUNT_ACTIVATE_CONFIRM||
+    Object.keys(b).some(k=>!["reviewId","qualificationId","expectedSha",
+      "accountId","policyHash","confirmation"].includes(k)))
+   return fail("explicit_exact_owner_activation_confirmation_required");
+ if(!ownerSelfEnrollmentAllowed(ownerId,b.accountId,configuredOwnerSelfScope()))
+   return fail("owner_self_account_not_enrolled");
+ const db=deps.db??pool;
+ let evidence:Awaited<ReturnType<typeof collectFinalReleaseEvidence>>=null;
+ try{
+   const existing=await readReleaseOwner(db,ownerId);
+   if(!existing.ok)return fail(existing.reason);
+   const a=existing.account;
+   if(a.id!==b.accountId||a.policy_hash!==b.policyHash||
+      a.commissioned!==true||a.execution_enabled!==false||
+      a.kill_switch!==true||a.blocked_reason!==null)
+     return fail("owner_release_requires_exact_disabled_killed_account");
+   const stake=Number(a.configured_stake_cents);
+   if(!Number.isSafeInteger(stake)||stake<500||
+      stake>Number(a.max_entry_stake_cents)||
+      stake>Number(a.max_entry_all_in_cents)||
+      !/^\d+$/.test(String(a.cash_micros))||
+      BigInt(stake)*10000n>BigInt(String(a.cash_micros)))
+     return fail("owner_release_stake_cash_or_risk_policy_invalid");
+   const source=String(a.fee_source_url??"");
+   if(a.fee_policy_version!==V3_FEE_POLICY_VERSION||
+      a.fee_formula_version!==V3_FEE_FORMULA_VERSION||
+      !parseV3FeeSource(source))
+     return fail("owner_only_monetary_policy_migration_required");
+   // Monetary authorization remains separate from owner execution approval.
+   // A current genuine issuer PDF + Kalshi API observation is still mandatory.
+   const currentFee=await(deps.verifyOwnerV3Fee??verifyOwnerV3FeeAuthority)(
+     ownerId,"STEP_11",source);
+   if(!currentFee.ok||currentFee.identity.sourceDigest!==a.fee_artifact_digest||
+      currentFee.identity.releaseCommitSha!==sha)
+     return fail("current_owner_issuer_fee_authority_required");
+   evidence=await collectFinalReleaseEvidence(ownerId,deps);
+   if(!evidence||evidence.account!==b.accountId)
+     return fail("signed_flat_account_reconciliation_unavailable");
+ }catch{return fail("fresh_signed_owner_account_preflight_failed");}
+ if(!evidence)return fail("signed_flat_account_reconciliation_unavailable");
+ let tx:Awaited<ReturnType<Db["connect"]>>|null=null,commitAttempted=false,committed=false,discard=false;
+ try{
+   tx=await db.connect();
+   await tx.query("BEGIN");
+   await tx.query("SET LOCAL lock_timeout='1500ms'");
+   await tx.query("SET LOCAL statement_timeout='12000ms'");
+   const current=await readReleaseOwner(tx,ownerId);
+   if(!current.ok||current.account.id!==b.accountId||
+      current.account.policy_hash!==b.policyHash||
+      current.account.commissioned!==true||current.account.execution_enabled!==false||
+      current.account.kill_switch!==true||current.account.blocked_reason!==null)
+     return fail("owner_release_account_policy_or_kill_changed");
+   const live=await tx.query(
+    "SELECT mode,live_execution_enabled,manual_kill_switch FROM public.live_execution_config WHERE id='singleton' FOR SHARE");
+   if(live.rows.length!==1||live.rows[0]?.mode!=="V13_PRODUCTION"||
+      live.rows[0]?.live_execution_enabled!==true||
+      live.rows[0]?.manual_kill_switch!==false)
+     return fail("shared_execution_gate_requires_separate_platform_release");
+   // Lock signer, cash, policy, account, lease, and all source identities.
+   const locked=await finalReleaseScope(tx,ownerId,String(b.accountId),true);
+   if(hash(locked)!==hash(evidence.scope)||hash(current.account)!==hash(evidence.activation))
+     return fail("signed_release_account_revision_or_credential_changed");
+   if(locked.worker.length!==1||
+      locked.worker[0]?.state!=="killed"||
+      locked.worker[0]?.account_kill!==true||
+      locked.worker[0]?.arm_requested!==false)
+     return fail("owner_release_requires_terminal_killed_unarmed_lease");
+   const history=await finalReleaseHistory(tx,String(b.accountId),ownerId,true);
+   if(history.reconciliationDigest!==evidence.history.reconciliationDigest)
+     return fail("signed_release_financial_history_changed");
+   finalReleaseSnapshot(history,evidence.snapshot);
+   const local=await tx.query(
+    "SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid",
+    [b.accountId,ownerId]);
+   if(local.rows.length!==1)return fail("signed_release_ledger_missing");
+   const ledger=new ProductionLedger(db as Pool,String(b.accountId));
+   await ledger.finalAccountProof(tx as PoolClient,local.rows[0] as unknown as Account,
+     evidence.snapshot,(deps.now??Date.now)());
+   await ledger.assertConservation(tx as PoolClient,local.rows[0] as unknown as Account);
+   const uncertain=await readUnresolvedIntentMode((sql,p)=>tx!.query(sql,p),String(b.accountId));
+   if(!uncertain.ok||uncertain.mode!=="entries")return fail("release_unresolved_exchange_order");
+   // Recheck the original server-issued owner review and qualification, not
+   // a browser-stated reviewer identity. Row locks fence concurrent revocation.
+   const review=await tx.query(`
+ SELECT r.release_id::text,r.evidence_digest,r.review_url,r.review_note,
+        q.qualification_id::text,q.evidence_digest AS qualification_digest
+ FROM private.strata_standing_execution_reviews r
+ JOIN private.strata_protective_release_qualification q
+   ON q.qualification_id=r.qualification_id
+   AND q.owner_user_id=r.owner_user_id
+   AND q.execution_account_id=r.execution_account_id
+   AND q.release_commit_sha=r.release_commit_sha
+ WHERE r.release_id=$1::uuid AND r.qualification_id=$2::uuid
+   AND r.owner_user_id=$3::uuid AND r.execution_account_id=$4
+   AND r.release_commit_sha=$5 AND r.policy_hash=$6
+   AND r.review_authority='OWNER_SELF_V1'
+   AND r.independent_reviewer_id IS NULL AND r.owner_authorizer_id=$3::uuid
+   AND r.confirmation=$7 AND r.state='approved' AND r.revoked_at IS NULL
+   AND r.created_at<=now() AND r.created_at>=q.observed_at
+   AND r.created_at<q.expires_at
+   AND q.expires_at>clock_timestamp()+interval '60 seconds'
+ FOR SHARE OF r,q`,
+    [b.reviewId,b.qualificationId,ownerId,b.accountId,sha,b.policyHash,
+      OWNER_SELF_REVIEW_CONFIRM]);
+   if(review.rows.length!==1)return fail("current_authenticated_owner_review_missing");
+   const r=review.rows[0]!;
+   const url=`https://github.com/PatentFiles/Strata-Backend/commit/${sha}`;
+   if(r.review_url!==url||r.review_note!==OWNER_SELF_REVIEW_NOTE||
+      r.evidence_digest!==hash({actor:ownerId,owner:ownerId,sha,qid:b.qualificationId,
+       account:b.accountId,policy:b.policyHash,
+       qualification:r.qualification_digest,note:OWNER_SELF_REVIEW_NOTE,url,
+       scope:OWNER_SELF_REVIEW_CONFIRM}))
+     return fail("owner_review_immutable_evidence_mismatch");
+   const approval=await tx.query(`
+ SELECT approval_id::text,qualification_id::text,qualification_digest,revoked_at
+ FROM private.strata_owner_sha_approvals
+ WHERE owner_user_id=$1::uuid AND execution_account_id=$2
+   AND release_commit_sha=$3
+ FOR UPDATE`,[ownerId,b.accountId,sha]);
+   if(approval.rows.length>1||approval.rows.some(x=>x.revoked_at!==null))
+     return fail("owner_sha_prior_revocation_or_duplicate");
+   let approvalId:string;
+   if(approval.rows.length===0){
+     // The exact same owner explicitly confirms this SHA and standing review.
+     // No second human or fabricated historical independent review row.
+     const issued=await tx.query(`
+ INSERT INTO private.strata_owner_sha_approvals
+ (owner_user_id,execution_account_id,release_commit_sha,
+  qualification_id,qualification_digest)
+ VALUES($1::uuid,$2,$3,$4::uuid,$5)
+ RETURNING approval_id::text`,
+      [ownerId,b.accountId,sha,b.qualificationId,r.qualification_digest]);
+     if(issued.rows.length!==1)return fail("owner_sha_approval_not_recorded");
+     approvalId=String(issued.rows[0]?.approval_id);
+   }else{
+     if(approval.rows[0]?.qualification_id!==b.qualificationId||
+        approval.rows[0]?.qualification_digest!==r.qualification_digest)
+       return fail("existing_owner_sha_approval_scope_mismatch");
+     approvalId=String(approval.rows[0]?.approval_id);
+   }
+   const at=(deps.now??Date.now)();
+   if((deps.sha??deployedGitSha)()!==sha||
+      at<evidence.started||at-evidence.started>5000)
+     return fail("owner_release_signed_evidence_outside_five_second_gate");
+   // Durable DB-trigger checks the same verified provider timestamp at COMMIT.
+   const signed={ownerId,accountId:b.accountId,sha,
+      approvalId,reviewId:b.reviewId,observedAtMs:evidence.started,
+      historyDigest:history.reconciliationDigest,exchangeDigest:hash(evidence.snapshot),
+      ordersSubmitted:false};
+   await tx.query(`
+ INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+ VALUES($1,$2,'OWNER_RELEASE_SIGNED_RECHECK',$3::jsonb,$4)`,
+    [randomUUID(),b.accountId,JSON.stringify(signed),v13Digest(signed)]);
+   const enabled=await tx.query(`
+ UPDATE public.v13_production_account
+ SET execution_enabled=true,kill_switch=false,revision=revision+1,
+     reconciled_at=to_timestamp($4::double precision/1000)
+ WHERE id=$1 AND owner_user_id=$2::uuid
+   AND commissioned=true AND execution_enabled=false AND kill_switch=true
+   AND blocked_reason IS NULL AND cash_precision_verified=true
+   AND reserved_micros=0
+   AND policy_id=$3
+   AND clock_timestamp()>=to_timestamp($4::double precision/1000)
+   AND clock_timestamp()<to_timestamp($4::double precision/1000)+interval '5 seconds'
+ RETURNING id`,[b.accountId,ownerId,current.account.policy_id,evidence.started]);
+   if(enabled.rows.length!==1)return fail("owner_account_activation_cas_failed");
+   const prior=locked.worker[0]!;
+   const next=await tx.query(`
+ UPDATE private.kalshi_account_worker_lease
+ SET state='released',account_kill=false,arm_requested=false,
+     fencing_token=fencing_token+1,heartbeat_at=now(),released_at=now()
+ WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
+  AND state='killed' AND account_kill=true AND arm_requested=false
+  AND fencing_token=$3::bigint
+ RETURNING fencing_token::text`,
+    [b.accountId,ownerId,prior.fencing_token]);
+   if(next.rows.length!==1)return fail("terminal_worker_release_fence_failed");
+   const audit={...signed,oldFencingToken:String(prior.fencing_token),
+     nextFencingToken:String(next.rows[0]?.fencing_token),
+     workerStarted:false,sharedGlobalGateChanged:false};
+   await tx.query(`
+ INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+ VALUES($1,$2,'OWNER_SELF_RELEASED_TERMINAL_LEASE',$3::jsonb,$4)`,
+    [randomUUID(),b.accountId,JSON.stringify(audit),v13Digest(audit)]);
+   // Never claim a submitted trade. Standing grant + ARM + START are separate
+   // future authenticated actions after current-readiness verification.
+   commitAttempted=true;await tx.query("COMMIT");committed=true;
+   return {ok:true as const,reason:"owner_self_account_eligible_worker_stopped",
+     sha,accountId:b.accountId,approvalId,reviewId:b.reviewId,
+     workerStarted:false as const,ordersSubmitted:false as const,
+     tradingAuthorized:false as const,requiresOwnerStandingGrant:true as const};
+ }catch{
+   if(commitAttempted){
+     discard=true;
+     return {...fail("owner_account_activation_commit_outcome_unknown"),
+       outcomeUnknown:true as const,retryAuthorized:false as const};
+   }
+   return fail("owner_account_activation_failed_closed");
+ }finally{
+   if(tx){
+     if(!committed&&!discard)try{await tx.query("ROLLBACK")}catch{discard=true;}
+     tx.release(discard);
+   }
+ }
 }

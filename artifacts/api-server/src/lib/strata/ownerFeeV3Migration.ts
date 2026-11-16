@@ -122,8 +122,14 @@ export async function previewOwnedV3FeeMigration(ownerId:string,deps:Inputs={}):
   if(a.kill_switch!==true)return fail("stop_and_disarm_before_fee_migration");
   if(a.blocked_reason!==null&&a.blocked_reason!==undefined&&a.blocked_reason!=="awaiting_account_commissioning")
    return fail("unresolved_account_risk_freeze");
-  if(a.cash_precision_verified!==true||Date.now()-safeTime(a.reconciled_at)>15*60_000)
-   return fail("fresh_cash_reconciliation_required");
+  // A STOPPED worker cannot keep its cached reconciled_at fresh. Preview is
+  // read-only; the confirm endpoint performs a new complete signed Kalshi
+  // history/balance reconciliation and rechecks the account under row locks.
+  // Do not confuse the old worker timestamp with current exchange evidence.
+  const lastCash=safeTime(a.reconciled_at),previewAt=(deps.now??Date.now)();
+  if(a.cash_precision_verified!==true||!Number.isFinite(lastCash)||
+     lastCash>previewAt+2000)
+   return fail("cash_precision_or_reconciliation_timestamp_unverified");
   return {ok:true,reason:"owner_v3_fee_migration_preview_only",policyMigrated:false,tradingAuthorized:false,
    expectedPolicyId:txt(a.policy_id),expectedPolicyHash:txt(a.policy_hash),
    expectedPolicyVersion:Number(a.version),
@@ -224,8 +230,14 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
      txt(a.kalshi_connection_id)!==txt(pre.kalshi_connection_id)||
      txt(a.policy_id)!==b.expectedPolicyId)return fail("policy_concurrency_conflict");
   const reconciled=safeTime(a.reconciled_at),now=(deps.now??Date.now)();
-  if(!Number.isFinite(reconciled)||reconciled>now+10_000||now-reconciled>15*60_000)
-   return fail("fresh_cash_reconciliation_required");
+  // This is a stopped-account migration. Exchange-native complete history,
+  // exact signed cash and unchanged financial/account rows above replace
+  // artificial worker timestamp freshness. Future-dated stored cash is invalid.
+  if(!Number.isFinite(reconciled)||reconciled>now+2000||
+     now<feedStarted||now-feedStarted>45_000||
+     feeds.historicalCoverageComplete!==true||
+     feeds.observedAtMs!==feedStarted||String(feeds.cashMicros)!==String(a.cash_micros))
+   return fail("fresh_signed_cash_history_or_clock_unverified");
   const funds=BigInt(String(a.cash_micros)),reserved=BigInt(String(a.reserved_micros));
   if(funds<0n||reserved!==0n||String(feeds.cashMicros)!==String(a.cash_micros))return fail("cash_or_reservations_unverified");
   // The account revision fences policy/cash changes. A separate re-read
@@ -364,6 +376,21 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);
+  // A signed owner policy migration invalidates the earlier
+  // OWNER_ACTIVATION_REQUEST because it hashes the old policy/source.
+  // Re-record ONLY this owner's explicit request for their newly selected
+  // policy. It grants no trade permission and does not clear the KILL.
+  const activationRequest={accountId:id,policyId,
+    feeDigest:fresh.identity.sourceDigest,
+    stakeCents:Number(stake.rows[0]!.configured_stake_cents),
+    commissioningDigest,minimumExitMicros:Number(a.minimum_exit_micros)};
+  if(!Number.isSafeInteger(activationRequest.minimumExitMicros)||
+     activationRequest.minimumExitMicros!==10000)
+    return fail("owner_activation_exit_floor_unverified");
+  await tx.query(`INSERT INTO public.v13_production_observation
+     (id,account_id,kind,payload,digest)
+     VALUES($1,$2,'OWNER_ACTIVATION_REQUEST',$3::jsonb,$4)`,
+    [randomUUID(),id,JSON.stringify(activationRequest),auditDigest(activationRequest)]);
   const event={accountId:id,ownerId,oldPolicyId:old.id,newPolicyId:policyId,
    oldPolicyHash:old.policyHash,newPolicyHash:next.policyHash,feeDigest:fresh.identity.sourceDigest,
    grantId:fresh.identity.authorityId,reason:"owner_authorized_pdf_to_owner_v3_source",

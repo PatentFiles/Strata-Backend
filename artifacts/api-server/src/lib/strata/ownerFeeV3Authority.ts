@@ -201,7 +201,7 @@ export async function verifyOwnerV3FeeAuthority(
       AND e.verification_stage='STEP_9'
       AND e.source_kind='official_kalshi_server_verified_v3'
       AND e.owner_confirmation='I_AUTHORIZE_MY_OWN_OFFICIAL_KALSHI_FEE_EVIDENCE_V3'
-    LIMIT 2`,
+    LIMIT 2 FOR SHARE OF g,e,a`,
    [id,ownerId,sha,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,
     V3_FEE_PUBLICATION_URL,V3_FEE_AUTHORITY_SCOPE,stage,V3_FEE_GRANT_CONFIRM]);
   if(rows.rows.length!==1)return reject("v3_authority_missing_revoked_or_expired");

@@ -30,6 +30,7 @@ import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSource
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
 import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
+import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
@@ -391,12 +392,16 @@ export function createProductionPersonalSession(
     if(!cashProof.ok)return cashProof;
     const alternate=parseOwnerFeeSource(sourceUrl);
     const apiSource=parseReviewedApiSource(sourceUrl);
+    const ownerV3=parseV3FeeSource(sourceUrl);
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
        formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
       return {ok:false,reason:"source_policy_identity_invalid"};
     if(apiSource && (policyVersion!==API_SOURCE_POLICY_VERSION ||
        formulaVersion!==API_SOURCE_FORMULA_VERSION))
       return {ok:false,reason:"api_source_policy_identity_invalid"};
+    if(ownerV3 && (policyVersion!==V3_FEE_POLICY_VERSION||
+       formulaVersion!==V3_FEE_FORMULA_VERSION))
+      return {ok:false,reason:"owner_v3_policy_identity_invalid"};
     const operatorAtStart=alternate?
       await verifyOwnerFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
     if(alternate && (!operatorAtStart?.ok || operatorAtStart.identity.digest!==digest))
@@ -405,17 +410,26 @@ export function createProductionPersonalSession(
       await verifyReviewedApiFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
     if(apiSource && (!apiAtStart?.ok || apiAtStart.identity.grantId!==apiSource.grantId))
       return {ok:false,reason:"reviewed_api_source_release_unavailable"};
+    const ownerV3AtStart=ownerV3?
+      await verifyOwnerV3FeeAuthority(input.userId,"STEP_11",sourceUrl):null;
+    if(ownerV3&&(!ownerV3AtStart?.ok||
+       ownerV3AtStart.identity.authorityId!==ownerV3||
+       ownerV3AtStart.identity.sourceDigest!==digest||
+       ownerV3AtStart.identity.sourceUrl!==sourceUrl))
+      return {ok:false,reason:"owner_v3_source_release_unavailable"};
     // The commissioning digest is a historical observation. Refresh the API
     // source for the exact target market at every readMarket and final POST.
     // The direct owner's standing policy has no human reviewer requirement,
     // but must prove authoritative monetary schedule + current Kalshi market.
     // Isolated test-injected fee verifiers never invoke the production source.
-    const monetaryAtStart=!apiSource&&!alternate&&!options.verifyFee?
+    const monetaryAtStart=!apiSource&&!alternate&&!ownerV3&&!options.verifyFee?
       await verifyMonetaryFeeContract("STEP_11"):null;
     if(monetaryAtStart && (!monetaryAtStart.ok||
        !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
       return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
-    const artifact=apiSource && apiAtStart?.ok?
+    const artifact=ownerV3&&ownerV3AtStart?.ok?
+      {valid:true,digest:ownerV3AtStart.identity.sourceDigest,verifiedAt:now()}:
+      apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
       alternate && operatorAtStart?.ok?
       {valid:true,digest:operatorAtStart.identity.digest,
@@ -460,7 +474,8 @@ export function createProductionPersonalSession(
       finalLedger.assertFinalWireClock();
       directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return ownerV3 ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{ownerV3Mode:true,borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+      apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
@@ -658,6 +673,16 @@ export function createProductionPersonalSession(
                   throw new Error("owner_operator_fee_source_unavailable");
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
+              }else if(ownerV3){
+                const checked=await verifyOwnerV3FeeAuthority(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market);
+                if(!checked.ok||checked.identity.authorityId!==ownerV3||
+                   checked.identity.sourceDigest!==digest||
+                   checked.identity.marketTicker!==market)
+                  throw new Error("owner_v3_exact_market_fee_source_unavailable");
+                // Only record time after the provider proof has completed.
+                feeVerifiedAt=now();
+                feeCheckedAt=feeVerifiedAt;
               }else if(!options.verifyFee){
                 const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
                 if(!monetary.ok||!monetary.monetaryFeeAuthorized||
