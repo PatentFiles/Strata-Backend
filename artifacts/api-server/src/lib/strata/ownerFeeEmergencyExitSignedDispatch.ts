@@ -187,7 +187,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * The one-use UNKNOWN marker remains durable; DB-relative evidence lifetimes
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
-async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:typeof verifyReviewedProtectiveExitFeeAuthority;providerFresh:()=>boolean}):
+async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
  let c:DBClient|null=null,committed=false,eligible=false;
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
