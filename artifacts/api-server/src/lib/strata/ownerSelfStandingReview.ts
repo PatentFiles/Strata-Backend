@@ -7,7 +7,8 @@ type Deps={db?:{connect:()=>Promise<Client>};sha?:()=>string;scope?:()=>Scope|un
 export const OWNER_SELF_REVOKE_CONFIRM='I_REVOKE_MY_OWNER_ONLY_STANDING_EXECUTION_REVIEW_V1';
 
 type Client={query:(sql:string,args?:unknown[])=>Promise<{rows:Record<string,unknown>[]}>,release:(error?:Error)=>void};
-const note='The authenticated account owner authorizes this exact deployed release after the application signed technical qualification. This is owner consent, not an independent review or a claim of machine attestation.';
+export const OWNER_SELF_REVIEW_NOTE='The authenticated account owner authorizes this exact deployed release after the application signed technical qualification. This is owner consent, not an independent review or a claim of machine attestation.';
+const note=OWNER_SELF_REVIEW_NOTE;
 /** Existing product qualification + explicit authenticated owner approval. No
  * machine issuer, unrelated reviewer, freeze clearance, ARM or START. */
 export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,deps:Deps={}){
