@@ -52,10 +52,17 @@ test('reduce-only exact IOC is passed once only after account and issuer checks'
  assert.deepEqual(h.statements[0].params?.slice(-2),[uuid,sha]);
 });
 test('entry requires protected standing grant and refuses absent or revoked lease',async()=>{
- const without=harness({standing:false});await assert.rejects(send(without,order(false)),/standing_entry_authority_not_current/);
- assert.equal(without.sends,0);
- const withoutHistory=harness({history:false});await assert.rejects(send(withoutHistory,order(false)),/standing_entry_authority_not_current/);
- assert.equal(withoutHistory.sends,0);
+ const prior=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ try{
+  const without=harness({standing:false});await assert.rejects(send(without,order(false)),/standing_entry_authority_not_current/);
+  assert.equal(without.sends,0);
+  const withoutHistory=harness({history:false});await assert.rejects(send(withoutHistory,order(false)),/standing_entry_authority_not_current/);
+  assert.equal(withoutHistory.sends,0);
+ }finally{
+  if(prior===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+  else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=prior;
+ }
 });
 test('missing locked fee authority or missing current provider proof cannot send',async()=>{
  const noRows=harness({lockRows:0});await assert.rejects(send(noRows,order(true)),/final_account_or_source_closed/);
