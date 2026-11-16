@@ -329,13 +329,25 @@ export async function ownerStandingFeeStatus(owner:string,deps:Deps={}){
  try{
   const db=deps.db??pool;
   const r=await db.query(`SELECT a.id AS account_id,p.policy_hash,p.fee_source_url,
-    s.consent_id::text,s.expires_at,s.revoked_at,s.source_authority_id::text
+    s.consent_id::text,s.expires_at,s.revoked_at,s.source_authority_id::text,
+    historical.last_revoked_id,historical.last_revoked_at
    FROM public.v13_production_account a
    JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
    LEFT JOIN private.strata_owner_standing_fee_v1 s
      ON s.owner_user_id=a.owner_user_id AND s.execution_account_id=a.id
      AND s.release_commit_sha=$2 AND s.approved_policy_hash=p.policy_hash
      AND s.revoked_at IS NULL
+   LEFT JOIN LATERAL (
+     SELECT prior.consent_id::text AS last_revoked_id,
+       prior.revoked_at AS last_revoked_at
+     FROM private.strata_owner_standing_fee_v1 prior
+     WHERE prior.owner_user_id=a.owner_user_id
+       AND prior.execution_account_id=a.id
+       AND prior.release_commit_sha=$2
+       AND prior.approved_policy_hash=p.policy_hash
+       AND prior.revoked_at IS NOT NULL
+     ORDER BY prior.revoked_at DESC,prior.consented_at DESC LIMIT 1
+   ) historical ON TRUE
    WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
      AND p.state='APPROVED' ORDER BY s.consented_at DESC NULLS LAST LIMIT 2`,[owner,sha]);
   if(r.rows.length!==1)return fail('owner_standing_fee_status_ambiguous');
@@ -346,6 +358,8 @@ export async function ownerStandingFeeStatus(owner:string,deps:Deps={}){
    consentId:row.consent_id??null,
    sourceAuthorityId:row.source_authority_id??null,
    expiresAt:row.expires_at??null,
+   lastRevokedId:row.last_revoked_id??null,
+   lastRevokedAt:row.last_revoked_at??null,
    consentCurrent:row.revoked_at===null&&Number.isFinite(expiry)&&expiry>clock(deps)+30_000,
    featureEnabled:allowed(deps),tradingAuthorized:false as const,
    ordersSubmitted:false as const};
