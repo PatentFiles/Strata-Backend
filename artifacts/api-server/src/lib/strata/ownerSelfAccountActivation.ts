@@ -18,7 +18,8 @@ import {createHash,randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {deployedGitSha} from './deployedGitSha';
 import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
-import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
+import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
+import {verifyOwnerStandingFee} from './ownerStandingFeeAuthorization';
 import {collectFinalReleaseEvidence,finalReleaseScope,finalReleaseHistory,finalReleaseSnapshot,readReleaseOwner} from './inAppProtectiveRelease';
 import {ProductionLedger,type Account} from '../v13-production/ledger';
 import {readUnresolvedIntentMode} from './workerUncertainOrderGate';
@@ -34,7 +35,7 @@ type Client=Query&{release(error?:Error):void};
 type Db=Query&{connect():Promise<Client>};
 type Deps={
  db?:Db;sha?:()=>string;clock?:()=>number;
- verify?:typeof verifyOwnerV3FeeAuthority;
+ verify?:typeof verifyOwnerStandingFee;
  signedEvidence?:typeof collectFinalReleaseEvidence;
  scope?:typeof configuredOwnerSelfScope;
 };
@@ -113,9 +114,10 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    !authorityId||account.commissioned!==true||
    account.execution_enabled!==false||account.kill_switch!==true||
    account.blocked_reason!==null)return no('owner_self_commissioned_v3_killed_scope_required');
-  const verified=await(deps.verify??verifyOwnerV3FeeAuthority)(owner,'STEP_11',source);
-  if(!verified.ok||verified.identity.authorityId!==authorityId||
-   verified.identity.releaseCommitSha!==sha||
+  const verified=await(deps.verify??verifyOwnerStandingFee)(owner,'STEP_11',source);
+  if(!verified.ok||verified.identity.sourceAuthorityId!==authorityId||
+   verified.identity.sha!==sha||
+   verified.identity.policyHash!==raw.policyHash||
    verified.identity.sourceDigest!==account.fee_artifact_digest)
    return no('owner_self_current_official_fee_authority_unavailable');
   // The existing preflight enforces complete signed Kalshi pagination, issuer
@@ -190,20 +192,26 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
       raw.qualificationId,OWNER_SELF_REVIEW_CONFIRM]);
   if(review.rows.length!==1)return no('owner_self_review_or_signed_proof_not_current');
   const fee=await tx.query(`SELECT g.authority_id
-    FROM private.strata_owner_fee_authority_v3 g
+    FROM private.strata_owner_standing_fee_v1 s
+    JOIN private.strata_owner_fee_authority_v3 g
+      ON g.authority_id=s.source_authority_id
+      AND g.owner_user_id=s.owner_user_id
+      AND g.execution_account_id=s.execution_account_id
+      AND g.release_commit_sha=s.release_commit_sha
+      AND g.official_source_digest=s.official_source_digest
     JOIN private.strata_owner_fee_evidence_v3 e ON e.attestation_id=g.attestation_id
-    AND e.owner_user_id=g.owner_user_id
-    AND e.execution_account_id=g.execution_account_id
-    WHERE g.authority_id=$1::uuid AND g.owner_user_id=$2::uuid
-    AND g.execution_account_id=$3 AND g.release_commit_sha=$4
-    AND g.policy_version=$5 AND g.formula_version=$6
-    AND g.official_source_digest=$7 AND e.source_digest=$7
-    AND g.revoked_at IS NULL AND e.revoked_at IS NULL
-    AND g.expires_at>clock_timestamp()+interval '120 seconds'
-    AND e.expires_at>clock_timestamp()+interval '120 seconds'
-    AND g.authorized_stages @> ARRAY['ORDER_ENTRY']::text[]
-    FOR SHARE OF g,e`,[authorityId,owner,raw.accountId,sha,
-      V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,verified.identity.sourceDigest]);
+      AND e.owner_user_id=g.owner_user_id AND e.execution_account_id=g.execution_account_id
+      AND e.release_commit_sha=g.release_commit_sha
+      AND e.source_digest=g.official_source_digest
+    WHERE s.source_authority_id=$1::uuid AND s.owner_user_id=$2::uuid
+    AND s.execution_account_id=$3 AND s.release_commit_sha=$4
+    AND s.fee_policy_version=$5 AND s.formula_version=$6
+    AND s.official_source_digest=$7 AND s.approved_policy_hash=$8
+    AND s.confirmation='I_AUTHORIZE_MY_OWN_STANDING_OFFICIAL_KALSHI_FEE_MODEL_V1'
+    AND s.revoked_at IS NULL AND g.revoked_at IS NULL AND e.revoked_at IS NULL
+    AND s.expires_at>clock_timestamp()+interval '120 seconds'
+    FOR SHARE OF s,g,e`,[authorityId,owner,raw.accountId,sha,
+      V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,verified.identity.sourceDigest,raw.policyHash]);
   if(fee.rows.length!==1)return no('owner_self_fee_authority_changed_or_expiring');
   const grants=await tx.query(`SELECT grant_id,revoked_at
     FROM private.strata_continuous_execution_grants
