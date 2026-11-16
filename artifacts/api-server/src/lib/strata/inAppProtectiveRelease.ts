@@ -899,6 +899,13 @@ export async function activateOwnerSelfStandingAccount(
       a.commissioned!==true||a.execution_enabled!==false||
       a.kill_switch!==true||a.blocked_reason!==null)
      return fail("owner_release_requires_exact_disabled_killed_account");
+   const stake=Number(a.configured_stake_cents);
+   if(!Number.isSafeInteger(stake)||stake<500||
+      stake>Number(a.max_entry_stake_cents)||
+      stake>Number(a.max_entry_all_in_cents)||
+      !/^\d+$/.test(String(a.cash_micros))||
+      BigInt(stake)*10000n>BigInt(String(a.cash_micros)))
+     return fail("owner_release_stake_cash_or_risk_policy_invalid");
    const source=String(a.fee_source_url??"");
    if(a.fee_policy_version!==V3_FEE_POLICY_VERSION||
       a.fee_formula_version!==V3_FEE_FORMULA_VERSION||
@@ -1031,13 +1038,16 @@ export async function activateOwnerSelfStandingAccount(
     [randomUUID(),b.accountId,JSON.stringify(signed),v13Digest(signed)]);
    const enabled=await tx.query(`
  UPDATE public.v13_production_account
- SET execution_enabled=true,kill_switch=false,revision=revision+1
+ SET execution_enabled=true,kill_switch=false,revision=revision+1,
+     reconciled_at=to_timestamp($4::double precision/1000)
  WHERE id=$1 AND owner_user_id=$2::uuid
    AND commissioned=true AND execution_enabled=false AND kill_switch=true
    AND blocked_reason IS NULL AND cash_precision_verified=true
    AND reserved_micros=0
    AND policy_id=$3
- RETURNING id`,[b.accountId,ownerId,current.account.policy_id]);
+   AND clock_timestamp()>=to_timestamp($4::double precision/1000)
+   AND clock_timestamp()<to_timestamp($4::double precision/1000)+interval '5 seconds'
+ RETURNING id`,[b.accountId,ownerId,current.account.policy_id,evidence.started]);
    if(enabled.rows.length!==1)return fail("owner_account_activation_cas_failed");
    const prior=locked.worker[0]!;
    const next=await tx.query(`
