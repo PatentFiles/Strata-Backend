@@ -17,6 +17,7 @@ import {recordWalletV4FeeEvidence,authorizeWalletV4FeeModel,revokeWalletV4FeeCon
 import {recordOwnerV3FeeEvidence} from "../lib/strata/ownerFeeV3Evidence";
 import {issueOwnerV3FeeAuthority,verifyOwnerV3FeeAuthority,revokeOwnerV3FeeAuthority} from "../lib/strata/ownerFeeV3Authority";
 import {previewOwnedV3FeeMigration,migrateOwnedV3FeePolicy} from "../lib/strata/ownerFeeV3Migration";
+import {ownerStandingFeeStatus,authorizeOwnerStandingFee,revokeOwnerStandingFee} from "../lib/strata/ownerStandingFeeAuthorization";
 import { probeCurrentKalshiFeeApi } from "../lib/strata/twoSourceFeeEvidence";
 import { step6ApiFeeObservation } from "../lib/strata/step6ApiFeeObservation";
 import { preparePdfFreeApiFeePolicyReview } from "../lib/strata/apiFeePolicyReviewCandidate";
@@ -1148,6 +1149,32 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     if(!owner)return void res.status(401).json({error:"Unauthorized"});
     res.setHeader("Cache-Control","private, no-store");
     const out=await previewOwnedV3FeeMigration(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // One authenticated AAL2 owner authorizes a bounded standing fee model.
+  // Initial short V3 issuer consent is immutable; the machine independently
+  // rechecks actual issuer bytes and exact market before every new order.
+  router.get("/fees/single-owner/standing/status",async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await ownerStandingFeeStatus(owner);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/single-owner/standing/consent",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await authorizeOwnerStandingFee(owner,req.body??{});
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  router.post("/fees/single-owner/standing/revoke",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    ignoreForeignOwner(req.body);
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await revokeOwnerStandingFee(owner,req.body??{});
     res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   router.post("/fees/single-owner/migration/confirm",async(req,res)=>{
