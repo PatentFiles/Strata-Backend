@@ -26,7 +26,7 @@ function harness(params:{lockRows?:number;providerOk?:boolean;standing?:boolean;
  const underlying=(async()=>{sends++;return new Response('{"accepted":true}',{status:200});}) as typeof fetch;
  const fee=createGuardedOwnerV3FeeFetch(owner,account,source,underlying,policy,fingerprint,12,'holder',digest,{
   borrowTransaction:()=>tx as never,sha:()=>sha,
-  verify:(async(...args)=>params.providerOk===false?{ok:false,reason:'provider_offline'}:verify(...args)) as never,
+  verify:(async(o:string,stage:string,url:string,market?:string)=>params.providerOk===false?{ok:false,reason:'provider_offline'}:verify(o,stage,url,market)) as never,
   hasHistory:async()=>params.history??true,
   currentStanding:async()=>params.standing??true,
  });
