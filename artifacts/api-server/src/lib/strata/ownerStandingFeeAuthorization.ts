@@ -80,6 +80,11 @@ async function currentOfficialMarketProof(deps:Deps,stage:ApiFeeStage,ticker:str
   observed.model.issuer!==CANONICAL_FEE_SCHEDULE_URL||
   observed.model.publicationDigest!==expectedDigest||
   observed.model.marketTicker!==selected||
+  // This is the fixed owner V3 quadratic taker model. A genuinely new
+  // published coefficient or default multiplier needs fresh explicit policy
+  // approval; never silently inherit a changed V4 dynamic observation.
+  observed.model.takerRatePpm!==70_000||
+  observed.model.defaultTakerMultiplierPpm!==1_000_000||
   observed.model.feeType!=='quadratic'||observed.model.feeMultiplier!=='1'||
   observed.model.tradingAuthorized!==false||
   observed.model.requiresVersionedReview!==true)
