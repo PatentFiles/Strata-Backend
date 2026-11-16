@@ -71,6 +71,10 @@ export async function standingExecutionStatus(owner:string,deps:{db?:Query;sha?:
    AND expires_at>now()+interval '60 seconds' ORDER BY observed_at DESC LIMIT 1`,[owner,account.id,sha]);
   return {ok:true as const,reason:'standing_status',sha,ownerId:owner,accountId:account.id,policyHash:account.policy_hash,
    ownerSelfAvailable:ownerSelfEnrollmentAllowed(owner,account.id,(deps.scope??configuredOwnerSelfScope)()),
+   // UI hint only. The mutation itself independently checks real issuer fees,
+   // signed history, account scope, MFA, worker/ledger locks and current SHA.
+   ownerSelfActivationAvailable:process.env.STRATA_OWNER_SELF_ACTIVATION_ENABLED==='true'&&
+     ownerSelfEnrollmentAllowed(owner,account.id,(deps.scope??configuredOwnerSelfScope)()),
    reviewId:reviews.rows.length===1?reviews.rows[0]?.release_id:null,
    reviewQualificationId:reviews.rows.length===1?reviews.rows[0]?.qualification_id:null,
    reviewerId:reviews.rows.length===1?reviews.rows[0]?.independent_reviewer_id:null,
