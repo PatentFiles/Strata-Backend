@@ -143,6 +143,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
     ? account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4
        ? approvedSource===CANONICAL_FEE_SCHEDULE_URL
           ? "DYNAMIC_PROVIDER_V4" : "UNRECOGNIZED"
+       : account.fee_policy_version===V3_FEE_POLICY_VERSION&&parseV3FeeSource(approvedSource) ? "OWNER_V3"
        : parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2"
        : approvedSource===CANONICAL_FEE_SCHEDULE_URL
           ? "LEGACY_PDF_V1" : "UNRECOGNIZED"
