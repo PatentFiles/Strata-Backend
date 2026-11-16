@@ -32,6 +32,7 @@ import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY
 import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
 import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
 import {createGuardedOwnerV3FeeFetch} from "./guardedOwnerV3FeeWire";
+import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
@@ -415,12 +416,12 @@ export function createProductionPersonalSession(
     // REVIEWED_API_V2 human reviewer identity. Fail closed if expired,
     // mismatched to the actual deployment, or no current official proof.
     const ownerV3AtStart=ownerV3Source?
-      await verifyOwnerV3FeeAuthority(input.userId,"STEP_11",sourceUrl):null;
+      await verifyOwnerStandingFee(input.userId,"STEP_11",sourceUrl):null;
     if(ownerV3Source && (!ownerV3AtStart?.ok ||
-       ownerV3AtStart.identity.authorityId!==ownerV3Source ||
+       ownerV3AtStart.identity.sourceAuthorityId!==ownerV3Source ||
        ownerV3AtStart.identity.sourceDigest!==digest ||
-       ownerV3AtStart.identity.releaseCommitSha!==startupSha))
-      return {ok:false,reason:"owner_v3_fee_source_release_unavailable"};
+       ownerV3AtStart.identity.sha!==startupSha))
+      return {ok:false,reason:"owner_standing_fee_source_release_unavailable"};
     // The commissioning digest is a historical observation. Refresh the API
     // source for the exact target market at every readMarket and final POST.
     // The direct owner's standing policy has no human reviewer requirement,
@@ -432,7 +433,7 @@ export function createProductionPersonalSession(
        !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
       return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
     const artifact=ownerV3Source&&ownerV3AtStart?.ok?
-      {valid:true,digest,verifiedAt:observedAt}:
+      {valid:true,digest,verifiedAt:ownerV3AtStart.identity.verifiedAtMs}:
       apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
       alternate && operatorAtStart?.ok?
@@ -680,14 +681,14 @@ export function createProductionPersonalSession(
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
               }else if(ownerV3Source){
-                const checked=await verifyOwnerV3FeeAuthority(input.userId,"ORDER_ENTRY",
+                const checked=await verifyOwnerStandingFee(input.userId,"ORDER_ENTRY",
                   sourceUrl,market);
-                if(!checked.ok||checked.identity.authorityId!==ownerV3Source||
+                if(!checked.ok||checked.identity.sourceAuthorityId!==ownerV3Source||
                    checked.identity.marketTicker!==market||
                    checked.identity.sourceDigest!==digest||
-                   checked.identity.releaseCommitSha!==startupSha)
-                  throw new Error("owner_v3_current_market_fee_authority_unavailable");
-                feeVerifiedAt=clock;
+                   checked.identity.sha!==startupSha)
+                  throw new Error("owner_standing_current_market_fee_authority_unavailable");
+                feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
               }else if(!options.verifyFee){
                 const monetary=await verifyMonetaryFeeContract("ORDER_ENTRY",market);
