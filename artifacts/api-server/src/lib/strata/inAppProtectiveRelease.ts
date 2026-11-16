@@ -958,7 +958,7 @@ export async function activateOwnerSelfStandingAccount(
    if(!uncertain.ok||uncertain.mode!=="entries")return fail("release_unresolved_exchange_order");
    // Recheck the original server-issued owner review and qualification, not
    // a browser-stated reviewer identity. Row locks fence concurrent revocation.
-   const review=await tx.query(\`
+   const review=await tx.query(`
  SELECT r.release_id::text,r.evidence_digest,r.review_url,r.review_note,
         q.qualification_id::text,q.evidence_digest AS qualification_digest
  FROM private.strata_standing_execution_reviews r
@@ -976,36 +976,36 @@ export async function activateOwnerSelfStandingAccount(
    AND r.created_at<=now() AND r.created_at>=q.observed_at
    AND r.created_at<q.expires_at
    AND q.expires_at>clock_timestamp()+interval '60 seconds'
- FOR SHARE OF r,q\`,
+ FOR SHARE OF r,q`,
     [b.reviewId,b.qualificationId,ownerId,b.accountId,sha,b.policyHash,
       OWNER_SELF_REVIEW_CONFIRM]);
    if(review.rows.length!==1)return fail("current_authenticated_owner_review_missing");
    const r=review.rows[0]!;
-   const url=\`https://github.com/PatentFiles/Strata-Backend/commit/\${sha}\`;
+   const url=`https://github.com/PatentFiles/Strata-Backend/commit/${sha}`;
    if(r.review_url!==url||r.review_note!==OWNER_SELF_REVIEW_NOTE||
       r.evidence_digest!==hash({actor:ownerId,owner:ownerId,sha,qid:b.qualificationId,
        account:b.accountId,policy:b.policyHash,
        qualification:r.qualification_digest,note:OWNER_SELF_REVIEW_NOTE,url,
        scope:OWNER_SELF_REVIEW_CONFIRM}))
      return fail("owner_review_immutable_evidence_mismatch");
-   const approval=await tx.query(\`
+   const approval=await tx.query(`
  SELECT approval_id::text,qualification_id::text,qualification_digest,revoked_at
  FROM private.strata_owner_sha_approvals
  WHERE owner_user_id=$1::uuid AND execution_account_id=$2
    AND release_commit_sha=$3
- FOR UPDATE\`,[ownerId,b.accountId,sha]);
+ FOR UPDATE`,[ownerId,b.accountId,sha]);
    if(approval.rows.length>1||approval.rows.some(x=>x.revoked_at!==null))
      return fail("owner_sha_prior_revocation_or_duplicate");
    let approvalId:string;
    if(approval.rows.length===0){
      // The exact same owner explicitly confirms this SHA and standing review.
      // No second human or fabricated historical independent review row.
-     const issued=await tx.query(\`
+     const issued=await tx.query(`
  INSERT INTO private.strata_owner_sha_approvals
  (owner_user_id,execution_account_id,release_commit_sha,
   qualification_id,qualification_digest)
  VALUES($1::uuid,$2,$3,$4::uuid,$5)
- RETURNING approval_id::text\`,
+ RETURNING approval_id::text`,
       [ownerId,b.accountId,sha,b.qualificationId,r.qualification_digest]);
      if(issued.rows.length!==1)return fail("owner_sha_approval_not_recorded");
      approvalId=String(issued.rows[0]?.approval_id);
@@ -1024,11 +1024,11 @@ export async function activateOwnerSelfStandingAccount(
       approvalId,reviewId:b.reviewId,observedAtMs:evidence.started,
       historyDigest:history.reconciliationDigest,exchangeDigest:hash(evidence.snapshot),
       ordersSubmitted:false};
-   await tx.query(\`
+   await tx.query(`
  INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
- VALUES($1,$2,'OWNER_RELEASE_SIGNED_RECHECK',$3::jsonb,$4)\`,
+ VALUES($1,$2,'OWNER_RELEASE_SIGNED_RECHECK',$3::jsonb,$4)`,
     [randomUUID(),b.accountId,JSON.stringify(signed),v13Digest(signed)]);
-   const enabled=await tx.query(\`
+   const enabled=await tx.query(`
  UPDATE public.v13_production_account
  SET execution_enabled=true,kill_switch=false,revision=revision+1
  WHERE id=$1 AND owner_user_id=$2::uuid
@@ -1036,25 +1036,25 @@ export async function activateOwnerSelfStandingAccount(
    AND blocked_reason IS NULL AND cash_precision_verified=true
    AND reserved_micros=0
    AND policy_id=$3
- RETURNING id\`,[b.accountId,ownerId,current.account.policy_id]);
+ RETURNING id`,[b.accountId,ownerId,current.account.policy_id]);
    if(enabled.rows.length!==1)return fail("owner_account_activation_cas_failed");
    const prior=locked.worker[0]!;
-   const next=await tx.query(\`
+   const next=await tx.query(`
  UPDATE private.kalshi_account_worker_lease
  SET state='released',account_kill=false,arm_requested=false,
      fencing_token=fencing_token+1,heartbeat_at=now(),released_at=now()
  WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
   AND state='killed' AND account_kill=true AND arm_requested=false
   AND fencing_token=$3::bigint
- RETURNING fencing_token::text\`,
+ RETURNING fencing_token::text`,
     [b.accountId,ownerId,prior.fencing_token]);
    if(next.rows.length!==1)return fail("terminal_worker_release_fence_failed");
    const audit={...signed,oldFencingToken:String(prior.fencing_token),
      nextFencingToken:String(next.rows[0]?.fencing_token),
      workerStarted:false,sharedGlobalGateChanged:false};
-   await tx.query(\`
+   await tx.query(`
  INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
- VALUES($1,$2,'OWNER_SELF_RELEASED_TERMINAL_LEASE',$3::jsonb,$4)\`,
+ VALUES($1,$2,'OWNER_SELF_RELEASED_TERMINAL_LEASE',$3::jsonb,$4)`,
     [randomUUID(),b.accountId,JSON.stringify(audit),v13Digest(audit)]);
    // Never claim a submitted trade. Standing grant + ARM + START are separate
    // future authenticated actions after current-readiness verification.
