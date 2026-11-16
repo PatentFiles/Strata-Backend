@@ -15,7 +15,8 @@ import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
-import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -27,7 +28,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyV3Fee?:typeof verifyOwnerV3FeeAuthority;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyV3StandingFee?:typeof verifyOwnerStandingFee;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -288,15 +289,14 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
        account.fee_formula_version!==V3_FEE_FORMULA_VERSION)
       return deny("release_owner_v3_policy_identity_invalid");
     const feeStarted=(deps.now??Date.now)();
-    const verified=await(deps.verifyV3Fee??verifyOwnerV3FeeAuthority)(
+    const verified=await(deps.verifyV3StandingFee??verifyOwnerStandingFee)(
       ownerId,"STEP_11",sourceUrl);
     const feeNow=(deps.now??Date.now)();
-    if(!verified.ok||verified.identity.authorityId!==ownerV3||
-       verified.identity.releaseCommitSha!==sha||
+    if(!verified.ok||verified.identity.sourceAuthorityId!==ownerV3||
+       verified.identity.sha!==sha||
        verified.identity.sourceUrl!==sourceUrl||
-       verified.identity.feePolicyVersion!==V3_FEE_POLICY_VERSION||
-       verified.identity.formulaVersion!==V3_FEE_FORMULA_VERSION||
        verified.identity.sourceDigest!==account.fee_artifact_digest||
+       verified.identity.policyHash!==account.policy_hash||
        !Number.isSafeInteger(feeStarted)||!Number.isSafeInteger(feeNow)||
        feeNow<feeStarted||feeNow-feeStarted>15000)
       return deny("release_owner_v3_current_provider_fee_unverified");
