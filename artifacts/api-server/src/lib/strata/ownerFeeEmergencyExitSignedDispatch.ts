@@ -1,3 +1,4 @@
+import {protectiveAuthoritySql} from './ownerFinalReleaseAuthority';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
@@ -232,17 +233,16 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
  JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
- -- Account owner AAL2 approval is required at account activation, but NEVER
- -- constitutes independent review of the executable emergency exit.
- -- Every signed protective IOC must have a genuinely independent exact-SHA
- -- technical release, including after a durable owner-SHA authorization.
+ -- Owner activation is not independent review. Current standing authority,
+ -- when present, is checked above without permitting legacy downgrade.
+ -- Otherwise explicit exact-SHA protective authority is required here;
+ -- owner-self mode remains account/policy scoped and legacy mode independent.
  LEFT JOIN LATERAL (
      SELECT v.expires_at FROM private.strata_protective_exit_release v
      WHERE NOT $14::boolean AND v.release_commit_sha=$1 AND v.state='approved'
        AND v.created_at<=clock_timestamp() AND v.expires_at>clock_timestamp()
        AND v.revoked_at IS NULL
-       AND v.independent_reviewer_id<>a.owner_user_id
-       AND v.operator_approver_id<>v.independent_reviewer_id
+    AND ${protectiveAuthoritySql('v','a.owner_user_id','a.id','p.policy_hash')}
      FOR SHARE OF v
  ) code_release ON TRUE
  WHERE ($14::boolean OR code_release.expires_at IS NOT NULL)

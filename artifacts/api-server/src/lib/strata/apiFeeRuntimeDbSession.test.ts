@@ -5,7 +5,7 @@ import { sanitizePublic } from "../v13-production/sanitize";
 const admin = "22222222-2222-4222-8222-222222222222";
 function validRow(): Record<string, unknown> {
   return {current_role: "postgres", session_role: "postgres", search_path: '"$user", public',
-    replication_role: "origin", row_security: "on", superuser: true, bypass_rls: true, schema_usage: true,
+    replication_role: "origin", row_security: "on", superuser: true, bypass_rls: true, schema_usage: true, standing_review_lock_column_update:true,
     ...Object.fromEntries(SESSION_RELATIONS.flatMap((_, i) => ["exists", "select", "insert", "update"].map(p => [`relation_${i}_${p}`, true])))};
 }
 function harness(options: {allowed?: unknown; rows?: Array<Record<string, unknown>>; failAt?: number} = {}) {
@@ -84,7 +84,7 @@ test("query errors and timeouts destroy checkout; connection errors are sanitize
   assert.equal(result.reason, "runtime_db_session_unavailable");
 });
 test("fixed metadata SQL has no application FROM/JOIN, fingerprint, writes or session changes", () => {
-  assert.equal(SESSION_RELATIONS.length, 8);
+  assert.equal(SESSION_RELATIONS.length, 9);
   assert.equal(/\b(?:from|join)\s+(?:public|private|auth)\./i.test(RUNTIME_DB_SESSION_SQL), false);
   const withoutLiterals = RUNTIME_DB_SESSION_SQL.replace(/'[^']*'/g, "''");
   assert.equal(/\b(?:insert|update|delete|grant|create|alter|drop|set|set_config|string_agg|md5)\b/i.test(withoutLiterals), false);
@@ -99,4 +99,12 @@ test("cleanup errors cannot replace the sanitized response", async () => {
   })});
   assert.equal(result.reason, "confirmed_administrator_required");
   assert.equal(JSON.stringify(result).includes("SECRET"), false);
+});
+
+test('standing review lock capability reports column ACL without granting or claiming RLS readiness',async()=>{
+ assert.ok(SESSION_RELATIONS.includes('private.strata_standing_execution_reviews'));
+ assert.match(RUNTIME_DB_SESSION_SQL,/has_column_privilege[\s\S]*release_id','UPDATE'/);
+ const result=await inspectRuntimeDbSession(admin,harness({rows:[{...validRow(),standing_review_lock_column_update:false}]}).db);
+ assert.equal(result.ok,true);assert.equal('standingReviewLockColumnUpdate' in result&&result.standingReviewLockColumnUpdate,false);
+ assert.equal(result.tradingAuthorized,false);
 });

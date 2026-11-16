@@ -26,7 +26,7 @@ test("session route requires verified AAL2 and confirmed ADMIN, uses trusted sub
       queries.push(q);
       if (q.values) return {rows: [{is_admin: allowed}]};
       return {rows: [{current_role: "postgres", session_role: "postgres", search_path: "public", replication_role: "origin",
-        row_security: "on", superuser: true, bypass_rls: true, schema_usage: true,
+        row_security: "on", superuser: true, bypass_rls: true, schema_usage: true, standing_review_lock_column_update: true,
         ...Object.fromEntries(SESSION_RELATIONS.flatMap((_, i) => ["exists", "select", "insert", "update"].map(p => [`relation_${i}_${p}`, true])))}]};
     }, release() {}};
   }) as typeof pool.connect;
@@ -57,7 +57,9 @@ test("session route requires verified AAL2 and confirmed ADMIN, uses trusted sub
     assert.equal(body.ok, true);
     assert.equal(body.privateSchemaUsable, true);
     assert.ok(Array.isArray(body.tablePrivileges));
-    assert.equal(body.tablePrivileges.length, 8);
+    assert.equal(body.tablePrivileges.length, SESSION_RELATIONS.length);
+    assert.equal(body.standingReviewLockColumnUpdate, true);
+    assert.ok((body.tablePrivileges as Array<{relation: string}>).some(row => row.relation === "private.strata_standing_execution_reviews"));
     assert.equal(body.tradingAuthorized, false);
     assert.equal(body.accountFingerprint, undefined);
   } finally {

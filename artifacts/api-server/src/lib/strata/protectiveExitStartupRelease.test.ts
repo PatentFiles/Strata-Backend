@@ -100,7 +100,7 @@ test("exact deployed SHA and unrelated reviewer with unexpired release is requir
  assert.deepEqual(result,{ok:true,reason:"protective_exit_release_verified"});
  assert.equal(calls,2);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/release_commit_sha=\$1::text/);
- assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/independent_reviewer_id <> \$2::uuid/);
+ assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/v.independent_reviewer_id<>a.owner_user_id/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/expires_at>now\(\)\+interval '20 minutes'/);
  assert.match(PROTECTIVE_STARTUP_RELEASE_SQL,/revoked_at IS NULL/);
 });
@@ -142,5 +142,8 @@ test("the account owner and an independently approved exit SHA are both necessar
  assert.ok(OWNER_SHA_STARTUP_RELEASE_SQL.includes("oa.release_commit_sha=$1"));
  assert.ok(OWNER_SHA_STARTUP_RELEASE_SQL.includes("oa.owner_user_id=$2::uuid"));
  assert.ok(OWNER_SHA_STARTUP_RELEASE_SQL.includes("a.blocked_reason IS NULL"));
- assert.ok(PROTECTIVE_STARTUP_RELEASE_SQL.includes("independent_reviewer_id <> $2::uuid"));
+ assert.ok(PROTECTIVE_STARTUP_RELEASE_SQL.includes("v.independent_reviewer_id<>a.owner_user_id"));
+ assert.ok(PROTECTIVE_STARTUP_RELEASE_SQL.includes("osr.revoked_at IS NULL"));
+ assert.ok(PROTECTIVE_STARTUP_RELEASE_SQL.includes("FOR SHARE OF osr"));
+ assert.ok(PROTECTIVE_STARTUP_RELEASE_SQL.includes("execution_account_id'=(a.id)::text"));
 });

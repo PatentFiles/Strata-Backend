@@ -29,6 +29,7 @@ export const SESSION_RELATIONS = [
   "private.strata_emergency_exit_reservations",
   "private.strata_protective_exit_release",
   "private.strata_owner_sha_approvals",
+  "private.strata_standing_execution_reviews",
 ] as const;
 const PRIVILEGES = ["SELECT", "INSERT", "UPDATE"] as const;
 export const RUNTIME_DB_SESSION_SQL = `
@@ -40,6 +41,7 @@ export const RUNTIME_DB_SESSION_SQL = `
         (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user) AS superuser,
         (SELECT rolbypassrls FROM pg_catalog.pg_roles WHERE rolname=current_user) AS bypass_rls,
         pg_catalog.has_schema_privilege(current_user,'private','USAGE') AS schema_usage,
+        coalesce(pg_catalog.has_column_privilege(current_user,pg_catalog.to_regclass('private.strata_standing_execution_reviews'),'release_id','UPDATE'),false) AS standing_review_lock_column_update,
         ${SESSION_RELATIONS.flatMap((table, i) => [
           `pg_catalog.to_regclass('${table}') IS NOT NULL AS relation_${i}_exists`,
           ...PRIVILEGES.map(privilege => `coalesce(pg_catalog.has_table_privilege(current_user,pg_catalog.to_regclass('${table}'),'${privilege}'),false) AS relation_${i}_${privilege.toLowerCase()}`),
@@ -67,7 +69,7 @@ export async function inspectRuntimeDbSession(actorId: string, db: Pool = pool) 
     const result = await client.query({text: RUNTIME_DB_SESSION_SQL, query_timeout: SESSION_QUERY_TIMEOUT_MS});
     if (result.rows.length !== 1) return deny("runtime_db_session_invalid");
     const row = result.rows[0]!;
-    const booleanKeys = ["superuser", "bypass_rls", "schema_usage", ...SESSION_RELATIONS.flatMap((_, i) =>
+    const booleanKeys = ["superuser", "bypass_rls", "schema_usage", "standing_review_lock_column_update", ...SESSION_RELATIONS.flatMap((_, i) =>
       [`relation_${i}_exists`, ...PRIVILEGES.map(p => `relation_${i}_${p.toLowerCase()}`)])];
     if (!boundedText(row.current_role, 128) || !boundedText(row.session_role, 128) ||
         (row.search_path !== "" && !boundedText(row.search_path, 4096)) ||
@@ -79,6 +81,7 @@ export async function inspectRuntimeDbSession(actorId: string, db: Pool = pool) 
       currentUser: row.current_role, sessionUser: row.session_role, searchPath: row.search_path,
       sessionReplicationRole: row.replication_role, rowSecurity: row.row_security,
       superuser: row.superuser, bypassRls: row.bypass_rls, privateSchemaUsable: row.schema_usage,
+      standingReviewLockColumnUpdate: row.standing_review_lock_column_update,
       tablePrivileges: SESSION_RELATIONS.map((relation, i) => ({
         relation, exists: row[`relation_${i}_exists`],
         select: row[`relation_${i}_select`], insert: row[`relation_${i}_insert`],

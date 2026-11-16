@@ -160,7 +160,7 @@ process.on("exit",()=>{
  else process.env.NODE_ENV=oldMode;
 });
 
-test("standing final admission uses explicit owner authority without changing finite release policy",async()=>{
+test("standing final admission uses explicit owner authority while preserving explicit finite protective authority",async()=>{
  let finalSql='';
  const c={query:async(sql:string)=>{
   if(sql.includes('SELECT grant_id FROM private.strata_continuous_execution_grants'))return {rows:[{grant_id:'g'}]};
@@ -174,5 +174,12 @@ test("standing final admission uses explicit owner authority without changing fi
  assert.match(finalSql,/x.independent_reviewer_id IS NULL/);
  assert.match(finalSql,/owner_authorizer_id/);
  assert.match(FINAL_V4_ADMISSION_SQL,/AND x.independent_reviewer_id<>a.owner_user_id/);
- assert.doesNotMatch(FINAL_V4_ADMISSION_SQL,/OWNER_SELF_V1/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/strata_wallet_v4_fee_authority g/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/g.revoked_at IS NULL/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/x.independent_reviewer_id IS NULL AND x.operator_approver_id=a.owner_user_id/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/execution_account_id'=[(]a.id[)]::text/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/osr.revoked_at IS NULL/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/FOR SHARE OF osr/);
+ assert.match(FINAL_V4_ADMISSION_SQL,/NOT EXISTS[\s\S]*strata_protective_exit_release oh/);
+ assert.doesNotMatch(finalSql,/strata_protective_exit_release oh/);
 });
