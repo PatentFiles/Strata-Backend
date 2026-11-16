@@ -18,6 +18,7 @@ import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,
 import {verifyMonetaryFeeContract} from './monetaryFeeContract';
 import {observeDynamicKalshiFees} from './dynamicOfficialFeeSchedule';
 import {CANONICAL_FEE_SCHEDULE_URL} from '../microLiveFeeArtifact';
+import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import type {ApiFeeStage} from './apiFeeGrantEligibility';
 
 export const OWNER_STANDING_FEE_CONFIRM='I_AUTHORIZE_MY_OWN_STANDING_OFFICIAL_KALSHI_FEE_MODEL_V1';
@@ -55,26 +56,36 @@ const checked=(deps:Deps,stage:ApiFeeStage,ticker?:string)=>
  * This reduces repeated PDF 429s without caching grants, fabricating source
  * timestamps or permitting changed/overridden fee formulas.
  */
-async function currentOfficialMarketProof(deps:Deps,stage:ApiFeeStage,ticker:string,
+async function currentOfficialMarketProof(deps:Deps,stage:ApiFeeStage,ticker:string|undefined,
  expectedDigest:string):Promise<{ok:true;sourceDigest:string;marketTicker:string;verifiedAt:string}|{ok:false}>{
  if(deps.verify){
   const legacy=await checked(deps,stage,ticker);
-  return legacy.ok&&legacy.monetaryFeeAuthorized&&legacy.marketTicker===ticker&&
-    legacy.sourceDigest===expectedDigest&&typeof legacy.verifiedAt==='string'
-   ?{ok:true,sourceDigest:legacy.sourceDigest,marketTicker:ticker,verifiedAt:legacy.verifiedAt}
+  return legacy.ok&&legacy.monetaryFeeAuthorized&&
+    (ticker===undefined||legacy.marketTicker===ticker)&&
+    legacy.sourceDigest===expectedDigest&&typeof legacy.verifiedAt==='string'&&
+    MARKET.test(txt(legacy.marketTicker))
+   ?{ok:true,sourceDigest:legacy.sourceDigest,
+     marketTicker:txt(legacy.marketTicker),verifiedAt:legacy.verifiedAt}
    :{ok:false};
  }
- const observed=await observeDynamicKalshiFees(ticker,expectedDigest);
+ // Startup needs one current exchange market, but the browser cannot choose
+ // a favorable ticker. Discover it from the real first-party open-market API.
+ const selected=ticker??await (async()=>{
+   const current=await probeCurrentKalshiFeeApi();
+   return current.ok&&MARKET.test(txt(current.marketTicker))?current.marketTicker:null;
+ })();
+ if(!selected||!MARKET.test(selected))return {ok:false};
+ const observed=await observeDynamicKalshiFees(selected,expectedDigest);
  if(!observed.ok||observed.providerContentChanged||
   observed.model.issuer!==CANONICAL_FEE_SCHEDULE_URL||
   observed.model.publicationDigest!==expectedDigest||
-  observed.model.marketTicker!==ticker||
+  observed.model.marketTicker!==selected||
   observed.model.feeType!=='quadratic'||observed.model.feeMultiplier!=='1'||
   observed.model.tradingAuthorized!==false||
   observed.model.requiresVersionedReview!==true)
   return {ok:false};
  return {ok:true,sourceDigest:observed.model.publicationDigest,
-  marketTicker:ticker,verifiedAt:observed.model.observedAt};
+  marketTicker:selected,verifiedAt:observed.model.observedAt};
 }
 const sourceConfirmation=(owner:string,account:string,sha:string,policy:string,id:string,bytes:string)=>
  digest({kind:'OWNER_STANDING_FEE_V1',owner,account,sha,policy,id,bytes,
@@ -155,7 +166,7 @@ export async function verifyOwnerStandingFee(
    return fail('owner_standing_fee_record_integrity_unverified');
   const began=clock(deps);
   if(!Number.isSafeInteger(began)||began<=0)return fail('owner_standing_fee_clock_invalid');
-  const marketProof=stage==='ORDER_ENTRY'&&marketTicker
+  const marketProof=stage!=='STEP_9'
     ?await currentOfficialMarketProof(deps,stage,marketTicker,bytes):null;
   const actual=marketProof??await checked(deps,stage,marketTicker);
   const ended=clock(deps),observedAt=time(actual.ok?actual.verifiedAt:undefined);
