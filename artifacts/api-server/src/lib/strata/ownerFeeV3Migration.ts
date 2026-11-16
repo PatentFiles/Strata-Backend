@@ -376,6 +376,21 @@ export async function migrateOwnedV3FeePolicy(ownerId:string,raw:unknown,deps:In
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);
+  // A signed owner policy migration invalidates the earlier
+  // OWNER_ACTIVATION_REQUEST because it hashes the old policy/source.
+  // Re-record ONLY this owner's explicit request for their newly selected
+  // policy. It grants no trade permission and does not clear the KILL.
+  const activationRequest={accountId:id,policyId,
+    feeDigest:fresh.identity.sourceDigest,
+    stakeCents:Number(stake.rows[0]!.configured_stake_cents),
+    commissioningDigest,minimumExitMicros:Number(a.minimum_exit_micros)};
+  if(!Number.isSafeInteger(activationRequest.minimumExitMicros)||
+     activationRequest.minimumExitMicros!==10000)
+    return fail("owner_activation_exit_floor_unverified");
+  await tx.query(`INSERT INTO public.v13_production_observation
+     (id,account_id,kind,payload,digest)
+     VALUES($1,$2,'OWNER_ACTIVATION_REQUEST',$3::jsonb,$4)`,
+    [randomUUID(),id,JSON.stringify(activationRequest),auditDigest(activationRequest)]);
   const event={accountId:id,ownerId,oldPolicyId:old.id,newPolicyId:policyId,
    oldPolicyHash:old.policyHash,newPolicyHash:next.policyHash,feeDigest:fresh.identity.sourceDigest,
    grantId:fresh.identity.authorityId,reason:"owner_authorized_pdf_to_owner_v3_source",
