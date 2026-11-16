@@ -12,9 +12,7 @@
  * any worker, grant protective exits or automatically retry an UNKNOWN send.
  */
 import type {PoolClient} from '@workspace/db';
-import {parseV3FeeSource,verifyOwnerV3FeeAuthority,
- V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,V3_FEE_PUBLICATION_URL,
- V3_FEE_AUTHORITY_SCOPE,V3_FEE_GRANT_CONFIRM} from './ownerFeeV3Authority';
+import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
 import {checkContinuousEligibility,hasContinuousGrantHistory} from './continuousExecutionAuthorization';
 import {FINAL_MONETARY_ACCOUNT_FENCE_SQL} from './guardedMonetaryFeeWire';
 import {deployedGitSha} from './deployedGitSha';
@@ -83,7 +81,9 @@ export function createGuardedOwnerV3FeeFetch(
  policyHash:string,keyFingerprint:string,fencingToken:number,holderId:string,feeDigest:string,
  deps:{
   borrowTransaction:()=>Tx|null;
-  verify?:typeof verifyOwnerV3FeeAuthority;
+  verifyStanding?:typeof verifyOwnerStandingFee;
+  verifyProtective?:typeof verifyOwnerV3ProtectiveFee;
+  exitReview?:typeof checkStandingExitReview;
   sha?:()=>string;
   currentStanding?:(tx:Tx,owner:string,sha:string)=>Promise<boolean>;
   hasHistory?:(tx:Tx,owner:string,sha:string)=>Promise<boolean>;
@@ -94,9 +94,28 @@ export function createGuardedOwnerV3FeeFetch(
   !HEX.test(feeDigest)||!Number.isSafeInteger(fencingToken)||fencingToken<=0||
   !holderId||holderId.length>200||!deps?.borrowTransaction)
   throw Error('owner_v3_fee_account_or_authority_identity_invalid');
+ if(process.env.NODE_ENV!=='test'&&
+   (deps.verifyStanding||deps.verifyProtective||deps.exitReview||deps.sha||
+    deps.currentStanding||deps.hasHistory))
+  throw Error('owner_v3_fee_production_override_forbidden');
  return async(request,init)=>{
   const method=(init?.method??(request instanceof Request?request.method:'GET')).toUpperCase();
-  if(method!=='POST')return transport(request,{...init,redirect:'error'});
+  if(method!=='POST'){
+   // Signed Kalshi credentials must never be forwarded to caller-chosen
+   // origins or following a cross-host redirect.
+   let url:URL;
+   try{url=new URL(request instanceof Request?request.url:typeof request==='string'?request:request.toString());}
+   catch{throw Error('owner_v3_fee_unexpected_read_endpoint');}
+   if(!['GET','HEAD','DELETE'].includes(method)||url.origin!=='https://external-api.kalshi.com'||
+     url.username!==''||url.password!==''||
+     !/^\/trade-api\/v2\/(?:portfolio|historical|markets|events|series|exchange)(?:\/|$)/.test(url.pathname)||
+     /%2f|%5c|%2e|\\\\|\/\//i.test(url.pathname))
+     throw Error('owner_v3_fee_unexpected_read_endpoint');
+   if(method==='DELETE'&&
+     !/^\/trade-api\/v2\/portfolio\/(?:orders|events\/orders)\/[A-Za-z0-9_-]+$/.test(url.pathname))
+     throw Error('owner_v3_fee_unexpected_cancel_endpoint');
+   return transport(request,{...init,redirect:'error'});
+  }
   if(init?.method!=='POST'||typeof request!=='string'||request!==ORDER_URL||
    typeof init.body!=='string')throw Error('owner_v3_fee_order_endpoint_invalid');
   let order:Record<string,unknown>;
@@ -138,7 +157,7 @@ export function createGuardedOwnerV3FeeFetch(
   }else{
    // An exit still requires a genuine, unrevoked current owner technical
    // review of the exact code. It does NOT require a standing ENTRY lease.
-   const approved=await checkStandingExitReview(tx,ownerId,accountId,sha);
+   const approved=await (deps.exitReview??checkStandingExitReview)(tx,ownerId,accountId,sha);
    if(!approved)throw Error('owner_v3_protective_exit_technical_review_missing');
   }
   const locked=await tx.query(FINAL_OWNER_V3_ACCOUNT_FENCE_SQL,[
@@ -150,8 +169,8 @@ export function createGuardedOwnerV3FeeFetch(
   // even for an emergency reduce-only exit. Only entries require a currently
   // unexpired owner standing monetary permission.
   if(isEntry){
-   const assessment=await verifyOwnerStandingFee(ownerId,'ORDER_ENTRY',
-      sourceUrl,ticker,{transaction:tx});
+   const assessment=await (deps.verifyStanding??verifyOwnerStandingFee)(
+      ownerId,'ORDER_ENTRY',sourceUrl,ticker,{transaction:tx});
    if(!assessment.ok||
     assessment.identity.sourceAuthorityId!==authorityId||
     assessment.identity.sourceDigest!==feeDigest||
@@ -160,8 +179,8 @@ export function createGuardedOwnerV3FeeFetch(
     assessment.identity.marketTicker!==ticker)
      throw Error('owner_v3_fee_current_provider_evidence_unverified');
   }else{
-   const protective=await verifyOwnerV3ProtectiveFee(ownerId,accountId,
-      sourceUrl,ticker,{transaction:tx});
+   const protective=await (deps.verifyProtective??verifyOwnerV3ProtectiveFee)(
+      ownerId,accountId,sourceUrl,ticker,{transaction:tx});
    if(!protective.ok||protective.sourceDigest!==feeDigest)
     throw Error('owner_v3_protective_exit_current_fee_unverified');
   }
