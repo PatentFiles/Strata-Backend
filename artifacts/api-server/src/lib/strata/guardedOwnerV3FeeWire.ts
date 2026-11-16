@@ -37,6 +37,8 @@ export const FINAL_OWNER_V3_ACCOUNT_FENCE_SQL=
    JOIN private.strata_owner_fee_evidence_v3 e ON e.attestation_id=g.attestation_id
     AND e.owner_user_id=g.owner_user_id
     AND e.execution_account_id=g.execution_account_id
+    AND e.release_commit_sha=g.release_commit_sha
+    AND e.source_digest=g.official_source_digest
    WHERE g.authority_id=$11::uuid AND g.owner_user_id=a.owner_user_id
     AND g.execution_account_id=a.id AND g.release_commit_sha=$12
     AND g.policy_version='strata_owner_official_monetary_fee_v3'
@@ -45,20 +47,35 @@ export const FINAL_OWNER_V3_ACCOUNT_FENCE_SQL=
     AND g.scope='KXBTC15M:INDEX2:SUBACCOUNT1'
     AND g.authorized_stages @> ARRAY['ORDER_ENTRY']::text[]
     AND g.confirmation='I_APPROVE_MY_OWN_VERIFIED_MONETARY_FEE_GRANT_V3'
-    AND g.revoked_at IS NULL AND g.issued_at<=now()
-    AND g.expires_at>clock_timestamp()+interval '30 seconds'
-    AND e.revoked_at IS NULL AND e.expires_at>clock_timestamp()+interval '30 seconds'
-    AND e.release_commit_sha=$12 AND e.source_digest=$8
-    AND e.source_digest=g.official_source_digest
+    AND g.issued_at<=clock_timestamp() AND e.source_digest=$8
     AND e.verification_stage='STEP_9'
     AND e.source_kind='official_kalshi_server_verified_v3'
     AND e.owner_confirmation='I_AUTHORIZE_MY_OWN_OFFICIAL_KALSHI_FEE_EVIDENCE_V3'
+    -- Historical source *provenance* may be used for a reduce-only EXIT
+    -- even after owner fee permission expires or is revoked. Only a
+    -- CURRENT revocable owner standing consent can authorize new entries.
+    AND (NOT $13::boolean OR (g.revoked_at IS NULL AND e.revoked_at IS NULL))
    FOR SHARE OF g,e
  )
+ AND (NOT $13::boolean OR EXISTS (
+    SELECT 1 FROM private.strata_owner_standing_fee_v1 s
+    WHERE s.owner_user_id=a.owner_user_id
+      AND s.execution_account_id=a.id AND s.release_commit_sha=$12
+      AND s.approved_policy_hash=p.policy_hash
+      AND s.source_authority_id=$11::uuid
+      AND s.official_source_digest=$8
+      AND s.fee_policy_version='strata_owner_official_monetary_fee_v3'
+      AND s.formula_version='standard-quadratic-0.07-v1'
+      AND s.confirmation='I_AUTHORIZE_MY_OWN_STANDING_OFFICIAL_KALSHI_FEE_MODEL_V1'
+      AND s.revoked_at IS NULL AND s.consented_at<=clock_timestamp()
+      AND s.expires_at>clock_timestamp()+interval '30 seconds'
+    FOR SHARE OF s
+ ))
  FOR SHARE OF a,p,live,c,lease`
  );
-if(!FINAL_OWNER_V3_ACCOUNT_FENCE_SQL.includes('FOR SHARE OF g,e')){
- throw Error('v3_final_fee_lock_query_not_constructed');
+if(!FINAL_OWNER_V3_ACCOUNT_FENCE_SQL.includes('FOR SHARE OF g,e')||
+   !FINAL_OWNER_V3_ACCOUNT_FENCE_SQL.includes('FOR SHARE OF s')){
+ throw Error('v3_owner_standing_final_fee_lock_query_not_constructed');
 }
 
 export function createGuardedOwnerV3FeeFetch(
@@ -109,32 +126,45 @@ export function createGuardedOwnerV3FeeFetch(
   const tx=deps.borrowTransaction();
   if(!tx)throw Error('owner_v3_fee_final_executor_transaction_required');
   const isEntry=order.reduce_only===false;
-  // Missing, revoked or expired standing grant may not fall back to a
-  // historic exit release for a new position. Exit-only orders never grant
-  // entry authority.
+  // A revoked or expired standing ENTRY grant can never acquire new
+  // inventory. Risk-reducing exits retain a separate genuinely verified
+  // fee-source path; neither mode is approved by the caller's boolean alone.
   if(isEntry){
    if(process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=='true')
     throw Error('owner_v3_protective_exit_release_disabled');
    const history=await (deps.hasHistory??hasContinuousGrantHistory)(tx,ownerId,sha);
    const authorized=history&&await (deps.currentStanding??checkContinuousEligibility)(tx,ownerId,sha);
    if(!authorized)throw Error('owner_v3_standing_entry_authority_not_current');
+  }else{
+   // An exit still requires a genuine, unrevoked current owner technical
+   // review of the exact code. It does NOT require a standing ENTRY lease.
+   const approved=await checkStandingExitReview(tx,ownerId,accountId,sha);
+   if(!approved)throw Error('owner_v3_protective_exit_technical_review_missing');
   }
   const locked=await tx.query(FINAL_OWNER_V3_ACCOUNT_FENCE_SQL,[
    ownerId,accountId,keyFingerprint,policyHash,sourceUrl,fencingToken,holderId,
-   feeDigest,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,authorityId,sha
+   feeDigest,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,authorityId,sha,isEntry
   ]);
   if(locked.rows.length!==1)throw Error('owner_v3_fee_final_account_or_source_closed');
-  // Re-check REAL issuer publication + exact live market after the immutable
-  // monetary authority has been locked. Do not accept the browser's quote.
-  const assessment=await (deps.verify??verifyOwnerV3FeeAuthority)(
-   ownerId,'ORDER_ENTRY',sourceUrl,ticker);
-  if(!assessment.ok||
-   assessment.identity.authorityId!==authorityId||
-   assessment.identity.sourceDigest!==feeDigest||
-   assessment.identity.sourceUrl!==sourceUrl||
-   assessment.identity.releaseCommitSha!==sha||
-   assessment.identity.marketTicker!==ticker)
-   throw Error('owner_v3_fee_current_provider_evidence_unverified');
+  // Real issuer publication plus fresh exact-market metadata is required
+  // even for an emergency reduce-only exit. Only entries require a currently
+  // unexpired owner standing monetary permission.
+  if(isEntry){
+   const assessment=await verifyOwnerStandingFee(ownerId,'ORDER_ENTRY',
+      sourceUrl,ticker,{transaction:tx});
+   if(!assessment.ok||
+    assessment.identity.sourceAuthorityId!==authorityId||
+    assessment.identity.sourceDigest!==feeDigest||
+    assessment.identity.sourceUrl!==sourceUrl||
+    assessment.identity.sha!==sha||
+    assessment.identity.marketTicker!==ticker)
+     throw Error('owner_v3_fee_current_provider_evidence_unverified');
+  }else{
+   const protective=await verifyOwnerV3ProtectiveFee(ownerId,accountId,
+      sourceUrl,ticker,{transaction:tx});
+   if(!protective.ok||protective.sourceDigest!==feeDigest)
+    throw Error('owner_v3_protective_exit_current_fee_unverified');
+  }
   // Transport is called exactly once. Any error after invocation is UNKNOWN;
   // the caller's ledger must reconcile it, never blindly resubmit.
   return transport(request,{...init,redirect:'error'});
