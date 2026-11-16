@@ -915,6 +915,7 @@ export async function activateOwnerSelfStandingAccount(
    if(!evidence||evidence.account!==b.accountId)
      return fail("signed_flat_account_reconciliation_unavailable");
  }catch{return fail("fresh_signed_owner_account_preflight_failed");}
+ if(!evidence)return fail("signed_flat_account_reconciliation_unavailable");
  let tx:Awaited<ReturnType<Db["connect"]>>|null=null,commitAttempted=false,committed=false,discard=false;
  try{
    tx=await db.connect();
