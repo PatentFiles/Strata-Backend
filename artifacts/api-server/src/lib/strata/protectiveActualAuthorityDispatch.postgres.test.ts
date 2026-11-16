@@ -56,7 +56,7 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  CREATE TABLE public.live_execution_config(id text,live_execution_enabled boolean,manual_kill_switch boolean);
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,holder_id text,fencing_token bigint,state text,credential_fingerprint text,account_kill boolean,heartbeat_at timestamptz);
  CREATE TABLE public.v13_production_position(id text,account_id text,market text,side text,quantity_hundredths bigint);
- CREATE TABLE public.v13_production_observation(account_id text,kind text);
+ CREATE TABLE public.v13_production_observation(account_id text,kind text,payload jsonb);
  CREATE TABLE public.v13_production_intent(id text,parent_id text,account_id text,client_order_id text,market text,kind text,state text,terminal boolean,exchange_order_id text,filled_hundredths bigint,reserved_micros bigint,side text,request jsonb,decision jsonb,policy_hash text,dispatch_at timestamptz);
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id uuid,owner_user_id uuid,execution_account_id text,client_order_id text,market_ticker text,reducing_side text,quantity_hundredths bigint,worker_holder_id text,worker_fencing_token bigint,state text,trading_authorized boolean,order_digest text,initial_position_fp text,created_at timestamptz,updated_at timestamptz);
  CREATE TABLE private.strata_protective_exit_release(release_commit_sha text,state text,created_at timestamptz,expires_at timestamptz,revoked_at timestamptz,independent_reviewer_id uuid,operator_approver_id uuid);
