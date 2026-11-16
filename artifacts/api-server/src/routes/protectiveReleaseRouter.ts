@@ -1,4 +1,5 @@
 import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
+import {activateOwnerSelfAccount,ownerSelfActivationOutcome} from '../lib/strata/ownerSelfAccountActivation';
 import {heldHistoryConsentOutcome} from '../lib/strata/ownerNeverPostedReleaseRenewal';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
@@ -114,6 +115,24 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:'unauthorized'});
   const result=await recordOwnerSelfStandingReview(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // Explicit AAL2 owner-only activation. Uses signed Kalshi history,
+ // issuer monetary evidence, exact-SHA technical review, ledger conservation,
+ // worker CAS and deferred five-second freshness. No ARM or START.
+ router.get('/owner-self-activation-outcome',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const sha=typeof req.query.sha==='string'?req.query.sha:'';
+  const result=await ownerSelfActivationOutcome(actor.subject,sha);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(200).json(sanitizePublic(result));
+ });
+ router.post('/owner-self-activate',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await activateOwnerSelfAccount(actor.subject,req.body);
   res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
