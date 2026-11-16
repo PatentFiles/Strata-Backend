@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {verifyOwnerStandingFee,verifyOwnerV3ProtectiveFee,OWNER_STANDING_FEE_CONFIRM} from './ownerStandingFeeAuthorization';
+import {verifyOwnerStandingFee,verifyOwnerV3ProtectiveFee,readOwnerV3ProtectiveSource,verifyOwnerV3ProtectiveFeeAuthority,OWNER_STANDING_FEE_CONFIRM} from './ownerStandingFeeAuthorization';
 import {verifyMonetaryFeeContract} from './monetaryFeeContract';
 
 const owner='11111111-1111-4111-8111-111111111111';
@@ -85,4 +85,41 @@ test('only an authenticated historical V3 source plus fresh provider fee can ser
  assert.equal((await verifyOwnerV3ProtectiveFee(owner,accountId,source,market,missing.deps)).ok,false);
  const issuer=harness({rows:[{source_digest:sourceDigest}],provider:false});
  assert.equal((await verifyOwnerV3ProtectiveFee(owner,accountId,source,market,issuer.deps)).ok,false);
+});
+
+test('protective fee mode is selected from approved owner policy, never client input',async()=>{
+ const sql:string[]=[];
+ const db={query:async(q:string,values?:unknown[])=>{
+  sql.push(q);assert.deepEqual(values,[owner,accountId]);
+  return {rows:[{fee_policy_version:'strata_owner_official_monetary_fee_v3',
+   fee_formula_version:'standard-quadratic-0.07-v1',
+   fee_source_url:source,policy_hash:policy}]};
+ }};
+ const result=await readOwnerV3ProtectiveSource(owner,accountId,db);
+ assert.equal(result.mode,'OWNER_V3');
+ if(result.mode==='OWNER_V3')assert.equal(result.sourceAuthorityId,id);
+ assert.ok(sql.every(q=>q.includes("p.state='APPROVED'")));
+ const invalid={query:async()=>({rows:[{fee_policy_version:'strata_owner_official_monetary_fee_v3',
+   fee_formula_version:'invalid',fee_source_url:source,policy_hash:policy}]})};
+ assert.equal((await readOwnerV3ProtectiveSource(owner,accountId,invalid)).mode,'UNAVAILABLE');
+});
+test('final reduce-only authority binds immutable original owner, release, approved policy and PDF bytes',async()=>{
+ const rows=[{policy_hash:policy,fee_source_url:source,authority_id:id,
+  official_source_digest:sourceDigest,attestation_id:consentId}];
+ const queries:string[]=[];
+ const db={query:async(q:string,params?:unknown[])=>{
+  queries.push(q);assert.deepEqual(params?.slice(0,3),[owner,accountId,sha]);
+  return {rows};
+ }};
+ const authority=await verifyOwnerV3ProtectiveFeeAuthority(owner,accountId,sha,db);
+ assert.equal(authority.ok,true);
+ if(authority.ok){
+  assert.match(authority.authorityFingerprint,/^[a-f0-9]{64}$/);
+  assert.ok(authority.validForMs<=5000);
+ }
+ assert.ok(queries[0]?.includes('FOR SHARE OF g,e,a,p'));
+ assert.ok(queries[0]?.includes('a.fee_artifact_digest=g.official_source_digest'));
+ assert.ok(queries[0]?.includes("p.state='APPROVED'"));
+ const missing={query:async()=>({rows:[]})};
+ assert.equal((await verifyOwnerV3ProtectiveFeeAuthority(owner,accountId,sha,missing)).ok,false);
 });
