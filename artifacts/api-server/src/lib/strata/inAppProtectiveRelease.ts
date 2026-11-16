@@ -11,6 +11,7 @@ import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
 import { observeDynamicKalshiFees, computeDynamicFeeModelDigest, type DynamicFeeResult } from "./dynamicOfficialFeeSchedule";
 import { DYNAMIC_FEE_POLICY_VERSION_V4 } from "./dynamicFeeOrderRiskV4";
+import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
 import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLease";
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
@@ -26,7 +27,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyOwnerV3Fee?:typeof verifyOwnerV3FeeAuthority;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -224,6 +225,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     return deny("commissioning_repair_requires_empty_exchange_and_ledger_history");
   const sourceUrl=String(account.fee_source_url??"");
   const reviewedApi=parseReviewedApiSource(sourceUrl);
+  const ownerV3Id=parseV3FeeSource(sourceUrl);
   let freshFeeDigest:string;
   let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
     authorityId:string}=null;
@@ -279,6 +281,25 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     freshFeeDigest=m.publicationDigest;
     v4FeeBinding={marketTicker:ticker,modelDigest:m.modelDigest,
       metadataDigest:m.metadataDigest,authorityId:String(g.authority_id)};
+  }else if(ownerV3Id){
+    // A versioned owner-authenticated fee source is an alternative to V2
+    // human ADMIN issuance, never a fabricated V2 independent signature.
+    // Check actual official monetary publication and current market metadata,
+    // owner/account/SHA scope, revocation and the saved policy source.
+    if(account.fee_policy_version!==V3_FEE_POLICY_VERSION||
+       account.fee_formula_version!==V3_FEE_FORMULA_VERSION)
+      return deny("release_owner_v3_policy_or_formula_mismatch");
+    const fee=await(deps.verifyOwnerV3Fee??verifyOwnerV3FeeAuthority)(
+      ownerId,"STEP_11",sourceUrl);
+    if(!fee.ok)return deny("release_owner_v3_"+fee.reason);
+    if(fee.identity.authorityId!==ownerV3Id||
+       fee.identity.releaseCommitSha!==sha||
+       fee.identity.sourceUrl!==sourceUrl||
+       fee.identity.feePolicyVersion!==V3_FEE_POLICY_VERSION||
+       fee.identity.formulaVersion!==V3_FEE_FORMULA_VERSION||
+       fee.identity.sourceDigest!==String(account.fee_artifact_digest??""))
+      return deny("release_owner_v3_source_sha_or_digest_mismatch");
+    freshFeeDigest=fee.identity.sourceDigest;
   }else if(reviewedApi){
     // This reviewed API-source grant is an independently signed model, NOT
     // evidence that Kalshi's PDF was fetched. Verify the exact owner/source
