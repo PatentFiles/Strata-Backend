@@ -118,7 +118,9 @@ export async function verifyOwnerStandingFee(
   const row=grant.rows[0]!;
   const account=txt(row.execution_account_id),policy=txt(row.approved_policy_hash);
   const bytes=txt(row.official_source_digest);
-  if(!UUID.test(txt(row.consent_id))||!HEX.test(policy)||!HEX.test(bytes)||
+  if(!UUID.test(txt(row.consent_id))||
+    row.owner_user_id!==ownerId||row.source_authority_id!==id||
+    row.release_commit_sha!==sha||!HEX.test(policy)||!HEX.test(bytes)||
     row.consent_digest!==sourceConfirmation(ownerId,account,sha,policy,id,bytes))
    return fail('owner_standing_fee_record_integrity_unverified');
   const began=clock(deps);
