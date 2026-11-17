@@ -1,3 +1,7 @@
+import {verifyDurableProtectiveAuthority} from './durableFeeConsumers';
+import {durableFeeStatus,revokeDurableFeeEntry} from './durableFeeLifecycle';
+import {reauthorizeDurableFeeRelease,durableFeeReauthorizationPreview,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization,DURABLE_REAUTH_CONFIRM,DURABLE_REAUTH_CANCEL} from './durableFeeReauthorization';
+import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,HISTORICAL_MIGRATION_CONFIRM,HISTORICAL_RISK_ACCEPTANCE} from './historicalOwnerFeeBaseline';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -62,7 +66,7 @@ async function schema(){
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id text,execution_account_id text,state text);`);
  for(const f of ['sql/strata_protective_exit_release_private.sql','sql/strata_protective_exit_release_renewable.sql','sql/strata_in_app_protective_release_approval.sql',
  'sql/strata_owner_sha_approval.sql','lib/db/drizzle/0043_strata_continuous_execution_grants.sql','lib/db/owner-self-release/001_explicit_owner_authority.sql',
- 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','docs/durable-fee/schema.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
+ 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','docs/durable-fee/schema.sql','lib/db/owner-self-release/005_durable_fee_release_authorization.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
 }
 const migrationBody=()=>({accountId:account,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:HISTORICAL_BASELINE_ID,modelId:authority,expectedSha:sha,expectedPolicyId:legacyRow.id,expectedPolicyHash:legacyRow.policy_hash,expectedPolicyVersion:1,confirmation:HISTORICAL_MIGRATION_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE});
 const migrationDeps={db:pool,sha:()=>sha,scope:()=>({ownerId:owner,accountId:account}),read:((m:typeof signer.material,at:number)=>signer.read(m,at,[],true)) as never};
@@ -111,6 +115,71 @@ const state=async()=>({a:(await pool.query('SELECT execution_enabled,kill_switch
 const wrap=(hook:(sql:string,args:unknown[]|undefined,c:any)=>Promise<any>)=>({...deps,db:{query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:(sql:string,args?:unknown[])=>hook(sql,args,c)};}}});
 async function untouched(){const s=await state();assert.equal(s.a.kill_switch,true);assert.equal(s.a.execution_enabled,false);assert.equal(s.w.state,'killed');assert.equal(s.w.fencing_token,'7');assert.equal(s.w.arm_requested,false);assert.equal(s.count,0);assert.equal(s.approvals,0);}
 test('historical baseline full chain, consent, source separation and atomicity',async(t)=>{try{await schema();
+
+ const newSha='d'.repeat(40),reauthId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+ const reauthBody=()=>({authorizationId:reauthId,accountId:account,modelId:authority,originalSha:sha,expectedSha:newSha,policyHash:hash,sourceDigest,confirmation:DURABLE_REAUTH_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE});
+ const reauthDeps={db:pool,sha:()=>newSha,scope:()=>({ownerId:owner,accountId:account}),read:((m:typeof signer.material,at:number)=>signer.read(m,at,[],true)) as never,probe:()=>probeCurrentKalshiFeeApi(feed,Date.now,market)};
+ await t.test('new exact build binding preserves original model policy and stopped state; old and new build proofs retain provenance',async()=>{
+  await reset();const before=(await pool.query('SELECT * FROM private.strata_durable_owner_fee_model')).rows;const policyBefore=(await pool.query('SELECT * FROM public.v13_live_money_policy ORDER BY version')).rows;const accountBefore=(await pool.query('SELECT * FROM public.v13_production_account')).rows;
+  assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY')).ok,false);
+  const preview=await durableFeeReauthorizationPreview(owner,reauthDeps);assert.equal(preview.ok,true,JSON.stringify(preview));
+  const result=await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps);assert.equal(result.ok,true,JSON.stringify(result));
+  assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,newSha,pool)).outcome,'RECORDED');
+  assert.equal((await stage()).ok,true);const proof=await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY');assert.equal(proof.ok,true,JSON.stringify(proof));if(proof.ok){assert.equal(proof.sourceAuthenticityVerified,false);assert.equal(proof.publicationKnownCurrent,false);}
+  assert.deepEqual((await pool.query('SELECT * FROM private.strata_durable_owner_fee_model')).rows,before);assert.deepEqual((await pool.query('SELECT * FROM public.v13_live_money_policy ORDER BY version')).rows,policyBefore);assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_account')).rows,accountBefore);
+  const canceled=await cancelDurableFeeReauthorization(owner,{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool);assert.equal(canceled.outcome,'RECORDED');
+  assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps)).ok,false);
+  await assert.rejects(pool.query("UPDATE private.strata_durable_fee_release_authorization SET release_commit_sha=repeat('f',40)"),/immutable/);
+  await assert.rejects(pool.query('DELETE FROM private.strata_durable_fee_release_authorization'),/retained/);
+ });
+ await t.test('deferred commit deadline refuses evidence that expires after UPDATE and retains UNKNOWN until cancel',async()=>{
+  await reset();const db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{if(sql==='COMMIT')await new Promise(r=>setTimeout(r,5100));return c.query(sql,args);}};}};
+  const result=await reauthorizeDurableFeeRelease(owner,reauthBody(),{...reauthDeps,db});assert.equal(result.ok,false);assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,newSha,pool)).outcome,'UNKNOWN');
+  assert.equal((await cancelDurableFeeReauthorization(owner,{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool)).outcome,'REJECTED');
+  assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY')).ok,false);
+ });
+ await t.test('lost successful COMMIT ACK reads RECORDED and cannot be canceled',async()=>{
+  await reset();const db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{const r=await c.query(sql,args);if(sql==='COMMIT')throw Error('synthetic lost ack');return r;}};}};
+  assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),{...reauthDeps,db})).ok,false);assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,newSha,pool)).outcome,'RECORDED');
+  assert.equal((await cancelDurableFeeReauthorization(owner,{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool)).outcome,'RECORDED');
+ });
+ await t.test('foreign owner and SHA cannot read or cancel exact authorization',async()=>{
+  await reset();assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps)).ok,true);
+  assert.equal((await durableFeeReauthorizationOutcome('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',reauthId,newSha,pool)).outcome,'UNKNOWN');
+  assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,'e'.repeat(40),pool)).outcome,'UNKNOWN');
+  assert.equal((await cancelDurableFeeReauthorization('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool)).outcome,'UNKNOWN');
+ });
+ await t.test('concurrent cancellation waits for recorded writer and cannot reject committed consent',async()=>{
+  await reset();const entered=deferred(),resume=deferred();const db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{if(sql==='COMMIT'){entered.resolve();await resume.promise;}return c.query(sql,args);}};}};
+  const writing=reauthorizeDurableFeeRelease(owner,reauthBody(),{...reauthDeps,db});await entered.promise;
+  const canceling=cancelDurableFeeReauthorization(owner,{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool);
+  await new Promise(r=>setTimeout(r,40));resume.resolve();assert.equal((await writing).ok,true);assert.equal((await canceling).outcome,'RECORDED');
+ });
+ await t.test('protective fingerprint, status and public revoke respect exact original/new/unapproved build',async()=>{
+  await reset();assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps)).ok,true);
+  const old=await verifyDurableProtectiveAuthority(owner,account,sha,pool),fresh=await verifyDurableProtectiveAuthority(owner,account,newSha,pool);
+  assert.equal(old.ok,true);assert.equal(fresh.ok,true);if(old.ok&&fresh.ok)assert.notEqual(old.authorityFingerprint,fresh.authorityFingerprint);
+  assert.equal((await verifyDurableProtectiveAuthority(owner,account,'e'.repeat(40),pool)).ok,false);
+  const prior=process.env.RAILWAY_GIT_COMMIT_SHA;try{
+   process.env.STRATA_OWNER_SELF_RELEASE_OWNER_ID=owner;process.env.STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID=account;process.env.RAILWAY_GIT_COMMIT_SHA=newSha;const status=await durableFeeStatus(owner);assert.equal(status.ok,true);if(status.ok)assert.equal(status.reason,'durable_model_already_recorded');
+   assert.equal((await revokeDurableFeeEntry(owner,{expectedSha:newSha,modelId:authority,confirmation:'I_REVOKE_DURABLE_FEE_NEW_ENTRIES_V1'})).ok,true);
+   assert.equal((await stage()).ok,false);assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY')).ok,false);
+  }finally{if(prior===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=prior;}
+ });
+ await t.test('entry revocation propagates across original and reauthorized releases without clearing protective fee proof',async()=>{
+  await reset();assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps)).ok,true);await pool.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true');
+  assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY')).ok,false);assert.equal((await stage()).ok,false);
+  assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'PROTECTIVE_EXIT')).ok,true);
+  assert.equal((await durableFeeReauthorizationPreview(owner,{...reauthDeps,sha:()=>'e'.repeat(40)})).ok,false);
+ });
+ await t.test('publication change blocks both original and reauthorized fee proofs',async()=>{await reset();assert.equal((await reauthorizeDurableFeeRelease(owner,reauthBody(),reauthDeps)).ok,true);await pool.query('UPDATE private.strata_durable_owner_fee_state SET known_publication_change=true');assert.equal((await stage()).ok,false);assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'PROTECTIVE_EXIT')).ok,false);});
+ await t.test('cancel pending under writer fence prohibits late signed-read completion',async()=>{
+  await reset();const entered=deferred(),resume=deferred();const write=reauthorizeDurableFeeRelease(owner,reauthBody(),{...reauthDeps,read:async(m,at)=>{entered.resolve();await resume.promise;return signer.read(m,at,[],true);}});await entered.promise;
+  const cancel=await cancelDurableFeeReauthorization(owner,{authorizationId:reauthId,accountId:account,modelId:authority,expectedSha:newSha,confirmation:DURABLE_REAUTH_CANCEL},pool);assert.equal(cancel.outcome,'REJECTED');resume.resolve();assert.equal((await write).ok,false);assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,newSha,pool)).outcome,'REJECTED');assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:hash},market,'ENTRY')).ok,false);
+ });
+ await t.test('revocation while signed read waits cannot create a new binding',async()=>{
+  await reset();const entered=deferred(),resume=deferred();const write=reauthorizeDurableFeeRelease(owner,reauthBody(),{...reauthDeps,read:async(m,at)=>{entered.resolve();await resume.promise;return signer.read(m,at,[],true);}});await entered.promise;await pool.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true');resume.resolve();assert.equal((await write).ok,false);assert.equal((await durableFeeReauthorizationOutcome(owner,reauthId,newSha,pool)).outcome,'REJECTED');
+ });
  await t.test('no prior same-SHA approval completes all actual stages, preserved limits, remains disarmed',async()=>{const b=await reset();assert.ok(b);const r=await activateOwnerSelfAccount(owner,b,deps);assert.equal(r.ok,true,JSON.stringify(r));const proof=await stage();assert.equal(proof.ok,true);if(proof.ok){assert.equal(proof.sourceAuthenticityVerified,false);assert.equal(proof.publicationKnownCurrent,false);assert.equal(proof.sourceKind,HISTORICAL_SOURCE_KIND);assert.equal(proof.policyVersion,HISTORICAL_FEE_VERSION);}const model=(await pool.query('SELECT source_capture_id,genuine_source_verified,source_kind FROM private.strata_durable_owner_fee_model')).rows[0];assert.equal(model.source_capture_id,null);assert.equal(model.genuine_source_verified,false);assert.equal(model.source_kind,HISTORICAL_SOURCE_KIND);assert.equal((await pool.query('SELECT count(*) FROM private.strata_railway_official_fee_capture_v5')).rows[0].count,'0');const st=await state();assert.equal(st.a.execution_enabled,true);assert.equal(st.a.kill_switch,false);assert.equal(st.w.state,'released');assert.equal(st.w.arm_requested,false);assert.equal(st.count,1);assert.equal(st.approvals,1);});
  await t.test('existing same-SHA approval refuses migration before any write or revocation',async()=>{await reset(true);const st=await state();assert.equal(st.a.kill_switch,true);assert.equal(st.a.execution_enabled,false);assert.equal(st.count,0);assert.equal(st.w.state,'killed');assert.equal((await pool.query('SELECT count(*) FROM private.strata_durable_owner_fee_model')).rows[0].count,'0');const p=(await pool.query('SELECT id,state FROM public.v13_live_money_policy')).rows;assert.equal(p.length,1);assert.equal(p[0].id,legacyRow.id);assert.equal(p[0].state,'APPROVED');assert.equal((await pool.query('SELECT revoked_at FROM private.strata_owner_sha_approvals')).rows[0].revoked_at,null);});
  await t.test('prior OLD-SHA approval revoked by migration does not poison new-SHA activation',async()=>{const b=await reset('old');assert.ok(b);const r=await activateOwnerSelfAccount(owner,b,deps);assert.equal(r.ok,true,JSON.stringify(r));const st=await state();assert.equal(st.approvals,2);assert.equal(st.count,1);assert.equal(st.w.arm_requested,false);const approvals=(await pool.query('SELECT release_commit_sha,revoked_at FROM private.strata_owner_sha_approvals ORDER BY release_commit_sha')).rows;assert.equal(approvals[0].release_commit_sha,sha);assert.equal(approvals[0].revoked_at,null);assert.ok(approvals[1].revoked_at);});

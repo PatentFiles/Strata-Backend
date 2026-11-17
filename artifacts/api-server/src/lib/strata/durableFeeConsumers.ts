@@ -1,3 +1,4 @@
+import {durableReleaseMatch} from './durableFeeReleaseBinding';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Server-only candidate consumers; no route accepts authority substitutions. */
 import {createHash} from 'node:crypto';import {pool} from '@workspace/db';
@@ -8,11 +9,11 @@ type Query={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknow
 export async function verifyDurableProtectiveAuthority(owner:string,account:string,sha:string,db:Query=pool){
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!/^[a-f0-9]{40}$/.test(sha))return {ok:false as const};
  try{const r=await db.query(`SELECT m.model_id::text,m.source_capture_id::text,m.source_kind,m.historical_baseline_id,m.official_source_digest,m.approved_policy_hash,
- m.owner_user_id,m.execution_account_id,m.release_commit_sha
+ m.owner_user_id,m.execution_account_id,m.release_commit_sha,$3::text AS authorized_release_sha
  FROM private.strata_durable_owner_fee_model m JOIN private.strata_durable_owner_fee_state s USING(model_id)
  JOIN public.v13_production_account a ON a.id=m.execution_account_id AND a.owner_user_id=m.owner_user_id
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
- WHERE m.owner_user_id=$1::uuid AND m.execution_account_id=$2 AND m.release_commit_sha=$3
+ WHERE m.owner_user_id=$1::uuid AND m.execution_account_id=$2 AND ${durableReleaseMatch('$3')}
  AND ((m.genuine_source_verified=true AND m.source_kind='FRESH_CANONICAL_CAPTURE' AND m.policy_version=$4) OR ($6::boolean AND m.genuine_source_verified=false AND m.source_kind='OWNER_ATTESTED_HISTORICAL_BASELINE' AND m.policy_version=$5 AND EXISTS(SELECT 1 FROM private.strata_durable_historical_baseline b WHERE b.baseline_id=m.historical_baseline_id AND b.content_sha256=m.official_source_digest))) AND m.formula_version='standard-quadratic-0.07-v1'
  AND s.known_publication_change=false AND p.state='APPROVED' AND p.policy_hash=m.approved_policy_hash
  AND p.fee_source_url='strata-durable-owner-fee://'||m.model_id::text

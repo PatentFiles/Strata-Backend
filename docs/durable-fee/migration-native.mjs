@@ -31,6 +31,7 @@ async function reset(){
  await pool.query("INSERT INTO private.strata_owner_sha_approvals VALUES($1,$2,NULL,repeat('b',40))",[owner,account]);
  await pool.query("INSERT INTO private.strata_railway_official_fee_capture_v5 VALUES(1,$1,$2,'2026-07-07','https://kalshi.com/docs/kalshi-fee-schedule.pdf','railway_canonical_https_direct',now(),now()+interval '55 minutes',$3,$4,'issuer_pdf_55m_signed_api_recheck_v2')",[account,digest,bytes,bytes.length]);
  await pool.query(readFileSync('docs/durable-fee/schema.sql','utf8'));
+ await pool.query(readFileSync('lib/db/owner-self-release/005_durable_fee_release_authorization.sql','utf8'));
 }
 const count=async()=>Number((await pool.query('SELECT count(*) FROM private.strata_durable_owner_fee_model')).rows[0].count);
 const wrapped=hook=>({...deps,db:{connect:async()=>{const c=await pool.connect();return {query:(s,a)=>hook(c,s,a),release:e=>c.release(e)}}}});
