@@ -41,4 +41,4 @@ jobs:
         env:
           PG_BIN: /usr/lib/postgresql/16/bin
           PG_SHARE: /usr/share/postgresql/16
-        run: bash docs/durable-activation-native/run-native-tests.sh && bash docs/durable-activation-native/run-fullchain.sh && bash docs/historical-activation-native/run-fullchain.sh
+        run: bash docs/durable-activation-native/run-native-tests.sh && bash docs/durable-activation-native/run-fullchain.sh && bash docs/historical-activation-native/run-fullchain.sh && bash docs/historical-activation-native/run-history109.sh
