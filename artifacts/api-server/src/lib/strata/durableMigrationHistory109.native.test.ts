@@ -1,3 +1,6 @@
+import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit,CREDIT_CONFIRM,CREDIT_CANCEL} from './capitalCreditRepair';
+import {capitalCreditProof,scopeDigest,type CreditScope} from './capitalCreditProof';
+import {reconciliationObservation} from '../v13-production/reconciliationObservation';
 import {reauthorizeDurableFeeRelease,DURABLE_REAUTH_CONFIRM} from './durableFeeReauthorization';
 import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import {personalAccountSnapshot} from './personalExchangeRead';
@@ -149,6 +152,54 @@ test('109 intent minimal-schema migration regression with real account foreign-k
  {...migrationDeps,sha:()=>newSha,read:(_m,at)=>read(true,orders,at),probe:()=>probeCurrentKalshiFeeApi(feed,Date.now,market)});
  assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(await state(),before);assert.equal((await pool.query('SELECT count(*) FROM public.v13_production_intent')).rows[0].count,'109');
  assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:m.approved_policy_hash},market,'ENTRY')).ok,true);
+ });
+ await t.test('retained109 signed provider credit repairs only capital, keeps real P&L and cannot double count',async(ct)=>{
+  await pool.query('ALTER TABLE private.kalshi_owner_historical_funding ADD COLUMN exchange_transfer_id text;ALTER TABLE private.kalshi_owner_pilot_transfers ADD COLUMN verified_exchange_transfer_id text;CREATE TABLE private.kalshi_owner_topups(id uuid,owner_user_id uuid);CREATE TABLE private.kalshi_owner_topup_legs(topup_id uuid,exchange_transfer_id text)');
+  await pool.query(readFileSync(root+'/lib/db/owner-self-release/006_capital_credit_repair.sql','utf8'));
+  const history=await readNeverPostedReleaseHistory(pool,account,false,{expiredExitOwnerId:owner});const beforeRead=await read();const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:fingerprint},beforeRead as never,history.requests);assert.ok('identity'in snapshot);if(!('identity'in snapshot))throw Error('fixture');
+  await pool.query("UPDATE public.v13_production_intent SET created_at=clock_timestamp()-interval '2 minutes' WHERE created_at IS NULL");
+  const checkpoint={...snapshot,observedAtMs:Date.now()-2000};const receipt=reconciliationObservation(checkpoint);
+  await pool.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('capital-checkpoint',$1,'RECONCILIATION',$2,$3)",[account,receipt,digest(receipt)]);
+  const transfer={transfer_id:'synthetic-capital-272',from_subaccount:0,to_subaccount:1,exchange_index:2,amount_cents:272,created_ts:Math.floor(Date.now()/1000)};
+  await pool.query('UPDATE public.v13_production_account SET cash_micros=27720000');signer.setCashDollars('27.7200');
+  const cd={...migrationDeps,read:(_m:typeof signer.material,at:number)=>read(true,orders,at),get:signer.transferGet([transfer])};
+  await capitalCreditProof(owner,account,sha,cd);const preview=await capitalCreditPreview(owner,cd);assert.equal(preview.ok,true,JSON.stringify(preview));if(!preview.ok)throw Error('preview');
+  const {ok,confirmation,observedAt,expiresAt,transferAttempted,tradingAuthorized,workerStarted,ordersSubmitted,retryAuthorized,...scope}=preview;
+  const beforeEvents=(await pool.query('SELECT * FROM public.v13_production_event ORDER BY event_id')).rows,beforePositions=(await pool.query('SELECT * FROM public.v13_production_position ORDER BY id')).rows;
+  const body=(repairId:string)=>({repairId,scope,confirmation:CREDIT_CONFIRM});
+  const unchanged=async()=>assert.equal((await pool.query('SELECT initial_cash_micros::text FROM public.v13_production_account')).rows[0].initial_cash_micros,'23100000');
+  const cancel=(repairId:string)=>cancelCapitalCredit(owner,{repairId,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope},pool);
+  await ct.test('capital cancel before any POST creates immutable fence and preserves account',async()=>{
+   const id=randomUUID();assert.equal((await cancel(id)).outcome,'REJECTED');assert.equal((await applyCapitalCredit(owner,body(id),cd)).ok,false);await unchanged();
+  });
+  await ct.test('capital partial provider archive and duplicate transfer evidence refuse without accounting changes',async()=>{
+   const id=randomUUID();assert.equal((await applyCapitalCredit(owner,body(id),{...cd,read:(_m,at)=>read(false,orders,at)})).ok,false);assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'REJECTED');await unchanged();
+   assert.equal((await capitalCreditPreview(owner,{...cd,get:signer.transferGet([transfer,transfer])})).ok,false);await unchanged();
+  });
+  await ct.test('capital pending cancellation fences late provider response',async()=>{
+   const entered=deferred(),resume=deferred(),id=randomUUID();const applying=applyCapitalCredit(owner,body(id),{...cd,read:async(m,at)=>{entered.resolve();await resume.promise;return read(true,orders,at);}});await entered.promise;const {scopeDigest:oldDigest,...otherCore}=scope;const changedCore={...otherCore,accountRevision:String(BigInt(scope.accountRevision)+1n)},otherScope={...changedCore,scopeDigest:scopeDigest(changedCore)};
+   assert.equal((await cancelCapitalCredit(owner,{repairId:id,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope:otherScope},pool)).outcome,'UNKNOWN');assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');
+   assert.equal((await cancel(id)).outcome,'REJECTED');resume.resolve();assert.equal((await applying).ok,false);await unchanged();
+  });
+  await ct.test('capital post-update exception atomically rolls base and receipt back',async()=>{
+   const id=randomUUID(),db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{const r=await c.query(sql,args);if(sql.startsWith('UPDATE public.v13_production_account SET initial_cash_micros='))throw Error('synthetic postwrite failure');return r;}};}};
+   assert.equal((await applyCapitalCredit(owner,body(id),{...cd,db})).ok,false);assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'REJECTED');await unchanged();
+  });
+  await ct.test('capital deferred commit deadline rejects stale signed proof without late credit',async()=>{
+   const id=randomUUID(),db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{if(sql==='COMMIT')await delay(15100);return c.query(sql,args);}};}};
+   assert.equal((await applyCapitalCredit(owner,body(id),{...cd,db})).ok,false);assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');await unchanged();assert.equal((await cancel(id)).outcome,'REJECTED');
+  });
+  // A lost successful commit acknowledgment must be resolved by exact receipt,
+  // never by retrying or canceling an already-recorded capital adjustment.
+  const committing=deferred(),allowCommit=deferred();
+  const lostAckDb={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{if(sql==='COMMIT'){committing.resolve();await allowCommit.promise;}const r=await c.query(sql,args);if(sql==='COMMIT')throw Error('synthetic lost commit ack');return r;}};}};
+  const id=randomUUID(),applying=applyCapitalCredit(owner,body(id),{...cd,db:lostAckDb});await committing.promise;const cancelling=cancel(id);await delay(40);allowCommit.resolve();const result=await applying;assert.equal((await cancelling).outcome,'RECORDED');assert.equal(result.ok,false,JSON.stringify(result));
+  assert.equal((await pool.query('SELECT initial_cash_micros::text FROM public.v13_production_account')).rows[0].initial_cash_micros,'25820000');
+  assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_event ORDER BY event_id')).rows,beforeEvents);assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_position ORDER BY id')).rows,beforePositions);
+  assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'RECORDED');assert.equal((await cancelCapitalCredit(owner,{repairId:id,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope},pool)).outcome,'RECORDED');
+  const lateId=randomUUID();assert.equal((await cancel(lateId)).outcome,'REJECTED');assert.equal((await applyCapitalCredit(owner,body(lateId),cd)).ok,false);
+  assert.equal((await applyCapitalCredit(owner,{repairId:randomUUID(),scope,confirmation:CREDIT_CONFIRM},cd)).ok,false);assert.equal((await capitalCreditPreview(owner,cd)).ok,false);
+  await assert.rejects(pool.query('DELETE FROM private.strata_capital_credit_repair'));await untouched();
  });
  await t.test('no real network or trading',()=>assert.equal(unexpectedNetwork,0));
 }finally{await pool.end();}});
