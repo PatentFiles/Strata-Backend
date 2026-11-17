@@ -1,0 +1,7 @@
+# Durable migration: mixed 109-intent history
+
+Run `PG_BIN=/trusted/postgres/bin PG_SHARE=/trusted/postgres/share bash docs/historical-activation-native/run-history109.sh`. Set `TMPDIR` when `/tmp` lacks space. Requires repository dependencies. Uses only disposable loopback PostgreSQL on port 55486; refuses other database targets. No real exchange requests.
+
+Ten scenarios (11 Node tests including parent): 38 dispatched blocked ENTRY intents with valid no-send receipts, 69 undispatched expired blocked EXIT intents with parent-linked receipts, two filled and settled provider orders. Positive migration retains stopped/disarmed controls. Missing or tampered proofs, incomplete archives, missing fills, contradictory/foreign provider orders, and valid proof revisions during network I/O fail closed. Injected post-policy-write failure rolls back. Rival contradictory receipt insertion hits PostgreSQL 55P03 under actual account foreign-key locking, both before rollback and before successful commit.
+
+Minimal schema is based on the existing historical full-chain fixture. It retains four account foreign keys, ENTRY source constraints and nonnegative amount constraints. It is not a complete production schema/ACL test, uses an injected synthetic Vault signer and synthetic RSA-signed HTTP responses, and does not execute activation or START. A separate local-only test repeated these cases with the reconstructed production catalog and verified non-superuser postgres role. PostgreSQL 17.11: 11/11 passed.
