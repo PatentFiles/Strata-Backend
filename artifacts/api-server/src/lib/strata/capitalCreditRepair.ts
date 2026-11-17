@@ -1,3 +1,4 @@
+import {logCapitalFailure,capitalPublicReason} from './capitalCreditDiagnostic';
 import {performance} from 'node:perf_hooks';
 import {pool} from '@workspace/db';
 import type {PoolClient} from '@workspace/db';
@@ -14,8 +15,8 @@ const unknown=()=>({outcome:'UNKNOWN' as const,...capitalNoAuthority});
 type Deps=ProofDeps&{sha?:()=>string;scope?:typeof configuredOwnerSelfScope};
 const str=(x:unknown)=>typeof x==='string'?x:'';
 function context(owner:string,d:Deps){if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)throw Error('capital_production_override_forbidden');const c=(d.scope??configuredOwnerSelfScope)(),sha=(d.sha??deployedGitSha)();if(!UUID.test(owner)||!c||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,c.accountId,c))throw Error('capital_owner_scope_unavailable');return {account:c.accountId,sha};}
-const safeReason=(e:unknown)=>e instanceof Error&&/^capital_[a-z_]{1,90}$/.test(e.message)?e.message:'capital_credit_refused';
-export async function capitalCreditPreview(owner:string,d:Deps={}){try{const c=context(owner,d);const pending=await(d.db??pool).query("SELECT repair_id FROM private.strata_capital_credit_repair WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state='PENDING' LIMIT 1",[c.account,owner]);if(pending.rows.length)return no('capital_existing_attempt_requires_readback');const proof=await capitalCreditProof(owner,c.account,c.sha,d);return {ok:true as const,...proof.scope,confirmation:CREDIT_CONFIRM,observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,...capitalNoAuthority};}catch(e){return no(safeReason(e));}}
+const safeReason=capitalPublicReason;
+export async function capitalCreditPreview(owner:string,d:Deps={}){try{const c=context(owner,d);const pending=await(d.db??pool).query("SELECT repair_id FROM private.strata_capital_credit_repair WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state='PENDING' LIMIT 1",[c.account,owner]);if(pending.rows.length)return no('capital_existing_attempt_requires_readback');const proof=await capitalCreditProof(owner,c.account,c.sha,d);return {ok:true as const,...proof.scope,confirmation:CREDIT_CONFIRM,observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,...capitalNoAuthority};}catch(e){const diagnostic=logCapitalFailure(e,'preview');return {...no(safeReason(e)),diagnostic};}}
 export async function capitalCreditOutcome(owner:string,id:string,sha:string,db:Query=pool){
  if(!UUID.test(owner)||!UUID.test(id)||!SHA.test(sha))return unknown();
  try{const r=await db.query('SELECT * FROM private.strata_capital_credit_repair WHERE repair_id=$1::uuid AND owner_user_id=$2::uuid AND release_commit_sha=$3',[id,owner,sha]);if(r.rows.length!==1)return unknown();const row=r.rows[0];if(!validCreditScope(row.scope))return unknown();const scope=row.scope;
@@ -45,7 +46,7 @@ export async function applyCapitalCredit(owner:string,raw:unknown,d:Deps={}){
  const saved=await tx.query("UPDATE private.strata_capital_credit_repair SET state='RECORDED',reason='capital_verified_provider_receipt_recorded',resolved_at=clock_timestamp(),evidence_deadline=$2::timestamptz WHERE repair_id=$1 AND state='PENDING' RETURNING repair_id",[b.repairId,proof.deadline]);if(saved.rows.length!==1)throw Error('capital_receipt_write_failed');
  const finalNow=(d.now??Date.now)();if(finalNow<proof.start||finalNow-proof.start>15000||performance.now()-proof.mono>15000)throw Error('capital_signed_evidence_expired');
  commit=true;await tx.query('COMMIT');done=true;
- }catch(e){reason=commit?'capital_commit_unknown':safeReason(e);if(commit)discard=Error(reason);}finally{if(tx){if(!done&&!discard)try{await tx.query('ROLLBACK')}catch{discard=Error('capital_rollback_unknown')}tx.release(discard);}}
+ }catch(e){logCapitalFailure(e,commit?'commit':'apply');reason=commit?'capital_commit_unknown':safeReason(e);if(commit)discard=Error(reason);}finally{if(tx){if(!done&&!discard)try{await tx.query('ROLLBACK')}catch{discard=Error('capital_rollback_unknown')}tx.release(discard);}}
  if(done)return {ok:true as const,reason:'capital_credit_recorded',repairId:b.repairId,...capitalNoAuthority};
  if(!commit)await terminalize(db,owner,str(b.repairId));return no(reason);
 }
