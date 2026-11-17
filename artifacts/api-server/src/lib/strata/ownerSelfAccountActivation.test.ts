@@ -58,3 +58,39 @@ test('missing or multiple ambiguous activation receipts never authorize a retry'
  const multi={query:async()=>({rows:[{id:'1'},{id:'2'}]})};
  assert.equal((await ownerSelfActivationOutcome(owner,sha,multi)).outcome,'UNKNOWN');
 });
+
+test('pre-transaction exception reports only sanitized stage and preserves stopped no-retry outcome',async()=>{
+ process.env.STRATA_OWNER_SELF_ACTIVATION_ENABLED='true';
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ const warnings:unknown[][]=[],warn=console.warn;
+ console.warn=(...args:unknown[])=>{warnings.push(args);};
+ let queries=0,connects=0;
+ try{
+  const result=await activateOwnerSelfAccount(owner,body,{sha:()=>sha,scope:()=>({ownerId:owner,accountId:account}),
+   db:{query:async()=>{if(queries++===0)return {rows:[]};throw Object.assign(Error('sensitive query and provider details'),{code:'57014'});},
+    connect:async()=>{connects++;throw Error('must not connect');}}});
+  assert.equal(result.ok,false);
+  assert.equal(result.reason,'owner_self_activation_unavailable_or_signed_proof_failed');
+  assert.equal(result.ordersSubmitted,false);assert.equal(result.workerStarted,false);assert.equal(result.tradingAuthorized,false);
+  assert.equal(connects,0);assert.equal(queries,2);
+  assert.ok('diagnostic' in result);
+  assert.deepEqual(result.diagnostic,{stage:'owner_scope',failureCode:'activation_internal_failure',sqlState:'57014'});
+  assert.equal(JSON.stringify(warnings).includes('sensitive'),false);
+  assert.deepEqual(warnings,[['owner_self_activation_failed',result.diagnostic]]);
+  assert.equal('retryAuthorized' in result,false);
+ }finally{console.warn=warn;}
+});
+
+test('a failed diagnostic log cannot replace the original refusal',async()=>{
+ process.env.STRATA_OWNER_SELF_ACTIVATION_ENABLED='true';
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ const warn=console.warn;console.warn=()=>{throw Error('logging stream failed');};
+ let reads=0;
+ try{
+  const result=await activateOwnerSelfAccount(owner,body,{sha:()=>sha,scope:()=>({ownerId:owner,accountId:account}),
+   db:{query:async()=>{if(reads++===0)return {rows:[]};throw Error('private failure');},connect:async()=>{throw Error('must not connect');}}});
+  assert.equal(result.reason,'owner_self_activation_unavailable_or_signed_proof_failed');
+  assert.equal(result.ok,false);assert.equal(result.ordersSubmitted,false);assert.equal(result.workerStarted,false);
+  assert.equal('retryAuthorized' in result,false);
+ }finally{console.warn=warn;}
+});
