@@ -10,19 +10,30 @@ export async function readCapitalTransfers(get:TransferGet,now:number):Promise<C
  const all:CapitalTransfer[]=[],ids=new Set<string>(),cursors=new Set<string>();let cursor='';
  for(let page=0;page<50;page++){
   const raw=await get('/trade-api/v2/portfolio/subaccounts/transfers','?limit=100'+(cursor?'&cursor='+encodeURIComponent(cursor):''));
-  if(!object(raw)||!Array.isArray(raw.transfers)||typeof raw.cursor!=='string'||raw.transfers.length>100)throw Error('capital_transfer_page_unverified');
+  if(!object(raw))throw Error('capital_transfer_response_shape_unverified');
+  if(!Array.isArray(raw.transfers))throw Error('capital_transfer_rows_shape_unverified');
+  if(raw.transfers.length>100)throw Error('capital_transfer_page_size_unverified');
+  // Official response schema requires transfers but makes next-page cursor
+  // optional. Only an absent property on a short page (or empty string) terminates the feed;
+  // explicit null/undefined/other types are not documented terminal values.
+  const hasCursor=Object.prototype.hasOwnProperty.call(raw,'cursor');
+  if(!hasCursor&&raw.transfers.length===100)throw Error('capital_transfer_missing_cursor_ambiguous');
+  if(hasCursor&&typeof raw.cursor!=='string')throw Error('capital_transfer_cursor_type_unverified');
+  const nextCursor=hasCursor?raw.cursor as string:'';
   for(const x of raw.transfers){
-   if(!object(x)||typeof x.transfer_id!=='string'||! /^[A-Za-z0-9_-]{8,128}$/.test(x.transfer_id)||ids.has(x.transfer_id)||
-    !Number.isSafeInteger(x.from_subaccount)||Number(x.from_subaccount)<0||Number(x.from_subaccount)>63||
+   if(!object(x))throw Error('capital_transfer_receipt_shape_unverified');
+   if(typeof x.transfer_id!=='string'||! /^[A-Za-z0-9_-]{8,128}$/.test(x.transfer_id))throw Error('capital_transfer_receipt_id_unverified');
+   if(ids.has(x.transfer_id))throw Error('capital_transfer_receipt_duplicate');
+   if(!Number.isSafeInteger(x.from_subaccount)||Number(x.from_subaccount)<0||Number(x.from_subaccount)>63||
     !Number.isSafeInteger(x.to_subaccount)||Number(x.to_subaccount)<0||Number(x.to_subaccount)>63||x.from_subaccount===x.to_subaccount||
-    !Number.isSafeInteger(x.amount_cents)||Number(x.amount_cents)<=0||Number(x.amount_cents)>2500000||
-    !Number.isSafeInteger(x.created_ts)||Number(x.created_ts)<=0||Number(x.created_ts)*1000>now||
-    !Number.isSafeInteger(x.exchange_index)||Number(x.exchange_index)<0)throw Error('capital_transfer_receipt_unverified');
+    !Number.isSafeInteger(x.exchange_index)||Number(x.exchange_index)<0)throw Error('capital_transfer_receipt_scope_unverified');
+   if(!Number.isSafeInteger(x.amount_cents)||Number(x.amount_cents)<=0||Number(x.amount_cents)>2500000)throw Error('capital_transfer_receipt_amount_unverified');
+   if(!Number.isSafeInteger(x.created_ts)||Number(x.created_ts)<=0||Number(x.created_ts)*1000>now)throw Error('capital_transfer_receipt_time_unverified');
    ids.add(x.transfer_id);all.push({transferId:x.transfer_id,fromSubaccount:Number(x.from_subaccount),toSubaccount:Number(x.to_subaccount),amountCents:Number(x.amount_cents),createdAtMs:Number(x.created_ts)*1000,exchangeIndex:Number(x.exchange_index)});
   }
-  if(raw.cursor==='')return all;
-  if(raw.cursor.length>2048||cursors.has(raw.cursor)||raw.transfers.length===0)throw Error('capital_transfer_pagination_unverified');
-  cursors.add(raw.cursor);cursor=raw.cursor;
+  if(nextCursor==='')return all;
+  if(nextCursor.length>2048||cursors.has(nextCursor)||raw.transfers.length===0)throw Error('capital_transfer_pagination_unverified');
+  cursors.add(nextCursor);cursor=nextCursor;
  }
  throw Error('capital_transfer_history_bound_exceeded');
 }
