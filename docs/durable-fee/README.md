@@ -1,3 +1,9 @@
+> Isolated historical-baseline extension: see [HISTORICAL-BASELINE.md](HISTORICAL-BASELINE.md).
+> The current-capture path remains default; a separately explicit, default-off
+> owner-assumed historical path has distinct provenance/consent. It does not
+> certify current issuer terms or guarantee a fee ceiling. Historical sections
+> below describe the original capture-only candidate and its prior test snapshots.
+
 # Isolated durable fee candidate, November 17, 2026
 
 Base: `202f5d3594468ec94617761b03b8916ec48621a9`. No production, deployment, PR or Brit checkout changed. Not release-ready.

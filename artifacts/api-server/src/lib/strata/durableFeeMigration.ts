@@ -1,3 +1,4 @@
+import {HISTORICAL_FEE_VERSION,HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,HISTORICAL_MIGRATION_CONFIRM,HISTORICAL_RISK_ACCEPTANCE,HISTORICAL_MODEL_CONFIRM,readHistoricalBaselineBytes,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Isolated, default-off atomic durable migration. No ARM, START or orders.
  * Preserves approved limits. Original V2/V3 consent is never relabeled. */
 import {createHash,randomUUID} from 'node:crypto';import {pool} from '@workspace/db';
@@ -6,7 +7,7 @@ import {approvedFromRow} from './ownerStakePolicyAmendment';
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from './personalExchangeRead';
 import type {Identity,Request} from '../v13-production/types';import {loadedMaterial} from './inAppProtectiveRelease';
 import {v3MigrationFlatHistoryCheck} from './ownerFeeV3Migration';import {verifyOfficialFeePdfBytes} from '../microLiveFeeArtifact';
-import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';import {deployedGitSha} from './deployedGitSha';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';import {deployedGitSha} from './deployedGitSha';
 import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
 export const DURABLE_MIGRATION_CONFIRM='I_APPROVE_ATOMIC_MIGRATION_TO_DURABLE_OFFICIAL_FEE_TERMS_V1';
 export const DURABLE_PUBLICATION_RISK_ACCEPTANCE='I_ACCEPT_PUBLICATION_FRESHNESS_MAY_BE_UNKNOWN_AND_UNBOUNDED_FEE_EXITS_MAY_BLOCK_V1';
@@ -31,15 +32,28 @@ async function readDurableMigrationCapture(db:Q,owner:string,account:string,capt
  const parsed=await verifyOfficialFeePdfBytes(v.original_bytes);
  return parsed.ok&&parsed.digest===v.content_sha256&&parsed.effectiveDate===v.effective_date_text?parsed:null;
 }
+const CAPTURE_KEYS='accountId,captureId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance';
+const HISTORICAL_KEYS='accountId,baselineId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance,sourceKind';
+const historicalBody=(b:Row)=>b.sourceKind===HISTORICAL_SOURCE_KIND;
+function validSourceBody(b:Row){return historicalBody(b)
+ ? historicalBaselineEnabled()&&Object.keys(b).sort().join(',')===HISTORICAL_KEYS&&b.baselineId===HISTORICAL_BASELINE_ID&&b.confirmation===HISTORICAL_MIGRATION_CONFIRM&&b.riskAcceptance===HISTORICAL_RISK_ACCEPTANCE
+ : Object.keys(b).sort().join(',')===CAPTURE_KEYS&&/^\d{1,18}$/.test(String(b.captureId))&&b.confirmation===DURABLE_MIGRATION_CONFIRM&&b.riskAcceptance===DURABLE_PUBLICATION_RISK_ACCEPTANCE;}
+async function readMigrationSource(db:Q,owner:string,account:string,b:Row){
+ if(!historicalBody(b))return readDurableMigrationCapture(db,owner,account,String(b.captureId));
+ if(!validSourceBody(b))return null;
+ const source=await readHistoricalBaselineBytes();if(!source)return null;
+ // Any known different publication, even expired or followed by a revert,
+ // contradicts this historical assumption. Never select only the newest row.
+ const conflict=await db.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[account,source.digest]);
+ if(conflict.rows.length)return null;return source;
+}
 /** Explicit owner mutation. Transaction fences account, policies, fee grant and in-flight orders. */
 async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps:Inputs={}):Promise<Result>{
  if(process.env.NODE_ENV!=='test'&&Object.keys(deps).length)return fail('production_override_forbidden');
  const b=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw as Row:{};
- const keys='accountId,captureId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance';
- if(Object.keys(b).sort().join(',')!==keys||!UUID.test(ownerId)||b.confirmation!==DURABLE_MIGRATION_CONFIRM||
- b.riskAcceptance!==DURABLE_PUBLICATION_RISK_ACCEPTANCE||!POLICY_ID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
+ if(!validSourceBody(b)||!UUID.test(ownerId)||!POLICY_ID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
  !Number.isSafeInteger(b.expectedPolicyVersion)||Number(b.expectedPolicyVersion)<1||!UUID.test(txt(b.modelId))||
- !/^\d{1,18}$/.test(String(b.captureId))||!/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||
+ !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||
  b.expectedSha!==(deps.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(ownerId,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))
  return fail('explicit_durable_migration_scope_consent_required');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return fail('durable_fee_feature_disabled');
@@ -65,7 +79,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
      if(txt(pre.id)!==b.accountId||txt(pre.policy_id)!==b.expectedPolicyId)
        return fail("policy_concurrency_conflict");
      if(pre.blocked_reason!=null)return fail('unresolved_account_risk_freeze');
-     const source=await readDurableMigrationCapture(preTx,ownerId,txt(b.accountId),String(b.captureId));
+     const source=await readMigrationSource(preTx,ownerId,txt(b.accountId),b);
      if(!source)return fail('durable_migration_genuine_capture_unverified');
      captureDigest=source.digest;
      credentials=await (deps.load??loadedMaterial)(preTx as never,{...pre,owner_id:ownerId});
@@ -155,8 +169,8 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   if(!old||old.policyHash!==computeV13LiveMoneyPolicyHash(old)||
      old.policyHash!==b.expectedPolicyHash||old.version!==b.expectedPolicyVersion)
    return fail("approved_policy_hash_or_version_changed");
-  if(old.feePolicyVersion===DURABLE_FEE_VERSION)return fail('already_using_durable_fee_policy');
-  const source=await readDurableMigrationCapture(tx,ownerId,id,String(b.captureId));
+  if(isDurableFeeVersion(old.feePolicyVersion))return fail('already_using_durable_fee_policy');
+  const source=await readMigrationSource(tx,ownerId,id,b);
   if(!source||source.digest!==captureDigest)return fail('durable_migration_capture_changed_or_expired');
   // Copy all approved limits exactly. This migration changes fee authority,
   // never stake, budget, strategy, depth, order style or loss permissions.
@@ -192,7 +206,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
    maxTotalLossCents:limits.maxTotalLossCents,
    maxQuoteAgeMs:limits.maxQuoteAgeMs,
    maxFeeEvidenceAgeMs:limits.maxFeeEvidenceAgeMs,
-   feePolicyVersion:DURABLE_FEE_VERSION,feeSourceUrl:"strata-durable-owner-fee://"+b.modelId,
+   feePolicyVersion:historicalBody(b)?HISTORICAL_FEE_VERSION:DURABLE_FEE_VERSION,feeSourceUrl:"strata-durable-owner-fee://"+b.modelId,
    feeFormulaVersion:source.formulaVersion,approvedBy:ownerId,approvedAt:at};
   next.policyHash=computeV13LiveMoneyPolicyHash(next);
   const revoked=await tx.query(`UPDATE public.v13_live_money_policy SET state='REVOKED'
@@ -233,19 +247,26 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);
+  if(historicalBody(b)){
+   const historical=await readHistoricalBaselineBytes();
+   if(!historical||historical.digest!==source.digest)return fail('historical_baseline_bytes_changed');
+   await tx.query(`INSERT INTO private.strata_durable_historical_baseline(baseline_id,source_kind,content_sha256,original_bytes,effective_date,formula_version)
+    VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(baseline_id) DO NOTHING`,[HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,source.digest,historical.bytes,source.effectiveDate,source.formulaVersion]);
+  }
   await tx.query(`INSERT INTO private.strata_durable_owner_fee_model(model_id,owner_user_id,execution_account_id,release_commit_sha,
-   approved_policy_hash,source_capture_id,official_source_digest,policy_version,formula_version,effective_date,confirmation,genuine_source_verified)
-   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'I_APPROVE_VERSIONED_DURABLE_OFFICIAL_FEE_TERMS_V1',true)`,
-   [b.modelId,ownerId,id,b.expectedSha,next.policyHash,b.captureId,source.digest,DURABLE_FEE_VERSION,source.formulaVersion,source.effectiveDate]);
+   approved_policy_hash,source_capture_id,official_source_digest,policy_version,formula_version,effective_date,confirmation,genuine_source_verified,source_kind,historical_baseline_id)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+   [b.modelId,ownerId,id,b.expectedSha,next.policyHash,historicalBody(b)?null:b.captureId,source.digest,next.feePolicyVersion,source.formulaVersion,source.effectiveDate,
+    historicalBody(b)?HISTORICAL_MODEL_CONFIRM:'I_APPROVE_VERSIONED_DURABLE_OFFICIAL_FEE_TERMS_V1',!historicalBody(b),historicalBody(b)?HISTORICAL_SOURCE_KIND:'FRESH_CANONICAL_CAPTURE',historicalBody(b)?HISTORICAL_BASELINE_ID:null]);
   await tx.query('INSERT INTO private.strata_durable_owner_fee_state(model_id) VALUES($1)',[b.modelId]);
   const event={accountId:id,ownerId,oldPolicyId:old.id,newPolicyId:policyId,
    oldPolicyHash:old.policyHash,newPolicyHash:next.policyHash,feeDigest:source.digest,
-   modelId:b.modelId,captureId:b.captureId,releaseSha:b.expectedSha,confirmation:DURABLE_MIGRATION_CONFIRM,
-   riskAcceptance:DURABLE_PUBLICATION_RISK_ACCEPTANCE,limitsPreserved:true,staleActivationRequiresFreshRequest:true};
+   modelId:b.modelId,captureId:b.captureId??null,sourceKind:historicalBody(b)?HISTORICAL_SOURCE_KIND:'FRESH_CANONICAL_CAPTURE',baselineId:b.baselineId??null,releaseSha:b.expectedSha,confirmation:b.confirmation,
+   riskAcceptance:b.riskAcceptance,limitsPreserved:true,staleActivationRequiresFreshRequest:true};
   await tx.query(`INSERT INTO private.strata_durable_fee_migration
-   (model_id,owner_user_id,execution_account_id,release_commit_sha,prior_policy_id,prior_policy_hash,new_policy_id,new_policy_hash,source_digest,confirmation,risk_acceptance)
-   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-   [b.modelId,ownerId,id,b.expectedSha,old.id,old.policyHash,policyId,next.policyHash,source.digest,DURABLE_MIGRATION_CONFIRM,DURABLE_PUBLICATION_RISK_ACCEPTANCE]);
+   (model_id,owner_user_id,execution_account_id,release_commit_sha,prior_policy_id,prior_policy_hash,new_policy_id,new_policy_hash,source_digest,confirmation,risk_acceptance,source_kind,historical_baseline_id)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+   [b.modelId,ownerId,id,b.expectedSha,old.id,old.policyHash,policyId,next.policyHash,source.digest,b.confirmation,b.riskAcceptance,historicalBody(b)?HISTORICAL_SOURCE_KIND:'FRESH_CANONICAL_CAPTURE',b.baselineId??null]);
   await tx.query(`INSERT INTO public.v13_production_observation (id,account_id,kind,payload,digest)
    VALUES($1,$2,'OWNER_DURABLE_FEE_POLICY_MIGRATION',$3::jsonb,$4)`,[randomUUID(),id,JSON.stringify(event),auditDigest(event)]);
   // Deferred model trigger rechecks source expiry/change at COMMIT.
@@ -260,10 +281,11 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
 /** Readback is audit only, never activation or authority to retry UNKNOWN. */
 export async function durableMigrationOutcome(owner:string,modelId:string,sha:string,db:Q=pool){
  if(!UUID.test(owner)||!UUID.test(modelId)||!/^[a-f0-9]{40}$/.test(sha))return {outcome:'UNKNOWN' as const,tradingAuthorized:false};
- try{const r=await db.query(`SELECT x.* FROM private.strata_durable_fee_migration x
+ try{const r=await db.query(`SELECT x.*,m.effective_date::text AS source_effective_date,m.policy_version AS source_policy_version FROM private.strata_durable_fee_migration x
  JOIN private.strata_durable_owner_fee_model m ON m.model_id=x.model_id AND m.owner_user_id=x.owner_user_id
  AND m.execution_account_id=x.execution_account_id AND m.release_commit_sha=x.release_commit_sha
  AND m.approved_policy_hash=x.new_policy_hash AND m.official_source_digest=x.source_digest
+ AND m.source_kind=x.source_kind AND m.historical_baseline_id IS NOT DISTINCT FROM x.historical_baseline_id
  WHERE x.owner_user_id=$1::uuid AND x.model_id=$2::uuid AND x.release_commit_sha=$3`,[owner,modelId,sha]);
  if(r.rows.length!==1){
  const rejected=await db.query(`SELECT * FROM private.strata_durable_fee_migration_attempt
@@ -272,16 +294,16 @@ export async function durableMigrationOutcome(owner:string,modelId:string,sha:st
  const a=rejected.rows[0],b=a.request as Row;
  return {outcome:'REJECTED' as const,ownerId:owner,modelId,sha,accountId:a.execution_account_id,
  priorPolicyId:b.expectedPolicyId,priorPolicyHash:b.expectedPolicyHash,priorPolicyVersion:b.expectedPolicyVersion,
- captureId:String(b.captureId),confirmation:b.confirmation,riskAcceptance:b.riskAcceptance,
+ captureId:b.captureId==null?null:String(b.captureId),sourceKind:b.sourceKind??'FRESH_CANONICAL_CAPTURE',baselineId:b.baselineId??null,confirmation:b.confirmation,riskAcceptance:b.riskAcceptance,
  reason:a.reason,noCommit:true,sameModelRetryAllowed:false,tradingAuthorized:false};
  }const v=r.rows[0];
  return {outcome:'RECORDED' as const,ownerId:owner,modelId,sha,accountId:v.execution_account_id,
  priorPolicyId:v.prior_policy_id,priorPolicyHash:v.prior_policy_hash,newPolicyId:v.new_policy_id,policyHash:v.new_policy_hash,
- sourceDigest:v.source_digest,confirmation:v.confirmation,riskAcceptance:v.risk_acceptance,tradingAuthorized:false};
+ sourceEffectiveDate:v.source_effective_date,policyVersion:v.source_policy_version,sourceKind:v.source_kind,baselineId:v.historical_baseline_id,sourceAuthenticityVerified:v.source_kind==='FRESH_CANONICAL_CAPTURE',publicationKnownCurrent:false,sourceDigest:v.source_digest,confirmation:v.confirmation,riskAcceptance:v.risk_acceptance,tradingAuthorized:false};
  }catch{return {outcome:'UNKNOWN' as const,tradingAuthorized:false};}
 }
 /** Non-mutating preview. Confirmation still performs signed history + locked CAS. */
-export async function previewDurableFeeMigration(owner:string){
+export async function previewDurableFeeMigration(owner:string,sourceKind:string='FRESH_CANONICAL_CAPTURE'){
  const scope=configuredOwnerSelfScope(),sha=deployedGitSha();
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!scope||
  !ownerSelfEnrollmentAllowed(owner,scope.accountId,scope)||!/^[a-f0-9]{40}$/.test(sha))return fail('durable_migration_scope_or_feature_unavailable');
@@ -290,18 +312,26 @@ export async function previewDurableFeeMigration(owner:string){
  WHERE a.owner_user_id=$1::uuid AND a.id=$2 AND a.subaccount=1 AND a.exchange_index=2 AND p.created_by=$1::text AND p.state='APPROVED'`,[owner,scope.accountId]);
  if(r.rows.length!==1)return fail('durable_migration_policy_scope_unavailable');const v=r.rows[0],old=approvedFromRow(v);
  if(!old||old.policyHash!==computeV13LiveMoneyPolicyHash(old))return fail('durable_migration_previous_policy_unverified');
- if(old.feePolicyVersion===DURABLE_FEE_VERSION)return fail('already_using_durable_fee_policy');
+ if(isDurableFeeVersion(old.feePolicyVersion))return fail('already_using_durable_fee_policy');
  const priorApproval=await pool.query('SELECT 1 FROM private.strata_owner_sha_approvals WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3 LIMIT 1',[owner,scope.accountId,sha]);
  if(priorApproval.rows.length)return fail('durable_migration_fresh_release_sha_required');
  if(v.execution_enabled!==false||v.kill_switch!==true||v.blocked_reason!=null||v.commissioned!==true)return fail('stopped_unblocked_commissioned_account_required');
  const c=await pool.query(`SELECT capture_id::text,content_sha256,captured_at,expires_at,effective_date::text FROM private.strata_railway_official_fee_capture_v5
  WHERE execution_account_id=$1 AND captured_at<=clock_timestamp() AND expires_at>clock_timestamp()+interval '45 seconds'
  ORDER BY captured_at DESC,capture_id DESC LIMIT 1`,[scope.accountId]);
- const capture=c.rows[0];if(!capture)return fail('genuine_current_capture_missing');
+ const capture=c.rows[0];
+ const historical=sourceKind===HISTORICAL_SOURCE_KIND;
+ if(!historical&&sourceKind!=='FRESH_CANONICAL_CAPTURE')return fail('durable_source_kind_invalid');
+ const baseline=historical?await readHistoricalBaselineBytes():null;
+ if(historical&&!baseline)return fail('historical_baseline_disabled_or_unverified_bytes');
+ if(historical){const conflict=await pool.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[scope.accountId,baseline!.digest]);if(conflict.rows.length)return fail('historical_baseline_conflicts_with_known_capture');}
+ if(!historical&&!capture)return fail('genuine_current_capture_missing');
  return {ok:true as const,ownerId:owner,accountId:scope.accountId,sha,expectedPolicyId:old.id,expectedPolicyHash:old.policyHash,expectedPolicyVersion:old.version,
- candidateCapture:{captureId:capture.capture_id,digest:capture.content_sha256,capturedAt:capture.captured_at,expiresAt:capture.expires_at,effectiveDate:capture.effective_date},
+ sourceKind,baselineId:historical?HISTORICAL_BASELINE_ID:null,sourceAuthenticityVerified:!historical,
+ candidateBaseline:historical?{baselineId:HISTORICAL_BASELINE_ID,digest:baseline!.digest,effectiveDate:baseline!.effectiveDate,sourceKind:HISTORICAL_SOURCE_KIND,sourceAuthenticityVerified:false,publicationKnownCurrent:false}:null,
+ candidateCapture:historical?null:{captureId:capture.capture_id,digest:capture.content_sha256,capturedAt:capture.captured_at,expiresAt:capture.expires_at,effectiveDate:capture.effective_date},
  limits:{capitalLimitCents:old.capitalLimitCents,maxEntryStakeCents:old.maxEntryStakeCents,maxEntryAllInCents:old.maxEntryAllInCents,maxDailyLossCents:old.maxDailyLossCents,maxTotalLossCents:old.maxTotalLossCents,maxOpenPositions:old.maxOpenPositions},
- confirmation:DURABLE_MIGRATION_CONFIRM,riskAcceptance:DURABLE_PUBLICATION_RISK_ACCEPTANCE,publicationKnownCurrent:false,tradingAuthorized:false,policyMigrated:false};
+ confirmation:historical?HISTORICAL_MIGRATION_CONFIRM:DURABLE_MIGRATION_CONFIRM,riskAcceptance:historical?HISTORICAL_RISK_ACCEPTANCE:DURABLE_PUBLICATION_RISK_ACCEPTANCE,publicationKnownCurrent:false,tradingAuthorized:false,policyMigrated:false};
  }catch{return fail('durable_migration_preview_unavailable');}
 }
 
@@ -311,7 +341,7 @@ function migrationBodyHash(b:Row){return createHash('sha256').update(JSON.string
 export async function migrateOwnedDurableFeePolicy(owner:string,raw:unknown,deps:Inputs={}):Promise<Result>{
  if(process.env.NODE_ENV!=='test'&&Object.keys(deps).length)return fail('production_override_forbidden');
  const b=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw as Row:{};
- if(Object.keys(b).sort().join(',')!=='accountId,captureId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance')return fail('durable_migration_attempt_body_invalid');
+ if(!validSourceBody(b))return fail('durable_migration_attempt_body_invalid');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!UUID.test(txt(b.modelId))||
  !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||b.expectedSha!==(deps.sha??deployedGitSha)()||
  !ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))return fail('durable_migration_attempt_scope_unavailable');

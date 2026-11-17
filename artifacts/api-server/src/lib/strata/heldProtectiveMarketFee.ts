@@ -1,5 +1,5 @@
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
-import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION,parseReviewedApiSource} from './apiFeeSourceStage';
 import {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256} from './apiFeeRateReference';
 import {verifyReviewedProtectiveExitFee,isReviewedProtectiveExitFeeFresh} from './reviewedProtectiveExitFee';
@@ -18,7 +18,7 @@ export async function readHeldProtectiveMarketFee(input:{ownerId:string;accountI
  // of an expired fee grant. It requires unchanged genuine source provenance,
  // the exact owned account and a live official market/fee re-observation.
  if(parseDurableFeeSource(input.sourceUrl)){
-  if(input.policyVersion!==DURABLE_FEE_VERSION||input.formulaVersion!==V3_FEE_FORMULA_VERSION)throw Error('held_durable_fee_policy_invalid');
+  if(!isDurableFeeVersion(input.policyVersion)||input.formulaVersion!==V3_FEE_FORMULA_VERSION)throw Error('held_durable_fee_policy_invalid');
   const checked=await verifyDurableFeeStage(input.ownerId,input.accountId,input.sourceUrl,'PROTECTIVE_EXIT',input.market);
   const now=(deps.clock??Date.now)();
   if(!checked.ok||checked.sourceDigest!==input.digest||now<checked.verifiedAtMs||now-checked.verifiedAtMs>=5000)throw Error('held_durable_fee_current_market_unverified');

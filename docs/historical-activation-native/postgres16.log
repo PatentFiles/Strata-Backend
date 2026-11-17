@@ -1,0 +1,39 @@
+waiting for server to start.... done
+server started
+
+  artifacts/api-server/dist/historical-fullchain-native.cjs  1.4mb ⚠️
+
+⚡ Done in 220ms
+▶ historical baseline full chain, consent, source separation and atomicity
+  ✔ no prior same-SHA approval completes all actual stages, preserved limits, remains disarmed (1867.661096ms)
+  ✔ existing same-SHA approval refuses migration before any write or revocation (736.9863ms)
+  ✔ prior OLD-SHA approval revoked by migration does not poison new-SHA activation (1382.100924ms)
+  ✔ migration refuses missing risk acceptance (52.210089ms)
+  ✔ migration refuses fresh capture consent (29.50905ms)
+  ✔ migration refuses unrecognized baseline (28.828867ms)
+  ✔ migration refuses added capture ID (25.863704ms)
+  ✔ migration refuses fake source kind (20.112648ms)
+  ✔ historical feature disabled refuses migration and active proof (1164.318426ms)
+  ✔ known conflicting canonical capture blocks historical migration (337.423018ms)
+  ✔ concurrent historical migrations commit exactly once (964.450585ms)
+  ✔ rollback at UPDATE public.v13_live_money_policy SET (623.249059ms)
+  ✔ rollback at INSERT INTO private.strata_durable_owner_fee_model (1167.569127ms)
+  ✔ rollback at INSERT INTO private.strata_durable_fee_migration (882.509778ms)
+  ✔ historical authenticity cannot be relabeled as verified canonical source (968.9ms)
+  ✔ historical activation fails closed after entry_revoked=true (1009.612316ms)
+  ✔ historical activation fails closed after known_publication_change=true (793.983464ms)
+  ✔ lost migration COMMIT ACK has historical readback, not retry permission or authenticity claim (953.009433ms)
+  ✔ new conflicting capture after qualification latches and blocks activation (811.569143ms)
+  ✔ two simultaneous historical activation requests commit only once (1105.339269ms)
+  ✔ missing current API applicability blocks historical qualification (1023.315598ms)
+  ✔ all stages remained off live network (0.232419ms)
+✔ historical baseline full chain, consent, source separation and atomicity (16050.089912ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 16758.953964
+Disposable evidence retained at /tmp/owner-final-native.yRcV8e; cluster stopped on exit.

@@ -20,7 +20,7 @@ import {deployedGitSha} from './deployedGitSha';
 import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
 import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from './ownerFeeV3Authority';
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
-import {DURABLE_FEE_VERSION,verifyDurableOwnerFee} from './durableOwnerFeePolicy';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion,verifyDurableOwnerFee} from './durableOwnerFeePolicy';
 import {verifyOwnerStandingFee} from './ownerStandingFeeAuthorization';
 import {collectFinalReleaseEvidence,finalReleaseScope,finalReleaseHistory,finalReleaseSnapshot,readReleaseOwner} from './inAppProtectiveRelease';
 import {ProductionLedger,type Account} from '../v13-production/ledger';
@@ -112,10 +112,10 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   if(!current.ok)return no(current.reason);
   const account=current.account;
   const source=str(account.fee_source_url),durableModel=parseDurableFeeSource(source);
-  const durable=account.fee_policy_version===DURABLE_FEE_VERSION||source.startsWith('strata-durable-owner-fee:');
+  const durable=isDurableFeeVersion(account.fee_policy_version)||source.startsWith('strata-durable-owner-fee:');
   const authorityId=durable?durableModel:parseV3FeeSource(source);
   if(account.id!==raw.accountId||account.policy_hash!==raw.policyHash||
-   account.fee_policy_version!==(durable?DURABLE_FEE_VERSION:V3_FEE_POLICY_VERSION)||
+   (durable?!isDurableFeeVersion(account.fee_policy_version):account.fee_policy_version!==V3_FEE_POLICY_VERSION)||
    account.fee_formula_version!==V3_FEE_FORMULA_VERSION||
    !authorityId||account.commissioned!==true||
    account.execution_enabled!==false||account.kill_switch!==true||

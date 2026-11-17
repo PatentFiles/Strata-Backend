@@ -1,5 +1,5 @@
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
-import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
 import {createDirectRoundingRuntime} from './directRoundingRuntime';
 import {createDirectRoundingOwnedAdapters} from './directRoundingOwnedAdapters';
@@ -399,7 +399,7 @@ export function createProductionPersonalSession(
     const apiSource=parseReviewedApiSource(sourceUrl);
     const ownerV3Source=parseV3FeeSource(sourceUrl);
     const durableSource=parseDurableFeeSource(sourceUrl);
-    if(durableSource&&(policyVersion!==DURABLE_FEE_VERSION||formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))return {ok:false,reason:'durable_fee_policy_identity_invalid'};
+    if(durableSource&&(!isDurableFeeVersion(policyVersion)||formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))return {ok:false,reason:'durable_fee_policy_identity_invalid'};
     const durableAtStart=durableSource?await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY'):null;
     if(durableSource&&(!durableAtStart?.ok||durableAtStart.sourceDigest!==digest))return {ok:false,reason:'durable_fee_startup_proof_unavailable'};
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||

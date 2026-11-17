@@ -113,3 +113,16 @@ test('source capability cannot be reconstructed from serialized proof',async()=>
  assert.equal(proof.ok,true);if(!proof.ok)return;
  assert.equal(proof.sourceFresh(),true);assert.equal(JSON.parse(JSON.stringify(proof)).sourceFresh,undefined);
 });
+
+import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256,readHistoricalBaselineBytes} from './historicalOwnerFeeBaseline';
+test('historical pinned bytes are an explicit assumption, never an implicit fresh source',async()=>{
+ const saved=process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;
+ try{
+ delete process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;assert.equal(await readHistoricalBaselineBytes(),null);
+ process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';const source=await readHistoricalBaselineBytes();assert.ok(source);assert.equal(source.digest,HISTORICAL_BASELINE_SHA256);assert.equal(source.effectiveDate,'2026-07-07');
+ const historical={...row,policy_version:HISTORICAL_FEE_VERSION,source_kind:HISTORICAL_SOURCE_KIND,genuine_source_verified:false,source_capture_id:null,historical_baseline_id:HISTORICAL_BASELINE_ID,historical_digest:HISTORICAL_BASELINE_SHA256,historical_bytes:source.bytes,official_source_digest:HISTORICAL_BASELINE_SHA256};
+ const verify=(r:Record<string,unknown>)=>verifyDurableOwnerFee({query:async()=>({rows:[r]})},scope,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:kalshiFeed(feeApiPages())});
+ const proof=await verify(historical);assert.equal(proof.ok,true);if(proof.ok){assert.equal(proof.sourceAuthenticityVerified,false);assert.equal(proof.publicationKnownCurrent,false);assert.equal(proof.sourceKind,HISTORICAL_SOURCE_KIND);}
+ for(const patch of [{genuine_source_verified:true},{source_capture_id:'1'},{historical_baseline_id:'other'},{historical_bytes:Buffer.from('not the pinned PDF')},{source_kind:'FRESH_CANONICAL_CAPTURE'},{historical_digest:'d'.repeat(64)}])assert.equal((await verify({...historical,...patch})).ok,false);
+ }finally{if(saved===undefined)delete process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;else process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED=saved;}
+});

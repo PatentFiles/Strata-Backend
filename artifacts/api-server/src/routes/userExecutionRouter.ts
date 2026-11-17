@@ -333,8 +333,8 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   router.use(requireUser);
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
-  router.get('/fees/durable/migration-preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
-    res.set('Cache-Control','private, no-store');const result=await previewDurableFeeMigration(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.get('/fees/durable/migration-preview',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');const result=await previewDurableFeeMigration(owner,typeof req.query.sourceKind==='string'?req.query.sourceKind:undefined);res.status(result.ok?200:409).json(sanitizePublic(result));});
   router.post('/fees/durable/cancel-pending',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
     res.set('Cache-Control','private, no-store');const result=await cancelPendingDurableMigration(owner,req.body);res.status(result.outcome==='UNKNOWN'?409:200).json(sanitizePublic(result));});
   router.post('/fees/durable/migrate',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});

@@ -1,9 +1,12 @@
+import {createHash} from 'node:crypto';
+import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Local candidate; not wired to production. A fee proof is not trading authority. */
 import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import {preparePdfFreeApiFeePolicyReview} from './apiFeePolicyReviewCandidate';
 export const DURABLE_FEE_VERSION='owner_approved_canonical_terms_v1';
+export const isDurableFeeVersion=(v:unknown)=>v===DURABLE_FEE_VERSION||v===HISTORICAL_FEE_VERSION;
 export type DurableModel={owner:string;account:string;sha:string;policyHash:string;digest:string;
- version:string;formula:string;effectiveDate:string;approved:boolean;entryRevoked:boolean;
+ sourceKind?:string;version:string;formula:string;effectiveDate:string;approved:boolean;entryRevoked:boolean;
  integrityValid:boolean;knownPublicationChange:boolean;monitorState:'unchanged'|'unavailable'|'changed'|'never_checked'};
 export type Intent='ENTRY'|'PROTECTIVE_EXIT';
 const deny=(reason:string)=>({ok:false as const,reason,feeProofOnly:true as const,tradingAuthorized:false as const});
@@ -21,7 +24,7 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
  if(model.owner!==scope.owner||model.account!==scope.account||model.sha!==scope.sha||model.policyHash!==scope.policyHash)
   return deny('durable_fee_scope_mismatch');
  if(!model.integrityValid||!model.approved||!/^([a-f0-9]{64})$/.test(model.digest)||
- model.version!==DURABLE_FEE_VERSION||model.formula!=='standard-quadratic-0.07-v1'||model.effectiveDate!=='2026-07-07')
+ !isDurableFeeVersion(model.version)||(model.version===HISTORICAL_FEE_VERSION&&(!historicalBaselineEnabled()||model.sourceKind!==HISTORICAL_SOURCE_KIND||model.digest!==HISTORICAL_BASELINE_SHA256))||model.formula!=='standard-quadratic-0.07-v1'||model.effectiveDate!=='2026-07-07')
   return deny('durable_fee_genuine_approved_terms_required');
  // An actual new publication may change a base coefficient not represented
  // in series metadata. Neither entries nor fee-uncapped exits may guess.
@@ -30,7 +33,8 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
  if(!market.ok||!/^KXBTC15M-[A-Za-z0-9-]+$/.test(market.ticker)||!Number.isSafeInteger(now)||
  !Number.isFinite(market.verifiedAt)||market.verifiedAt>now||now-market.verifiedAt>5000)
   return deny(intent==='ENTRY'?'durable_fee_current_market_unverified':'protective_fee_unavailable_no_verified_bound');
- return {ok:true as const,reason:'approved_durable_terms_and_fresh_market_metadata',sourceDigest:model.digest,
+ return {ok:true as const,reason:model.version===HISTORICAL_FEE_VERSION?'owner_attested_historical_baseline_and_fresh_market_metadata':'approved_durable_terms_and_fresh_market_metadata',sourceDigest:model.digest,
+ policyVersion:model.version,sourceKind:model.sourceKind??'FRESH_CANONICAL_CAPTURE',sourceAuthenticityVerified:model.version!==HISTORICAL_FEE_VERSION,
  verifiedAtMs:market.verifiedAt,marketTicker:market.ticker,intent,
  publicationKnownCurrent:false as const,publicationMonitorState:model.monitorState,
  entryConsentRequired:intent==='ENTRY',feeProofOnly:true as const,tradingAuthorized:false as const};
@@ -38,7 +42,8 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
 /** Existing caller transaction must hold these locks THROUGH final send.
  * No HTTP route exposes a model/intent override. Native integration pending. */
 export const DURABLE_FEE_LOCK_SQL=`SELECT m.*,m.effective_date::text AS effective_date_text,s.known_publication_change,s.monitor_state,s.entry_revoked,
- p.state AS policy_state FROM private.strata_durable_owner_fee_model m
+ p.state AS policy_state,b.original_bytes AS historical_bytes,b.content_sha256 AS historical_digest FROM private.strata_durable_owner_fee_model m
+ LEFT JOIN private.strata_durable_historical_baseline b ON b.baseline_id=m.historical_baseline_id
  JOIN private.strata_durable_owner_fee_state s ON s.model_id=m.model_id
  JOIN public.v13_production_account a ON a.id=m.execution_account_id AND a.owner_user_id=m.owner_user_id
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
@@ -60,6 +65,9 @@ export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[])
  const rows=await tx.query(DURABLE_FEE_LOCK_SQL,[scope.owner,scope.account,scope.sha,scope.policyHash]);
  if(rows.rows.length!==1)return deny('durable_fee_unique_locked_model_required');
  const r=rows.rows[0];
+ const historical=r.policy_version===HISTORICAL_FEE_VERSION;
+ const historicalIntegrity=historical&&historicalBaselineEnabled()&&r.source_kind===HISTORICAL_SOURCE_KIND&&r.genuine_source_verified===false&&r.source_capture_id===null&&r.historical_baseline_id===HISTORICAL_BASELINE_ID&&r.historical_digest===HISTORICAL_BASELINE_SHA256&&Buffer.isBuffer(r.historical_bytes)&&createHash('sha256').update(r.historical_bytes).digest('hex')===HISTORICAL_BASELINE_SHA256;
+ if(historical&&!historicalIntegrity)return deny('historical_fee_baseline_provenance_unverified');
  // This probe owns fresh direct GETs (no supplied cache/prefetch reader).
  // Start the durable age conservatively BEFORE its earliest transport, never
  // at the last response or the generic probe's completion timestamp. Keep the
@@ -74,9 +82,9 @@ export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[])
  !Number.isFinite(elapsedMono)||elapsedMono<0||elapsedMono>5000)
   return deny('durable_fee_market_observation_deadline_exceeded');
  const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.release_commit_sha),
- policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
+ sourceKind:String(r.source_kind??'FRESH_CANONICAL_CAPTURE'),policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
  effectiveDate:String(r.effective_date_text),approved:r.policy_state==='APPROVED',entryRevoked:r.entry_revoked===true,
- integrityValid:r.genuine_source_verified===true,knownPublicationChange:r.known_publication_change===true,
+ integrityValid:historical?historicalIntegrity:r.genuine_source_verified===true&&(!r.source_kind||r.source_kind==='FRESH_CANONICAL_CAPTURE'),knownPublicationChange:r.known_publication_change===true,
  monitorState:r.monitor_state as DurableModel['monitorState']},scope,intent,
  {ok:candidate.ok&&candidate.marketTicker===ticker,ticker,verifiedAt:sourceStartedAt},assessedAt);
  if(!proof.ok)return proof;

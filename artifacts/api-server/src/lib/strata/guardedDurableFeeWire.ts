@@ -1,3 +1,4 @@
+import {HISTORICAL_FEE_VERSION} from './historicalOwnerFeeBaseline';
 /** Local candidate adapter, NOT wired to production supervisor. Preserves
  * existing account/lease/credential/technical/order-shape fences. This is
  * additional fee protection, not a replacement for actual position ownership,
@@ -94,9 +95,9 @@ export function createGuardedDurableFeeFetch(
    const approved=await (deps.exitReview??checkStandingExitReview)(tx,ownerId,accountId,sha);
    if(!approved)throw Error('owner_v3_protective_exit_technical_review_missing');
   }
-  const locked=await tx.query(FINAL_MONETARY_ACCOUNT_FENCE_SQL,[
+  const locked=await tx.query(FINAL_MONETARY_ACCOUNT_FENCE_SQL.replace('p.fee_policy_version=$9','p.fee_policy_version=ANY($9::text[])'),[
    ownerId,accountId,keyFingerprint,policyHash,sourceUrl,fencingToken,holderId,
-   feeDigest,DURABLE_FEE_VERSION,'standard-quadratic-0.07-v1'
+   feeDigest,[DURABLE_FEE_VERSION,HISTORICAL_FEE_VERSION],'standard-quadratic-0.07-v1'
   ]);
   if(locked.rows.length!==1)throw Error('owner_v3_fee_final_account_or_source_closed');
   const proof=await (deps.verifyDurable??verifyDurableOwnerFee)(tx as never,

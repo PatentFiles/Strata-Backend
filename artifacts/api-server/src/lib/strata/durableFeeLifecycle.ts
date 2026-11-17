@@ -64,7 +64,7 @@ export async function inspectDurableFeePublication(modelId:string,d:Pick<Deps,'d
  await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='1500ms'");
  const m=await c.query(`SELECT m.*,s.known_publication_change AS latched_change,original.captured_at AS original_captured_at FROM private.strata_durable_owner_fee_model m
  JOIN private.strata_durable_owner_fee_state s ON s.model_id=m.model_id
- JOIN private.strata_railway_official_fee_capture_v5 original ON original.capture_id=m.source_capture_id
+ LEFT JOIN private.strata_railway_official_fee_capture_v5 original ON original.capture_id=m.source_capture_id
  WHERE m.model_id=$1 FOR UPDATE OF s`,[modelId]);
  if(m.rows.length!==1)return deny('durable_fee_model_missing');
  const model=m.rows[0];
@@ -72,7 +72,7 @@ export async function inspectDurableFeePublication(modelId:string,d:Pick<Deps,'d
  // changed document followed by a revert must still latch. NOT EXISTS rather
  // than a sequence high-watermark also handles out-of-order transaction commit.
  const captures=await c.query(`SELECT capture.* FROM private.strata_railway_official_fee_capture_v5 capture
- WHERE execution_account_id=$1 AND captured_at>=$2 AND captured_at<=clock_timestamp()
+ WHERE execution_account_id=$1 AND ($2::timestamptz IS NULL OR captured_at>=$2) AND captured_at<=clock_timestamp()
  AND NOT EXISTS(SELECT 1 FROM private.strata_durable_fee_publication_observation o
  WHERE o.model_id=$3 AND o.source_capture_id=capture.capture_id)
  ORDER BY capture_id LIMIT 1001`,[model.execution_account_id,model.original_captured_at,modelId]);
@@ -107,12 +107,12 @@ export async function inspectDurableFeePublication(modelId:string,d:Pick<Deps,'d
 export async function durableFeeEnrollmentOutcome(owner:string,modelId:string,sha:string,
  db:{query(sql:string,args:unknown[]):Promise<{rows:Row[]}>}=pool){
  if(!UUID.test(owner)||!UUID.test(modelId)||!/^[a-f0-9]{40}$/.test(sha))return {outcome:'UNKNOWN' as const};
- try{const r=await db.query(`SELECT m.model_id,m.owner_user_id,m.execution_account_id,m.release_commit_sha,m.approved_policy_hash,m.official_source_digest,s.entry_revoked,s.known_publication_change
+ try{const r=await db.query(`SELECT m.model_id,m.owner_user_id,m.execution_account_id,m.release_commit_sha,m.approved_policy_hash,m.official_source_digest,m.source_kind,m.historical_baseline_id,m.genuine_source_verified,m.effective_date::text AS source_effective_date,s.entry_revoked,s.known_publication_change
  FROM private.strata_durable_owner_fee_model m JOIN private.strata_durable_owner_fee_state s USING(model_id)
  WHERE m.model_id=$1::uuid AND m.owner_user_id=$2::uuid AND m.release_commit_sha=$3`,[modelId,owner,sha]);
  if(r.rows.length!==1)return {outcome:'UNKNOWN' as const};
  return {outcome:'RECORDED' as const,modelId,ownerId:r.rows[0].owner_user_id,accountId:r.rows[0].execution_account_id,sha:r.rows[0].release_commit_sha,policyHash:r.rows[0].approved_policy_hash,sourceDigest:r.rows[0].official_source_digest,
- entryRevoked:r.rows[0].entry_revoked,knownPublicationChange:r.rows[0].known_publication_change,tradingAuthorized:false as const};
+ sourceKind:r.rows[0].source_kind,baselineId:r.rows[0].historical_baseline_id,sourceEffectiveDate:r.rows[0].source_effective_date,sourceAuthenticityVerified:r.rows[0].genuine_source_verified===true,publicationKnownCurrent:false,entryRevoked:r.rows[0].entry_revoked,knownPublicationChange:r.rows[0].known_publication_change,tradingAuthorized:false as const};
  }catch{return {outcome:'UNKNOWN' as const};}
 }
 
@@ -123,7 +123,7 @@ export async function durableFeeStatus(owner:string){
  if(!configured||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return deny('durable_fee_scope_not_enrolled');
  try{
  const rows=await pool.query(`SELECT a.id,a.execution_enabled,a.kill_switch,a.policy_id,p.policy_hash,p.fee_policy_version,p.fee_source_url,
- p.state,m.model_id::text,s.entry_revoked,s.known_publication_change,s.monitor_state
+ p.state,m.model_id::text,m.source_kind,m.historical_baseline_id,m.genuine_source_verified,m.effective_date::text AS source_effective_date,m.official_source_digest,s.entry_revoked,s.known_publication_change,s.monitor_state
  FROM public.v13_production_account a JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  LEFT JOIN private.strata_durable_owner_fee_model m ON m.execution_account_id=a.id AND m.owner_user_id=a.owner_user_id
  AND m.release_commit_sha=$2 AND m.approved_policy_hash=p.policy_hash
@@ -138,7 +138,7 @@ export async function durableFeeStatus(owner:string){
  const ready=!!id&&UUID.test(id)&&r.fee_policy_version===DURABLE_FEE_VERSION&&r.state==='APPROVED'&&
  r.execution_enabled===false&&r.kill_switch===true&&!r.model_id&&!!c;
  return {ok:true as const,ownerId:owner,sha,accountId:r.id,policyId:r.policy_id,policyHash:r.policy_hash,policyVersion:r.fee_policy_version,
- sourceUrl:r.fee_source_url,modelId:r.model_id??id??null,entryRevoked:r.entry_revoked??false,knownPublicationChange:r.known_publication_change??false,
+ sourceDigest:r.official_source_digest??null,sourceEffectiveDate:r.source_effective_date??null,sourceKind:r.source_kind??null,baselineId:r.historical_baseline_id??null,sourceAuthenticityVerified:r.genuine_source_verified===true,sourceUrl:r.fee_source_url,modelId:r.model_id??id??null,entryRevoked:r.entry_revoked??false,knownPublicationChange:r.known_publication_change??false,
  monitorState:r.monitor_state??'never_checked',executionEnabled:r.execution_enabled,killSwitch:r.kill_switch,featureEnabled:true,
  enrollmentReady:false,reason:r.model_id?'durable_model_already_recorded':!id||r.fee_policy_version!==DURABLE_FEE_VERSION?'durable_policy_migration_required':!c?'genuine_current_capture_missing':!ready?'stopped_account_required':'durable_atomic_migration_required',
  candidateCapture:c?{captureId:c.capture_id,digest:c.content_sha256,capturedAt:c.captured_at,expiresAt:c.expires_at,effectiveDate:c.effective_date}:null,

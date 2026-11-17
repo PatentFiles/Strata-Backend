@@ -17,7 +17,7 @@ import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
-import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
@@ -141,7 +141,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    // Misreporting V4 as legacy sends the owner through an obsolete 2h
    // snapshot renewal even when strict V4 evidence is the actual gate.
    const feeSourceMode=account
-    ? account.fee_policy_version===DURABLE_FEE_VERSION
+    ? isDurableFeeVersion(account.fee_policy_version)
        ? parseDurableFeeSource(approvedSource)&&account.fee_formula_version===V3_FEE_FORMULA_VERSION
           ? "DURABLE_OWNER_TERMS_V1" : "UNRECOGNIZED"
        : account.fee_policy_version===V3_FEE_POLICY_VERSION
@@ -240,9 +240,9 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   let freshFeeDigest:string;
   let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
     authorityId:string}=null;
-  if(account.fee_policy_version===DURABLE_FEE_VERSION||sourceUrl.startsWith('strata-durable-owner-fee:')){
+  if(isDurableFeeVersion(account.fee_policy_version)||sourceUrl.startsWith('strata-durable-owner-fee:')){
     if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!durableModel||
-       account.fee_policy_version!==DURABLE_FEE_VERSION||account.fee_formula_version!==V3_FEE_FORMULA_VERSION||
+       !isDurableFeeVersion(account.fee_policy_version)||account.fee_formula_version!==V3_FEE_FORMULA_VERSION||
        !/^[a-f0-9]{64}$/.test(String(account.policy_hash??'')))return deny('release_durable_policy_identity_invalid');
     // ENTRY proof requires explicit durable consent. This qualification does
     // not borrow a V3 standing grant and is not execution authorization.
