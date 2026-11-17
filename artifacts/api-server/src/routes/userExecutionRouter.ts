@@ -1,3 +1,4 @@
+import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit} from '../lib/strata/capitalCreditRepair';
 import {durableFeeReauthorizationPreview,reauthorizeDurableFeeRelease,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization} from '../lib/strata/durableFeeReauthorization';
 import {migrateOwnedDurableFeePolicy,durableMigrationOutcome,previewDurableFeeMigration,cancelPendingDurableMigration} from '../lib/strata/durableFeeMigration';
 import {durableFeeStatus,durableFeeEnrollmentOutcome,revokeDurableFeeEntry} from '../lib/strata/durableFeeLifecycle';
@@ -334,6 +335,10 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   router.use(requireUser);
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
+  router.get('/capital-credit/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await capitalCreditPreview(owner);res.status(r.ok?200:409).json(sanitizePublic(r));});
+  router.post('/capital-credit/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await applyCapitalCredit(owner,req.body);res.status(r.ok?200:409).json(sanitizePublic(r));});
+  router.get('/capital-credit/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await capitalCreditOutcome(owner,String(req.query.repairId??''),String(req.query.sha??''))));});
+  router.post('/capital-credit/cancel',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await cancelCapitalCredit(owner,req.body);res.status(r.outcome==='UNKNOWN'?409:200).json(sanitizePublic(r));});
   router.get('/fees/durable/reauthorization-preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await durableFeeReauthorizationPreview(owner);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.post('/fees/durable/reauthorize',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await reauthorizeDurableFeeRelease(owner,req.body);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.get('/fees/durable/reauthorization-outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await durableFeeReauthorizationOutcome(owner,String(req.query.authorizationId??''),String(req.query.sha??''))));});

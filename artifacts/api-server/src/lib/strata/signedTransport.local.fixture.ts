@@ -45,7 +45,16 @@ export function createJoinedSigner(cashDollars='1.0000'){
  const pair=generateKeyPairSync('rsa',{modulusLength:2048});
  const material={keyId:'synthetic-joined-rsa',privateKey:pair.privateKey.export({type:'pkcs8',format:'pem'}).toString()};
  let mode='ok',calls=0;
- return {material,setMode:(m:string)=>{mode=m;},get calls(){return calls;},
+ return {material,setCashDollars:(v:string)=>{cashDollars=v;},setMode:(m:string)=>{mode=m;},get calls(){return calls;},
+  transferGet:(rows:unknown[],cursor='')=>async(loaded:typeof material,path:string,query='')=>{
+   assert.deepEqual(loaded,material);assert.equal(path,'/trade-api/v2/portfolio/subaccounts/transfers');
+   return getScopedKalshiJson(loaded,path,query,async(input,init)=>{
+    calls++;const u=new URL(String(input)),h=new Headers(init?.headers);
+    assert.equal(u.origin,'https://external-api.kalshi.com');assert.equal(init?.method,'GET');assert.equal(init?.body,undefined);
+    assert.ok(verify('sha256',Buffer.from(h.get('KALSHI-ACCESS-TIMESTAMP')+'GET'+u.pathname),{key:pair.publicKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},Buffer.from(h.get('KALSHI-ACCESS-SIGNATURE')!,'base64')));
+    return Response.json({transfers:rows,cursor});
+   },'https://external-api.kalshi.com');
+  },
   cashGet:async(loaded:typeof material,path:string,query='')=>{
    assert.deepEqual(loaded,material);assert.equal(path,'/trade-api/v2/portfolio/balance');
    assert.ok(query===''||query==='?subaccount=1&exchange_index=2');

@@ -14,5 +14,10 @@ test('durable routes authenticate before feature/body handling, never trust supp
  if(path==='cancel-pending'||path==='reauthorization-cancel'){assert.equal(response.status,409,path);assert.equal(result.outcome,'UNKNOWN',path);}
  else if(method==='POST'||path==='status'||path==='migration-preview'||path==='reauthorization-preview'){assert.equal(response.status,409,path);assert.equal(result.ok,false,path);}else assert.equal(result.outcome,'UNKNOWN',path);
  assert.notEqual(result.tradingAuthorized,true,path);}
+
+ for(const [method,path] of [['GET','preview'],['POST','apply'],['GET','outcome'],['POST','cancel']]){
+  const url:string='http://127.0.0.1:'+a.port+'/capital-credit/'+path;assert.equal((await fetch(url,{method})).status,401);
+  const r=await fetch(url,{method,headers:{authorization:'synthetic-mfa-owner','content-type':'application/json'},...(method==='POST'?{body:'{}'}:{})});assert.equal(r.headers.get('cache-control'),'private, no-store');const dto=await r.json() as Record<string,unknown>;assert.equal(dto.retryAuthorized,false);assert.equal(dto.transferAttempted,false);assert.equal(dto.tradingAuthorized,false);
+ }
  }finally{if(previous===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=previous;await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
 });

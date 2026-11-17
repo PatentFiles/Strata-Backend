@@ -31,3 +31,5 @@ test('mutable exception getters emit only the exact values checked by the allowl
  assert.equal(messages,1);
  assert.equal(codes,1);
 });
+
+test('money conservation diagnostic exposes only safe fixed reason, no balances',()=>{assert.deepEqual(diagnostic(Error('production_money_conservation_failed'),'ledger_proof'),{stage:'ledger_proof',failureCode:'production_money_conservation_failed'});});

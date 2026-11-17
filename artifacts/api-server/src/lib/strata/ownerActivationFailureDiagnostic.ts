@@ -10,7 +10,7 @@ const SAFE_FAILURE_CODES = new Set([
  'release_empty_history_financial_records_present','release_empty_history_signed_exposure',
  'release_signer_unverified','release_complete_signed_evidence_required','release_signed_scope_cash_unverified',
  'release_empty_history_signed_activity','release_signed_evidence_stale',
- 'production_final_account_changed_or_unproven','production_final_history_gap',
+ 'production_money_conservation_failed','production_final_account_changed_or_unproven','production_final_history_gap',
  'production_final_order_changed','production_final_unreconciled_fill',
  'production_final_unreconciled_settlement','production_final_position_changed'
 ]);
