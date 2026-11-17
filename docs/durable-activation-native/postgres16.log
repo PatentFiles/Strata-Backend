@@ -1,0 +1,34 @@
+waiting for server to start.... done
+server started
+
+  artifacts/api-server/dist/owner-final-native.cjs  1.3mb ⚠️
+
+⚡ Done in 134ms
+▶ durable enrollment + qualification + actual activation on native PostgreSQL
+  ✔ happy path + replay readback: account enabled, lease released/disarmed, no START (888.158438ms)
+  ✔ two concurrent requests commit exactly one activation and fence (550.034746ms)
+  ✔ rollback after UPDATE public.v13_production_account (378.673206ms)
+  ✔ rollback after OWNER_SELF_ACCOUNT_ACTIVATED (340.761375ms)
+  ✔ deferred five-second freshness guard rolls back at COMMIT (5447.327307ms)
+  ✔ lost COMMIT acknowledgment is UNKNOWN, no retry authorization, durable readback (450.051387ms)
+  ✔ review revocation during signed read refuses activation (357.138998ms)
+  ✔ durable entry revocation during signed read refuses activation (380.370503ms)
+  ✔ known publication change during signed read refuses activation (335.494967ms)
+  ✔ credential revocation during signed read refuses activation (370.448589ms)
+  ✔ policy change during signed read refuses activation (357.610469ms)
+  ✔ V2 policy is refused, not relabeled by owner-self activation (322.70863ms)
+  ✔ unknown before COMMIT takes effect retains killed state and no retry authorization (425.722466ms)
+  ✔ qualification refuses revoked entry without a new receipt (315.885595ms)
+  ✔ qualification refuses changed publication without a new receipt (305.709863ms)
+  ✔ qualification refuses unavailable fresh market metadata, no receipt (412.515078ms)
+  ✔ durable state revocation waits through activation COMMIT then blocks next fee proof (503.628482ms)
+✔ durable enrollment + qualification + actual activation on native PostgreSQL (12224.84674ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 12885.429462
+Disposable evidence retained at /tmp/owner-final-native.gabasc; cluster stopped on exit.

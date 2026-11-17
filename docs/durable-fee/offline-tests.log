@@ -1,0 +1,33 @@
+✔ durable approved evidence has no recurring PDF lease, but does not claim current publication (1.075469ms)
+✔ ENTRY publication transport outage alone does not discard approved terms (0.182745ms)
+✔ ENTRY rejects approved (0.115123ms)
+✔ ENTRY rejects integrityValid (0.145209ms)
+✔ ENTRY rejects knownPublicationChange (0.117247ms)
+✔ ENTRY rejects formula (0.075654ms)
+✔ ENTRY rejects digest (0.056485ms)
+✔ ENTRY rejects owner (0.111638ms)
+✔ ENTRY rejects sha (0.123296ms)
+✔ ENTRY fresh metadata missing/stale/future refuses without guessed fee bound (0.307954ms)
+✔ PROTECTIVE_EXIT publication transport outage alone does not discard approved terms (0.081813ms)
+✔ PROTECTIVE_EXIT rejects approved (0.056995ms)
+✔ PROTECTIVE_EXIT rejects integrityValid (0.093301ms)
+✔ PROTECTIVE_EXIT rejects knownPublicationChange (0.114813ms)
+✔ PROTECTIVE_EXIT rejects formula (0.073411ms)
+✔ PROTECTIVE_EXIT rejects digest (0.054271ms)
+✔ PROTECTIVE_EXIT rejects owner (0.034292ms)
+✔ PROTECTIVE_EXIT rejects sha (0.055874ms)
+✔ PROTECTIVE_EXIT fresh metadata missing/stale/future refuses without guessed fee bound (0.085949ms)
+✔ entry revocation does not disable independent reduce-only fee proof (0.24553ms)
+✔ known change latch cannot be cleared by stale matching response or429 (0.187482ms)
+✔ malformed change evidence rejects (0.296897ms)
+✔ locked durable row plus existing actual market verifier makes ZERO PDF calls (5.848755ms)
+✔ real market multiplier change is refused without publication polling (1.705328ms)
+✔ missing/ambiguous durable state refuses (0.164338ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 547.256327

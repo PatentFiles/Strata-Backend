@@ -1,3 +1,6 @@
+import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
+import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
 import {createDirectRoundingRuntime} from './directRoundingRuntime';
 import {createDirectRoundingOwnedAdapters} from './directRoundingOwnedAdapters';
 import {releaseFailedStartLease} from "./failedStartLeaseCleanup";
@@ -395,6 +398,10 @@ export function createProductionPersonalSession(
     const alternate=parseOwnerFeeSource(sourceUrl);
     const apiSource=parseReviewedApiSource(sourceUrl);
     const ownerV3Source=parseV3FeeSource(sourceUrl);
+    const durableSource=parseDurableFeeSource(sourceUrl);
+    if(durableSource&&(!isDurableFeeVersion(policyVersion)||formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))return {ok:false,reason:'durable_fee_policy_identity_invalid'};
+    const durableAtStart=durableSource?await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY'):null;
+    if(durableSource&&(!durableAtStart?.ok||durableAtStart.sourceDigest!==digest))return {ok:false,reason:'durable_fee_startup_proof_unavailable'};
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
        formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
       return {ok:false,reason:"source_policy_identity_invalid"};
@@ -427,12 +434,12 @@ export function createProductionPersonalSession(
     // The direct owner's standing policy has no human reviewer requirement,
     // but must prove authoritative monetary schedule + current Kalshi market.
     // Isolated test-injected fee verifiers never invoke the production source.
-    const monetaryAtStart=!apiSource&&!alternate&&!ownerV3Source&&!options.verifyFee?
+    const monetaryAtStart=!apiSource&&!alternate&&!ownerV3Source&&!durableSource&&!options.verifyFee?
       await verifyMonetaryFeeContract("STEP_11"):null;
     if(monetaryAtStart && (!monetaryAtStart.ok||
        !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
       return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
-    const artifact=ownerV3Source&&ownerV3AtStart?.ok?
+    const artifact=durableSource&&durableAtStart?.ok?{valid:true,digest,verifiedAt:durableAtStart.verifiedAtMs}:ownerV3Source&&ownerV3AtStart?.ok?
       {valid:true,digest,verifiedAt:ownerV3AtStart.identity.verifiedAtMs}:
       apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
@@ -479,7 +486,7 @@ export function createProductionPersonalSession(
       finalLedger.assertFinalWireClock();
       directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       ownerV3Source ? createGuardedOwnerV3FeeFetch(input.userId,input.accountId,sourceUrl,
         clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,
         {borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
@@ -680,6 +687,10 @@ export function createProductionPersonalSession(
                   throw new Error("owner_operator_fee_source_unavailable");
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
+              }else if(durableSource){
+                const checked=await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY',market);
+                if(!checked.ok||checked.sourceDigest!==digest||checked.marketTicker!==market)throw Error('durable_fee_market_unavailable');
+                feeVerifiedAt=checked.verifiedAtMs;feeCheckedAt=clock;
               }else if(ownerV3Source){
                 const checked=await verifyOwnerStandingFee(input.userId,"ORDER_ENTRY",
                   sourceUrl,market);

@@ -1,3 +1,5 @@
+import {migrateOwnedDurableFeePolicy,durableMigrationOutcome,previewDurableFeeMigration,cancelPendingDurableMigration} from '../lib/strata/durableFeeMigration';
+import {durableFeeStatus,durableFeeEnrollmentOutcome,revokeDurableFeeEntry} from '../lib/strata/durableFeeLifecycle';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {previewOwnedApiFeeMigration,migrateOwnedApiFeePolicy} from "../lib/strata/ownerApiFeePolicyMigration";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
@@ -330,6 +332,23 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
+  router.get('/fees/durable/migration-preview',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');const result=await previewDurableFeeMigration(owner,typeof req.query.sourceKind==='string'?req.query.sourceKind:undefined);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.post('/fees/durable/cancel-pending',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');const result=await cancelPendingDurableMigration(owner,req.body);res.status(result.outcome==='UNKNOWN'?409:200).json(sanitizePublic(result));});
+  router.post('/fees/durable/migrate',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');const result=await migrateOwnedDurableFeePolicy(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.get('/fees/durable/migration-outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await durableMigrationOutcome(owner,String(req.query.modelId??''),String(req.query.sha??''))));});
+  router.get('/fees/durable/status',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+   res.setHeader('Cache-Control','private, no-store');const out=await durableFeeStatus(owner);res.status(out.ok?200:409).json(sanitizePublic(out));});
+  router.post('/fees/durable/consent',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+   res.setHeader('Cache-Control','private, no-store');res.status(409).json({ok:false,reason:'durable_atomic_migration_required',tradingAuthorized:false});});
+  router.get('/fees/durable/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+   res.setHeader('Cache-Control','private, no-store');const out=await durableFeeEnrollmentOutcome(owner,String(req.query.modelId??''),String(req.query.sha??''));res.json(sanitizePublic(out));});
+  router.post('/fees/durable/revoke',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+   res.setHeader('Cache-Control','private, no-store');const out=await revokeDurableFeeEntry(owner,req.body);res.status(out.ok?200:409).json(sanitizePublic(out));});
   const migrated = async (res: { status: (code: number) => { json: (body: unknown) => void } }) => {
     try {
       if (await port.migrationReady()) return true;
