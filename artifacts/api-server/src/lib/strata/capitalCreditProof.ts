@@ -1,3 +1,5 @@
+import {loadCapitalTransferSigner} from './capitalCreditTransferSigner';
+import {dedicatedSignerFingerprint} from './commissioning';
 import {capitalStage} from './capitalCreditDiagnostic';
 import {approvedFromRow} from './ownerStakePolicyAmendment';
 import {computeV13LiveMoneyPolicyHash} from '../v13LiveMoneyRisk';
@@ -64,7 +66,9 @@ async function rejectRegisteredCapitalReceipt(db:Query,owner:string,receiptId:st
 export async function capitalCreditProof(owner:string,account:string,sha:string,d:ProofDeps={}){
  const db=d.db??pool,now=d.now??Date.now,start=now(),mono=performance.now(),local=await capitalStage('local_ledger',()=>creditLocal(db,owner,account));
  const material=await capitalStage('restricted_signer',()=>(d.load??loadedMaterial)(db,local.a));if(!material)throw Error('capital_signer_unavailable');
- const [feeds,transfers]=await Promise.all([capitalStage('signed_trade_history',()=>(d.read??readOwnedKalshiFeeds)(material,start)),capitalStage('transfer_history',()=>readCapitalTransfers((path,q)=>(d.get??getScopedKalshiJson)(material,path,q,fetch,'https://external-api.kalshi.com',owner),start))]);
+ if(dedicatedSignerFingerprint(material.keyId,material.privateKey)!==local.a.key_fingerprint)throw Error('capital_signer_changed');
+ const transferSigner=await capitalStage('transfer_signer',()=>loadCapitalTransferSigner(db,local.a));
+ const [feeds,transfers]=await Promise.all([capitalStage('signed_trade_history',()=>(d.read??readOwnedKalshiFeeds)(material,start)),capitalStage('transfer_history',()=>readCapitalTransfers((path,q)=>(d.get??getScopedKalshiJson)(transferSigner.material,path,q,fetch,'https://external-api.kalshi.com',owner),start))]);
  if(!feeds.ok||feeds.observedAtMs!==start||now()<start||now()-start>15000||performance.now()-mono>15000)throw Error('capital_signed_evidence_unavailable_or_stale');
  const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:String(local.a.key_fingerprint)},feeds,local.history.requests);
  if(!('identity'in snapshot)||feeds.historicalCoverageComplete!==true||!v3MigrationFlatHistoryCheck(snapshot,local.history.expectedRequests).ok||snapshot.orders.some(o=>local.history.neverPosted.some(n=>n.clientOrderId===o.request.clientOrderId))||String(snapshot.cashMicros)!==local.a.cash_text)throw Error('capital_signed_history_unverified');
@@ -73,12 +77,12 @@ export async function capitalCreditProof(owner:string,account:string,sha:string,
  // Existing registered funding must never be credited a second time.
  await capitalStage('receipt_registry',()=>rejectRegisteredCapitalReceipt(db,owner,receipt.transferId));
  const core={ownerId:owner,accountId:account,sha,policyHash:String(local.a.policy_hash),checkpointId:String(local.checkpoint.id),checkpointDigest:String(local.checkpoint.digest),receiptId:receipt.transferId,receiptDigest:receipt.receiptDigest,receiptCreatedAt:new Date(receipt.createdAtMs).toISOString(),amountCents:receipt.amountCents,oldInitialCashMicros:String(local.a.initial_text),newInitialCashMicros:String(BigInt(String(local.a.initial_text))+amount),cashMicros:String(local.a.cash_text),accountRevision:String(local.a.revision_text)};
- return {...local,snapshot,scope:{...core,scopeDigest:scopeDigest(core)},start,mono,deadline:new Date(start+15000).toISOString()};
+ return {...local,snapshot,signerBindings:transferSigner.bindings,scope:{...core,scopeDigest:scopeDigest(core)},start,mono,deadline:new Date(start+15000).toISOString()};
 }
 export async function verifyCreditFinal(db:Db,tx:Query,proof:Awaited<ReturnType<typeof capitalCreditProof>>,owner:string,account:string,now:number){
  const local=await capitalStage('locked_scope',()=>creditLocal(tx,owner,account,true));if(local.localDigest!==proof.localDigest)throw Error('capital_account_or_history_changed');
  await capitalStage('receipt_registry',()=>rejectRegisteredCapitalReceipt(tx,owner,proof.scope.receiptId));
- const credential=await tx.query("SELECT 1 FROM private.kalshi_connection_credentials WHERE owner_user_id=$1::uuid AND financial_account_id=$2 AND key_fingerprint=$3 AND role='restricted_execution' AND revoked_at IS NULL AND verified_at IS NOT NULL AND verification_reason='credential_verified' FOR SHARE",[owner,local.a.kalshi_connection_id,local.a.key_fingerprint]);if(credential.rows.length!==1)throw Error('capital_signer_changed');
+ const currentSigners=await capitalStage('locked_signers',()=>loadCapitalTransferSigner(tx,local.a,true));if(digest(currentSigners.bindings)!==digest(proof.signerBindings))throw Error('capital_signer_changed');
  if(now<proof.start||now-proof.start>15000||performance.now()-proof.mono>15000)throw Error('capital_signed_evidence_expired');
  const ledger=new ProductionLedger(db as unknown as Pool,account);await capitalStage('final_ledger',()=>ledger.finalAccountProof(tx as unknown as PoolClient,local.a as unknown as Account,proof.snapshot,now));return {local,ledger};
 }

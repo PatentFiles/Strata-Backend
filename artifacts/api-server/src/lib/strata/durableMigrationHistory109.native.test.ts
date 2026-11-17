@@ -163,14 +163,29 @@ test('109 intent minimal-schema migration regression with real account foreign-k
   await pool.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('capital-checkpoint',$1,'RECONCILIATION',$2,$3)",[account,receipt,digest(receipt)]);
   const transfer={transfer_id:'synthetic-capital-272',from_subaccount:0,to_subaccount:1,exchange_index:2,amount_cents:272,created_ts:Math.floor(Date.now()/1000)};
   await pool.query('UPDATE public.v13_production_account SET cash_micros=27720000');signer.setCashDollars('27.7200');
-  const cd={...migrationDeps,read:(_m:typeof signer.material,at:number)=>read(true,orders,at),get:signer.transferGet([transfer])};
-  await capitalCreditProof(owner,account,sha,cd);const preview=await capitalCreditPreview(owner,cd);assert.equal(preview.ok,true,JSON.stringify(preview));if(!preview.ok)throw Error('preview');
+  await pool.query('ALTER TABLE private.kalshi_connection_credentials ADD COLUMN id uuid DEFAULT gen_random_uuid()');
+  const setupSigner=createJoinedSigner();setupSigner.material.keyId='synthetic-capital-setup';const setupId=randomUUID(),setupVault=randomUUID(),setupFingerprint=dedicatedSignerFingerprint(setupSigner.material.keyId,setupSigner.material.privateKey)!;
+  await pool.query('INSERT INTO vault.decrypted_secrets VALUES($1,$2)',[setupVault,JSON.stringify({api_key_id:setupSigner.material.keyId,private_key:setupSigner.material.privateKey})]);
+  await pool.query("INSERT INTO private.kalshi_connection_credentials(owner_user_id,financial_account_id,provider_connection_id,key_fingerprint,role,revoked_at,verified_at,verification_reason,vault_secret_id,id) VALUES($1,$2,$3,$4,'account_setup_execution',NULL,now(),'credential_verified',$5,$6)",[owner,connection,provider,setupFingerprint,setupVault,setupId]);
+  const {load:unusedFixtureOverride,...realVaultDeps}=migrationDeps;
+  const cd={...realVaultDeps,read:(m:typeof signer.material,at:number)=>{assert.deepEqual(m,signer.material);return read(true,orders,at);},get:setupSigner.transferGet([transfer])};
+  const privateProof=await capitalCreditProof(owner,account,sha,cd);assert.ok(!JSON.stringify(privateProof).includes(JSON.stringify(setupSigner.material.privateKey).slice(1,-1)));assert.ok(!JSON.stringify(privateProof).includes(setupSigner.material.keyId));const preview=await capitalCreditPreview(owner,cd);assert.equal(preview.ok,true,JSON.stringify(preview));if(!preview.ok)throw Error('preview');assert.ok(!JSON.stringify(preview).includes(JSON.stringify(setupSigner.material.privateKey).slice(1,-1)));assert.ok(!JSON.stringify(preview).includes(setupSigner.material.keyId));
   const {ok,confirmation,observedAt,expiresAt,transferAttempted,tradingAuthorized,workerStarted,ordersSubmitted,retryAuthorized,...scope}=preview;
   const beforeEvents=(await pool.query('SELECT * FROM public.v13_production_event ORDER BY event_id')).rows,beforePositions=(await pool.query('SELECT * FROM public.v13_production_position ORDER BY id')).rows;
   await ct.test('capital diagnostic distinguishes typed provider refusal from local SQL failure without retry',async()=>{
    const provider=await capitalCreditPreview(owner,{...cd,get:async()=>{throw new KalshiApiError('HTTP_ERROR',403);}});assert.equal(provider.ok,false);if(!provider.ok){assert.equal(provider.reason,'capital_credit_refused');assert.ok('diagnostic'in provider);assert.deepEqual(provider.diagnostic,{stage:'transfer_history',failureCode:'capital_provider_read_failed',providerType:'HTTP_ERROR',providerStatus:403});}
    const db={...pool,query:async(sql:string,args?:unknown[])=>{if(sql.includes('UNION ALL SELECT 1 FROM private.kalshi_owner_pilot_transfers'))throw Object.assign(Error('private SQL secret'),{code:'42703'});return pool.query(sql,args);},connect:pool.connect.bind(pool)};
    const local=await capitalCreditPreview(owner,{...cd,db});assert.equal(local.ok,false);if(!local.ok){assert.ok('diagnostic'in local);assert.deepEqual(local.diagnostic,{stage:'receipt_registry',failureCode:'capital_internal_failure',sqlState:'42703'});}
+  });
+  await ct.test('capital setup key rejects wrong owner/account/provider, revoked, unverified and duplicate credentials',async()=>{
+   for(const [column,value] of [['owner_user_id',randomUUID()],['financial_account_id',randomUUID()],['provider_connection_id',randomUUID()],['revoked_at',new Date()],['verified_at',null],['verification_reason','not_verified']]){
+    const before=(await pool.query('SELECT '+column+' FROM private.kalshi_connection_credentials WHERE id=$1',[setupId])).rows[0][column as string];
+    await pool.query('UPDATE private.kalshi_connection_credentials SET '+column+'=$2 WHERE id=$1',[setupId,value]);
+    assert.equal((await capitalCreditPreview(owner,cd)).ok,false,column as string);await pool.query('UPDATE private.kalshi_connection_credentials SET '+column+'=$2 WHERE id=$1',[setupId,before]);
+   }
+   const duplicate=randomUUID();await pool.query("INSERT INTO private.kalshi_connection_credentials SELECT owner_user_id,financial_account_id,provider_connection_id,key_fingerprint,role,revoked_at,verified_at,verification_reason,vault_secret_id,$2 FROM private.kalshi_connection_credentials WHERE id=$1",[setupId,duplicate]);assert.equal((await capitalCreditPreview(owner,cd)).ok,false);await pool.query('DELETE FROM private.kalshi_connection_credentials WHERE id=$1',[duplicate]);
+   const otherProvider=randomUUID();await pool.query('INSERT INTO private.provider_connections VALUES($1,$2)',[otherProvider,connection]);await pool.query('UPDATE private.kalshi_connection_credentials SET provider_connection_id=$2 WHERE id=$1',[setupId,otherProvider]);assert.equal((await capitalCreditPreview(owner,cd)).ok,false);await pool.query('UPDATE private.kalshi_connection_credentials SET provider_connection_id=$2 WHERE id=$1',[setupId,provider]);
+   const secret=(await pool.query('SELECT decrypted_secret FROM vault.decrypted_secrets WHERE id=$1',[setupVault])).rows[0].decrypted_secret;await pool.query('UPDATE vault.decrypted_secrets SET decrypted_secret=$2 WHERE id=$1',[setupVault,JSON.stringify({api_key_id:signer.material.keyId,private_key:signer.material.privateKey})]);assert.equal((await capitalCreditPreview(owner,cd)).ok,false);await pool.query('UPDATE vault.decrypted_secrets SET decrypted_secret=$2 WHERE id=$1',[setupVault,secret]);
   });
   const body=(repairId:string)=>({repairId,scope,confirmation:CREDIT_CONFIRM});
   const unchanged=async()=>assert.equal((await pool.query('SELECT initial_cash_micros::text FROM public.v13_production_account')).rows[0].initial_cash_micros,'23100000');
@@ -180,12 +195,18 @@ test('109 intent minimal-schema migration regression with real account foreign-k
   });
   await ct.test('capital partial provider archive and duplicate transfer evidence refuse without accounting changes',async()=>{
    const id=randomUUID();assert.equal((await applyCapitalCredit(owner,body(id),{...cd,read:(_m,at)=>read(false,orders,at)})).ok,false);assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'REJECTED');await unchanged();
-   assert.equal((await capitalCreditPreview(owner,{...cd,get:signer.transferGet([transfer,transfer])})).ok,false);await unchanged();
+   assert.equal((await capitalCreditPreview(owner,{...cd,get:setupSigner.transferGet([transfer,transfer])})).ok,false);await unchanged();
   });
   await ct.test('capital pending cancellation fences late provider response',async()=>{
    const entered=deferred(),resume=deferred(),id=randomUUID();const applying=applyCapitalCredit(owner,body(id),{...cd,read:async(m,at)=>{entered.resolve();await resume.promise;return read(true,orders,at);}});await entered.promise;const {scopeDigest:oldDigest,...otherCore}=scope;const changedCore={...otherCore,accountRevision:String(BigInt(scope.accountRevision)+1n)},otherScope={...changedCore,scopeDigest:scopeDigest(changedCore)};
    assert.equal((await cancelCapitalCredit(owner,{repairId:id,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope:otherScope},pool)).outcome,'UNKNOWN');assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');
    assert.equal((await cancel(id)).outcome,'REJECTED');resume.resolve();assert.equal((await applying).ok,false);await unchanged();
+  });
+  await ct.test('capital locks and rechecks both signer roles after network reads',async()=>{
+   for(const role of ['account_setup_execution','restricted_execution']){
+    const entered=deferred(),resume=deferred(),id=randomUUID();const applying=applyCapitalCredit(owner,body(id),{...cd,read:async(m,at)=>{assert.deepEqual(m,signer.material);entered.resolve();await resume.promise;return read(true,orders,at);}});await entered.promise;
+    await pool.query('UPDATE private.kalshi_connection_credentials SET revoked_at=now() WHERE role=$1',[role]);resume.resolve();assert.equal((await applying).ok,false);await unchanged();await pool.query('UPDATE private.kalshi_connection_credentials SET revoked_at=NULL WHERE role=$1',[role]);
+   }
   });
   await ct.test('capital post-update exception atomically rolls base and receipt back',async()=>{
    const id=randomUUID(),db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{const r=await c.query(sql,args);if(sql.startsWith('UPDATE public.v13_production_account SET initial_cash_micros='))throw Error('synthetic postwrite failure');return r;}};}};
@@ -199,7 +220,9 @@ test('109 intent minimal-schema migration regression with real account foreign-k
   // never by retrying or canceling an already-recorded capital adjustment.
   const committing=deferred(),allowCommit=deferred();
   const lostAckDb={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(sql:string,args?:unknown[])=>{if(sql==='COMMIT'){committing.resolve();await allowCommit.promise;}const r=await c.query(sql,args);if(sql==='COMMIT')throw Error('synthetic lost commit ack');return r;}};}};
-  const id=randomUUID(),applying=applyCapitalCredit(owner,body(id),{...cd,db:lostAckDb});await committing.promise;const cancelling=cancel(id);await delay(40);allowCommit.resolve();const result=await applying;assert.equal((await cancelling).outcome,'RECORDED');assert.equal(result.ok,false,JSON.stringify(result));
+  const id=randomUUID(),applying=applyCapitalCredit(owner,body(id),{...cd,db:lostAckDb});await committing.promise;
+  for(const sql of ["UPDATE private.kalshi_connection_credentials SET revoked_at=now() WHERE role='account_setup_execution'","UPDATE private.kalshi_connection_credentials SET revoked_at=now() WHERE role='restricted_execution'","UPDATE private.provider_connections SET financial_account_id=financial_account_id","UPDATE public.financial_accounts SET user_id=user_id"]){const c=await pool.connect();try{await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='100ms'");await assert.rejects(c.query(sql),(e:any)=>e.code==='55P03');}finally{await c.query('ROLLBACK');c.release();}}
+  const cancelling=cancel(id);await delay(40);allowCommit.resolve();const result=await applying;assert.equal((await cancelling).outcome,'RECORDED');assert.equal(result.ok,false,JSON.stringify(result));
   assert.equal((await pool.query('SELECT initial_cash_micros::text FROM public.v13_production_account')).rows[0].initial_cash_micros,'25820000');
   assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_event ORDER BY event_id')).rows,beforeEvents);assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_position ORDER BY id')).rows,beforePositions);
   assert.equal((await capitalCreditOutcome(owner,id,sha,pool)).outcome,'RECORDED');assert.equal((await cancelCapitalCredit(owner,{repairId:id,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope},pool)).outcome,'RECORDED');
