@@ -8,7 +8,7 @@ test('durable routes authenticate before feature/body handling, never trust supp
  const previous=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;
  try{const a=server.address();assert.ok(a&&typeof a!=='string');
  for(const [method,path] of [['GET','status'],['GET','migration-preview'],['GET','outcome'],['GET','migration-outcome'],['POST','migrate'],['POST','consent'],['POST','revoke'],['POST','cancel-pending']]){
- const url=`http://127.0.0.1:${a.port}/fees/durable/${path}`;assert.equal((await fetch(url,{method})).status,401,path);
+ const url: string=`http://127.0.0.1:${a.port}/fees/durable/${path}`;assert.equal((await fetch(url,{method})).status,401,path);
  const response=await fetch(url,{method,headers:{authorization:'synthetic-mfa-owner','content-type':'application/json'},...(method==='POST'?{body:'{"ownerId":"forged"}'}:{})});
  assert.equal(response.headers.get('cache-control'),'private, no-store');const result=await response.json() as Record<string,unknown>;
  if(path==='cancel-pending'){assert.equal(response.status,409,path);assert.equal(result.outcome,'UNKNOWN',path);}

@@ -5,7 +5,7 @@ import {pool} from '@workspace/db';
 import {createHash} from 'node:crypto';
 import {migrateOwnedDurableFeePolicy,DURABLE_MIGRATION_CONFIRM,DURABLE_PUBLICATION_RISK_ACCEPTANCE} from './durableFeeMigration';
 import {requestOwnedAccountActivation,REQUEST_OWNED_ACTIVATION_CONFIRMATION} from './personalAccountActivation';
-import {row as originalRow,old,computeV13LiveMoneyPolicyHash} from '../../../../../docs/durable-fee/migration-fixture';
+import {row as originalRow,old,computeV13LiveMoneyPolicyHash} from './durableFeeMigration.fixture';
 import {verifyDurableOwnerFee,DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
 import {collectFinalReleaseEvidence,qualifyProtectiveRelease} from './inAppProtectiveRelease';
 import {activateOwnerSelfAccount,ownerSelfActivationOutcome,OWNER_SELF_ACTIVATION_CONFIRM} from './ownerSelfAccountActivation';
