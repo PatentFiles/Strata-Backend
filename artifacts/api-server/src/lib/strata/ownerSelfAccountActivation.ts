@@ -26,6 +26,7 @@ import {collectFinalReleaseEvidence,finalReleaseScope,finalReleaseHistory,finalR
 import {ProductionLedger,type Account} from '../v13-production/ledger';
 import {readUnresolvedIntentMode} from './workerUncertainOrderGate';
 import {digest as auditDigest} from '../v13-production/types';
+import {ownerActivationFailureDiagnostic,type OwnerActivationStage} from './ownerActivationFailureDiagnostic';
 
 export const OWNER_SELF_ACTIVATION_CONFIRM='I_AUTHORIZE_MY_OWN_SIGNED_KALSHI_ACCOUNT_ACTIVATION_V1';
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -104,10 +105,12 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
  const db=deps.db??pool as unknown as Db,now=deps.clock??Date.now;
  let durableSourceFresh:(()=>boolean)|undefined;
  let tx:Client|null=null,committed=false,commitAttempted=false,discard:Error|undefined;
+ let diagnosticStage:OwnerActivationStage='outcome_readback';
  try{
   const readback=await ownerSelfActivationOutcome(owner,sha,db);
   if(readback.outcome==='RECORDED')
    return no('owner_self_activation_already_recorded_use_readback');
+  diagnosticStage='owner_scope';
   const current=await readReleaseOwner(db,owner);
   if(!current.ok)return no(current.reason);
   const account=current.account;
@@ -123,6 +126,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   let sourceDigest:string,durableTicker:string|undefined;
   if(durable){
    if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return no('owner_self_durable_fee_feature_disabled');
+  diagnosticStage='fee_preflight';
    const verified=await(deps.verifyDurableStage??verifyDurableFeeStage)(owner,raw.accountId,source,'ENTRY');
    if(!verified.ok||verified.feeProofOnly!==true||verified.tradingAuthorized!==false||
     verified.sourceDigest!==account.fee_artifact_digest||
@@ -131,6 +135,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
     return no('owner_self_durable_fee_preflight_unverified');
    sourceDigest=verified.sourceDigest;durableTicker=verified.marketTicker;
   }else{
+  diagnosticStage='fee_preflight';
    const verified=await(deps.verify??verifyOwnerStandingFee)(owner,'STEP_11',source);
    if(!verified.ok||verified.identity.sourceAuthorityId!==authorityId||
     verified.identity.sha!==sha||verified.identity.policyHash!==raw.policyHash||
@@ -140,23 +145,28 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   }
   // The existing preflight enforces complete signed Kalshi pagination, issuer
   // credential binding, cash parity, retained ledger/exits and 5s freshness.
+  diagnosticStage='signed_evidence';
   const evidence=await(deps.signedEvidence??collectFinalReleaseEvidence)(owner,{db:db as never,now});
   if(!evidence||evidence.account!==raw.accountId)
    return no('owner_self_signed_exchange_scope_unverified');
   if(now()-evidence.started>5000||now()<evidence.started)
    return no('owner_self_signed_exchange_evidence_expired');
+  diagnosticStage='transaction_begin';
   tx=await db.connect();await tx.query('BEGIN');
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='12000ms'");
+  diagnosticStage='deadline_guard';
   const guard=await tx.query(`SELECT 1 FROM pg_catalog.pg_trigger t
     JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
     WHERE t.tgrelid='public.v13_production_observation'::regclass
     AND t.tgname='final_release_signed_deadline' AND t.tgenabled='O'
     AND t.tgdeferrable AND t.tginitdeferred AND NOT p.prosecdef`);
   if(guard.rows.length!==1)return no('owner_self_signed_deadline_migration_missing');
+  diagnosticStage='locked_scope';
   const locked=await finalReleaseScope(tx,owner,raw.accountId,true);
   if(fingerprint(locked)!==fingerprint(evidence.scope))
    return no('owner_self_account_policy_credential_or_worker_changed');
+  diagnosticStage='locked_owner_scope';
   const activation=await readReleaseOwner(tx,owner);
   if(!activation.ok||fingerprint(activation.account)!==fingerprint(evidence.activation))
    return no('owner_self_account_authorization_changed');
@@ -164,10 +174,12 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   if(a.policy_hash!==raw.policyHash||a.fee_source_url!==source||
    a.fee_artifact_digest!==sourceDigest)
    return no('owner_self_fee_or_approved_policy_changed');
+  diagnosticStage='locked_history';
   const history=await finalReleaseHistory(tx,raw.accountId,owner,true);
   if(history.reconciliationDigest!==evidence.history.reconciliationDigest)
    return no('owner_self_retained_financial_history_changed');
   finalReleaseSnapshot(history,evidence.snapshot);
+  diagnosticStage='account_checks';
   const local=await tx.query(`SELECT a.* FROM public.v13_production_account a
    WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.commissioned=true
    AND a.execution_enabled=false AND a.kill_switch=true AND a.blocked_reason IS NULL
@@ -192,6 +204,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
       WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[raw.accountId]);
   if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
    outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
+  diagnosticStage='owner_review';
   const review=await tx.query(`SELECT r.release_id,q.evidence_digest
     FROM private.strata_standing_execution_reviews r
     JOIN private.strata_protective_release_qualification q
@@ -212,6 +225,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   if(durable){
    // Hold durable policy/model/state locks in the same activation transaction.
    // A preflight receipt is not sufficient to clear the account KILL.
+  diagnosticStage='locked_fee';
    const fee=await(deps.verifyDurableLocked??verifyDurableOwnerFee)(tx,
     {owner,account:raw.accountId,sha,policyHash:raw.policyHash},durableTicker!,'ENTRY');
    if(!fee.ok||!fee.sourceFresh()||fee.sourceDigest!==sourceDigest||fee.marketTicker!==durableTicker||
@@ -220,6 +234,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
     return no('owner_self_durable_fee_changed_or_unverified');
    durableSourceFresh=fee.sourceFresh;
   }else{
+  diagnosticStage='locked_fee';
   const fee=await tx.query(`SELECT g.authority_id
     FROM private.strata_owner_standing_fee_v1 s
     JOIN private.strata_owner_fee_authority_v3 g
@@ -243,15 +258,18 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
       V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION,sourceDigest,raw.policyHash]);
   if(fee.rows.length!==1)return no('owner_self_fee_authority_changed_or_expiring');
   }
+  diagnosticStage='grant_check';
   const grants=await tx.query(`SELECT grant_id,revoked_at
     FROM private.strata_continuous_execution_grants
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2
       AND release_commit_sha=$3 FOR UPDATE`,[owner,raw.accountId,sha]);
   if(grants.rows.length>0)return no('owner_self_existing_standing_grant_requires_reconciliation');
   // Same signed, authoritative ledger proof as the legacy final release.
+  diagnosticStage='ledger_proof';
   const ledger=new ProductionLedger(db as unknown as Pool,raw.accountId);
   await ledger.finalAccountProof(tx as unknown as PoolClient,local.rows[0] as unknown as Account,evidence.snapshot,now());
   await ledger.assertConservation(tx as unknown as PoolClient,local.rows[0] as Account);
+  diagnosticStage='sha_approval';
   const approvals=await tx.query(`SELECT approval_id::text,revoked_at FROM private.strata_owner_sha_approvals
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
     ORDER BY confirmed_at DESC FOR UPDATE`,[owner,raw.accountId,sha]);
@@ -266,6 +284,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    if(saved.rows.length!==1)return no('owner_self_sha_approval_insert_failed');
    approvalId=str(saved.rows[0]!.approval_id);
   }
+  diagnosticStage='lease_release';
   const lease=await tx.query(`SELECT state,account_kill,arm_requested,fencing_token::text
     FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
     AND owner_user_id=$2::uuid FOR UPDATE`,[raw.accountId,owner]);
@@ -281,12 +300,14 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
       AND fencing_token=$3::bigint RETURNING fencing_token::text`,
     [raw.accountId,owner,lease.rows[0]!.fencing_token]);
   if(w.rows.length!==1)return no('owner_self_killed_lease_fence_conflict');
+  diagnosticStage='account_enable';
   const enabled=await tx.query(`UPDATE public.v13_production_account
     SET execution_enabled=true,kill_switch=false,revision=revision+1
     WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
     AND execution_enabled=false AND kill_switch=true AND blocked_reason IS NULL
     AND reserved_micros=0 RETURNING id`,[raw.accountId,owner]);
   if(enabled.rows.length!==1)return no('owner_self_account_activation_compare_and_set_failed');
+  diagnosticStage='audit_write';
   const audit={ownerId:owner,accountId:raw.accountId,sha,
    reviewId:raw.reviewId,qualificationId:raw.qualificationId,approvalId,
    feeAuthorityId:authorityId,feePolicyVersion:account.fee_policy_version,policyHash:raw.policyHash,
@@ -302,15 +323,19 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    sha,observedAtMs:evidence.started,qualificationId:raw.qualificationId});
   // DB COMMIT executes the deferred five-second signed-evidence freshness
   // trigger. If it expires, the whole account+lease+approval change rolls back.
+  diagnosticStage='precommit_freshness';
   if(durable&&(!durableSourceFresh||!durableSourceFresh()))return no('owner_self_durable_fee_changed_or_unverified');
+  diagnosticStage='commit';
   commitAttempted=true;await tx.query('COMMIT');committed=true;
   return {ok:true as const,reason:'owner_self_account_activated_worker_released_and_disarmed',
    accountId:raw.accountId,sha,approvalId,
    tradingAuthorized:false as const,workerStarted:false as const,ordersSubmitted:false as const};
- }catch{
+ }catch(error){
+  const diagnostic=ownerActivationFailureDiagnostic(error,diagnosticStage);
+  try{console.warn('owner_self_activation_failed',diagnostic);}catch{/* Logging must not alter refusal or rollback. */}
   if(commitAttempted){discard=Error('owner_self_activation_commit_unknown');
    return {...no('owner_self_activation_commit_outcome_unknown'),outcomeUnknown:true,retryAuthorized:false};}
-  return no('owner_self_activation_unavailable_or_signed_proof_failed');
+  return {...no('owner_self_activation_unavailable_or_signed_proof_failed'),diagnostic};
  }finally{
   if(tx){if(!committed&&!discard)try{await tx.query('ROLLBACK');}
    catch{discard=Error('owner_self_activation_rollback_unknown');}
