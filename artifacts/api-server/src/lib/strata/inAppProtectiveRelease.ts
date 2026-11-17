@@ -16,6 +16,8 @@ import { officialFeeSnapshotLeaseValid } from "./verifiedOfficialFeeSnapshotLeas
 import { parseReviewedApiSource, verifyReviewedApiFeeSourceStage,
   API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
+import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
 import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { digest as v13Digest, type Identity, type Request } from "../v13-production/types";
 
@@ -28,7 +30,7 @@ export const PROVISIONAL_REPAIR_CONFIRM="I_AUTHORIZE_AN_AUDITED_REPAIR_OF_MY_STA
 type DbRow=Record<string,unknown>;
 type Query={query(sql:string,params?:unknown[]):Promise<{rows:DbRow[];rowCount?:number|null}>};
 type Db=Query & {connect():Promise<Query&{release(discard?:boolean):void}>};
-type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyV3StandingFee?:typeof verifyOwnerStandingFee;now?:()=>number};
+type Deps={db?:Db;sha?:()=>string;readFeeds?:typeof readOwnedKalshiFeeds;verifyFee?:typeof verifyProtectiveReleaseFeePreflight;verifyApiFee?:typeof verifyReviewedApiFeeSourceStage;observeV4Fee?:(ticker:string)=>Promise<DynamicFeeResult>;verifyV3StandingFee?:typeof verifyOwnerStandingFee;verifyDurableFee?:typeof verifyDurableFeeStage;now?:()=>number};
 const deny=(reason:string)=>({ok:false,reason,ordersSubmitted:false as const});
 const valid=(s:unknown):s is string=>typeof s==="string"&&UUID.test(s);
 const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -139,7 +141,13 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
    // Misreporting V4 as legacy sends the owner through an obsolete 2h
    // snapshot renewal even when strict V4 evidence is the actual gate.
    const feeSourceMode=account
-    ? account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4
+    ? account.fee_policy_version===DURABLE_FEE_VERSION
+       ? parseDurableFeeSource(approvedSource)&&account.fee_formula_version===V3_FEE_FORMULA_VERSION
+          ? "DURABLE_OWNER_TERMS_V1" : "UNRECOGNIZED"
+       : account.fee_policy_version===V3_FEE_POLICY_VERSION
+          ? parseV3FeeSource(approvedSource)&&account.fee_formula_version===V3_FEE_FORMULA_VERSION
+             ? "OWNER_OFFICIAL_V3" : "UNRECOGNIZED"
+       : account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4
        ? approvedSource===CANONICAL_FEE_SCHEDULE_URL
           ? "DYNAMIC_PROVIDER_V4" : "UNRECOGNIZED"
        : parseReviewedApiSource(approvedSource) ? "REVIEWED_API_V2"
@@ -186,6 +194,7 @@ export async function protectiveReleaseStatus(actorId:string,ownerId:string,deps
  * This never creates an order and never sends vault secrets to a browser.
  */
 export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
+ if(process.env.NODE_ENV!=='test'&&deps.verifyDurableFee)return deny('release_durable_production_override_forbidden');
  const db=deps.db??pool,sha=(deps.sha??deployedGitSha)(),now=(deps.now??Date.now)();
  if(!valid(ownerId)||!SHA.test(sha))return deny("release_identity_or_deployment_invalid");
  try{
@@ -227,10 +236,26 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const sourceUrl=String(account.fee_source_url??"");
   const reviewedApi=parseReviewedApiSource(sourceUrl);
   const ownerV3=parseV3FeeSource(sourceUrl);
+  const durableModel=parseDurableFeeSource(sourceUrl);
   let freshFeeDigest:string;
   let v4FeeBinding:null|{marketTicker:string;modelDigest:string;metadataDigest:string;
     authorityId:string}=null;
-  if(account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4){
+  if(account.fee_policy_version===DURABLE_FEE_VERSION||sourceUrl.startsWith('strata-durable-owner-fee:')){
+    if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!durableModel||
+       account.fee_policy_version!==DURABLE_FEE_VERSION||account.fee_formula_version!==V3_FEE_FORMULA_VERSION||
+       !/^[a-f0-9]{64}$/.test(String(account.policy_hash??'')))return deny('release_durable_policy_identity_invalid');
+    // ENTRY proof requires explicit durable consent. This qualification does
+    // not borrow a V3 standing grant and is not execution authorization.
+    const verified=await(deps.verifyDurableFee??verifyDurableFeeStage)(ownerId,String(account.id),sourceUrl,'ENTRY');
+    const feeNow=(deps.now??Date.now)();
+    if(!verified.ok||verified.sourceDigest!==account.fee_artifact_digest||
+       verified.feeProofOnly!==true||verified.tradingAuthorized!==false||
+       !/^KXBTC15M-[A-Za-z0-9-]+$/.test(verified.marketTicker)||
+       !Number.isSafeInteger(verified.verifiedAtMs)||!Number.isSafeInteger(feeNow)||
+       feeNow<verified.verifiedAtMs||feeNow-verified.verifiedAtMs>5000)
+      return deny('release_durable_fee_unverified');
+    freshFeeDigest=verified.sourceDigest;
+  }else if(account.fee_policy_version===DYNAMIC_FEE_POLICY_VERSION_V4){
     // A V4-approved policy must NEVER fall through the legacy pinned-PDF
     // qualifier merely because both policies identify the same issuer URL.
     // Require actual owner/MFA consent for this precise account, policy and
@@ -353,7 +378,7 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,
    cash:feeds.cashMicros,orders:feeds.orders,fills:feeds.fills,
    positions:feeds.positions,settlements:feeds.settlements,
-   fee:account.fee_artifact_digest,freshFeeDigest,v4FeeBinding,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
+   fee:account.fee_artifact_digest,freshFeeDigest,durableModel,durablePolicyHash:durableModel?account.policy_hash:null,v4FeeBinding,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});
   const recorded=await db.query(`
  INSERT INTO private.strata_protective_release_qualification
  (release_commit_sha,owner_user_id,execution_account_id,evidence_digest)

@@ -50,7 +50,7 @@ const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_st
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{consent?:boolean;review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
+function fakeDb(input:{v3Source?:boolean;durableSource?:boolean;consent?:boolean;review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
  const executed:string[]=[];let signedReads=0;
  const readFeeds=async(material:typeof fixtureSigner.material,at:number)=>{signedReads++;return fixtureSigner.read(material,at,[],true);};
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
@@ -86,7 +86,7 @@ function fakeDb(input:{consent?:boolean;review?:boolean;duplicate?:boolean;permi
     fee_policy_version:DYNAMIC_FEE_POLICY_VERSION_V4,
     fee_formula_version:DYNAMIC_FEE_POLICY_VERSION_V4,
     policy_hash:"f".repeat(64),
-  }:{})}]};
+  }:{}),...(input.v3Source?{fee_source_url:`strata-owner-fee-v3://kxbtc15m/${QID}`,fee_policy_version:"strata_owner_official_monetary_fee_v3",fee_formula_version:"standard-quadratic-0.07-v1"}:{}),...(input.durableSource?{fee_source_url:`strata-durable-owner-fee://${QID}`,fee_policy_version:"owner_approved_canonical_terms_v1",fee_formula_version:"standard-quadratic-0.07-v1",policy_hash:"f".repeat(64)}:{})}]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
       feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
@@ -697,6 +697,8 @@ test("Step12 status returns legacy fee evidence diagnostics without claiming qua
 
 test("Step12 status identifies approved V4 policy by version, never falsely as legacy PDF",async()=>{
  for(const scenario of [
+  {name:"durable",opts:{durableSource:true},expected:"DURABLE_OWNER_TERMS_V1",legacyExpired:false},
+  {name:"owner_v3",opts:{v3Source:true},expected:"OWNER_OFFICIAL_V3",legacyExpired:false},
   {name:"approved_v4",opts:{v4Source:true},expected:"DYNAMIC_PROVIDER_V4",legacyExpired:false},
   {name:"legacy_pdf",opts:{},expected:"LEGACY_PDF_V1",legacyExpired:true},
   {name:"reviewed_api",opts:{apiSource:true},expected:"REVIEWED_API_V2",legacyExpired:false},
@@ -763,4 +765,27 @@ test('final release lookup keeps absent or ambiguous receipts unknown and perfor
    connect:async()=>{throw Error('no transaction');}};
   assert.deepEqual(await lookupProtectiveReleaseAuthorization(OWNER,RID,{db}),{outcome:'UNKNOWN'});
  }
+});
+
+// Durable source consent is a separate branch; it cannot reuse V3 grants.
+test('durable qualification requires exact proof, retains exchange gates, and never calls PDF/V3',async()=>{
+ const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
+ try{
+  const now=Date.now();const d=fakeDb({durableSource:true});let calls=0;
+  const proof={ok:true as const,reason:'approved_durable_terms_and_fresh_market_metadata',sourceDigest:DIGEST,
+   verifiedAtMs:now,marketTicker:'KXBTC15M-TEST',intent:'ENTRY' as const,publicationKnownCurrent:false as const,
+   publicationMonitorState:'never_checked' as const,entryConsentRequired:true,feeProofOnly:true as const,tradingAuthorized:false as const};
+  const deps={...d,sha:()=>SHA,now:()=>now,verifyDurableFee:async(...args:unknown[])=>{calls++;assert.deepEqual(args,[OWNER,account.id,`strata-durable-owner-fee://${QID}`,'ENTRY']);return proof;},verifyFee:async()=>{throw Error('no PDF');},verifyV3StandingFee:async()=>{throw Error('no V3');}};
+  const r=await qualifyProtectiveRelease(OWNER,deps);assert.equal(r.ok,true,JSON.stringify(r));assert.equal(calls,1);
+  for(const patch of [{sourceDigest:'e'.repeat(64)},{verifiedAtMs:now-5001},{verifiedAtMs:now+1},{marketTicker:'FOREIGN'},{feeProofOnly:false},{tradingAuthorized:true}]){
+   const f=fakeDb({durableSource:true});const result=await qualifyProtectiveRelease(OWNER,{...deps,...f,verifyDurableFee:async()=>({...proof,...patch}) as typeof proof});
+   assert.equal(result.ok,false);assert.equal(f.executed.some(q=>q.includes('INSERT INTO private.strata_protective_release_qualification')),false);
+  }
+  for(const input of [{freeze:'risk_hold'}]){
+   const blocked=fakeDb({durableSource:true,...input});let feeCalls=0;
+   const denied=await qualifyProtectiveRelease(OWNER,{...deps,...blocked,verifyDurableFee:async()=>{feeCalls++;return proof;}});
+   assert.equal(denied.ok,false);assert.equal(feeCalls,0,'exchange/account fences precede durable fee proof');
+  }
+  process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='false';assert.equal((await qualifyProtectiveRelease(OWNER,deps)).ok,false);
+ }finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
 });

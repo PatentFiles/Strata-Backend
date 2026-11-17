@@ -1,0 +1,111 @@
+import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';import {createRequire} from 'node:module';
+import pg from '../../lib/db/node_modules/pg/lib/index.js';
+const require=createRequire(import.meta.url);
+const {migrateOwnedDurableFeePolicy,durableMigrationOutcome,previewDurableFeeMigration,cancelPendingDurableMigration,DURABLE_PENDING_CANCEL_CONFIRM,DURABLE_MIGRATION_CONFIRM,DURABLE_PUBLICATION_RISK_ACCEPTANCE}=require('../../artifacts/api-server/dist/durableFeeMigration.cjs');
+const {row,old,computeV13LiveMoneyPolicyHash}=require('../../artifacts/api-server/dist/migration-fixture.cjs');
+assert.equal(process.env.DURABLE_TEST_DATABASE_URL,'postgresql://agent@127.0.0.1:55483/durable_fee_disposable');
+const pool=new pg.Pool({connectionString:process.env.DURABLE_TEST_DATABASE_URL});
+const owner=row.created_by,account='strata-account-aaaaaaaaaaaaaaaaaaaaaaaa',id='33333333-3333-4333-8333-333333333333',sha='a'.repeat(40);
+const bytes=readFileSync('attached_assets/0_kalshi-fee-schedule_1790474920034.pdf'),digest=createHash('sha256').update(bytes).digest('hex');
+const body={accountId:account,captureId:'1',confirmation:DURABLE_MIGRATION_CONFIRM,riskAcceptance:DURABLE_PUBLICATION_RISK_ACCEPTANCE,expectedPolicyId:row.id,expectedPolicyHash:row.policy_hash,expectedPolicyVersion:1,expectedSha:sha,modelId:id};
+const deps={db:pool,sha:()=>sha,scope:()=>({ownerId:owner,accountId:account}),load:async()=>({keyId:'synthetic',privateKey:'not-a-real-key'}),read:async(_,t)=>({ok:true,observedAtMs:t,historicalCoverageComplete:true,cashMicros:'25000000',orders:[],fills:[],positions:[],settlements:[]})};
+async function reset(){
+ await pool.query(`DROP SCHEMA IF EXISTS private CASCADE;DROP SCHEMA IF EXISTS auth CASCADE;
+ DROP TABLE IF EXISTS public.v13_production_account,public.v13_live_money_policy,public.v13_production_intent,public.v13_production_position,public.v13_production_observation CASCADE;
+ CREATE SCHEMA private;CREATE SCHEMA auth;CREATE TABLE auth.users(id uuid PRIMARY KEY);
+ CREATE TABLE public.v13_production_account(id text PRIMARY KEY,owner_user_id uuid,policy_id text,subaccount integer,exchange_index integer,fee_artifact_digest text,commissioned boolean,execution_enabled boolean,kill_switch boolean,reserved_micros bigint,cash_micros bigint,cash_precision_verified boolean,reconciled_at timestamptz,blocked_reason text,revision bigint,key_fingerprint text,kalshi_connection_id text,commissioning_digest text);
+ CREATE TABLE public.v13_live_money_policy(${Object.entries(row).map(([k,v])=>`${k} ${v instanceof Date?'timestamptz':typeof v==='number'?'integer':typeof v==='boolean'?'boolean':'text'}`).join(',')},execution_account_id text);
+ CREATE TABLE public.v13_production_intent(id text,account_id text,request jsonb,created_at timestamptz,terminal boolean);
+ CREATE TABLE public.v13_production_position(account_id text,quantity_hundredths bigint);
+ CREATE TABLE public.v13_production_observation(id uuid,account_id text,kind text,payload jsonb,digest text);
+ CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,state text,arm_requested boolean,account_kill boolean);
+ CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text);
+ CREATE TABLE private.kalshi_connection_credentials(owner_user_id uuid,financial_account_id text,key_fingerprint text,role text,revoked_at timestamptz,verified_at timestamptz,verification_reason text);
+ CREATE TABLE private.strata_owner_sha_approvals(owner_user_id uuid,execution_account_id text,revoked_at timestamptz,release_commit_sha text);
+ CREATE TABLE private.strata_railway_official_fee_capture_v5(capture_id bigint PRIMARY KEY,execution_account_id text,content_sha256 text,effective_date date,canonical_url text,source_kind text,captured_at timestamptz,expires_at timestamptz,original_bytes bytea,byte_length integer,policy_version text);`);
+ await pool.query('INSERT INTO auth.users VALUES($1)',[owner]);
+ await pool.query("INSERT INTO public.v13_production_account VALUES($1,$2,$3,1,2,$4,true,false,true,0,25000000,true,clock_timestamp(),NULL,1,$5,'connection','old-commissioning')",[account,owner,row.id,digest,'b'.repeat(64)]);
+ const entries=Object.entries({...row,execution_account_id:account});await pool.query(`INSERT INTO public.v13_live_money_policy(${entries.map(x=>x[0])}) VALUES(${entries.map((_,i)=>'$'+(i+1))})`,entries.map(x=>x[1]));
+ await pool.query("INSERT INTO private.kalshi_account_worker_lease VALUES($1,$2,'killed',false,true)",[account,owner]);
+ await pool.query("INSERT INTO private.kalshi_connection_credentials VALUES($1,'connection',$2,'restricted_execution',NULL,clock_timestamp(),'credential_verified')",[owner,'b'.repeat(64)]);
+ await pool.query("INSERT INTO private.strata_owner_sha_approvals VALUES($1,$2,NULL,repeat('b',40))",[owner,account]);
+ await pool.query("INSERT INTO private.strata_railway_official_fee_capture_v5 VALUES(1,$1,$2,'2026-07-07','https://kalshi.com/docs/kalshi-fee-schedule.pdf','railway_canonical_https_direct',now(),now()+interval '55 minutes',$3,$4,'issuer_pdf_55m_signed_api_recheck_v2')",[account,digest,bytes,bytes.length]);
+ await pool.query(readFileSync('docs/durable-fee/schema.sql','utf8'));
+}
+const count=async()=>Number((await pool.query('SELECT count(*) FROM private.strata_durable_owner_fee_model')).rows[0].count);
+const wrapped=hook=>({...deps,db:{connect:async()=>{const c=await pool.connect();return {query:(s,a)=>hook(c,s,a),release:e=>c.release(e)}}}});
+async function unchanged(){assert.equal(await count(),0);const a=(await pool.query('SELECT * FROM public.v13_production_account')).rows[0];assert.equal(a.policy_id,row.id);assert.equal(a.revision,'1');assert.equal((await pool.query('SELECT state FROM public.v13_live_money_policy')).rows[0].state,'APPROVED');}
+try{
+ process.env.STRATA_OWNER_SELF_RELEASE_OWNER_ID=owner;process.env.STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID=account;process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+ await reset();const preview=await previewDurableFeeMigration(owner);assert.equal(preview.ok,true,JSON.stringify(preview));assert.equal(preview.expectedPolicyHash,row.policy_hash);assert.equal(preview.limits.maxEntryStakeCents,150);await unchanged();console.log('PASS actual native nonmutating migration-preview SQL exact preserved limits');
+ await reset();const done=await migrateOwnedDurableFeePolicy(owner,body,deps);assert.equal(done.ok,true,JSON.stringify(done));
+ const policy=(await pool.query("SELECT * FROM public.v13_live_money_policy WHERE state='APPROVED'")).rows[0];
+ for(const k of Object.keys(row).filter(k=>!['id','version','supersedes_policy_id','fee_policy_version','fee_source_url','policy_hash','approved_at'].includes(k)))assert.deepEqual(policy[k],row[k],k);
+ assert.equal(policy.max_entry_stake_cents,150);assert.equal(policy.max_entry_all_in_cents,200);assert.equal(policy.max_daily_loss_cents,500);
+ const a=(await pool.query('SELECT * FROM public.v13_production_account')).rows[0];assert.equal(a.execution_enabled,false);assert.equal(a.kill_switch,true);assert.equal(await count(),1);
+ assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'RECORDED');assert.equal((await durableMigrationOutcome('22222222-2222-4222-8222-222222222222',id,sha,pool)).outcome,'UNKNOWN');
+ assert.equal((await pool.query('SELECT revoked_at IS NOT NULL AS revoked FROM private.strata_owner_sha_approvals')).rows[0].revoked,true);
+ console.log('PASS atomic migration preserves exact lower legacy limits/strategy, keeps stopped, revokes stale SHA, scoped receipt');
+ await reset();const both=await Promise.all([migrateOwnedDurableFeePolicy(owner,body,deps),migrateOwnedDurableFeePolicy(owner,body,deps)]);assert.equal(both.filter(x=>x.ok).length,1,JSON.stringify(both));assert.equal(await count(),1);console.log('PASS native concurrent migration exactly one');
+ for(const marker of ['UPDATE public.v13_live_money_policy SET','INSERT INTO public.v13_live_money_policy','UPDATE public.v13_production_account','INSERT INTO private.strata_durable_owner_fee_state','INSERT INTO private.strata_durable_fee_migration']){
+ await reset();const bad=await migrateOwnedDurableFeePolicy(owner,body,wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s.includes(marker))throw Error('fault');return r}));assert.equal(bad.ok,false);await unchanged();}
+ console.log('PASS native rollback after five separate write boundaries restores old policy/account/no model');
+ await reset();const unknown=await migrateOwnedDurableFeePolicy(owner,body,wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s==='COMMIT')throw Error('lost acknowledgement');return r}));assert.equal(unknown.reason,'durable_migration_commit_unknown');assert.equal(unknown.retryAuthorized,false);assert.equal(await count(),1);assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'RECORDED');console.log('PASS lost COMMIT acknowledgement requires exact immutable receipt, no retry');
+ for(const change of [{riskAcceptance:'omit'},{expectedPolicyHash:'c'.repeat(64)},{expectedPolicyVersion:2},{expectedSha:'b'.repeat(40)},{ownerId:owner}]){await reset();assert.equal((await migrateOwnedDurableFeePolicy(owner,{...body,...change},deps)).ok,false);await unchanged();}console.log('PASS exact prior-policy/hash/version/SHA/explicit-risk/actor body fail closed');
+ await reset();const moving={...deps,read:async(...args)=>{const f=await deps.read(...args);await pool.query('UPDATE public.v13_production_account SET revision=revision+1');return f}};assert.equal((await migrateOwnedDurableFeePolicy(owner,body,moving)).reason,'policy_concurrency_conflict');assert.equal(await count(),0);console.log('PASS account revision race refuses migration');
+ await reset();await pool.query('UPDATE public.v13_production_account SET execution_enabled=true');assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).ok,false);assert.equal(await count(),0);console.log('PASS execution-enabled account never migrates');
+ await reset();const revoked={...deps,read:async(...args)=>{const f=await deps.read(...args);await pool.query('UPDATE private.kalshi_connection_credentials SET revoked_at=clock_timestamp()');return f}};assert.equal((await migrateOwnedDurableFeePolicy(owner,body,revoked)).reason,'migration_credential_changed_or_revoked');await unchanged();console.log('PASS credential revoked during signed preflight fails locked recheck');
+ await reset();await pool.query('UPDATE private.strata_owner_sha_approvals SET release_commit_sha=$1',[sha]);assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).reason,'durable_migration_fresh_release_sha_required');await unchanged();assert.equal((await pool.query('SELECT revoked_at FROM private.strata_owner_sha_approvals')).rows[0].revoked_at,null);console.log('PASS same-SHA prior approval refuses before mutation or revocation');
+ await reset();await pool.query("UPDATE public.v13_production_account SET reconciled_at=clock_timestamp()-interval '20 minutes'");
+ const refusal=await migrateOwnedDurableFeePolicy(owner,body,deps);assert.equal(refusal.reason,'fresh_cash_reconciliation_required');
+ const rejection=await durableMigrationOutcome(owner,id,sha,pool);assert.equal(rejection.outcome,'REJECTED');assert.equal(rejection.noCommit,true);assert.equal(rejection.sameModelRetryAllowed,false);assert.equal(rejection.priorPolicyHash,body.expectedPolicyHash);await unchanged();
+ await pool.query('UPDATE public.v13_production_account SET reconciled_at=clock_timestamp()');
+ assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).reason,'durable_migration_attempt_already_exists');await unchanged();
+ const newBody={...body,modelId:'44444444-4444-4444-8444-444444444444'};assert.equal((await migrateOwnedDurableFeePolicy(owner,newBody,deps)).ok,true);assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'REJECTED');console.log('PASS durable rejection permits fresh explicitly scoped attempt, never same-ID replay');
+ await reset();let entered,releaseHold;const held=new Promise(r=>entered=r),gate=new Promise(r=>releaseHold=r);
+ const inFlight=migrateOwnedDurableFeePolicy(owner,body,wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s.startsWith('INSERT INTO private.strata_durable_fee_migration\n')){entered();await gate;}return r}));
+ await held;assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');
+ const adversary=await pool.connect();let locked=false;await adversary.query('BEGIN');
+ const waiting=adversary.query('SELECT model_id FROM private.strata_durable_fee_migration_attempt WHERE model_id=$1 FOR UPDATE',[id]).then(()=>locked=true);
+ await new Promise(r=>setTimeout(r,50));assert.equal(locked,false);releaseHold();assert.equal((await inFlight).ok,true);await waiting;
+ await assert.rejects(adversary.query("UPDATE private.strata_durable_fee_migration_attempt SET state='REJECTED',reason='false_reject',resolved_at=clock_timestamp() WHERE model_id=$1",[id]),/cannot reject committed model/);
+ await adversary.query('ROLLBACK');adversary.release();assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'RECORDED');console.log('PASS rejection lock waits for active migration and cannot mislabel committed model');
+ const cancellation={accountId:account,modelId:id,expectedSha:sha,confirmation:DURABLE_PENDING_CANCEL_CONFIRM};
+ const cancelDeps={db:pool,scope:deps.scope};
+ const orphan=async()=>{const x=await migrateOwnedDurableFeePolicy(owner,body,wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s.startsWith('INSERT INTO private.strata_durable_fee_migration_attempt'))throw Error('claim acknowledgement lost');return r}));assert.equal(x.reason,'durable_migration_attempt_claim_unknown');};
+ await reset();await orphan();assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');
+ const cancelled=await cancelPendingDurableMigration(owner,cancellation,cancelDeps);assert.equal(cancelled.outcome,'REJECTED');assert.equal(cancelled.noCommit,true);assert.equal(cancelled.sameModelRetryAllowed,false);await unchanged();
+ assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).reason,'durable_migration_attempt_already_exists');
+ assert.equal((await migrateOwnedDurableFeePolicy(owner,{...body,modelId:'55555555-5555-4555-8555-555555555555'},deps)).ok,true);console.log('PASS orphan claim explicitly cancelled with authoritative no-commit receipt; only fresh ID may execute');
+ await reset();let readEntered,readRelease;const readHeld=new Promise(r=>readEntered=r),readGate=new Promise(r=>readRelease=r);
+ const late=migrateOwnedDurableFeePolicy(owner,body,{...deps,read:async(...args)=>{readEntered();await readGate;return deps.read(...args)}});
+ await readHeld;assert.equal((await cancelPendingDurableMigration(owner,cancellation,cancelDeps)).outcome,'REJECTED');readRelease();assert.equal((await late).reason,'durable_migration_attempt_not_pending');await unchanged();
+ assert.equal((await pool.query("SELECT count(*) FROM public.v13_production_observation WHERE kind='OWNER_DURABLE_FEE_PENDING_CANCELLED'")).rows[0].count,'1');console.log('PASS cancelled delayed original writer cannot execute after signed read completes');
+ await reset();let txEntered,txRelease;const txHeld=new Promise(r=>txEntered=r),txGate=new Promise(r=>txRelease=r);
+ const executing=migrateOwnedDurableFeePolicy(owner,body,wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s.startsWith('INSERT INTO private.strata_durable_fee_migration\n')){txEntered();await txGate;}return r}));
+ await txHeld;const blocked=await cancelPendingDurableMigration(owner,cancellation,cancelDeps);assert.equal(blocked.outcome,'UNKNOWN');assert.equal(blocked.reason,'pending_migration_cancellation_unconfirmed');txRelease();assert.equal((await executing).ok,true);assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'RECORDED');assert.equal((await cancelPendingDurableMigration(owner,cancellation,cancelDeps)).outcome,'RECORDED');console.log('PASS active transaction blocks cancellation; committed work never becomes rejected');
+ await reset();await orphan();for(const changed of [{accountId:'another-account'},{expectedSha:'b'.repeat(40)},{confirmation:'wrong'}])assert.equal((await cancelPendingDurableMigration(owner,{...cancellation,...changed},cancelDeps)).outcome,'UNKNOWN');
+ assert.equal((await cancelPendingDurableMigration('22222222-2222-4222-8222-222222222222',cancellation,cancelDeps)).outcome,'UNKNOWN');assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'UNKNOWN');await unchanged();console.log('PASS cancellation exact owner/account/SHA/explicit-action fences');
+ await reset();await orphan();const cancellations=await Promise.all([cancelPendingDurableMigration(owner,cancellation,cancelDeps),cancelPendingDurableMigration(owner,cancellation,cancelDeps)]);assert.ok(cancellations.every(x=>x.outcome==='REJECTED'));assert.equal((await pool.query("SELECT count(*) FROM public.v13_production_observation WHERE kind='OWNER_DURABLE_FEE_PENDING_CANCELLED'")).rows[0].count,'1');console.log('PASS simultaneous cancellations produce one cancellation event and terminal rejection');
+ await reset();await orphan();const lostCancel=await cancelPendingDurableMigration(owner,cancellation,{scope:deps.scope,db:wrapped(async(c,s,args)=>{const r=await c.query(s,args);if(s==='COMMIT')throw Error('lost acknowledgement');return r}).db});assert.equal(lostCancel.outcome,'UNKNOWN');assert.equal((await durableMigrationOutcome(owner,id,sha,pool)).outcome,'REJECTED');assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).reason,'durable_migration_attempt_already_exists');console.log('PASS cancellation COMMIT uncertainty resolves by exact readback, never replay');
+ await reset();await orphan();const express=require('../../artifacts/api-server/node_modules/express');const {createUserExecutionRouter}=require('../../artifacts/api-server/dist/durableUserExecutionRouter.cjs');
+ const app=express();app.use(express.json());app.use(createUserExecutionRouter((req,res,next)=>{if(req.headers.authorization!=='synthetic-mfa-owner')return void res.status(401).json({reason:'unauthorized'});res.locals.strata={subject:owner,role:'USER'};next()},{}));
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
+ try{const url='http://127.0.0.1:'+server.address().port+'/fees/durable/';
+ assert.equal((await fetch(url+'cancel-pending',{method:'POST'})).status,401);
+ const response=await fetch(url+'cancel-pending',{method:'POST',headers:{authorization:'synthetic-mfa-owner','content-type':'application/json'},body:JSON.stringify(cancellation)});
+ assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'private, no-store');assert.equal((await response.json()).outcome,'REJECTED');
+ const actual=await (await fetch(url+'migration-outcome?modelId='+id+'&sha='+sha,{headers:{authorization:'synthetic-mfa-owner'}})).json();assert.equal(actual.outcome,'REJECTED');assert.equal(actual.ownerId,owner);assert.equal(actual.noCommit,true);await unchanged();
+ }finally{await new Promise((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}
+ console.log('PASS actual cancellation HTTP handler + scoped database readback with synthetic MFA middleware');
+ await reset();await orphan();const crashed=await pool.connect();await crashed.query('BEGIN');await crashed.query('SELECT model_id FROM private.strata_durable_fee_migration_attempt WHERE model_id=$1 FOR UPDATE',[id]);
+ assert.equal((await cancelPendingDurableMigration(owner,cancellation,cancelDeps)).outcome,'UNKNOWN');
+ // Simulate server rollback after an in-flight process dies. There is no
+ // inference from elapsed time: the second explicit call takes the real lock.
+ await crashed.query('ROLLBACK');crashed.release();
+ assert.equal((await cancelPendingDurableMigration(owner,cancellation,cancelDeps)).outcome,'REJECTED');
+ assert.equal((await cancelPendingDurableMigration(owner,cancellation,cancelDeps)).outcome,'REJECTED');
+ assert.equal((await pool.query("SELECT count(*) FROM public.v13_production_observation WHERE kind='OWNER_DURABLE_FEE_PENDING_CANCELLED'")).rows[0].count,'1');
+ assert.equal((await migrateOwnedDurableFeePolicy(owner,body,deps)).reason,'durable_migration_attempt_already_exists');console.log('PASS separately explicit cancellation after real writer rollback is idempotent, never migration replay');
+ console.log('PASS 20 native migration groups, strict real PDF/SQL, synthetic provider/credential fixture, no exchange signing or orders');
+}finally{await pool.end()}

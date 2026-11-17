@@ -1,3 +1,5 @@
+import {parseDurableFeeSource} from './durableFeeConsumers';
+import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
 /**
  * Durable, explicitly owner-consented monetary permission for ONE exact
  * release/account/policy. It does not extend or rewrite short-lived V3 records.
@@ -263,6 +265,11 @@ export async function readOwnerV3ProtectiveSource(owner:string,account:string,db
       AND p.state='APPROVED' LIMIT 2`,[owner,account]);
   if(r.rows.length!==1)return {mode:'UNAVAILABLE' as const};
   const x=r.rows[0]!,source=txt(x.fee_source_url);
+  const durable=parseDurableFeeSource(source);
+  if(x.fee_policy_version===DURABLE_FEE_VERSION){
+   if(!durable||x.fee_formula_version!==V3_FEE_FORMULA_VERSION||!HEX.test(txt(x.policy_hash)))return {mode:'UNAVAILABLE' as const};
+   return {mode:'OWNER_DURABLE' as const,sourceUrl:source,sourceAuthorityId:durable,policyHash:txt(x.policy_hash)};
+  }
   const id=parseV3FeeSource(source);
   if(x.fee_policy_version!==V3_FEE_POLICY_VERSION)return {mode:'OTHER' as const};
   if(!id||x.fee_formula_version!==V3_FEE_FORMULA_VERSION||

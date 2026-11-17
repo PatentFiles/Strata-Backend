@@ -1,0 +1,43 @@
+name: Durable fee candidate safety
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/**'
+      - 'lib/**'
+      - 'docs/durable-fee/**'
+      - 'docs/durable-activation-native/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/durable-fee-candidate.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-durable-fee:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-16
+      - name: Offline durable and prior authorization regressions
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:1/unused
+        run: pnpm run test:durable-fee-offline && pnpm run test:durable-fee-routes
+      - name: Disposable real PostgreSQL enrollment migration monitor and wire races
+        env:
+          PG_BIN: /usr/lib/postgresql/16/bin
+          PG_SHARE: /usr/share/postgresql/16
+        run: bash docs/durable-fee/run-native.sh
+      - name: Disposable complete durable qualification activation and migration chain
+        env:
+          PG_BIN: /usr/lib/postgresql/16/bin
+          PG_SHARE: /usr/share/postgresql/16
+        run: bash docs/durable-activation-native/run-native-tests.sh && bash docs/durable-activation-native/run-fullchain.sh

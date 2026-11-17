@@ -1,0 +1,1 @@
+../../lib/db/owner-self-release/003_durable_owner_fee_v1.sql

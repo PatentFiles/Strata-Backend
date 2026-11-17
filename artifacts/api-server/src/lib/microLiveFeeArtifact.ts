@@ -81,11 +81,11 @@ function failure(
 }
 
 function calendarDay(value: string): string | null {
-  const parsed = new Date(value);
+  const parsed = new Date(`${value} UTC`);
   if (Number.isNaN(parsed.getTime())) return null;
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${parsed.getFullYear()}-${month}-${day}`;
+  const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getUTCDate()).padStart(2, "0");
+  return `${parsed.getUTCFullYear()}-${month}-${day}`;
 }
 
 /**
@@ -138,7 +138,8 @@ export function parseFeeScheduleText(text: string): ParsedFeeSchedule | null {
   const normalized = text.replace(/\s+/g, " ").trim();
   const date = normalized.match(/\bEffective(?:\s+Date)?\s*(?::|as of)?\s*((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+20\d{2})\b/i);
   if (!date) return null;
-  const parsedDate = Date.parse(date[1]!);
+  // Publication dates are civil dates, not process-local midnight.
+  const parsedDate = Date.parse(`${date[1]!} UTC`);
   if (!Number.isFinite(parsedDate) || parsedDate > Date.now() ||
       parsedDate < Date.parse("2020-01-01")) return null;
   if (normalized.startsWith("Trading Fees") &&

@@ -1,3 +1,4 @@
+import {verifyDurableFeeStage,verifyDurableProtectiveAuthority} from './durableFeeConsumers';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
@@ -369,14 +370,15 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  const policy=await (testMode&&ports.verifyFee?Promise.resolve({mode:'OTHER' as const}):
    readOwnerV3ProtectiveSource(ownerId,accountId));
  if(policy.mode==='UNAVAILABLE')return fail('protective_exit_owner_policy_not_verified');
- const ownerV3=policy.mode==='OWNER_V3';
+ const ownerDurable=policy.mode==='OWNER_DURABLE';
+ const ownerV3=policy.mode==='OWNER_V3'||ownerDurable;
  const ownerV3Source=ownerV3?policy.sourceUrl:null;
  const checkFee=ports.verifyFee??(ownerV3
    ?async(_stage:"ORDER_ENTRY",market:string)=>{
-     const evidence=await verifyOwnerV3ProtectiveFee(ownerId,accountId,ownerV3Source!,market);
+     const evidence=await (ownerDurable?verifyDurableFeeStage(ownerId,accountId,ownerV3Source!,'PROTECTIVE_EXIT',market):verifyOwnerV3ProtectiveFee(ownerId,accountId,ownerV3Source!,market));
      if(!evidence.ok)return {ok:false,monetaryFeeAuthorized:false,
        marketTicker:market,verifiedAt:undefined,authorityFingerprint:undefined};
-     const auth=await verifyOwnerV3ProtectiveFeeAuthority(ownerId,accountId,releaseSha);
+     const auth=await (ownerDurable?verifyDurableProtectiveAuthority:verifyOwnerV3ProtectiveFeeAuthority)(ownerId,accountId,releaseSha);
      return {ok:auth.ok,monetaryFeeAuthorized:auth.ok,
        marketTicker:market,verifiedAt:new Date(evidence.verifiedAtMs).toISOString(),
        authorityFingerprint:auth.ok?auth.authorityFingerprint:undefined};
@@ -425,7 +427,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
    return signedPost(material,order,beforeSend);
   },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),
     enforceFeeAuthority?{fingerprint:initialAuthority as string,
-      verify:(ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
+      verify:(ownerDurable?verifyDurableProtectiveAuthority:ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
       providerFresh:isCurrentProviderFee}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
  if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");

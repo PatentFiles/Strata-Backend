@@ -1,0 +1,26 @@
+PASS cross-owner capture denied
+PASS immutable source model
+PASS actual native verifier SELECT/DATE mapping + real market validator (mock HTTP)
+PASS actual native verifier refuses source/version/formula mismatch
+PASS concurrent change waits on final-share fence
+PASS sticky change/revocation
+PASS monitor rollback
+PASS private RLS and client ACL
+PASS 8 native groups including actual verifier (synthetic prerequisite schema, not full V3 integration)
+PASS real strict PDF enrollment transaction
+PASS real monitor same/change/unavailable sticky audit
+PASS unseen change followed by revert is retained
+PASS unseen expired change followed by revert is retained
+PASS concurrent enrollment exactly one
+PASS rollback after model/state insert
+PASS lost COMMIT acknowledgement no retry + actual durable readback
+PASS deferred enrollment deadline rolls back at COMMIT
+PASS corrupted source never enrolls
+PASS corrupted stored provenance latches entries closed
+PASS live account enrollment refused
+PASS actual final-account+durable SQL holds revocation until transport and COMMIT
+PASS revoke-before-send blocks actual entry adapter
+PASS entry consent revoked does not block independently reviewed exit fee adapter
+PASS one transport on unknown outcome, no internal retry
+PASS actual capture change serializes with wire and blocks subsequent dispatch without monitor
+PASS 11 lifecycle +5 native wire groups; synthetic provider/technical authorization, real PDF/parser/SQL, no exchange orders
