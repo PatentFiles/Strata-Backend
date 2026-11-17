@@ -1,3 +1,5 @@
+import {reauthorizeDurableFeeRelease,DURABLE_REAUTH_CONFIRM} from './durableFeeReauthorization';
+import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
 import {personalAccountSnapshot} from './personalExchangeRead';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {randomUUID} from 'node:crypto';
@@ -79,7 +81,7 @@ async function schema(){
  `);
  for(const f of ['sql/strata_protective_exit_release_private.sql','sql/strata_protective_exit_release_renewable.sql','sql/strata_in_app_protective_release_approval.sql',
  'sql/strata_owner_sha_approval.sql','lib/db/drizzle/0043_strata_continuous_execution_grants.sql','lib/db/owner-self-release/001_explicit_owner_authority.sql',
- 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','lib/db/owner-self-release/003_durable_owner_fee_v1.sql','lib/db/owner-self-release/004_durable_trigger_search_path.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
+ 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','lib/db/owner-self-release/003_durable_owner_fee_v1.sql','lib/db/owner-self-release/004_durable_trigger_search_path.sql','lib/db/owner-self-release/005_durable_fee_release_authorization.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
 }
 async function setup(){
  await pool.query('INSERT INTO auth.users VALUES($1)',[owner]);
@@ -140,5 +142,13 @@ test('109 intent minimal-schema migration regression with real account foreign-k
  await t.test('concurrent valid receipt revision during signed network rejects locked digest',async()=>{const r=await run({read:async(_m:any,at:number)=>{await pool.query("UPDATE public.v13_production_observation SET observed_at=clock_timestamp() WHERE id='proof-2'");return read(true,orders,at);}});assert.equal(r.ok,false);assert.equal(r.reason,'financial_history_changed_during_migration');await noMigration();});
  await t.test('postwrite policy failure rolls all policy/model mutations back',async()=>{const db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(s:string,a?:unknown[])=>{const r=await c.query(s,a);if(s.startsWith('INSERT INTO public.v13_live_money_policy')){await assertLateInsertBlocked();throw Error('synthetic rollback after policy write');}return r;}};}};const r=await run({db});assert.equal(r.ok,false);await noMigration();});
  await t.test('109 intents with 107 proven no-sends and two filled settled orders migrate',async()=>{let checked=false;const db={query:pool.query.bind(pool),connect:async()=>{const c=await pool.connect();return {release:c.release.bind(c),query:async(s:string,a?:unknown[])=>{const r=await c.query(s,a);if(s.startsWith('INSERT INTO public.v13_live_money_policy')){await assertLateInsertBlocked();checked=true;}return r;}};}};const r=await run({db});assert.equal(checked,true);assert.equal(r.ok,true,JSON.stringify(r));assert.equal((await pool.query('SELECT count(*) FROM public.v13_production_intent')).rows[0].count,'109');const st=await state();assert.equal(st.a.execution_enabled,false);assert.equal(st.a.kill_switch,true);assert.equal(st.w.arm_requested,false);});
+ await t.test('retained109 migrated historical model explicitly reauthorizes exact new build without policy replacement',async()=>{
+ const m=(await pool.query('SELECT * FROM private.strata_durable_owner_fee_model')).rows[0],newSha='d'.repeat(40);
+ const before=await state();
+ const result=await reauthorizeDurableFeeRelease(owner,{authorizationId:randomUUID(),accountId:account,modelId:m.model_id,originalSha:sha,expectedSha:newSha,policyHash:m.approved_policy_hash,sourceDigest,confirmation:DURABLE_REAUTH_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE},
+ {...migrationDeps,sha:()=>newSha,read:(_m,at)=>read(true,orders,at),probe:()=>probeCurrentKalshiFeeApi(feed,Date.now,market)});
+ assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(await state(),before);assert.equal((await pool.query('SELECT count(*) FROM public.v13_production_intent')).rows[0].count,'109');
+ assert.equal((await locked(pool,{owner,account,sha:newSha,policyHash:m.approved_policy_hash},market,'ENTRY')).ok,true);
+ });
  await t.test('no real network or trading',()=>assert.equal(unexpectedNetwork,0));
 }finally{await pool.end();}});

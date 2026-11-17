@@ -24,6 +24,7 @@ try{
   await assert.rejects(setup.query(schema),/already exists/);await setup.query('ROLLBACK');
   assert.notEqual((await setup.query("SELECT to_regclass('private.strata_durable_owner_fee_model') AS t")).rows[0].t,null);
  }finally{setup.release()}
+ await pool.query(readFileSync('lib/db/owner-self-release/005_durable_fee_release_authorization.sql','utf8'));
  console.log('PASS atomic DDL rollback and duplicate migration fail-closed without partial effects');
  const insert=`INSERT INTO private.strata_durable_owner_fee_model(model_id,owner_user_id,execution_account_id,release_commit_sha,approved_policy_hash,source_capture_id,official_source_digest,policy_version,formula_version,effective_date,confirmation,genuine_source_verified,approved_at) VALUES($1,$2,'account',repeat('a',40),repeat('b',64),1,repeat('c',64),'owner_approved_canonical_terms_v1','standard-quadratic-0.07-v1','2026-07-07','I_APPROVE_VERSIONED_DURABLE_OFFICIAL_FEE_TERMS_V1',true,now())`;
  const id='33333333-3333-4333-8333-333333333333',owner='11111111-1111-4111-8111-111111111111';

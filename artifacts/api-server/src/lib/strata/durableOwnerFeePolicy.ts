@@ -1,3 +1,4 @@
+import {durableReleaseMatch} from './durableFeeReleaseBinding';
 import {createHash} from 'node:crypto';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Local candidate; not wired to production. A fee proof is not trading authority. */
@@ -41,13 +42,13 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
 }
 /** Existing caller transaction must hold these locks THROUGH final send.
  * No HTTP route exposes a model/intent override. Native integration pending. */
-export const DURABLE_FEE_LOCK_SQL=`SELECT m.*,m.effective_date::text AS effective_date_text,s.known_publication_change,s.monitor_state,s.entry_revoked,
+export const DURABLE_FEE_LOCK_SQL=`SELECT m.*,$3::text AS authorized_release_sha,m.effective_date::text AS effective_date_text,s.known_publication_change,s.monitor_state,s.entry_revoked,
  p.state AS policy_state,b.original_bytes AS historical_bytes,b.content_sha256 AS historical_digest FROM private.strata_durable_owner_fee_model m
  LEFT JOIN private.strata_durable_historical_baseline b ON b.baseline_id=m.historical_baseline_id
  JOIN private.strata_durable_owner_fee_state s ON s.model_id=m.model_id
  JOIN public.v13_production_account a ON a.id=m.execution_account_id AND a.owner_user_id=m.owner_user_id
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
- WHERE m.owner_user_id=$1::uuid AND m.execution_account_id=$2 AND m.release_commit_sha=$3
+ WHERE m.owner_user_id=$1::uuid AND m.execution_account_id=$2 AND ${durableReleaseMatch('$3')}
  AND m.approved_policy_hash=$4 AND p.policy_hash=$4 AND p.state='APPROVED'
  AND p.fee_source_url='strata-durable-owner-fee://'||m.model_id::text
  AND p.fee_policy_version=m.policy_version AND p.fee_formula_version=m.formula_version
@@ -81,7 +82,7 @@ export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[])
  if(!Number.isSafeInteger(assessedAt)||assessedAt<sourceStartedAt||assessedAt-sourceStartedAt>5000||
  !Number.isFinite(elapsedMono)||elapsedMono<0||elapsedMono>5000)
   return deny('durable_fee_market_observation_deadline_exceeded');
- const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.release_commit_sha),
+ const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.authorized_release_sha??r.release_commit_sha),
  sourceKind:String(r.source_kind??'FRESH_CANONICAL_CAPTURE'),policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
  effectiveDate:String(r.effective_date_text),approved:r.policy_state==='APPROVED',entryRevoked:r.entry_revoked===true,
  integrityValid:historical?historicalIntegrity:r.genuine_source_verified===true&&(!r.source_kind||r.source_kind==='FRESH_CANONICAL_CAPTURE'),knownPublicationChange:r.known_publication_change===true,

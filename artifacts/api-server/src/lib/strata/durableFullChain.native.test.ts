@@ -60,7 +60,7 @@ async function schema(){
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id text,execution_account_id text,state text);`);
  for(const f of ['sql/strata_protective_exit_release_private.sql','sql/strata_protective_exit_release_renewable.sql','sql/strata_in_app_protective_release_approval.sql',
  'sql/strata_owner_sha_approval.sql','lib/db/drizzle/0043_strata_continuous_execution_grants.sql','lib/db/owner-self-release/001_explicit_owner_authority.sql',
- 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','docs/durable-fee/schema.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
+ 'sql/held-consent-deadlines.sql','lib/db/drizzle/0036_owner_fee_v3_evidence.sql','lib/db/drizzle/0037_owner_v3_fee_authority.sql','lib/db/owner-self-release/002_owner_standing_fee_v1.sql','docs/durable-fee/schema.sql','lib/db/owner-self-release/005_durable_fee_release_authorization.sql'])await pool.query(readFileSync(root+'/'+f,'utf8'));
 }
 async function reset(priorSameSha: false|true|'old'=false){
  hash=sourceDigest;

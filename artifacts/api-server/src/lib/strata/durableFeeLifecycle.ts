@@ -1,3 +1,4 @@
+import {durableReleaseMatch} from './durableFeeReleaseBinding';
 /** Isolated server-side candidate. Actor must come from AAL2 middleware;
  * Public production is atomic migration only; no publisher/capture is invoked here. */
 import {createHash,randomUUID} from 'node:crypto';
@@ -126,7 +127,7 @@ export async function durableFeeStatus(owner:string){
  p.state,m.model_id::text,m.source_kind,m.historical_baseline_id,m.genuine_source_verified,m.effective_date::text AS source_effective_date,m.official_source_digest,s.entry_revoked,s.known_publication_change,s.monitor_state
  FROM public.v13_production_account a JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  LEFT JOIN private.strata_durable_owner_fee_model m ON m.execution_account_id=a.id AND m.owner_user_id=a.owner_user_id
- AND m.release_commit_sha=$2 AND m.approved_policy_hash=p.policy_hash
+ AND ${durableReleaseMatch('$2')} AND m.approved_policy_hash=p.policy_hash
  LEFT JOIN private.strata_durable_owner_fee_state s ON s.model_id=m.model_id
  WHERE a.owner_user_id=$1::uuid AND a.id=$3 AND a.subaccount=1 AND a.exchange_index=2`,[owner,sha,configured.accountId]);
  if(rows.rows.length!==1)return deny('durable_fee_scope_ambiguous');
@@ -154,7 +155,7 @@ export async function revokeDurableFeeEntry(owner:string,raw:unknown){
  const c=await pool.connect();let committed=false;
  try{await c.query('BEGIN');const r=await c.query(`UPDATE private.strata_durable_owner_fee_state s SET entry_revoked=true
  FROM private.strata_durable_owner_fee_model m WHERE m.model_id=s.model_id AND m.owner_user_id=$1::uuid
- AND m.release_commit_sha=$2 AND m.model_id=$3::uuid RETURNING m.model_id`,[owner,b.expectedSha,b.modelId]);
+ AND ${durableReleaseMatch('$2')} AND m.model_id=$3::uuid RETURNING m.model_id`,[owner,b.expectedSha,b.modelId]);
  if(r.rows.length!==1)return deny('durable_fee_revoke_scope_unavailable');
  await c.query('INSERT INTO private.strata_durable_fee_revocation(event_id,model_id,owner_user_id) VALUES($1,$2,$3)',[randomUUID(),b.modelId,owner]);
  await c.query('COMMIT');committed=true;return {ok:true,entryRevoked:true,protectiveFeeProofRevoked:false,tradingAuthorized:false};
