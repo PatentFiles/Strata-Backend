@@ -1,3 +1,4 @@
+import {ownerSelfReviewOutcome} from '../lib/strata/ownerSelfReviewOutcome';
 import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
 import {activateOwnerSelfAccount,ownerSelfActivationOutcome} from '../lib/strata/ownerSelfAccountActivation';
 import {heldHistoryConsentOutcome} from '../lib/strata/ownerNeverPostedReleaseRenewal';
@@ -111,6 +112,13 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
  });
  // New owner-only authority is separate from immutable historical independent reviews.
  // Require signed AAL2 owner session and server-configured exact owner/account scope.
+ router.get('/owner-standing-review-outcome',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await ownerSelfReviewOutcome(actor.subject,req.query);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(200).json(sanitizePublic(result));
+ });
  router.post('/owner-standing-review',async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:'unauthorized'});

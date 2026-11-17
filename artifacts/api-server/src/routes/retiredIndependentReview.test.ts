@@ -18,6 +18,12 @@ test('owner and historical review routes authenticate and reject unsupported iss
  await new Promise<void>(r=>server.once('listening',r));
  try{
   const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+  const unauthRead=await fetch(`http://127.0.0.1:${addr.port}/owner-standing-review-outcome`);
+  assert.equal(unauthRead.status,401);
+  const malformedRead=await fetch(`http://127.0.0.1:${addr.port}/owner-standing-review-outcome?ownerUserId=forged`,{headers:{authorization:'test-owner'}});
+  assert.equal(malformedRead.headers.get('cache-control'),'private, no-store');
+  const historical=await malformedRead.json() as Record<string,unknown>;
+  assert.equal(historical.outcome,'UNKNOWN');assert.equal(historical.retryAuthorized,false);assert.equal(historical.tradingAuthorized,false);
   for(const path of ['/review','/standing-review','/authorize','/owner-standing-review','/owner-standing-review-revoke']){
    const unauth=await fetch(`http://127.0.0.1:${addr.port}${path}`,{method:'POST'});
    assert.equal(unauth.status,401,path);
