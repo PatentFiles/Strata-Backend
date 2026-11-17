@@ -102,6 +102,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   (deps.verify||deps.verifyDurableStage||deps.verifyDurableLocked||deps.signedEvidence||deps.db||deps.sha||deps.clock||deps.scope))
   return no('owner_self_production_override_forbidden');
  const db=deps.db??pool as unknown as Db,now=deps.clock??Date.now;
+ let durableSourceFresh:(()=>boolean)|undefined;
  let tx:Client|null=null,committed=false,commitAttempted=false,discard:Error|undefined;
  try{
   const readback=await ownerSelfActivationOutcome(owner,sha,db);
@@ -213,10 +214,11 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    // A preflight receipt is not sufficient to clear the account KILL.
    const fee=await(deps.verifyDurableLocked??verifyDurableOwnerFee)(tx,
     {owner,account:raw.accountId,sha,policyHash:raw.policyHash},durableTicker!,'ENTRY');
-   if(!fee.ok||fee.sourceDigest!==sourceDigest||fee.marketTicker!==durableTicker||
+   if(!fee.ok||!fee.sourceFresh()||fee.sourceDigest!==sourceDigest||fee.marketTicker!==durableTicker||
     fee.feeProofOnly!==true||fee.tradingAuthorized!==false||
     !Number.isSafeInteger(fee.verifiedAtMs)||now()<fee.verifiedAtMs||now()-fee.verifiedAtMs>5000)
     return no('owner_self_durable_fee_changed_or_unverified');
+   durableSourceFresh=fee.sourceFresh;
   }else{
   const fee=await tx.query(`SELECT g.authority_id
     FROM private.strata_owner_standing_fee_v1 s
@@ -300,6 +302,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    sha,observedAtMs:evidence.started,qualificationId:raw.qualificationId});
   // DB COMMIT executes the deferred five-second signed-evidence freshness
   // trigger. If it expires, the whole account+lease+approval change rolls back.
+  if(durable&&(!durableSourceFresh||!durableSourceFresh()))return no('owner_self_durable_fee_changed_or_unverified');
   commitAttempted=true;await tx.query('COMMIT');committed=true;
   return {ok:true as const,reason:'owner_self_account_activated_worker_released_and_disarmed',
    accountId:raw.accountId,sha,approvalId,

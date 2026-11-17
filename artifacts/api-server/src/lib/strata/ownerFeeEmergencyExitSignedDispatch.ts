@@ -381,6 +381,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
      const auth=await (ownerDurable?verifyDurableProtectiveAuthority:verifyOwnerV3ProtectiveFeeAuthority)(ownerId,accountId,releaseSha);
      return {ok:auth.ok,monetaryFeeAuthorized:auth.ok,
        marketTicker:market,verifiedAt:new Date(evidence.verifiedAtMs).toISOString(),
+       sourceFresh:ownerDurable&&'sourceFresh' in evidence?evidence.sourceFresh:undefined,
        authorityFingerprint:auth.ok?auth.authorityFingerprint:undefined};
     }
    :(_stage:"ORDER_ENTRY",market:string)=>verifyReviewedProtectiveExitFee(ownerId,accountId,market));
@@ -414,6 +415,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
   return refuseNeverSent(input,"final_fee_rejected",ports.db??(pool as unknown as DB));
  const isCurrentProviderFee=()=>{
    if(ownerV3){
+     if(ownerDurable&&(!('sourceFresh' in current)||typeof current.sourceFresh!=='function'||!current.sourceFresh()))return false;
      const observedAt=Date.parse(String(current.verifiedAt??''));
      const now=Date.now();
      return Number.isFinite(observedAt)&&observedAt<=now&&

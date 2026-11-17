@@ -47,3 +47,23 @@ The script builds current modules, creates only a new disposable loopback databa
 7. No independently verified exchange-enforced worst-case fee ceiling exists for unavailable market metadata. Safe automatic exits cannot be promised under that condition.
 
 Current deployed V2 account,24h V3 standing permission and all trading controls remain untouched. This is a tested isolated implementation, not START clearance.
+
+
+## Fresh-source deadline hardening (draft PR follow-up)
+
+The durable verifier now measures from before its earliest direct API request,
+not completion of the last response. Both wall-clock and monotonic elapsed time
+must remain within five seconds. A process-local callback retains that original
+clock through normal final transport, emergency post-RSA signing, and activation
+pre-COMMIT. It cannot be reconstructed from a serialized receipt. The existing
+PostgreSQL deferred COMMIT guard remains in place; no live-order permission is
+created by these tests.
+
+Validation: 155 offline tests plus two emergency RSA boundary cases, 45 native
+PostgreSQL groups, 19 activation tests and four full-chain tests passed locally,
+as did the complete workspace typecheck. The emergency runner is part of
+`test:durable-fee-offline`. It uses test-only bundler replacements for policy and
+authority discovery and synthetic database/transport, while executing the actual
+core freshness callback, emergency dispatch and RSA signing. Wall-clock rollback
+cannot hide a source age of 5,001 ms. These are not live exchange latency proofs.
+Prior log files above are historical snapshots, not logs of this follow-up.

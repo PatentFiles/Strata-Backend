@@ -773,7 +773,7 @@ test('durable qualification requires exact proof, retains exchange gates, and ne
  try{
   const now=Date.now();const d=fakeDb({durableSource:true});let calls=0;
   const proof={ok:true as const,reason:'approved_durable_terms_and_fresh_market_metadata',sourceDigest:DIGEST,
-   verifiedAtMs:now,marketTicker:'KXBTC15M-TEST',intent:'ENTRY' as const,publicationKnownCurrent:false as const,
+   sourceFresh:()=>true,verifiedAtMs:now,marketTicker:'KXBTC15M-TEST',intent:'ENTRY' as const,publicationKnownCurrent:false as const,
    publicationMonitorState:'never_checked' as const,entryConsentRequired:true,feeProofOnly:true as const,tradingAuthorized:false as const};
   const deps={...d,sha:()=>SHA,now:()=>now,verifyDurableFee:async(...args:unknown[])=>{calls++;assert.deepEqual(args,[OWNER,account.id,`strata-durable-owner-fee://${QID}`,'ENTRY']);return proof;},verifyFee:async()=>{throw Error('no PDF');},verifyV3StandingFee:async()=>{throw Error('no V3');}};
   const r=await qualifyProtectiveRelease(OWNER,deps);assert.equal(r.ok,true,JSON.stringify(r));assert.equal(calls,1);

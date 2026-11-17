@@ -47,3 +47,69 @@ const row={owner_user_id:scope.owner,execution_account_id:scope.account,release_
 test('locked durable row plus existing actual market verifier makes ZERO PDF calls',async()=>{process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';let calls=0;const fetcher=kalshiFeed(feeApiPages());const r=await verifyDurableOwnerFee({query:async sql=>{assert.match(sql,/FOR SHARE OF m,s,a,p/);return {rows:[row]}}},scope,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async(...args)=>{calls++;assert.ok(!String(args[0]).includes('.pdf'));return fetcher(...args)}});assert.equal(r.ok,true,JSON.stringify(r));assert.ok(calls>0)});
 test('real market multiplier change is refused without publication polling',async()=>{const pages=feeApiPages();(pages['/series/KXBTC15M'].series as Record<string,unknown>).fee_multiplier=2;const r=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:kalshiFeed(pages)});assert.equal(r.ok,false)});
 test('missing/ambiguous durable state refuses',async()=>{for(const rows of [[],[row,row]])assert.equal((await verifyDurableOwnerFee({query:async()=>({rows})},scope,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:kalshiFeed(feeApiPages())})).ok,false)});
+for(const intent of ['ENTRY','PROTECTIVE_EXIT'] as const){
+ test(intent+' oldest request cannot be restamped by a late final metadata body',async()=>{
+  process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';let at=fixtureClock;
+  const feed=kalshiFeed(feeApiPages());
+  const fetcher:typeof fetch=async(...args)=>{const response=await feed(...args);
+   if(String(args[0]).includes('/events/fee_changes?')){const bytes=response.arrayBuffer.bind(response);Object.defineProperty(response,'arrayBuffer',{value:async()=>{const result=await bytes();at+=14000;return result;}});}
+   return response;};
+  const result=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,intent,{clock:()=>at,fetcher});
+  assert.equal(result.ok,false,'14-second source must not acquire a fresh completion timestamp');
+ });
+}
+for(const intent of ['ENTRY','PROTECTIVE_EXIT'] as const){
+ for(const [stage,delay] of [['first',5000],['last',5000],['first',5001],['last',5001],['last',14000]] as const){
+  test(`${intent} conservative oldest-request age: ${stage} body +${delay}ms`,async()=>{
+   process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';let at=fixtureClock,mono=0;
+   const feed=kalshiFeed(feeApiPages());const fetcher:typeof fetch=async(...args)=>{
+    const response=await feed(...args);const path=String(args[0]);
+    if(stage==='first'?path.includes('/markets/'):path.includes('/events/fee_changes?')){
+     const bytes=response.arrayBuffer.bind(response);Object.defineProperty(response,'arrayBuffer',{value:async()=>{const result=await bytes();at+=delay;mono+=delay;return result;}});}
+    return response;
+   };
+   const result=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,intent,{clock:()=>at,monotonicNow:()=>mono,fetcher});
+   assert.equal(result.ok,delay<=5000,JSON.stringify(result));
+   if(result.ok)assert.equal(result.verifiedAtMs,fixtureClock,'must retain pre-transport origin, not completion');
+  });
+ }
+}
+test('monotonic elapsed rejects wall-clock restamping/rollback even if wall age looks fresh',async()=>{
+ let mono=0;const feed=kalshiFeed(feeApiPages());
+ const result=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,'ENTRY',{
+ clock:()=>fixtureClock,monotonicNow:()=>mono,fetcher:async(...args)=>{const response=await feed(...args);if(String(args[0]).includes('/events/fee_changes?'))mono=5001;return response;}});
+ assert.equal(result.ok,false);
+});
+test('invalid observation clocks never start provider reads',async()=>{
+ for(const invalid of [NaN,Infinity,-1]){let calls=0;
+ const result=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,'ENTRY',{
+ clock:()=>fixtureClock,monotonicNow:()=>invalid,fetcher:async()=>{calls++;throw Error('must not fetch')}});
+ assert.equal(result.ok,false);assert.equal(calls,0);}
+});
+import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
+for(const rollback of [false,true])for(const reduceOnly of [false,true])for(const afterVerification of [1000,1001]){
+ test(`final ${reduceOnly?'exit':'entry'} wire retains source age across ${afterVerification}ms boundary delay rollback=${rollback}`, async()=>{
+ const savedNow=Date.now,savedFlag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';let at=fixtureClock,mono=0,sends=0;
+ Date.now=()=>at;
+ try{
+ const tx={query:async(sql:string)=>({rows:sql.includes('strata_durable_owner_fee_model')?[row]:[{id:scope.account}]})};
+ const feed=kalshiFeed(feeApiPages());const fetcher:typeof fetch=async(...args)=>{const response=await feed(...args);if(String(args[0]).includes('/events/fee_changes?')){at+=4000;mono+=4000;}return response};
+ const guarded=createGuardedDurableFeeFetch(scope.owner,scope.account,'strata-durable-owner-fee://33333333-3333-4333-8333-333333333333',
+ (async()=>{sends++;return new Response('{}',{status:200})}) as typeof fetch,scope.policyHash,'d'.repeat(64),1,'holder',model.digest,{
+ borrowTransaction:()=>tx as never,sha:()=>scope.sha,hasHistory:async()=>true,currentStanding:async()=>true,exitReview:async()=>true,
+ verifyDurable:async()=>{const proof=await verifyDurableOwnerFee(tx,scope,marketTicker,reduceOnly?'PROTECTIVE_EXIT':'ENTRY',{clock:()=>at,monotonicNow:()=>mono,fetcher});at+=rollback?-3000:afterVerification;mono+=afterVerification;return proof;},
+ });
+ const request=()=>guarded('https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders',{method:'POST',body:JSON.stringify({ticker:marketTicker,subaccount:1,exchange_index:2,reduce_only:reduceOnly,time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,client_order_id:'v13p-44444444-4444-4444-8444-444444444444',side:'bid',count:'1.00',price:'0.2500'})});
+ if(afterVerification>1000)await assert.rejects(request(),/durable_fee_final_fresh_model_unverified/);else assert.equal((await request()).status,200);
+ assert.equal(sends,afterVerification>1000?0:1);
+ }finally{Date.now=savedNow;if(savedFlag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=savedFlag;}
+ });
+}
+
+test('source capability cannot be reconstructed from serialized proof',async()=>{
+ const proof=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,'ENTRY',{
+ clock:()=>fixtureClock,monotonicNow:()=>0,fetcher:kalshiFeed(feeApiPages())});
+ assert.equal(proof.ok,true);if(!proof.ok)return;
+ assert.equal(proof.sourceFresh(),true);assert.equal(JSON.parse(JSON.stringify(proof)).sourceFresh,undefined);
+});

@@ -101,7 +101,7 @@ export function createGuardedDurableFeeFetch(
   if(locked.rows.length!==1)throw Error('owner_v3_fee_final_account_or_source_closed');
   const proof=await (deps.verifyDurable??verifyDurableOwnerFee)(tx as never,
     {owner:ownerId,account:accountId,sha,policyHash},ticker,isEntry?'ENTRY':'PROTECTIVE_EXIT');
-  if(!proof.ok||proof.sourceDigest!==feeDigest||proof.marketTicker!==ticker||
+  if(!proof.ok||!proof.sourceFresh()||proof.sourceDigest!==feeDigest||proof.marketTicker!==ticker||
      Date.now()<proof.verifiedAtMs||Date.now()-proof.verifiedAtMs>5000)
     throw Error('durable_fee_final_fresh_model_unverified');
   // Transport is called exactly once. Any error after invocation is UNKNOWN;

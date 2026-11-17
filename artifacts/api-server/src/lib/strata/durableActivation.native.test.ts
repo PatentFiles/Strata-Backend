@@ -101,6 +101,17 @@ test('durable enrollment + qualification + actual activation on native PostgreSQ
  await t.test('two concurrent requests commit exactly one activation and fence',async()=>{const b=await reset();const r=await Promise.all([activateOwnerSelfAccount(owner,b,deps),activateOwnerSelfAccount(owner,b,deps)]);assert.equal(r.filter(x=>x.ok).length,1,JSON.stringify(r));const s=await state();assert.equal(s.count,1);assert.equal(s.approvals,1);assert.equal(s.w.fencing_token,'8');});
  for(const label of ['UPDATE public.v13_production_account','OWNER_SELF_ACCOUNT_ACTIVATED'])await t.test('rollback after '+label,async()=>{const b=await reset();let hit=false;const d=wrap(async(sql,args,c)=>{const out=await c.query(sql,args);if(sql.includes(label)||(label==='OWNER_SELF_ACCOUNT_ACTIVATED'&&args?.[2]===label)){hit=true;throw Error('injected post-write fault');}return out;});const r=await activateOwnerSelfAccount(owner,b,d);assert.equal(hit,true);assert.equal(r.ok,false);await untouched();});
  await t.test('deferred five-second freshness guard rolls back at COMMIT',async()=>{const b=await reset();const d=wrap(async(sql,args,c)=>{if(sql==='COMMIT')await delay(5100);return c.query(sql,args);});const r=await activateOwnerSelfAccount(owner,b,d);assert.equal(r.ok,false);assert.equal(r.reason,'owner_self_activation_commit_outcome_unknown');await untouched();assert.equal((await ownerSelfActivationOutcome(owner,sha,pool)).outcome,'UNKNOWN');});
+ await t.test('source monotonic deadline refuses COMMIT despite post-proof wall rollback',async()=>{
+ const b=await reset();let mono=0,wall=Date.now(),commits=0,advanced=false;
+ const d=wrap(async(sql,args,c)=>{const out=await c.query(sql,args);
+  if(args?.[2]==='OWNER_RELEASE_SIGNED_RECHECK'){mono=5001;wall-=1000;advanced=true;}
+  if(sql==='COMMIT')commits++;return out;});
+ const r=await activateOwnerSelfAccount(owner,b,{...d,verifyDurableLocked:async(tx,scope,ticker,intent)=>{
+  const proof=await verifyDurableOwnerFee(tx,scope,ticker,intent,{fetcher:feed,clock:()=>wall,monotonicNow:()=>mono});
+  wall+=4000;mono=4000;return proof;}});
+ assert.equal(advanced,true);assert.equal(r.ok,false);assert.equal(r.reason,'owner_self_durable_fee_changed_or_unverified');
+ assert.equal(commits,0);await untouched();
+ });
  await t.test('lost COMMIT acknowledgment is UNKNOWN, no retry authorization, durable readback',async()=>{const b=await reset();const d=wrap(async(sql,args,c)=>{const out=await c.query(sql,args);if(sql==='COMMIT')throw Error('injected lost acknowledgment');return out;});const r=await activateOwnerSelfAccount(owner,b,d);assert.equal(r.ok,false);assert.equal(r.reason,'owner_self_activation_commit_outcome_unknown');assert.equal('retryAuthorized' in r&&r.retryAuthorized,false);assert.equal((await state()).count,1);assert.equal((await ownerSelfActivationOutcome(owner,sha,pool)).outcome,'RECORDED');});
 
  for(const [name,mutation] of [

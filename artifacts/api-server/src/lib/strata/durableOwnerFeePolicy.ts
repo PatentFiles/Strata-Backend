@@ -52,21 +52,39 @@ export const DURABLE_FEE_LOCK_SQL=`SELECT m.*,m.effective_date::text AS effectiv
  * Must remain composed with existing technical/account/lease/order fences. */
 export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[]):Promise<{rows:Record<string,unknown>[]}>},
  scope:{owner:string;account:string;sha:string;policyHash:string},ticker:string,intent:Intent,
- deps:{fetcher?:typeof fetch;clock?:()=>number}={}){
+ deps:{fetcher?:typeof fetch;clock?:()=>number;monotonicNow?:()=>number}={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(deps).length)return deny('durable_fee_production_override_forbidden');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return deny('durable_fee_feature_disabled');
- const now=deps.clock??Date.now;
+ const now=deps.clock??Date.now,monotonic=deps.monotonicNow??(()=>performance.now());
  try{
  const rows=await tx.query(DURABLE_FEE_LOCK_SQL,[scope.owner,scope.account,scope.sha,scope.policyHash]);
  if(rows.rows.length!==1)return deny('durable_fee_unique_locked_model_required');
  const r=rows.rows[0];
+ // This probe owns fresh direct GETs (no supplied cache/prefetch reader).
+ // Start the durable age conservatively BEFORE its earliest transport, never
+ // at the last response or the generic probe's completion timestamp. Keep the
+ // original fetch identity so existing public quota/cancellation rules remain.
+ const sourceStartedAt=now(),sourceStartedMono=monotonic();
+ if(!Number.isSafeInteger(sourceStartedAt)||sourceStartedAt<=0||!Number.isFinite(sourceStartedMono)||sourceStartedMono<0)
+  return deny('durable_fee_observation_clock_invalid');
  const observation=await probeCurrentKalshiFeeApi(deps.fetcher??globalThis.fetch,now,ticker);
  const candidate=preparePdfFreeApiFeePolicyReview(observation,now());
- return assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.release_commit_sha),
+ const assessedAt=now(),elapsedMono=monotonic()-sourceStartedMono;
+ if(!Number.isSafeInteger(assessedAt)||assessedAt<sourceStartedAt||assessedAt-sourceStartedAt>5000||
+ !Number.isFinite(elapsedMono)||elapsedMono<0||elapsedMono>5000)
+  return deny('durable_fee_market_observation_deadline_exceeded');
+ const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.release_commit_sha),
  policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
  effectiveDate:String(r.effective_date_text),approved:r.policy_state==='APPROVED',entryRevoked:r.entry_revoked===true,
  integrityValid:r.genuine_source_verified===true,knownPublicationChange:r.known_publication_change===true,
  monitorState:r.monitor_state as DurableModel['monitorState']},scope,intent,
- {ok:candidate.ok&&candidate.marketTicker===ticker,ticker,verifiedAt:candidate.ok?Date.parse(candidate.verifiedAt):NaN},now());
+ {ok:candidate.ok&&candidate.marketTicker===ticker,ticker,verifiedAt:sourceStartedAt},assessedAt);
+ if(!proof.ok)return proof;
+ // Process-local capability, never serialized or reconstructed from a receipt.
+ // Retains the SAME source clock through signing/fences and final send.
+ const sourceFresh=()=>{const wall=now(),mono=monotonic(),elapsed=mono-sourceStartedMono;
+  return Number.isSafeInteger(wall)&&wall>=sourceStartedAt&&wall-sourceStartedAt<=5000&&
+   Number.isFinite(elapsed)&&elapsed>=0&&elapsed<=5000;};
+ return {...proof,sourceFresh};
  }catch{return deny('durable_fee_database_or_market_unavailable');}
 }
