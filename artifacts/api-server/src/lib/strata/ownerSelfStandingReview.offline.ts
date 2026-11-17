@@ -1,3 +1,4 @@
+import {ownerSelfReviewOutcome} from './ownerSelfReviewOutcome';
 import {standingExecutionStatus} from './standingExecutionReview';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -45,6 +46,13 @@ assert.equal((await recordOwnerSelfStandingReview(owner,body,deps)).ok,false,
 await db.query("UPDATE private.kalshi_account_worker_lease SET arm_requested=false");
 const killedConsent=await recordOwnerSelfStandingReview(owner,body,deps);
 assert.equal(killedConsent.ok,true,JSON.stringify(killedConsent));
+const historicalScope={expectedSha:sha,accountId:'acct',policyHash:policy,qualificationId:qid};
+const historical=await ownerSelfReviewOutcome(owner,historicalScope,db);
+assert.equal(historical.outcome,'RECORDED');assert.equal(historical.tradingAuthorized,false);assert.equal(historical.retryAuthorized,false);
+assert.equal((await ownerSelfReviewOutcome(other,historicalScope,db)).outcome,'UNKNOWN');
+assert.equal((await ownerSelfReviewOutcome(owner,{...historicalScope,accountId:'foreign'},db)).outcome,'UNKNOWN');
+assert.equal((await ownerSelfReviewOutcome(owner,{...historicalScope,policyHash:'c'.repeat(64)},db)).outcome,'UNKNOWN');
+
 const killedAfter=(await db.query("SELECT execution_enabled,kill_switch FROM public.v13_production_account WHERE id='acct'")).rows[0];
 const leaseAfter=(await db.query("SELECT state,account_kill,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id='acct'")).rows[0];
 assert.equal(killedAfter.execution_enabled,false);assert.equal(killedAfter.kill_switch,true);
@@ -75,5 +83,12 @@ assert.equal((await revokeOwnerSelfStandingReview(other,revoke,deps)).ok,false);
 assert.equal((await revokeOwnerSelfStandingReview(owner,{...revoke,accountId:'foreign'},deps)).ok,false);
 assert.equal((await revokeOwnerSelfStandingReview(owner,revoke,deps)).ok,true);
 assert.equal((await revokeOwnerSelfStandingReview(owner,revoke,deps)).ok,false);assert.equal(await checkContinuousEligibility(db,owner,sha),false);
+await db.query("UPDATE private.strata_protective_release_qualification SET expires_at=now()-interval '1 hour'");
+const revokedHistorical=await ownerSelfReviewOutcome(owner,historicalScope,db);
+assert.equal(revokedHistorical.outcome,'RECORDED');assert.ok('revoked' in revokedHistorical&&revokedHistorical.revoked);
+assert.equal(revokedHistorical.tradingAuthorized,false);assert.equal(revokedHistorical.workerStarted,false);assert.equal(revokedHistorical.ordersSubmitted,false);
+const beforeHistoryRead=await db.query('SELECT * FROM private.strata_standing_execution_reviews');
+await ownerSelfReviewOutcome(owner,historicalScope,db);
+assert.deepEqual((await db.query('SELECT * FROM private.strata_standing_execution_reviews')).rows,beforeHistoryRead.rows);
 console.log('PASS: actual migrations + owner review + owner grant + live eligibility SQL; wrong owner, missing consent, stale qualification, frozen account, immature lease, immutable actor and revoked authority refuse (disposable PostgreSQL only)');
 }finally{await db.end()}})().catch(e=>{console.error(e);process.exitCode=1});
