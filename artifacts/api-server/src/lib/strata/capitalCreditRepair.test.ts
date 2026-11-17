@@ -22,3 +22,23 @@ test('actual production sanitizer preserves complete capital preview and termina
  for(const dto of [{ok:true,...scope,confirmation:CREDIT_CONFIRM,...capitalNoAuthority},{outcome:'RECORDED',repairId:'22222222-2222-4222-8222-222222222222',...scope,confirmation:CREDIT_CONFIRM,...capitalNoAuthority},{outcome:'REJECTED',repairId:'22222222-2222-4222-8222-222222222222',...scope,confirmation:CREDIT_CONFIRM,noCommit:true,reason:'capital_pending_repair_canceled_or_refused',...capitalNoAuthority}])assert.deepEqual(sanitizePublic(dto),dto);
 });
 test('outcome malformed owner/id never queries DB or implies retry',async()=>{let calls=0;const r=await capitalCreditOutcome(core.ownerId,'bad',core.sha,{query:async()=>{calls++;return {rows:[]};}});assert.equal(calls,0);assert.deepEqual(r,{outcome:'UNKNOWN',...capitalNoAuthority});});
+
+test('optional terminal cursor accepts only absent short pages; explicit invalid cursor and full absent page refuse',async()=>{
+ const row=(n:number)=>({...transfer,transfer_id:'receipt-'+String(n).padStart(5,'0')});
+ for(const count of [0,1,99])assert.equal((await readCapitalTransfers(async()=>({transfers:Array.from({length:count},(_,n)=>row(n))}),now)).length,count);
+ for(const cursor of [null,undefined,0,false,{},[]])await assert.rejects(readCapitalTransfers(async()=>({transfers:[transfer],cursor}),now),/capital_transfer_cursor_type_unverified/);
+ await assert.rejects(readCapitalTransfers(async()=>({transfers:Array.from({length:100},(_,n)=>row(n))}),now),/capital_transfer_missing_cursor_ambiguous/);
+ assert.equal((await readCapitalTransfers(async()=>({transfers:Array.from({length:100},(_,n)=>row(n)),cursor:''}),now)).length,100);
+});
+test('short nonterminal page continues and later failed pages never return partial transfer evidence',async()=>{
+ let calls=0;const rows=await readCapitalTransfers(async(_p,q)=>{calls++;return calls===1?{transfers:[transfer],cursor:'second'}:{transfers:[{...transfer,transfer_id:'second-receipt'}]};},now);assert.equal(calls,2);assert.equal(rows.length,2);
+ calls=0;await assert.rejects(readCapitalTransfers(async()=>{if(++calls===1)return {transfers:[transfer],cursor:'second'};throw Error('provider down');},now));assert.equal(calls,2);
+ calls=0;const terminal=await readCapitalTransfers(async()=>++calls===1?{transfers:[transfer],cursor:'second'}:{transfers:[]},now);assert.equal(terminal.length,1);assert.equal(calls,2);
+});
+test('structural errors are fixed codes and page/cursor bounds remain enforced',async()=>{
+ const cases:[unknown,string][]=[[null,'response_shape'],[[],'response_shape'],[{},'rows_shape'],[{transfers:null},'rows_shape'],[{transfers:Array(101).fill(transfer),cursor:''},'page_size']];
+ for(const [raw,code] of cases)await assert.rejects(readCapitalTransfers(async()=>raw,now),new RegExp('capital_transfer_'+code+'_unverified'));
+ let calls=0;await assert.rejects(readCapitalTransfers(async()=>({transfers:[{...transfer,transfer_id:'receipt-'+String(++calls).padStart(5,'0')}],cursor:'page-'+calls}),now),/capital_transfer_history_bound_exceeded/);assert.equal(calls,50);
+ calls=0;await assert.rejects(readCapitalTransfers(async()=>({transfers:[{...transfer,transfer_id:'receipt-'+String(++calls).padStart(5,'0')}],cursor:'same'}),now),/capital_transfer_pagination_unverified/);assert.equal(calls,2);
+ await assert.rejects(readCapitalTransfers(async()=>({transfers:[],cursor:'next'}),now),/capital_transfer_pagination_unverified/);
+});
