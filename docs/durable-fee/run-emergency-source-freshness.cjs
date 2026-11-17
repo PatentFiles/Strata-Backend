@@ -2,11 +2,14 @@ const fs=require('fs');
 // Test-only bundling selects durable discovery without adding a production override.
 // Actual core verifier, dispatch, and RSA signing execute; no exchange calls.
 const path=require('node:path');
-const os=require('node:os');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
 const root=path.resolve(__dirname,'../../artifacts/api-server');
-const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'durable-emergency-source-'));
+// Externalized parser/logging modules resolve from the bundle's ancestors,
+// not cwd or NODE_PATH. Keep disposable output beneath this package.
+const outputRoot=path.join(root,'dist');
+fs.mkdirSync(outputRoot,{recursive:true});
+const temporary=fs.mkdtempSync(path.join(outputRoot,'durable-emergency-source-'));
 const output=path.join(temporary,'regression.cjs');
 const esbuild=require(root+'/node_modules/esbuild');
 const dir=root+'/src/lib/strata';
