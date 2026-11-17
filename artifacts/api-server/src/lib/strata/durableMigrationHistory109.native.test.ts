@@ -1,3 +1,4 @@
+import {KalshiApiError} from '../kalshiAccountClient';
 import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit,CREDIT_CONFIRM,CREDIT_CANCEL} from './capitalCreditRepair';
 import {capitalCreditProof,scopeDigest,type CreditScope} from './capitalCreditProof';
 import {reconciliationObservation} from '../v13-production/reconciliationObservation';
@@ -166,6 +167,11 @@ test('109 intent minimal-schema migration regression with real account foreign-k
   await capitalCreditProof(owner,account,sha,cd);const preview=await capitalCreditPreview(owner,cd);assert.equal(preview.ok,true,JSON.stringify(preview));if(!preview.ok)throw Error('preview');
   const {ok,confirmation,observedAt,expiresAt,transferAttempted,tradingAuthorized,workerStarted,ordersSubmitted,retryAuthorized,...scope}=preview;
   const beforeEvents=(await pool.query('SELECT * FROM public.v13_production_event ORDER BY event_id')).rows,beforePositions=(await pool.query('SELECT * FROM public.v13_production_position ORDER BY id')).rows;
+  await ct.test('capital diagnostic distinguishes typed provider refusal from local SQL failure without retry',async()=>{
+   const provider=await capitalCreditPreview(owner,{...cd,get:async()=>{throw new KalshiApiError('HTTP_ERROR',403);}});assert.equal(provider.ok,false);if(!provider.ok){assert.equal(provider.reason,'capital_credit_refused');assert.ok('diagnostic'in provider);assert.deepEqual(provider.diagnostic,{stage:'transfer_history',failureCode:'capital_provider_read_failed',providerType:'HTTP_ERROR',providerStatus:403});}
+   const db={...pool,query:async(sql:string,args?:unknown[])=>{if(sql.includes('UNION ALL SELECT 1 FROM private.kalshi_owner_pilot_transfers'))throw Object.assign(Error('private SQL secret'),{code:'42703'});return pool.query(sql,args);},connect:pool.connect.bind(pool)};
+   const local=await capitalCreditPreview(owner,{...cd,db});assert.equal(local.ok,false);if(!local.ok){assert.ok('diagnostic'in local);assert.deepEqual(local.diagnostic,{stage:'receipt_registry',failureCode:'capital_internal_failure',sqlState:'42703'});}
+  });
   const body=(repairId:string)=>({repairId,scope,confirmation:CREDIT_CONFIRM});
   const unchanged=async()=>assert.equal((await pool.query('SELECT initial_cash_micros::text FROM public.v13_production_account')).rows[0].initial_cash_micros,'23100000');
   const cancel=(repairId:string)=>cancelCapitalCredit(owner,{repairId,accountId:account,expectedSha:sha,confirmation:CREDIT_CANCEL,scope},pool);
