@@ -6,6 +6,7 @@ import {computeV13LiveMoneyPolicyHash} from '../v13LiveMoneyRisk';import {digest
 import {approvedFromRow} from './ownerStakePolicyAmendment';
 import {readOwnedKalshiFeeds,personalAccountSnapshot} from './personalExchangeRead';
 import type {Identity,Request} from '../v13-production/types';import {loadedMaterial} from './inAppProtectiveRelease';
+import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {v3MigrationFlatHistoryCheck} from './ownerFeeV3Migration';import {verifyOfficialFeePdfBytes} from '../microLiveFeeArtifact';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';import {deployedGitSha} from './deployedGitSha';
 import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
@@ -63,6 +64,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
  // credentials, policy ID, worker fence, cash and grant before any mutation.
  let tx:Awaited<ReturnType<Db["connect"]>>|null=null,done=false,commitAttempted=false,discard:Error|undefined;
  let pre:Row={};let requests:Request[]=[];let captureDigest="";
+ let history:Awaited<ReturnType<typeof readNeverPostedReleaseHistory>>;
  let credentials:Awaited<ReturnType<typeof loadedMaterial>>=null;
  let feedStarted=0;
  let feeds:Awaited<ReturnType<typeof readOwnedKalshiFeeds>>={ok:false,reason:"unverified"};
@@ -84,14 +86,11 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
      captureDigest=source.digest;
      credentials=await (deps.load??loadedMaterial)(preTx as never,{...pre,owner_id:ownerId});
      if(!credentials)return fail("restricted_signer_unavailable");
-     const intentRows=await preTx.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[pre.id]);
-     requests=[];
-     for(const row of intentRows.rows){
-       const request=typeof row.request==="string"?JSON.parse(row.request):row.request;
-       if(!request||typeof request!=="object"||Array.isArray(request))
-         return fail("financial_intent_unreadable");
-       requests.push(request as Request);
-     }
+     // A terminal BLOCKED row alone is not non-submission proof. Preserve all
+     // requests for provider mapping, excluding only existing digest-bound,
+     // contradiction-checked no-send evidence from the expected order count.
+     history=await readNeverPostedReleaseHistory(preTx,txt(pre.id),false,{expiredExitOwnerId:ownerId});
+     requests=history.requests;
    }finally{preTx.release();}
    // Release the DB connection BEFORE awaiting any external Kalshi requests.
    // Never monopolize pool capacity while an exchange call stalls or retries.
@@ -107,7 +106,12 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
  const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:txt(pre.key_fingerprint)};
  const mapped=personalAccountSnapshot(identity,feeds,requests);
  if(!("identity" in mapped))return fail(mapped.reason);
- const flat=v3MigrationFlatHistoryCheck(mapped,requests);
+ const excluded=new Set(history!.neverPosted.map(x=>x.clientOrderId));
+ if(mapped.orders.some(o=>excluded.has(o.request.clientOrderId)))
+   return fail('proven_never_posted_provider_record_conflict');
+ if(excluded.size>0&&feeds.historicalCoverageComplete!==true)
+   return fail('authenticated_exchange_history_incomplete');
+ const flat=v3MigrationFlatHistoryCheck(mapped,history!.expectedRequests);
  if(!flat.ok)return fail(flat.reason);
  try{
   tx=await db.connect();
@@ -141,14 +145,14 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
    return fail("fresh_cash_reconciliation_required");
   const funds=BigInt(String(a.cash_micros)),reserved=BigInt(String(a.reserved_micros));
   if(funds<0n||reserved!==0n||String(feeds.cashMicros)!==String(a.cash_micros))return fail("cash_or_reservations_unverified");
-  // The account revision fences policy/cash changes. A separate re-read
-  // fingerprints the financial intent history so newly inserted terminal
-  // events cannot escape because they did not bump the account revision.
-  const lockedHistory=await tx.query(
-    "SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[id]);
-  const stableHistory=(rows:Row[])=>JSON.stringify(rows.map(row=>
-    typeof row.request==="string"?JSON.parse(row.request):row.request));
-  if(stableHistory(lockedHistory.rows)!==JSON.stringify(requests))
+  // Revalidate the entire intent AND no-send evidence after network I/O,
+  // under the account fence and SERIALIZABLE transaction. SHARE locks retain
+  // rows through commit; production account foreign keys also fence new
+  // intent/observation/event/marker inserts against our account FOR UPDATE.
+  // SERIALIZABLE alone is not this phantom fence. The digest catches contradictions
+  // and identity/state changes, not merely request-body changes.
+  const lockedHistory=await readNeverPostedReleaseHistory(tx,id,true,{expiredExitOwnerId:ownerId});
+  if(lockedHistory.historyDigest!==history!.historyDigest)
     return fail("financial_history_changed_during_migration");
   const exposure=await tx.query(`SELECT
    (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
