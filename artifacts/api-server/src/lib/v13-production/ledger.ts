@@ -1,3 +1,4 @@
+import {ReconciliationEventDigests} from "./reconciliationEventDigests";
 import {transactionConnectionFence} from "./transactionConnectionFence";
 import {reconciledIntentState,reconciliationIntentChanged} from "./reconciliationIntentPersistence";
 import {reconciliationObservation} from "./reconciliationObservation";
@@ -70,6 +71,20 @@ export class HeldReconciliationCommitUncertain extends Error {
   constructor() { super("production_held_reconciliation_commit_uncertain");
     this.name = "HeldReconciliationCommitUncertain"; }
 }
+
+
+export const FINAL_ACCOUNT_PROJECTION_SQL = `SELECT
+  COALESCE((SELECT json_agg(i) FROM (
+    SELECT created_at,client_order_id,request,exchange_order_id,terminal,filled_hundredths::text AS filled_hundredths
+    FROM v13_production_intent WHERE account_id=$1
+  ) i),'[]'::json) AS known,
+  COALESCE((SELECT json_agg(e) FROM (
+    SELECT event_id,digest FROM v13_production_event WHERE account_id=$1 AND event_id=ANY($2::text[])
+  ) e),'[]'::json) AS events,
+  COALESCE((SELECT json_agg(p ORDER BY p.market,p.side) FROM (
+    SELECT market,side,quantity_hundredths::text AS quantity_hundredths FROM v13_production_position
+    WHERE account_id=$1 AND quantity_hundredths>0
+  ) p),'[]'::json) AS positions`;
 
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
@@ -229,11 +244,18 @@ export class ProductionLedger {
       snapshot.complete && snapshot.cashExact && !snapshot.unexplainedCashActivity &&
       snapshot.observedAtMs <= nowMs && nowMs - snapshot.observedAtMs <= 15_000 &&
       money(snapshot.cashMicros) === money(a.cash_micros), "production_final_account_changed_or_unproven");
-    // Final signed-account comparison needs every intent, but never reads its
-    // decision/capability JSON. Reconciliation retains its full locked history.
-    const known = (await tx.query<Pick<Intent,
-      "created_at" | "client_order_id" | "request" | "exchange_order_id" | "terminal" | "filled_hundredths">>(
-      "SELECT created_at,client_order_id,request,exchange_order_id,terminal,filled_hundredths FROM v13_production_intent WHERE account_id=$1", [a.id])).rows;
+    // One statement snapshot under the caller's existing account lock. Independent
+    // aggregates avoid a history cross-product and project no decision payload.
+    // Cast bigint values to text to preserve node-postgres int8 precision.
+    const eventIds = [...snapshot.fills.map(f => `fill:${f.id}`),
+      ...snapshot.settlements.map(s => `settlement:${s.id}`)];
+    const projection = (await tx.query<{
+      known: Array<Pick<Intent,"client_order_id"|"request"|"exchange_order_id"|"terminal"|"filled_hundredths"> & {created_at:string}>;
+      events: Array<{event_id:string;digest:string}>;
+      positions: Array<{market:string;side:string;quantity_hundredths:string}>;
+    }>(FINAL_ACCOUNT_PROJECTION_SQL,[a.id,eventIds])).rows[0];
+    const known=projection.known.map(row=>({...row,
+      created_at:typeof row.created_at==="string"?new Date(row.created_at):row.created_at}));
     requireProof(snapshot.historyFromMs <= Math.min(...known.map(i => i.created_at.getTime()), nowMs),
       "production_final_history_gap");
     for (const o of snapshot.orders) {
@@ -242,18 +264,16 @@ export class ProductionLedger {
         i.exchange_order_id === o.orderId && i.terminal === o.terminal &&
         money(i.filled_hundredths) === money(o.filledHundredths), "production_final_order_changed");
     }
+    const eventRows = projection.events;
+    const events = new Map(eventRows.map(r => [r.event_id, r.digest]));
+    requireProof(events.size === eventRows.length, "production_final_event_history_ambiguous");
     for (const f of snapshot.fills) {
-      const r = (await tx.query("SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2",
-        [a.id, `fill:${f.id}`])).rows[0];
-      requireProof(r && r.digest === digest(f), "production_final_unreconciled_fill");
+      requireProof(events.get(`fill:${f.id}`) === digest(f), "production_final_unreconciled_fill");
     }
     for (const s of snapshot.settlements) {
-      const r = (await tx.query("SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2",
-        [a.id, `settlement:${s.id}`])).rows[0];
-      requireProof(r && r.digest === digest(s), "production_final_unreconciled_settlement");
+      requireProof(events.get(`settlement:${s.id}`) === digest(s), "production_final_unreconciled_settlement");
     }
-    const pos = (await tx.query(`SELECT market,side,quantity_hundredths FROM v13_production_position
-      WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY market,side`, [a.id])).rows;
+    const pos = projection.positions;
     const actual = snapshot.positions.filter(p => money(p.quantityHundredths) !== 0n)
       .map(p => ({ market: p.market, side: p.side, quantity_hundredths: String(money(p.quantityHundredths)) }))
       .sort((x, y) => x.market.localeCompare(y.market) || x.side.localeCompare(y.side));
@@ -404,15 +424,17 @@ export class ProductionLedger {
         const entrySpent=new Map<string,bigint>();
         const fills = snapshot.fills.slice().sort((x, y) => x.occurredAtMs - y.occurredAtMs || x.id.localeCompare(y.id));
         requireProof(new Set(fills.map(f => f.id)).size === fills.length, "production_duplicate_fill_in_scan");
+        const eventDigests=new ReconciliationEventDigests((sql,args)=>tx.query(sql,args),a.id,
+          ()=>[...fills.map(f=>`fill:${f.id}`),...snapshot.settlements.map(s=>`settlement:${s.id}`)]);
         for (const f of fills) {
           const i = byClient.get(f.clientOrderId);
           const o = byOrder.get(f.orderId);
           requireProof(i && o && o.request.clientOrderId === f.clientOrderId &&
             f.market === i.market && f.side === i.side &&
             f.action === i.request.action, "production_unattributed_fill");
-          const prior = await tx.query("SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2", [a.id, `fill:${f.id}`]);
-          if (prior.rows.length) {
-            requireProof(prior.rows[0].digest === digest(f), "production_changed_fill_evidence");
+          const prior = await eventDigests.read(`fill:${f.id}`);
+          if (prior.present) {
+            requireProof(prior.digest === digest(f), "production_changed_fill_evidence");
             continue;
           }
           requireProof(Number.isSafeInteger(f.priceMicros) && f.priceMicros > 0 && f.priceMicros < 1_000_000 &&
@@ -483,9 +505,11 @@ export class ProductionLedger {
           }
           a.cash_micros = String(money(a.cash_micros) + delta);
           i.filled_hundredths = String(filled);
+          const insertedEventId=`fill:${f.id}`,insertedDigest=digest(f);
           await tx.query(`INSERT INTO v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at)
             VALUES($1,$2,$3,'FILL',$4,$5,$6,$7,$8)`,
-          [a.id, `fill:${f.id}`, i.id, digest(f), JSON.stringify(f), String(delta), String(pnl), new Date(f.occurredAtMs)]);
+          [a.id, insertedEventId, i.id, insertedDigest, JSON.stringify(f), String(delta), String(pnl), new Date(f.occurredAtMs)]);
+          eventDigests.inserted(insertedEventId,insertedDigest);
         }
         for (const o of snapshot.orders) {
           const i = byClient.get(o.request.clientOrderId)!;
@@ -495,8 +519,8 @@ export class ProductionLedger {
           if (o.terminal) { i.terminal = true; i.state = "TERMINAL"; }
         }
         for (const s of snapshot.settlements) {
-          const old = await tx.query("SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2", [a.id, `settlement:${s.id}`]);
-          if (old.rows.length) { requireProof(old.rows[0].digest === digest(s), "production_changed_settlement"); continue; }
+          const old = await eventDigests.read(`settlement:${s.id}`);
+          if (old.present) { requireProof(old.digest === digest(s), "production_changed_settlement"); continue; }
           const pos = (await tx.query(`SELECT * FROM v13_production_position WHERE account_id=$1 AND market=$2
             AND side=$3 AND quantity_hundredths>0 FOR UPDATE`, [a.id, s.market, s.side])).rows[0];
           requireProof(pos && money(s.quantityHundredths) === money(pos.quantity_hundredths), "production_settlement_ownership_mismatch");
@@ -510,9 +534,11 @@ export class ProductionLedger {
           a.cash_micros = String(money(a.cash_micros) + delta);
           await tx.query("UPDATE v13_production_position SET quantity_hundredths=0,basis_micros=0,realized_pnl_micros=realized_pnl_micros+$2 WHERE id=$1",
             [parent.id, String(pnl)]);
+          const insertedEventId=`settlement:${s.id}`,insertedDigest=digest(s);
           await tx.query(`INSERT INTO v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at)
             VALUES($1,$2,$3,'SETTLEMENT',$4,$5,$6,$7,$8)`,
-          [a.id, `settlement:${s.id}`, parent.id, digest(s), JSON.stringify(s), String(delta), String(pnl), new Date(s.occurredAtMs)]);
+          [a.id, insertedEventId, parent.id, insertedDigest, JSON.stringify(s), String(delta), String(pnl), new Date(s.occurredAtMs)]);
+          eventDigests.inserted(insertedEventId,insertedDigest);
         }
         // These intent IDs were read under FOR UPDATE and the account lock is
         // retained. The retention loop mutates only local reservation values,

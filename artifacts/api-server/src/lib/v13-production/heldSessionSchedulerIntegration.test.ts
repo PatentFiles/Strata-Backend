@@ -1,3 +1,4 @@
+import {OWNED_GATE_READ_SQL} from './ownedGateRead';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
@@ -49,7 +50,10 @@ function fixture(){
    assert(staged);staged.cash_micros=String(args[1]);staged.reserved_micros=String(args[2]);
    staged.blocked_reason=args[3] as string;staged.revision=String(BigInt(staged.revision)+1n);staged.reconciled_at=args[4] as Date;return {rows:[]};
   }
-  if(sql.includes('WITH uncertain AS MATERIALIZED'))return {rows:[{has_uncertain_order:false,owner_user_id:owner}]};
+  if(sql===OWNED_GATE_READ_SQL){
+   assert.equal(args[0],accountId);assert.equal(args[3],owner);
+   return {rows:[{has_uncertain_order:false,owner_user_id:owner,master_rows:[{manual_kill_switch:false,live_execution_enabled:true}],policy_rows:[{policy_hash:hash}]}]};
+  }
   if(sql==='SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config')return {rows:[{manual_kill_switch:false,live_execution_enabled:true}]};
   if(sql.startsWith('SELECT p.policy_hash'))return {rows:[{policy_hash:hash}]};
   if(sql.includes('FROM forward_test_evaluations')){entryQueries++;throw Error('unexpected_entry_discovery');}

@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported} from "./strata/kalshiMemberReadBudget";
 import { createPrivateKey, createSign, constants } from "node:crypto";
 import { KEY_NAME, SCOPES, SUBACCOUNT } from "./keyProvisioningAttempt";
 
@@ -7,6 +8,7 @@ export interface GeneratedKey {
 }
 
 export async function generateRestrictedKalshiKey(): Promise<GeneratedKey> {
+  assertMemberBudgetUnsupported();
   if (process.env.NODE_ENV !== "development" ||
       process.env.REPLIT_DEPLOYMENT === "1" ||
       process.env.KALSHI_KEY_PROVISIONING_ENABLED !== "true" ||

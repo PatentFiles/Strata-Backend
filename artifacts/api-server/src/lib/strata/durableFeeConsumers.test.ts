@@ -33,7 +33,7 @@ test('borrowed durable stage failure has no pool retry or transaction ownership'
  const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
  let queries=0,lifecycle=0;const borrowed={query:async()=>{queries++;throw Object.assign(Error('synthetic connection lost'),{code:'08006'});},release:()=>{lifecycle++;}};
  try{const result=await verifyDurableFeeStage(id,'account',source,'ENTRY','KXBTC15M-X',undefined,borrowed);
- assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_source_or_market_unavailable');
+ assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_fee_database_or_market_unavailable');
  assert.equal(queries,1);assert.equal(lifecycle,0);
  }finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
 });
@@ -45,4 +45,12 @@ test('FINAL handle rejects discovery, protective or mixed metadata before any re
  try{for(const [intent,ticker,prepare] of [['ENTRY',undefined,undefined],['PROTECTIVE_EXIT','KXBTC15M-X',undefined],['ENTRY','KXBTC15M-X',handle]] as const){
  const result=await verifyDurableFeeStage(id,'account',source,intent,ticker,prepare,db,handle);assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_fee_prefetch_scope_invalid');
  }assert.equal(queries,0);}finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
+});
+
+test('known ticker selects one exact-source locked query; discovery retains original initial policy lookup',async()=>{
+ const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
+ try{for(const ticker of ['KXBTC15M-X',undefined]){let queries=0;
+ const result=await verifyDurableFeeStage(id,'account',source,'ENTRY',ticker,undefined,{async query(sql,args){queries++;if(ticker){assert.match(sql,/FOR SHARE OF m,s,a,p/);assert.match(sql,/m.approved_policy_hash=p.policy_hash AND p.fee_source_url=\$4/);assert.equal(args?.[3],source);}else{assert.match(sql,/SELECT p.policy_hash/);assert.deepEqual(args,['account',id,source]);}return {rows:[]};}});
+ assert.equal(result.ok,false);assert.equal(queries,1);
+ }}finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
 });

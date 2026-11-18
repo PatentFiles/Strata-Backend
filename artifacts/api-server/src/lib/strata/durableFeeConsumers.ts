@@ -5,7 +5,7 @@ import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,historicalBaselineEnabled}
 /** Server-only candidate consumers; no route accepts authority substitutions. */
 import {createHash} from 'node:crypto';import {pool} from '@workspace/db';
 import {deployedGitSha} from './deployedGitSha';import {probeCurrentKalshiFeeApi} from './twoSourceFeeEvidence';
-import {verifyDurableOwnerFee,DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
+import {verifyDurableOwnerFee,verifyDurableOwnerFeeSource,DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
 export const parseDurableFeeSource=(source:string)=>/^strata-durable-owner-fee:\/\/([a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/i.exec(source)?.[1]??null;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 export async function verifyDurableProtectiveAuthority(owner:string,account:string,sha:string,db:Query=pool){
@@ -34,7 +34,9 @@ export async function verifyDurableFeeStage(owner:string,account:string,source:s
  // that exact server-owned client: another pool connection would wait on its
  // own caller. This function never begins, commits, releases or retries it.
  const db=borrowedTransaction??pool;
- try{const r=await db.query(`SELECT p.policy_hash FROM public.v13_production_account a
+ try{
+ if(ticker)return verifyDurableOwnerFeeSource(db,{owner,account,sha:deployedGitSha()},source,ticker,intent,{},prepareMetadata,finalMetadata?{phase:"FINAL_MARKET",handle:finalMetadata}:undefined);
+ const r=await db.query(`SELECT p.policy_hash FROM public.v13_production_account a
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND p.fee_source_url=$3 AND p.state='APPROVED'`,[account,owner,source]);
  if(r.rows.length!==1)return {ok:false as const,reason:'durable_policy_scope_unverified'};

@@ -1,3 +1,4 @@
+import {FINAL_ACCOUNT_PROJECTION_SQL} from "../v13-production/ledger";
 import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
 import {createJoinedSigner} from './signedTransport.local.fixture';
 import {dedicatedSignerFingerprint} from './commissioning';
@@ -75,6 +76,12 @@ function fakeDb(input:{v3Source?:boolean;durableSource?:boolean;consent?:boolean
   if(sql.includes('SELECT id FROM public.v13_production_position'))return {rows:input.leaseExposure?[{id:'synthetic-position'}]:[]};
   if(sql.startsWith('SELECT * FROM public.v13_production_account'))return {rows:[{...account,subaccount:1,exchange_index:2,initial_cash_micros:'25000000',reserved_micros:'0'}]};
   if(sql.includes('SELECT e.cash,e.pnl'))return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
+  // Exact batched FINAL proof shape for this original empty-history fixture.
+  // Match before inner SELECT fragments; no synthetic retained history.
+  if(sql===FINAL_ACCOUNT_PROJECTION_SQL){
+    assert.deepEqual(_args,[account.id,[]]);
+    return {rows:[{known:[],events:[],positions:[]}]};
+  }
   if(sql.includes('SELECT created_at,client_order_id')||sql.includes('SELECT market,side,quantity_hundredths'))return {rows:[]};
   if(sql.includes('clock_timestamp()')&&sql.includes('AS fresh'))return {rows:[{fresh:true}]};
   // Preserve the original empty-history scenario. Never invent a no-send

@@ -37,6 +37,7 @@ export {computeV13LiveMoneyPolicyHash} from ${JSON.stringify(lib+'/v13LiveMoneyR
 export * from ${JSON.stringify(strata+'/sharedPersonalTradingControls.ts')};
 export {FinalPublicMetadataPhases} from ${JSON.stringify(strata+'/finalPublicMetadataPhases.ts')};
 export {processCommittedPublicMetadata} from ${JSON.stringify(strata+'/committedPublicMetadata.ts')};
+export {OWNED_GATE_READ_SQL} from ${JSON.stringify(lib+'/v13-production/ownedGateRead.ts')};
 export {ProductionExecutor} from ${JSON.stringify(lib+'/v13-production/executor.ts')};
 export {ProductionLedger} from ${JSON.stringify(lib+'/v13-production/ledger.ts')};
 export {ProductionWorker} from ${JSON.stringify(lib+'/v13-production/worker.ts')};
@@ -172,7 +173,10 @@ function installExitFixture(f,spec){
   if(sql.startsWith('SELECT release_id FROM private.strata_standing_execution_reviews'))return spec.standing?rows({release_id:'standing'}):rows();
   if(sql.startsWith('SELECT r.release_id'))return spec.standing?rows({release_id:'standing'}):rows();
   if(sql.startsWith('SELECT * FROM v13_production_intent WHERE id='))return rows(parent);
-  if(sql.includes('WITH uncertain AS MATERIALIZED'))return rows({has_uncertain_order:f.intents.some(i=>['DISPATCHED','UNKNOWN'].includes(i.state)),owner_user_id:owner});
+  if(sql===f.exports.OWNED_GATE_READ_SQL){
+   assert.equal(args[0],account);assert.equal(args[3],owner);
+   return rows({has_uncertain_order:f.intents.some(i=>['DISPATCHED','UNKNOWN'].includes(i.state)),owner_user_id:owner,master_rows:[{manual_kill_switch:false,live_execution_enabled:true}],policy_rows:[{policy_hash:p.policyHash}]});
+  }
   if(sql==='SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config')return rows({manual_kill_switch:false,live_execution_enabled:true});
   if(sql.includes('SELECT p.policy_hash'))return rows({policy_hash:p.policyHash});
   if(sql.startsWith('SELECT p.* FROM v13_live_money_policy')||sql.startsWith('SELECT * FROM v13_live_money_policy'))return rows(policyRow);
