@@ -15,6 +15,25 @@ const freeze=(value:unknown)=>{const pending=[value];while(pending.length){const
 export type MetadataPrefetchScope=Readonly<{accountId:string;ownerId:string;releaseSha:string;holderId:string;fence:string;policyHash:string}>;
 export type PreparedMetadataSource=Readonly<{evaluationId:string;marketTicker:string;evaluatedAtMs:number;btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number}>;
 export type PrefetchedPublicMetadata=Readonly<{read:(path:string)=>Promise<Body>;capture:()=>MetadataCaptureManifest}>;
+// Process-local provenance only: callers cannot forge source clocks or serialize a capability.
+const prepareClocks=new WeakMap<PrefetchedPublicMetadata,{scope:MetadataPrefetchScope;ticker:string;startedAtMs:number;fresh:()=>boolean}>();
+export function durablePrepareMetadataClock(metadata:PrefetchedPublicMetadata,
+ scope:{owner:string;account:string;sha:string;policyHash:string},ticker:string){
+ const clock=prepareClocks.get(metadata);
+ if(!clock||clock.scope.ownerId!==scope.owner||clock.scope.accountId!==scope.account||
+ clock.scope.releaseSha!==scope.sha||clock.scope.policyHash!==scope.policyHash||clock.ticker!==ticker)
+  throw error("durable_fee_prefetch_scope_invalid");
+ if(!clock.fresh())throw error("durable_fee_prefetch_expired");
+ return Object.freeze({startedAtMs:clock.startedAtMs,sourceFresh:clock.fresh});
+}
+// Separate capability namespace: phase bytes can never satisfy PREPARE.
+const phaseClocks=new WeakMap<PrefetchedPublicMetadata,{scope:MetadataPrefetchScope;ticker:string;binding:MetadataPhaseBinding;startedAtMs:number;fresh:()=>boolean}>();
+export function durablePhaseMetadataClock(metadata:PrefetchedPublicMetadata,scope:{owner:string;account:string;sha:string;policyHash:string},ticker:string,binding:MetadataPhaseBinding){
+ const c=phaseClocks.get(metadata);
+ if(!c||c.scope.ownerId!==scope.owner||c.scope.accountId!==scope.account||c.scope.releaseSha!==scope.sha||c.scope.policyHash!==scope.policyHash||c.ticker!==ticker||c.binding.phase!==binding.phase||c.binding.intentId!==binding.intentId)throw error('durable_fee_phase_scope_invalid');
+ if(!c.fresh())throw error('durable_fee_phase_expired');
+ return Object.freeze({startedAtMs:c.startedAtMs,sourceFresh:c.fresh});
+}
 export type MetadataPhaseBinding=Readonly<{phase:"FINAL_MARKET"|"WIRE_FEE";intentId:string}>;
 export type PhaseMetadataIdentity=MetadataPhaseBinding;
 type MetadataAttempt<S extends PreparedMetadataSource>={
@@ -83,7 +102,7 @@ export class CommittedPublicMetadataCoordinator {
   private startScoped<S extends PreparedMetadataSource>(scopeInput:MetadataPrefetchScope,hintInput:S,
     phaseInput?:MetadataPhaseBinding):MetadataAttempt<S>|null {
     const at=this.wallNow(),mono=this.monotonicNow();
-    if(phaseInput&&(!Number.isFinite(mono)||mono<0))return null;
+    if(!Number.isFinite(mono)||mono<0)return null;
     for(const [key,end] of this.seen)if(end<=at)this.seen.delete(key);
     const ages=[hintInput.btcProviderAgeMs,hintInput.btcReceiveAgeMs,hintInput.marketAgeMs];
     if(![scopeInput.accountId,scopeInput.ownerId,scopeInput.holderId,hintInput.evaluationId,hintInput.marketTicker].every(v=>typeof v==="string")||!identifier.test(scopeInput.accountId)||!identifier.test(scopeInput.ownerId)||!identifier.test(scopeInput.holderId)||
@@ -121,7 +140,7 @@ export class CommittedPublicMetadataCoordinator {
     timer.unref?.();
     const fresh=(includeProviderFailure=true)=>{
       const now=this.wallNow(),elapsed=this.monotonicNow()-mono;
-      if((phase&&(!Number.isFinite(now)||!Number.isFinite(elapsed)))||now<at||now>=expires||elapsed<0||elapsed>=Math.min(this.limits.timeoutMs,expires-at))discard("entry_metadata_prefetch_expired");
+      if(!Number.isSafeInteger(now)||!Number.isFinite(elapsed)||now<at||now>=expires||elapsed<0||elapsed>=Math.min(this.limits.timeoutMs,expires-at))discard("entry_metadata_prefetch_expired");
       if(discarded||(includeProviderFailure&&failed))throw failure;
     };
     const load=(path:string):Promise<Body>=>{
@@ -191,7 +210,7 @@ export class CommittedPublicMetadataCoordinator {
           discard("entry_metadata_scope_changed");
         }
         allowed=true;this.pump();
-        return Object.freeze({
+        const metadata:PrefetchedPublicMetadata=Object.freeze({
           read:async(path:string)=>{
             fresh(false);
             if(!pendingBodies.has(path)){
@@ -205,6 +224,12 @@ export class CommittedPublicMetadataCoordinator {
           capture:()=>{fresh();if(!eventTicker||captures.size!==5)throw error("entry_metadata_capture_incomplete");
             return Object.freeze({marketTicker:hint.marketTicker,eventTicker,exchangeIndex:2 as const,records:Object.freeze([...captures.values()])});},
         });
+        // Creation precedes every queued transport; never reset the clock at consume.
+        // FINAL/WIRE attempts deliberately have no durable PREPARE capability.
+        if(phase)phaseClocks.set(metadata,{scope,ticker:hint.marketTicker,binding:phase,startedAtMs:at,fresh:()=>{try{fresh();return true;}catch{return false;}}});
+        if(!phase)prepareClocks.set(metadata,{scope,ticker:hint.marketTicker,startedAtMs:at,
+          fresh:()=>{try{fresh();return true;}catch{return false;}}});
+        return metadata;
       },
     });
     this.accounts.set(scope.accountId,attempt);

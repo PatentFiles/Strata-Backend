@@ -21,3 +21,28 @@ test('durable protective mode selected only from exact approved policy identity'
  for(const change of [{fee_formula_version:'unrecognized'},{fee_policy_version:'other'},{policy_hash:'bad'}]){
  const r=await readOwnerV3ProtectiveSource(id,'account',{query:async()=>({rows:[{...row,...change}]})});assert.notEqual(r.mode,'OWNER_DURABLE');}
 });
+test('supplied PREPARE metadata cannot initiate ticker discovery or protective authority reads',async()=>{
+ const previous=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
+ const metadata={read:async()=>{throw Error('must_not_read');},capture:()=>{throw Error('must_not_capture');}};
+ try{for(const [intent,ticker] of [['ENTRY',undefined],['PROTECTIVE_EXIT','KXBTC15M-X']] as const){
+ const result=await verifyDurableFeeStage(id,'account',source,intent,ticker,metadata);
+ assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_fee_prefetch_scope_invalid');
+ }}finally{if(previous===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=previous;}
+});
+test('borrowed durable stage failure has no pool retry or transaction ownership',async()=>{
+ const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
+ let queries=0,lifecycle=0;const borrowed={query:async()=>{queries++;throw Object.assign(Error('synthetic connection lost'),{code:'08006'});},release:()=>{lifecycle++;}};
+ try{const result=await verifyDurableFeeStage(id,'account',source,'ENTRY','KXBTC15M-X',undefined,borrowed);
+ assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_source_or_market_unavailable');
+ assert.equal(queries,1);assert.equal(lifecycle,0);
+ }finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
+});
+
+test('FINAL handle rejects discovery, protective or mixed metadata before any read',async()=>{
+ const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';let queries=0;
+ const db={query:async()=>{queries++;throw Error('unexpected query');}};
+ const handle={kind:'DURABLE_PHASE_PUBLIC_BYTES' as const,read:async()=>{throw Error('read');},capture:()=>{throw Error('capture');}};
+ try{for(const [intent,ticker,prepare] of [['ENTRY',undefined,undefined],['PROTECTIVE_EXIT','KXBTC15M-X',undefined],['ENTRY','KXBTC15M-X',handle]] as const){
+ const result=await verifyDurableFeeStage(id,'account',source,intent,ticker,prepare,db,handle);assert.equal(result.ok,false);if(!result.ok)assert.equal(result.reason,'durable_fee_prefetch_scope_invalid');
+ }assert.equal(queries,0);}finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
+});

@@ -1,3 +1,5 @@
+import type {DurablePhaseMetadata} from './durablePhaseMetadata';
+import type {PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import {durableReleaseMatch} from './durableFeeReleaseBinding';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Server-only candidate consumers; no route accepts authority substitutions. */
@@ -24,16 +26,21 @@ export async function verifyDurableProtectiveAuthority(owner:string,account:stri
  return {ok:true as const,authorityFingerprint:createHash('sha256').update(JSON.stringify(r.rows[0])).digest('hex'),validForMs:5000};
  }catch{return {ok:false as const};}
 }
-export async function verifyDurableFeeStage(owner:string,account:string,source:string,intent:'ENTRY'|'PROTECTIVE_EXIT',ticker?:string){
+export async function verifyDurableFeeStage(owner:string,account:string,source:string,intent:'ENTRY'|'PROTECTIVE_EXIT',ticker?:string,prepareMetadata?:PrefetchedPublicMetadata,borrowedTransaction?:Query,finalMetadata?:DurablePhaseMetadata){
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return {ok:false as const,reason:'durable_fee_feature_disabled'};
  if(!parseDurableFeeSource(source))return {ok:false as const,reason:'durable_source_invalid'};
- try{const r=await pool.query(`SELECT p.policy_hash FROM public.v13_production_account a
+ if(((prepareMetadata||finalMetadata)&&(!ticker||intent!=='ENTRY'))||(prepareMetadata&&finalMetadata))return {ok:false as const,reason:'durable_fee_prefetch_scope_invalid'};
+ // FINAL is already inside the ledger account FOR UPDATE transaction. Reuse
+ // that exact server-owned client: another pool connection would wait on its
+ // own caller. This function never begins, commits, releases or retries it.
+ const db=borrowedTransaction??pool;
+ try{const r=await db.query(`SELECT p.policy_hash FROM public.v13_production_account a
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
  WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND p.fee_source_url=$3 AND p.state='APPROVED'`,[account,owner,source]);
  if(r.rows.length!==1)return {ok:false as const,reason:'durable_policy_scope_unverified'};
  let selected=ticker;
  if(!selected){const observation=await probeCurrentKalshiFeeApi();if(!observation.ok)return {ok:false as const,reason:observation.reason};selected=observation.marketTicker;}
  if(!selected)return {ok:false as const,reason:'durable_exact_market_missing'};
- return verifyDurableOwnerFee(pool,{owner,account,sha:deployedGitSha(),policyHash:String(r.rows[0].policy_hash)},selected,intent);
+ return verifyDurableOwnerFee(db,{owner,account,sha:deployedGitSha(),policyHash:String(r.rows[0].policy_hash)},selected,intent,{},prepareMetadata,finalMetadata?{phase:"FINAL_MARKET",handle:finalMetadata}:undefined);
  }catch{return {ok:false as const,reason:'durable_source_or_market_unavailable'};}
 }

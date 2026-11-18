@@ -1,3 +1,5 @@
+import {consumeDurablePhaseMetadata,type DurablePhaseMetadata} from './durablePhaseMetadata';
+import {durablePrepareMetadataClock,type PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import {durableReleaseMatch} from './durableFeeReleaseBinding';
 import {createHash} from 'node:crypto';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
@@ -58,7 +60,8 @@ export const DURABLE_FEE_LOCK_SQL=`SELECT m.*,$3::text AS authorized_release_sha
  * Must remain composed with existing technical/account/lease/order fences. */
 export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[]):Promise<{rows:Record<string,unknown>[]}>},
  scope:{owner:string;account:string;sha:string;policyHash:string},ticker:string,intent:Intent,
- deps:{fetcher?:typeof fetch;clock?:()=>number;monotonicNow?:()=>number}={}){
+ deps:{fetcher?:typeof fetch;clock?:()=>number;monotonicNow?:()=>number}={},
+ prepareMetadata?:PrefetchedPublicMetadata,phaseMetadata?:{phase:"FINAL_MARKET"|"WIRE_FEE";handle:DurablePhaseMetadata}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(deps).length)return deny('durable_fee_production_override_forbidden');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return deny('durable_fee_feature_disabled');
  const now=deps.clock??Date.now,monotonic=deps.monotonicNow??(()=>performance.now());
@@ -69,17 +72,25 @@ export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[])
  const historical=r.policy_version===HISTORICAL_FEE_VERSION;
  const historicalIntegrity=historical&&historicalBaselineEnabled()&&r.source_kind===HISTORICAL_SOURCE_KIND&&r.genuine_source_verified===false&&r.source_capture_id===null&&r.historical_baseline_id===HISTORICAL_BASELINE_ID&&r.historical_digest===HISTORICAL_BASELINE_SHA256&&Buffer.isBuffer(r.historical_bytes)&&createHash('sha256').update(r.historical_bytes).digest('hex')===HISTORICAL_BASELINE_SHA256;
  if(historical&&!historicalIntegrity)return deny('historical_fee_baseline_provenance_unverified');
- // This probe owns fresh direct GETs (no supplied cache/prefetch reader).
+ // Only distinct process-local exact-scope capabilities may supply public bytes.
+ // Model/revocation reads above always run at consumption. Phase capabilities
+ // additionally bind an active owning invocation and literal stage; EXIT stays
+ // direct. PREPARE bytes cannot satisfy FINAL/WIRE. Failed attempts never retry.
+ if((prepareMetadata||phaseMetadata)&&intent!=='ENTRY'||prepareMetadata&&phaseMetadata)return deny('durable_fee_prefetch_scope_invalid');
+ const phase=phaseMetadata?consumeDurablePhaseMetadata(phaseMetadata.handle,phaseMetadata.phase,scope,ticker):undefined;
+ const prefetched=phase??(prepareMetadata?durablePrepareMetadataClock(prepareMetadata,scope,ticker):undefined);
+ const metadata=phase?.metadata??prepareMetadata;
+ // Without a capability this probe owns fresh direct GETs.
  // Start the durable age conservatively BEFORE its earliest transport, never
  // at the last response or the generic probe's completion timestamp. Keep the
  // original fetch identity so existing public quota/cancellation rules remain.
- const sourceStartedAt=now(),sourceStartedMono=monotonic();
+ const sourceStartedAt=prefetched?.startedAtMs??now(),sourceStartedMono=monotonic();
  if(!Number.isSafeInteger(sourceStartedAt)||sourceStartedAt<=0||!Number.isFinite(sourceStartedMono)||sourceStartedMono<0)
   return deny('durable_fee_observation_clock_invalid');
- const observation=await probeCurrentKalshiFeeApi(deps.fetcher??globalThis.fetch,now,ticker);
+ const observation=await probeCurrentKalshiFeeApi(deps.fetcher??globalThis.fetch,now,ticker,metadata?.read,metadata?.capture);
  const candidate=preparePdfFreeApiFeePolicyReview(observation,now());
  const assessedAt=now(),elapsedMono=monotonic()-sourceStartedMono;
- if(!Number.isSafeInteger(assessedAt)||assessedAt<sourceStartedAt||assessedAt-sourceStartedAt>5000||
+ if((prefetched&&!prefetched.sourceFresh())||!Number.isSafeInteger(assessedAt)||assessedAt<sourceStartedAt||assessedAt-sourceStartedAt>5000||
  !Number.isFinite(elapsedMono)||elapsedMono<0||elapsedMono>5000)
   return deny('durable_fee_market_observation_deadline_exceeded');
  const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.authorized_release_sha??r.release_commit_sha),
@@ -92,7 +103,7 @@ export async function verifyDurableOwnerFee(tx:{query(sql:string,args:unknown[])
  // Process-local capability, never serialized or reconstructed from a receipt.
  // Retains the SAME source clock through signing/fences and final send.
  const sourceFresh=()=>{const wall=now(),mono=monotonic(),elapsed=mono-sourceStartedMono;
-  return Number.isSafeInteger(wall)&&wall>=sourceStartedAt&&wall-sourceStartedAt<=5000&&
+  return (!prefetched||prefetched.sourceFresh())&&Number.isSafeInteger(wall)&&wall>=sourceStartedAt&&wall-sourceStartedAt<=5000&&
    Number.isFinite(elapsed)&&elapsed>=0&&elapsed<=5000;};
  return {...proof,sourceFresh};
  }catch{return deny('durable_fee_database_or_market_unavailable');}

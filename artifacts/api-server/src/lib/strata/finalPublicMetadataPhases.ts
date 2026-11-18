@@ -1,7 +1,9 @@
+import {bindDurablePhaseMetadata} from './durablePhaseMetadata';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {CommittedPublicMetadataCoordinator,type MetadataPrefetchScope,type PreparedMetadataSource,type PrefetchedPublicMetadata,type PhaseMetadataAttempt} from './committedPublicMetadata';
 export type FinalPublicMetadataContext=Readonly<{intentId:string;invocation:symbol;source:PreparedMetadataSource}>;
 export interface FinalPublicMetadataHooks {
+ dispatch?<T>(intentId:string,invocation:symbol,operation:()=>Promise<T>):Promise<T>;
  start(phase:'FINAL_MARKET'|'WIRE_FEE',context:FinalPublicMetadataContext):void;
  finalMarket<T>(context:FinalPublicMetadataContext,operation:()=>Promise<T>):Promise<T>;
  finish(intentId:string,invocation:symbol):void;
@@ -10,6 +12,11 @@ export interface FinalPublicMetadataHooks {
  * One owned session shares the existing process-wide coordinator budget.
  */
 export class FinalPublicMetadataPhases implements FinalPublicMetadataHooks {
+ private readonly dispatches=new AsyncLocalStorage<{intentId:string;invocation:symbol;active:boolean}>();
+ dispatch<T>(intentId:string,invocation:symbol,operation:()=>Promise<T>):Promise<T>{
+  const context={intentId,invocation,active:true};
+  return this.dispatches.run(context,operation).finally(()=>{context.active=false;});
+ }
  private readonly contexts=new AsyncLocalStorage<FinalPublicMetadataContext>();
  private readonly attempts=new Map<string,{context:FinalPublicMetadataContext;phase:'FINAL_MARKET'|'WIRE_FEE';attempt:PhaseMetadataAttempt}>();
  constructor(private readonly coordinator:CommittedPublicMetadataCoordinator,
@@ -36,6 +43,22 @@ export class FinalPublicMetadataPhases implements FinalPublicMetadataHooks {
  consumeWire(clientOrderId:string,market:string):PrefetchedPublicMetadata|undefined {
   const id=clientOrderId.startsWith('v13p-')?clientOrderId.slice(5):'';
   return this.consume(id,market,'WIRE_FEE');
+ }
+ consumeDurableFinalMarket(market:string){
+  const current=this.contexts.getStore();if(!current)return undefined;
+  return this.consumeDurable(current.intentId,market,'FINAL_MARKET',()=>this.consumeFinalMarket(market));
+ }
+ consumeDurableWire(clientOrderId:string,market:string){
+  const id=clientOrderId.startsWith('v13p-')?clientOrderId.slice(5):'';
+  return this.consumeDurable(id,market,'WIRE_FEE',()=>this.consumeWire(clientOrderId,market));
+ }
+ private consumeDurable(id:string,market:string,phase:'FINAL_MARKET'|'WIRE_FEE',consume:()=>PrefetchedPublicMetadata|undefined){
+  const entry=this.attempts.get(id);if(!entry){if(this.attempts.size)throw Error('phase_metadata_intent_mismatch');return undefined;}
+  const dispatch=this.dispatches.getStore();
+  const active=()=>!!dispatch&&dispatch.active&&this.dispatches.getStore()===dispatch&&dispatch.intentId===id&&dispatch.invocation===entry.context.invocation&&this.allowed();
+  if(!active())throw Error('phase_metadata_invocation_mismatch');
+  const metadata=consume();if(!metadata)throw Error('phase_metadata_missing');
+  return bindDurablePhaseMetadata(metadata,{phase,intentId:id},active);
  }
  private consume(id:string,market:string,phase:'FINAL_MARKET'|'WIRE_FEE',source?:PreparedMetadataSource):PrefetchedPublicMetadata|undefined {
   const entry=this.attempts.get(id);

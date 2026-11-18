@@ -1,3 +1,4 @@
+import type {DurablePhaseMetadata} from './durablePhaseMetadata';
 import type {DirectAccountRoundingEvidence,DirectAccountRoundingIdentity} from './directAccountRoundingEvidence';
 import type {EntryPrepareMarketContext,MarketEvidence} from "../v13-production/types";
 import type {MetadataPrefetchAttempt,MetadataPrefetchScope,PrefetchedPublicMetadata} from "./committedPublicMetadata";
@@ -16,23 +17,25 @@ type PublicReader=(path:string)=>Promise<Record<string,unknown>>;
  */
 export async function readOwnedEntryMarket(input:{
   market:string;side:"YES"|"NO";context?:EntryPrepareMarketContext;
-  now:()=>number;apiSource:boolean;activeMetadata:MetadataPrefetchAttempt|null;
+  now:()=>number;apiSource:boolean;durableSource?:boolean;activeMetadata:MetadataPrefetchAttempt|null;
   metadataScope:()=>MetadataPrefetchScope;
   finalPublicMetadata?:()=>PrefetchedPublicMetadata|undefined;
-  verifyFee:(clock:number,readMetadata:PublicReader|undefined,captureMetadata:(()=>MetadataCaptureManifest)|undefined)=>Promise<number>;
+  finalDurableMetadata?:()=>DurablePhaseMetadata|undefined;
+  verifyFee:(clock:number,readMetadata:PublicReader|undefined,captureMetadata:(()=>MetadataCaptureManifest)|undefined,prepareMetadata?:PrefetchedPublicMetadata,finalMetadata?:DurablePhaseMetadata)=>Promise<number>;
   readBook:()=>Promise<unknown>;readPublic:(path:string)=>Promise<unknown>;publicFetch?:typeof fetch;
   readDirectRounding?:()=>Promise<{evidence:Readonly<DirectAccountRoundingEvidence>;currentScope:DirectAccountRoundingIdentity}>;
   configuredStakeCents:number;policyVersion:string;sourceUrl:string;formulaVersion:string;artifactDigest:string;policyHash:string;
 }):Promise<MarketEvidence>{
   const clock=input.now(),{market,side,context,activeMetadata}=input;
   const finalMetadata=input.apiSource&&!context?input.finalPublicMetadata?.():undefined;
-  const speculative=finalMetadata??(input.apiSource&&context?.stage==="prepare"&&activeMetadata?.source.evaluationId===context.evaluationId
+  const durableFinal=input.durableSource&&!context?input.finalDurableMetadata?.():undefined;
+  const speculative=finalMetadata??((input.apiSource||input.durableSource)&&context?.stage==="prepare"&&activeMetadata?.source.evaluationId===context.evaluationId
     ?activeMetadata.consume(input.metadataScope(),context):undefined);
   if(context&&activeMetadata&&!speculative)activeMetadata.discard("entry_metadata_source_changed");
-  const metadataSnapshot=input.apiSource?(speculative??createEntryMetadataSnapshot(market,input.publicFetch)):undefined;
+  const metadataSnapshot=durableFinal??speculative??(input.apiSource?createEntryMetadataSnapshot(market,input.publicFetch):undefined);
   let verifiedAtMs:number;
   const gathered=await gatherCompleteReadOnlyMarketEvidence({market,
-    verifyFee:async()=>{verifiedAtMs=await input.verifyFee(clock,metadataSnapshot?.read,speculative?.capture);},
+    verifyFee:async()=>{verifiedAtMs=await input.verifyFee(clock,metadataSnapshot?.read,speculative?.capture,input.durableSource&&context?.stage==="prepare"?speculative:undefined,durableFinal);},
     readBook:input.readBook,readPublic:metadataSnapshot?.read??input.readPublic,
   });
   const {bookPayload,seriesPayload,marketPayload,eventPayload,seriesChangesPayload,eventChangesPayload}=gathered;

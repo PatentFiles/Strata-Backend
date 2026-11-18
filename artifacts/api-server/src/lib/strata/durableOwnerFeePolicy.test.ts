@@ -126,3 +126,80 @@ test('historical pinned bytes are an explicit assumption, never an implicit fres
  for(const patch of [{genuine_source_verified:true},{source_capture_id:'1'},{historical_baseline_id:'other'},{historical_bytes:Buffer.from('not the pinned PDF')},{source_kind:'FRESH_CANONICAL_CAPTURE'},{historical_digest:'d'.repeat(64)}])assert.equal((await verify({...historical,...patch})).ok,false);
  }finally{if(saved===undefined)delete process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;else process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED=saved;}
 });
+
+import {CommittedPublicMetadataCoordinator,type PrefetchedPublicMetadata} from './committedPublicMetadata';
+async function durablePrefetchFixture(overrides:Record<string,unknown>={},failedTransport=false){
+ let wall=fixtureClock,mono=0,calls=0,queries=0,currentRow:Record<string,unknown>={...row,...overrides};
+ const coordinator=new CommittedPublicMetadataCoordinator(async(...args)=>{calls++;if(failedTransport)return new Response('{}',{status:503});return kalshiFeed(feeApiPages())(...args);},()=>wall,()=>mono);
+ const metadataScope={ownerId:scope.owner,accountId:scope.account,releaseSha:scope.sha,policyHash:scope.policyHash,holderId:'holder',fence:'1'};
+ const hint={evaluationId:'evaluation',marketTicker,evaluatedAtMs:fixtureClock,committedAtMs:fixtureClock,qualifyingTrigger:true as const,btcProviderAgeMs:0,btcReceiveAgeMs:0,marketAgeMs:0};
+ const attempt=coordinator.start(metadataScope,hint)!;await attempt.drained;
+ const metadata=attempt.consume(metadataScope,hint);
+ const query=async()=>{queries++;return {rows:[currentRow]};};
+ const check=(supplied=metadata,intent:'ENTRY'|'PROTECTIVE_EXIT'='ENTRY',expected=scope)=>verifyDurableOwnerFee({query},expected,marketTicker,intent,
+  {clock:()=>wall,monotonicNow:()=>mono,fetcher:async()=>{throw Error('fresh_fallback_forbidden');}},supplied);
+ return {metadata,attempt,check,clock:(w:number,m:number)=>{wall=w;mono=m;},revoke:()=>{currentRow.entry_revoked=true;},counts:()=>({calls,queries})};
+}
+test('durable PREPARE overlaps public transport but rechecks locked authority and keeps original clocks',async()=>{
+ const f=await durablePrefetchFixture();try{
+  f.clock(fixtureClock+1100,1100);const proof=await f.check();assert.equal(proof.ok,true,JSON.stringify(proof));
+  assert.deepEqual(f.counts(),{calls:5,queries:1});
+  if(!proof.ok)throw Error('proof_missing');assert.equal(proof.verifiedAtMs,fixtureClock);assert.equal(proof.sourceFresh(),true);
+  // Wall rollback cannot hide monotonic expiry or reset source age at consume.
+  f.clock(fixtureClock+1200,5001);assert.equal(proof.sourceFresh(),false);
+ }finally{f.attempt.discard();}
+});
+test('durable PREPARE never reuses authority across revocation and never retries expired metadata',async()=>{
+ const f=await durablePrefetchFixture();try{f.revoke();assert.equal((await f.check()).ok,false);
+ f.clock(fixtureClock+5001,5001);assert.equal((await f.check()).ok,false);assert.equal(f.counts().calls,5);
+ }finally{f.attempt.discard();}
+});
+test('durable metadata cannot be forged, used for another scope, or adopted for protective exits',async()=>{
+ const f=await durablePrefetchFixture();try{
+  assert.equal((await f.check({...f.metadata} as PrefetchedPublicMetadata)).ok,false);
+  for(const key of ['owner','account','sha','policyHash'] as const)assert.equal((await f.check(f.metadata,'ENTRY',{...scope,[key]:'wrong'})).ok,false);
+  assert.equal((await f.check(f.metadata,'PROTECTIVE_EXIT')).ok,false);assert.equal(f.counts().calls,5);
+ }finally{f.attempt.discard();}
+});
+test('discarded durable metadata cannot authorize after STOP or scope invalidation',async()=>{
+ const f=await durablePrefetchFixture();f.attempt.discard('entry_metadata_stopped');assert.equal((await f.check()).ok,false);assert.equal(f.counts().calls,5);
+});
+
+test('owner-attested historical durable PREPARE keeps provenance disclosures and current locked authority',async()=>{
+ process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';
+ const baseline=await readHistoricalBaselineBytes();assert.ok(baseline);
+ const f=await durablePrefetchFixture({policy_version:HISTORICAL_FEE_VERSION,source_kind:HISTORICAL_SOURCE_KIND,
+ genuine_source_verified:false,source_capture_id:null,historical_baseline_id:HISTORICAL_BASELINE_ID,
+ historical_digest:HISTORICAL_BASELINE_SHA256,historical_bytes:baseline.bytes,official_source_digest:HISTORICAL_BASELINE_SHA256});
+ try{f.clock(fixtureClock+1100,1100);const proof=await f.check();assert.equal(proof.ok,true,JSON.stringify(proof));
+ if(!proof.ok)throw Error('proof_missing');assert.equal(proof.publicationKnownCurrent,false);assert.equal(proof.sourceAuthenticityVerified,false);
+ f.revoke();assert.equal((await f.check()).ok,false);
+ }finally{f.attempt.discard();}
+});
+test('admitted speculative provider failure cannot trigger direct fee retry',async()=>{
+ const f=await durablePrefetchFixture({},true);try{const before=f.counts().calls;
+ assert.equal((await f.check()).ok,false);assert.equal(f.counts().calls,before);
+ }finally{f.attempt.discard();}
+});
+
+import {readOwnedEntryMarket} from './ownedEntryMarketRead';
+test('actual durable PREPARE market adapter adopts captured bytes, keeps signed book fresh, and passes original provenance',async()=>{
+ let at=fixtureClock,calls=0,books=0;
+ const binding={ownerId:scope.owner,accountId:scope.account,releaseSha:scope.sha,policyHash:scope.policyHash,holderId:'holder',fence:'1'};
+ const hint={evaluationId:'adapter-evaluation',marketTicker,evaluatedAtMs:at,committedAtMs:at,qualifyingTrigger:true as const,btcProviderAgeMs:0,btcReceiveAgeMs:0,marketAgeMs:0};
+ const pages=feeApiPages();Object.assign(pages['/markets/'+marketTicker].market as object,{status:'active',price_level_structure:'deci_cent',price_ranges:[{start:'0.0000',end:'1.0000',step:'0.0010'}]});
+ const coordinator=new CommittedPublicMetadataCoordinator(async(...args)=>{calls++;return kalshiFeed(pages)(...args);},()=>at,()=>at-fixtureClock);
+ const attempt=coordinator.start(binding,hint)!;await attempt.drained;at+=1100;
+ try{
+ const evidence=await readOwnedEntryMarket({market:marketTicker,side:'YES',context:{...hint,stage:'prepare'},now:()=>at,apiSource:false,durableSource:true,
+ activeMetadata:attempt,metadataScope:()=>binding,
+ verifyFee:async(_clock,_read,_capture,metadata)=>{assert.ok(metadata);const proof=await verifyDurableOwnerFee({query:async()=>({rows:[row]})},scope,marketTicker,'ENTRY',
+ {clock:()=>at,monotonicNow:()=>at-fixtureClock,fetcher:async()=>{throw Error('direct_fee_fallback_forbidden');}},metadata);
+ assert.equal(proof.ok,true);if(!proof.ok)throw Error('proof_missing');return proof.verifiedAtMs;},
+ readBook:async()=>{books++;return {orderbook_fp:{yes_dollars:[['0.4900','100']],no_dollars:[['0.5100','100']]}};},
+ readPublic:async()=>{throw Error('direct_public_fallback_forbidden');},configuredStakeCents:500,
+ policyVersion:model.version,sourceUrl:'strata-durable-owner-fee://11111111-1111-4111-8111-111111111111',formulaVersion:model.formula,artifactDigest:model.digest,policyHash:scope.policyHash});
+ assert.equal(calls,5);assert.equal(books,1);assert.equal(evidence.observedAtMs,at);
+ assert.equal(evidence.fee.verifiedAtMs,fixtureClock);assert.ok(evidence.publicMetadataCapture);
+ }finally{attempt.discard();}
+});
