@@ -347,7 +347,7 @@ export function accountCredentialControls(
             return closed;
           }
           await db.query(
-            "UPDATE v13_production_account SET kill_switch = true WHERE owner_user_id = $1::uuid",
+            "UPDATE v13_production_account SET kill_switch = true, execution_enabled = false WHERE owner_user_id = $1::uuid",
             [userId],
           );
           return {
@@ -384,7 +384,7 @@ export function accountCredentialControls(
             },
             async markKilled(ownerUserId, executionAccountId, client) {
               await (client ?? db).query(
-                `UPDATE v13_production_account SET kill_switch = true
+                `UPDATE v13_production_account SET kill_switch = true, execution_enabled = false
                  WHERE id = $1 AND owner_user_id = $2::uuid`,
                 [executionAccountId, ownerUserId],
               );
