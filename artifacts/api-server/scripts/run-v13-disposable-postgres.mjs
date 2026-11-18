@@ -72,16 +72,18 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
 // exclusively owns a NEW local postgres/v13_ci cluster on 5432, or fails.
 if (fullSuite) { env.GITHUB_ACTIONS = "true"; env.CI = "true"; }
 function run(command, args, options = {}) {
+  const timeout = options.timeout ?? (fullSuite ? 600_000 : 180_000);
   const shell = process.platform === "win32" && /\.cmd$/i.test(command);
+  const startedAt = performance.now();
   const r = spawnSync(command, args, {
     cwd: api,
     env,
     stdio: "inherit",
-    timeout: fullSuite ? 600_000 : 180_000,
+    timeout,
     shell,
     ...options,
   });
-  if (r.status !== 0) throw new Error(`Disposable test command failed (${r.status}): ${command}`);
+  if (r.status !== 0) throw new Error(`Disposable test command failed (status=${r.status}, signal=${r.signal ?? "none"}, timedOut=${r.error?.code === "ETIMEDOUT"}, timeoutMs=${timeout}, elapsedMs=${Math.round(performance.now() - startedAt)}): ${command}`);
 }
 console.info("ISOLATED_FINAL_OVERLAP_ENV",JSON.stringify({port,fullSuite,final:env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,older:env.STRATA_PUBLIC_METADATA_PREFETCH_ENABLED}));
 let started = false;
@@ -101,7 +103,9 @@ try {
   if (rounding) {
     run(process.execPath, ["scripts/direct-rounding-postgres.cjs"]);
   } else if (process.argv[2] === "--full-suite") {
-    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
+    // This aggregates all safety groups; individual child/SQL/wire budgets remain unchanged.
+    // Both workflow callers reserve additional setup and cleanup headroom.
+    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"], { timeout: 1_200_000 });
   } else {
     const testFile = auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
