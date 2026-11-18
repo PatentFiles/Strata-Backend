@@ -1,3 +1,4 @@
+import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
@@ -10,7 +11,7 @@ import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
 import {createBoundedUnknownEntryReadRunner} from "./boundedUnknownEntryReadRunner";
 import {FinalPublicMetadataPhases} from "./finalPublicMetadataPhases";
 import {createFeeVerificationTiming} from "./feeVerificationTiming";
-import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
+import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming,createOwnedSnapshotTiming} from "./ownedFeedReadTiming";
 import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
 import {processCommittedPublicMetadata,type MetadataPrefetchAttempt} from "./committedPublicMetadata";
 import {lockStopAccount,readStopExposure} from "./stopExposure";
@@ -290,6 +291,9 @@ export function createProductionPersonalSession(
     /** LOCAL prototype opt-in. Production construction leaves this disabled. */
     publicMetadataPrefetch?: boolean;
     finalPublicMetadataPrefetch?: boolean;
+    /** Process-only experimental scheduling switches, never execution authority. */
+    overlapFinalAccountSnapshot?: boolean;
+    boundedHistoryReads?: boolean;
     /** Inactive candidate; no production caller supplies this option. Requires reviewed registry. */
     directPrecisionSizing?: boolean;
   } = {},
@@ -379,7 +383,7 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "fee_evidence_missing" };
     }
     const observedAt = now();
-    const feeds = await readOwnedKalshiFeeds(material, observedAt, get);
+    const feeds = await readOwnedKalshiFeeds(material, observedAt, get, options.boundedHistoryReads===true&&(parseReviewedApiSource(sourceUrl)||parseDurableFeeSource(sourceUrl))?{mode:"bounded_history_reads_v1"}:undefined);
     if (!feeds.ok) return feeds;
     const identity: Identity = { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint };
     const requests = await loadRequests(db, input.accountId);
@@ -585,6 +589,8 @@ export function createProductionPersonalSession(
         }
       },
       readSnapshot: async () => {
+        const snapshotTiming=createOwnedSnapshotTiming();let snapshotCompleted=false;
+        try {
         const abort=heldReadAbort;
         const checkRead=()=>{abort?.throwIfAborted();if(abort&&(state.accountKill||state.globalKill))throw Error("held_recovery_read_killed");};
         checkRead();
@@ -603,6 +609,7 @@ export function createProductionPersonalSession(
         const snapshotDb: { query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}> } = {
           query:(sql,params)=>proofTx?proofTx.query(sql,params):db.query(sql,params),
         };
+        snapshotTiming.mark("unresolved_intents");
         const unresolvedNow=await readUnresolvedIntentMode(
           (sql,params)=>snapshotDb.query(sql,params),input.accountId,currentEntry,
         );
@@ -620,7 +627,8 @@ export function createProductionPersonalSession(
           if(currentEntry)throw new Error("production_other_uncertain_order");
         }
         checkRead();
-        const beat = await heartbeatLease(snapshotDb, {
+        snapshotTiming.mark("heartbeat");
+        const beat = await (proofTx ? heartbeatLeaseInTransaction : heartbeatLease)(snapshotDb, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
         });
@@ -634,6 +642,7 @@ export function createProductionPersonalSession(
         // If a process died between persisting a cash maintenance hold and
         // requesting STOP, the next heartbeat still disables new entries.
         // Protective reduce-only exit management is left to the worker.
+        snapshotTiming.mark("maintenance");
         if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
           try {
             const maintenance=await snapshotDb.query(
@@ -645,20 +654,26 @@ export function createProductionPersonalSession(
         }
         // Separate bounded diagnostics only; original signed-read clock/proof remain untouched.
         const scopedGet:typeof getScopedKalshiJson=async(creds,path,query,fetchImpl,host,owner,signal)=>{
-          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort??signal);checkRead();return result;
+          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort&&signal?AbortSignal.any([abort,signal]):abort??signal);checkRead();return result;
         };
+        snapshotTiming.mark("signed_feeds");
         const feedTiming=createOwnedFeedReadTiming(scopedGet,recordOwnedFeedReadTiming);
         let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
-        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get); }
+        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get, options.boundedHistoryReads===true&&(apiSource||durableSource)&&!heldRecoveryScope&&!abort&&(!proofTx||currentEntry!==null)?{mode:"bounded_history_reads_v1"}:undefined); }
         finally { feedTiming.finish(); }
         if (!latest.ok) throw new Error(latest.reason);
-        const proven = emptySnapshot(identity, latest, await loadRequests(snapshotDb, input.accountId));
+        snapshotTiming.mark("load_requests");
+        const requests=await loadRequests(snapshotDb, input.accountId);
+        snapshotTiming.mark("snapshot_mapping");
+        const proven = emptySnapshot(identity, latest, requests);
         if (!("identity" in proven)) throw new Error(proven.reason);
         // Authority remains closed here. Only committed ledger reconciliation
         // or the final transactional account proof can reopen it.
         // Refresh out of band after exposure proof, never delay protective reconciliation.
         if(directRounding&&!proofTx)void directRounding.refresh();
+        snapshotCompleted=true;
         return proven;
+        } finally {snapshotTiming.finish(snapshotCompleted);}
       },
       readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({
         ...(directRounding&&purpose!=="EXIT"&&!heldRecoveryScope?{readDirectRounding:()=>directRounding.read(finalLedger?.currentWireScopeToken()??undefined)}:{}),
@@ -727,6 +742,7 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
+    session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
     if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,

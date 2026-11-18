@@ -8,7 +8,7 @@ const url=process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.ok(url&&/^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(url));
 after(()=>pool.end());
 const owner='00000000-0000-4000-8000-000000000001',foreign='00000000-0000-4000-8000-000000000002';
-test('owned gate batches identity/UNKNOWN only; matches old query semantics and preserves locks',async()=>{
+test('owned gate batches coherent authority facts; matches refusal semantics and preserves locks',async()=>{
  const tx=await pool.connect(),other=await pool.connect();
  const schema='gate_batch_test';
  try {
@@ -40,7 +40,7 @@ test('owned gate batches identity/UNKNOWN only; matches old query semantics and 
   calls=[];assert.equal(await outcome(ignore,lifecycle),expected,JSON.stringify({account,states,lifecycle,ignore}));
   assert.equal(calls.filter(q=>q.includes('WITH uncertain AS MATERIALIZED')).length,1);
   batchSql=calls.find(q=>q.includes('WITH uncertain AS MATERIALIZED'))!;
-  assert.equal(calls.length,expected==='ok'?3:1); // old owned success was4, no extra reads on denial
+  assert.equal(calls.length,1); // all owned facts share one coherent statement; no fallback reads
   await tx.query('ROLLBACK');
  }
  // Already-held account lock fences a competing owner change; same-tx changes remain visible.
@@ -48,9 +48,9 @@ test('owned gate batches identity/UNKNOWN only; matches old query semantics and 
  // EXPLAIN ANALYZE proves CASE's owner relation is not executed on UNKNOWN denial.
  await tx.query("INSERT INTO v13_production_intent VALUES('u','a','UNKNOWN')");
  const ownerLoops=async(lifecycle:boolean)=>{
-  const explained=await tx.query('EXPLAIN (ANALYZE,FORMAT JSON) '+batchSql,['a',null,lifecycle]);
+  const explained=await tx.query('EXPLAIN (ANALYZE,FORMAT JSON) '+batchSql,['a',null,lifecycle,owner]);
   const plans:Record<string,unknown>[]=[];
-  const visit=(p:Record<string,unknown>)=>{if(p['Relation Name']==='v13_production_account')plans.push(p);for(const c of (p.Plans??[]) as Record<string,unknown>[])visit(c);};
+  const visit=(p:Record<string,unknown>)=>{if(p['Relation Name']==='v13_production_account'&&p.Alias==='v13_production_account')plans.push(p);for(const c of (p.Plans??[]) as Record<string,unknown>[])visit(c);};
   visit(explained.rows[0]['QUERY PLAN'][0].Plan);assert.equal(plans.length,1);return plans[0]['Actual Loops'];
  };
  assert.equal(await ownerLoops(false),0);assert.equal(await ownerLoops(true),1);
@@ -61,7 +61,7 @@ test('owned gate batches identity/UNKNOWN only; matches old query semantics and 
  assert.equal(await outcome(null,false),'ok');
  await tx.query("UPDATE v13_production_account SET owner_user_id=$1 WHERE id='a'",[foreign]);
  assert.equal(await outcome(null,false),'foreign_execution_account');await tx.query('ROLLBACK');
- // Master remains a later independent read, with unchanged failure precedence.
+ // Every invocation rereads master; no cross-invocation cache and same failure precedence.
  await tx.query('UPDATE live_execution_config SET manual_kill_switch=true');
  assert.equal(await outcome(null,false),'production_master_kill_switch_or_flag');
  } finally {await tx.query('ROLLBACK');await tx.query('SET search_path TO public');await other.query('SET search_path TO public');await tx.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);tx.release();other.release();}

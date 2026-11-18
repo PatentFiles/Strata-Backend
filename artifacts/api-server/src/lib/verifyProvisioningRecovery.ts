@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported} from "./strata/kalshiMemberReadBudget";
 import { constants, createPrivateKey, createSign } from "node:crypto";
 import { KEY_NAME, SCOPES, SUBACCOUNT } from "./keyProvisioningAttempt";
 
@@ -21,6 +22,7 @@ function credential(id: string | undefined, privateKey: string | undefined): Cre
 }
 
 async function read(cred: Credential, path: string, query = ""): Promise<Record<string, unknown>> {
+  assertMemberBudgetUnsupported();
   if (path !== `${PREFIX}/api_keys` &&
       !READ_PATHS.some(allowed => path === `${PREFIX}${allowed}`)) {
     throw new Error("Recovery GET path forbidden");

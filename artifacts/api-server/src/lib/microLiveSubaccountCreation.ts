@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported} from "./strata/kalshiMemberReadBudget";
 import { randomUUID, createPrivateKey, createSign, constants as cryptoConstants, createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
@@ -453,6 +454,7 @@ export async function signedProvisioningRequest(
   query = "",
   observed?: { signer: ProvisioningSignerDiagnostic | null },
 ): Promise<Response> {
+  assertMemberBudgetUnsupported();
   if (observed) observed.signer = null;
   let keyId: string;
   let key: ReturnType<typeof createPrivateKey>;

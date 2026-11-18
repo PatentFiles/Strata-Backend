@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported} from "./strata/kalshiMemberReadBudget";
 import { constants, createPrivateKey, createSign } from "node:crypto";
 import {
   PAIR_KEY_NAME, PAIR_SCOPES, PAIR_SUBACCOUNT,
@@ -34,6 +35,7 @@ function credential(kind: "provisioning" | "verifier") {
 
 async function request(kind: "provisioning" | "verifier", method: "GET" | "POST",
   path: string, body?: string): Promise<Response> {
+  assertMemberBudgetUnsupported();
   const { id, key } = credential(kind);
   const timestamp = String(Date.now());
   const signer = createSign("sha256");

@@ -1,3 +1,5 @@
+import {reserveMemberRead,memberReadBudgetEnabled,dispatchMemberRead,type MemberReadTicket} from "./strata/kalshiMemberReadBudget";
+import {dedicatedSignerFingerprint} from "./strata/commissioning";
 import {
   constants as cryptoConstants,
   createHash,
@@ -1415,6 +1417,13 @@ export function createKalshiTradingClient(options: KalshiTradingClientOptions) {
     if (creds.keyId !== expectedKeyId) {
       throw new KalshiTradingApiError("MUTATION_GUARD_REJECTED");
     }
+    let readTicket:MemberReadTicket|null=null;
+    if(method === "GET" && baseUrl()==="https://external-api.kalshi.com" && memberReadBudgetEnabled()){
+      readTicket=await reserveMemberRead(path.split("?")[0]!,dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+    if((selectedSubaccount()!==subaccount || selectedAccountMode(subaccount)!==accountMode ||
+      credentials().keyId!==creds.keyId || credentials().privateKey!==creds.privateKey))
+      throw new KalshiTradingApiError("MUTATION_GUARD_REJECTED");
+    }
     const timestamp = Date.now().toString();
     // Kalshi signs the pathname, never its query string (e.g. shard routing).
     const signed = signature(creds, method, path.split("?")[0]!, timestamp);
@@ -1427,13 +1436,15 @@ export function createKalshiTradingClient(options: KalshiTradingClientOptions) {
     if (body) headers["Content-Type"] = "application/json";
     let response: Response;
     try {
-      response = await fetchImpl(`${baseUrl()}${path}`, {
+      const send=()=>fetchImpl(`${baseUrl()}${path}`, {
         method,
         cache: "no-store",
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         headers,
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
+      response=await (method==="GET"&&baseUrl()==="https://external-api.kalshi.com"
+        ?dispatchMemberRead(readTicket,send):send());
     } catch {
       throw new KalshiTradingApiError("NETWORK_ERROR");
     }

@@ -3,6 +3,38 @@ import { pool } from "@workspace/db";
 
 const MAX_QUEUED_MS = 15_000;
 
+export const BALANCE_RESERVATION_SQL=`INSERT INTO private.strata_kalshi_balance_read_slots (budget_key,next_slot_at)
+     VALUES ($1,clock_timestamp()+interval '1200 milliseconds')
+     ON CONFLICT (budget_key) DO UPDATE SET
+       next_slot_at=greatest(private.strata_kalshi_balance_read_slots.next_slot_at,clock_timestamp())+interval '1200 milliseconds'
+     -- An already saturated queue must NOT reserve more slots on a rejected
+     -- request. The predicate runs atomically under the conflicting-row lock.
+     -- Preserve the conservative 1.2s spacing and fail closed with no result.
+     WHERE private.strata_kalshi_balance_read_slots.next_slot_at
+           <= clock_timestamp()+interval '13800 milliseconds'
+     RETURNING extract(epoch FROM ((next_slot_at-interval '1200 milliseconds')-clock_timestamp()))*1000 AS wait_ms`;
+export const BALANCE_IDENTITY_RESERVATION_SQL=`WITH identities AS MATERIALIZED (
+ SELECT DISTINCT owner_user_id::text AS owner
+ FROM private.kalshi_connection_credentials
+ WHERE key_fingerprint=$1 AND revoked_at IS NULL AND verified_at IS NOT NULL
+ AND verification_reason='credential_verified' LIMIT 2
+), budget AS MATERIALIZED (
+ SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+ 'strata:kalshi:balance:' || CASE WHEN count(*)=1 AND max(owner) IS NOT NULL
+ THEN 'member:'||max(owner) ELSE 'member:unmapped-conservative' END || ':v1','UTF8')),'hex') AS budget_key
+ FROM identities
+)
+INSERT INTO private.strata_kalshi_balance_read_slots (budget_key,next_slot_at)
+     SELECT budget_key,clock_timestamp()+interval '1200 milliseconds' FROM budget WHERE true
+     ON CONFLICT (budget_key) DO UPDATE SET
+       next_slot_at=greatest(private.strata_kalshi_balance_read_slots.next_slot_at,clock_timestamp())+interval '1200 milliseconds'
+     -- An already saturated queue must NOT reserve more slots on a rejected
+     -- request. The predicate runs atomically under the conflicting-row lock.
+     -- Preserve the conservative 1.2s spacing and fail closed with no result.
+     WHERE private.strata_kalshi_balance_read_slots.next_slot_at
+           <= clock_timestamp()+interval '13800 milliseconds'
+     RETURNING extract(epoch FROM ((next_slot_at-interval '1200 milliseconds')-clock_timestamp()))*1000 AS wait_ms`;
+
 /**
  * Kalshi's /portfolio/balance has a separate one-request-per-second bucket
  * for Basic/Advanced, without burst. Until a reliable per-member identifier
@@ -21,35 +53,14 @@ export async function reserveKalshiBalanceReadSlot(
   if (!keyId.trim()) throw new Error("kalshi_balance_credential_missing");
   if (ownerUserId && !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/.test(ownerUserId))
     throw new Error("kalshi_balance_owner_invalid");
-  // All verified credential roles belonging to a single member must
-  // consume the SAME bucket. Separate users must not block one another's
-  // live execution reads. Unknown credentials use one conservative fallback.
-  let effectiveOwner=ownerUserId;
-  if(!effectiveOwner && signerFingerprint && /^[0-9a-f]{64}$/.test(signerFingerprint)){
-    const identities=await query(
-      `SELECT DISTINCT owner_user_id::text AS owner
-         FROM private.kalshi_connection_credentials
-        WHERE key_fingerprint=$1 AND revoked_at IS NULL
-          AND verified_at IS NOT NULL AND verification_reason='credential_verified'
-        LIMIT 2`,[signerFingerprint]);
-    if(identities.rows.length===1 && typeof identities.rows[0]?.owner==="string")
-      effectiveOwner=identities.rows[0].owner;
-  }
-  const scope=effectiveOwner ? `member:${effectiveOwner}` : "member:unmapped-conservative";
-  const digest=createHash("sha256").update(`strata:kalshi:balance:${scope}:v1`).digest("hex");
-  const response=await query(
-    `INSERT INTO private.strata_kalshi_balance_read_slots (budget_key,next_slot_at)
-     VALUES ($1,clock_timestamp()+interval '1200 milliseconds')
-     ON CONFLICT (budget_key) DO UPDATE SET
-       next_slot_at=greatest(private.strata_kalshi_balance_read_slots.next_slot_at,clock_timestamp())+interval '1200 milliseconds'
-     -- An already saturated queue must NOT reserve more slots on a rejected
-     -- request. The predicate runs atomically under the conflicting-row lock.
-     -- Preserve the conservative 1.2s spacing and fail closed with no result.
-     WHERE private.strata_kalshi_balance_read_slots.next_slot_at
-           <= clock_timestamp()+interval '13800 milliseconds'
-     RETURNING extract(epoch FROM ((next_slot_at-interval '1200 milliseconds')-clock_timestamp()))*1000 AS wait_ms`,
-    [digest],
-  );
+  // Fuse only the original two-query identity-discovery path. Explicit-owner
+  // and missing/invalid-fingerprint callers retain their original single query,
+  // including no credential-table dependency. This is bucket routing, NOT
+  // authorization: the authoritative member binding still runs after its wait.
+  const response=!ownerUserId&&signerFingerprint&&/^[0-9a-f]{64}$/.test(signerFingerprint)
+    ? await query(BALANCE_IDENTITY_RESERVATION_SQL,[signerFingerprint])
+    : await query(BALANCE_RESERVATION_SQL,[createHash("sha256").update(
+      `strata:kalshi:balance:${ownerUserId?`member:${ownerUserId}`:"member:unmapped-conservative"}:v1`).digest("hex")]);
   const wait=Number(response.rows[0]?.wait_ms);
   if (!Number.isFinite(wait) || wait < -2_000 || wait > MAX_QUEUED_MS)
     throw new Error("kalshi_balance_quota_busy");

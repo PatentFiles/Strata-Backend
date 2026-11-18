@@ -120,10 +120,10 @@ test('historical pinned bytes are an explicit assumption, never an implicit fres
  try{
  delete process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;assert.equal(await readHistoricalBaselineBytes(),null);
  process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';const source=await readHistoricalBaselineBytes();assert.ok(source);assert.equal(source.digest,HISTORICAL_BASELINE_SHA256);assert.equal(source.effectiveDate,'2026-07-07');
- const historical={...row,policy_version:HISTORICAL_FEE_VERSION,source_kind:HISTORICAL_SOURCE_KIND,genuine_source_verified:false,source_capture_id:null,historical_baseline_id:HISTORICAL_BASELINE_ID,historical_digest:HISTORICAL_BASELINE_SHA256,historical_bytes:source.bytes,official_source_digest:HISTORICAL_BASELINE_SHA256};
+ const historical={...row,policy_version:HISTORICAL_FEE_VERSION,source_kind:HISTORICAL_SOURCE_KIND,genuine_source_verified:false,source_capture_id:null,historical_baseline_id:HISTORICAL_BASELINE_ID,historical_digest:HISTORICAL_BASELINE_SHA256,historical_actual_digest:source.digest,official_source_digest:HISTORICAL_BASELINE_SHA256};
  const verify=(r:Record<string,unknown>)=>verifyDurableOwnerFee({query:async()=>({rows:[r]})},scope,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:kalshiFeed(feeApiPages())});
  const proof=await verify(historical);assert.equal(proof.ok,true);if(proof.ok){assert.equal(proof.sourceAuthenticityVerified,false);assert.equal(proof.publicationKnownCurrent,false);assert.equal(proof.sourceKind,HISTORICAL_SOURCE_KIND);}
- for(const patch of [{genuine_source_verified:true},{source_capture_id:'1'},{historical_baseline_id:'other'},{historical_bytes:Buffer.from('not the pinned PDF')},{source_kind:'FRESH_CANONICAL_CAPTURE'},{historical_digest:'d'.repeat(64)}])assert.equal((await verify({...historical,...patch})).ok,false);
+ for(const patch of [{genuine_source_verified:true},{source_capture_id:'1'},{historical_baseline_id:'other'},{historical_actual_digest:'0'.repeat(64)},{historical_actual_digest:null},{historical_actual_digest:undefined},{source_kind:'FRESH_CANONICAL_CAPTURE'},{historical_digest:'d'.repeat(64)}])assert.equal((await verify({...historical,...patch})).ok,false);
  }finally{if(saved===undefined)delete process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED;else process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED=saved;}
 });
 
@@ -170,7 +170,7 @@ test('owner-attested historical durable PREPARE keeps provenance disclosures and
  const baseline=await readHistoricalBaselineBytes();assert.ok(baseline);
  const f=await durablePrefetchFixture({policy_version:HISTORICAL_FEE_VERSION,source_kind:HISTORICAL_SOURCE_KIND,
  genuine_source_verified:false,source_capture_id:null,historical_baseline_id:HISTORICAL_BASELINE_ID,
- historical_digest:HISTORICAL_BASELINE_SHA256,historical_bytes:baseline.bytes,official_source_digest:HISTORICAL_BASELINE_SHA256});
+ historical_digest:HISTORICAL_BASELINE_SHA256,historical_actual_digest:baseline.digest,official_source_digest:HISTORICAL_BASELINE_SHA256});
  try{f.clock(fixtureClock+1100,1100);const proof=await f.check();assert.equal(proof.ok,true,JSON.stringify(proof));
  if(!proof.ok)throw Error('proof_missing');assert.equal(proof.publicationKnownCurrent,false);assert.equal(proof.sourceAuthenticityVerified,false);
  f.revoke();assert.equal((await f.check()).ok,false);
@@ -202,4 +202,40 @@ test('actual durable PREPARE market adapter adopts captured bytes, keeps signed 
  assert.equal(calls,5);assert.equal(books,1);assert.equal(evidence.observedAtMs,at);
  assert.equal(evidence.fee.verifiedAtMs,fixtureClock);assert.ok(evidence.publicMetadataCapture);
  }finally{attempt.discard();}
+});
+
+import {verifyDurableOwnerFeeSource,DURABLE_FEE_SOURCE_LOCK_SQL,DURABLE_FEE_LOCK_SQL} from './durableOwnerFeePolicy';
+const exactSource='strata-durable-owner-fee://11111111-1111-4111-8111-111111111111';
+test('exact-source stage fuses current policy and locked model without loosening joins or locks',async()=>{
+ assert.equal(DURABLE_FEE_SOURCE_LOCK_SQL,DURABLE_FEE_LOCK_SQL.replace("AND m.approved_policy_hash=$4 AND p.policy_hash=$4 AND p.state='APPROVED'","AND m.approved_policy_hash=p.policy_hash AND p.fee_source_url=$4 AND p.state='APPROVED'"));
+ let queries=0;
+ const proof=await verifyDurableOwnerFeeSource({async query(sql,args){queries++;assert.equal(sql,DURABLE_FEE_SOURCE_LOCK_SQL);assert.deepEqual(args,[scope.owner,scope.account,scope.sha,exactSource]);return {rows:[row]};}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:kalshiFeed(feeApiPages())});
+ assert.equal(proof.ok,true);assert.equal(queries,1);if(proof.ok)assert.equal(proof.tradingAuthorized,false);
+});
+test('source-bound revoked changed malformed missing or ambiguous row never issues provider reads',async()=>{
+ for(const rows of [[],[row,row],[{...row,entry_revoked:true}],[{...row,known_publication_change:true}],[{...row,approved_policy_hash:null}]]){
+ let calls=0;
+ const proof=await verifyDurableOwnerFeeSource({async query(){return {rows};}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async()=>{calls++;throw Error('forbidden');}});
+ assert.equal(proof.ok,false);assert.equal(calls,0);
+ }
+});
+test('source-bound lost connection never retries or changes transaction ownership',async()=>{
+ let queries=0,calls=0;
+ const proof=await verifyDurableOwnerFeeSource({async query(){queries++;throw Object.assign(Error('lost'),{code:'08006'});}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async()=>{calls++;throw Error('forbidden');}});
+ assert.equal(proof.ok,false);assert.equal(queries,1);assert.equal(calls,0);
+});
+test('source-bound metadata is checked against current locked policy, not old caller hash',async()=>{
+ const fixture=await durablePrefetchFixture();let calls=0;
+ const proof=await verifyDurableOwnerFeeSource({async query(){return {rows:[{...row,approved_policy_hash:'e'.repeat(64)}]};}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async()=>{calls++;throw Error('no fallback');}},fixture.metadata);
+ assert.equal(proof.ok,false);assert.equal(calls,0);
+});
+test('source-only wrapper rejects malformed namespace without lookup or discovery',async()=>{
+ let queries=0,calls=0;
+ const proof=await verifyDurableOwnerFeeSource({async query(){queries++;return {rows:[row]};}},scope,'https://example.com',marketTicker,'ENTRY',{fetcher:async()=>{calls++;throw Error('forbidden');}});
+ assert.equal(proof.ok,false);assert.equal(proof.reason,'durable_source_invalid');assert.equal(queries,0);assert.equal(calls,0);
+});
+test('source-bound FINAL rejects forged or other-phase capability without fresh fallback',async()=>{
+ let calls=0;const handle={kind:'DURABLE_PHASE_PUBLIC_BYTES' as const,read:async()=>{calls++;throw Error('forbidden');},capture:()=>{throw Error('forbidden');}};
+ const proof=await verifyDurableOwnerFeeSource({async query(){return {rows:[row]};}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async()=>{calls++;throw Error('no fallback');}},undefined,{phase:'FINAL_MARKET',handle});
+ assert.equal(proof.ok,false);assert.equal(calls,0);
 });

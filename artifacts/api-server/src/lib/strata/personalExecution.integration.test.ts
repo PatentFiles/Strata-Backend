@@ -1305,7 +1305,9 @@ test('two distinct final public scopes overlap real owned-ledger gates and signe
   const intent=await s.executor.prepareEntry(evaluationId);const before=(await pool.query('SELECT decision,request FROM v13_production_intent WHERE id=$1',[intent])).rows[0];
   dispatching=true;if(sensitivity)clockOffset=3650;let shouldPost=failure==='none'||(failure==='deadline-stress'&&enabled);const start=performance.now();
   let refusal:string|null=null;
-  if(sensitivity&&failure!=='deadline-stress'){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
+  // Faster gate reads may let the formerly marginal phase-OFF stress arm pass.
+  // Observe that outcome, retaining the same raw 5s guard and financial checks.
+  if(sensitivity&&!(failure==='deadline-stress'&&enabled)){try{await s.executor.dispatch(intent);shouldPost=true;}catch(error){refusal=String(error);shouldPost=false;}}
   else if(shouldPost){
    try{await s.executor.dispatch(intent);}catch(error){
     // Preserve
@@ -2001,7 +2003,7 @@ test('BOTH active committed worker PREPARE to FINAL and WIRE preserves original 
 
 import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
 import {verifyDurableFeeStage} from './durableFeeConsumers';
-import {verifyDurableOwnerFee} from './durableOwnerFeePolicy';
+import {verifyDurableOwnerFee,DURABLE_FEE_LOCK_SQL} from './durableOwnerFeePolicy';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256} from './historicalOwnerFeeBaseline';
 test('historical durable FINAL uses owning transaction; revocation, rollback and dispatch retain fences',async()=>{
  const posts:string[]=[],s=await tradingSession(500,posts),modelId='77777777-7777-4777-8777-777777777777',sha='a'.repeat(40),ticker='KXBTC15M-TEST-000';
@@ -2031,6 +2033,30 @@ test('historical durable FINAL uses owning transaction; revocation, rollback and
  ['/events/fee_changes?event_ticker='+ticker+'&limit=100']:{event_fee_changes:[],cursor:''}};assert.ok(path in pages);return Response.json(pages[path]);};
  try{
  const unlocked=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker);assert.equal(unlocked.ok,true,JSON.stringify(unlocked));
+ // Native digest integrity regressions use the actual locked SELECT, not a mock digest.
+ const exactScope={owner:USER,account:ACCOUNT,sha,policyHash:approved.policyHash!};
+ const lockedRow=(await pool.query(DURABLE_FEE_LOCK_SQL,[USER,ACCOUNT,sha,approved.policyHash])).rows[0];
+ assert.equal(lockedRow.historical_actual_digest,HISTORICAL_BASELINE_SHA256);
+ assert.equal(Object.hasOwn(lockedRow,'historical_bytes'),false);
+ const baselineBytes=readFileSync('../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf');
+ const oldTextBytes=Buffer.byteLength('\\x'+baselineBytes.toString('hex'));
+ assert.equal(oldTextBytes,562260);assert.equal(Buffer.byteLength(lockedRow.historical_actual_digest),64);
+ console.info('HISTORICAL_DIGEST_PAYLOAD',JSON.stringify({oldByteaTextBytes:oldTextBytes,newDigestTextBytes:64,savedPerRead:oldTextBytes-64,scope:'field payload only; no network latency measurement'}));
+ for(const [sql,args] of [
+  ['UPDATE private.strata_durable_historical_baseline SET original_bytes=$1',[Buffer.from('corrupt')]],
+  ['UPDATE private.strata_durable_historical_baseline SET original_bytes=NULL',[]],
+  ['UPDATE private.strata_durable_historical_baseline SET content_sha256=$1',['0'.repeat(64)]],
+  ['UPDATE private.strata_durable_historical_baseline SET content_sha256=NULL',[]],
+  ['UPDATE private.strata_durable_owner_fee_model SET genuine_source_verified=true',[]],
+  ['UPDATE private.strata_durable_owner_fee_state SET known_publication_change=true',[]],
+ ] as [string,unknown[]][]){
+  const c=await pool.connect();try{await c.query('BEGIN');await c.query(sql,args);
+   const proof=await verifyDurableOwnerFee(c,exactScope,ticker,'ENTRY');assert.equal(proof.ok,false,sql);
+  }finally{await c.query('ROLLBACK');c.release();}
+ }
+ const intact=await verifyDurableOwnerFee(pool,exactScope,ticker,'ENTRY');assert.equal(intact.ok,true);
+ if(intact.ok){assert.equal(intact.sourceAuthenticityVerified,false);assert.equal(intact.publicationKnownCurrent,false);assert.equal(intact.sourceDigest,HISTORICAL_BASELINE_SHA256);}
+ for(const changed of [{owner:'99999999-9999-4999-8999-999999999999'},{account:'foreign-account'},{sha:'b'.repeat(40)},{policyHash:'b'.repeat(64)}])assert.equal((await verifyDurableOwnerFee(pool,{...exactScope,...changed},ticker,'ENTRY')).ok,false);
  const before=reads;
 
  await s.executor.ledger.transaction(async(tx)=>{
@@ -2086,7 +2112,7 @@ test('historical durable FINAL uses owning transaction; revocation, rollback and
  }finally{globalThis.fetch=saved;for(const [key,value] of [['STRATA_DURABLE_OWNER_FEE_ENABLED',priorEnv.feature],['STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED',priorEnv.historical],['RAILWAY_GIT_COMMIT_SHA',priorEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',priorEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
 });
 
-for(const scenario of ['success','provider_failure','cancel','post_sign_expiry'] as const)test(`historical durable phase-bound FINAL/WIRE ${scenario}`,async()=>{
+for(const scenario of ['success','provider_failure','cancel','post_sign_expiry','observed_source_expiry','observed_overlap_expiry','snapshot_overlap_success'] as const)test(`historical durable phase-bound FINAL/WIRE ${scenario}`,async()=>{
  await pool.query('DROP TABLE IF EXISTS private.strata_durable_fee_release_authorization,private.strata_durable_owner_fee_state,private.strata_durable_owner_fee_model,private.strata_durable_historical_baseline');
  const posts:string[]=[],s=await tradingSession(500,posts),modelId='77777777-7777-4777-8777-777777777777',sha='a'.repeat(40),ticker='KXBTC15M-TEST-000';
  const sourceUrl='strata-durable-owner-fee://'+modelId;
@@ -2146,8 +2172,12 @@ for(const scenario of ['success','provider_failure','cancel','post_sign_expiry']
  readPublic:async path=>{const r=await globalThis.fetch('https://external-api.kalshi.com/trade-api/v2'+path);return r.json();},
  configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:HISTORICAL_BASELINE_SHA256,policyHash:approved.policyHash!,
  })});
+ // Observed Nov18 source age and dispatch prefix are replay inputs, not a fill simulation.
+ const successfulScenario=scenario==='success'||scenario==='snapshot_overlap_success';
+ s.executor.overlapFinalAccountSnapshot=scenario==='observed_overlap_expiry'||scenario==='snapshot_overlap_success';
+ const observedReplay=scenario==='observed_source_expiry'||scenario==='observed_overlap_expiry',providerAge=observedReplay?1537:901,dispatchPrefix=observedReplay?3110:2123;
  let sourceAt=0,wireEffectiveAgeMs:number|null=null;
- const raw=s.exchange.fetchImpl!,checkedWire=createEntryWireClockFetch(()=>{if(scenario==='success'&&wireCapture)wireCapture=wireCapture.capture();s.executor.ledger.assertFinalWireClock();wireEffectiveAgeMs=time()-sourceAt+901;},raw);const wire:typeof fetch=async(request,init)=>{if(scenario==='post_sign_expiry')await new Promise(r=>setTimeout(r,650));return checkedWire(request,init);};
+ const raw=s.exchange.fetchImpl!,checkedWire=createEntryWireClockFetch(()=>{if(successfulScenario&&wireCapture)wireCapture=wireCapture.capture();s.executor.ledger.assertFinalWireClock();wireEffectiveAgeMs=time()-sourceAt+providerAge;},raw);const wire:typeof fetch=async(request,init)=>{if(scenario==='post_sign_expiry')await new Promise(r=>setTimeout(r,650));return checkedWire(request,init);};
  // Existing integration fixture substitutes private grant/lease authorization ports.
  // The actual durable model SQL, provenance, revocation and market verification are NOT substituted.
  let wireReads=0;
@@ -2161,17 +2191,17 @@ for(const scenario of ['success','provider_failure','cancel','post_sign_expiry']
  })});
  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
  const originalSnapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof originalSnapshot>)=>{await new Promise(r=>setTimeout(r,1094));time();return originalSnapshot(...args);}});delayed=true;
- sourceAt=time()-554;const evaluation=await source(sourceAt);await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=901 WHERE id=$1',[evaluation]);
+ sourceAt=time()-(observedReplay?638:554);const evaluation=await source(sourceAt);await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=$2 WHERE id=$1',[evaluation,providerAge]);
  const coordinator=new CommittedPublicMetadataCoordinator(globalThis.fetch,time,()=>performance.now());
  activePrepare=coordinator.start({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'},
- {evaluationId:evaluation,marketTicker:ticker,evaluatedAtMs:sourceAt,committedAtMs:time(),qualifyingTrigger:true,btcProviderAgeMs:901,btcReceiveAgeMs:0,marketAgeMs:0});assert.ok(activePrepare);
+ {evaluationId:evaluation,marketTicker:ticker,evaluatedAtMs:sourceAt,committedAtMs:time(),qualifyingTrigger:true,btcProviderAgeMs:providerAge,btcReceiveAgeMs:0,marketAgeMs:0});assert.ok(activePrepare);
  const reconcileAt=time();await s.executor.reconcile();await activePrepare.drained;activePrepare.pause();
  await new Promise(r=>setTimeout(r,63)); // explicit synthetic discovery delay
  const prepareAt=time();const intent=await s.executor.prepareEntry(evaluation);activePrepare.discard();activePrepare=null;
- await new Promise(r=>setTimeout(r,Math.max(0,2123-(time()-sourceAt)))); // calibrate optimistic observed prepare completion, never reset source
- phases=new FinalPublicMetadataPhases(coordinator,()=>({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'}),()=>true);s.executor.finalPublicMetadata=phases;const phaseStart=phases.start.bind(phases);phases.start=(phase,context)=>{if(phase==='WIRE_FEE'&&scenario==='provider_failure')wireFailure=true;phaseStart(phase,context);if(phase==='WIRE_FEE'&&scenario==='cancel')phases.discardAll();};
- const dispatchAt=time();if(scenario!=='success'){if(scenario==='post_sign_expiry')await assert.rejects(s.executor.dispatch(intent),/production_final_wire_source_expired/);else await assert.rejects(s.executor.dispatch(intent));assert.equal(posts.length,0);if(scenario==='provider_failure')assert.ok(failedReads>0&&failedReads<=3);console.info('DURABLE_PHASE_REFUSAL',JSON.stringify({scenario,failedReads,syntheticPosts:posts.length}));return;}await s.executor.dispatch(intent);
- console.info('DURABLE_TIMED_PHASES',JSON.stringify({sourceToReconcileMs:reconcileAt-sourceAt,sourceToPrepareMs:prepareAt-sourceAt,sourceToDispatchMs:dispatchAt-sourceAt,wireEffectiveAgeMs}));
+ await new Promise(r=>setTimeout(r,Math.max(0,dispatchPrefix-(time()-sourceAt)))); // calibrate optimistic observed prepare completion, never reset source
+ phases=new FinalPublicMetadataPhases(coordinator,()=>({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'}),()=>true);if(!observedReplay)s.executor.finalPublicMetadata=phases;const phaseStart=phases.start.bind(phases);phases.start=(phase,context)=>{if(phase==='WIRE_FEE'&&scenario==='provider_failure')wireFailure=true;phaseStart(phase,context);if(phase==='WIRE_FEE'&&scenario==='cancel')phases.discardAll();};
+ const dispatchAt=time();if(!successfulScenario){if(observedReplay)await assert.rejects(s.executor.dispatch(intent),/production_final_source_changed_or_expired/);else if(scenario==='post_sign_expiry')await assert.rejects(s.executor.dispatch(intent),/production_final_wire_source_expired/);else await assert.rejects(s.executor.dispatch(intent));assert.equal(posts.length,0);if(scenario==='provider_failure')assert.ok(failedReads>0&&failedReads<=3);console.info('DURABLE_PHASE_REFUSAL',JSON.stringify({scenario,failedReads,syntheticPosts:posts.length}));return;}await s.executor.dispatch(intent);
+ console.info('DURABLE_TIMED_PHASES',JSON.stringify({scenario,sourceToReconcileMs:reconcileAt-sourceAt,sourceToPrepareMs:prepareAt-sourceAt,sourceToDispatchMs:dispatchAt-sourceAt,wireEffectiveAgeMs}));
  assert.ok(finalCapture&&wireCapture);assert.equal(finalCapture.records.length,5);assert.equal(wireCapture.records.length,5);assert.ok(Math.max(...finalCapture.records.map((r:any)=>r.capturedAtMs))<=Math.min(...wireCapture.records.map((r:any)=>r.requestStartedAtMs)));assert.notDeepEqual(finalCapture,wireCapture);
  assert.ok(finalReads>=1);assert.equal(wireReads,1);assert.equal(posts.length,1);
  assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[intent])).rows[0].state,'UNKNOWN');
@@ -2180,4 +2210,66 @@ for(const scenario of ['success','provider_failure','cancel','post_sign_expiry']
  assert.ok(await readHeldProtectiveMarketFee({ownerId:USER,accountId:ACCOUNT,sourceUrl,market:ticker,policyVersion:HISTORICAL_FEE_VERSION,formulaVersion:approved.feeFormulaVersion!,digest:HISTORICAL_BASELINE_SHA256},{},tx));});
  console.info('HISTORICAL_DURABLE_TIMED_DISPATCH',JSON.stringify({finalReads,wireReads,syntheticPosts:posts.length,originalProviderAgeMs:901,wireEffectiveAgeMs,scope:'actual historical fee verifier and ledger/executor; synthetic grant/lease and provider ports, not production authorization'}));
  }finally{globalThis.fetch=saved;for(const [key,value] of [['STRATA_DURABLE_OWNER_FEE_ENABLED',priorEnv.feature],['STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED',priorEnv.historical],['RAILWAY_GIT_COMMIT_SHA',priorEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',priorEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
+});
+
+import {OWNED_GATE_READ_SQL} from '../v13-production/ownedGateRead';
+test('batched owned gate rechecks master and policy and retains separate policy lock',async()=>{
+ const posts:string[]=[],s=await tradingSession(500,posts);
+ await s.executor.ledger.transaction(async(tx,a)=>{
+  await s.executor.gate(tx,a);
+  await pool.query('UPDATE live_execution_config SET manual_kill_switch=true,live_execution_enabled=false');
+  await assert.rejects(s.executor.gate(tx,a),/production_master_kill_switch_or_flag/);
+  await pool.query('UPDATE live_execution_config SET manual_kill_switch=false,live_execution_enabled=true');
+  await s.executor.gate(tx,a);
+  await pool.query("UPDATE v13_live_money_policy SET state='REVOKED' WHERE id=$1",[a.policy_id]);
+  await assert.rejects(s.executor.gate(tx,a),/production_policy_missing/);
+  await pool.query("UPDATE v13_live_money_policy SET state='APPROVED' WHERE id=$1",[a.policy_id]);
+  await s.executor.gate(tx,a);await s.executor.ledger.policy(tx,a);
+  const c=await pool.connect();try{await c.query("SET lock_timeout='200ms'");
+   const pid=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+   const blocked=c.query("UPDATE v13_live_money_policy SET state='REVOKED' WHERE id=$1",[a.policy_id]).then(()=>null,(e:any)=>e);
+   let observed=false;for(let n=0;n<30;n++){
+    const activity=(await tx.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0];
+    if(activity?.wait_event_type==='Lock'){observed=true;break;}await new Promise(r=>setTimeout(r,2));
+   }
+   assert.equal(observed,true,'separate policy FOR SHARE must block contender');assert.equal((await blocked)?.code,'55P03');
+  }finally{c.release();}
+ });assert.equal(posts.length,0);
+});
+test('batched owned gate refuses zero duplicate null and foreign authority in order',async()=>{
+ const s=await tradingSession(500,[]);
+ await s.executor.ledger.transaction(async(tx,a)=>{
+  // Temporary malformed rowsets do not change production schema constraints.
+  await tx.query('CREATE TEMP TABLE live_execution_config(manual_kill_switch boolean,live_execution_enabled boolean) ON COMMIT DROP');
+  await assert.rejects(s.executor.gate(tx,a),/production_master_kill_switch_or_flag/);
+  await tx.query('INSERT INTO live_execution_config VALUES(false,true),(false,true)');
+  await assert.rejects(s.executor.gate(tx,a),/production_master_kill_switch_or_flag/);
+  await tx.query('TRUNCATE live_execution_config; INSERT INTO live_execution_config VALUES(NULL,true)');
+  await assert.rejects(s.executor.gate(tx,a),/production_master_kill_switch_or_flag/);
+  s.executor.accountOwnerUserId=OTHER;await assert.rejects(s.executor.gate(tx,a),/foreign_execution_account/);
+  s.executor.accountOwnerUserId='malformed';await assert.rejects(s.executor.gate(tx,a),/foreign_execution_account/);
+  s.executor.accountOwnerUserId=USER;
+  await tx.query('TRUNCATE live_execution_config; INSERT INTO live_execution_config VALUES(false,true)');
+  await tx.query('CREATE TEMP TABLE v13_live_money_policy(id text,execution_account_id text,policy_hash text,state text) ON COMMIT DROP');
+  await assert.rejects(s.executor.gate(tx,a),/production_policy_missing/);
+  await tx.query("INSERT INTO v13_live_money_policy VALUES($1,$2,$3,'APPROVED'),($1,$2,$3,'APPROVED')",[a.policy_id,ACCOUNT,'a'.repeat(64)]);
+  await assert.rejects(s.executor.gate(tx,a),/production_policy_missing/);
+  await tx.query('TRUNCATE v13_live_money_policy');
+  await tx.query("INSERT INTO v13_live_money_policy VALUES($1,$2,NULL,'APPROVED')",[a.policy_id,ACCOUNT]);
+  await assert.rejects(s.executor.gate(tx,a),/production_policy_missing/);
+ });
+});
+test('batched owned gate uncertainty precedes owner and rollback remains atomic',async()=>{
+ const posts:string[]=[],s=await tradingSession(500,posts),evaluation=await source(s.now),id=await s.executor.prepareEntry(evaluation);
+ await pool.query("UPDATE v13_production_intent SET state='UNKNOWN' WHERE id=$1",[id]);
+ await assert.rejects(s.executor.ledger.transaction(async(tx,a)=>{
+  s.executor.accountOwnerUserId=OTHER;
+  await assert.rejects(s.executor.gate(tx,a),/production_uncertain_order_blocks_mutation/);
+  const facts=(await tx.query(OWNED_GATE_READ_SQL,[a.id,null,false,OTHER])).rows[0];
+  assert.equal(facts.owner_user_id,null);assert.deepEqual(facts.master_rows,[]);assert.deepEqual(facts.policy_rows,[]);
+  s.executor.accountOwnerUserId=USER;
+  await tx.query("UPDATE v13_production_intent SET state='BLOCKED' WHERE id=$1",[id]);
+  await s.executor.gate(tx,a);throw Error('owned_gate_rollback_sentinel');
+ }),/owned_gate_rollback_sentinel/);
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[id])).rows[0].state,'UNKNOWN');assert.equal(posts.length,0);
 });

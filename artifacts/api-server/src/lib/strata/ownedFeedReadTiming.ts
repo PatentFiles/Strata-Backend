@@ -56,7 +56,7 @@ export function createOwnedFeedReadTiming<T extends Get>(get:T,
 }
 
 const validSummaries=new WeakSet<object>();
-const readContext=new AsyncLocalStorage<{summary?:OwnedFeedReadTiming}>();
+const readContext=new AsyncLocalStorage<{summary?:OwnedFeedReadTiming;snapshotPhases?:OwnedSnapshotTiming}>();
 export function recordOwnedFeedReadTiming(summary:OwnedFeedReadTiming):void {
  try{const context=readContext.getStore();if(context&&validSummaries.has(summary))context.summary=summary;}catch{/* diagnostic only */}
 }
@@ -65,7 +65,43 @@ export function isOwnedFeedReadTiming(value:unknown):value is OwnedFeedReadTimin
 }
 /** Dedicated side channel; never put this object on a signed snapshot. */
 export class OwnedFeedTimingCapture {
- private readonly context:{summary?:OwnedFeedReadTiming}={};
+ private readonly context:{summary?:OwnedFeedReadTiming;snapshotPhases?:OwnedSnapshotTiming}={};
  run<T>(fn:()=>T):T{return readContext.run(this.context,fn);}
  snapshot():OwnedFeedReadTiming|undefined{return this.context.summary;}
+ snapshotPhases():OwnedSnapshotTiming|undefined{return this.context.snapshotPhases;}
+}
+
+/** Snapshot phases are diagnostic-only and never attached to financial proof.
+ * A phase includes client scheduling, DB/transport waits and local work, not
+ * exclusive server execution. Fixed labels contain no provider/credential data. */
+const SNAPSHOT_PHASES=['unresolved_intents','heartbeat','maintenance','signed_feeds','load_requests','snapshot_mapping'] as const;
+type SnapshotPhase=typeof SNAPSHOT_PHASES[number];
+export type OwnedSnapshotTiming=Readonly<{version:1;semantics:'CLIENT_MONOTONIC_PHASE_ELAPSED';
+ totalElapsedMs:number|null;completed:boolean;phases:ReadonlyArray<Readonly<{phase:SnapshotPhase;elapsedMs:number|null;completed:boolean}>>}>;
+const validSnapshotTimings=new WeakSet<object>();
+export function isOwnedSnapshotTiming(value:unknown):value is OwnedSnapshotTiming {
+ return typeof value==='object'&&value!==null&&validSnapshotTimings.has(value);
+}
+export function recordOwnedSnapshotTiming(summary:OwnedSnapshotTiming):void {
+ try{const context=readContext.getStore();if(context&&validSnapshotTimings.has(summary))context.snapshotPhases=summary;}catch{/* diagnostic only */}
+}
+export function createOwnedSnapshotTiming(observer:(event:OwnedSnapshotTiming)=>unknown=recordOwnedSnapshotTiming,
+ clock:()=>number=()=>performance.now()) {
+ const sample=()=>{try{const n=clock();return Number.isFinite(n)&&n>=0?n:null;}catch{return null;}};
+ const elapsed=(a:number|null,b:number|null)=>a===null||b===null||b<a?null:Math.min(3_600_000,Math.round((b-a)*1000)/1000);
+ const started=sample(),rows:Array<{phase:SnapshotPhase;elapsedMs:number|null;completed:boolean}>=[];
+ let active:{phase:SnapshotPhase;started:number|null}|null=null,finished=false;
+ const end=(completed:boolean,at:number|null)=>{if(active){rows.push({phase:active.phase,elapsedMs:elapsed(active.started,at),completed});active=null;}};
+ return {
+  mark:(phase:SnapshotPhase)=>{try{if(finished||!SNAPSHOT_PHASES.includes(phase)||rows.length>=SNAPSHOT_PHASES.length)return;
+   const at=sample();end(true,at);if(rows.length<SNAPSHOT_PHASES.length)active={phase,started:at};
+  }catch{/* Telemetry cannot change a read or refusal. */}},
+  finish:(completed:boolean)=>{if(finished)return;finished=true;
+   try{const at=sample();end(completed,at);const event:OwnedSnapshotTiming=Object.freeze({version:1,
+    semantics:'CLIENT_MONOTONIC_PHASE_ELAPSED',totalElapsedMs:elapsed(started,at),completed,
+    phases:Object.freeze(rows.map(row=>Object.freeze({...row})))});
+    validSnapshotTimings.add(event);Promise.resolve(observer(event)).catch(()=>{});
+   }catch{/* Sync/async observer failure has no execution authority. */}
+  },
+ };
 }

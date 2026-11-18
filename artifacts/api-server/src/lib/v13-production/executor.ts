@@ -1,3 +1,5 @@
+import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
+import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
 import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
@@ -69,6 +71,8 @@ export class ProductionExecutor {
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
   }|null)|null=null;
   finalPublicMetadata:FinalPublicMetadataHooks|null=null;
+  /** Internal opt-in scheduling only; no client or authority input. */
+  overlapFinalAccountSnapshot = false;
   private phaseContext(i:Intent,invocation:symbol|undefined):FinalPublicMetadataContext|null {
     if(!invocation)return null;
     const source=i.decision?.source as Record<string,any>|undefined;
@@ -118,16 +122,10 @@ export class ProductionExecutor {
     requireProof(!a.blocked_reason || allowBlockedExit || lifecycle, "production_account_frozen");
     requireProof(a.reconciled_at && a.reconciled_at.getTime() <= this.now() &&
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
-    // The owned account row is already locked by ledger.transaction. Batch only
-    // these adjacent independent reads; mutable master/policy checks stay later.
-    // CASE preserves UNKNOWN-first denial: do not read owner identity on that path.
-    const ownedGate = this.accountOwnerUserId ? (await tx.query(`
-      WITH uncertain AS MATERIALIZED (
-        SELECT EXISTS(SELECT 1 FROM v13_production_intent WHERE account_id=$1
-          AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)) AS has_uncertain_order
-      ) SELECT has_uncertain_order, CASE WHEN $3::boolean OR NOT has_uncertain_order
-        THEN (SELECT owner_user_id::text FROM v13_production_account WHERE id=$1)
-        ELSE NULL END AS owner_user_id FROM uncertain`, [a.id, ignoreIntentId, lifecycle])).rows[0] : null;
+    // Preserve each gate boundary and refusal order. Only its independent
+    // non-locking reads are batched; locked policy decoding remains separate.
+    const ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
+      [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
     const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
     requireProof(lifecycle || (ownedGate ? ownedGate.has_uncertain_order === false : unknown!.rows.length === 0),
@@ -135,15 +133,11 @@ export class ProductionExecutor {
     if (this.accountOwnerUserId) {
       requireProof(ownedGate && ownedGate.owner_user_id === this.accountOwnerUserId,
         "foreign_execution_account");
-      const master = await tx.query("SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config");
-      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
-        master.rows[0].live_execution_enabled === true, "production_master_kill_switch_or_flag");
-      const policy = await tx.query(`SELECT p.policy_hash
-        FROM v13_live_money_policy p
-        JOIN v13_production_account a ON a.policy_id = p.id AND a.id = p.execution_account_id
-        WHERE a.id = $1 AND a.owner_user_id = $2::uuid AND p.state = 'APPROVED'`,
-      [a.id, this.accountOwnerUserId]);
-      requireProof(policy.rows.length === 1 && /^[0-9a-f]{64}$/.test(String(policy.rows[0].policy_hash ?? "")),
+      const master = {rows:Array.isArray(ownedGate.master_rows)?ownedGate.master_rows:[]};
+      requireProof(master.rows.length === 1 && master.rows[0]?.manual_kill_switch === false &&
+        master.rows[0]?.live_execution_enabled === true, "production_master_kill_switch_or_flag");
+      const policy = {rows:Array.isArray(ownedGate.policy_rows)?ownedGate.policy_rows:[]};
+      requireProof(policy.rows.length === 1 && /^[0-9a-f]{64}$/.test(String(policy.rows[0]?.policy_hash ?? "")),
         "production_policy_missing");
       return;
     }
@@ -179,8 +173,8 @@ export class ProductionExecutor {
       const { account: a, earliest: floor } = await this.ledger.readReconcileAccount();
       const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
-      try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot()});}
-      catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
+      try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});}
+      catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
       const commit=this.startTiming("ledger_reconcile_commit");
       try {const reconciliationReceipt=this.heldReconcile
           ?await this.heldReconcile(snapshot,a.revision)
@@ -289,15 +283,8 @@ export class ProductionExecutor {
       assertChampionSourceReference(source);
       if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
       subtimings.mark("exposure_and_stake");
-      const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
-      requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
-      const balances = await tx.query(`SELECT
-        (SELECT count(*) FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) AS open,
-        (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
-        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
-        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1
-          AND occurred_at >= $2) AS daily_loss`, [a.id, new Date(new Date(this.now()).toISOString().slice(0, 10))]);
-      const b = balances.rows[0];
+      const b = await readPrepareEntryCapacity((sql,params)=>tx.query(sql,params),a.id,
+        new Date(new Date(this.now()).toISOString().slice(0,10)));
       const capital = BigInt(p.capitalLimitCents) * 10_000n - money(b.basis) - money(a.reserved_micros) - money(b.total_loss);
       requireProof(capital >= 0n, "production_capital_exhausted");
       const stake = await this.readConfiguredStake(tx);
@@ -465,6 +452,15 @@ export class ProductionExecutor {
           const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
           let finalComparison:FinalComparisonDiagnostics|undefined;
           let finalMarketReads:MarketEvidenceReadTiming|undefined;
+          let pendingSnapshot:Promise<{ok:true;snapshot:Snapshot}|{ok:false;error:unknown}>|undefined;
+          let snapshotHistoryFloor:Date|null|undefined;
+          const readFinalSnapshot=async(oldest:Date|null)=>{
+            const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
+            try{const snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
+              () => this.exchange.snapshot(identity(a), new Date(oldest as Date).getTime())));
+              snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});return snapshot;}
+            catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
+          };
           try {
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
@@ -474,6 +470,13 @@ export class ProductionExecutor {
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
             i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
+          if(i.kind==="ENTRY"&&this.overlapFinalAccountSnapshot){
+            snapshotHistoryFloor=(await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1",[a.id])).rows[0].earliest;
+            // Only fresh read-only proof is overlapped. The child snapshot ALS
+            // exemption never reaches the market sibling. Attach both handlers
+            // immediately; every exit below drains before this transaction ends.
+            pendingSnapshot=readFinalSnapshot(snapshotHistoryFloor!).then(snapshot=>({ok:true as const,snapshot}),error=>({ok:false as const,error}));
+          }
           const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
           const book = phaseContext&&this.finalPublicMetadata
             ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side,undefined,i.kind))
@@ -551,13 +554,11 @@ export class ProductionExecutor {
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k => source[k] + age <= p.maxQuoteAgeMs),
             "production_final_owned_feed_changed_or_stale");
           }
-          const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+          const oldest = pendingSnapshot ? snapshotHistoryFloor! : (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
           if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("WIRE_FEE",context);}
-          const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
           let snapshot:Snapshot;
-          try{snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
-            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime())));snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot()});}
-          catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
+          if(pendingSnapshot){const outcome=await pendingSnapshot;if(!outcome.ok)throw outcome.error;snapshot=outcome.snapshot;}
+          else snapshot=await readFinalSnapshot(oldest);
           await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
@@ -645,7 +646,8 @@ export class ProductionExecutor {
           // downstream refusal proves its transport was never invoked.
           invoked = true;
           finalTiming("completed",{finalMarketReads});
-          }catch(error){finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
+          }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
+          finally{if(pendingSnapshot)await pendingSnapshot;}
         };
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.
