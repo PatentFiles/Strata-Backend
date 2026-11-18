@@ -1,0 +1,75 @@
+# DRAFT TOOLING ONLY: incomplete coverage intentionally fails before qualification.
+name: Strata owner-flow behavioral candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact run source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Pin Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Verify protected producer bytes before executing checkout code
+        run: |
+          python3 - "$GITHUB_WORKSPACE" "e011e209a88f743fd899f5ab63810b216c320a3c0035dd2e81854f2b2f0a47e8" <<'PYBOOT'
+          # This exact body is inlined into the pinned workflow, never executed from checkout.
+          import hashlib,json,pathlib,sys
+          root=pathlib.Path(sys.argv[1]);expected=sys.argv[2]
+          manifest=root/'machine-qualification/producer-files.json'
+          if manifest.is_symlink(): raise ValueError('manifest_symlink')
+          raw=manifest.read_bytes()
+          if len(raw)>16384 or hashlib.sha256(raw).hexdigest()!=expected: raise ValueError('manifest_untrusted')
+          m=json.loads(raw);names={'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/machine-binding.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/verify-artifact.cjs', 'machine-qualification/behavioral-suite/fixtures/runtimeRoleProbe.offline.ts', 'machine-qualification/behavioral-suite/fixtures/account-scoped-lifecycle-barrier.sql', 'machine-qualification/behavioral-suite/fixtures/consumption-test.sql', 'machine-qualification/behavioral-suite/fixtures/ownerAtomicRecovery.offline.ts', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/verify-local-runtime.cjs', 'machine-qualification/behavioral-suite/fixtures/heldReaderNative.offline.ts', 'machine-qualification/behavioral-suite/fixtures/github-evidence/verify.test.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/check-strata-bundle.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/verify-local-runtime.test.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/machine-binding.test.cjs', 'machine-qualification/behavioral-suite/fixtures/recovery-runtime-permissions-readonly.sql', 'machine-qualification/behavioral-suite/fixtures/consumption.sql', 'machine-qualification/behavioral-suite/files.json', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/account-machine-binding.test.cjs', 'machine-qualification/behavioral-suite/fixtures/admission-outcome-schema.sql', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/verify-artifact.test.cjs', 'machine-qualification/policy.json', 'machine-qualification/behavioral-suite/fixtures/owner-lease-consent-epoch.sql', 'machine-qualification/behavioral-suite/fixtures/owner-consent-schema.sql', 'machine-qualification/behavioral-suite/plan.json', 'machine-qualification/producer.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/verify.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/offline-fixture.cjs', 'machine-qualification/behavioral-suite/fixtures/ownerConsentCandidate.offline.ts', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/read-archive.py', 'machine-qualification/behavioral-suite/run.py', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/producer.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/producer.test.cjs', 'machine-qualification/behavioral-suite/fixtures/ownerBarrierActualWriters.offline.ts', 'machine-qualification/behavioral-suite/fixtures/ownerRecoveryProviderIdentityCandidate.test.ts', 'machine-qualification/check-strata-bundle.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/account-machine-binding.cjs', 'machine-qualification/behavioral-suite/fixtures/github-evidence/qualification/check-strata-bundle.test.cjs', 'machine-qualification/behavioral-suite/fixtures/account-scoped-exposure-barrier.sql'}
+          if m.get('schema')!='strata.protected-producer-files.v1' or set(m.get('files',{}))!=names: raise ValueError('producer_file_set_invalid')
+          for name,digest in m['files'].items():
+              p=root
+              for part in name.split('/'):
+                  p=p/part
+                  if p.is_symlink():raise ValueError('producer_symlink')
+              if not p.is_file() or p.stat().st_size>1048576 or hashlib.sha256(p.read_bytes()).hexdigest()!=digest:raise ValueError('producer_bytes_untrusted')
+          print('PROTECTED_PRODUCER_FILES_VERIFIED')
+          PYBOOT
+      - name: Refuse incomplete qualification or missing candidate application
+        run: |
+          python3 - <<'PYCOVERAGE'
+          import json
+          p=json.load(open('machine-qualification/policy.json'))
+          if p.get('completeOwnerRecoveryQualification') is not True or p.get('candidateApplicationPublished') is not True or p.get('unqualified'):
+              raise SystemExit('Owner-only qualification incomplete: do not issue release evidence')
+          PYCOVERAGE
+      - name: Install exact package manager and frozen dependencies without scripts
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v24.22.1"
+          npm install --global pnpm@9.15.9 --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install disposable PostgreSQL test tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-16
+          test -x /usr/lib/postgresql/16/bin/initdb
+      - name: Produce immutable-source candidate manifest
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          TRUSTED_POLICY_SHA256: 9f06dd5e7be6aecc0b76a0c79c0d04bc3a192c37d5497e9ac4f650d5422aefa8
+        run: |
+          set -euo pipefail
+          export EXPECTED_TREE="$(git rev-parse HEAD^{tree})"
+          node machine-qualification/producer.cjs "$GITHUB_WORKSPACE" machine-qualification/policy.json > "$RUNNER_TEMP/qualification-candidate.json"
+      - name: Upload attempt-specific candidate only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qualification-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-candidate.json
+          if-no-files-found: error
+          retention-days: 1
