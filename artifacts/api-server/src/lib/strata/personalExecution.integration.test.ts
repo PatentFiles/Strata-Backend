@@ -1,3 +1,4 @@
+import {readHeldProtectiveMarketFee} from './heldProtectiveMarketFee';
 import {entryCashRiskFeeFixture} from "../v13-production/entryCashRisk.fixture";
 import {canonicalEntryQuoteEvidenceDigest} from "../v13-production/entryQuoteEvidence";
 import {dispatchReviewedProtectiveExitOnce} from "./ownerFeeEmergencyExitSignedDispatch";
@@ -1996,4 +1997,187 @@ test('BOTH active committed worker PREPARE to FINAL and WIRE preserves original 
  }
  console.info('BOTH_ACTIVE_WORKER_SUMMARY',JSON.stringify({cases:cases.length,arms:results.length,posts:results.filter(r=>r.shouldPost).length,refusals:results.filter(r=>!r.shouldPost).length}));
  }finally{for(const [key,value] of [['NODE_ENV',savedEnv.node],['RAILWAY_GIT_COMMIT_SHA',savedEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',savedEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
+});
+
+import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
+import {verifyDurableFeeStage} from './durableFeeConsumers';
+import {verifyDurableOwnerFee} from './durableOwnerFeePolicy';
+import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256} from './historicalOwnerFeeBaseline';
+test('historical durable FINAL uses owning transaction; revocation, rollback and dispatch retain fences',async()=>{
+ const posts:string[]=[],s=await tradingSession(500,posts),modelId='77777777-7777-4777-8777-777777777777',sha='a'.repeat(40),ticker='KXBTC15M-TEST-000';
+ const sourceUrl='strata-durable-owner-fee://'+modelId;
+ const approved={...policy(),executionAccountId:ACCOUNT,maxQuoteAgeMs:5000,feePolicyVersion:HISTORICAL_FEE_VERSION,feeSourceUrl:sourceUrl,feeFormulaVersion:'standard-quadratic-0.07-v1'};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
+ await pool.query('UPDATE v13_live_money_policy SET max_quote_age_ms=5000,fee_policy_version=$1,fee_source_url=$2,fee_formula_version=$3,policy_hash=$4 WHERE id=$5',[approved.feePolicyVersion,sourceUrl,approved.feeFormulaVersion,approved.policyHash,approved.id]);
+ await pool.query('UPDATE v13_production_account SET fee_artifact_digest=$1 WHERE id=$2',[HISTORICAL_BASELINE_SHA256,ACCOUNT]);
+ // Minimal native row-shape fixture only. No claim of migrations/consent provenance.
+ // The production verifier and its unchanged FOR SHARE locking SQL are real.
+ await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+ CREATE TABLE private.strata_durable_owner_fee_model(model_id uuid,owner_user_id uuid,execution_account_id text,release_commit_sha text,approved_policy_hash text,official_source_digest text,policy_version text,formula_version text,effective_date date,source_kind text,genuine_source_verified boolean,source_capture_id bigint,historical_baseline_id text);
+ CREATE TABLE private.strata_durable_owner_fee_state(model_id uuid,known_publication_change boolean,monitor_state text,entry_revoked boolean);
+ CREATE TABLE private.strata_durable_historical_baseline(baseline_id text,original_bytes bytea,content_sha256 text);
+ CREATE TABLE private.strata_durable_fee_release_authorization(model_id uuid,owner_user_id uuid,execution_account_id text,original_release_sha text,release_commit_sha text,policy_hash text,source_digest text,state text);`);
+ await pool.query('INSERT INTO private.strata_durable_owner_fee_model VALUES($1,$2,$3,$4,$5,$6,$7,$8,\'2026-07-07\',$9,false,NULL,$10)',[modelId,USER,ACCOUNT,sha,approved.policyHash,HISTORICAL_BASELINE_SHA256,HISTORICAL_FEE_VERSION,approved.feeFormulaVersion,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID]);
+ await pool.query("INSERT INTO private.strata_durable_owner_fee_state VALUES($1,false,'never_checked',false)",[modelId]);
+ await pool.query('INSERT INTO private.strata_durable_historical_baseline VALUES($1,$2,$3)',[HISTORICAL_BASELINE_ID,readFileSync('../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf'),HISTORICAL_BASELINE_SHA256]);
+ const priorEnv={feature:process.env.STRATA_DURABLE_OWNER_FEE_ENABLED,historical:process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED,sha:process.env.RAILWAY_GIT_COMMIT_SHA,release:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+ process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+ const saved=globalThis.fetch;let reads=0;
+ const marketClock=Date.now();
+ globalThis.fetch=async(input)=>{reads++;const at=marketClock,iso=(n:number)=>new Date(at+n).toISOString();const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');const pages:Record<string,unknown>={
+ ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expiration_time:iso(660000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
+ ['/events/'+ticker]:{event:{event_ticker:ticker,series_ticker:'KXBTC15M',fee_type_override:null,fee_multiplier_override:null}},
+ '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
+ '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[],cursor:''},
+ ['/events/fee_changes?event_ticker='+ticker+'&limit=100']:{event_fee_changes:[],cursor:''}};assert.ok(path in pages);return Response.json(pages[path]);};
+ try{
+ const unlocked=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker);assert.equal(unlocked.ok,true,JSON.stringify(unlocked));
+ const before=reads;
+
+ await s.executor.ledger.transaction(async(tx)=>{
+ const standby=await pool.connect();await standby.query("SET lock_timeout='200ms'");standby.release();
+ const started=performance.now();const blocked=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker);const elapsed=performance.now()-started;
+ assert.equal(blocked.ok,false);if(!blocked.ok)assert.equal(blocked.reason,'durable_fee_database_or_market_unavailable');assert.equal(reads,before);assert.ok(elapsed>=150);assert.ok(elapsed<2000);
+ const borrowed=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx);assert.equal(borrowed.ok,true,JSON.stringify(borrowed));
+ const heldAt=await readHeldProtectiveMarketFee({ownerId:USER,accountId:ACCOUNT,sourceUrl,market:ticker,policyVersion:HISTORICAL_FEE_VERSION,formulaVersion:approved.feeFormulaVersion!,digest:HISTORICAL_BASELINE_SHA256},{},tx);assert.ok(heldAt>0);
+ const contender=await pool.connect();try{await contender.query("SET lock_timeout='200ms'");
+ await assert.rejects(contender.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]),(e:any)=>e.code==='55P03');
+ }finally{contender.release();}
+ console.info('DURABLE_FINAL_SELF_LOCK',JSON.stringify({poolStageOk:blocked.ok,borrowedStageOk:borrowed.ok,waitMs:elapsed,providerReadsBeforeLock:before,providerReadsAfterBorrow:reads,orders:posts.length}));
+ });assert.equal(posts.length,0);
+ await assert.rejects(s.executor.ledger.transaction(async(tx)=>{
+  await tx.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]);
+  const denied=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx);assert.equal(denied.ok,false);
+  throw Error('caller_rollback_sentinel');
+ }),/caller_rollback_sentinel/);
+ assert.equal((await pool.query('SELECT entry_revoked FROM private.strata_durable_owner_fee_state WHERE model_id=$1',[modelId])).rows[0].entry_revoked,false);
+ let finalReads=0;const time=()=>{const now=Date.now();if(now>s.now)s.advance(now-s.now);return s.now;};
+ Object.defineProperty(s.executor,'now',{value:time});
+ Object.defineProperty(s.exchange,'readMarket',{value:async(market:string,side:'YES'|'NO',context:any)=>readOwnedEntryMarket({
+ market,side,context,now:time,apiSource:false,durableSource:true,activeMetadata:null,metadataScope:()=>({} as never),
+ verifyFee:async()=>{const tx=s.executor.ledger.currentTransaction();if(tx)finalReads++;
+ const proof=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',market,undefined,tx??undefined);
+ if(!proof.ok)throw Error(proof.reason);return proof.verifiedAtMs;},
+ readBook:async()=>({orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}}),
+ readPublic:async path=>{const r=await globalThis.fetch('https://external-api.kalshi.com/trade-api/v2'+path);return r.json();},
+ configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:HISTORICAL_BASELINE_SHA256,policyHash:approved.policyHash!,
+ })});
+ let sourceAt=0,wireEffectiveAgeMs:number|null=null;
+ const raw=s.exchange.fetchImpl!,wire=createEntryWireClockFetch(()=>{s.executor.ledger.assertFinalWireClock();wireEffectiveAgeMs=time()-sourceAt+901;},raw);
+ // Existing integration fixture substitutes private grant/lease authorization ports.
+ // The actual durable model SQL, provenance, revocation and market verification are NOT substituted.
+ let wireReads=0;
+ Object.defineProperty(s.exchange,'fetchImpl',{value:createGuardedDurableFeeFetch(USER,ACCOUNT,sourceUrl,wire,approved.policyHash!,s.exchange.state.credentialFingerprint,3,'fixture',HISTORICAL_BASELINE_SHA256,{
+ hasHistory:async()=>true,currentStanding:async()=>true,
+ borrowTransaction:(()=>{const tx=s.executor.ledger.currentTransaction();if(!tx)return null;return {query:async(sql:string,args?:any[])=>{
+ if(sql.includes('JOIN private.kalshi_account_worker_lease'))return tx.query('SELECT id FROM v13_production_account WHERE id=$1 AND owner_user_id=$2 AND commissioned AND execution_enabled AND NOT kill_switch',[ACCOUNT,USER]);
+ if(sql.includes('strata_durable_owner_fee_model'))wireReads++;
+ return tx.query(sql,args);
+ }};}) as never,
+ })});
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ sourceAt=time();const evaluation=await source(sourceAt);await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=901 WHERE id=$1',[evaluation]);
+ const intent=await s.executor.prepareEntry(evaluation);await s.executor.dispatch(intent);
+ assert.ok(finalReads>=1);assert.equal(wireReads,1);assert.equal(posts.length,1);
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[intent])).rows[0].state,'UNKNOWN');
+ await pool.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]);
+ await s.executor.ledger.transaction(async tx=>{assert.equal((await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx)).ok,false);
+ assert.ok(await readHeldProtectiveMarketFee({ownerId:USER,accountId:ACCOUNT,sourceUrl,market:ticker,policyVersion:HISTORICAL_FEE_VERSION,formulaVersion:approved.feeFormulaVersion!,digest:HISTORICAL_BASELINE_SHA256},{},tx));});
+ console.info('HISTORICAL_DURABLE_FULL_DISPATCH',JSON.stringify({finalReads,wireReads,syntheticPosts:posts.length,originalProviderAgeMs:901,wireEffectiveAgeMs,scope:'actual historical fee verifier and ledger/executor; synthetic grant/lease and provider ports, not production authorization'}));
+ }finally{globalThis.fetch=saved;for(const [key,value] of [['STRATA_DURABLE_OWNER_FEE_ENABLED',priorEnv.feature],['STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED',priorEnv.historical],['RAILWAY_GIT_COMMIT_SHA',priorEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',priorEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
+});
+
+for(const scenario of ['success','provider_failure','cancel','post_sign_expiry'] as const)test(`historical durable phase-bound FINAL/WIRE ${scenario}`,async()=>{
+ await pool.query('DROP TABLE IF EXISTS private.strata_durable_fee_release_authorization,private.strata_durable_owner_fee_state,private.strata_durable_owner_fee_model,private.strata_durable_historical_baseline');
+ const posts:string[]=[],s=await tradingSession(500,posts),modelId='77777777-7777-4777-8777-777777777777',sha='a'.repeat(40),ticker='KXBTC15M-TEST-000';
+ const sourceUrl='strata-durable-owner-fee://'+modelId;
+ const approved={...policy(),executionAccountId:ACCOUNT,maxQuoteAgeMs:5000,feePolicyVersion:HISTORICAL_FEE_VERSION,feeSourceUrl:sourceUrl,feeFormulaVersion:'standard-quadratic-0.07-v1'};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
+ await pool.query('UPDATE v13_live_money_policy SET max_quote_age_ms=5000,fee_policy_version=$1,fee_source_url=$2,fee_formula_version=$3,policy_hash=$4 WHERE id=$5',[approved.feePolicyVersion,sourceUrl,approved.feeFormulaVersion,approved.policyHash,approved.id]);
+ await pool.query('UPDATE v13_production_account SET fee_artifact_digest=$1 WHERE id=$2',[HISTORICAL_BASELINE_SHA256,ACCOUNT]);
+ // Minimal native row-shape fixture only. No claim of migrations/consent provenance.
+ // The production verifier and its unchanged FOR SHARE locking SQL are real.
+ await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+ CREATE TABLE private.strata_durable_owner_fee_model(model_id uuid,owner_user_id uuid,execution_account_id text,release_commit_sha text,approved_policy_hash text,official_source_digest text,policy_version text,formula_version text,effective_date date,source_kind text,genuine_source_verified boolean,source_capture_id bigint,historical_baseline_id text);
+ CREATE TABLE private.strata_durable_owner_fee_state(model_id uuid,known_publication_change boolean,monitor_state text,entry_revoked boolean);
+ CREATE TABLE private.strata_durable_historical_baseline(baseline_id text,original_bytes bytea,content_sha256 text);
+ CREATE TABLE private.strata_durable_fee_release_authorization(model_id uuid,owner_user_id uuid,execution_account_id text,original_release_sha text,release_commit_sha text,policy_hash text,source_digest text,state text);`);
+ await pool.query('INSERT INTO private.strata_durable_owner_fee_model VALUES($1,$2,$3,$4,$5,$6,$7,$8,\'2026-07-07\',$9,false,NULL,$10)',[modelId,USER,ACCOUNT,sha,approved.policyHash,HISTORICAL_BASELINE_SHA256,HISTORICAL_FEE_VERSION,approved.feeFormulaVersion,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID]);
+ await pool.query("INSERT INTO private.strata_durable_owner_fee_state VALUES($1,false,'never_checked',false)",[modelId]);
+ await pool.query('INSERT INTO private.strata_durable_historical_baseline VALUES($1,$2,$3)',[HISTORICAL_BASELINE_ID,readFileSync('../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf'),HISTORICAL_BASELINE_SHA256]);
+ const priorEnv={feature:process.env.STRATA_DURABLE_OWNER_FEE_ENABLED,historical:process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED,sha:process.env.RAILWAY_GIT_COMMIT_SHA,release:process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE};
+ process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+ const saved=globalThis.fetch;let reads=0;
+ let wireFailure=false,failedReads=0;let delayed=false;const marketClock=Date.now();
+ globalThis.fetch=async(input)=>{reads++;if(wireFailure){failedReads++;return Response.json({error:'synthetic'}, {status:503});}if(delayed)await new Promise(r=>setTimeout(r,181));const at=marketClock,iso=(n:number)=>new Date(at+n).toISOString();const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');const pages:Record<string,unknown>={
+ ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expiration_time:iso(660000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
+ ['/events/'+ticker]:{event:{event_ticker:ticker,series_ticker:'KXBTC15M',fee_type_override:null,fee_multiplier_override:null}},
+ '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
+ '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[],cursor:''},
+ ['/events/fee_changes?event_ticker='+ticker+'&limit=100']:{event_fee_changes:[],cursor:''}};assert.ok(path in pages);return Response.json(pages[path]);};
+ try{
+ const unlocked=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker);assert.equal(unlocked.ok,true,JSON.stringify(unlocked));
+ const before=reads;
+
+ await s.executor.ledger.transaction(async(tx)=>{
+ const standby=await pool.connect();await standby.query("SET lock_timeout='200ms'");standby.release();
+ const started=performance.now();const blocked=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker);const elapsed=performance.now()-started;
+ assert.equal(blocked.ok,false);if(!blocked.ok)assert.equal(blocked.reason,'durable_fee_database_or_market_unavailable');assert.equal(reads,before);assert.ok(elapsed>=150);assert.ok(elapsed<2000);
+ const borrowed=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx);assert.equal(borrowed.ok,true,JSON.stringify(borrowed));
+ const heldAt=await readHeldProtectiveMarketFee({ownerId:USER,accountId:ACCOUNT,sourceUrl,market:ticker,policyVersion:HISTORICAL_FEE_VERSION,formulaVersion:approved.feeFormulaVersion!,digest:HISTORICAL_BASELINE_SHA256},{},tx);assert.ok(heldAt>0);
+ const contender=await pool.connect();try{await contender.query("SET lock_timeout='200ms'");
+ await assert.rejects(contender.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]),(e:any)=>e.code==='55P03');
+ }finally{contender.release();}
+ console.info('DURABLE_FINAL_SELF_LOCK',JSON.stringify({poolStageOk:blocked.ok,borrowedStageOk:borrowed.ok,waitMs:elapsed,providerReadsBeforeLock:before,providerReadsAfterBorrow:reads,orders:posts.length}));
+ });assert.equal(posts.length,0);
+ await assert.rejects(s.executor.ledger.transaction(async(tx)=>{
+  await tx.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]);
+  const denied=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx);assert.equal(denied.ok,false);
+  throw Error('caller_rollback_sentinel');
+ }),/caller_rollback_sentinel/);
+ assert.equal((await pool.query('SELECT entry_revoked FROM private.strata_durable_owner_fee_state WHERE model_id=$1',[modelId])).rows[0].entry_revoked,false);
+ let finalCapture:any,wireCapture:any;let phases:FinalPublicMetadataPhases;let activePrepare:MetadataPrefetchAttempt|null=null;let finalReads=0;const time=()=>{const now=Date.now();if(now>s.now)s.advance(now-s.now);return s.now;};
+ Object.defineProperty(s.executor,'now',{value:time});
+ Object.defineProperty(s.exchange,'readMarket',{value:async(market:string,side:'YES'|'NO',context:any)=>readOwnedEntryMarket({
+ market,side,context,now:time,apiSource:false,durableSource:true,activeMetadata:activePrepare,metadataScope:()=>({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'}),
+ finalDurableMetadata:()=>phases?.consumeDurableFinalMarket(market),
+ verifyFee:async(_clock,_read,_capture,metadata,finalMetadata)=>{const tx=s.executor.ledger.currentTransaction();if(tx)finalReads++;
+ const proof=await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',market,metadata,tx??undefined,finalMetadata);
+ if(!proof.ok)throw Error(proof.reason);if(finalMetadata)finalCapture=finalMetadata.capture();return proof.verifiedAtMs;},
+ readBook:async()=>({orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}}),
+ readPublic:async path=>{const r=await globalThis.fetch('https://external-api.kalshi.com/trade-api/v2'+path);return r.json();},
+ configuredStakeCents:500,policyVersion:approved.feePolicyVersion!,sourceUrl,formulaVersion:approved.feeFormulaVersion!,artifactDigest:HISTORICAL_BASELINE_SHA256,policyHash:approved.policyHash!,
+ })});
+ let sourceAt=0,wireEffectiveAgeMs:number|null=null;
+ const raw=s.exchange.fetchImpl!,checkedWire=createEntryWireClockFetch(()=>{if(scenario==='success'&&wireCapture)wireCapture=wireCapture.capture();s.executor.ledger.assertFinalWireClock();wireEffectiveAgeMs=time()-sourceAt+901;},raw);const wire:typeof fetch=async(request,init)=>{if(scenario==='post_sign_expiry')await new Promise(r=>setTimeout(r,650));return checkedWire(request,init);};
+ // Existing integration fixture substitutes private grant/lease authorization ports.
+ // The actual durable model SQL, provenance, revocation and market verification are NOT substituted.
+ let wireReads=0;
+ Object.defineProperty(s.exchange,'fetchImpl',{value:createGuardedDurableFeeFetch(USER,ACCOUNT,sourceUrl,wire,approved.policyHash!,s.exchange.state.credentialFingerprint,3,'fixture',HISTORICAL_BASELINE_SHA256,{
+ hasHistory:async()=>true,currentStanding:async()=>true,consumePublicMetadata:(id,ticker)=>{const cap=phases?.consumeDurableWire(id,ticker);if(cap)wireCapture=cap;return cap;},
+ borrowTransaction:(()=>{const tx=s.executor.ledger.currentTransaction();if(!tx)return null;return {query:async(sql:string,args?:any[])=>{
+ if(sql.includes('JOIN private.kalshi_account_worker_lease'))return tx.query('SELECT id FROM v13_production_account WHERE id=$1 AND owner_user_id=$2 AND commissioned AND execution_enabled AND NOT kill_switch',[ACCOUNT,USER]);
+ if(sql.includes('strata_durable_owner_fee_model'))wireReads++;
+ return tx.query(sql,args);
+ }};}) as never,
+ })});
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ const originalSnapshot=s.exchange.readSnapshot!;Object.defineProperty(s.exchange,'readSnapshot',{value:async(...args:Parameters<typeof originalSnapshot>)=>{await new Promise(r=>setTimeout(r,1094));time();return originalSnapshot(...args);}});delayed=true;
+ sourceAt=time()-554;const evaluation=await source(sourceAt);await pool.query('UPDATE forward_test_evaluations SET btc_provider_age_ms=901 WHERE id=$1',[evaluation]);
+ const coordinator=new CommittedPublicMetadataCoordinator(globalThis.fetch,time,()=>performance.now());
+ activePrepare=coordinator.start({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'},
+ {evaluationId:evaluation,marketTicker:ticker,evaluatedAtMs:sourceAt,committedAtMs:time(),qualifyingTrigger:true,btcProviderAgeMs:901,btcReceiveAgeMs:0,marketAgeMs:0});assert.ok(activePrepare);
+ const reconcileAt=time();await s.executor.reconcile();await activePrepare.drained;activePrepare.pause();
+ await new Promise(r=>setTimeout(r,63)); // explicit synthetic discovery delay
+ const prepareAt=time();const intent=await s.executor.prepareEntry(evaluation);activePrepare.discard();activePrepare=null;
+ await new Promise(r=>setTimeout(r,Math.max(0,2123-(time()-sourceAt)))); // calibrate optimistic observed prepare completion, never reset source
+ phases=new FinalPublicMetadataPhases(coordinator,()=>({accountId:ACCOUNT,ownerId:USER,releaseSha:sha,policyHash:approved.policyHash!,holderId:'fixture',fence:'3'}),()=>true);s.executor.finalPublicMetadata=phases;const phaseStart=phases.start.bind(phases);phases.start=(phase,context)=>{if(phase==='WIRE_FEE'&&scenario==='provider_failure')wireFailure=true;phaseStart(phase,context);if(phase==='WIRE_FEE'&&scenario==='cancel')phases.discardAll();};
+ const dispatchAt=time();if(scenario!=='success'){if(scenario==='post_sign_expiry')await assert.rejects(s.executor.dispatch(intent),/production_final_wire_source_expired/);else await assert.rejects(s.executor.dispatch(intent));assert.equal(posts.length,0);if(scenario==='provider_failure')assert.ok(failedReads>0&&failedReads<=3);console.info('DURABLE_PHASE_REFUSAL',JSON.stringify({scenario,failedReads,syntheticPosts:posts.length}));return;}await s.executor.dispatch(intent);
+ console.info('DURABLE_TIMED_PHASES',JSON.stringify({sourceToReconcileMs:reconcileAt-sourceAt,sourceToPrepareMs:prepareAt-sourceAt,sourceToDispatchMs:dispatchAt-sourceAt,wireEffectiveAgeMs}));
+ assert.ok(finalCapture&&wireCapture);assert.equal(finalCapture.records.length,5);assert.equal(wireCapture.records.length,5);assert.ok(Math.max(...finalCapture.records.map((r:any)=>r.capturedAtMs))<=Math.min(...wireCapture.records.map((r:any)=>r.requestStartedAtMs)));assert.notDeepEqual(finalCapture,wireCapture);
+ assert.ok(finalReads>=1);assert.equal(wireReads,1);assert.equal(posts.length,1);
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[intent])).rows[0].state,'UNKNOWN');
+ await pool.query('UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true WHERE model_id=$1',[modelId]);
+ await s.executor.ledger.transaction(async tx=>{assert.equal((await verifyDurableFeeStage(USER,ACCOUNT,sourceUrl,'ENTRY',ticker,undefined,tx)).ok,false);
+ assert.ok(await readHeldProtectiveMarketFee({ownerId:USER,accountId:ACCOUNT,sourceUrl,market:ticker,policyVersion:HISTORICAL_FEE_VERSION,formulaVersion:approved.feeFormulaVersion!,digest:HISTORICAL_BASELINE_SHA256},{},tx));});
+ console.info('HISTORICAL_DURABLE_TIMED_DISPATCH',JSON.stringify({finalReads,wireReads,syntheticPosts:posts.length,originalProviderAgeMs:901,wireEffectiveAgeMs,scope:'actual historical fee verifier and ledger/executor; synthetic grant/lease and provider ports, not production authorization'}));
+ }finally{globalThis.fetch=saved;for(const [key,value] of [['STRATA_DURABLE_OWNER_FEE_ENABLED',priorEnv.feature],['STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED',priorEnv.historical],['RAILWAY_GIT_COMMIT_SHA',priorEnv.sha],['STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE',priorEnv.release]]){if(value===undefined)delete process.env[key!];else process.env[key!]=value;}}
 });

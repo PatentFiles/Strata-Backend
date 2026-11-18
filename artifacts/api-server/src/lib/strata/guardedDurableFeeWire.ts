@@ -1,3 +1,4 @@
+import type {DurablePhaseMetadata} from './durablePhaseMetadata';
 import {HISTORICAL_FEE_VERSION} from './historicalOwnerFeeBaseline';
 /** Local candidate adapter, NOT wired to production supervisor. Preserves
  * existing account/lease/credential/technical/order-shape fences. This is
@@ -17,6 +18,7 @@ export function createGuardedDurableFeeFetch(
  policyHash:string,keyFingerprint:string,fencingToken:number,holderId:string,feeDigest:string,
  deps:{
   borrowTransaction:()=>Tx|null;
+  consumePublicMetadata?:(clientOrderId:string,ticker:string)=>DurablePhaseMetadata|undefined;
   verifyDurable?:typeof verifyDurableOwnerFee;
   exitReview?:typeof checkStandingExitReview;
   sha?:()=>string;
@@ -100,8 +102,9 @@ export function createGuardedDurableFeeFetch(
    feeDigest,[DURABLE_FEE_VERSION,HISTORICAL_FEE_VERSION],'standard-quadratic-0.07-v1'
   ]);
   if(locked.rows.length!==1)throw Error('owner_v3_fee_final_account_or_source_closed');
+  const phaseMetadata=isEntry?deps.consumePublicMetadata?.(order.client_order_id as string,ticker):undefined;
   const proof=await (deps.verifyDurable??verifyDurableOwnerFee)(tx as never,
-    {owner:ownerId,account:accountId,sha,policyHash},ticker,isEntry?'ENTRY':'PROTECTIVE_EXIT');
+    {owner:ownerId,account:accountId,sha,policyHash},ticker,isEntry?'ENTRY':'PROTECTIVE_EXIT',{},undefined,phaseMetadata?{phase:'WIRE_FEE',handle:phaseMetadata}:undefined);
   if(!proof.ok||!proof.sourceFresh()||proof.sourceDigest!==feeDigest||proof.marketTicker!==ticker||
      Date.now()<proof.verifiedAtMs||Date.now()-proof.verifiedAtMs>5000)
     throw Error('durable_fee_final_fresh_model_unverified');

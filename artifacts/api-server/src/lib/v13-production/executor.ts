@@ -414,7 +414,8 @@ export class ProductionExecutor {
     return withoutFeeAuthorityTiming(()=>{
     if(!this.finalPublicMetadata)return this.dispatchWithPhases(id);
     const invocation=Symbol("dispatch-metadata");
-    return this.dispatchWithPhases(id,invocation).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
+    const operation=()=>this.dispatchWithPhases(id,invocation);
+    return (this.finalPublicMetadata.dispatch?this.finalPublicMetadata.dispatch(id,invocation,operation):operation()).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
     });
   }
   private async dispatchWithPhases(id:string,invocation?:symbol):Promise<void> {

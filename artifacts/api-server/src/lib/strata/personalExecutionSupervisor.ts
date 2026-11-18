@@ -486,7 +486,7 @@ export function createProductionPersonalSession(
       finalLedger.assertFinalWireClock();
       directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       ownerV3Source ? createGuardedOwnerV3FeeFetch(input.userId,input.accountId,sourceUrl,
         clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,
         {borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
@@ -662,14 +662,14 @@ export function createProductionPersonalSession(
       },
       readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({
         ...(directRounding&&purpose!=="EXIT"&&!heldRecoveryScope?{readDirectRounding:()=>directRounding.read(finalLedger?.currentWireScopeToken()??undefined)}:{}),
-        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),
-        verifyFee:async(clock,readMetadata,captureMetadata)=>{
+        market,side,context,now,apiSource:!!apiSource,durableSource:!!durableSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),finalDurableMetadata:()=>finalPublicMetadata?.consumeDurableFinalMarket(market),
+        verifyFee:async(clock,readMetadata,captureMetadata,prepareMetadata,finalMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               const feeReads=createFeeVerificationTiming();
               try {
               if(heldRecoveryScope){
                 feeVerifiedAt=await readHeldProtectiveMarketFee({ownerId:input.userId,accountId:input.accountId,
-                  market,sourceUrl,policyVersion,formulaVersion,digest});
+                  market,sourceUrl,policyVersion,formulaVersion,digest},{},finalLedger?.currentTransaction()??undefined);
                 feeCheckedAt=clock;
               }else if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
@@ -688,7 +688,7 @@ export function createProductionPersonalSession(
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
               }else if(durableSource){
-                const checked=await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY',market);
+                const checked=await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY',market,prepareMetadata,finalLedger?.currentTransaction()??undefined,finalMetadata);
                 if(!checked.ok||checked.sourceDigest!==digest||checked.marketTicker!==market)throw Error('durable_fee_market_unavailable');
                 feeVerifiedAt=checked.verifiedAtMs;feeCheckedAt=clock;
               }else if(ownerV3Source){
@@ -727,13 +727,13 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     finalLedger=session.executor.ledger;
-    if(apiSource&&options.finalPublicMetadataPrefetch===true){
+    if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if(apiSource&&options.publicMetadataPrefetch===true){
+    if((apiSource||durableSource)&&options.publicMetadataPrefetch===true){
       session.executor.prefetchCommittedPublicMetadata=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;

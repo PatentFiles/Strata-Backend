@@ -67,7 +67,7 @@ test("exact true opts the same supervisor into its existing reviewed public-only
   // Static integration assertion: this is the unchanged reviewed hook, not a
   // new coordinator, book cache, alternate worker construction or bypass.
   const text=await readFile(supervisor,"utf8");
-  assert.match(text,/if\(apiSource&&options\.publicMetadataPrefetch===true\)\{/);
+  assert.match(text,/if\(\(apiSource\|\|durableSource\)&&options\.publicMetadataPrefetch===true\)\{/);
   assert.match(text,/const attempt=processCommittedPublicMetadata\.start\(metadataScope\(\),hint\)/);
 });
 
