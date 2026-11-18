@@ -1,3 +1,4 @@
+import {PREPARE_ENTRY_CAPACITY_SQL} from './prepareEntryCapacity';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {ProductionExecutor} from './executor';
@@ -30,6 +31,8 @@ function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;pr
  const exitSource={...source,btc_price:77025,signed_buffer:-10,velocity:-38};
  const tx={query:async(sql:string)=>{
   if(/^(INSERT|UPDATE|DELETE)/.test(sql)){counts.writes++;throw Error('offline_write_forbidden');}
+  // Stop at the exact capacity boundary before its nested position subquery.
+  if(sql===PREPARE_ENTRY_CAPACITY_SQL)throw Error(afterFreshness);
   if(sql.includes('FROM v13_production_position'))return {rows:[position]};
   if(sql.includes('FROM forward_test_evaluations'))return {rows:[source]};
   if(sql.includes("state='PREPARED'"))throw Error(afterFreshness);

@@ -54,7 +54,7 @@ async function schema(){
  CONSTRAINT kalshi_account_worker_lease_owner_fk FOREIGN KEY(execution_account_id,owner_user_id) REFERENCES public.v13_production_account(id,owner_user_id));
  CREATE TABLE public.v13_production_intent(id text PRIMARY KEY,account_id text,created_at timestamptz,kind text,state text,request jsonb,
  client_order_id text,exchange_order_id text,terminal boolean,filled_hundredths bigint,reserved_micros bigint);
- CREATE TABLE public.v13_production_event(event_id text,account_id text,intent_id text,cash_delta_micros bigint,pnl_micros bigint);
+ CREATE TABLE public.v13_production_event(event_id text,account_id text,intent_id text,digest text NOT NULL,cash_delta_micros bigint,pnl_micros bigint);
  CREATE TABLE public.v13_production_position(id text,account_id text,market text,side text,quantity_hundredths bigint,basis_micros bigint,realized_pnl_micros bigint);
  CREATE TABLE public.v13_production_observation(id text PRIMARY KEY,account_id text,kind text,payload jsonb,digest text,observed_at timestamptz DEFAULT now());
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id text,execution_account_id text,state text);`);

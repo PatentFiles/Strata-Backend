@@ -1,3 +1,4 @@
+import {PREPARE_ENTRY_CAPACITY_SQL} from './prepareEntryCapacity';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_LEGACY_ENTRY_POLICY} from '@workspace/v13-strategy';
@@ -157,7 +158,7 @@ test('real prepare wiring records sizing without changing request/reservation or
   let requested:Record<string,unknown>|undefined,decision:Record<string,any>|undefined,bookReads=0,posts=0;
   const tx={query:async(sql:string,args?:unknown[])=>{
    if(sql.includes('FROM forward_test_evaluations'))return {rows:[source]};
-   if(sql.includes('AS total_loss'))return {rows:[{basis:'0',total_loss:'0',daily_loss:'0',open:0}]};
+   if(sql===PREPARE_ENTRY_CAPACITY_SQL)return {rows:[{has_prepared:false,basis:'0',total_loss:'0',daily_loss:'0',open:'0'}]};
    if(sql.includes('FROM strata_configured_stake'))return {rows:[{configured_stake_cents:500,revision:1}]};
    if(sql.startsWith('INSERT INTO v13_production_intent')){requested=JSON.parse(String(args![6]));decision=JSON.parse(String(args![7]));}
    return {rows:[]};
