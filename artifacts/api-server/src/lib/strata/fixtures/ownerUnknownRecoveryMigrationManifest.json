@@ -61,5 +61,6 @@
   "lib/db/drizzle/0044_v13_signal_decision_trace.sql",
   "lib/db/drizzle/0045_v13_bounded_signal_audit.sql",
   "docs/reviews/maintenance-hardening-20261028.sql",
-  "sql/held-consent-deadlines.sql"
+  "sql/held-consent-deadlines.sql",
+  "sql/strata_owner_settled_cash_recovery_commit_fence.sql"
 ]
