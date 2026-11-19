@@ -446,6 +446,7 @@ export async function getScopedKalshiJson(
   host = baseUrl(),
   rateLimitOwnerId?: string,
   externalSignal?: AbortSignal,
+  observeBalanceFetchInvoked?: () => void,
 ): Promise<unknown> {
   externalSignal?.throwIfAborted();
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
@@ -487,7 +488,8 @@ export async function getScopedKalshiJson(
   const signature = signRequest(creds, "GET", path, timestamp, true);
   let response:Response;
   try {
-    response = await dispatchMemberRead(memberTicket,()=>fetchImpl(`${host}${path}${query}`, {
+    response = await dispatchMemberRead(memberTicket,()=>{
+      const request=fetchImpl(`${host}${path}${query}`, {
       method: "GET",
       ...(externalSignal?{signal:externalSignal}:{}),
       cache: "no-store",
@@ -499,7 +501,14 @@ export async function getScopedKalshiJson(
         "KALSHI-ACCESS-SIGNATURE": signature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
       },
-    }));
+      });
+      if(path===`${API_PREFIX}/portfolio/balance`&&query==='?subaccount=1&exchange_index=2'&&
+        host==='https://external-api.kalshi.com'){
+        // The fetch API was invoked; this is not evidence of provider receipt.
+        try{observeBalanceFetchInvoked?.();}catch{/* observation cannot affect transport */}
+      }
+      return request;
+    });
   } catch {
     // Transport exceptions may include sensitive request URLs or headers.
     // Preserve only a typed nonsecret error at the portfolio read boundary.
