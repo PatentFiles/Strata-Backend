@@ -1,3 +1,4 @@
+import {IndependentWorkerReplay,type IndependentReplayPorts,type IndependentReplayScope} from './independentWorkerReplay';
 import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
@@ -20,6 +21,15 @@ export function nextSequentialPollDelayMs(intervalMs:number,elapsedMs:number):nu
 }
 
 export class ProductionWorker {
+  /** Staging-only assembly with no execution, signing, or paper capabilities.
+   * Existing production factories do not call this entry point. */
+  static createIndependentReplay(scope:IndependentReplayScope,reads:IndependentReplayPorts):IndependentWorkerReplay {
+    if(process.env.NODE_ENV!=='test'||process.env.RAILWAY_ENVIRONMENT_ID||
+      process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID)
+      throw new Error('independent_worker_replay_test_only');
+    return new IndependentWorkerReplay(scope,reads);
+  }
+
   /** Trusted same-session recovery only. No route/client can supply this hook.
    * Returning false retains the normal fail-closed scheduler stop. */
   recoverUnreconciledEntry:((error:unknown)=>Promise<boolean>)|null=null;
