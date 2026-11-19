@@ -14,6 +14,7 @@ import { createStrataCommissioningRouter, type CommissioningPort } from "./strat
 import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
 import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
+import { createStoppedCashDiagnosticRouter } from "./stoppedCashDiagnosticHandler";
 import { readForwardTestBrtiReference } from "./forwardTest";
 import { readTriangulatedMarketStatus } from "../lib/strataResearchMarketObserver";
 import { getV13AdaptiveResearchRecommendation } from "../lib/v13StrategyResearch";
@@ -171,6 +172,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const userScope = deps.userScope ?? closedUserScopePort();
   router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
+  router.use("/me/release", createStoppedCashDiagnosticRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
   router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
