@@ -1,7 +1,8 @@
 /** Owner-scoped cash diagnostic; never a release or cash-clear authority. */
 import {Router,type IRouter,type RequestHandler} from 'express';
 import {pool} from '@workspace/db';
-import {observeStoppedBalanceOnly} from '../lib/strata/stoppedBalanceObservation';
+import {logger} from '../lib/logger';
+import {observeStoppedBalanceOnly,STOPPED_BALANCE_FAILURE_STAGES} from '../lib/strata/stoppedBalanceObservation';
 import {balanceEvidence} from '../lib/strata/settledCashBracket';
 import {getOwnedProductionKalshiJson} from '../lib/strata/personalExchangeRead';
 import {deployedGitSha} from '../lib/strata/deployedGitSha';
@@ -17,9 +18,13 @@ const no=(reason:string)=>({ok:false as const,reason,accountWritesPerformed:fals
 type Result=Awaited<ReturnType<typeof inspectStoppedCashDiagnosticPrototype>>;
 type BalanceResult=Awaited<ReturnType<typeof observeStoppedBalanceOnly>>;
 type Deps={env:()=>NodeJS.ProcessEnv; inspect:(subject:string)=>Promise<Result>;
- observeBalance?:(subject:string)=>Promise<BalanceResult>};
+ observeBalance?:(subject:string,observeTransport:(read:1|2)=>void)=>Promise<BalanceResult>};
 const balanceNo=()=>({status:'balance_observation_unverified' as const,historyUnverified:true as const,
  accountWritesPerformed:false as const,observationPersisted:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const});
+const safeBalanceStage=(stage:unknown)=>STOPPED_BALANCE_FAILURE_STAGES.find(x=>x===stage)??'observation_unavailable';
+function logBalanceObservation(fields:Record<string,string|boolean>){
+ try{logger.info({event:'stopped_balance_observation',...fields});}catch{/* diagnostics cannot affect responses */}
+}
 export function stoppedBalanceObservationOwner(env:NodeJS.ProcessEnv):string|null{
  const sha=env.STRATA_STOPPED_BALANCE_OBSERVATION_SHA??'',owner=env.STRATA_STOPPED_BALANCE_OBSERVATION_OWNER??'';
  return env.NODE_ENV==='production'&&env.STRATA_STOPPED_BALANCE_OBSERVATION_ENABLED==='true'&&
@@ -40,7 +45,7 @@ const bracket=createStoppedCashBracketAdapter();
 const defaults:Deps={env:()=>process.env,inspect:subject=>inspectStoppedCashDiagnosticPrototype(
  {subject,aal:'aal2'},{...loader,bracket,
  env:()=>stoppedCashDiagnosticOwner(process.env)===subject?process.env:{},wall:Date.now,mono:()=>performance.now()}),
- observeBalance:subject=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,
+ observeBalance:(subject,observeTransport)=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,observeTransport,
  exactOwnerGate:owner=>stoppedBalanceObservationOwner(process.env)===owner,
  scopedGet:getOwnedProductionKalshiJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()})};
 
@@ -77,7 +82,8 @@ export function createStoppedCashDiagnosticRouter(requireUser:RequestHandler,dep
    finally{inFlight=false;}
   });
  // Independent default-off capability; existing proof and cash-clear contracts unchanged.
- router.post('/my-stopped-balance-observation',(_req,res,next)=>{res.set('Cache-Control','private, no-store');next();},
+ router.post('/my-stopped-balance-observation',(_req,res,next)=>{
+  res.set('Cache-Control','private, no-store');logBalanceObservation({phase:'http_arrived'});next();},
   requireUser,async(req,res)=>{
    const subject:unknown=res.locals.strata?.subject;
    if(typeof subject!=='string'||!UUID.test(subject)){res.status(401).json(balanceNo());return;}
@@ -90,18 +96,32 @@ export function createStoppedCashDiagnosticRouter(requireUser:RequestHandler,dep
    if(stoppedBalanceObservationOwner(deps.env())!==subject||!deps.observeBalance){
     res.status(404).json(balanceNo());return;
    }
-   if(inFlight){res.status(409).json(balanceNo());return;}
+   if(inFlight){logBalanceObservation({phase:'in_progress'});res.status(409).json({...balanceNo(),failureStage:'observation_in_progress'});return;}
    inFlight=true;
+   let openingFetchInvoked=false,closingFetchInvoked=false;
+   let disposition='observation_unavailable';
    try{
-    const b=await deps.observeBalance(subject);
-    if(stoppedBalanceObservationOwner(deps.env())!==subject){res.status(404).json(balanceNo());return;}
+    const b=await deps.observeBalance(subject,leg=>{
+     if(leg===1)openingFetchInvoked=true;
+     if(leg===2)closingFetchInvoked=true;
+    });
+    if(stoppedBalanceObservationOwner(deps.env())!==subject){disposition='gate_changed';res.status(404).json(balanceNo());return;}
     if(!('observedAt' in b)||typeof b.observedAt!=='string'||
        !['balance_matches_local_cash_history_unverified','balance_differs_from_local_cash_history_unverified'].includes(b.status)){
-      res.status(409).json(balanceNo());return;
+      const failureStage=safeBalanceStage('failureStage' in b?b.failureStage:undefined);
+      disposition=failureStage;
+      res.status(409).json({...balanceNo(),failureStage});return;
     }
+    disposition='observation_complete'; // Do not log balance direction or amounts.
     res.status(200).json({...balanceNo(),status:b.status,observedAt:b.observedAt});
-   }catch{res.status(503).json(balanceNo());}
-   finally{inFlight=false;}
+   }catch{
+    if(stoppedBalanceObservationOwner(deps.env())!==subject){res.status(404).json(balanceNo());return;}
+    res.status(503).json({...balanceNo(),failureStage:'observation_unavailable'});
+   }
+   finally{
+    inFlight=false;
+    logBalanceObservation({phase:'owner_observation_finished',disposition,openingFetchInvoked,closingFetchInvoked});
+   }
   });
  return router;
 }

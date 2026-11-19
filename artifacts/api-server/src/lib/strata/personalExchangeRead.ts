@@ -23,8 +23,8 @@ export const PERSONAL_MARKET_METADATA_HOST = "https://external-api.kalshi.com/tr
  * Preserve original transport identity, quota owner and cancellation signal.
  */
 export const getOwnedProductionKalshiJson:typeof getScopedKalshiJson=(
- creds,path,query="",fetchImpl=fetch,_host,rateLimitOwnerId,externalSignal,
-)=>getScopedKalshiJson(creds,path,query,fetchImpl,PERSONAL_KALSHI_HOST,rateLimitOwnerId,externalSignal);
+ creds,path,query="",fetchImpl=fetch,_host,rateLimitOwnerId,externalSignal,observeBalanceFetchInvoked,
+)=>getScopedKalshiJson(creds,path,query,fetchImpl,PERSONAL_KALSHI_HOST,rateLimitOwnerId,externalSignal,observeBalanceFetchInvoked);
 
 
 const BALANCE_PATH = "/trade-api/v2/portfolio/balance";
