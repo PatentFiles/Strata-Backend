@@ -11,7 +11,7 @@ const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rounding = process.argv[2] === "--rounding-authority";
 const auditCursor = process.argv[2] === "--audit-cursor";
 const renewal = process.argv[2] === "--renewal";
-const recovery = process.argv[2] === "--recovery";
+const recovery = ["--recovery","--settled-cash-recovery"].includes(process.argv[2]);
 const restore = process.argv[2] === "--restore";
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
@@ -107,7 +107,7 @@ try {
     // Both workflow callers reserve additional setup and cleanup headroom.
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"], { timeout: 1_200_000 });
   } else {
-    const testFile = auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
+    const testFile = auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? (process.argv[2] === "--settled-cash-recovery" ? "src/lib/strata/ownerSettledCashFreezeRecovery.postgres.test.ts" : "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts") : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",

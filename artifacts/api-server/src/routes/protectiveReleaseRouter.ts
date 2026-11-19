@@ -3,6 +3,7 @@ import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../li
 import {activateOwnerSelfAccount,ownerSelfActivationOutcome} from '../lib/strata/ownerSelfAccountActivation';
 import {heldHistoryConsentOutcome} from '../lib/strata/ownerNeverPostedReleaseRenewal';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
+import {createOwnerSettledCashRecoveryHandler} from './ownerSettledCashRecoveryHandler';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
@@ -90,6 +91,8 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
+ // Separate exact-settlement recovery. Default disabled; never invokes transient fallback.
+ router.post('/owner-settled-cash-freeze-recover',createOwnerSettledCashRecoveryHandler());
  // Explicit owner opt-in for continuous technical renewal. No orders or
  // releases are created from this endpoint; it requires an existing reviewed
  // exact-SHA release and durable owner approval.
