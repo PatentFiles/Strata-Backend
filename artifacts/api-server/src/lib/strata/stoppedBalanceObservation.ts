@@ -1,8 +1,8 @@
 /** Scoped signed balance-only observation; never release/clearance evidence. */
-import type {getOwnedProductionKalshiJson} from './personalExchangeRead';
+import type {getStoppedBalanceObservationJson} from './personalExchangeRead';
 import type {balanceEvidence} from './settledCashBracket';
 type Header={owner:string,id:string,held:boolean,fingerprint:string,cash:string,fence:string};
-type Get=typeof getOwnedProductionKalshiJson;
+type Get=typeof getStoppedBalanceObservationJson;
 type Ports={exactOwnerGate:(owner:string)=>boolean;heldHeader:(owner:string)=>Promise<Header|null>;
  verifiedMaterial:(owner:string,id:string,fingerprint:string)=>Promise<Parameters<Get>[0]|null>;
  observeTransport?:(read:1|2)=>void;scopedGet:Get;parseBalance:typeof balanceEvidence;wall:()=>number;mono:()=>number};
@@ -10,7 +10,7 @@ type Status='balance_observation_unverified'|'balance_matches_local_cash_history
 const UINT=/^(0|[1-9]\d{0,18})$/;
 const HASH=/^[a-f0-9]{64}$/;
 const OWNER=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const MAX_AGE=5000, PATH='/trade-api/v2/portfolio/balance', QUERY='?subaccount=1&exchange_index=2';
+const MAX_AGE=5000;
 const label=(status:Status)=>({status,historyUnverified:true as const,accountWritesPerformed:false as const,
  observationPersisted:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const});
 export const STOPPED_BALANCE_FAILURE_STAGES=[
@@ -47,7 +47,7 @@ export async function observeStoppedBalanceOnly(session:{subject:unknown;aal:unk
     lastWall=wall;lastMono=m;return true;};
   const read=async(leg:1|2)=>{
    stage=leg===1?'opening_read_before_fetch':'closing_read_before_fetch';
-   const payload=await p.scopedGet(material,PATH,QUERY,undefined,undefined,owner,signal,()=>{
+   const payload=await p.scopedGet(material,owner,signal,()=>{
     stage=leg===1?'opening_fetch_unverified':'closing_fetch_unverified';
     try{p.observeTransport?.(leg);}catch{/* diagnostics do not affect observation */}
    });

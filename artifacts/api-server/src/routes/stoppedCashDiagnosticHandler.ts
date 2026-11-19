@@ -4,7 +4,7 @@ import {pool} from '@workspace/db';
 import {logger} from '../lib/logger';
 import {observeStoppedBalanceOnly,STOPPED_BALANCE_FAILURE_STAGES} from '../lib/strata/stoppedBalanceObservation';
 import {balanceEvidence} from '../lib/strata/settledCashBracket';
-import {getOwnedProductionKalshiJson} from '../lib/strata/personalExchangeRead';
+import {getStoppedBalanceObservationJson} from '../lib/strata/personalExchangeRead';
 import {deployedGitSha} from '../lib/strata/deployedGitSha';
 import {personalTradingSession} from '../lib/strata/sharedPersonalTradingControls';
 import {createStoppedCashBracketAdapter} from '../lib/strata/stoppedCashDiagnosticAdapters';
@@ -47,7 +47,7 @@ const defaults:Deps={env:()=>process.env,inspect:subject=>inspectStoppedCashDiag
  env:()=>stoppedCashDiagnosticOwner(process.env)===subject?process.env:{},wall:Date.now,mono:()=>performance.now()}),
  observeBalance:(subject,observeTransport)=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,observeTransport,
  exactOwnerGate:owner=>stoppedBalanceObservationOwner(process.env)===owner,
- scopedGet:getOwnedProductionKalshiJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()})};
+ scopedGet:getStoppedBalanceObservationJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()})};
 
 /** requireUser must be Strata's verified AAL2 middleware. No unauthenticated
  * handler export; in-process guard is supplemental to the persistent quota. */

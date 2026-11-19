@@ -23,11 +23,21 @@ export const PERSONAL_MARKET_METADATA_HOST = "https://external-api.kalshi.com/tr
  * Preserve original transport identity, quota owner and cancellation signal.
  */
 export const getOwnedProductionKalshiJson:typeof getScopedKalshiJson=(
- creds,path,query="",fetchImpl=fetch,_host,rateLimitOwnerId,externalSignal,observeBalanceFetchInvoked,
-)=>getScopedKalshiJson(creds,path,query,fetchImpl,PERSONAL_KALSHI_HOST,rateLimitOwnerId,externalSignal,observeBalanceFetchInvoked);
+ creds,path,query="",fetchImpl=fetch,_host,rateLimitOwnerId,externalSignal,
+)=>getScopedKalshiJson(creds,path,query,fetchImpl,PERSONAL_KALSHI_HOST,rateLimitOwnerId,externalSignal);
 
 
 const BALANCE_PATH = "/trade-api/v2/portfolio/balance";
+
+/** Separate native-only fixed-scope balance transport; legacy readers unchanged. */
+export function getStoppedBalanceObservationJson(
+ creds:Parameters<typeof getScopedKalshiJson>[0],owner:string,signal:AbortSignal,
+ observeBalanceFetchInvoked:()=>void,
+):Promise<unknown>{
+ return getScopedKalshiJson(creds,BALANCE_PATH,'?subaccount=1&exchange_index=2',
+  undefined,PERSONAL_KALSHI_HOST,owner,signal,observeBalanceFetchInvoked);
+}
+
 const ORDER_PATH = "/trade-api/v2/portfolio/orders";
 const FILL_PATH = "/trade-api/v2/portfolio/fills";
 const POSITION_PATH = "/trade-api/v2/portfolio/positions";
