@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 import {activityTables,migrationManifest,schemaRoot,sourceManifest} from './ownerUnknownRecoverySchema.fixture';
 
 test('full-schema manifest covers every checked-in migration and sidecar, including both 0043s',()=>{
- const manifest=sourceManifest();assert.equal(manifest.length,63);
+ const manifest=sourceManifest();assert.equal(manifest.length,64);
  assert.equal(manifest.filter(m=>m.path.includes('/0043_')).length,2);
  assert.ok(manifest.every(m=>/^[a-f0-9]{64}$/.test(m.sha256)));
 });
@@ -17,6 +17,10 @@ test('dependency ordering preserves fee, protective and trace function prerequis
  order('0043_strata_continuous_execution_grants.sql','maintenance-hardening-20261028.sql');
  order('strata_in_app_protective_release_approval.sql','held-consent-deadlines.sql');
  assert.equal(migrationManifest.filter(p=>p==='sql/held-consent-deadlines.sql').length,1);
+ const settled='strata_owner_settled_cash_recovery_commit_fence.sql';
+ assert.equal(migrationManifest.filter(p=>p==='sql/'+settled).length,1);
+ order('0000_reviewed_release_schema.sql',settled);
+ order('0013_kalshi_account_worker_lease.sql',settled);
 });
 test('all independent activity tables have checked-in nondeferred account FKs',()=>{
  const sql=migrationManifest.map(p=>readFileSync(resolve(schemaRoot,p),'utf8')).join('\n');
