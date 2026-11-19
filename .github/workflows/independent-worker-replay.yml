@@ -10,7 +10,8 @@ permissions:
   contents: read
 jobs:
   disposable-pg16-no-submit:
-    runs-on: ubuntu-latest
+    # Keep PostgreSQL 16 host tools aligned with the existing Strata database CI.
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
