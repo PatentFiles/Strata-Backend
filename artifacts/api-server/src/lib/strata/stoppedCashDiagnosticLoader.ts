@@ -57,6 +57,17 @@ async function readHeader(q:QueryOnly,owner:string,options:Options){
 
 export function createStoppedCashDiagnosticLoader(options:Options){
  return Object.freeze({
+  // Separate observation lane: reuse the exact held header, intentionally do
+  // not treat missing retained history as validated or even read those rows.
+  async heldHeader(owner:string){
+   if(!UUID.test(owner))return null;
+   return readStoppedCashDatabaseLeg(options.connect,async q=>{
+    const a=await readHeader(q,owner,options);if(!a)return null;
+    const r=a.row;
+    return {owner,id:a.id,held:true as const,fingerprint:a.fingerprint,cash:text(r.cash_micros_text),
+     fence:digest({revision:r.hold_revision,leaseCredentialFingerprint:r.lease_credential_fingerprint})};
+   });
+  },
   async loadHeld(owner:string):Promise<StoppedCashDiagnosticHeld|null>{
    if(!UUID.test(owner))return null;
    return readStoppedCashDatabaseLeg(options.connect,async q=>{

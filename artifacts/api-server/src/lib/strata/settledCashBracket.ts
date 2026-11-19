@@ -9,7 +9,7 @@ type Read=typeof getOwnedProductionKalshiJson;
 type Result=OwnedKalshiRead|{ok:false;reason:string};
 const time=(n:unknown):n is number=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0;
 const refuse=(reason:string):Result=>({ok:false,reason});
-function balanceEvidence(input:unknown,at:number) {
+export function balanceEvidence(input:unknown,at:number) {
  if(!scopeEcho(input))return null;
  const row=input as Record<string,unknown>;
  // Kalshi's scoped balance body does not promise the requested pair is echoed.
