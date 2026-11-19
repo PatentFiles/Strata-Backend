@@ -22,6 +22,7 @@ export interface WalletDisplayReadDiagnostic {
 }
 export interface KalshiUserRead {
   /** Optional display-only diagnostics; complete means received usable shapes, NOT full pagination or signed reconciliation. */
+  subaccountTransferPageState?: 'more' | 'last' | 'unknown';
   displayReadDiagnostics?: {complete: boolean; reads: Record<WalletDisplayReadLabel, WalletDisplayReadDiagnostic>};
   credentialVerified: boolean;
   verificationReason: string | null;
