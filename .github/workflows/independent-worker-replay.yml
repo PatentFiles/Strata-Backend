@@ -4,6 +4,7 @@ on:
     paths:
       - 'artifacts/api-server/src/lib/v13-production/worker.ts'
       - 'artifacts/api-server/src/lib/v13-production/*Replay*.ts'
+      - 'artifacts/api-server/src/lib/v13-production/independentWorkerPgAssembly.ts'
       - 'artifacts/api-server/scripts/independent-worker-ci/**'
       - '.github/workflows/independent-worker-replay.yml'
 permissions:
