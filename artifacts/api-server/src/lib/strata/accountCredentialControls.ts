@@ -1,3 +1,5 @@
+import { advanceTechnicalSetup, createTechnicalSetupAdmission, SETUP_ROLE_ORDER, TECHNICAL_SETUP_CONFIRMATION,
+  technicalSetupResult, type TechnicalSetupSnapshot, type SetupRole } from "./technicalSetupAdvance";
 import { emptyUserExecutionView } from "./userExecutionScope";
 import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
   executeOwnerShardAllocation, reconcileOwnerShardAllocation,
@@ -430,7 +432,7 @@ export function accountCredentialControls(
         },
       });
   }
-  return {
+  const controls = {
     async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
       if (options.session) {
         const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
@@ -901,6 +903,54 @@ export function accountCredentialControls(
               operationPreparations,
             ),
       };
+    },
+  };
+  const admitTechnicalSetup=createTechnicalSetupAdmission();
+  const scopeOf=(context:import("./accountCommissioningContext").AccountCommissioningContext)=>JSON.stringify([
+    context.authenticatedUserId,context.financialAccountId,context.providerConnectionId,context.executionAccountId,
+    context.subaccount,context.exchangeIndex,context.executionKeyFingerprint,
+    context.credentials.map(ref=>[ref.role,ref.vaultSecretId,ref.keyFingerprint]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))),
+  ]);
+  return {
+    ...controls,
+    async advanceTechnicalSetup(userId:string,body:unknown){
+      if(!body||typeof body!=="object"||Array.isArray(body))
+        return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
+      const input=body as Record<string,unknown>;
+      if(input.expectedOwnerId!==userId||input.confirmation!==TECHNICAL_SETUP_CONFIRMATION||
+          Object.keys(input).some(key=>key!=="expectedOwnerId"&&key!=="confirmation"))
+        return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
+      if(!await credentialTablesReady(db))return technicalSetupResult("BLOCKED","credential_migration_missing");
+      return admitTechnicalSetup(userId,()=>advanceTechnicalSetup({
+        now:()=>performance.now(),
+        async snapshot():Promise<TechnicalSetupSnapshot>{
+          const p=ports();
+          const before=await resolveAccountCommissioningContext(userId,p);
+          if(!before.ok)throw Error("technical_setup_scope_changed");
+          const status=await listAccountCredentialStatus(database,p,userId);
+          if(!status.ok)throw Error("technical_setup_scope_changed");
+          const after=await resolveAccountCommissioningContext(userId,p);
+          if(!after.ok||scopeOf(before.context)!==scopeOf(after.context))throw Error("technical_setup_scope_changed");
+          const ctx=after.context;
+          const bindings=ctx.credentials.map(ref=>{
+            if(!SETUP_ROLE_ORDER.includes(ref.role as SetupRole)||!ref.keyFingerprint)throw Error("technical_setup_scope_changed");
+            const roles=status.roles.filter(item=>item.role===ref.role&&!item.revoked&&item.fingerprint===ref.keyFingerprint);
+            if(roles.length!==1)throw Error("technical_setup_scope_changed");
+            return {role:ref.role as SetupRole,fingerprint:ref.keyFingerprint,vaultSecretId:ref.vaultSecretId,
+              verified:roles[0]!.verified&&roles[0]!.verificationReason==="credential_verified"};
+          });
+          // Existing accounts are never sent through technical provisioning again.
+          const attempts=ctx.executionAccountId===null
+            ?await listOwnedAccountSetupAttempts(database,userId,ctx.providerConnectionId):[];
+          const unresolved=attempts.find(a=>a.state==="attempted"||a.state==="response_received"||a.state==="uncertain");
+          return {scope:scopeOf(ctx),executionAccountExists:ctx.executionAccountId!==null,bindings,
+            unresolvedAttemptId:unresolved?.attemptId??null};
+        },
+        verify:binding=>verifySavedRole(userId,{role:binding.role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"},
+          {fingerprint:binding.fingerprint,vaultSecretId:binding.vaultSecretId}),
+        status:()=>controls.commissioningStatus(userId),
+        prepare:operation=>controls.authorizeOperation(userId,{operation,confirmation:ACCOUNT_SETUP_CONFIRMATIONS[operation]}),
+      }));
     },
   };
 }
