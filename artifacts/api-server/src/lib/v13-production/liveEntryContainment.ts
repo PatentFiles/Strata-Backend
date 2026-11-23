@@ -13,7 +13,7 @@ export function assertIndependentEntryAvailable():never {
 /** The production transport constructs a fixed string URL, explicit method and
  * serialized order object. Reject other input shapes rather than guess whether
  * a request is reducing. This is a narrowing fence, not an exit authorization. */
-export function assertContainedProductionRequest(input:RequestInfo|URL,init?:RequestInit):void {
+export function assertContainedProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit):void {
   if(typeof input!=="string"||!init||typeof init.method!=="string")assertIndependentEntryAvailable();
   const method=init.method.toUpperCase();
   let url:URL;

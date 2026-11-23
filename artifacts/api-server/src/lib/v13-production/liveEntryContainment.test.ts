@@ -9,7 +9,7 @@ test("entry source containment rejects entry, forged live labels and absent redu
     assert.throws(()=>assertContainedProductionRequest(url,post(x)),{message:LIVE_ENTRY_SOURCE_UNAVAILABLE});
 });
 test("unknown mutation, altered destination and ambiguous body fail closed",()=>{
-  for(const [u,i] of [[url,{method:"POST",body:"{"}],[url+"?other=1",post(reducing)],["https://example.com"+new URL(url).pathname,post(reducing)],[url,{method:"PUT"}],[new Request(url,{method:"POST",body:JSON.stringify(reducing)}),undefined]] as [RequestInfo,RequestInit|undefined][])
+  for(const [u,i] of [[url,{method:"POST",body:"{"}],[url+"?other=1",post(reducing)],["https://example.com"+new URL(url).pathname,post(reducing)],[url,{method:"PUT"}],[new Request(url,{method:"POST",body:JSON.stringify(reducing)}),undefined]] as [Parameters<typeof fetch>[0],RequestInit|undefined][])
     assert.throws(()=>assertContainedProductionRequest(u,i),{message:LIVE_ENTRY_SOURCE_UNAVAILABLE});
 });
 test("existing reducing and cancel routes are not blocked by the narrowing fence",()=>{
