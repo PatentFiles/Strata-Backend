@@ -534,6 +534,15 @@ export async function reconcileOwnedSubaccountCash(
   if (!signer.ok) return { ok: false, reason: signer.reason, transferAttempted: false };
   const get = input.get ?? ((creds, path, query = "", fetchImpl = fetch) =>
     getScopedKalshiJson(creds, path, query, fetchImpl, PERSONAL_KALSHI_HOST));
+  // Anchor the observation before either signed GET. A late completion
+  // must never retimestamp that original read or persist as fresh.
+  const observedAtMs = Date.now();
+  const monotonicStart = performance.now();
+  if (!Number.isSafeInteger(input.nowMs) || input.nowMs <= 0 ||
+      !Number.isSafeInteger(observedAtMs) || observedAtMs < input.nowMs ||
+      !Number.isFinite(monotonicStart) || monotonicStart < 0) {
+    return { ok: false, reason: "cash_read_clock_unverified", transferAttempted: false };
+  }
   let subaccountBalance: unknown;
   let primaryBalance: unknown;
   try {
@@ -544,6 +553,16 @@ export async function reconcileOwnedSubaccountCash(
   } catch {
     return { ok: false, reason: "kalshi_read_failed", transferAttempted: false };
   }
+  const completedAtMs = Date.now();
+  const completedMono = performance.now();
+  if (!Number.isSafeInteger(completedAtMs) || completedAtMs < observedAtMs ||
+      !Number.isFinite(completedMono) || completedMono < monotonicStart) {
+    return { ok: false, reason: "cash_read_clock_unverified", transferAttempted: false };
+  }
+  const effectiveNowMs = Math.max(completedAtMs, observedAtMs + Math.ceil(completedMono - monotonicStart));
+  if (!Number.isSafeInteger(effectiveNowMs) || effectiveNowMs - observedAtMs > 15_000) {
+    return { ok: false, reason: "cash_read_expired", transferAttempted: false };
+  }
   if (!scopeEcho(subaccountBalance)) {
     return { ok: false, reason: "account_target_pair_mismatch", transferAttempted: false };
   }
@@ -553,8 +572,8 @@ export async function reconcileOwnedSubaccountCash(
     confirmation: input.confirmation,
     subaccount: 1,
     exchangeIndex: 2,
-    observedAtMs: input.nowMs,
-    nowMs: input.nowMs,
+    observedAtMs,
+    nowMs: effectiveNowMs,
     maxAgeMs: 15_000,
     subaccountBalance,
     primaryBalance,

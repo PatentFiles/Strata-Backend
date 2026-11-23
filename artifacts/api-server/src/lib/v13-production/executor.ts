@@ -50,6 +50,13 @@ export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled
 
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
+  /** Set by actual production factories until independent source qualification. */
+  private independentEntryHold = false;
+  containLiveEntries():void { this.independentEntryHold=true; }
+  get liveEntryContained():boolean { return this.independentEntryHold; }
+  private assertEntrySourceAvailable():void {
+    requireProof(!this.independentEntryHold, "production_independent_entry_source_unavailable");
+  }
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
   constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
@@ -192,6 +199,7 @@ export class ProductionExecutor {
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
+    this.assertEntrySourceAvailable();
     const done=this.startTiming("prepare_entry",{evaluationId});
     const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
     try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
@@ -412,6 +420,7 @@ export class ProductionExecutor {
       const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
       requireProof(i, "production_intent_missing");
       if (i.state !== "PREPARED") return false;
+      if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
       if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
       await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
@@ -462,6 +471,7 @@ export class ProductionExecutor {
             catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
           };
           try {
+          if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");

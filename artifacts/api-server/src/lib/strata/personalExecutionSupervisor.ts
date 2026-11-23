@@ -159,12 +159,14 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-/** Distinct from global fetch, so a deployment cannot submit through the unbound global client. */
+import {containedProductionFetch} from "../v13-production/liveEntryContainment";
+
+/** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
 export async function personalProductionFetch(
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
 ): Promise<Response> {
-  return fetch(input, init);
+  return containedProductionFetch(input,init);
 }
 
 export function createOwnedTradingSupervisor(
@@ -741,6 +743,7 @@ export function createProductionPersonalSession(
       }),
       fetchImpl: measuredFetch,
     });
+    session.executor.containLiveEntries();
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
     if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){

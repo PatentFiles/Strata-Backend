@@ -111,6 +111,13 @@ export class ProductionWorker {
       else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
       await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
+      if(this.executor.liveEntryContained){
+        if(!this.entryHoldReported){
+          this.entryHoldReported=true;
+          this.report(new Error("production_independent_entry_source_unavailable"));
+        }
+        return;
+      }
       if (!this.entriesOpen()) {
         // A healthy reconciliation heartbeat does not prove entries are open.
         // Report this once per suspended interval without attempting an order.
@@ -276,7 +283,7 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=onCommittedForwardSignal((hint)=>{
+    this.detachWake=this.executor.liveEntryContained?null:onCommittedForwardSignal((hint)=>{
       if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;
