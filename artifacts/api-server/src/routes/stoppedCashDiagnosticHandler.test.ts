@@ -127,7 +127,7 @@ test('forward route uses separate exact AAL2 gate and reports current balance wi
   assert.equal(calls,0);
   const response=await send(valid);assert.equal(response.status,409);
   assert.equal(response.headers.get('cache-control'),'private, no-store');
-  const b=await response.json();
+  const b=await response.json() as Record<string,unknown>;
   assert.equal(b.balanceMatchesLocal,true);assert.equal(b.stoppedLocalScopeVerified,true);
   assert.equal(b.pendingCashCompletenessVerified,false);assert.equal(b.authenticatedExchangeFlat,false);
   assert.equal(b.historyReplayed,false);assert.equal(b.holdCleared,false);assert.equal(b.tradingAuthorized,false);assert.equal(calls,1);
