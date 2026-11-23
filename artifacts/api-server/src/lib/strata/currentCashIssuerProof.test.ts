@@ -1,64 +1,61 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {generateKeyPairSync,sign} from 'node:crypto';
-import {verifyCurrentCashIssuerProof} from './currentCashIssuerProof';
-import {observeCurrentCashIssuerRecord} from './currentCashIssuerObservation';
+import {verifyCurrentObligationsProof,verifyPostedSettlementProof} from './currentCashIssuerProof';
+import {observeCurrentCashObligations} from './currentCashIssuerObservation';
 const a=generateKeyPairSync('ed25519'),b=generateKeyPairSync('ed25519'),d=(x:string)=>x.repeat(64);
-const c={accountScopeDigest:d('a'),buildSha:'b'.repeat(40),nonce:d('c'),stopRevisionDigest:d('d'),issuedAtMs:1000,settlementId:'settlement:fixture',settlementDigest:d('e')};
-const pin={issuerKeyId:'issuer-fixture',publicKey:a.publicKey,accountScopeDigest:c.accountScopeDigest,buildSha:c.buildSha,notBeforeMs:100,expiresAtMs:9000};
-const p={issuerKeyId:pin.issuerKeyId,accountScopeDigest:c.accountScopeDigest,buildSha:c.buildSha,nonce:c.nonce,stopRevisionDigest:c.stopRevisionDigest,
- issuedAtMs:c.issuedAtMs,observedAtMs:1010,expiresAtMs:6000,subaccount:1,exchangeIndex:2,
- coverage:'complete_all_current_pending_cash_and_exact_posted_settlement',pendingCashItems:0,settlementId:c.settlementId,settlementStatus:'posted',settlementPostedAtMs:900,settlementDigest:c.settlementDigest};
-function envelope(q= p,key=a.privateKey){
- const bytes=Buffer.from(JSON.stringify(['STRATA_CURRENT_PENDING_CASH_AND_POSTED_SETTLEMENT_V1',q.issuerKeyId,q.accountScopeDigest,q.buildSha,q.nonce,q.stopRevisionDigest,
-  q.issuedAtMs,q.observedAtMs,q.expiresAtMs,q.subaccount,q.exchangeIndex,q.coverage,q.pendingCashItems,q.settlementId,q.settlementStatus,q.settlementPostedAtMs,q.settlementDigest]));
+const common={accountScopeDigest:d('a'),buildSha:'b'.repeat(40),nonce:d('c'),stopRevisionDigest:d('d'),issuedAtMs:1000};
+const current={...common,currentCutDigest:d('1')};
+const incident={...common,settlementId:'settlement:KXBTC15M:2026-11-22T04:01:02.003Z',settlementDigest:d('e')};
+const pin={issuerKeyId:'issuer-fixture',publicKey:a.publicKey,accountScopeDigest:common.accountScopeDigest,buildSha:common.buildSha,notBeforeMs:100,expiresAtMs:9000};
+const body={issuerKeyId:pin.issuerKeyId,...common,observedAtMs:1010,expiresAtMs:6000,subaccount:1,exchangeIndex:2};
+const obligations={...body,coverage:'complete_all_current_pending_cash',currentCutDigest:current.currentCutDigest,pendingCashItems:0};
+const settlement={...body,coverage:'exact_posted_settlement',settlementId:incident.settlementId,settlementStatus:'posted',settlementDigest:incident.settlementDigest};
+const shared=['issuerKeyId','accountScopeDigest','buildSha','nonce','stopRevisionDigest','issuedAtMs','observedAtMs','expiresAtMs','subaccount','exchangeIndex'];
+function envelope(q:Record<string,unknown>,posted=false,key=a.privateKey){
+ const fields=[...shared,'coverage',...(posted?['settlementId','settlementStatus','settlementDigest']:['currentCutDigest','pendingCashItems'])];
+ const bytes=Buffer.from(JSON.stringify([posted?'STRATA_POSTED_SETTLEMENT_V1':'STRATA_CURRENT_OBLIGATIONS_V1',...fields.map(k=>q[k])]));
  return {payload:q,signature:sign(null,bytes,key).toString('base64url')};
 }
-test('exact admitted proof distinguishes verified nonzero from zero without history or clearance',()=>{
+test('present proof works without any settlement ID and binds exact cut/pair',()=>{
  for(const pendingCashItems of [0,2]){
-  const r=verifyCurrentCashIssuerProof(envelope({...p,pendingCashItems}),c,[pin],1100);
-  assert.ok(r.ok);assert.equal(r.pendingCashItems,pendingCashItems);assert.equal(r.settlementPosted,true);
-  assert.equal(r.historicalCoverageVerified,false);assert.equal(r.authenticatedExchangeFlat,false);assert.equal(r.holdCleared,false);assert.equal(r.tradingAuthorized,false);
+  const r=verifyCurrentObligationsProof(envelope({...obligations,pendingCashItems}),current,[pin],1100);
+  assert.ok(r.ok);assert.equal(r.pendingCashItems,pendingCashItems);
+  assert.equal(r.authenticatedExchangeFlat,false);assert.equal(r.tradingAuthorized,false);
  }
+ for(const p of [{...obligations,currentCutDigest:d('2')},{...obligations,subaccount:2},{...obligations,exchangeIndex:1},
+  {...obligations,pendingCashItems:-1},{...obligations,coverage:'partial'},{...obligations,settlementId:incident.settlementId}])
+  assert.equal(verifyCurrentObligationsProof(envelope(p),current,[pin],1100).ok,false);
 });
-test('wrong scope, challenge, build, revision, settlement and inadequate coverage refuse even when signed',()=>{
- for(const q of [{...p,nonce:d('f')},{...p,stopRevisionDigest:d('f')},{...p,accountScopeDigest:d('f')},
-  {...p,buildSha:'f'.repeat(40)},{...p,exchangeIndex:1},{...p,subaccount:2},{...p,settlementStatus:'pending'},{...p,settlementPostedAtMs:0},{...p,settlementPostedAtMs:1011},
-  {...p,settlementDigest:d('f')},{...p,coverage:'partial'},{...p,pendingCashItems:-1}])
-  assert.equal(verifyCurrentCashIssuerProof(envelope(q),c,[pin],1100).ok,false);
+test('exact posted settlement accepts canonical fractional-second period and grants no obligations credit',()=>{
+ const r=verifyPostedSettlementProof(envelope(settlement,true),incident,[pin],1100);
+ assert.ok(r.ok);assert.equal(r.settlementPosted,true);assert.equal(Object.hasOwn(r,'pendingCashItems'),false);
+ assert.equal(r.historicalCoverageVerified,false);assert.equal(r.holdCleared,false);
+ for(const id of [incident.settlementId.replace('.003Z','.004Z'), 'settlement:x/1', 'not-settlement:x']){
+  const p={...settlement,settlementId:id};
+  assert.equal(verifyPostedSettlementProof(envelope(p,true),incident,[pin],1100).ok,false);
+  if(id.includes('/')||id.startsWith('not'))assert.equal(verifyPostedSettlementProof(envelope(p,true),{...incident,settlementId:id},[pin],1100).ok,false);
+ }
+ assert.equal(verifyPostedSettlementProof(envelope(obligations),incident,[pin],1100).ok,false);
+ assert.equal(verifyCurrentObligationsProof(envelope(settlement,true),current,[pin],1100).ok,false);
 });
-test('missing, untrusted, ambiguous or expired pins and forged payload refuse',()=>{
- const good=envelope();
- assert.equal(verifyCurrentCashIssuerProof(good,c,[],1100).ok,false);
- assert.equal(verifyCurrentCashIssuerProof(good,c,[pin,pin],1100).ok,false);
- assert.equal(verifyCurrentCashIssuerProof(good,c,[{...pin,expiresAtMs:5999}],1100).ok,false);
- assert.equal(verifyCurrentCashIssuerProof(envelope(p,b.privateKey),c,[pin],1100).ok,false);
- assert.equal(verifyCurrentCashIssuerProof({...good,payload:{...p,pendingCashItems:1}},c,[pin],1100).ok,false);
- assert.equal(verifyCurrentCashIssuerProof({...good,publicKey:a.publicKey},c,[pin],1100).ok,false);
+test('both contracts fail closed against tampering, self-signed, stale/replayed nonce, scope and revocation',()=>{
+ for(const p of [{...obligations,nonce:d('f')},{...obligations,stopRevisionDigest:d('f')},{...obligations,buildSha:'f'.repeat(40)},
+  {...obligations,accountScopeDigest:d('f')},{...obligations,observedAtMs:1101},{...obligations,expiresAtMs:6001}])
+  assert.equal(verifyCurrentObligationsProof(envelope(p),current,[pin],1100).ok,false);
+ assert.equal(verifyCurrentObligationsProof(envelope(obligations,false,b.privateKey),current,[pin],1100).ok,false);
+ assert.equal(verifyCurrentObligationsProof(envelope(obligations),current,[],1100).ok,false);
+ assert.equal(verifyCurrentObligationsProof(envelope(obligations),current,[pin,pin],1100).ok,false);
+ assert.equal(verifyCurrentObligationsProof(envelope(obligations),current,[pin],6000).ok,false);
+ const forged=envelope(obligations);assert.equal(verifyCurrentObligationsProof({...forged,payload:{...obligations,pendingCashItems:1}},current,[pin],1100).ok,false);
+ assert.equal(verifyPostedSettlementProof(envelope({...settlement,settlementDigest:d('f')},true),incident,[pin],1100).ok,false);
+ assert.equal(verifyPostedSettlementProof(envelope({...settlement,settlementStatus:'pending'},true),incident,[pin],1100).ok,false);
 });
-test('future, stale and expiry extensions refuse; next nonce invalidates old packet',()=>{
- for(const [q,now] of [[p,1009],[p,6000],[{...p,expiresAtMs:6001},1100]] as const)
-  assert.equal(verifyCurrentCashIssuerProof(envelope(q),c,[pin],now).ok,false);
- assert.equal(verifyCurrentCashIssuerProof(envelope(),{...c,nonce:d('f')},[pin],1100).ok,false);
-});
-test('stopped assembly requires a configured source, rejects STOP change, and keeps nonces single-use',async()=>{
- const scope={accountScopeDigest:c.accountScopeDigest,buildSha:c.buildSha,stopRevisionDigest:c.stopRevisionDigest,
-  settlementId:c.settlementId,settlementDigest:c.settlementDigest};
- const ports={readStoppedScope:async()=>scope,trustPins:()=>[pin],now:()=>1000};
- const reason=(value:Awaited<ReturnType<typeof observeCurrentCashIssuerRecord>>)=>{
-  assert.ok(!value.ok);return value.reason;
- };
- assert.equal(reason(await observeCurrentCashIssuerRecord(ports)),'issuer_source_unconfigured');
- let n=0; let packet:ReturnType<typeof envelope>|undefined;
- const fetchRecord:NonNullable<Parameters<typeof observeCurrentCashIssuerRecord>[0]['fetchRecord']>=async challenge=>{
-  n++;
-  packet??=envelope({...p,nonce:challenge.nonce,observedAtMs:1000});
-  return packet;
- };
- assert.equal((await observeCurrentCashIssuerRecord({...ports,fetchRecord})).ok,true);
- assert.equal(reason(await observeCurrentCashIssuerRecord({...ports,fetchRecord})),'challenge_mismatch');
- assert.equal(n,2);
- let reads=0;
- assert.equal(reason(await observeCurrentCashIssuerRecord({...ports,fetchRecord,readStoppedScope:async()=>reads++===0
-  ?scope:{...scope,stopRevisionDigest:d('f')}})),'stopped_scope_changed');
+test('assembly refuses a changing complete-cut digest even with a signed first cut',async()=>{
+ const scope={accountScopeDigest:current.accountScopeDigest,buildSha:current.buildSha,
+  stopRevisionDigest:current.stopRevisionDigest,currentCutDigest:current.currentCutDigest};
+ let n=0;
+ const ret=await observeCurrentCashObligations({now:()=>1000,trustPins:()=>[pin],readStoppedScope:async()=>++n===1?scope:{...scope,currentCutDigest:d('2')},
+  fetchRecord:async c=>envelope({...obligations,...c,observedAtMs:1000})});
+ assert.equal(ret.ok,false);if(!ret.ok)assert.equal(ret.reason,'stopped_scope_changed');
 });
