@@ -139,6 +139,8 @@ export async function registerAccountCredential(
     role: string;
     apiKeyId: string;
     privateKey: string;
+    /** New onboarding never rotates an existing role. */
+    createOnly?: boolean;
   },
 ): Promise<AccountCredentialRegistration> {
   if (!knownCredentialRole(input.role)) {
@@ -170,6 +172,7 @@ export async function registerAccountCredential(
         role: input.role,
         vaultSecretId,
         keyFingerprint: fingerprint,
+        createOnly: input.createOnly === true,
         frozenRestrictedRecovery: input.role === "restricted_execution" &&
           resolved.context.executionAccountId !== null,
       });
@@ -188,6 +191,7 @@ export async function registerAccountCredential(
     const reason = error instanceof Error ? error.message : "credential_binding_rejected";
     if (reason === "vault_secret_reused_from_provider_connection" || reason === "vault_secret_reused" ||
         reason === "credential_not_owned" || reason === "ambiguous_credential_role" ||
+        reason === "credential_already_registered" ||
         reason === "restricted_execution_rebinding_required") {
       return registration(false, reason, input.role);
     }
