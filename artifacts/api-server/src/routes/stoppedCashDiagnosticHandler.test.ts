@@ -102,12 +102,19 @@ test('forward route uses separate exact AAL2 gate and reports current balance wi
   verifyToken:t=>verifySupabaseAccessToken(t,{supabaseUrl,keys:async()=>key}),roleOf:async()=> 'ADMIN',
  });
  let calls=0;
+ let localKind:'clean'|'held'|'unverified'='held',revision=0,changeFence=false;
  let env:NodeJS.ProcessEnv={};
  const forwardConfig={NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,STRATA_FORWARD_CASH_OBSERVATION_SHA:sha,
   STRATA_FORWARD_CASH_OBSERVATION_ENABLED:'true',STRATA_FORWARD_CASH_OBSERVATION_REVIEWED:'true',STRATA_FORWARD_CASH_OBSERVATION_OWNER:owner};
  app.use('/fixture',createStoppedCashDiagnosticRouter(access.requireUser,{env:()=>env,
   inspect:async()=>{throw Error('historical lane must not run');},
-  observeForward:async who=>{assert.equal(who,owner);calls++;return {
+  observeForwardLocal:async who=>{
+   assert.equal(who,owner);
+   return localKind==='unverified'?null:{status:'LOCAL_STOP_SCOPE_ONLY',fence:String(revision),
+    cashMismatchHold:localKind==='held',authenticatedExchangeFlat:false,pendingCashCompletenessVerified:false,
+    holdCleared:false,tradingAuthorized:false};
+  },
+  observeForward:async who=>{assert.equal(who,owner);calls++;if(changeFence)revision++;return {
    status:'balance_matches_local_cash_history_unverified',observedAt:report.observedAt,historyUnverified:true,
    accountWritesPerformed:false,observationPersisted:false,ordersSubmitted:false,tradingAuthorized:false,
   };},
@@ -125,11 +132,27 @@ test('forward route uses separate exact AAL2 gate and reports current balance wi
   assert.equal((await send(valid,'{}')).status,400);
   assert.equal((await send(valid,undefined,'?owner='+other)).status,400);
   assert.equal(calls,0);
+  localKind='unverified';
+  const blocked=await send(valid);
+  assert.equal((await blocked.json() as Record<string,unknown>).reason,'local_stop_unverified');
+  localKind='clean';
+  const ordinary=await send(valid);
+  assert.equal(ordinary.status,409);
+  const local=await ordinary.json() as Record<string,unknown>;
+  assert.equal(local.localStopKind,'routine');assert.equal(local.stoppedLocalScopeVerified,true);
+  assert.equal(local.authenticatedExchangeFlat,false);assert.equal(local.tradingAuthorized,false);
+  assert.equal(calls,0);
+  localKind='held';
   const response=await send(valid);assert.equal(response.status,409);
   assert.equal(response.headers.get('cache-control'),'private, no-store');
   const b=await response.json() as Record<string,unknown>;
   assert.equal(b.balanceMatchesLocal,true);assert.equal(b.stoppedLocalScopeVerified,true);
   assert.equal(b.pendingCashCompletenessVerified,false);assert.equal(b.authenticatedExchangeFlat,false);
   assert.equal(b.historyReplayed,false);assert.equal(b.holdCleared,false);assert.equal(b.tradingAuthorized,false);assert.equal(calls,1);
+  changeFence=true;
+  const raced=await send(valid);
+  const rejected=await raced.json() as Record<string,unknown>;
+  assert.equal(rejected.reason,'local_stop_changed');assert.equal(rejected.stoppedLocalScopeVerified,false);
+  assert.equal(rejected.balanceMatchesLocal,null);
  }finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
 });

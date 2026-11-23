@@ -4,6 +4,7 @@ import {pool} from '@workspace/db';
 import {logger} from '../lib/logger';
 import {observeStoppedBalanceOnly,STOPPED_BALANCE_FAILURE_STAGES} from '../lib/strata/stoppedBalanceObservation';
 import {forwardCashVerdict} from '../lib/strata/forwardCashVerdict';
+import {createRoutineStopFence} from '../lib/strata/routineStopFence';
 import {balanceEvidence} from '../lib/strata/settledCashBracket';
 import {getStoppedBalanceObservationJson} from '../lib/strata/personalExchangeRead';
 import {deployedGitSha} from '../lib/strata/deployedGitSha';
@@ -20,6 +21,7 @@ type Result=Awaited<ReturnType<typeof inspectStoppedCashDiagnosticPrototype>>;
 type BalanceResult=Awaited<ReturnType<typeof observeStoppedBalanceOnly>>;
 type Deps={env:()=>NodeJS.ProcessEnv; inspect:(subject:string)=>Promise<Result>;
  observeForward?:(subject:string)=>Promise<BalanceResult>;
+ observeForwardLocal?:ReturnType<typeof createRoutineStopFence>;
  observeBalance?:(subject:string,observeTransport:(read:1|2)=>void)=>Promise<BalanceResult>};
 const balanceNo=()=>({status:'balance_observation_unverified' as const,historyUnverified:true as const,
  accountWritesPerformed:false as const,observationPersisted:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const});
@@ -50,10 +52,14 @@ export function stoppedCashDiagnosticOwner(env:NodeJS.ProcessEnv):string|null{
 const loader=createStoppedCashDiagnosticLoader({connect:()=>pool.connect(),
  releaseSha:()=>deployedGitSha(process.env)??'',
  isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)});
+const observeForwardLocal=createRoutineStopFence({connect:()=>pool.connect(),
+ releaseSha:()=>deployedGitSha(process.env)??'',
+ isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)});
 const bracket=createStoppedCashBracketAdapter();
 const defaults:Deps={env:()=>process.env,inspect:subject=>inspectStoppedCashDiagnosticPrototype(
  {subject,aal:'aal2'},{...loader,bracket,
  env:()=>stoppedCashDiagnosticOwner(process.env)===subject?process.env:{},wall:Date.now,mono:()=>performance.now()}),
+ observeForwardLocal,
  observeForward:subject=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,
  exactOwnerGate:owner=>forwardCashObservationOwner(process.env)===owner,
  scopedGet:getStoppedBalanceObservationJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()}),
@@ -147,15 +153,26 @@ export function createStoppedCashDiagnosticRouter(requireUser:RequestHandler,dep
   if(!empty||Object.keys(req.query).length||
     (req.header('content-length')!==undefined&&req.header('content-length')!=='0')||
     req.header('transfer-encoding')!==undefined){refuse(400,'forward_cash_observation_accepts_no_input');return;}
-  if(forwardCashObservationOwner(deps.env())!==subject||!deps.observeForward){
+  if(forwardCashObservationOwner(deps.env())!==subject||!deps.observeForward||!deps.observeForwardLocal){
    refuse(404,'forward_cash_observation_unavailable');return;}
   if(inFlight){refuse(409,'forward_cash_observation_in_progress');return;}
   inFlight=true;
   try{
-   const out=await deps.observeForward(subject);
+   const head=await deps.observeForwardLocal(subject);
    if(forwardCashObservationOwner(deps.env())!==subject){refuse(404,'forward_cash_observation_unavailable');return;}
-   // Always a refused clearance verdict. Current balance equality does not prove exposure/liabilities.
-   res.status(409).json(forwardCashVerdict(out));
+   if(!head){refuse(409,'local_stop_unverified');return;}
+   if(!head.cashMismatchHold){
+    // Routine STOP needs no historical ledger scan or venue balance requery to report local state.
+    res.status(409).json({...forwardCashVerdict(null),reason:'exchange_current_state_unverified',
+     stoppedLocalScopeVerified:true,localStopKind:'routine'});
+    return;
+   }
+   const out=await deps.observeForward(subject);
+   const tail=await deps.observeForwardLocal(subject);
+   if(forwardCashObservationOwner(deps.env())!==subject){refuse(404,'forward_cash_observation_unavailable');return;}
+   if(!tail||tail.fence!==head.fence||!tail.cashMismatchHold){refuse(409,'local_stop_changed');return;}
+   // Local STOP plus current balance still cannot prove all exposure and pending liabilities.
+   res.status(409).json({...forwardCashVerdict(out),stoppedLocalScopeVerified:true,localStopKind:'cash_mismatch'});
   }catch{
    if(forwardCashObservationOwner(deps.env())!==subject){refuse(404,'forward_cash_observation_unavailable');return;}
    refuse(503,'forward_cash_observation_unavailable');
