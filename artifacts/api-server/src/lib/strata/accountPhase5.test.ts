@@ -563,3 +563,27 @@ test("credential role probes preserve fractional-cent cash and retain pair and m
    }
  }
 });
+
+
+test("combined key save refuses invalid consent or a changed authenticated owner before any mutation",async()=>{
+ const seen:string[]=[];
+ const db:UserScopeQuery={async query(sql:string){
+  seen.push(sql);
+  if(sql.includes("to_regclass('private.kalshi_connection_credentials')"))
+   return {rows:[{name:"private.kalshi_connection_credentials"}]};
+  throw Error("no_credential_or_vault_mutation_allowed");
+ }};
+ const controls=accountCredentialControls(db,{kalshiGet:async()=>{throw Error("no_provider_call_allowed");}});
+ for(const request of [
+  {expectedOwnerId:USER_B,verifyAfterSave:"VERIFY_ACCOUNT_CREDENTIAL"},
+  {expectedOwnerId:USER_A,verifyAfterSave:"yes"},
+  {verifyAfterSave:"VERIFY_ACCOUNT_CREDENTIAL"},
+  {expectedOwnerId:USER_B},
+ ]){
+  const r=await controls.registerCredential(USER_A,{role:"verification",apiKeyId:"fixture",privateKey:"fixture",...request});
+  assert.equal(r.ok,false);
+  assert.equal(r.reason,"explicit_authorization_required");
+  assert.equal(r.executable,false);
+ }
+ assert.equal(seen.length,4);
+});
