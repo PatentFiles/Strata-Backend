@@ -15,10 +15,12 @@ const sameCommon=(a:Scope<CashCommonChallenge>,b:Scope<CashCommonChallenge>)=>a.
 // Snapshots include key bytes and pin validity. Reject a trust change during
 // the observation; a newly trusted issuer cannot validate an already-started challenge.
 function snapshotPins(pins:readonly CashIssuerPin[],scope:Scope<CashCommonChallenge>){
- const applicable=pins.filter(pin=>pin.accountScopeDigest===scope.accountScopeDigest&&pin.buildSha===scope.buildSha)
-  .map(pin=>Object.freeze({...pin}));
+ const scopedIds=new Set(pins.filter(pin=>pin.accountScopeDigest===scope.accountScopeDigest&&pin.buildSha===scope.buildSha)
+  .map(pin=>pin.issuerKeyId));
+ // Preserve the verifier’s global duplicate-ID refusal for relevant IDs.
+ const applicable=pins.filter(pin=>scopedIds.has(pin.issuerKeyId)).map(pin=>Object.freeze({...pin}));
  const fingerprint=createHash('sha256').update(JSON.stringify(applicable.map(pin=>JSON.stringify([
-  pin.issuerKeyId,pin.notBeforeMs,pin.expiresAtMs,pin.publicKey.export({type:'spki',format:'der'}).toString('hex'),
+  pin.issuerKeyId,pin.accountScopeDigest,pin.buildSha,pin.notBeforeMs,pin.expiresAtMs,pin.publicKey.export({type:'spki',format:'der'}).toString('hex'),
  ])).sort())).digest('hex');
  return {applicable,fingerprint};
 }

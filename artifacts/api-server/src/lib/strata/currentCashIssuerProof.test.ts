@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {generateKeyPairSync,sign} from 'node:crypto';
-import {verifyCurrentObligationsProof,verifyPostedSettlementProof} from './currentCashIssuerProof';
+import {verifyCurrentObligationsProof,verifyPostedSettlementProof,type CashIssuerPin} from './currentCashIssuerProof';
 import {observeCurrentCashObligations} from './currentCashIssuerObservation';
 const a=generateKeyPairSync('ed25519'),b=generateKeyPairSync('ed25519'),d=(x:string)=>x.repeat(64);
 const common={accountScopeDigest:d('a'),buildSha:'b'.repeat(40),nonce:d('c'),stopRevisionDigest:d('d'),issuedAtMs:1000};
@@ -69,4 +69,17 @@ test('assembly refuses revocation and replacement even with same issuer key ID',
    fetchRecord:async c=>envelope({...obligations,...c,observedAtMs:1000},false,b.privateKey)});
   assert.equal(ret.ok,false);if(!ret.ok)assert.equal(ret.reason,'issuer_trust_changed');
  }
+});
+
+test('assembly preserves cross-scope duplicate refusal and ignores unrelated issuer IDs',async()=>{
+ const scope={accountScopeDigest:current.accountScopeDigest,buildSha:current.buildSha,
+  stopRevisionDigest:current.stopRevisionDigest,currentCutDigest:current.currentCutDigest};
+ const other={...pin,accountScopeDigest:d('f'),publicKey:b.publicKey};
+ const observe=(trustPins:()=>CashIssuerPin[])=>observeCurrentCashObligations({now:()=>1000,trustPins,readStoppedScope:async()=>scope,
+  fetchRecord:async c=>envelope({...obligations,...c,observedAtMs:1000})});
+ const ambiguous=await observe(()=>[pin,other]);
+ assert.equal(ambiguous.ok,false);if(!ambiguous.ok)assert.equal(ambiguous.reason,'issuer_untrusted');
+ let n=0;const introduced=await observe(()=>n++?[pin,other]:[pin]);
+ assert.equal(introduced.ok,false);if(!introduced.ok)assert.equal(introduced.reason,'issuer_trust_changed');
+ n=0;assert.equal((await observe(()=>n++?[pin,{...other,issuerKeyId:'unrelated'}]:[pin])).ok,true);
 });
