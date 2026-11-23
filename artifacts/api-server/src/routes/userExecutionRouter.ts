@@ -147,6 +147,7 @@ export interface UserScopePort {
   registerCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   revokeCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
+  advanceTechnicalSetup?(userId:string,body:unknown):Promise<import("../lib/strata/technicalSetupAdvance").TechnicalSetupResult>;
   authorizeFunding(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   recordFundingEvidence(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   authorizeOperation(userId: string, body: unknown): Promise<{
@@ -774,6 +775,20 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.setHeader("Cache-Control","private, no-store");
     const out=await revokeWalletV4FeeConsent(owner,req.body);
     res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
+  // Technical advancement verifies saved keys and prepares an existing durable
+  // operation only. No exchange mutation, transfer, approval or worker control.
+  router.post("/onboarding/advance-technical-setup",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    if(!port.advanceTechnicalSetup)return void res.status(503).json({reason:"technical_setup_unavailable"});
+    try{
+      const out=await port.advanceTechnicalSetup(owner,req.body??{});
+      res.status(out.ok?200:409).json(sanitizePublic(out));
+    }catch{
+      res.status(503).json({reason:"technical_setup_unavailable"});
+    }
   });
   // Early personal account onboarding is not Steps 12-13 or trading
   // authorization. No exchange calls, credentials, fee PDF or mutations.
