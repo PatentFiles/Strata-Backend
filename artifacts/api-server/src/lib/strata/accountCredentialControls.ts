@@ -307,119 +307,8 @@ export function accountCredentialControls(
 ) {
   const database = executionDatabase(db);
   const ports = () => createDatabaseAccountCommissioningPorts(database);
-  return {
-    async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
-      if (options.session) {
-        const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
-        if (!stopped.workerStopped) {
-          return {
-            ok: false as const,
-            reason: "worker_still_scheduled",
-            executable: false as const,
-            workerStarted: false as const,
-            executionActive: false as const,
-            view: emptyUserExecutionView(userId),
-          };
-        }
-      }
-      const closed = {
-        ok: false as const,
-        reason: "user_scope_not_migrated",
-        executable: false as const,
-        workerStarted: false as const,
-        executionActive: false as const,
-        view: emptyUserExecutionView(userId),
-      };
-      try {
-        const ready = await db.query(LEASE_TABLE_SQL);
-        if (!ready.rows[0]?.name) {
-          if (action !== "KILL") {
-            if (options.session) {
-              return {
-                ok: true as const,
-                reason: "entries_stopped",
-                executable: false as const,
-                workerStarted: false as const,
-                executionActive: false as const,
-                view: emptyUserExecutionView(userId),
-              };
-            }
-            return closed;
-          }
-          await db.query(
-            "UPDATE v13_production_account SET kill_switch = true, execution_enabled = false WHERE owner_user_id = $1::uuid",
-            [userId],
-          );
-          return {
-            ok: true as const,
-            reason: "account_killed",
-            executable: false as const,
-            workerStarted: false as const,
-            executionActive: false as const,
-            view: emptyUserExecutionView(userId),
-          };
-        }
-        const result = await operateAccountWorker({
-          commissioning: ports(),
-          activity: { async readOwnedAccount() { return null; } },
-          leases: database,
-          safety: {
-            async listAccounts(ownerUserId) {
-              const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
-              return accounts.rows.flatMap((row) => {
-                const executionAccountId = text(row.execution_account_id);
-                const financialAccountId = text(row.financial_account_id);
-                if (!executionAccountId || !financialAccountId) return [];
-                return [{
-                  executionAccountId,
-                  ownerUserId,
-                  financialAccountId,
-                  providerConnectionId: financialAccountId,
-                  keyFingerprint: null,
-                  vaultSecretId: null,
-                  openPositionCount: count(row.open_positions),
-                  unresolvedIntentCount: count(row.unresolved_intents),
-                }];
-              });
-            },
-            async markKilled(ownerUserId, executionAccountId, client) {
-              await (client ?? db).query(
-                `UPDATE v13_production_account SET kill_switch = true, execution_enabled = false
-                 WHERE id = $1 AND owner_user_id = $2::uuid`,
-                [executionAccountId, ownerUserId],
-              );
-            },
-          },
-          async globalKill() {
-            const kill = await db.query("SELECT manual_kill_switch FROM live_execution_config");
-            return kill.rows.length !== 1 || kill.rows[0]?.manual_kill_switch === true;
-          },
-          now: () => Date.now(),
-        }, { authenticatedUserId: userId, holderId: "account-safety", action });
-        return { ...result, view: emptyUserExecutionView(userId) };
-      } catch {
-        return closed;
-      }
-    },
-    async credentialStatus(userId: string) {
-      if (!await credentialTablesReady(db)) {
-        return { ok: false, reason: "credential_migration_missing", executable: false as const, roles: [] };
-      }
-      return listAccountCredentialStatus(database, ports(), userId);
-    },
-    async registerCredential(userId: string, body: unknown) {
-      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
-      const fields = credentialBody(body);
-      if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
-      return registerAccountCredential(database, ports(), { authenticatedUserId: userId, ...fields });
-    },
-    async revokeCredential(userId: string, body: unknown) {
-      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
-      const role = roleOf(body);
-      if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
-      return revokeAccountCredential(database, ports(), { authenticatedUserId: userId, role });
-    },
-    async verifyCredential(userId: string, body: unknown) {
+  async function verifySavedRole(userId: string, body: unknown,
+    expectedStored?: Readonly<{ fingerprint: string; vaultSecretId: string }>) {
       if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
       const role = roleOf(body);
       if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
@@ -430,6 +319,7 @@ export function accountCredentialControls(
         authenticatedUserId: userId,
         role,
         confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
+        ...(expectedStored ? { expectedStored } : {}),
         readSecret: (vaultSecretId) => readOwnedSecret(db, userId, vaultSecretId),
         async probe(material, context) {
           const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
@@ -535,6 +425,143 @@ export function accountCredentialControls(
           return probed;
         },
       });
+  }
+  return {
+    async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
+      if (options.session) {
+        const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
+        if (!stopped.workerStopped) {
+          return {
+            ok: false as const,
+            reason: "worker_still_scheduled",
+            executable: false as const,
+            workerStarted: false as const,
+            executionActive: false as const,
+            view: emptyUserExecutionView(userId),
+          };
+        }
+      }
+      const closed = {
+        ok: false as const,
+        reason: "user_scope_not_migrated",
+        executable: false as const,
+        workerStarted: false as const,
+        executionActive: false as const,
+        view: emptyUserExecutionView(userId),
+      };
+      try {
+        const ready = await db.query(LEASE_TABLE_SQL);
+        if (!ready.rows[0]?.name) {
+          if (action !== "KILL") {
+            if (options.session) {
+              return {
+                ok: true as const,
+                reason: "entries_stopped",
+                executable: false as const,
+                workerStarted: false as const,
+                executionActive: false as const,
+                view: emptyUserExecutionView(userId),
+              };
+            }
+            return closed;
+          }
+          await db.query(
+            "UPDATE v13_production_account SET kill_switch = true, execution_enabled = false WHERE owner_user_id = $1::uuid",
+            [userId],
+          );
+          return {
+            ok: true as const,
+            reason: "account_killed",
+            executable: false as const,
+            workerStarted: false as const,
+            executionActive: false as const,
+            view: emptyUserExecutionView(userId),
+          };
+        }
+        const result = await operateAccountWorker({
+          commissioning: ports(),
+          activity: { async readOwnedAccount() { return null; } },
+          leases: database,
+          safety: {
+            async listAccounts(ownerUserId) {
+              const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
+              return accounts.rows.flatMap((row) => {
+                const executionAccountId = text(row.execution_account_id);
+                const financialAccountId = text(row.financial_account_id);
+                if (!executionAccountId || !financialAccountId) return [];
+                return [{
+                  executionAccountId,
+                  ownerUserId,
+                  financialAccountId,
+                  providerConnectionId: financialAccountId,
+                  keyFingerprint: null,
+                  vaultSecretId: null,
+                  openPositionCount: count(row.open_positions),
+                  unresolvedIntentCount: count(row.unresolved_intents),
+                }];
+              });
+            },
+            async markKilled(ownerUserId, executionAccountId, client) {
+              await (client ?? db).query(
+                `UPDATE v13_production_account SET kill_switch = true, execution_enabled = false
+                 WHERE id = $1 AND owner_user_id = $2::uuid`,
+                [executionAccountId, ownerUserId],
+              );
+            },
+          },
+          async globalKill() {
+            const kill = await db.query("SELECT manual_kill_switch FROM live_execution_config");
+            return kill.rows.length !== 1 || kill.rows[0]?.manual_kill_switch === true;
+          },
+          now: () => Date.now(),
+        }, { authenticatedUserId: userId, holderId: "account-safety", action });
+        return { ...result, view: emptyUserExecutionView(userId) };
+      } catch {
+        return closed;
+      }
+    },
+    async credentialStatus(userId: string) {
+      if (!await credentialTablesReady(db)) {
+        return { ok: false, reason: "credential_migration_missing", executable: false as const, roles: [] };
+      }
+      return listAccountCredentialStatus(database, ports(), userId);
+    },
+    async registerCredential(userId: string, body: unknown) {
+      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
+      const fields = credentialBody(body);
+      if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
+      const optIn = (body as Record<string, unknown>).verifyAfterSave;
+      if (optIn !== undefined && optIn !== "VERIFY_ACCOUNT_CREDENTIAL") {
+        return { ok: false, reason: "explicit_authorization_required", executable: false as const };
+      }
+      // Saving and verifying remain separate durable facts. The caller may opt
+      // into both with one action, but a failed/unknown verification MUST NOT
+      // replay registration or rotate the saved key.
+      const saved = await registerAccountCredential(database, ports(), { authenticatedUserId: userId, ...fields });
+      if (optIn === undefined || !saved.ok) return saved;
+      const pending = { ok: false, executable: false as const, role: fields.role,
+        fingerprint: saved.fingerprint, vaultSecretId: null, saved: true as const };
+      if (!saved.fingerprint || !saved.vaultSecretId) {
+        return { ...pending, reason: "saved_binding_unverified", verificationState: "UNKNOWN" as const };
+      }
+      try {
+        const verified = await verifySavedRole(userId, {
+          role: fields.role, confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+        }, { fingerprint: saved.fingerprint, vaultSecretId: saved.vaultSecretId });
+        return { ...verified, vaultSecretId: null, saved: true as const,
+          verificationState: verified.ok ? "VERIFIED" as const : "REFUSED" as const };
+      } catch {
+        return { ...pending, reason: "saved_verification_unconfirmed", verificationState: "UNKNOWN" as const };
+      }
+    },
+    async revokeCredential(userId: string, body: unknown) {
+      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
+      const role = roleOf(body);
+      if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
+      return revokeAccountCredential(database, ports(), { authenticatedUserId: userId, role });
+    },
+    async verifyCredential(userId: string, body: unknown) {
+      return verifySavedRole(userId, body);
     },
 
     /**
