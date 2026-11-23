@@ -39,6 +39,7 @@ import {
   inspectRestrictedKeyMetadata,
   inspectSubaccount1,
   probeAccountCredential,
+  probeSetupManagementCredential,
   restrictedMetadataNextRequirement,
   type AccountSetupNextRequirement,
   type CredentialProbeResult,
@@ -378,6 +379,9 @@ export function accountCredentialControls(
               ? credentialProbeResult(true, "credential_verified")
               : credentialProbeResult(false,
                 tier.apiTier ? "advanced_api_tier_required" : "provisioning_api_tier_unproven");
+          } else if (context.executionAccountId === null &&
+              (role === "provisioning" || role === "verification")) {
+            probed = await probeSetupManagementCredential(role, fingerprint, material, getJson);
           } else {
             probed = await probeAccountCredential(
               role,
