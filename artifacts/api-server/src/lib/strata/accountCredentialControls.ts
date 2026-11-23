@@ -944,7 +944,8 @@ export function accountCredentialControls(
             ?await listOwnedAccountSetupAttempts(database,userId,ctx.providerConnectionId):[];
           const unresolved=attempts.find(a=>a.state==="attempted"||a.state==="response_received"||a.state==="uncertain");
           return {scope:scopeOf(ctx),executionAccountExists:ctx.executionAccountId!==null,bindings,
-            unresolvedAttemptId:unresolved?.attemptId??null};
+            unresolvedAttemptId:unresolved?.attemptId??null,
+            preparedAttempts:attempts.filter(a=>a.state==="prepared").map(a=>({attemptId:a.attemptId,operation:a.operation,state:a.state}))};
         },
         verify:binding=>verifySavedRole(userId,{role:binding.role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"},
           {fingerprint:binding.fingerprint,vaultSecretId:binding.vaultSecretId}),
