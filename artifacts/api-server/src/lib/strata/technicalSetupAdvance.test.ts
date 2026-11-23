@@ -19,7 +19,7 @@ function harness(initial=SETUP_ROLE_ORDER.slice(0,3).map((role,i)=>roleBinding(r
   let prepared:PublicAccountSetupAttempt|null=null;
   const ports:TechnicalSetupPorts={
     now:()=>now,
-    async snapshot(){return {scope,executionAccountExists:existing,bindings:bindings.map(b=>({...b})),unresolvedAttemptId:unknown};},
+    async snapshot(){return {scope,executionAccountExists:existing,bindings:bindings.map(b=>({...b})),unresolvedAttemptId:unknown,preparedAttempts:prepared?[prepared]:[]};},
     async verify(b){calls.push("verify:"+b.role);
       if(throwRole===b.role)throw Error("synthetic timeout");
       if(failRole===b.role)return {ok:false,reason:"provider_refused"};
