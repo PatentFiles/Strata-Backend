@@ -59,3 +59,14 @@ test('assembly refuses a changing complete-cut digest even with a signed first c
   fetchRecord:async c=>envelope({...obligations,...c,observedAtMs:1000})});
  assert.equal(ret.ok,false);if(!ret.ok)assert.equal(ret.reason,'stopped_scope_changed');
 });
+
+test('assembly refuses revocation and replacement even with same issuer key ID',async()=>{
+ const scope={accountScopeDigest:current.accountScopeDigest,buildSha:current.buildSha,
+  stopRevisionDigest:current.stopRevisionDigest,currentCutDigest:current.currentCutDigest};
+ for(const endPins of [[],[{...pin,publicKey:b.publicKey}],[{...pin,expiresAtMs:pin.expiresAtMs-1}]]){
+  let n=0;
+  const ret=await observeCurrentCashObligations({now:()=>1000,trustPins:()=>n++?endPins:[pin],readStoppedScope:async()=>scope,
+   fetchRecord:async c=>envelope({...obligations,...c,observedAtMs:1000},false,b.privateKey)});
+  assert.equal(ret.ok,false);if(!ret.ok)assert.equal(ret.reason,'issuer_trust_changed');
+ }
+});

@@ -1,5 +1,5 @@
 /** Internal unmounted read-only assembly. No configured issuer or writer. */
-import {randomBytes} from 'node:crypto';
+import {createHash,randomBytes} from 'node:crypto';
 import {verifyCurrentObligationsProof,verifyPostedSettlementProof,type CashCommonChallenge,type CashIssuerPin,
  type CurrentObligationsChallenge,type PostedSettlementChallenge} from './currentCashIssuerProof';
 type Scope<C>=Omit<C,'nonce'|'issuedAtMs'>;
@@ -12,6 +12,16 @@ type Ports<C>={
 const no=(reason:string)=>({ok:false as const,reason,holdCleared:false as const,tradingAuthorized:false as const});
 const sameCommon=(a:Scope<CashCommonChallenge>,b:Scope<CashCommonChallenge>)=>a.accountScopeDigest===b.accountScopeDigest&&
  a.buildSha===b.buildSha&&a.stopRevisionDigest===b.stopRevisionDigest;
+// Snapshots include key bytes and pin validity. Reject a trust change during
+// the observation; a newly trusted issuer cannot validate an already-started challenge.
+function snapshotPins(pins:readonly CashIssuerPin[],scope:Scope<CashCommonChallenge>){
+ const applicable=pins.filter(pin=>pin.accountScopeDigest===scope.accountScopeDigest&&pin.buildSha===scope.buildSha)
+  .map(pin=>Object.freeze({...pin}));
+ const fingerprint=createHash('sha256').update(JSON.stringify(applicable.map(pin=>JSON.stringify([
+  pin.issuerKeyId,pin.notBeforeMs,pin.expiresAtMs,pin.publicKey.export({type:'spki',format:'der'}).toString('hex'),
+ ])).sort())).digest('hex');
+ return {applicable,fingerprint};
+}
 async function observe<C extends CashCommonChallenge,R>(p:Ports<C>,
  same:(a:Scope<C>,b:Scope<C>)=>boolean,verify:(body:unknown,challenge:C,pins:readonly CashIssuerPin[],now:number)=>R){
  let timer:ReturnType<typeof setTimeout>|undefined;
@@ -23,14 +33,18 @@ async function observe<C extends CashCommonChallenge,R>(p:Ports<C>,
    const found=await p.readStoppedScope();
    if(!found||!live())return no('stopped_scope_unverified');
    const initial=Object.freeze({...found});
-   if(!p.trustPins().some(pin=>pin.accountScopeDigest===initial.accountScopeDigest&&pin.buildSha===initial.buildSha))
+   const startPins=snapshotPins(p.trustPins(),initial);
+   if(!startPins.applicable.length)
     return no('issuer_trust_unconfigured');
    const challenge=Object.freeze({...initial,nonce:randomBytes(32).toString('hex'),issuedAtMs:now()}) as unknown as Readonly<C>;
    const packet=await fetchRecord(challenge,abort.signal);
    if(!live())return no('issuer_observation_timeout');
    const final=await p.readStoppedScope();
    if(!final||!sameCommon(initial,final)||!same(initial,final)||!live())return no('stopped_scope_changed');
-   return verify(packet,challenge,p.trustPins(),now());
+   const endPins=snapshotPins(p.trustPins(),initial);
+   if(startPins.fingerprint!==endPins.fingerprint)return no('issuer_trust_changed');
+   const result=verify(packet,challenge,startPins.applicable,now());
+   return live()?result:no('issuer_observation_timeout');
   }catch{return no('issuer_observation_unavailable');}
  };
  try{
