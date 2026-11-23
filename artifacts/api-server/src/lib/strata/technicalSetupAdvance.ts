@@ -15,6 +15,7 @@ export type TechnicalSetupSnapshot = Readonly<{
   executionAccountExists: boolean;
   bindings: readonly SetupRoleBinding[];
   unresolvedAttemptId?: string|null;
+  preparedAttempts?: readonly {attemptId:string;operation:AccountSetupOperation;state:string}[];
 }>;
 export type TechnicalSetupPorts = {
   snapshot(): Promise<TechnicalSetupSnapshot>;
@@ -118,7 +119,9 @@ export async function advanceTechnicalSetup(ports:TechnicalSetupPorts):Promise<T
     const attempt=prepared.attempt;
     if(!attempt||attempt.state!=="prepared"||attempt.operation!==op||!UUID.test(attempt.attemptId))
       return technicalSetupResult("UNKNOWN","prepared_operation_readback_unconfirmed",observed);
-    await refresh();
+    const readback=await refresh();
+    if(!readback.preparedAttempts?.some(a=>a.attemptId===attempt.attemptId&&a.operation===op&&a.state==="prepared"))
+      return technicalSetupResult("UNKNOWN","prepared_operation_readback_unconfirmed",observed);
     return technicalSetupResult("PREPARED","technical_operation_prepared_for_owner_review",observed,next.action,attempt.attemptId);
   }catch(error){
     if(!actionInFlight&&error instanceof Error&&error.message==="technical_setup_prior_operation_unresolved")
