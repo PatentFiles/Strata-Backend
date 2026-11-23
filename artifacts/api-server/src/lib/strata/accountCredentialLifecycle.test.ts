@@ -518,3 +518,42 @@ test("verification stays unauthorized until explicitly confirmed and funding is 
   assert.equal(source.includes("process.env"), false);
   assert.equal(source.includes("KALSHI_INDEX2"), false);
 });
+
+
+test("save-and-verify pins the exact newly stored owner, role and vault binding", async () => {
+  const { db, ports } = harness();
+  const material = keyMaterial();
+  const original = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "verification", ...material,
+  });
+  assert.ok(original.ok && original.fingerprint && original.vaultSecretId);
+  const expectedStored = { fingerprint: original.fingerprint, vaultSecretId: original.vaultSecretId };
+  let reads = 0, probes = 0;
+  const verify = (owner: string, binding: typeof expectedStored) => verifyAccountCredential(db, ports, {
+    authenticatedUserId: owner, role: "verification", confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+    expectedStored: binding,
+    async readSecret() { reads++; return { keyId: material.apiKeyId, privateKey: material.privateKey }; },
+    async probe() { probes++; return { ok: true, reason: "credential_verified" }; },
+  });
+  // A foreign owner or a changed vault ID must not even open the key.
+  assert.equal((await verify(USER_B, expectedStored)).ok, false);
+  assert.equal((await verify(USER_A, { ...expectedStored, vaultSecretId: WALLET_A })).reason, "credential_rotated");
+  assert.equal((await verify(USER_A, { ...expectedStored, fingerprint: "f".repeat(64) })).reason, "credential_rotated");
+  assert.equal(reads, 0);
+  assert.equal(probes, 0);
+  assert.equal((await verify(USER_A, expectedStored)).ok, true);
+  assert.equal(reads, 1);
+  assert.equal(probes, 1);
+  // Even re-registering the same key creates a new vault binding; the earlier
+  // save operation cannot silently verify that replacement.
+  const replaced = await registerAccountCredential(db, ports, {
+    authenticatedUserId: USER_A, role: "verification", ...material,
+  });
+  assert.equal(replaced.ok, true);
+  assert.equal(replaced.fingerprint, original.fingerprint);
+  assert.notEqual(replaced.vaultSecretId, original.vaultSecretId);
+  assert.equal((await verify(USER_A, expectedStored)).reason, "credential_rotated");
+  assert.equal(reads, 1);
+  assert.equal(probes, 1);
+  assert.equal(db.bindings.filter(row => !row.revokedAt && row.verifiedAt !== null).length, 0);
+});
