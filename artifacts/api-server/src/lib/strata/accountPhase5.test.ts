@@ -6,7 +6,7 @@ import type { Pool } from "@workspace/db";
 import type { AccountCommissioningPorts } from "./accountCommissioningContext";
 import { accountCredentialControls } from "./accountCredentialControls";
 import { dedicatedSignerFingerprint } from "./commissioning";
-import { probeAccountCredential } from "./accountCredentialProbe";
+import { probeAccountCredential, probeSetupManagementCredential, inspectSubaccount1 } from "./accountCredentialProbe";
 import {
   persistAccountFundingAuthorization,
   persistAccountFundingEvidence,
@@ -586,4 +586,52 @@ test("combined key save refuses invalid consent or a changed authenticated owner
   assert.equal(r.executable,false);
  }
  assert.equal(seen.length,4);
+});
+
+
+test("management bootstrap verifies before Subaccount 1 exists without fabricating cash", async () => {
+  const k=keyMaterial("bootstrap-management"), material={keyId:k.apiKeyId,privateKey:k.privateKey};
+  const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey);
+  assert.ok(fingerprint);
+  for(const role of ["provisioning","verification"] as const){
+    const paths:string[]=[];
+    const proof=await probeSetupManagementCredential(role,fingerprint,material,async(creds,path,query)=>{
+      assert.equal(creds.keyId,material.keyId);
+      assert.equal(query,"");
+      paths.push(path);
+      if(path.endsWith("/api_keys"))return {api_keys:[{api_key_id:material.keyId,scopes:["read"],subaccount:null}]};
+      assert.equal(path,"/trade-api/v2/portfolio/subaccounts/balances");
+      return {subaccount_balances:[{subaccount_number:0,exchange_index:0,balance:"0.0000"}]};
+    });
+    assert.equal(proof.ok,true);
+    assert.equal(proof.evidenceMicros,null);
+    assert.equal(proof.subaccount1Exists,false);
+    assert.equal(proof.subaccount1Exchange2Exists,false);
+    assert.equal(proof.nextRequirement,"create_subaccount_1");
+    assert.deepEqual(paths,["/trade-api/v2/api_keys","/trade-api/v2/portfolio/subaccounts/balances"]);
+  }
+  let calls=0;
+  const restricted=await probeSetupManagementCredential("verification",fingerprint,material,async()=>{
+    calls++;
+    return {api_keys:[{api_key_id:material.keyId,scopes:["read"],subaccount:1}]};
+  });
+  assert.equal(restricted.ok,false);
+  assert.equal(calls,1);
+});
+test("malformed or duplicate inventory cannot authorize missing subaccount creation", async () => {
+  const k=keyMaterial("bootstrap-inventory"),material={keyId:k.apiKeyId,privateKey:k.privateKey};
+  const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey);
+  assert.ok(fingerprint);
+  const primary={subaccount_number:0,exchange_index:0};
+  for(const payload of [
+    {subaccount_balances:[]},
+    {subaccount_balances:[primary,{exchange_index:2}]},
+    {subaccount_balances:[primary,{subaccount_number:1}]},
+    {subaccount_balances:[primary,primary]},
+    {subaccount_balances:[primary],cursor:"more"},
+  ]){
+    const proof=await inspectSubaccount1({expectedFingerprint:fingerprint,material},async()=>payload);
+    assert.equal(proof.ok,false);
+    assert.notEqual(proof.safeToCreate,true);
+  }
 });
