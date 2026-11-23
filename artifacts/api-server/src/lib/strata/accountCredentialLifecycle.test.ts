@@ -557,3 +557,19 @@ test("save-and-verify pins the exact newly stored owner, role and vault binding"
   assert.equal(probes, 1);
   assert.equal(db.bindings.filter(row => !row.revokedAt && row.verifiedAt !== null).length, 0);
 });
+
+
+test("concurrent create-only onboarding cannot rotate a saved role or leave orphan Vault secrets", async () => {
+  const { db, ports } = harness();
+  const results = await Promise.all([keyMaterial(),keyMaterial()].map(material =>
+    registerAccountCredential(db,ports,{
+      authenticatedUserId:USER_A,role:"verification",...material,createOnly:true,
+    })
+  ));
+  assert.equal(results.filter(r=>r.ok).length,1);
+  assert.equal(results.filter(r=>r.reason==="credential_already_registered").length,1);
+  assert.equal(db.bindings.length,1);
+  assert.equal(db.secrets.length,1);
+  assert.equal(db.bindings[0]?.revokedAt,null);
+  assert.equal(db.bindings[0]?.verifiedAt,null);
+});
