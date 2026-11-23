@@ -86,5 +86,50 @@ test('application path is mounted behind AAL2 and fail-closed when deployment is
   const off=await attempt(await token(owner,'aal2'));
   assert.equal(off.status,404);assert.equal(off.headers.get('cache-control'),'private, no-store');
   assert.equal((await off.json() as {reason?:string}).reason,'stopped_cash_diagnostic_unavailable');
+  const forward=url.replace('my-stopped-cash-proof','my-forward-cash-observation');
+  const forwardAttempt=(jwt:string)=>fetch(forward,{method:'POST',headers:{authorization:'Bearer '+jwt}});
+  assert.equal((await forwardAttempt(await token(owner,'aal1'))).status,401);
+  const forwardOff=await forwardAttempt(await token(owner,'aal2'));
+  assert.equal(forwardOff.status,404);
+  assert.equal(forwardOff.headers.get('cache-control'),'private, no-store');
+  assert.equal((await forwardOff.json() as {reason?:string}).reason,'forward_cash_observation_unavailable');
+ }finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
+});
+
+test('forward route uses separate exact AAL2 gate and reports current balance without claiming clearance',async()=>{
+ const app=express();app.use(express.json());
+ const access=createStrataAccess({
+  verifyToken:t=>verifySupabaseAccessToken(t,{supabaseUrl,keys:async()=>key}),roleOf:async()=> 'ADMIN',
+ });
+ let calls=0;
+ let env:NodeJS.ProcessEnv={};
+ const forwardConfig={NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,STRATA_FORWARD_CASH_OBSERVATION_SHA:sha,
+  STRATA_FORWARD_CASH_OBSERVATION_ENABLED:'true',STRATA_FORWARD_CASH_OBSERVATION_REVIEWED:'true',STRATA_FORWARD_CASH_OBSERVATION_OWNER:owner};
+ app.use('/fixture',createStoppedCashDiagnosticRouter(access.requireUser,{env:()=>env,
+  inspect:async()=>{throw Error('historical lane must not run');},
+  observeForward:async who=>{assert.equal(who,owner);calls++;return {
+   status:'balance_matches_local_cash_history_unverified',observedAt:report.observedAt,historyUnverified:true,
+   accountWritesPerformed:false,observationPersisted:false,ordersSubmitted:false,tradingAuthorized:false,
+  };},
+ }));
+ const server=app.listen(0,'127.0.0.1');
+ await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+ try{
+  const addr=server.address();assert.ok(addr&&typeof addr==='object');
+  const valid=await token(owner,'aal2'),aal1=await token(owner,'aal1'),foreign=await token(other,'aal2');
+  const send=(bearer:string,body?:string,query='')=>fetch('http://127.0.0.1:'+addr.port+'/fixture/my-forward-cash-observation'+query,
+   {method:'POST',headers:{authorization:'Bearer '+bearer,...(body?{'content-type':'application/json'}:{})},body});
+  assert.equal((await send(valid)).status,404);env=forwardConfig;
+  assert.equal((await send(aal1)).status,401);
+  assert.equal((await send(foreign)).status,404);
+  assert.equal((await send(valid,'{}')).status,400);
+  assert.equal((await send(valid,undefined,'?owner='+other)).status,400);
+  assert.equal(calls,0);
+  const response=await send(valid);assert.equal(response.status,409);
+  assert.equal(response.headers.get('cache-control'),'private, no-store');
+  const b=await response.json();
+  assert.equal(b.balanceMatchesLocal,true);assert.equal(b.stoppedLocalScopeVerified,true);
+  assert.equal(b.pendingCashCompletenessVerified,false);assert.equal(b.authenticatedExchangeFlat,false);
+  assert.equal(b.historyReplayed,false);assert.equal(b.holdCleared,false);assert.equal(b.tradingAuthorized,false);assert.equal(calls,1);
  }finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
 });

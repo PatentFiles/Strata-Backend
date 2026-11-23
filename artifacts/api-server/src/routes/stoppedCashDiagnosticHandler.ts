@@ -3,6 +3,7 @@ import {Router,type IRouter,type RequestHandler} from 'express';
 import {pool} from '@workspace/db';
 import {logger} from '../lib/logger';
 import {observeStoppedBalanceOnly,STOPPED_BALANCE_FAILURE_STAGES} from '../lib/strata/stoppedBalanceObservation';
+import {forwardCashVerdict} from '../lib/strata/forwardCashVerdict';
 import {balanceEvidence} from '../lib/strata/settledCashBracket';
 import {getStoppedBalanceObservationJson} from '../lib/strata/personalExchangeRead';
 import {deployedGitSha} from '../lib/strata/deployedGitSha';
@@ -18,6 +19,7 @@ const no=(reason:string)=>({ok:false as const,reason,accountWritesPerformed:fals
 type Result=Awaited<ReturnType<typeof inspectStoppedCashDiagnosticPrototype>>;
 type BalanceResult=Awaited<ReturnType<typeof observeStoppedBalanceOnly>>;
 type Deps={env:()=>NodeJS.ProcessEnv; inspect:(subject:string)=>Promise<Result>;
+ observeForward?:(subject:string)=>Promise<BalanceResult>;
  observeBalance?:(subject:string,observeTransport:(read:1|2)=>void)=>Promise<BalanceResult>};
 const balanceNo=()=>({status:'balance_observation_unverified' as const,historyUnverified:true as const,
  accountWritesPerformed:false as const,observationPersisted:false as const,ordersSubmitted:false as const,tradingAuthorized:false as const});
@@ -29,6 +31,13 @@ export function stoppedBalanceObservationOwner(env:NodeJS.ProcessEnv):string|nul
  const sha=env.STRATA_STOPPED_BALANCE_OBSERVATION_SHA??'',owner=env.STRATA_STOPPED_BALANCE_OBSERVATION_OWNER??'';
  return env.NODE_ENV==='production'&&env.STRATA_STOPPED_BALANCE_OBSERVATION_ENABLED==='true'&&
   env.STRATA_STOPPED_BALANCE_OBSERVATION_REVIEWED==='true'&&SHA.test(sha)&&
+  deployedGitSha(env)===sha&&UUID.test(owner)?owner:null;
+}
+
+export function forwardCashObservationOwner(env:NodeJS.ProcessEnv):string|null{
+ const sha=env.STRATA_FORWARD_CASH_OBSERVATION_SHA??'',owner=env.STRATA_FORWARD_CASH_OBSERVATION_OWNER??'';
+ return env.NODE_ENV==='production'&&env.STRATA_FORWARD_CASH_OBSERVATION_ENABLED==='true'&&
+  env.STRATA_FORWARD_CASH_OBSERVATION_REVIEWED==='true'&&SHA.test(sha)&&
   deployedGitSha(env)===sha&&UUID.test(owner)?owner:null;
 }
 
@@ -45,6 +54,9 @@ const bracket=createStoppedCashBracketAdapter();
 const defaults:Deps={env:()=>process.env,inspect:subject=>inspectStoppedCashDiagnosticPrototype(
  {subject,aal:'aal2'},{...loader,bracket,
  env:()=>stoppedCashDiagnosticOwner(process.env)===subject?process.env:{},wall:Date.now,mono:()=>performance.now()}),
+ observeForward:subject=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,
+ exactOwnerGate:owner=>forwardCashObservationOwner(process.env)===owner,
+ scopedGet:getStoppedBalanceObservationJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()}),
  observeBalance:(subject,observeTransport)=>observeStoppedBalanceOnly({subject,aal:'aal2'},{...loader,observeTransport,
  exactOwnerGate:owner=>stoppedBalanceObservationOwner(process.env)===owner,
  scopedGet:getStoppedBalanceObservationJson,parseBalance:balanceEvidence,wall:Date.now,mono:()=>performance.now()})};
@@ -123,5 +135,31 @@ export function createStoppedCashDiagnosticRouter(requireUser:RequestHandler,dep
     logBalanceObservation({phase:'owner_observation_finished',disposition,openingFetchInvoked,closingFetchInvoked});
    }
   });
+ // Current-only path; no historical scan and no effect on the two existing routes.
+ router.post('/my-forward-cash-observation',(_req,res,next)=>{
+  res.set('Cache-Control','private, no-store');next();
+ },requireUser,async(req,res)=>{
+  const subject:unknown=res.locals.strata?.subject;
+  const refuse=(status:number,reason:string)=>res.status(status).json({...forwardCashVerdict(null),reason});
+  if(typeof subject!=='string'||!UUID.test(subject)){refuse(401,'owner_aal2_required');return;}
+  const empty=req.body===undefined||(req.body!==null&&typeof req.body==='object'&&
+    !Array.isArray(req.body)&&Object.keys(req.body).length===0);
+  if(!empty||Object.keys(req.query).length||
+    (req.header('content-length')!==undefined&&req.header('content-length')!=='0')||
+    req.header('transfer-encoding')!==undefined){refuse(400,'forward_cash_observation_accepts_no_input');return;}
+  if(forwardCashObservationOwner(deps.env())!==subject||!deps.observeForward){
+   refuse(404,'forward_cash_observation_unavailable');return;}
+  if(inFlight){refuse(409,'forward_cash_observation_in_progress');return;}
+  inFlight=true;
+  try{
+   const out=await deps.observeForward(subject);
+   if(forwardCashObservationOwner(deps.env())!==subject){refuse(404,'forward_cash_observation_unavailable');return;}
+   // Always a refused clearance verdict. Current balance equality does not prove exposure/liabilities.
+   res.status(409).json(forwardCashVerdict(out));
+  }catch{
+   if(forwardCashObservationOwner(deps.env())!==subject){refuse(404,'forward_cash_observation_unavailable');return;}
+   refuse(503,'forward_cash_observation_unavailable');
+  }finally{inFlight=false;}
+ });
  return router;
 }
