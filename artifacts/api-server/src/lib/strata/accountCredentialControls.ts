@@ -1,6 +1,7 @@
 import { advanceTechnicalSetup, createTechnicalSetupAdmission, SETUP_ROLE_ORDER, TECHNICAL_SETUP_CONFIRMATION,
   technicalSetupResult, type TechnicalSetupSnapshot, type SetupRole } from "./technicalSetupAdvance";
 import { emptyUserExecutionView } from "./userExecutionScope";
+import {withTechnicalSetupDatabaseAdmission} from "./technicalSetupAdmissionDb";
 import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
   executeOwnerShardAllocation, reconcileOwnerShardAllocation,
   type ShardAllocationView } from "./ownerShardAllocation";
@@ -905,7 +906,7 @@ export function accountCredentialControls(
       };
     },
   };
-  const admitTechnicalSetup=createTechnicalSetupAdmission();
+  const admitTechnicalSetup=createTechnicalSetupAdmission(2);
   const scopeOf=(context:import("./accountCommissioningContext").AccountCommissioningContext)=>JSON.stringify([
     context.authenticatedUserId,context.financialAccountId,context.providerConnectionId,context.executionAccountId,
     context.subaccount,context.exchangeIndex,context.executionKeyFingerprint,
@@ -921,9 +922,13 @@ export function accountCredentialControls(
           Object.keys(input).some(key=>key!=="expectedOwnerId"&&key!=="confirmation"))
         return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
       if(!await credentialTablesReady(db))return technicalSetupResult("BLOCKED","credential_migration_missing");
-      return admitTechnicalSetup(userId,()=>advanceTechnicalSetup({
+      // Production cannot fall back to process-local coordination.
+      if(!("connect" in db)||typeof (db as PgPoolLike).connect!=="function")
+        return technicalSetupResult("BLOCKED","technical_setup_admission_unavailable");
+      return admitTechnicalSetup(userId,()=>withTechnicalSetupDatabaseAdmission(db as PgPoolLike,userId,checkpoint=>advanceTechnicalSetup({
         now:()=>performance.now(),
         async snapshot():Promise<TechnicalSetupSnapshot>{
+          await checkpoint();
           const p=ports();
           const before=await resolveAccountCommissioningContext(userId,p);
           if(!before.ok)throw Error("technical_setup_scope_changed");
@@ -947,11 +952,11 @@ export function accountCredentialControls(
             unresolvedAttemptId:unresolved?.attemptId??null,
             preparedAttempts:attempts.filter(a=>a.state==="prepared").map(a=>({attemptId:a.attemptId,operation:a.operation,state:a.state}))};
         },
-        verify:binding=>verifySavedRole(userId,{role:binding.role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"},
-          {fingerprint:binding.fingerprint,vaultSecretId:binding.vaultSecretId}),
-        status:()=>controls.commissioningStatus(userId),
-        prepare:operation=>controls.authorizeOperation(userId,{operation,confirmation:ACCOUNT_SETUP_CONFIRMATIONS[operation]}),
-      }));
+        verify:async binding=>{await checkpoint();return verifySavedRole(userId,{role:binding.role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"},
+          {fingerprint:binding.fingerprint,vaultSecretId:binding.vaultSecretId});},
+        status:async()=>{await checkpoint();return controls.commissioningStatus(userId);},
+        prepare:async operation=>{await checkpoint();return controls.authorizeOperation(userId,{operation,confirmation:ACCOUNT_SETUP_CONFIRMATIONS[operation]});},
+      })));
     },
   };
 }

@@ -91,6 +91,8 @@ export async function advanceTechnicalSetup(ports:TechnicalSetupPorts):Promise<T
         return technicalSetupResult("NEEDS_CREDENTIAL","setup_role_missing",observed,"register_"+role);
       }
       if(binding.verified)continue;
+      // A slow snapshot can exhaust the budget after the earlier check.
+      if(expired())return technicalSetupResult("RESUME_REQUIRED","technical_setup_request_budget_reached",observed);
       actionInFlight=true;
       const result=await ports.verify(binding);
       actionInFlight=false;
@@ -102,6 +104,7 @@ export async function advanceTechnicalSetup(ports:TechnicalSetupPorts):Promise<T
     if(expired())return technicalSetupResult("RESUME_REQUIRED","technical_setup_request_budget_reached",observed);
     const status=await ports.status();
     await refresh();
+    if(expired())return technicalSetupResult("RESUME_REQUIRED","technical_setup_request_budget_reached",observed);
     if(status.executionAccountExists===true)return technicalSetupResult("EXISTING_ACCOUNT","existing_execution_account_preserved",observed);
     const next=status.nextAuthorizedAction;
     const unresolved=status.operationPreparations?.find(a=>noReplayStates.has(a.state));
