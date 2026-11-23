@@ -182,6 +182,32 @@ export async function probeAccountCredential(
   };
 }
 
+/** New-account management proof must not depend on a bot subaccount
+ * which has not been created. This is permission/read evidence only: never
+ * use primary or inventory balances as trading cash or funding evidence. */
+export async function probeSetupManagementCredential(
+  role: "provisioning" | "verification",
+  expectedFingerprint: string,
+  material: CredentialProbeMaterial,
+  getJson: (creds: CredentialProbeMaterial, path: string, query?: string) => Promise<unknown>,
+): Promise<CredentialProbeResult> {
+  const verified = await inspectProvisioningCredential(expectedFingerprint, material, getJson);
+  if (!verified.ok) return emptyProbe(verified.reason);
+  const inventory = await inspectSubaccount1({ expectedFingerprint, material }, getJson);
+  if (!inventory.ok) return emptyProbe(inventory.reason);
+  // This result records a valid account-wide signer, not a valid target pair.
+  // The existing setup preparation independently checks safeToCreate and
+  // restricted signer verification still requires the exact funded pair.
+  return {
+    ...emptyProbe("credential_verified"),
+    ok: true,
+    subaccount1Exists: inventory.exists,
+    subaccount1Exchange2Exists: inventory.exchangeIndex2Exists,
+    nextRequirement: inventory.exists === false && inventory.safeToCreate === true
+      ? "create_subaccount_1" : null,
+  };
+}
+
 /** Uses a separately verified management-capable key; the target key never calls key management. */
 export async function inspectRestrictedKeyMetadata(
   targetKeyId: string,
@@ -240,6 +266,19 @@ export async function inspectSubaccount1(
   }
   try {
     const identities = subaccountIdentitiesFromBalancePayload(payload);
+    // An incomplete row cannot prove absence of Subaccount 1. Refuse the
+    // entire inventory instead of filtering invalid identities out.
+    if (identities.length === 0 || identities.some(row =>
+        row.subaccount === null || row.exchangeIndex === null ||
+        row.subaccount < 0 || row.exchangeIndex < 0)) {
+      return subaccountInspection(false, "subaccount_inventory_unproven", null, null, null, null);
+    }
+    const seen = new Set<string>();
+    for (const row of identities) {
+      const key = String(row.subaccount) + ":" + String(row.exchangeIndex);
+      if (seen.has(key)) return subaccountInspection(false, "subaccount_inventory_ambiguous", null, null, null, null);
+      seen.add(key);
+    }
     const summary = summarizeSubaccountInventory(identities);
     const exists = summary.subaccount1Exists;
     const diagnosis = cleanPairInventoryDiagnosis(identities);
