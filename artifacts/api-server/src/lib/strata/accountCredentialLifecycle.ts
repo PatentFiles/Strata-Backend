@@ -283,6 +283,8 @@ export async function verifyAccountCredential(
     authenticatedUserId: string;
     role: string;
     confirmation: unknown;
+    /** Internal save-and-verify binding; never accepted from an HTTP caller. */
+    expectedStored?: Readonly<{ fingerprint: string; vaultSecretId: string }>;
     readSecret: (vaultSecretId: string) => Promise<{ keyId: string; privateKey: string } | null>;
     probe: (
       material: { keyId: string; privateKey: string },
@@ -314,6 +316,13 @@ export async function verifyAccountCredential(
   const fingerprint = text(locked.rows[0]?.key_fingerprint);
   if (!credentialId || !vaultSecretId || !fingerprint) {
     return registration(false, "credential_fingerprint_invalid", input.role);
+  }
+  // Another tab may replace the role between saving and verification. Never
+  // verify that replacement as if it were the just-saved credential.
+  if (input.expectedStored &&
+      (input.expectedStored.fingerprint !== fingerprint ||
+       input.expectedStored.vaultSecretId !== vaultSecretId)) {
+    return registration(false, "credential_rotated", input.role);
   }
   const material = await input.readSecret(vaultSecretId);
   if (!material) return registration(false, "vault_secret_missing", input.role);
