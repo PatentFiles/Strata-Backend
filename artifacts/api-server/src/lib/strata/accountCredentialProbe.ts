@@ -191,6 +191,7 @@ export async function probeSetupManagementCredential(
   material: CredentialProbeMaterial,
   getJson: (creds: CredentialProbeMaterial, path: string, query?: string) => Promise<unknown>,
 ): Promise<CredentialProbeResult> {
+  if (role !== "provisioning" && role !== "verification") return emptyProbe("credential_role_rejected");
   const verified = await inspectProvisioningCredential(expectedFingerprint, material, getJson);
   if (!verified.ok) return emptyProbe(verified.reason);
   const inventory = await inspectSubaccount1({ expectedFingerprint, material }, getJson);
@@ -276,7 +277,10 @@ export async function inspectSubaccount1(
     const seen = new Set<string>();
     for (const row of identities) {
       const key = String(row.subaccount) + ":" + String(row.exchangeIndex);
-      if (seen.has(key)) return subaccountInspection(false, "subaccount_inventory_ambiguous", null, null, null, null);
+      if (seen.has(key)) return subaccountInspection(false, "subaccount_inventory_ambiguous",
+        row.subaccount === PRODUCTION_SUBACCOUNT && row.exchangeIndex === PRODUCTION_EXCHANGE_INDEX ? true : null,
+        row.subaccount === PRODUCTION_SUBACCOUNT && row.exchangeIndex === PRODUCTION_EXCHANGE_INDEX ? true : null,
+        false, summarizeSubaccountInventory(identities).numberedSubaccounts);
       seen.add(key);
     }
     const summary = summarizeSubaccountInventory(identities);
