@@ -91,3 +91,20 @@ test("onboarding response never manufactures missing role approval",async()=>{
  assert.deepEqual(safe.credentials.verifiedRoles,["verification"]);
  assert.equal(safe.tradingAuthorized,false);
 });
+
+
+test("pre-account onboarding retains verified setup roles without implying commissioning",async()=>{
+ const r=await read([{...base,account_exists:false,commissioned:null,kill_switch:null,
+  blocked_reason:null,policy_state:null,configured_stake_cents:null,funding_recorded:false,
+  active_roles:["provisioning","verification","account_setup_execution"]}]).run();
+ assert.equal(r.ok,true);
+ assert.equal(r.phase,"account_missing");
+ assert.equal(r.account.commissioned,false);
+ assert.equal(r.ownedAccountUnique,false);
+ assert.equal(r.credentials.allFourRecorded,false);
+ assert.deepEqual(r.credentials.verifiedRoles,["provisioning","verification","account_setup_execution"]);
+ assert.equal(r.tradingAuthorized,false);
+ assert.match(OWNER_ONBOARDING_READ_SQL,/fa\.user_id=u\.id AND fa\.provider='kalshi'/);
+ assert.match(OWNER_ONBOARDING_READ_SQL,/a\.id IS NULL OR c\.financial_account_id=a\.kalshi_connection_id/);
+ assert.match(OWNER_ONBOARDING_READ_SQL,/WHERE owned\.user_id=u\.id AND owned\.provider='kalshi'\)=1/);
+});
