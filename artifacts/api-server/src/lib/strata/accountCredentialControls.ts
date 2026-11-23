@@ -531,13 +531,16 @@ export function accountCredentialControls(
       const fields = credentialBody(body);
       if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
       const optIn = (body as Record<string, unknown>).verifyAfterSave;
-      if (optIn !== undefined && optIn !== "VERIFY_ACCOUNT_CREDENTIAL") {
+      if (optIn !== undefined && (optIn !== "VERIFY_ACCOUNT_CREDENTIAL" ||
+          (body as Record<string, unknown>).expectedOwnerId !== userId)) {
         return { ok: false, reason: "explicit_authorization_required", executable: false as const };
       }
       // Saving and verifying remain separate durable facts. The caller may opt
       // into both with one action, but a failed/unknown verification MUST NOT
       // replay registration or rotate the saved key.
-      const saved = await registerAccountCredential(database, ports(), { authenticatedUserId: userId, ...fields });
+      const saved = await registerAccountCredential(database, ports(), {
+        authenticatedUserId: userId, ...fields, createOnly: optIn !== undefined,
+      });
       if (optIn === undefined || !saved.ok) return saved;
       const pending = { ok: false, executable: false as const, role: fields.role,
         fingerprint: saved.fingerprint, vaultSecretId: null, saved: true as const };
