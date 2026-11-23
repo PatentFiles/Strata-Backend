@@ -531,8 +531,9 @@ export function accountCredentialControls(
       const fields = credentialBody(body);
       if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
       const optIn = (body as Record<string, unknown>).verifyAfterSave;
-      if (optIn !== undefined && (optIn !== "VERIFY_ACCOUNT_CREDENTIAL" ||
-          (body as Record<string, unknown>).expectedOwnerId !== userId)) {
+      const expectedOwnerId = (body as Record<string, unknown>).expectedOwnerId;
+      if ((expectedOwnerId !== undefined && expectedOwnerId !== userId) ||
+          (optIn !== undefined && (optIn !== "VERIFY_ACCOUNT_CREDENTIAL" || expectedOwnerId !== userId))) {
         return { ok: false, reason: "explicit_authorization_required", executable: false as const };
       }
       // Saving and verifying remain separate durable facts. The caller may opt
