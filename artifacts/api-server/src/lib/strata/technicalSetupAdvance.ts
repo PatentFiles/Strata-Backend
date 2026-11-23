@@ -14,6 +14,7 @@ export type TechnicalSetupSnapshot = Readonly<{
   scope: string; // Internal owner/connection/account/exact credential version pin. Never returned.
   executionAccountExists: boolean;
   bindings: readonly SetupRoleBinding[];
+  unresolvedAttemptId?: string|null;
 }>;
 export type TechnicalSetupPorts = {
   snapshot(): Promise<TechnicalSetupSnapshot>;
@@ -67,11 +68,13 @@ export async function advanceTechnicalSetup(ports:TechnicalSetupPorts):Promise<T
     if(!validSnapshot(snapshot))return technicalSetupResult("BLOCKED","technical_setup_scope_unverified");
     observed=verified(snapshot);
     if(snapshot.executionAccountExists)return technicalSetupResult("EXISTING_ACCOUNT","existing_execution_account_preserved",observed);
+    if(snapshot.unresolvedAttemptId)return technicalSetupResult("WAITING_RECONCILIATION","prior_operation_requires_reconciliation",observed,null,snapshot.unresolvedAttemptId);
     const scope=snapshot.scope;
     const refresh=async()=>{
       const current=await ports.snapshot();
       if(!validSnapshot(current)||current.scope!==scope||current.executionAccountExists)
         throw new Error("technical_setup_scope_changed");
+      if(current.unresolvedAttemptId)throw new Error("technical_setup_prior_operation_unresolved");
       snapshot=current;
       observed=verified(current);
       return current;
@@ -118,6 +121,8 @@ export async function advanceTechnicalSetup(ports:TechnicalSetupPorts):Promise<T
     await refresh();
     return technicalSetupResult("PREPARED","technical_operation_prepared_for_owner_review",observed,next.action,attempt.attemptId);
   }catch(error){
+    if(!actionInFlight&&error instanceof Error&&error.message==="technical_setup_prior_operation_unresolved")
+      return technicalSetupResult("WAITING_RECONCILIATION","prior_operation_requires_reconciliation",observed);
     if(!actionInFlight&&error instanceof Error&&error.message==="technical_setup_scope_changed")
       return technicalSetupResult("BLOCKED","technical_setup_scope_changed",observed);
     return technicalSetupResult(actionInFlight?"UNKNOWN":"BLOCKED",actionInFlight?"technical_setup_outcome_unconfirmed":"technical_setup_unavailable",observed);
