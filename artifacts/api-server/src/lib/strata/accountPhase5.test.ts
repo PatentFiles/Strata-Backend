@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./technicalSetupAdvance.test";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
