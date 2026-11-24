@@ -8,6 +8,7 @@ import { configuredOwnerSelfScope, ownerSelfEnrollmentAllowed } from "./ownerSel
 import { CREDIT_CONFIRM, CREDIT_CANCEL } from "./capitalCreditTransfers";
 import { capitalNoAuthority } from "./capitalCreditRepair";
 import { loadCapitalTransferSigner } from "./capitalCreditTransferSigner";
+import {capitalFailureDiagnostic,capitalStage,logCapitalFailure,type CapitalDiagnostic} from './capitalCreditDiagnostic';
 import type { Db, ProofDeps, Query, Row } from "./capitalCreditProof";
 import {
   REGISTERED_OPENING_MODE, registeredOpeningProof, readRegisteredOpeningLocal,
@@ -18,10 +19,10 @@ const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]
 const SHA=/^[a-f0-9]{40}$/;
 const str=(v:unknown)=>typeof v==="string"?v:"";
 type Deps=ProofDeps & {sha?:()=>string;scope?:typeof configuredOwnerSelfScope};
-const refused=(reason:string)=>({ok:false as const,reason,...capitalNoAuthority});
+const refused=(reason:string,diagnostic?:CapitalDiagnostic)=>({ok:false as const,reason,...(diagnostic?{diagnostic}:{}),...capitalNoAuthority});
 const unknown=()=>({ok:false as const,outcome:"UNKNOWN" as const,reason:"registered_opening_commit_unknown",...capitalNoAuthority});
 function reason(e:unknown){
-  const code=e instanceof Error?e.message:"";
+  const code=capitalFailureDiagnostic(e,'preview').failureCode;
   return /^registered_opening_[a-z_]{1,80}$/.test(code)?code:"registered_opening_proof_or_database_refused";
 }
 /** Recovery rollout is independent of live-entry eligibility. Explicit scopes
@@ -73,7 +74,7 @@ export async function registeredOpeningCapitalPreview(owner:string,d:Deps={}){
       observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,
       history:{orders:0,fills:0,positions:0,settlements:0,capitalTransfers:1},
       ...capitalNoAuthority};
-  }catch(e){return refused(reason(e));}
+  }catch(e){return refused(reason(e),logCapitalFailure(e,'preview'));}
 }
 async function readOutcome(db:Query,owner:string,id:string,sha:string){
   const result=await db.query(`SELECT scope,state,reason FROM private.strata_capital_credit_repair
@@ -100,7 +101,7 @@ export async function registeredOpeningCapitalOutcome(owner:string,id:string,sha
  * funding, permissions, stake, credentials, or worker state. */
 export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:Deps={}){
   let c:{account:string;sha:string};
-  try{c=await context(owner,d);}catch(e){return refused(reason(e));}
+  try{c=await context(owner,d);}catch(e){return refused(reason(e),logCapitalFailure(e,'apply'));}
   const b=raw as Row;
   let scope:RegisteredOpeningScope;
   try{
@@ -123,6 +124,7 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
   let tx:Awaited<ReturnType<Db["connect"]>>|undefined;
   let committed=false,commitSent=false,discard:Error|undefined;
   let failure="registered_opening_proof_or_database_refused";
+  let diagnostic:CapitalDiagnostic|undefined;
   try{
     const proof=await registeredOpeningProof(owner,c.account,c.sha,d);
     if(proof.scope.scopeDigest!==scope.scopeDigest)throw Error("registered_opening_review_scope_changed");
@@ -130,14 +132,14 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
     await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
     await tx.query("SET LOCAL lock_timeout='1500ms'");
     await tx.query("SET LOCAL statement_timeout='12000ms'");
-    const local=await readRegisteredOpeningLocal(tx,owner,c.account,true);
+    const local=await capitalStage('locked_scope',()=>readRegisteredOpeningLocal(tx!,owner,c.account,true));
     if(local.localStateDigest!==proof.localStateDigest)throw Error("registered_opening_local_state_changed");
-    const signer=await loadCapitalTransferSigner(tx,local.a,true);
+    const signer=await capitalStage('locked_signers',()=>loadCapitalTransferSigner(tx!,local.a,true));
     if(digest(signer.bindings)!==scope.signerBindingDigest)throw Error("registered_opening_signer_changed");
     const now=(d.now??Date.now)();
     if(!fresh(proof,now))throw Error("registered_opening_signed_evidence_expired");
     const ledger=new ProductionLedger(db as unknown as Pool,c.account);
-    await ledger.finalAccountProof(tx as unknown as PoolClient,local.a as unknown as Account,proof.snapshot,now);
+    await capitalStage('final_ledger',()=>ledger.finalAccountProof(tx as unknown as PoolClient,local.a as unknown as Account,proof.snapshot,now));
     // Existing unique receipt and pending-account indexes also fence this mode
     // against the separate unregistered-capital-credit service.
     const journal=await tx.query(`INSERT INTO private.strata_capital_credit_repair
@@ -164,10 +166,11 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
     // Existing deferred conservation trigger validates the exact post-state
     // at COMMIT. Lost acknowledgment must be resolved by the exact receipt.
     commitSent=true;
-    await tx.query("COMMIT");
+    await capitalStage('commit',()=>tx!.query("COMMIT"));
     committed=true;
   }catch(e){
     failure=reason(e);
+    diagnostic=logCapitalFailure(e,commitSent?'commit':'apply');
     if(commitSent)discard=Error("registered_opening_commit_unknown");
   }finally{
     if(tx){
@@ -180,7 +183,7 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
     const prior=await readOutcome(db,owner,id,c.sha);
     if(prior)return prior.outcome!=="UNKNOWN"&&prior.scope.scopeDigest===scope.scopeDigest?prior:unknown();
   }catch{return unknown();}
-  return commitSent?unknown():refused(failure);
+  return commitSent?unknown():refused(failure,diagnostic);
 }
 
 /** Resolve a possibly interrupted attempt without replaying a financial write.

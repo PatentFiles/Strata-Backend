@@ -6,8 +6,9 @@ import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { dedicatedSignerFingerprint } from "./commissioning";
 import { loadedMaterial } from "./inAppProtectiveRelease";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
-import { readOwnedKalshiFeeds, personalAccountSnapshot, type OwnedKalshiRead } from "./personalExchangeRead";
+import { readOwnedKalshiFeeds, getOwnedProductionKalshiJson, personalAccountSnapshot, type OwnedKalshiRead } from "./personalExchangeRead";
 import { loadCapitalTransferSigner } from "./capitalCreditTransferSigner";
+import {capitalStage} from './capitalCreditDiagnostic';
 import { readCapitalTransfers, type CapitalTransfer } from "./capitalCreditTransfers";
 import { validCreditScope, type CreditScope, type ProofDeps, type Query, type Row } from "./capitalCreditProof";
 
@@ -161,24 +162,44 @@ export function proveRegisteredOpeningEvidence(
 }
 export async function registeredOpeningProof(owner:string,account:string,sha:string,d:ProofDeps={}) {
   const db=d.db??pool, now=d.now??Date.now, start=now(), mono=performance.now();
-  const local=await readRegisteredOpeningLocal(db,owner,account);
-  const material=await(d.load??loadedMaterial)(db,local.a);
-  requireOpening(material && dedicatedSignerFingerprint(material.keyId,material.privateKey)===local.a.key_fingerprint,
-    "restricted_signer_unverified");
-  const signer=await loadCapitalTransferSigner(db,local.a);
-  requireOpening(!local.receipt.providerConnectionId || local.receipt.providerConnectionId===signer.bindings.setup.providerConnectionId,
-    "receipt_provider_connection_mismatch");
+  const local=await capitalStage('local_ledger',()=>readRegisteredOpeningLocal(db,owner,account));
+  const material=await capitalStage('restricted_signer',async()=>{
+    const loaded=await(d.load??loadedMaterial)(db,local.a);
+    requireOpening(loaded && dedicatedSignerFingerprint(loaded.keyId,loaded.privateKey)===local.a.key_fingerprint,
+      "restricted_signer_unverified");
+    return loaded;
+  });
+  const signer=await capitalStage('transfer_signer',async()=>{
+    const loaded=await loadCapitalTransferSigner(db,local.a);
+    requireOpening(!local.receipt.providerConnectionId || local.receipt.providerConnectionId===loaded.bindings.setup.providerConnectionId,
+      "receipt_provider_connection_mismatch");
+    return loaded;
+  });
   const signal=AbortSignal.timeout(15000);
   const [feeds,transfers]=await Promise.all([
-    (d.read??readOwnedKalshiFeeds)(material,start),
-    readCapitalTransfers((path,q)=>(d.get??getScopedKalshiJson)(signer.material,path,q,fetch,"https://external-api.kalshi.com",owner,signal),start),
+    capitalStage('signed_trade_history',async()=>{
+      // The shared reader returns a safe coarse reason. Retain its underlying
+      // exception here only for the existing allowlisted capital diagnostic.
+      let failure:unknown;
+      const get:typeof getScopedKalshiJson=async(...args)=>{
+        try{return await getOwnedProductionKalshiJson(...args);}
+        catch(error){failure??=error;throw error;}
+      };
+      const read=d.read?await d.read(material,start):await readOwnedKalshiFeeds(material,start,get);
+      if(!read.ok&&failure)throw failure;
+      requireOpening(read.ok,"signed_evidence_stale_or_unavailable");return read;
+    }),
+    capitalStage('transfer_history',()=>readCapitalTransfers((path,q)=>(d.get??getScopedKalshiJson)(signer.material,path,q,fetch,"https://external-api.kalshi.com",owner,signal),start)),
   ]);
-  requireOpening(feeds.ok && now()>=start && now()-start<=15000 && performance.now()-mono<=15000,
-    "signed_evidence_stale_or_unavailable");
-  const found=proveRegisteredOpeningEvidence(local.receipt,String(local.a.cash_text),feeds,transfers,start);
-  const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:String(local.a.key_fingerprint)},feeds,[]);
-  requireOpening("identity" in snapshot && snapshot.authenticated && snapshot.complete &&
-    snapshot.cashExact && !snapshot.unexplainedCashActivity,"signed_history_unverified");
+  const {found,snapshot}=await capitalStage('signed_trade_history',async()=>{
+    requireOpening(now()>=start && now()-start<=15000 && performance.now()-mono<=15000,
+      "signed_evidence_stale_or_unavailable");
+    const found=proveRegisteredOpeningEvidence(local.receipt,String(local.a.cash_text),feeds,transfers,start);
+    const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:String(local.a.key_fingerprint)},feeds,[]);
+    requireOpening("identity" in snapshot && snapshot.authenticated && snapshot.complete &&
+      snapshot.cashExact && !snapshot.unexplainedCashActivity,"signed_history_unverified");
+    return {found,snapshot};
+  });
   // checkpointId/Digest name the actual immutable initial-funding registry
   // evidence in this mode, never a fabricated RECONCILIATION observation.
   const core:Omit<RegisteredOpeningScope,"scopeDigest">={

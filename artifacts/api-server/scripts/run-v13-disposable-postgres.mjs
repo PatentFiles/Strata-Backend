@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, delimiter } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -57,6 +57,8 @@ globalThis.fetch = (...args) => {
 };
 `);
 const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
+  ...Object.fromEntries(['SystemRoot','SYSTEMROOT','WINDIR','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','COMSPEC']
+    .filter(key=>process.env[key]).map(key=>[key,process.env[key]])),
   // Avoid host timezone autodetection during initdb in restricted containers.
   TZ: "UTC", PGTZ: "UTC",
   STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED: process.env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,
@@ -82,19 +84,25 @@ function run(command, args, options = {}) {
     stdio: "inherit",
     timeout,
     shell,
+    windowsHide: true,
     ...options,
   });
-  if (r.status !== 0) throw new Error(`Disposable test command failed (status=${r.status}, signal=${r.signal ?? "none"}, timedOut=${r.error?.code === "ETIMEDOUT"}, timeoutMs=${timeout}, elapsedMs=${Math.round(performance.now() - startedAt)}): ${command}`);
+  if (r.status !== 0) {
+    if(command===executable(bin,'pg_ctl')&&existsSync(join(root,'postgres.log')))console.error(readFileSync(join(root,'postgres.log'),'utf8'));
+    throw new Error(`Disposable test command failed (status=${r.status}, signal=${r.signal ?? "none"}, timedOut=${r.error?.code === "ETIMEDOUT"}, timeoutMs=${timeout}, elapsedMs=${Math.round(performance.now() - startedAt)}): ${command}`);
+  }
 }
 console.info("ISOLATED_FINAL_OVERLAP_ENV",JSON.stringify({port,fullSuite,final:env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,older:env.STRATA_PUBLIC_METADATA_PREFETCH_ENABLED}));
 let started = false;
 try {
   run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
     "--set=shared_buffers=16MB"]);
+  // Configuration avoids nested shell quoting differences in Windows pg_ctl.
+  appendFileSync(join(root,'data','postgresql.conf'), "\nunix_socket_directories = ''\n");
   run(executable(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
     // Every test client is pinned to loopback TCP. Do not also require a Unix
     // socket, which restricted test containers may not permit creating.
-    `-h 127.0.0.1 -p ${port} -c unix_socket_directories=''`, "-w", "start"]);
+    `-h 127.0.0.1 -p ${port}`, "-w", "start"]);
   started = true;
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
