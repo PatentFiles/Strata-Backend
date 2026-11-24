@@ -57,3 +57,17 @@ test("independent default transport refuses entry without a bound ledger and sco
     await wire(url,post(reducing));assert.equal(calls,1);
   }finally{globalThis.fetch=original;}
 });
+
+test("multi-account rollout is exact, fails closed, and never grants cross-owner eligibility",()=>{
+  const other={ownerId:"22222222-2222-4222-8222-222222222222",accountId:"second-account",releaseSha:rolloutScope.releaseSha};
+  const env=(value:unknown)=>({...rolloutEnv,STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:JSON.stringify(value)});
+  assert.equal(independentLiveRolloutAllowed(rolloutScope,env([rolloutScope,other])),true);
+  assert.equal(independentLiveRolloutAllowed(other,env([rolloutScope,other])),true);
+  assert.equal(independentLiveRolloutAllowed({...other,ownerId:rolloutScope.ownerId},env([rolloutScope,other])),false);
+  assert.equal(independentLiveRolloutAllowed(rolloutScope,env([other])),false);
+  for(const bad of [[],null,{},[rolloutScope,rolloutScope],[rolloutScope,{...other,accountId:rolloutScope.accountId}],[rolloutScope,{...other,releaseSha:"b".repeat(40)}],[{...rolloutScope,extra:true}]]){
+    assert.equal(independentLiveRolloutAllowed(rolloutScope,env(bad)),false);
+  }
+  assert.equal(independentLiveRolloutAllowed(rolloutScope,{...rolloutEnv,STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:"broken"}),false);
+  assert.equal(independentLiveRolloutAllowed(rolloutScope,{...env([rolloutScope,other]),STRATA_INDEPENDENT_LIVE_SOURCE_V1:"false"}),false);
+});
