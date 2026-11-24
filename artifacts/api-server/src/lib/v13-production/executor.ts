@@ -687,6 +687,11 @@ export class ProductionExecutor {
           // Earlier local failures therefore prove that no POST was attempted;
           // failures after success remain UNKNOWN unless an exact, private
           // downstream refusal proves its transport was never invoked.
+          if(i.kind==="ENTRY"&&this.#directSimulationSource){
+            const s=i.decision.source as {original_oldest_ms:number;market_close_ms:number};
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_entry_original_source_expired");
+          }
           invoked = true;
           finalTiming("completed",{finalMarketReads});
           }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}

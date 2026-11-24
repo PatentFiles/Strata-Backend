@@ -401,7 +401,7 @@ export class ProductionLedger {
         // pass before fill/capability reads and cannot enter PREPARED recovery.
         // Keep full decisions for all other states, especially late-filled
         // TERMINAL entries. Only unused BLOCKED decision payload is omitted.
-        const intents = (await tx.query<ReconciliationIntent>(`SELECT id,account_id,evaluation_id,crossing_key,parent_id,
+        const intents = (await tx.query<ReconciliationIntent>(`SELECT id,account_id,evaluation_id,direct_source_id,crossing_key,parent_id,
           kind,market,side,state,request,
           CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision,
           policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id,

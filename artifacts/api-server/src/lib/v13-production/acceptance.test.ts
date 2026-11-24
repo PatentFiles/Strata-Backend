@@ -173,7 +173,7 @@ test("independent market crossing reaches the existing isolated executor without
  const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
  p.policyHash=computeV13LiveMoneyPolicyHash(p);
  await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
- const open=Math.floor(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-TEST-000";
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-TEST-000";
  f.exchange.now=open+10000;
  f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
  let btc=99999;
