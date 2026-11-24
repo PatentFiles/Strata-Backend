@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
-import {fileURLToPath} from "node:url";
-// Resolve the unchanged issuer fixture from this module, independent of the test runner cwd.
-const feeFixturePath=resolve(fileURLToPath(new URL("../../../../../",import.meta.url)),"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
+import {existsSync} from "node:fs";
+// Match the schema fixture root convention; works with bundled CommonJS output.
+const repositoryRoot=existsSync(resolve("lib/db/drizzle"))?resolve("."):resolve("../..");
+const feeFixturePath=resolve(repositoryRoot,"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
 import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,readPlatformOfficialFeeV5,V5_URL,V5_VERSION} from "./independentOfficialFeeV5";
 const owner="d06bc1ce-718b-42d1-8e3d-2779249661f2";
 const account="strata-account-2e3180472d83df50f13ce7f9";

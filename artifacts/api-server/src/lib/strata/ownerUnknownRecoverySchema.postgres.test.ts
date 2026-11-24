@@ -28,7 +28,10 @@ const input={ownerId:owner,targetIntentId:target,confirmation:OWNER_UNKNOWN_ACCO
 async function reset(){
  // Fresh disposable cluster only. TRUNCATE is fixture reset, not a recovery path.
  await db.query(`TRUNCATE public.v13_production_account,public.v13_live_money_policy,
-  public.financial_accounts,auth.users,vault.secrets,public.forward_test_evaluations CASCADE`);
+  public.financial_accounts,auth.users,vault.secrets,public.forward_test_evaluations,
+  private.strata_v13_execution_trace,private.strata_platform_official_fee_capture_v1 CASCADE`);
+ // The immutable trace has deliberately no account FK; prove isolation before seeding.
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_v13_execution_trace')).rows[0].n,0);
  await db.query('INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,\'owner@example.invalid\',now())',[owner]);
  await db.query('INSERT INTO vault.secrets(id) VALUES($1)',[secret]);
  await db.query('INSERT INTO public.financial_accounts(id,user_id,provider) VALUES($1,$2,\'kalshi\')',[financial,owner]);
