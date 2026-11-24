@@ -1,3 +1,5 @@
+import {platformFeeUploadEnabled} from "./platformFeeUploadMode";
+import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
 import {pool,type PoolClient} from "@workspace/db";
 import {V13_CHAMPION_PARAMETER_HASH} from "@workspace/v13-strategy";
 import {digest} from "../v13-production/types";
@@ -124,7 +126,8 @@ async function proof(owner:string,choice:Selection,sha:string){
  requireCondition(digest(identity(current))===digest(key)&&performance.now()<=deadline,"initial_risk_scope_changed");
  const core={ownerId:owner,accountId:before.id,releaseSha:sha,presetId:choice.preset.id,presetRevision:choice.preset.revision,
   capitalBudgetCents:choice.selection.capitalBudgetCents,stakeCents:chosen.stakeCents,cashMicros:feeds.cashMicros,
-  limits:chosen.limits,maxOpenPositions:1,feeDigest:fee.sourceDigest,feeFormulaVersion:STANDARD_QUADRATIC_FEE_FORMULA_VERSION};
+  limits:chosen.limits,maxOpenPositions:1,feeDigest:fee.sourceDigest,feeFormulaVersion:STANDARD_QUADRATIC_FEE_FORMULA_VERSION,
+  ...(fee.sourceKind?{feeSourceKind:fee.sourceKind,feeEffectiveDate:fee.sourceEffectiveDate,feeSourceAuthenticityVerified:false}: {})};
  return {review:{...core,scopeDigest:digest({core,key})},key,deadline,now};
 }
 export async function publicInitialRiskAction(owner:string,raw:unknown){
@@ -142,9 +145,14 @@ export async function publicInitialRiskAction(owner:string,raw:unknown){
   requireCondition(digest(identity(current))===digest(evidence.key)&&performance.now()<=evidence.deadline&&Date.now()-evidence.now<=15000&&deployedGitSha()===sha,"initial_risk_signed_scope_expired_or_changed");
   // Lock the original publication identity against concurrent capture changes.
   await tx.query("SELECT pg_advisory_xact_lock_shared(1958371201,1)");
-  const publication=await tx.query("SELECT content_sha256,effective_date IS NOT NULL AND expires_at>clock_timestamp() AND captured_at<=clock_timestamp() AS current "+
+  if(platformFeeUploadEnabled()){
+    const uploaded=await readActiveUploadedFeeSchedule(tx);
+    requireCondition(uploaded&&uploaded.digest===evidence.review.feeDigest,"initial_risk_uploaded_publication_changed");
+   }else{
+   const publication=await tx.query("SELECT content_sha256,effective_date IS NOT NULL AND expires_at>clock_timestamp() AND captured_at<=clock_timestamp() AS current "+
     "FROM private.strata_platform_official_fee_capture_v1 ORDER BY captured_at DESC,capture_id DESC LIMIT 1");
   requireCondition(publication.rows.length===1&&publication.rows[0]!.content_sha256===evidence.review.feeDigest&&publication.rows[0]!.current===true,"initial_risk_issuer_publication_changed");
+   }
   const draft=await createOwnedPolicyDraft(tx,{ownerUserId:owner,executionAccountId:current.id,limits:evidence.review.limits});
   requireCondition(draft.ok,"initial_risk_draft_unavailable");
   const at=new Date();
