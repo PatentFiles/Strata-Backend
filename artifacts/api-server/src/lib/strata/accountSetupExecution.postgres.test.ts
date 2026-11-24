@@ -1471,7 +1471,7 @@ function executeKeyGeneration(
 }
 
 
-for(const mode of ["reviewed","single","public-active"] as const) test(mode==="public-active"?"qualified public owner provisions independently while global trading is enabled":mode==="single"?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
+for(const mode of ["reviewed","single","public-active"] as const) test(mode==="public-active"?"multi-key action executes for a qualified new owner while global trading is enabled":mode==="single"?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
   const singleAction=mode!=="reviewed";
   const savedEnv={...process.env};
   const publicActive=mode==="public-active";
