@@ -23,6 +23,7 @@ export type OwnerOnboardingReadiness={
  funding:{historicalOrCompletedTransferRecorded:boolean;freshExchangeCashRequired:true};
  policy:{approvedRecord:boolean;configuredStakeCents:number|null};
  account:{commissioned:boolean;killSwitchOn:boolean;provisionalHold:boolean;otherFreeze:boolean};
+ openingBasis:{cashMicros:string;initialCashMicros:string;cashMovementMicros:string;differenceMicros:string;repairCandidate:boolean}|null;
  nextActions:string[];
 };
 const empty=(reason:string):OwnerOnboardingReadiness=>({
@@ -32,7 +33,7 @@ const empty=(reason:string):OwnerOnboardingReadiness=>({
  funding:{historicalOrCompletedTransferRecorded:false,freshExchangeCashRequired:true},
  policy:{approvedRecord:false,configuredStakeCents:null},
  account:{commissioned:false,killSwitchOn:true,provisionalHold:false,otherFreeze:false},
- nextActions:[reason],
+ openingBasis:null,nextActions:[reason],
 });
 const isTrue=(value:unknown)=>value===true;
 const asInt=(value:unknown):number|null=>{
@@ -45,6 +46,8 @@ export const OWNER_ONBOARDING_READ_SQL=[
  "SELECT u.email_confirmed_at IS NOT NULL AS email_verified,",
  "a.id IS NOT NULL AS account_exists,a.commissioned,a.kill_switch,a.blocked_reason,",
  "p.state AS policy_state, s.configured_stake_cents,",
+ "a.cash_micros::text AS cash_micros,a.initial_cash_micros::text AS initial_cash_micros,",
+ "(SELECT COALESCE(SUM(e.cash_delta_micros),0)::text FROM public.v13_production_event e WHERE e.account_id=a.id) AS cash_movement_micros,",
  "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
  " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=c.financial_account_id",
  " JOIN public.financial_accounts fa ON fa.id=pc.financial_account_id AND fa.user_id=u.id AND fa.provider='kalshi'",
@@ -95,6 +98,15 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.account.provisionalHold=a.blocked_reason==="awaiting_account_commissioning";
   r.account.otherFreeze=a.blocked_reason!==null&&a.blocked_reason!==undefined&&
     !r.account.provisionalHold;
+  if(r.ownedAccountUnique &&
+    [a.cash_micros,a.initial_cash_micros,a.cash_movement_micros].every(v=>typeof v==="string"&&/^-?\\d+$/.test(v))){
+   const cash=BigInt(String(a.cash_micros)),initial=BigInt(String(a.initial_cash_micros)),movement=BigInt(String(a.cash_movement_micros));
+   const difference=cash-initial-movement;
+   r.openingBasis={cashMicros:String(cash),initialCashMicros:String(initial),cashMovementMicros:String(movement),
+    differenceMicros:String(difference),repairCandidate:r.account.commissioned&&r.account.killSwitchOn&&
+    r.funding.historicalOrCompletedTransferRecorded&&initial===0n&&movement===0n&&cash>0n};
+   if(difference!==0n)r.nextActions.push("verify_registered_opening_capital_before_release");
+  }
   if(!r.emailVerified)r.nextActions.push("confirm_own_email_before_account_setup");
   if(!r.ownedAccountUnique){
    r.phase="account_missing";
