@@ -72,7 +72,7 @@ jobs:
       - name: Owner financial evidence continuation and signed proof safety
         working-directory: artifacts/api-server
         run: |
-          pnpm exec esbuild src/lib/strata/ownerCommissioningFinancialChecks.test.ts src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outdir=dist/onboarding-financial --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
-          node --test dist/onboarding-financial/ownerCommissioningFinancialChecks.test.js dist/onboarding-financial/ownerSignedExchangeReleaseProof.test.js
+          pnpm exec esbuild src/lib/strata/ownerCommissioningFinancialChecks.test.ts src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outdir=dist/onboarding-financial --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/onboarding-financial/ownerCommissioningFinancialChecks.test.cjs dist/onboarding-financial/ownerSignedExchangeReleaseProof.test.cjs
       - name: Full workspace typecheck
         run: pnpm run typecheck
