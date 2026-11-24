@@ -5,7 +5,7 @@ import {createPublicForwardTestFeeds,type ForwardTestFeeds} from "../forwardTest
 import {createPublicBookReader,type ReadonlyResearchBook} from "../forwardTestOrderbookDepth";
 import {readForwardCycleFeeds} from "../forwardFeedReadScope";
 import {assertChampionSourceReference} from "./sourceReference";
-import {requireProof} from "./types";
+import {canonical,requireProof} from "./types";
 
 const AGE=5000;
 const TICKER=/^KXBTC15M-[A-Z0-9-]{5,90}$/;
@@ -17,7 +17,8 @@ const sha=(s:string)=>createHash("sha256").update(s,"utf8").digest("hex");
 const simulationEnvironment=()=>process.env.NODE_ENV==="test"&&!process.env.RAILWAY_ENVIRONMENT_ID&&
  !process.env.RAILWAY_SERVICE_ID&&!process.env.RAILWAY_PROJECT_ID&&
  /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(process.env.V13_DISPOSABLE_DATABASE_URL??"");
-export type DirectScope=Readonly<{accountId:string;ownerId:string|null}>;
+export type DirectWorkerPin=Readonly<{holderId:string;fencingToken:string;credentialFingerprint:string;releaseSha:string}>;
+export type DirectScope=Readonly<{accountId:string;ownerId:string|null;worker?:DirectWorkerPin}>;
 type Environment="LIVE_OBSERVATION"|"SIMULATION";
 export type DirectEvaluation={
  id:string;evaluation_source:"direct_live_v1"|"direct_simulation_v1";execution_environment:Environment;
@@ -27,6 +28,8 @@ export type DirectEvaluation={
  up_offer:number;down_offer:number;entry_offer:number;signal:"SCOUT"|"CONFIRM";direction:"UP"|"DOWN";
  qualifying_trigger:true;fresh_cross:true;crossing_consumed:true;position_was_open:false;feed_freshness:"current";
  btc_provider_age_ms:number;btc_receive_age_ms:number;market_age_ms:number;
+ account_id:string;owner_user_id:string|null;worker_pin:DirectWorkerPin|null;
+ direct_quote_evidence:Quote;
 };
 type Point={price:number;provider:number;received:number};
 type Prior={ticker:string;target:number;open:number;close:number;point:Point};
@@ -39,7 +42,7 @@ function observedVelocity(points:Point[]):number|null{
  return finite(velocity)?velocity:null;
 }
 type Quote={timestampAuthority:"LOCAL_RECEIPT_ONLY";started:number;headers:number;completed:number;
- digest:string;yesBid:number;noBid:number};
+ digest:string;normalizedBookDigest:string;yesBid:number;noBid:number};
 type Unsigned={version:1;account:string;owner:string|null;ticker:string;evaluation:string;oldest:number;observed:number;closesAt:number;
  environment:Environment;source:DirectEvaluation;quote:Quote;};
 type Receipt=Unsigned&{producerSeal:string};
@@ -47,8 +50,9 @@ type Query=Pick<Pool|PoolClient,"query">;
 /** A held position has its own market and quantity; current-window discovery
  * cannot substitute for that contract, including during rollover. */
 export type DirectHeldEvaluation={
- id:string;evaluation_source:"direct_held_simulation_v1";execution_environment:"SIMULATION";
- position_id:string;account_id:string;market_ticker:string;side:"YES"|"NO";quantity_hundredths:string;
+ id:string;evaluation_source:"direct_held_simulation_v1"|"direct_held_live_v1";execution_environment:Environment;
+ position_id:string;account_id:string;owner_user_id:string|null;worker_pin:DirectWorkerPin|null;
+ market_ticker:string;side:"YES"|"NO";quantity_hundredths:string;
  strategy_parameter_set_id:string;strategy_parameter_hash:string;
  evaluated_at:string;original_oldest_ms:number;market_close_ms:number;
  btc_price:number;target:number;signed_buffer:number;velocity:number|null;up_offer:number;down_offer:number;
@@ -76,8 +80,38 @@ function top(book:ReadonlyResearchBook,market:string,cycle:number,now:number):Qu
  const yesBid=bid(book.yesBids),noBid=bid(book.noBids);
  requireProof(yesBid+noBid<=10000,"direct_entry_book_crossed");
  return {timestampAuthority:"LOCAL_RECEIPT_ONLY",started:book.requestStartedAtMs,headers:book.receivedAtMs,
-  completed:book.bodyCompletedAtMs,digest:book.rawResponseDigest,yesBid,noBid};
+  completed:book.bodyCompletedAtMs,digest:book.rawResponseDigest,
+  normalizedBookDigest:sha(canonical({ticker:book.ticker,yes:[...book.yesBids].sort((a,b)=>b.priceTicks-a.priceTicks),
+    no:[...book.noBids].sort((a,b)=>b.priceTicks-a.priceTicks)})),yesBid,noBid};
 }
+/** Independent public depth and top-of-book identity. Actual signed depth,
+ * stake and cash-risk checks remain mandatory. No modeled paper quantity or
+ * fill is execution evidence. HMAC custody is checked separately by readExact.
+ */
+export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
+ const fail="direct_entry_quote_evidence_invalid";
+ requireProof(value!==null&&typeof value==="object"&&!Array.isArray(value),fail);
+ const v=value as DirectEvaluation,q=v.direct_quote_evidence;
+ requireProof(q&&typeof q==="object"&&q.timestampAuthority==="LOCAL_RECEIPT_ONLY"&&
+  (v.evaluation_source==="direct_live_v1"&&v.execution_environment==="LIVE_OBSERVATION"||
+   v.evaluation_source==="direct_simulation_v1"&&v.execution_environment==="SIMULATION")&&
+  TICKER.test(v.market_ticker)&&typeof q.digest==="string"&&HASH.test(q.digest)&&
+  typeof q.normalizedBookDigest==="string"&&HASH.test(q.normalizedBookDigest)&&
+  time(q.started)&&time(q.headers)&&time(q.completed)&&
+  Number.isSafeInteger(q.yesBid)&&q.yesBid>0&&q.yesBid<10000&&
+  Number.isSafeInteger(q.noBid)&&q.noBid>0&&q.noBid<10000&&q.yesBid+q.noBid<=10000&&
+  v.up_offer===(10000-q.noBid)/10000&&v.down_offer===(10000-q.yesBid)/10000&&
+  (v.direction==="UP"||v.direction==="DOWN")&&v.entry_offer===(v.direction==="UP"?v.up_offer:v.down_offer),fail);
+ const evaluated=Date.parse(v.evaluated_at);
+ requireProof(time(now)&&time(evaluated)&&time(v.original_oldest_ms)&&time(v.market_open_ms)&&time(v.market_close_ms)&&
+  v.market_close_ms-v.market_open_ms===900000&&v.market_open_ms<=v.original_oldest_ms&&
+  v.original_oldest_ms<=q.started&&q.started<=q.headers&&q.headers<=q.completed&&q.completed<=evaluated&&evaluated<=now&&
+  now-v.original_oldest_ms<=AGE&&now<v.market_close_ms&&
+  [v.btc_provider_age_ms,v.btc_receive_age_ms,v.market_age_ms].every(a=>time(a)&&a+now-evaluated<=AGE),
+  "direct_entry_original_source_expired");
+ assertChampionSourceReference(v);
+}
+
 /**
  * Independent producer and exact committed-source reader for the existing
  * executor. Public provider observations only; no paper ledger, positions,
@@ -86,7 +120,7 @@ function top(book:ReadonlyResearchBook,market:string,cycle:number,now:number):Qu
  * The seal is process-local custody, NOT an exchange signature. Restart or
  * another producer instance cannot adopt a receipt. A crossing is durably
  * unique even after expiry; a lost commit cannot be retried as a new crossing.
- * The real-market factory remains observation-only pending qualification.
+ * The live factory pins the actual owner-worker lease. It never restores custody after restart.
  */
 export class DirectEntrySource{
  readonly #secret=randomBytes(32);
@@ -98,11 +132,15 @@ export class DirectEntrySource{
  private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number){
   requireProof(typeof scope.accountId==="string"&&scope.accountId.length>0&&scope.accountId.length<=128&&
    (scope.ownerId===null||UUID.test(scope.ownerId)),"direct_entry_scope_invalid");
-  this.#scope=Object.freeze({...scope});this.#environment=environment;
+  this.#scope=Object.freeze({...scope,...(scope.worker?{worker:Object.freeze({...scope.worker})}:{})});this.#environment=environment;
  }
  get environment(){return this.#environment;}
  matches(scope:DirectScope){return this.#scope.accountId===scope.accountId&&this.#scope.ownerId===scope.ownerId;}
  static marketObservation(scope:DirectScope){
+  requireProof(scope.ownerId&&scope.worker&&/^[A-Za-z0-9._:-]{1,128}$/.test(scope.worker.holderId)&&
+   /^[1-9]\d*$/.test(scope.worker.fencingToken)&&HASH.test(scope.worker.credentialFingerprint)&&
+   /^[a-f0-9]{40}$/.test(scope.worker.releaseSha)&&scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
+   "direct_live_worker_scope_invalid");
   const feeds=createPublicForwardTestFeeds();
   return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now);
  }
@@ -114,12 +152,36 @@ export class DirectEntrySource{
   requireProof(this.#environment==="SIMULATION"&&simulationEnvironment()&&this.matches(scope),
    "direct_entry_simulation_binding_invalid");
  }
+ /** Real LIVE adapters may be exercised with synthetic sources only in the
+  * existing disposable environment. The real HTTP wrapper rejects them. */
+ assertExecutorBinding(mode:"LIVE"|"SIMULATION",scope:DirectScope):void{
+  requireProof(this.matches(scope),"direct_source_account_mismatch");
+  if(this.#environment==="SIMULATION"){this.assertSimulationBinding(scope);return;}
+  requireProof(mode==="LIVE"&&this.#scope.ownerId!==null&&this.#scope.worker&&
+    this.#scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
+    "direct_live_worker_scope_invalid");
+ }
  async #assertDatabase(db:Query){
   if(this.#environment==="SIMULATION"){
    requireProof(simulationEnvironment(),"direct_entry_simulation_requires_disposable");
    const r=await db.query("SELECT current_database() AS db,host(inet_server_addr()) AS host");
    requireProof(r.rows.length===1&&r.rows[0].db===new URL(process.env.V13_DISPOSABLE_DATABASE_URL!).pathname.slice(1)&&
     r.rows[0].host==="127.0.0.1","direct_entry_simulation_requires_disposable");
+  }else{
+   this.assertExecutorBinding("LIVE",this.#scope);
+   const pin=this.#scope.worker!;
+   // Same account, credential, holder and fence on every custody read.
+   // STOP only closes entries; a still-owned non-killed lease can reduce.
+   const r=await db.query("SELECT l.execution_account_id FROM private.kalshi_account_worker_lease l "+
+    "JOIN public.v13_production_account a ON a.id=l.execution_account_id AND a.owner_user_id=l.owner_user_id "+
+    "JOIN private.kalshi_connection_credentials c ON c.owner_user_id=a.owner_user_id AND c.financial_account_id=a.kalshi_connection_id "+
+    "AND c.provider_connection_id=l.provider_connection_id AND c.vault_secret_id=l.vault_secret_id AND c.key_fingerprint=l.credential_fingerprint "+
+    "WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND l.holder_id=$3 AND l.fencing_token=$4::bigint "+
+    "AND l.credential_fingerprint=$5 AND a.key_fingerprint=$5 AND l.state='owned' AND l.account_kill=false "+
+    "AND a.kill_switch=false AND a.execution_enabled=true AND l.heartbeat_at BETWEEN clock_timestamp()-interval '5 seconds' AND clock_timestamp() "+
+    "AND c.role='restricted_execution' AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified' FOR SHARE OF l,c",
+    [this.#scope.accountId,this.#scope.ownerId,pin.holderId,pin.fencingToken,pin.credentialFingerprint]);
+   requireProof(r.rows.length===1&&r.rows[0].execution_account_id===this.#scope.accountId,"direct_live_worker_lease_changed");
   }
  }
  #now(){const n=this.clock();requireProof(time(n)&&n>=this.#lastClock,"direct_entry_clock_regressed");this.#lastClock=n;return n;}
@@ -168,8 +230,9 @@ export class DirectEntrySource{
     btc_price:btc.price,target,signed_buffer:btc.price-target,velocity,previous_side:previousBuffer>0?"UP":previousBuffer<0?"DOWN":"AT",
     up_offer:up,down_offer:down,entry_offer:decision.entrySideOffer,signal:decision.signal,direction:decision.direction,
     qualifying_trigger:true,fresh_cross:true,crossing_consumed:true,position_was_open:false,feed_freshness:"current",
-    btc_provider_age_ms:observed-provider,btc_receive_age_ms:observed-received,market_age_ms:observed-fetched};
-   assertChampionSourceReference(source);
+    btc_provider_age_ms:observed-provider,btc_receive_age_ms:observed-received,market_age_ms:observed-fetched,
+    account_id:account,owner_user_id:this.#scope.ownerId,worker_pin:this.#scope.worker??null,direct_quote_evidence:quote};
+   assertDirectEntryQuoteEvidence(source,observed);
    const unsigned:Unsigned={version:1,account,owner:this.#scope.ownerId,ticker,evaluation:id,oldest,observed,closesAt:close,
     environment:this.#environment,source,quote};
    const receipt:Receipt={...unsigned,producerSeal:this.#seal(JSON.stringify(unsigned))};
@@ -203,6 +266,8 @@ export class DirectEntrySource{
    if(JSON.stringify(receipt)!==bytes||receipt.version!==1||receipt.environment!==this.#environment||
     receipt.account!==this.#scope.accountId||receipt.owner!==this.#scope.ownerId||row.owner_id!==this.#scope.ownerId||
     receipt.evaluation!==id||s.id!==id||s.execution_environment!==this.#environment||
+    s.account_id!==this.#scope.accountId||s.owner_user_id!==this.#scope.ownerId||
+    canonical(s.worker_pin)!==canonical(this.#scope.worker??null)||canonical(s.direct_quote_evidence)!==canonical(receipt.quote)||
     s.evaluation_source!==(this.#environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1")||
     receipt.ticker!==row.market_ticker||receipt.ticker!==s.market_ticker||s.crossing_key!==row.crossing_key||
     s.crossing_key!==s.market_ticker+":first"||!time(receipt.oldest)||!time(receipt.observed)||!time(receipt.closesAt)||
@@ -212,7 +277,7 @@ export class DirectEntrySource{
     s.original_oldest_ms!==receipt.oldest||s.market_close_ms!==receipt.closesAt||s.market_open_ms>receipt.oldest||s.entry_policy_version!==V13_ENTRY_POLICY_VERSION||
     s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
     !s.qualifying_trigger||!s.fresh_cross||!s.crossing_consumed||s.position_was_open||s.feed_freshness!=="current")return null;
-   assertChampionSourceReference(s);
+   assertDirectEntryQuoteEvidence(s,now);
    return Object.freeze(s);
   }catch{return null;}
  }
@@ -227,7 +292,7 @@ export class DirectEntrySource{
   return r.rows.length===1?r.rows[0]:null;
  }
  async captureHeld(db:Query,parentId:string,signal?:AbortSignal):Promise<string|null>{
-  this.assertSimulationBinding(this.#scope);
+  this.assertExecutorBinding(this.#environment==="SIMULATION"?"SIMULATION":"LIVE",this.#scope);
   if(this.#running)return null;this.#running=true;
   try{
    await this.#assertDatabase(db);
@@ -267,8 +332,9 @@ export class DirectEntrySource{
     upOffer:up,downOffer:down,freshness:"current" as const,position:{status:"open" as const,direction:pos.side==="YES"?"up" as const:"down" as const}};
    const decision=evaluateV13Strategy(input);
    if(decision.signal!=="EXIT"||!decision.positionExitReason)return null;
-   const id=randomUUID(),source:DirectHeldEvaluation={id,evaluation_source:"direct_held_simulation_v1",execution_environment:"SIMULATION",
-    position_id:parentId,account_id:this.#scope.accountId,market_ticker:pos.market,side:pos.side,quantity_hundredths:pos.quantity_hundredths,
+   const id=randomUUID(),source:DirectHeldEvaluation={id,evaluation_source:this.#environment==="SIMULATION"?"direct_held_simulation_v1":"direct_held_live_v1",execution_environment:this.#environment,
+    position_id:parentId,account_id:this.#scope.accountId,owner_user_id:this.#scope.ownerId,worker_pin:this.#scope.worker??null,
+    market_ticker:pos.market,side:pos.side,quantity_hundredths:pos.quantity_hundredths,
     strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
     evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_close_ms:close,
     btc_price:btc.price,target:market.target,signed_buffer:btc.price-market.target,velocity,up_offer:up,down_offer:down,feed_freshness:"current",
@@ -279,19 +345,29 @@ export class DirectEntrySource{
    // The existing financial audit journal holds the exact sealed bytes. JSONB
    // key reordering cannot change the receipt digest because bytes are a string.
    await db.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) "+
-    "VALUES($1,$2,'DIRECT_HELD_SIMULATION_V1',$3,$4)",
-    [id,this.#scope.accountId,JSON.stringify({bytes}),sha(bytes)]);
+    "VALUES($1,$2,$3,$4,$5)",
+    [id,this.#scope.accountId,this.#environment==="SIMULATION"?"DIRECT_HELD_SIMULATION_V1":"DIRECT_HELD_LIVE_V1",JSON.stringify({bytes}),sha(bytes)]);
    return await this.readHeldExact(db,id,parentId,this.#now())?id:null;
   }catch(e){this.#clearHeld();throw e;}finally{this.#running=false;}
  }
  async readHeldExact(db:Query,id:string,parentId:string,now:number):Promise<DirectHeldEvaluation|null>{
-  this.assertSimulationBinding(this.#scope);
+  return this.#readHeld(db,id,parentId,now,false);
+ }
+ /** Distinguish authentic expired evidence from corruption at the locked
+  * signed-exit fence. Never grants send permission: the caller must enforce
+  * the remaining lifetime at the actual transport boundary. */
+ async verifyHeldForFinalFence(db:Query,id:string,parentId:string,now:number,expected:unknown):Promise<boolean>{
+  const source=await this.#readHeld(db,id,parentId,now,true);
+  return source!==null&&canonical(source)===canonical(expected);
+ }
+ async #readHeld(db:Query,id:string,parentId:string,now:number,allowExpired:boolean):Promise<DirectHeldEvaluation|null>{
+  this.assertExecutorBinding(this.#environment==="SIMULATION"?"SIMULATION":"LIVE",this.#scope);
   if(!UUID.test(id)||!time(now))return null;
   await this.#assertDatabase(db);
   const pos=await this.#heldPosition(db,parentId);
   if(!pos)return null;
   const r=await db.query("SELECT payload,digest FROM public.v13_production_observation WHERE id=$1 AND account_id=$2 "+
-   "AND kind='DIRECT_HELD_SIMULATION_V1' FOR SHARE",[id,this.#scope.accountId]);
+   "AND kind=$3 FOR SHARE",[id,this.#scope.accountId,this.#environment==="SIMULATION"?"DIRECT_HELD_SIMULATION_V1":"DIRECT_HELD_LIVE_V1"]);
   const row=r.rows[0],bytes=row?.payload?.bytes;
   if(r.rows.length!==1||typeof bytes!=="string"||Buffer.byteLength(bytes)>65536||sha(bytes)!==row.digest)return null;
   try{
@@ -299,10 +375,13 @@ export class DirectEntrySource{
    if(!HASH.test(producerSeal)||!timingSafeEqual(Buffer.from(producerSeal,"hex"),Buffer.from(this.#seal(JSON.stringify(unsigned)),"hex")))return null;
    if(JSON.stringify(receipt)!==bytes||receipt.version!==1||receipt.account!==this.#scope.accountId||receipt.owner!==this.#scope.ownerId||
     s.id!==id||s.position_id!==parentId||s.account_id!==this.#scope.accountId||s.market_ticker!==pos.market||s.side!==pos.side||
-    s.quantity_hundredths!==pos.quantity_hundredths||s.evaluation_source!=="direct_held_simulation_v1"||s.execution_environment!=="SIMULATION"||
+    s.quantity_hundredths!==pos.quantity_hundredths||s.owner_user_id!==this.#scope.ownerId||
+    canonical(s.worker_pin)!==canonical(this.#scope.worker??null)||
+    s.evaluation_source!==(this.#environment==="SIMULATION"?"direct_held_simulation_v1":"direct_held_live_v1")||s.execution_environment!==this.#environment||
     s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
     s.feed_freshness!=="current"||!time(s.original_oldest_ms)||!time(s.market_close_ms)||!time(Date.parse(s.evaluated_at))||
-    s.original_oldest_ms>Date.parse(s.evaluated_at)||Date.parse(s.evaluated_at)>now||now-s.original_oldest_ms>AGE||now>=s.market_close_ms)return null;
+    s.original_oldest_ms>Date.parse(s.evaluated_at)||Date.parse(s.evaluated_at)>now||Date.parse(s.evaluated_at)>=s.market_close_ms||
+    (!allowExpired&&(now-s.original_oldest_ms>AGE||now>=s.market_close_ms)))return null;
    const decision=evaluateV13Strategy({marketTicker:s.market_ticker,btcPrice:s.btc_price,target:s.target,previousBuffer:null,
     velocity:s.velocity,upOffer:s.up_offer,downOffer:s.down_offer,freshness:"current",position:{status:"open",direction:s.side==="YES"?"up":"down"}});
    return decision.signal==="EXIT"&&decision.positionExitReason?Object.freeze(s):null;
