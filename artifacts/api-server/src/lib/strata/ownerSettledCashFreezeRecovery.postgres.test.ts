@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {pool as db} from '@workspace/db';
 import {generateKeyPairSync} from 'node:crypto';
-import {recoverOwnerSettledCashFreeze,OWNER_SETTLED_CASH_RECOVERY_CONFIRM,SETTLED_CASH_FREEZE} from './ownerSettledCashFreezeRecovery';
+import {previewOwnerSettledCashFreeze,ownerSettledCashRecoveryOutcome,recoverOwnerSettledCashFreeze,OWNER_SETTLED_CASH_RECOVERY_CONFIRM,SETTLED_CASH_FREEZE} from './ownerSettledCashFreezeRecovery';
+import {retainedHistorySchema,seedSettledCashHistory} from './settledCashRecovery.fixture';
 import {readBracketedSettledCash} from './settledCashBracket';
 import type {getOwnedProductionKalshiJson,readOwnedKalshiFeeds} from './personalExchangeRead';
 import {dedicatedSignerFingerprint} from './commissioning';
@@ -17,17 +18,15 @@ const owner='11111111-1111-4111-8111-111111111111';
 const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}).toString();
 const fp=dedicatedSignerFingerprint('test',pem)!;
 const policyHash=computeV13LiveMoneyPolicyHash({id:'p',state:'APPROVED',createdBy:owner} as never);
-const at=Date.now()-10000,ticker='KXBTC15M-TEST',settled=new Date(at).toISOString();
-const raw={ticker,yes_count_fp:'0.00',no_count_fp:'3.00',market_result:'no',revenue:300,settled_time:settled};
-const settlement={id:ticker+':'+settled,market:ticker,side:'NO',result:'NO',quantityHundredths:'300',payoutMicros:'3000000',feeMicros:'0',occurredAtMs:at};
-const scope={confirmation:OWNER_SETTLED_CASH_RECOVERY_CONFIRM,accountId:'a',expectedRevision:'1',settlementEventId:'settlement:'+settlement.id};
+let fixture:Awaited<ReturnType<typeof seedSettledCashHistory>>;
+const scope={confirmation:OWNER_SETTLED_CASH_RECOVERY_CONFIRM,accountId:'a',expectedRevision:'1',settlementEventId:''};
 const reset=async()=>{
- await db.query(`TRUNCATE public.v13_production_observation;
+ await db.query(`DELETE FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY';
  UPDATE public.v13_production_account SET blocked_reason='production_external_cash_mismatch',revision=1,execution_enabled=true,kill_switch=false;
  UPDATE private.kalshi_account_worker_lease SET state='released',arm_requested=false;
  UPDATE private.kalshi_connection_credentials SET revoked_at=NULL;`);
 };
-const read=async(_creds:unknown,observedAtMs:number)=>({ok:true as const,observedAtMs,historicalCoverageComplete:true,cashMicros:'25000000',orders:[],fills:[],positions:[],settlements:[raw]});
+const read:typeof readOwnedKalshiFeeds=async(c,ts)=>fixture.read(c,ts);
 const recover=(readFn:typeof readOwnedKalshiFeeds=read,options:Record<string,unknown>={})=>recoverOwnerSettledCashFreeze(owner,scope,{db,isScheduled:()=>false,read:readFn,...options});
 const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(r=>{resolve=r;});return {promise,resolve};};
 test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
@@ -49,19 +48,52 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
  CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text);
  CREATE TABLE public.v13_production_event(account_id text,event_id text,digest text,kind text,payload jsonb,cash_delta_micros bigint,pnl_micros bigint);
  CREATE TABLE public.v13_production_observation(id text,account_id text,kind text,payload jsonb,digest text);`);
- await db.query(`INSERT INTO public.v13_production_account VALUES('a',$1,1,2,'p','connection',$2,$3,true,true,0,25000000,22000000,1,true,false,NULL,NULL)`,[owner,fp,SETTLED_CASH_FREEZE]);
+ await db.query(`INSERT INTO public.v13_production_account VALUES('a',$1,1,2,'p','connection',$2,$3,true,true,0,26484500,27720000,1,true,false,NULL,NULL)`,[owner,fp,SETTLED_CASH_FREEZE]);
  await db.query(`INSERT INTO public.v13_live_money_policy VALUES('p','a',$1,'APPROVED',$2)`,[owner,policyHash]);
  await db.query(`INSERT INTO private.kalshi_account_worker_lease VALUES('a',$1,'released',false,$2,22)`,[owner,fp]);
  await db.query(`INSERT INTO private.kalshi_connection_credentials VALUES($1,'connection','restricted_execution',NULL,now(),'credential_verified',$2,'secret')`,[owner,fp]);
  await db.query(`INSERT INTO vault.decrypted_secrets VALUES('secret',$1)`,[JSON.stringify({api_key_id:'test',private_key:pem})]);
- await db.query("INSERT INTO public.v13_production_event VALUES('a',$1,$2,'SETTLEMENT',$3,3000000,3000000)",[scope.settlementEventId,digest(settlement),settlement]);
- await db.query("INSERT INTO public.v13_production_position VALUES('a',$1,'NO',0,0,3000000)",[ticker]);
- await t.test('success records evidence and leaves trading off; replay refuses',async()=>{
+ await db.query(retainedHistorySchema);
+ fixture=await seedSettledCashHistory(db,'a',owner,fp);scope.settlementEventId=fixture.settlementEventId;
+ await t.test('read-only preview proves all 173 retained intents and leaves the account untouched',async()=>{
+  const p=await previewOwnerSettledCashFreeze(owner,{db,isScheduled:()=>false,read});assert.equal(p.ok,true,JSON.stringify(p));if(!p.ok)throw Error('fixture preview');
+  assert.equal(p.retainedIntents,173);assert.equal(p.neverPostedIntents,170);assert.equal(p.postedOrders,3);assert.equal(p.fills,3);assert.equal(p.settlements,3);
+  assert.equal(p.cashMicros,'26484500');assert.equal(p.openingMicros,'27720000');assert.equal(p.stakeCents,500);assert.equal(p.scope.settlementEventId,scope.settlementEventId);
+  assert.equal((await db.query("SELECT blocked_reason FROM public.v13_production_account")).rows[0].blocked_reason,SETTLED_CASH_FREEZE);
+  assert.equal((await previewOwnerSettledCashFreeze('22222222-2222-4222-8222-222222222222',{db,isScheduled:()=>false,read})).ok,false);
+ });
+ await t.test('BLOCKED status alone, wrong owner, tampered receipt and provider contradiction refuse',async()=>{
+  const cases=[
+   ["UPDATE private.strata_protective_exit_local_no_send SET evidence_sha256=repeat('0',64)","private.strata_protective_exit_local_no_send"],
+   ["UPDATE private.strata_protective_exit_local_no_send SET owner_user_id='22222222-2222-4222-8222-222222222222'","private.strata_protective_exit_local_no_send"],
+   ["DELETE FROM private.strata_protective_exit_local_no_send WHERE client_order_id='v13p-recovery-124'","private.strata_protective_exit_local_no_send"],
+   ["UPDATE private.strata_emergency_exit_reservations SET worker_fencing_token=23 WHERE client_order_id='v13p-recovery-124'","private.strata_emergency_exit_reservations"],
+   ["DELETE FROM public.v13_production_observation WHERE id='proof-46'","public.v13_production_observation"],
+  ];
+  for(const [sql,table] of cases){
+   const saved=(await db.query('SELECT * FROM '+table)).rows;
+   await db.query(sql!);let reads=0;const r=await recover(async(c,ts)=>{reads++;return read(c,ts);});assert.equal(r.ok,false,sql);assert.equal(reads,0,sql);
+   await db.query('DELETE FROM '+table);
+   for(const row of saved){const entries=Object.entries(row);await db.query('INSERT INTO '+table+'('+entries.map(e=>e[0]).join(',')+') VALUES('+entries.map((_,n)=>'$'+(n+1)).join(',')+')',entries.map(e=>e[1]));}
+  }
+  assert.equal((await recover(async(c,ts)=>({...await fixture.read(c,ts),orders:[...fixture.orders,{...fixture.orders[0],order_id:'contradiction',client_order_id:'v13p-recovery-124'}]}))).ok,false);
+ });
+ await t.test('incomplete history, mismatched cash, activity and stale scope refuse',async()=>{
+  for(const change of [{historicalCoverageComplete:false},{fills:fixture.fills.slice(1)},{settlements:fixture.settlements.slice(1)},{cashMicros:'26484501'}])assert.equal((await recover(async(c,ts)=>({...await fixture.read(c,ts),...change}))).ok,false);
+  for(const [set,restore] of [["arm_requested=true","arm_requested=false"],["state='owned'","state='released'"]]){
+   await db.query('UPDATE private.kalshi_account_worker_lease SET '+set);assert.equal((await recover()).ok,false);await db.query('UPDATE private.kalshi_account_worker_lease SET '+restore);
+  }
+  assert.equal((await recover(read,{isScheduled:()=>true})).ok,false);
+  for(const change of [{expectedRevision:'2'},{settlementEventId:'settlement:absent'}])assert.equal((await recoverOwnerSettledCashFreeze(owner,{...scope,...change},{db,isScheduled:()=>false,read})).ok,false);
+ });
+ await t.test('success preserves finances and history; exact replay is idempotent',async()=>{
   assert.equal((await recover()).ok,true);
   const a=(await db.query('SELECT * FROM public.v13_production_account')).rows[0];
   assert.equal(a.blocked_reason,null);assert.equal(a.execution_enabled,false);assert.equal(a.kill_switch,true);
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rows.length,1);
-  assert.equal((await recover()).ok,false);
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rows.length,1);
+  assert.equal((await recover()).ok,true);
+  assert.equal(a.cash_micros,'26484500');assert.equal(a.initial_cash_micros,'27720000');
+  assert.equal((await db.query('SELECT configured_stake_cents FROM public.strata_configured_stake')).rows[0].configured_stake_cents,500);
  });
  await t.test('concurrent START-style account lock waits then observes shut gates',async()=>{
   await reset();const entered=deferred(),resume=deferred();
@@ -98,7 +130,7 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   await entered.promise;let revoked=false;
   const revoke=db.query('UPDATE private.kalshi_connection_credentials SET revoked_at=now()').then(()=>{revoked=true;});
   await new Promise(r=>setTimeout(r,80));assert.equal(revoked,false);resume.resolve();assert.equal((await operation).ok,true);await revoke;
-  await db.query('UPDATE public.v13_production_account SET blocked_reason=$1',[SETTLED_CASH_FREEZE]);
+  await db.query('UPDATE public.v13_production_account SET blocked_reason=$1,revision=1',[SETTLED_CASH_FREEZE]);
   assert.equal((await recover()).ok,false);
  });
  await t.test('DB-clock expiry after audit rolls back both audit and clearance',async()=>{
@@ -108,7 +140,7 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   const result=await recover();assert.equal(result.ok,false);assert.equal(result.reason,'recovery_final_freshness_or_cas_refused');
   const a=(await db.query('SELECT * FROM public.v13_production_account')).rows[0];
   assert.equal(a.blocked_reason,SETTLED_CASH_FREEZE);assert.equal(a.revision,'1');
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rows.length,0);
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rows.length,0);
   await db.query('DROP TRIGGER slow_audit ON public.v13_production_observation');
  });
  await t.test('another freeze reason refuses before any exchange-shaped fixture read',async()=>{
@@ -120,12 +152,12 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   await reset();
   const mismatched=await recover(async(c,ts)=>({...await read(c,ts),cashMicros:'24990000'}));
   assert.equal(mismatched.ok,false);
-  await db.query('UPDATE public.v13_production_event SET cash_delta_micros=2990000');
+  await db.query('UPDATE public.v13_production_event SET cash_delta_micros=2990000 WHERE cash_delta_micros=3000000');
   try{assert.equal((await recover()).ok,false);}
-  finally{await db.query('UPDATE public.v13_production_event SET cash_delta_micros=3000000');}
+  finally{await db.query('UPDATE public.v13_production_event SET cash_delta_micros=3000000 WHERE cash_delta_micros=2990000');}
   const a=(await db.query("SELECT revision,blocked_reason,cash_micros FROM public.v13_production_account WHERE id='a'")).rows[0];
-  assert.deepEqual(a,{revision:'1',blocked_reason:SETTLED_CASH_FREEZE,cash_micros:'25000000'});
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,0);
+  assert.deepEqual(a,{revision:'1',blocked_reason:SETTLED_CASH_FREEZE,cash_micros:'26484500'});
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,0);
  });
  await t.test('post-audit revision CAS refusal rolls back audit and account changes',async()=>{
   await reset();
@@ -135,7 +167,7 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   try{const r=await recover();assert.equal(r.reason,'recovery_final_freshness_or_cas_refused');
    const a=(await db.query("SELECT revision,blocked_reason FROM public.v13_production_account WHERE id='a'")).rows[0];
    assert.deepEqual(a,{revision:'1',blocked_reason:SETTLED_CASH_FREEZE});
-   assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,0);
+   assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,0);
   }finally{await db.query('DROP TRIGGER change_revision ON public.v13_production_observation');}
  });
  const acl=async()=>await db.query(`SELECT 'relation:'||relname AS object, relacl::text AS acl
@@ -165,20 +197,20 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
     assert.equal(signal?.aborted,false);reads++;
     if(path.endsWith('/balance')){
      assert.equal(query,'?subaccount=1&exchange_index=2');balances++;
-     return {balance:2500,balance_dollars:'25.0000',updated_ts:drift&&balances===2?56:55};
+     return {balance:2648,balance_dollars:drift&&balances===2?'26.4846':'26.4845',updated_ts:55+balances};
     }
-    if(path.endsWith('/orders'))return {orders:[]};
-    if(path.endsWith('/fills'))return {fills:[]};
+    if(path.endsWith('/orders'))return {orders:path.includes('/historical/')?[]:fixture.orders};
+    if(path.endsWith('/fills'))return {fills:path.includes('/historical/')?[]:fixture.fills};
     if(path.endsWith('/positions'))return {market_positions:[]};
-    if(path.endsWith('/settlements'))return {settlements:[raw]};
+    if(path.endsWith('/settlements'))return {settlements:fixture.settlements};
     throw Error('unexpected signed fixture path');
    };
    const result=await recover((c,ts)=>readBracketedSettledCash(c,ts,{get}));
-   assert.equal(result.ok,!drift);assert.equal(balances,2);assert.equal(reads,8);
+   assert.equal(result.ok,!drift);assert.equal(balances,drift?2:3);assert.equal(reads,drift?8:15);
    const a=(await db.query('SELECT blocked_reason,execution_enabled,kill_switch FROM public.v13_production_account')).rows[0];
    assert.deepEqual(a,drift?{blocked_reason:SETTLED_CASH_FREEZE,execution_enabled:true,kill_switch:false}:
      {blocked_reason:null,execution_enabled:false,kill_switch:true});
-   assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,drift?0:1);
+   assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,drift?0:1);
   }
  });
  await t.test('exact migration pins invoker functions and reciprocal deferred ALWAYS triggers, with no new grants',async()=>{
@@ -227,7 +259,7 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
    await assert.rejects(client.query('COMMIT'),/owner_settled_cash_recovery_transition_unproven/);
   }finally{await client.query('ROLLBACK');client.release();}
   assert.equal((await db.query('SELECT blocked_reason FROM public.v13_production_account')).rows[0].blocked_reason,SETTLED_CASH_FREEZE);
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,1);
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,1);
  });
  await t.test('non-owner service role with preexisting DML grants uses both triggers without EXECUTE grant',async()=>{
   await reset();
@@ -236,12 +268,12 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
    GRANT SELECT ON public.v13_production_account,public.v13_live_money_policy,private.kalshi_account_worker_lease,
     private.kalshi_connection_credentials,vault.decrypted_secrets,public.v13_production_intent,
     public.v13_production_position,private.strata_emergency_exit_reservations,
-    public.v13_production_event,public.v13_production_observation TO fixture_recovery_runtime;
+    public.v13_production_event,public.v13_production_observation,private.strata_protective_exit_reconciliations,private.strata_protective_exit_local_no_send TO fixture_recovery_runtime;
    GRANT UPDATE (blocked_reason,reconciled_at,evidence_digest,revision,execution_enabled,kill_switch)
     ON public.v13_production_account TO fixture_recovery_runtime;
    GRANT INSERT ON public.v13_production_observation TO fixture_recovery_runtime;
    GRANT UPDATE (state) ON public.v13_live_money_policy,private.kalshi_account_worker_lease TO fixture_recovery_runtime;
-   GRANT UPDATE (revoked_at) ON private.kalshi_connection_credentials TO fixture_recovery_runtime; GRANT UPDATE (event_id) ON public.v13_production_event TO fixture_recovery_runtime;`);
+   GRANT UPDATE (revoked_at) ON private.kalshi_connection_credentials TO fixture_recovery_runtime; GRANT UPDATE (event_id) ON public.v13_production_event TO fixture_recovery_runtime; GRANT UPDATE ON public.v13_production_intent,public.v13_production_observation,public.v13_production_position,private.strata_emergency_exit_reservations,private.strata_protective_exit_reconciliations,private.strata_protective_exit_local_no_send TO fixture_recovery_runtime;`);
   const client=await db.connect();
   try{
    await client.query('SET ROLE fixture_recovery_runtime');
@@ -272,7 +304,7 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   assert.equal(result.riskFreezeCleared,null);
   const a=(await db.query('SELECT revision,blocked_reason FROM public.v13_production_account')).rows[0];
   assert.deepEqual(a,{revision:'1',blocked_reason:SETTLED_CASH_FREEZE});
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,0);
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,0);
  });
  await t.test('lost successful COMMIT acknowledgement remains typed unknown and disarmed',async()=>{
   await reset();
@@ -283,9 +315,12 @@ test('isolated real PostgreSQL recovery locks, replay and rollback',async t=>{
   const result=await recover(read,{db:injected});
   assert.equal(result.reason,'recovery_commit_outcome_unverified');assert.equal(result.riskFreezeCleared,null);
   assert.equal('outcomeUnknown' in result && result.outcomeUnknown,true);
+  const outcome=await ownerSettledCashRecoveryOutcome(owner,scope,db);assert.equal(outcome.ok,true);assert.equal(outcome.tradingAuthorized,false);
+  assert.equal((await recover()).ok,true);
+  assert.equal((await ownerSettledCashRecoveryOutcome('22222222-2222-4222-8222-222222222222',scope,db)).ok,false);
   const a=(await db.query('SELECT blocked_reason,execution_enabled,kill_switch FROM public.v13_production_account')).rows[0];
   assert.deepEqual(a,{blocked_reason:null,execution_enabled:false,kill_switch:true});
-  assert.equal((await db.query('SELECT * FROM public.v13_production_observation')).rowCount,1);
+  assert.equal((await db.query("SELECT * FROM public.v13_production_observation WHERE kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY'")).rowCount,1);
  });
  }finally{await db.end();}
 });

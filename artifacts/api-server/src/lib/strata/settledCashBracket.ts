@@ -1,5 +1,6 @@
 import {classifyOwnedKalshiReadFailure,getOwnedProductionKalshiJson,readOwnedKalshiFeeds,scopeEcho,type OwnedKalshiRead} from './personalExchangeRead';
 import {readSubaccountSpendableCash} from './personalMarketAdapter';
+import {canonical} from '../v13-production/types';
 
 const BALANCE='/trade-api/v2/portfolio/balance';
 const QUERY='?subaccount=1&exchange_index=2';
@@ -22,10 +23,16 @@ export function balanceEvidence(input:unknown,at:number) {
  return cash.ok?{cash:cash.cashMicros,updated:row.updated_ts}:null;
 }
 
-/** Recovery only. The actual default getter signs only fixed-origin GETs and
- * uses the existing quota controls. The second balance verifies, never replaces,
- * the first; same-value/timestamp is not a provider atomic snapshot guarantee.
- * No retry, START, transfer, write, or relaxation of later ledger checks. */
+const history=(r:OwnedKalshiRead)=>canonical({cash:r.cashMicros,
+ orders:r.orders.map(canonical).sort(),fills:r.fills.map(canonical).sort(),
+ positions:r.positions.map(canonical).sort(),settlements:r.settlements.map(canonical).sort()});
+
+/** Recovery only: two complete signed histories and three exact scoped balances
+ * share ONE five-second deadline and normal quota admission. Production balance
+ * updated_ts can advance with identical cash/history; never treat it as an atomic
+ * version. Reject regressing stamps, any cash change and any history difference.
+ * The closing reads verify, never replace, the original evidence. No retry or
+ * write is performed; locked ledger/settlement/conservation checks still follow. */
 export async function readBracketedSettledCash(
  creds:Credentials,observedAt:number,options:{get?:Read;now?:()=>number}={},
 ):Promise<Result>{
@@ -36,32 +43,41 @@ export async function readBracketedSettledCash(
  const signal=AbortSignal.timeout(MAX_AGE-(start-observedAt));
  let last=start;
  const usable=()=>{const n=now();if(!time(n)||n<last||n-observedAt>MAX_AGE||signal.aborted)return false;last=n;return true;};
- let opening:ReturnType<typeof balanceEvidence>=null;
- let malformedOpening=false;
+ const balances:NonNullable<ReturnType<typeof balanceEvidence>>[]=[];
+ let balanceFailure:string|null=null;
  const pinnedGet:Read=async(c,path,query,fetchImpl,_host,_owner,inner)=>{
   if(!usable())throw Error('recovery_signed_bracket_expired');
   if(path===BALANCE&&query!==QUERY)throw Error('recovery_signed_bracket_scope_invalid');
   const reply=await get(c,path,query,fetchImpl,undefined,undefined,inner?AbortSignal.any([signal,inner]):signal);
   if(!usable())throw Error('recovery_signed_bracket_expired');
   if(path===BALANCE){
-   opening=balanceEvidence(reply,observedAt);
-   if(!opening){malformedOpening=true;throw Error('recovery_signed_bracket_balance_invalid');}
+   const next=balanceEvidence(reply,observedAt),prior=balances.at(-1);
+   if(!next)balanceFailure='recovery_signed_bracket_balance_invalid';
+   else if(prior&&(next.cash!==prior.cash||next.updated<prior.updated))balanceFailure='recovery_signed_bracket_changed';
+   if(balanceFailure)throw Error(balanceFailure);
+   balances.push(next!);
   }
   return reply;
  };
  const scan=await readOwnedKalshiFeeds(creds,observedAt,pinnedGet,{mode:'bounded_history_reads_v1',signal});
  if(!usable())return refuse('recovery_signed_bracket_expired');
- if(malformedOpening)return refuse('recovery_signed_bracket_balance_invalid');
+ if(balanceFailure)return refuse(balanceFailure);
  if(!scan.ok)return refuse(scan.reason);
- const initial=opening as ReturnType<typeof balanceEvidence>;
+ const initial=balances[0];
  if(!initial||scan.cashMicros!==initial.cash||scan.historicalCoverageComplete!==true)
   return refuse('recovery_signed_bracket_history_incomplete');
+ const verification=await readOwnedKalshiFeeds(creds,observedAt,pinnedGet,{mode:'bounded_history_reads_v1',signal});
+ if(!usable())return refuse('recovery_signed_bracket_expired');
+ if(balanceFailure)return refuse(balanceFailure);
+ if(!verification.ok)return refuse(verification.reason);
+ if(verification.historicalCoverageComplete!==true||balances.length!==2||history(scan)!==history(verification))
+  return refuse('recovery_signed_bracket_history_changed');
  try{
-  const closing=await get(creds,BALANCE,QUERY,undefined,undefined,undefined,signal);
+  const closing=await pinnedGet(creds,BALANCE,QUERY,undefined,undefined,undefined,signal);
   if(!usable())return refuse('recovery_signed_bracket_expired');
   const tail=balanceEvidence(closing,last);
   if(!tail)return refuse('recovery_signed_bracket_balance_invalid');
-  if(tail.cash!==initial.cash||tail.updated!==initial.updated)return refuse('recovery_signed_bracket_changed');
+  if(tail.cash!==initial.cash||Number(balances.length)!==3)return refuse('recovery_signed_bracket_changed');
   return scan;
- }catch(error){return refuse(!usable()?'recovery_signed_bracket_expired':classifyOwnedKalshiReadFailure(error));}
+ }catch(error){return refuse(!usable()?'recovery_signed_bracket_expired':balanceFailure??classifyOwnedKalshiReadFailure(error));}
 }

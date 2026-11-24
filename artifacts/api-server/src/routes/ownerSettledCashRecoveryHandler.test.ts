@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import {pool} from '@workspace/db';
 import {createStrataAccess} from '../lib/strata/supabaseAuth';
 import {OWNER_SETTLED_CASH_RECOVERY_CONFIRM} from '../lib/strata/ownerSettledCashFreezeRecovery';
-import {createOwnerSettledCashRecoveryHandler,ownerSettledCashRecoveryReleaseApproved,OWNER_SETTLED_CASH_RECOVERY_MIGRATION_READY_SQL} from './ownerSettledCashRecoveryHandler';
+import {createOwnerSettledCashRecoveryReadHandler,createOwnerSettledCashRecoveryHandler,ownerSettledCashRecoveryReleaseApproved,OWNER_SETTLED_CASH_RECOVERY_MIGRATION_READY_SQL} from './ownerSettledCashRecoveryHandler';
 const owner='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
 const sha='a'.repeat(40);
 const enable={NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,STRATA_OWNER_SETTLED_CASH_RECOVERY_SHA:sha,
@@ -74,6 +74,28 @@ test('auth, exact scope, schema readiness, wrong owner and scheduled refusal wit
    accountId:body.accountId,expectedRevision:body.expectedRevision,settlementEventId:body.settlementEventId,confirmation:body.confirmation,
   }});
  }finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
+});
+
+test('preview and outcome enforce AAL2, owner-derived scope and closed GET parameters',async()=>{
+ const app=express();let enabled=true,ready=true;const called:string[]=[];
+ const access=createStrataAccess({verifyToken:async token=>{if(token!=='own-aal2'&&token!=='other-aal2')throw Error('aal2 required');return {subject:token==='own-aal2'?owner:other,issuer:'fixture',audience:'authenticated',aal:'aal2'};},roleOf:async()=> 'STANDARD'});
+ const no={ok:false as const,reason:'fixture_no_changes',ordersSubmitted:false as const,workerStarted:false as const,tradingAuthorized:false as const,riskFreezeCleared:false as const};
+ const deps={approved:()=>enabled,migrationReady:async()=>ready,sha:()=>sha,
+  preview:async(who:string)=>{called.push('preview:'+who);return no;},
+  outcome:async(who:string)=>{called.push('outcome:'+who);return {...no,status:'UNKNOWN' as const,outcomeUnknown:true};}};
+ app.get('/preview',access.requireUser,createOwnerSettledCashRecoveryReadHandler('preview',deps));
+ app.get('/outcome',access.requireUser,createOwnerSettledCashRecoveryReadHandler('outcome',deps));
+ const server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+ try{const address=server.address();assert.ok(address&&typeof address==='object');
+  const get=async(path:string,token='own-aal2')=>{const r=await fetch('http://127.0.0.1:'+address.port+path,{headers:{authorization:'Bearer '+token}});return {status:r.status,cache:r.headers.get('cache-control'),data:await r.json() as Record<string,unknown>};};
+  assert.equal((await get('/preview','aal1')).status,401);assert.equal((await get('/preview?ownerId='+other)).status,400);
+  enabled=false;assert.equal((await get('/preview')).status,409);assert.equal(called.length,0);
+  const q=new URLSearchParams({accountId:body.accountId,expectedRevision:body.expectedRevision,settlementEventId:body.settlementEventId});
+  assert.equal((await get('/outcome?'+q,'other-aal2')).status,200);assert.deepEqual(called,['outcome:'+other]);
+  assert.equal((await get('/outcome?'+q+'&ownerId='+owner)).status,400);
+  enabled=true;ready=false;assert.equal((await get('/preview')).status,409);ready=true;
+  const r=await get('/preview');assert.equal(r.cache,'private, no-store');assert.equal(r.data.sha,sha);assert.equal(called.at(-1),'preview:'+owner);
+ }finally{await new Promise<void>((r,j)=>server.close(e=>e?j(e):r()));}
 });
 
 test('real catalog requires both locked-down deferred constraints in disposable PostgreSQL',async()=>{
