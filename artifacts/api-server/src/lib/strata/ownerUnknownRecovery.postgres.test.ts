@@ -51,7 +51,7 @@ async function schema(){
   role text,revoked_at timestamptz,verified_at timestamptz,verification_reason text,key_fingerprint text);
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY,owner_user_id uuid,state text,
   fencing_token bigint,credential_fingerprint text,account_kill boolean,arm_requested boolean,released_at timestamptz,heartbeat_at timestamptz);
- CREATE TABLE public.v13_production_intent(id text PRIMARY KEY,account_id text,evaluation_id text,crossing_key text,parent_id text,
+ CREATE TABLE public.v13_production_intent(id text PRIMARY KEY,account_id text,evaluation_id text,direct_source_id text,crossing_key text,parent_id text,
   kind text,market text,side text,state text,request jsonb,decision jsonb,policy_hash text,fee_fingerprint text,
   capability_digest text,client_order_id text,exchange_order_id text,reserved_micros bigint,exit_fee_micros bigint,
   filled_hundredths bigint,terminal boolean,cancel_attempted boolean,dispatch_at timestamptz,created_at timestamptz);
@@ -76,6 +76,8 @@ async function reset(){
   private.kalshi_owner_topups,private.kalshi_owner_pilot_transfers,private.kalshi_owner_shard_allocations;
  DROP TRIGGER IF EXISTS unknown_recovery_injected_fault ON public.v13_production_observation;`);
  const at=Date.now();
+ // This minimal fixture represents the post-0046 projection, while all existing
+ // UNKNOWN accounting cases remain historical evaluation-linked intents.
  await pool.query(`INSERT INTO public.v13_production_account VALUES($1,$2,$3,'synthetic-policy',1,2,$4,7,
   25000000,6000000,25000000,'personal_exchange_history_unreconciled',false,true,true,true,NULL,NULL)`,[account,owner,connection,fingerprint]);
  await pool.query(`INSERT INTO public.v13_live_money_policy VALUES('synthetic-policy',$1,$2,'APPROVED')`,[account,owner]);

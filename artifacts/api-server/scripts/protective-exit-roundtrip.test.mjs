@@ -75,7 +75,7 @@ const owner='11111111-1111-4111-8111-111111111111',account='offline-account',gra
 const market='KXBTC15M-26NOV031700-00',event='KXBTC15M-26NOV031700';
 const at=Date.parse('2026-11-03T16:55:00Z'),release='a'.repeat(40);
 const finalFlag='STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED',oldFlag='STRATA_PUBLIC_METADATA_PREFETCH_ENABLED';
-const reconciliationIntentSql="SELECT id,account_id,evaluation_id,crossing_key,parent_id, kind,market,side,state,request, CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision, policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id, reserved_micros,exit_fee_micros,filled_hundredths,terminal,cancel_attempted,dispatch_at,created_at FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE";
+const reconciliationIntentSql="SELECT id,account_id,evaluation_id,direct_source_id,crossing_key,parent_id, kind,market,side,state,request, CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision, policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id, reserved_micros,exit_fee_micros,filled_hundredths,terminal,cancel_attempted,dispatch_at,created_at FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE";
 const isReconciliationIntentQuery=sql=>typeof sql==='string'&&sql.replace(/\s+/g,' ').trim()===reconciliationIntentSql;
 const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
 const keyId='offline-fixture-not-a-provider-key';
@@ -213,7 +213,7 @@ function installExitFixture(f,spec){
   if(sql.startsWith('SELECT a.*,')&&sql.includes('reconciliation_history_floor')){f.reconciliations++;return rows({...f.row,reconciliation_history_floor:new Date(at-10000)});}
   if(isReconciliationIntentQuery(sql)){
    assert.equal(args.length,1);assert.equal(args[0],account);
-   return {rows:f.intents.map(i=>({...i,decision:i.state==='BLOCKED'&&i.terminal===true?null:i.decision}))};
+   return {rows:f.intents.map(i=>({...i,direct_source_id:i.direct_source_id??null,decision:i.state==='BLOCKED'&&i.terminal===true?null:i.decision}))};
   }
   if(sql.startsWith('SELECT position.id,position.quantity_hundredths'))return rows({id:parentId,quantity_hundredths:'25'});
   if(sql.startsWith('SELECT market,side,quantity_hundredths FROM v13_production_position'))return rows({market,side:'YES',quantity_hundredths:'25'});
