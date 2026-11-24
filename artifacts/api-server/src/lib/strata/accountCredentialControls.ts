@@ -703,15 +703,18 @@ export function accountCredentialControls(
       }
       return prepareSetupReview(db, database, options.kalshiGet, userId, operation);
     },
-    async executeOperation(userId: string, body: unknown, claimGuard?: (client:CredentialClient)=>Promise<void>) {
+    async executeOperation(userId: string, body: unknown, claimGuard?: (client:CredentialClient)=>Promise<()=>Promise<void>>) {
       // This optional port is internal only. HTTP callers cannot supply it.
       // The first transaction is the existing operation claim; the remaining
       // transactions must be able to store/reconcile its response even if consent expires.
       let checked=false;
       const executionDb:CredentialDatabase=claimGuard?{query:(sql,params)=>database.query(sql,params),
         transaction:work=>database.transaction(async client=>{
-          if(!checked){await claimGuard(client);checked=true;}
-          return work(client);
+          if(checked)return work(client);
+          const finalize=await claimGuard(client);checked=true;
+          const result=await work(client);
+          await finalize();
+          return result;
         })}:database;
       const fields = accountSetupExecutionBody(body);
       if (!fields || !executionConfirmationAllowed(fields.operation, fields.confirmation)) {
@@ -1014,6 +1017,13 @@ export function accountCredentialControls(
           "WHERE id=$2::uuid AND owner_user_id=$3::uuid AND financial_account_id=$4::uuid AND provider_connection_id=$5::uuid AND operation=$6 AND state='prepared' AND precondition_digest=$7 AND plan=$8::jsonb RETURNING id",
           [plan.digest,attempt.attemptId,userId,current.financialAccountId,current.providerConnectionId,attempt.operation,attempt.preconditionDigest,JSON.stringify(accountSetupPlan(attempt.operation,current.providerConnectionId))]);
         if(audited.rows.length!==1||performance.now()>=deadline)throw Error("technical_setup_plan_changed");
+        return async()=>{
+          // A refused claim must not leave consent on an unclaimed attempt.
+          // Finish inside the same short transaction, before any external IO.
+          if(performance.now()>=deadline)throw Error("technical_setup_plan_changed");
+          await client.query("UPDATE private.kalshi_account_operation_attempts SET owner_technical_plan_digest=NULL,owner_technical_authorized_at=NULL WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared' AND owner_technical_plan_digest=$3",
+            [attempt.attemptId,userId,plan.digest]);
+        };
       });
     },
     async confirmCompleted(attempt,prior){
