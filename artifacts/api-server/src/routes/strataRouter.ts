@@ -1,4 +1,4 @@
-import {parseHistoryView,parseHistoryCursor,type readOwnerHistory} from "../lib/strata/ownerHistoryIntelligence";
+import {parseHistoryView,parseHistoryCursor,parseHistoryEvaluationId,type readOwnerHistory} from "../lib/strata/ownerHistoryIntelligence";
 import { paperAnalyticsPaused, PAPER_ANALYTICS_PAUSE_MESSAGE } from "../lib/paperAnalyticsMaintenance";
 import {createOwnerUnknownRecoveryRouter} from "./ownerUnknownRecoveryRouter";
 import type {OwnerUnknownRecoveryPort} from "../lib/strata/ownerUnknownRecoveryService";
@@ -182,11 +182,13 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
     const view=parseHistoryView(req.query.view);
     const {beforeAt,beforeId}=req.query;
     const cursor=beforeAt===undefined&&beforeId===undefined?null:parseHistoryCursor(beforeAt,beforeId);
-    if(!view||((beforeAt!==undefined||beforeId!==undefined)&&!cursor)){
+    const evaluationId=req.query.evaluationId===undefined?null:parseHistoryEvaluationId(req.query.evaluationId);
+    if(!view||((beforeAt!==undefined||beforeId!==undefined)&&!cursor)||
+       (req.query.evaluationId!==undefined&&(!evaluationId||view==="trades"))){
       res.status(400).json({error:"Invalid history view or cursor"});return;
     }
     if(!deps.ownerHistory){res.status(503).json({error:"Owner history unavailable"});return;}
-    try{res.json(sanitizePublic(await deps.ownerHistory(subject,view,cursor)));}
+    try{res.json(sanitizePublic(await deps.ownerHistory(subject,view,cursor,evaluationId)));}
     catch{res.status(503).json({error:"Owner history temporarily unavailable"});}
   });
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
