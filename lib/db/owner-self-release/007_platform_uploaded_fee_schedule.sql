@@ -28,10 +28,52 @@ REVOKE ALL ON private.strata_platform_uploaded_fee_schedule FROM PUBLIC,anon,aut
 REVOKE ALL ON SEQUENCE private.strata_platform_uploaded_fee_schedule_upload_id_seq FROM PUBLIC,anon,authenticated,service_role;
 CREATE TRIGGER strata_platform_uploaded_fee_immutable BEFORE UPDATE OR DELETE ON private.strata_platform_uploaded_fee_schedule
  FOR EACH ROW EXECUTE FUNCTION private.durable_observation_immutable();
+-- Withdrawal is append-only; the latest withdrawn publication never causes an
+-- older one to become active. Existing bytes and owner financial records remain.
+CREATE TABLE private.strata_platform_fee_withdrawal(
+ upload_id bigint PRIMARY KEY REFERENCES private.strata_platform_uploaded_fee_schedule(upload_id),
+ administrator_user_id uuid NOT NULL REFERENCES auth.users(id),
+ withdrawn_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ confirmation text NOT NULL CHECK(confirmation='WITHDRAW_PLATFORM_KALSHI_FEE_PDF_V1')
+);
+ALTER TABLE private.strata_platform_fee_withdrawal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.strata_platform_fee_withdrawal FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON private.strata_platform_fee_withdrawal FROM PUBLIC,anon,authenticated,service_role;
+CREATE TRIGGER strata_platform_fee_withdrawal_immutable BEFORE UPDATE OR DELETE ON private.strata_platform_fee_withdrawal
+ FOR EACH ROW EXECUTE FUNCTION private.durable_observation_immutable();
+CREATE FUNCTION private.strata_platform_fee_require_safe_cutover() RETURNS void
+ LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
+BEGIN
+ -- Prevent a phantom lease, intent or exposure between inspection and COMMIT.
+ LOCK TABLE public.v13_production_position,public.v13_production_intent,private.kalshi_account_worker_lease IN SHARE MODE;
+ IF EXISTS(SELECT 1 FROM public.v13_production_position WHERE quantity_hundredths<>0)
+ OR EXISTS(SELECT 1 FROM public.v13_production_intent WHERE terminal IS DISTINCT FROM true)
+ OR EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease WHERE state='owned' OR arm_requested)
+ THEN RAISE EXCEPTION 'platform fee change requires safe cutover'; END IF;
+END $$;
+CREATE FUNCTION private.strata_platform_fee_withdrawal_guard() RETURNS trigger
+ LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
+BEGIN
+ PERFORM pg_advisory_xact_lock(1958371201,1);
+ IF NOT EXISTS(SELECT 1 FROM auth.users u JOIN public.profiles p ON p.id=u.id
+ JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
+ WHERE u.id=NEW.administrator_user_id AND u.email_confirmed_at IS NOT NULL AND p.role='ADMIN' AND ra.role='ADMIN'
+ AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp())) THEN RAISE EXCEPTION 'platform fee withdrawal admin required';END IF;
+ IF NEW.upload_id IS DISTINCT FROM (SELECT upload_id FROM private.strata_platform_uploaded_fee_schedule ORDER BY upload_id DESC LIMIT 1)
+ THEN RAISE EXCEPTION 'only latest publication can be withdrawn';END IF;
+ PERFORM private.strata_platform_fee_require_safe_cutover();
+ UPDATE private.strata_durable_owner_fee_state s SET known_publication_change=true,monitor_state='changed'
+ FROM private.strata_durable_owner_fee_model m WHERE m.model_id=s.model_id
+ AND m.historical_baseline_id LIKE 'platform-upload-%' AND s.known_publication_change=false;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER strata_platform_fee_withdrawal_guard BEFORE INSERT ON private.strata_platform_fee_withdrawal
+ FOR EACH ROW EXECUTE FUNCTION private.strata_platform_fee_withdrawal_guard();
 CREATE FUNCTION private.strata_platform_uploaded_fee_guard() RETURNS trigger
  LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
  PERFORM pg_advisory_xact_lock(1958371201,1);
+ PERFORM private.strata_platform_fee_require_safe_cutover();
  IF NOT EXISTS(SELECT 1 FROM auth.users u JOIN public.profiles p ON p.id=u.id
  JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
  WHERE u.id=NEW.uploader_user_id AND u.email_confirmed_at IS NOT NULL AND p.role='ADMIN' AND ra.role='ADMIN'
@@ -65,7 +107,8 @@ BEGIN
  IF NEW.historical_baseline_id LIKE 'platform-upload-%' THEN
   PERFORM pg_advisory_xact_lock_shared(1958371201,1);
   IF NEW.historical_baseline_id IS DISTINCT FROM
-   (SELECT baseline_id FROM private.strata_platform_uploaded_fee_schedule ORDER BY upload_id DESC LIMIT 1)
+   (SELECT latest.baseline_id FROM (SELECT upload_id,baseline_id FROM private.strata_platform_uploaded_fee_schedule ORDER BY upload_id DESC LIMIT 1) latest
+    WHERE NOT EXISTS(SELECT 1 FROM private.strata_platform_fee_withdrawal w WHERE w.upload_id=latest.upload_id))
   THEN RAISE EXCEPTION 'active uploaded fee schedule required'; END IF;
  END IF;
  RETURN NEW;
@@ -82,4 +125,5 @@ ALTER TABLE private.strata_durable_fee_migration
  OR (historical_baseline_id~'^platform-upload-[a-f0-9]{64}$' AND confirmation='I_APPROVE_ADMIN_UPLOADED_KALSHI_FEE_TERMS_V1'))
  AND risk_acceptance='I_ACCEPT_UNVERIFIED_SOURCE_AUTHENTICITY_AND_CURRENT_BASE_RATES_CHANGE_DETECTION_GAPS_AND_UNBOUNDED_FEE_EXITS_MAY_BLOCK_V1'));
 REVOKE ALL ON FUNCTION private.strata_platform_uploaded_fee_guard(),private.strata_platform_uploaded_fee_latch(),private.strata_uploaded_fee_model_guard() FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION private.strata_platform_fee_require_safe_cutover(),private.strata_platform_fee_withdrawal_guard() FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

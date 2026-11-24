@@ -11,6 +11,7 @@ BEGIN
  FOREACH role_name IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
   FOREACH perm IN ARRAY ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'] LOOP
    IF has_table_privilege(role_name,'private.strata_platform_uploaded_fee_schedule',perm) THEN RAISE EXCEPTION 'manual publication ACL leak'; END IF;
+   IF has_table_privilege(role_name,'private.strata_platform_fee_withdrawal',perm) THEN RAISE EXCEPTION 'withdrawal ACL leak'; END IF;
   END LOOP;
  END LOOP;
  bytes:=convert_to('%PDF-'||repeat('c',128),'UTF8');digest:=encode(sha256(bytes),'hex');first_id:='platform-upload-'||digest;
@@ -46,6 +47,39 @@ BEGIN
   INSERT INTO private.strata_durable_owner_fee_model(model_id,owner_user_id,execution_account_id,release_commit_sha,approved_policy_hash,official_source_digest,source_kind,historical_baseline_id,policy_version,formula_version,effective_date,confirmation,genuine_source_verified)
   SELECT '99999999-9999-4999-8999-999999999999','22222222-2222-4222-8222-222222222222','platform-fee-two',repeat('a',40),repeat('d',64),content_sha256,source_kind,baseline_id,'owner_attested_historical_terms_v1',formula_version,effective_date,'I_APPROVE_OWNER_ATTESTED_HISTORICAL_FEE_TERMS_V1',false FROM private.strata_durable_historical_baseline WHERE baseline_id=first_id;
   RAISE EXCEPTION 'superseded document authorized';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'active uploaded fee schedule required' THEN RAISE;END IF;END;
+ BEGIN
+  INSERT INTO private.strata_platform_fee_withdrawal(upload_id,administrator_user_id,confirmation)
+  SELECT upload_id,'22222222-2222-4222-8222-222222222222','WITHDRAW_PLATFORM_KALSHI_FEE_PDF_V1' FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=second_id;
+  RAISE EXCEPTION 'STANDARD withdrawal accepted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'platform fee withdrawal admin required' THEN RAISE;END IF;END;
+ INSERT INTO public.v13_production_intent(id,account_id,parent_id,kind,market,side,state,request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros,terminal)
+ VALUES('cutover-position','platform-fee-two','synthetic-parent','EXIT','KXBTC15M-TEST','YES','UNKNOWN','{}','{}',repeat('a',64),repeat('b',64),repeat('c',64),'cutover-no-wire',0,0,false);
+ BEGIN
+  INSERT INTO private.strata_platform_fee_withdrawal(upload_id,administrator_user_id,confirmation)
+  SELECT upload_id,'11111111-1111-4111-8111-111111111111','WITHDRAW_PLATFORM_KALSHI_FEE_PDF_V1' FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=second_id;
+  RAISE EXCEPTION 'withdrawal with unresolved order accepted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'platform fee change requires safe cutover' THEN RAISE;END IF;END;
+ UPDATE public.v13_production_intent SET state='TERMINAL',terminal=true WHERE id='cutover-position';
+ INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros)
+ VALUES('cutover-position','platform-fee-two','KXBTC15M-TEST','YES',100,500000);
+ BEGIN
+  INSERT INTO private.strata_platform_fee_withdrawal(upload_id,administrator_user_id,confirmation)
+  SELECT upload_id,'11111111-1111-4111-8111-111111111111','WITHDRAW_PLATFORM_KALSHI_FEE_PDF_V1' FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=second_id;
+  RAISE EXCEPTION 'withdrawal with exposure accepted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'platform fee change requires safe cutover' THEN RAISE;END IF;END;
+ DELETE FROM public.v13_production_position WHERE id='cutover-position';
+ INSERT INTO private.strata_platform_fee_withdrawal(upload_id,administrator_user_id,confirmation)
+ SELECT upload_id,'11111111-1111-4111-8111-111111111111','WITHDRAW_PLATFORM_KALSHI_FEE_PDF_V1' FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=second_id;
+ IF NOT (SELECT known_publication_change FROM private.strata_durable_owner_fee_state WHERE model_id='88888888-8888-4888-8888-888888888888') THEN RAISE EXCEPTION 'withdrawal failed to block prior terms';END IF;
+ BEGIN
+  DELETE FROM private.strata_platform_fee_withdrawal;
+  RAISE EXCEPTION 'mutable withdrawal history';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'immutable durable publication observation' THEN RAISE;END IF;END;
+ BEGIN
+  INSERT INTO private.strata_durable_owner_fee_model(model_id,owner_user_id,execution_account_id,release_commit_sha,approved_policy_hash,official_source_digest,source_kind,historical_baseline_id,policy_version,formula_version,effective_date,confirmation,genuine_source_verified)
+  SELECT '99999999-9999-4999-8999-999999999999','22222222-2222-4222-8222-222222222222','platform-fee-two',repeat('a',40),repeat('d',64),content_sha256,source_kind,baseline_id,'owner_attested_historical_terms_v1',formula_version,effective_date,'I_APPROVE_OWNER_ATTESTED_HISTORICAL_FEE_TERMS_V1',false FROM private.strata_durable_historical_baseline WHERE baseline_id=second_id;
+  RAISE EXCEPTION 'withdrawn document authorized';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'active uploaded fee schedule required' THEN RAISE;END IF;END;
 END $test$;
 SET CONSTRAINTS ALL IMMEDIATE;
