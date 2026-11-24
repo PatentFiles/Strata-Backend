@@ -35,8 +35,8 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM private.strata_durable_historical_baseline b WHERE b.baseline_id=NEW.baseline_id
  AND substring(b.original_bytes from 1 for 5)=decode('255044462d','hex')
  AND NOT EXISTS(SELECT 1 FROM private.strata_platform_official_fee_capture_v1 c WHERE c.content_sha256<>b.content_sha256)
- AND NOT EXISTS(SELECT 1 FROM private.strata_platform_uploaded_fee_schedule u JOIN private.strata_durable_historical_baseline old USING(baseline_id)
- WHERE old.effective_date>b.effective_date)) THEN RAISE EXCEPTION 'upload identity or applicable publication unverified';END IF;
+ AND NOT EXISTS(SELECT 1 FROM private.strata_platform_uploaded_fee_schedule u JOIN private.strata_durable_historical_baseline prior_baseline USING(baseline_id)
+ WHERE prior_baseline.effective_date>b.effective_date)) THEN RAISE EXCEPTION 'upload identity or applicable publication unverified';END IF;
  RETURN NEW;
 END $$;
 CREATE TRIGGER strata_platform_uploaded_fee_guard BEFORE INSERT ON private.strata_platform_uploaded_fee_schedule
