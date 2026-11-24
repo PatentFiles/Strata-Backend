@@ -245,7 +245,7 @@ function installExitFixture(f,spec){
   if(f.direct&&(init?.method??'GET')==='GET'){
    const url=String(input);let data;
    if(url==='https://api.exchange.coinbase.com/products/BTC-USD/ticker')data={price:'99990',time:iso(f.now)};
-   else if(url==='https://external-api.kalshi.com/trade-api/v2/markets/'+market+'/orderbook?depth=100')data={orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};
+   else if(url==='https://external-api.kalshi.com/trade-api/v2/markets/'+market+'/orderbook')data={orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};
    if(data){const response=Response.json(data);Object.defineProperty(response,'url',{value:url});return response;}
   }
   if(init?.method==='POST'){assert.match(String(input),/\/portfolio\/events\/orders$/);const body=JSON.parse(init.body);assert.equal(body.reduce_only,true);f.posts.push(body);throw Error('synthetic_uncertain_transport');}};

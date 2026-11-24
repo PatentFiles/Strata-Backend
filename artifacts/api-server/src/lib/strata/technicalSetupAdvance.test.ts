@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {advanceTechnicalSetup,createTechnicalSetupAdmission,technicalSetupResult,SETUP_ROLE_ORDER,type SetupRole,type SetupRoleBinding,type TechnicalSetupPorts} from "./technicalSetupAdvance";
+import {buildTechnicalSetupPlan,executeAuthorizedTechnicalSetup,publicTechnicalSetupReview,advanceTechnicalSetup,createTechnicalSetupAdmission,technicalSetupResult,SETUP_ROLE_ORDER,type SetupRole,type SetupRoleBinding,type TechnicalSetupPorts,type AuthorizedTechnicalSetupPorts,type ReviewedSetupAttempt,type TechnicalSetupSnapshot} from "./technicalSetupAdvance";
 import type {AccountSetupOperation, PublicAccountSetupAttempt} from "./accountSetupPreparation";
 
 const ATTEMPT="11111111-1111-4111-8111-111111111111";
@@ -108,4 +108,66 @@ test("same owner and global capacity are bounded without queuing or leaking slot
   assert.equal((await admit("owner-b",async()=>{throw Error("unexpected");})).stage,"BUSY");
   release();await first;
   assert.equal((await admit("owner-b",async()=>technicalSetupResult("EXISTING_ACCOUNT","ok"))).stage,"EXISTING_ACCOUNT");
+});
+
+
+function executionHarness(options:{restricted?:boolean;fail?:AccountSetupOperation;drift?:boolean;expired?:boolean}={}){
+  const sequence:AccountSetupOperation[]=["create_subaccount",...(options.restricted?[]:["generate_api_key" as const]),"provision_execution_account"];
+  const ids=sequence.map((_,i)=>"33333333-3333-4333-8333-"+String(i+1).padStart(12,"0"));
+  let index=0,scope="owner-a/connection-a/version-1",now=0,existing=false,unresolved:string|null=null,prepared=true;
+  let bindings=SETUP_ROLE_ORDER.slice(0,options.restricted?4:3).map((r,i)=>roleBinding(r,i,true));
+  const calls:AccountSetupOperation[]=[],attempt=():ReviewedSetupAttempt=>({attemptId:ids[index]!,operation:sequence[index]!,preconditionDigest:String(index+1).repeat(64)});
+  const snapshot=():TechnicalSetupSnapshot=>({scope,executionAccountExists:existing,bindings:[...bindings],
+    unresolvedAttemptId:unresolved,preparedAttempts:prepared&&index<sequence.length?[{...attempt(),state:"prepared"}]:[]});
+  const ports:AuthorizedTechnicalSetupPorts={
+    now:()=>now,
+    async snapshot(){return snapshot();},
+    async advance(){prepared=true;return technicalSetupResult("PREPARED","prepared");},
+    async nextAttempt(){return index<sequence.length&&prepared?attempt():null;},
+    async execute(a,pin,deadline){assert.equal(pin,scope);assert.ok(now<deadline);assert.deepEqual(a,attempt());calls.push(a.operation);now+=8_000;
+      if(options.fail===a.operation){unresolved=a.attemptId;return {ok:false,reason:"transport_timeout",state:"uncertain",attempted:true};}
+      prepared=false;return {ok:true,reason:"completed",state:"completed",attempted:true};},
+    async confirmCompleted(a,prior){assert.equal(prior.scope,scope);
+      if(a.operation==="generate_api_key"){bindings=[...bindings,roleBinding("restricted_execution",3,true)];scope+=":generated";}
+      if(a.operation==="provision_execution_account"){existing=true;scope+=":provisioned";}
+      index++;if(options.drift)return null;if(options.expired)now=65_001;return snapshot();},
+  };
+  const plan=buildTechnicalSetupPlan(snapshot(),attempt());assert.ok(plan);
+  return {ports,plan,calls,snapshot,attempt,setExisting:()=>{existing=true;},setScope:(value:string)=>{scope=value;},get now(){return now;}};
+}
+test("explicit reviewed owner plan executes all three operations, returns only killed-account provisioning completion",async()=>{
+ const h=executionHarness();
+ const preview=publicTechnicalSetupReview(h.plan);
+ assert.deepEqual(preview.operations,["create_subaccount","generate_api_key","provision_execution_account"]);
+ assert.equal("scope" in preview,false);assert.equal(JSON.stringify(preview).includes("vaultSecretId"),false);
+ const r=await executeAuthorizedTechnicalSetup(h.plan,h.ports);
+ assert.equal(r.stage,"EXISTING_ACCOUNT");assert.equal(r.reason,"technical_setup_provisioned_owner_review_required");
+ assert.deepEqual(r.completedOperations,preview.operations);assert.deepEqual(h.calls,preview.operations);
+ assert.equal(r.elapsedMs,24_000);assert.equal(r.executable,false);assert.equal(r.ordersSubmitted,false);
+ assert.equal(r.transferAttempted,false);assert.equal(r.workerStarted,false);
+});
+test("existing saved restricted credential is never rotated by an automated plan",async()=>{
+ const h=executionHarness({restricted:true});
+ const r=await executeAuthorizedTechnicalSetup(h.plan,h.ports);
+ assert.deepEqual(h.calls,["create_subaccount","provision_execution_account"]);assert.equal(r.stage,"EXISTING_ACCOUNT");
+});
+test("changed initial scope, existing account, ambiguous provider response, and unconfirmed readback do not replay",async()=>{
+ for(const kind of ["scope","existing","uncertain","readback","deadline"]){
+   const h=executionHarness({fail:kind==="uncertain"?"create_subaccount":undefined,drift:kind==="readback",expired:kind==="deadline"});
+   if(kind==="scope")h.setScope("foreign-version");
+   if(kind==="existing")h.setExisting();
+   const r=await executeAuthorizedTechnicalSetup(h.plan,h.ports);
+   assert.equal(r.stage,kind==="uncertain"?"WAITING_RECONCILIATION":kind==="readback"?"UNKNOWN":kind==="deadline"?"RESUME_REQUIRED":"BLOCKED");
+   assert.equal(h.calls.length,kind==="scope"||kind==="existing"?0:1);
+   const retried=await executeAuthorizedTechnicalSetup(h.plan,h.ports);
+   assert.notEqual(retried.stage,"EXISTING_ACCOUNT");assert.equal(h.calls.length,kind==="scope"||kind==="existing"?0:1);
+ }
+});
+test("review digest changes when attempt preconditions or credential versions change",()=>{
+ const h=executionHarness(),initial=h.snapshot(),attempt=h.attempt();
+ const changed=buildTechnicalSetupPlan(initial,{...attempt,preconditionDigest:"f".repeat(64)});
+ assert.ok(changed);assert.notEqual(changed.digest,h.plan.digest);
+ assert.notEqual(buildTechnicalSetupPlan({...initial,scope:"replacement"},attempt)?.digest,h.plan.digest);
+ assert.equal(buildTechnicalSetupPlan({...initial,executionAccountExists:true},attempt),null);
+ assert.equal(buildTechnicalSetupPlan({...initial,bindings:initial.bindings.slice(0,2)},attempt),null);
 });

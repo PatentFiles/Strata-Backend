@@ -63,5 +63,6 @@
   "docs/reviews/maintenance-hardening-20261028.sql",
   "sql/held-consent-deadlines.sql",
   "sql/strata_owner_settled_cash_recovery_commit_fence.sql",
-  "lib/db/drizzle/0046_strata_direct_entry_source.sql"
+  "lib/db/drizzle/0046_strata_direct_entry_source.sql",
+  "lib/db/drizzle/0047_owner_technical_setup_approval.sql"
 ]
