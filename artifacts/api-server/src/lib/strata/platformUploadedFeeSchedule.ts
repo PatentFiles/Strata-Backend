@@ -68,7 +68,7 @@ export async function publishPlatformUploadedFeeSchedule(admin:string,bytes:Buff
   const conflict=await tx.query("SELECT 1 FROM private.strata_platform_official_fee_capture_v1 WHERE content_sha256<>$1 LIMIT 1",[digest]);
   if(conflict.rows.length)return deny("uploaded_fee_conflicts_with_known_issuer_observation");
   if(latest?.baseline_id!==id){
-   if(latest){
+   {
     const exposure=await tx.query(`SELECT
      EXISTS(SELECT 1 FROM public.v13_production_position WHERE quantity_hundredths<>0) OR
      EXISTS(SELECT 1 FROM public.v13_production_intent WHERE NOT terminal) OR

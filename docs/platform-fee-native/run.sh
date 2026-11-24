@@ -54,5 +54,17 @@ db < "$migration"
 if [[ "$TEST_SCENARIO" == fresh ]]; then
   db < docs/platform-fee-native/seed.sql
 fi
+# Exercise manual registry as an additive upgrade, without persisting test publications.
+manual_migration=lib/db/owner-self-release/007_platform_uploaded_fee_schedule.sql
+before="$(snapshot)"
+if sed 's/^COMMIT;$/SELECT 1\/0; COMMIT;/' "$manual_migration" | db; then
+  echo "Expected manual publication migration failure" >&2; exit 1
+fi
+[[ "$(db -Atc "SELECT to_regclass('private.strata_platform_uploaded_fee_schedule') IS NULL")" == t ]]
+[[ "$(snapshot)" == "$before" ]]
+db < "$manual_migration"
+[[ "$(snapshot)" == "$before" ]]
+db < docs/platform-fee-native/manual-upload-assertions.sql
+[[ "$(snapshot)" == "$before" ]]
 db < docs/platform-fee-native/assertions.sql
 echo "PASS 0049 PostgreSQL $TEST_PG_MAJOR $TEST_SCENARIO (actual schema and synthetic fee bytes only)"
