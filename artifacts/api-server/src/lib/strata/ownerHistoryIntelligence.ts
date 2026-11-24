@@ -87,6 +87,18 @@ export const LINKED_SETTLEMENT_SQL=`SELECT ev.event_id AS "eventId",ev.intent_id
  WHERE entry.account_id=$1 AND entry.kind='ENTRY' AND entry.evaluation_id=ANY($2::text[])
  ORDER BY ev.occurred_at DESC,ev.event_id DESC LIMIT 101`;
 
+// Project only reviewed, non-secret fields from the transactional trace. Its
+// observations are not themselves exchange fills or proof of a wire attempt.
+export const LINKED_TRACE_SQL=`SELECT t.trace_id::text AS "traceId",t.evaluation_id AS "evaluationId",
+ t.intent_id AS "intentId",t.kind,${iso("t.recorded_at")} AS "recordedAt",
+ t.details->>'state' AS "state",t.details->>'orderKind' AS "orderKind",
+ t.details->>'filledHundredths' AS "filledHundredths",
+ t.details->>'eventKind' AS "eventKind",t.details->>'eventId' AS "eventId",
+ t.details->>'observationKind' AS "observationKind",t.details->>'outcome' AS "outcome"
+ FROM private.strata_v13_execution_trace t
+ WHERE t.execution_account_id=$1 AND t.evaluation_id=ANY($2::text[])
+ ORDER BY t.trace_id DESC LIMIT 301`;
+
 type Row=Record<string,unknown>;
 type Client={query(sql:string,values?:unknown[]):Promise<{rows:Row[]}>;release(error?:Error):void};
 type Database={connect():Promise<Client>};
@@ -117,11 +129,13 @@ export async function readOwnerHistory(subject:string,view:HistoryView,cursor:Hi
   }:null;
   const ids=view==="live"?[...new Set(page.map(r=>r.evaluationId).filter((v):v is string=>typeof v==="string"))]:[];
   const settlements=accountId&&ids.length?(await client.query(LINKED_SETTLEMENT_SQL,[accountId,ids])).rows:[];
+  const executionTrace=accountId&&ids.length?(await client.query(LINKED_TRACE_SQL,[accountId,ids])).rows:[];
   await client.query("COMMIT");
   return {version:1 as const,view,scope:view==="source"?"SHARED_PAPER_SOURCE":"OWNER_LIVE_LEDGER",
    accountExists:view==="source"?null:accountId!==null,rows:page,next,
    linkedSettlements:settlements.slice(0,HISTORY_LIMIT),linkedSettlementsTruncated:settlements.length>HISTORY_LIMIT,
    // This is a page of persisted observations, not proof of complete telemetry.
+   executionTrace:executionTrace.slice(0,300),executionTraceTruncated:executionTrace.length>300,
    stageTimingsPersisted:false,readOnly:true as const};
  }catch(error){
   try{await client.query("ROLLBACK");}catch{discard=new Error("history_rollback_failed");}
