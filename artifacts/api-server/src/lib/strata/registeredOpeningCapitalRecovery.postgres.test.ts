@@ -239,3 +239,58 @@ test("registered opening recovery enrollment is independent of live entry and ex
  }
  assert.equal(registeredOpeningRecoveryScope(OWNER,SHA,{STRATA_REGISTERED_OPENING_RECOVERY_SCOPES_V1:"bad-json"}),undefined);
 });
+
+import {collectCommissioningCashEvidence} from "./ownerSignedExchangeReleaseProof";
+import {commitCommissioningCashEvidence} from "./ownerCommissioningCashTransition";
+import {registeredReceipt,proveRegisteredOpeningEvidence} from "./registeredOpeningCapitalProof";
+import {readCapitalTransfers} from "./capitalCreditTransfers";
+import {loadCapitalTransferSigner} from "./capitalCreditTransferSigner";
+import {digest} from "../v13-production/types";
+import type {Pool} from "@workspace/db";
+
+async function commissioningFixture(t:TestContext){
+ const f=await fixture(t);if(!f)return null;
+ await f.db.exec(`
+ ALTER TABLE public.v13_live_money_policy ADD COLUMN fee_policy_version text;
+ ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN holder_id text;
+ ALTER TABLE public.v13_production_intent ADD COLUMN id text,ADD COLUMN state text;
+ ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN state text;
+ `);
+ const collect=()=>collectCommissioningCashEvidence(OWNER,{db:f.native,read:async(_material,now)=>({...f.feed,observedAtMs:now})});
+ const commitDb=f.db.nativePool as unknown as Pool;
+ return {...f,collect,commitDb};
+}
+test("commissioning cash write conserves funded balance and original timestamp; stale, cross-owner and replay evidence refused",async t=>{
+ const f=await commissioningFixture(t);if(!f)return;
+ await f.db.exec("UPDATE public.v13_production_account SET initial_cash_micros=cash_micros");
+ const {evidence,proof}=await f.collect();
+ assert.ok(evidence,proof.reason);assert.equal(evidence.initialFundingCandidate,false);
+ const before=await state(f.db);
+ assert.equal((await commitCommissioningCashEvidence(OTHER,evidence,null,f.commitDb)).ok,false);
+ assert.equal((await commitCommissioningCashEvidence(OWNER,evidence,null,f.commitDb,()=>evidence.snapshot.observedAtMs+15001)).ok,false);
+ assert.deepEqual(await state(f.db),before);
+ const out=await commitCommissioningCashEvidence(OWNER,evidence,null,f.commitDb);
+ assert.equal(out.ok,true,out.reason);
+ const row=(await f.db.query("SELECT reconciled_at,commissioned,execution_enabled,kill_switch FROM public.v13_production_account")).rows[0]!;
+ assert.equal((row.reconciled_at instanceof Date?row.reconciled_at:new Date(String(row.reconciled_at))).toISOString(),new Date(evidence.snapshot.observedAtMs).toISOString());
+ assert.equal(row.commissioned,true);assert.equal(row.execution_enabled,false);assert.equal(row.kill_switch,true);
+ assert.equal((await state(f.db)).cash_micros,f.cash);assert.equal((await state(f.db)).initial_cash_micros,f.cash);
+ assert.equal((await commitCommissioningCashEvidence(OWNER,evidence,null,f.commitDb)).ok,false);
+});
+test("initial commissioning records only the registered signed original transfer, not a second credit",async t=>{
+ const f=await commissioningFixture(t);if(!f)return;
+ await f.db.exec("UPDATE public.v13_production_account SET commissioned=false,cash_micros=0,initial_cash_micros=0,blocked_reason='awaiting_account_commissioning'");
+ const {evidence,proof}=await f.collect();assert.ok(evidence,proof.reason);assert.equal(evidence.initialFundingCandidate,true);
+ assert.equal((await commitCommissioningCashEvidence(OWNER,evidence,null,f.commitDb)).ok,false);
+ const receipt=registeredReceipt((await f.db.query("SELECT * FROM private.kalshi_owner_pilot_transfers")).rows,[],OWNER,evidence.account);
+ const signer=await loadCapitalTransferSigner(f.native,evidence.account);
+ const transfers=await readCapitalTransfers(async()=>({transfers:f.transfers,cursor:""}),evidence.snapshot.observedAtMs);
+ proveRegisteredOpeningEvidence(receipt,evidence.snapshot.cashMicros,evidence.feeds,transfers,evidence.snapshot.observedAtMs);
+ const out=await commitCommissioningCashEvidence(OWNER,evidence,{receipt,signerDigest:digest(signer.bindings)},f.commitDb);
+ assert.equal(out.ok,true,out.reason);
+ assert.equal((await state(f.db)).cash_micros,f.cash);assert.equal((await state(f.db)).initial_cash_micros,f.cash);
+ assert.equal((await state(f.db)).kill_switch,true);assert.equal((await state(f.db)).execution_enabled,false);
+ assert.equal(String((await f.db.query("SELECT count(*) AS n FROM private.kalshi_owner_pilot_transfers")).rows[0]!.n),"1");
+ assert.equal(String((await f.db.query("SELECT count(*) AS n FROM public.v13_production_event")).rows[0]!.n),"0");
+ assert.equal((await commitCommissioningCashEvidence(OWNER,evidence,{receipt,signerDigest:digest(signer.bindings)},f.commitDb)).ok,false);
+});
