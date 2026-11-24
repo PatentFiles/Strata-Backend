@@ -1,4 +1,5 @@
-import {configuredOwnerSelfScope,ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
+import {ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
 import {standingAuthoritySql,sameStandingAuthoritySql,OWNER_SELF_MODE} from './ownerSelfReviewMode';
 import {beginFeeAuthorityTiming} from "./feeAuthorityTiming";
 import { createHash, randomUUID } from "node:crypto";
@@ -67,7 +68,7 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
    ORDER BY r.created_at DESC LIMIT 2 FOR SHARE`,[sha,ownerId,a.id,a.policy_hash]);
   if(technical.rows.length!==1)return denied("standing_independent_release_not_current");
   const self=technical.rows[0]?.review_authority===OWNER_SELF_MODE;
-  if(self&&!ownerSelfEnrollmentAllowed(ownerId,a.id,(deps.scope?deps.scope():configuredOwnerSelfScope(ownerId,sha))))return denied('owner_self_account_not_enabled');
+  if(self&&!ownerSelfEnrollmentAllowed(ownerId,a.id,(deps.scope?deps.scope():await resolveOwnerSelfScope(c,ownerId,sha))))return denied('owner_self_account_not_enabled');
   const reviewer=self?null:String(technical.rows[0]?.independent_reviewer_id);
   if(self?technical.rows[0]?.owner_authorizer_id!==ownerId:!UUID.test(reviewer!))return denied("standing_independent_reviewer_identity_invalid");
   const prior=await c.query(`

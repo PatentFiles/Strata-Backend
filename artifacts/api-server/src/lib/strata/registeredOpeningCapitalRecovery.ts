@@ -1,3 +1,4 @@
+import {resolveOwnerSelfScope,publicSelfServiceRequested} from './ownerSelfServiceEligibility';
 import { performance } from "node:perf_hooks";
 import { pool, type Pool, type PoolClient } from "@workspace/db";
 import { ProductionLedger, type Account } from "../v13-production/ledger";
@@ -47,9 +48,9 @@ export function registeredOpeningRecoveryScope(owner:string,sha:string,env:NodeJ
   return selected;
  }catch{return undefined;}
 }
-function context(owner:string,d:Deps){
+async function context(owner:string,d:Deps){
   if(process.env.NODE_ENV!=="test" && Object.keys(d).length)throw Error("registered_opening_production_override_forbidden");
-  const sha=(d.sha??deployedGitSha)(),c=d.scope?d.scope():registeredOpeningRecoveryScope(owner,sha);
+  const sha=(d.sha??deployedGitSha)(),c=d.scope?d.scope():publicSelfServiceRequested()?await resolveOwnerSelfScope(pool,owner,sha,'recovery'):registeredOpeningRecoveryScope(owner,sha);
   if(!UUID.test(owner)||!SHA.test(sha)||!c||!ownerSelfEnrollmentAllowed(owner,c.accountId,c))
     throw Error("registered_opening_owner_scope_unavailable");
   return {account:c.accountId,sha};
@@ -67,7 +68,7 @@ function fresh(proof:Awaited<ReturnType<typeof registeredOpeningProof>>,now:numb
  * unregistered-credit proof still rejects all registered transfers. */
 export async function registeredOpeningCapitalPreview(owner:string,d:Deps={}){
   try{
-    const c=context(owner,d),proof=await registeredOpeningProof(owner,c.account,c.sha,d);
+    const c=await context(owner,d),proof=await registeredOpeningProof(owner,c.account,c.sha,d);
     return {ok:true as const,scope:proof.scope,confirmation:CREDIT_CONFIRM,
       observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,
       history:{orders:0,fills:0,positions:0,settlements:0,capitalTransfers:1},
@@ -99,7 +100,7 @@ export async function registeredOpeningCapitalOutcome(owner:string,id:string,sha
  * funding, permissions, stake, credentials, or worker state. */
 export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:Deps={}){
   let c:{account:string;sha:string};
-  try{c=context(owner,d);}catch(e){return refused(reason(e));}
+  try{c=await context(owner,d);}catch(e){return refused(reason(e));}
   const b=raw as Row;
   let scope:RegisteredOpeningScope;
   try{
@@ -190,7 +191,7 @@ export async function cancelRegisteredOpeningCapital(owner:string,raw:unknown,d:
   const b=raw as Row;
   let scope:RegisteredOpeningScope;
   try{
-    const c=context(owner,d);
+    const c=await context(owner,d);
     if(!b||typeof b!=="object"||Array.isArray(b)||Object.keys(b).sort().join(",")!=="confirmation,repairId,scope"||
       b.confirmation!==CREDIT_CANCEL||!UUID.test(str(b.repairId))||!validRegisteredOpeningScope(b.scope)||
       b.scope.ownerId!==owner||b.scope.accountId!==c.account)return unknown();

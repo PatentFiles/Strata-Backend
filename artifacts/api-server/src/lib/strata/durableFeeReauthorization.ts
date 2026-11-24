@@ -1,3 +1,4 @@
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {performance} from 'node:perf_hooks';
 import {createHash} from 'node:crypto';
 import {pool} from '@workspace/db';
@@ -54,7 +55,7 @@ function matches(m:Row,b:Row){return m.model_id===b.modelId&&m.release_commit_sh
 function tuple(r:Row){return {authorizationId:r.authorization_id,ownerId:r.owner_user_id,accountId:r.execution_account_id,modelId:r.model_id,originalSha:r.original_release_sha,sha:r.release_commit_sha,policyHash:r.policy_hash,sourceDigest:r.source_digest,confirmation:r.confirmation,riskAcceptance:r.risk_acceptance,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:HISTORICAL_BASELINE_ID,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,...noAuthority};}
 export async function durableFeeReauthorizationPreview(owner:string,d:Pick<Deps,'db'|'sha'|'scope'>={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)return no('production_override_forbidden');
- const sha=(d.sha??deployedGitSha)(),configured=d.scope?d.scope():configuredOwnerSelfScope(owner,sha);if(!enabled()||!UUID.test(owner)||!configured||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
+ const sha=(d.sha??deployedGitSha)(),configured=d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,sha);if(!enabled()||!UUID.test(owner)||!configured||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
  try{const db=d.db??pool,found=await scopeRow(db,owner,configured.accountId);if(!found)return no('durable_reauthorization_historical_stopped_scope_unverified');const {m,p}=found;
  const reconciled=new Date(String(m.reconciled_at)).getTime();if(!Number.isFinite(reconciled)||reconciled>Date.now()+10000||Date.now()-reconciled>900000)return no('durable_reauthorization_fresh_reconciliation_required');
  if(m.release_commit_sha===sha)return no('durable_reauthorization_different_release_required');
@@ -103,7 +104,7 @@ async function execute(owner:string,b:Row,d:Deps){
 export async function reauthorizeDurableFeeRelease(owner:string,raw:unknown,d:Deps={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)return no('production_override_forbidden');
  if(!enabled()||!UUID.test(owner)||!validDurableReauthorizationBody(raw))return no('explicit_durable_reauthorization_required');const b=raw;
- if(b.expectedSha!==(d.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(owner,str(b.accountId),(d.scope?d.scope():configuredOwnerSelfScope(owner,b.expectedSha))))return no('durable_reauthorization_scope_invalid');
+ if(b.expectedSha!==(d.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(owner,str(b.accountId),(d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,b.expectedSha))))return no('durable_reauthorization_scope_invalid');
  const db=d.db??pool;
  try{const claim=await db.query(`INSERT INTO private.strata_durable_fee_release_authorization(authorization_id,model_id,owner_user_id,execution_account_id,original_release_sha,release_commit_sha,policy_hash,source_digest,confirmation,risk_acceptance)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING RETURNING authorization_id`,[b.authorizationId,b.modelId,owner,b.accountId,b.originalSha,b.expectedSha,b.policyHash,b.sourceDigest,b.confirmation,b.riskAcceptance]);if(claim.rows.length!==1)return no('durable_reauthorization_existing_attempt_requires_readback');}catch{return no('durable_reauthorization_claim_unknown');}
