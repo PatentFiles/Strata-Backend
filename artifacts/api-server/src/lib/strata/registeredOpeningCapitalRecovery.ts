@@ -4,7 +4,7 @@ import { ProductionLedger, type Account } from "../v13-production/ledger";
 import { digest } from "../v13-production/types";
 import { deployedGitSha } from "./deployedGitSha";
 import { configuredOwnerSelfScope, ownerSelfEnrollmentAllowed } from "./ownerSelfReviewMode";
-import { CREDIT_CONFIRM } from "./capitalCreditTransfers";
+import { CREDIT_CONFIRM, CREDIT_CANCEL } from "./capitalCreditTransfers";
 import { capitalNoAuthority } from "./capitalCreditRepair";
 import { loadCapitalTransferSigner } from "./capitalCreditTransferSigner";
 import type { Db, ProofDeps, Query, Row } from "./capitalCreditProof";
@@ -51,13 +51,17 @@ export async function registeredOpeningCapitalPreview(owner:string,d:Deps={}){
   }catch(e){return refused(reason(e));}
 }
 async function readOutcome(db:Query,owner:string,id:string,sha:string){
-  const result=await db.query(`SELECT scope,state FROM private.strata_capital_credit_repair
+  const result=await db.query(`SELECT scope,state,reason FROM private.strata_capital_credit_repair
     WHERE repair_id=$1::uuid AND owner_user_id=$2::uuid AND release_commit_sha=$3`,[id,owner,sha]);
   if(result.rows.length===0)return null;
   if(result.rows.length!==1)return unknown();
   const row=result.rows[0]!;
   if(!validRegisteredOpeningScope(row.scope)||row.scope.ownerId!==owner||row.scope.sha!==sha)return unknown();
-  return row.state==="RECORDED"?recorded(id,row.scope):unknown();
+  if(row.state==="RECORDED")return recorded(id,row.scope);
+  if(row.state==="REJECTED"&&row.reason==="capital_owner_canceled_exact_repair")
+    return {ok:false as const,outcome:"REJECTED" as const,reason:"registered_opening_exact_attempt_canceled",
+      repairId:id,scope:row.scope,noCommit:true as const,...capitalNoAuthority};
+  return unknown();
 }
 export async function registeredOpeningCapitalOutcome(owner:string,id:string,sha:string,db:Query=pool){
   if(!UUID.test(owner)||!UUID.test(id)||!SHA.test(sha))return unknown();
@@ -89,7 +93,7 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
   // opening basis is no longer zero. A conflicting same ID never authorizes mutation.
   try{
     const prior=await readOutcome(db,owner,id,c.sha);
-    if(prior)return prior.ok&&prior.scope.scopeDigest===scope.scopeDigest?prior:unknown();
+    if(prior)return prior.outcome!=="UNKNOWN"&&prior.scope.scopeDigest===scope.scopeDigest?prior:unknown();
   }catch{return unknown();}
   let tx:Awaited<ReturnType<Db["connect"]>>|undefined;
   let committed=false,commitSent=false,discard:Error|undefined;
@@ -149,7 +153,48 @@ export async function applyRegisteredOpeningCapital(owner:string,raw:unknown,d:D
   if(committed)return recorded(id,scope);
   try{
     const prior=await readOutcome(db,owner,id,c.sha);
-    if(prior)return prior.ok&&prior.scope.scopeDigest===scope.scopeDigest?prior:unknown();
+    if(prior)return prior.outcome!=="UNKNOWN"&&prior.scope.scopeDigest===scope.scopeDigest?prior:unknown();
   }catch{return unknown();}
   return commitSent?unknown():refused(failure);
+}
+
+/** Resolve a possibly interrupted attempt without replaying a financial write.
+ * The immutable rejection uses the same exact ID and scope. Inserting it
+ * competes with an in-flight apply's primary-key claim; a committed apply is
+ * always returned as RECORDED, never changed to canceled. */
+export async function cancelRegisteredOpeningCapital(owner:string,raw:unknown,d:Deps={}){
+  const b=raw as Row;
+  let scope:RegisteredOpeningScope;
+  try{
+    const c=context(owner,d);
+    if(!b||typeof b!=="object"||Array.isArray(b)||Object.keys(b).sort().join(",")!=="confirmation,repairId,scope"||
+      b.confirmation!==CREDIT_CANCEL||!UUID.test(str(b.repairId))||!validRegisteredOpeningScope(b.scope)||
+      b.scope.ownerId!==owner||b.scope.accountId!==c.account)return unknown();
+    scope=b.scope;
+  }catch{return unknown();}
+  const id=str(b.repairId),db:Db=d.db??pool;
+  let tx:Awaited<ReturnType<Db["connect"]>>|undefined,done=false,sent=false,discard:Error|undefined;
+  try{
+    tx=await db.connect();await tx.query("BEGIN");
+    await tx.query("SET LOCAL lock_timeout='1500ms'");
+    await tx.query("SET LOCAL statement_timeout='12000ms'");
+    // Lock the owner/account row before the receipt claim, in apply's order.
+    const a=await tx.query(`SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid
+      AND subaccount=1 AND exchange_index=2 FOR UPDATE`,[scope.accountId,owner]);
+    if(a.rows.length!==1)return unknown();
+    await tx.query(`INSERT INTO private.strata_capital_credit_repair
+      (repair_id,owner_user_id,execution_account_id,release_commit_sha,receipt_id,scope_digest,scope,confirmation,state,reason,resolved_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'REJECTED','capital_owner_canceled_exact_repair',clock_timestamp())
+      ON CONFLICT DO NOTHING`,[id,owner,scope.accountId,scope.sha,scope.receiptId,scope.scopeDigest,scope,CREDIT_CONFIRM]);
+    const saved=await tx.query(`SELECT repair_id FROM private.strata_capital_credit_repair WHERE repair_id=$1::uuid
+      AND owner_user_id=$2::uuid AND execution_account_id=$3 AND release_commit_sha=$4 AND scope_digest=$5 FOR UPDATE`,
+      [id,owner,scope.accountId,scope.sha,scope.scopeDigest]);
+    if(saved.rows.length!==1)return unknown();
+    await tx.query(`UPDATE private.strata_capital_credit_repair SET state='REJECTED',
+      reason='capital_owner_canceled_exact_repair',resolved_at=clock_timestamp()
+      WHERE repair_id=$1::uuid AND state='PENDING'`,[id]);
+    sent=true;await tx.query("COMMIT");done=true;
+  }catch{if(sent)discard=Error("registered_opening_cancel_unknown");}
+  finally{if(tx){if(!done&&!discard)try{await tx.query("ROLLBACK");}catch{discard=Error("registered_opening_rollback_unknown");}tx.release(discard);}}
+  return registeredOpeningCapitalOutcome(owner,id,scope.sha,db);
 }
