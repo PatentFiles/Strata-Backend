@@ -1,3 +1,4 @@
+import {verifyCommissioningFinancialChecks} from "../lib/strata/ownerCommissioningFinancialChecks";
 import {registeredOpeningCapitalPreview,applyRegisteredOpeningCapital,registeredOpeningCapitalOutcome,cancelRegisteredOpeningCapital} from '../lib/strata/registeredOpeningCapitalRecovery';
 import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit} from '../lib/strata/capitalCreditRepair';
 import {durableFeeReauthorizationPreview,reauthorizeDurableFeeRelease,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization} from '../lib/strata/durableFeeReauthorization';
@@ -797,6 +798,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   // Early personal account onboarding is not Steps 12-13 or trading
   // authorization. No exchange calls, credentials, fee PDF or mutations.
+  // Separately versioned evidence-only continuation; owner identity comes from
+  // authenticated middleware. No grants, funds, risk approvals or START.
+  router.post("/onboarding/verify-financial-evidence",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await verifyCommissioningFinancialChecks(owner,req.body);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
   router.get("/onboarding/my-setup-readiness",async (_req,res)=>{
     const owner=subject(res);
     if(!owner)return void res.status(401).json({error:"Unauthorized"});
