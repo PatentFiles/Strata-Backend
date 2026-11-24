@@ -23,9 +23,33 @@ function reason(e:unknown){
   const code=e instanceof Error?e.message:"";
   return /^registered_opening_[a-z_]{1,80}$/.test(code)?code:"registered_opening_proof_or_database_refused";
 }
+/** Recovery rollout is independent of live-entry eligibility. Explicit scopes
+ * are server-controlled and tied to the running release; no client selector
+ * can enroll another account. Invalid configuration never falls back. */
+export function registeredOpeningRecoveryScope(owner:string,sha:string,env:NodeJS.ProcessEnv=process.env){
+ const configured=env.STRATA_REGISTERED_OPENING_RECOVERY_SCOPES_V1;
+ if(configured===undefined)return configuredOwnerSelfScope();
+ if(!UUID.test(owner)||!SHA.test(sha)||configured.length>65536)return undefined;
+ try{
+  const entries:unknown=JSON.parse(configured);
+  if(!Array.isArray(entries)||entries.length>256)return undefined;
+  const owners=new Set<string>(),accounts=new Set<string>();
+  let selected:{ownerId:string;accountId:string}|undefined;
+  for(const entry of entries){
+   if(!entry||typeof entry!=="object"||Array.isArray(entry)||
+    Object.keys(entry).sort().join(",")!=="accountId,ownerId,releaseSha"||
+    typeof entry.ownerId!=="string"||!UUID.test(entry.ownerId)||
+    typeof entry.accountId!=="string"||!(/^[A-Za-z0-9._:-]{1,200}$/).test(entry.accountId)||
+    entry.releaseSha!==sha||owners.has(entry.ownerId.toLowerCase())||accounts.has(entry.accountId))return undefined;
+   owners.add(entry.ownerId.toLowerCase());accounts.add(entry.accountId);
+   if(entry.ownerId===owner)selected={ownerId:owner,accountId:entry.accountId};
+  }
+  return selected;
+ }catch{return undefined;}
+}
 function context(owner:string,d:Deps){
   if(process.env.NODE_ENV!=="test" && Object.keys(d).length)throw Error("registered_opening_production_override_forbidden");
-  const c=(d.scope??configuredOwnerSelfScope)(),sha=(d.sha??deployedGitSha)();
+  const sha=(d.sha??deployedGitSha)(),c=d.scope?d.scope():registeredOpeningRecoveryScope(owner,sha);
   if(!UUID.test(owner)||!SHA.test(sha)||!c||!ownerSelfEnrollmentAllowed(owner,c.accountId,c))
     throw Error("registered_opening_owner_scope_unavailable");
   return {account:c.accountId,sha};
