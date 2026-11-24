@@ -98,16 +98,6 @@ test('durable enrollment + qualification + actual activation on native PostgreSQ
  const b=await reset();const r=await activateOwnerSelfAccount(owner,b,deps);assert.equal(r.ok,true,JSON.stringify(r));const s=await state();assert.equal(s.a.execution_enabled,true);assert.equal(s.a.kill_switch,false);assert.equal(s.w.state,'released');assert.equal(s.w.fencing_token,'8');assert.equal(s.w.arm_requested,false);assert.equal(s.count,1);assert.equal(s.approvals,1);assert.equal(r.workerStarted,false);assert.equal(r.ordersSubmitted,false);
  assert.equal((await ownerSelfActivationOutcome(owner,sha,pool)).outcome,'RECORDED');assert.equal((await activateOwnerSelfAccount(owner,b,deps)).ok,false);assert.equal((await state()).count,1);
  });
- for(const scenario of ['valid','missing','wrong_owner','bad_digest','future_revision'])await t.test('new-release activation after settled recovery: '+scenario,async()=>{
-  const b=await reset();
-  await pool.query("UPDATE private.kalshi_account_worker_lease SET state='released',account_kill=false,arm_requested=false,released_at=now()");
-  const p={owner:scenario==='wrong_owner'?connection:owner,accountId:account,priorReason:'production_external_cash_mismatch',priorRevision:scenario==='future_revision'?'10':'0',tradingAuthorized:false};
-  if(scenario!=='missing')await pool.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES('recovery',$1,'OWNER_SETTLED_CASH_FREEZE_RECOVERY',$2,$3)",[account,p,scenario==='bad_digest'?'f'.repeat(64):digest(p)]);
-  const r=await activateOwnerSelfAccount(owner,b,deps);assert.equal(r.ok,scenario==='valid',JSON.stringify(r));
-  const s=await state();assert.equal(s.w.state,'released');assert.equal(s.w.arm_requested,false);
-  assert.equal(s.a.execution_enabled,scenario==='valid');assert.equal(s.w.fencing_token,scenario==='valid'?'8':'7');
-  assert.equal(s.count,scenario==='valid'?1:0);assert.equal(s.approvals,scenario==='valid'?1:0);
- });
  await t.test('two concurrent requests commit exactly one activation and fence',async()=>{const b=await reset();const r=await Promise.all([activateOwnerSelfAccount(owner,b,deps),activateOwnerSelfAccount(owner,b,deps)]);assert.equal(r.filter(x=>x.ok).length,1,JSON.stringify(r));const s=await state();assert.equal(s.count,1);assert.equal(s.approvals,1);assert.equal(s.w.fencing_token,'8');});
  for(const label of ['UPDATE public.v13_production_account','OWNER_SELF_ACCOUNT_ACTIVATED'])await t.test('rollback after '+label,async()=>{const b=await reset();let hit=false;const d=wrap(async(sql,args,c)=>{const out=await c.query(sql,args);if(sql.includes(label)||(label==='OWNER_SELF_ACCOUNT_ACTIVATED'&&args?.[2]===label)){hit=true;throw Error('injected post-write fault');}return out;});const r=await activateOwnerSelfAccount(owner,b,d);assert.equal(hit,true);assert.equal(r.ok,false);await untouched();});
  await t.test('deferred five-second freshness guard rolls back at COMMIT',async()=>{const b=await reset();const d=wrap(async(sql,args,c)=>{if(sql==='COMMIT')await delay(5100);return c.query(sql,args);});const r=await activateOwnerSelfAccount(owner,b,d);assert.equal(r.ok,false);assert.equal(r.reason,'owner_self_activation_commit_outcome_unknown');await untouched();assert.equal((await ownerSelfActivationOutcome(owner,sha,pool)).outcome,'UNKNOWN');});

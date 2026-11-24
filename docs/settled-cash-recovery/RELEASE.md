@@ -70,8 +70,9 @@ worker fence. It never excludes a row based on BLOCKED status alone. Recovery
 uses the existing full two-way retained-event reconciliation, conservation and
 deferred audit/transition fences. Subsequent owner qualification reuses the existing restore service for a current
 build approval, with the same complete retained-history proof. A new build uses
-fresh owner activation; a released lease is accepted only with a verified
-immutable settled-recovery receipt. Existing grants and revocations are preserved.
+the existing owner KILL, exact-build fee consent and fresh owner activation
+sequence. No fee or activation guard is relaxed. Existing grants and revocations
+are preserved.
 Cash renewal now locks the owned account and
 released/disarmed matching worker and requires equal exact cash, no hold and no
 exposure or uncertainty. It preserves execution flags and all financial values.
@@ -150,8 +151,13 @@ does not resubmit approval. A receipt lookup serializes with the account fence.
 
 Select **Resume Commissioning** for current release qualification and complete
 any separate owner execution review presented for the deployed build. If the
-build changes, explicitly review and authorize the existing durable fee terms
-for that build before execution qualification; publication is not owner consent. Existing
+build changes and requires new fee consent, use the existing explicit Dashboard
+KILL action first (the recovered account is already stopped). In Wallets advanced
+controls choose **Preview exact-build fee authorization**, review the unchanged
+terms and check the confirmation, then **Record exact-build fee consent**. Resume
+Commissioning and complete **Review execution authorization** / **Authorize &
+qualify account**. Publication is not owner consent. KILL and the subsequent
+activation must be performed by the owner; support must not perform them. Existing
 durable fee terms and risk settings remain unchanged. Dashboard's **Reconcile
 Bot Cash (No Transfer)** can renew equal cash while the authorized worker is
 stopped. **ARM and START remain separate deliberate owner actions.** Support
