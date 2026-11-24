@@ -99,7 +99,7 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.account.otherFreeze=a.blocked_reason!==null&&a.blocked_reason!==undefined&&
     !r.account.provisionalHold;
   if(r.ownedAccountUnique &&
-    [a.cash_micros,a.initial_cash_micros,a.cash_movement_micros].every(v=>typeof v==="string"&&/^-?\\d+$/.test(v))){
+    [a.cash_micros,a.initial_cash_micros,a.cash_movement_micros].every(v=>typeof v==="string"&&/^-?\d+$/.test(v))){
    const cash=BigInt(String(a.cash_micros)),initial=BigInt(String(a.initial_cash_micros)),movement=BigInt(String(a.cash_movement_micros));
    const difference=cash-initial-movement;
    r.openingBasis={cashMicros:String(cash),initialCashMicros:String(initial),cashMovementMicros:String(movement),
