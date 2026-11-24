@@ -1,3 +1,4 @@
+import {technicalSetupMasterSafe} from "./technicalSetupMasterSafety";
 import { createHash } from "node:crypto";
 import type { CredentialDatabase } from "./accountCredentialStore";
 
@@ -255,9 +256,7 @@ export async function executePreparedExecutionAccountProvisioning(
           false, input.attemptId, state, null);
       }
       const master = await client.query(MASTER_SAFETY_SQL);
-      if (master.rows.length !== 1 ||
-          master.rows[0]?.live_execution_enabled !== false ||
-          master.rows[0]?.manual_kill_switch !== true) {
+      if (!await technicalSetupMasterSafe(client,master,input,"provision_execution_account")) {
         return result(false, "production_safety_controls_not_fail_closed",
           false, input.attemptId, state, null);
       }

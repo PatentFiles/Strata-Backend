@@ -1471,7 +1471,10 @@ function executeKeyGeneration(
 }
 
 
-for(const singleAction of [false,true]) test(singleAction?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
+for(const mode of ["reviewed","single","public-active"] as const) test(mode==="public-active"?"multi-key action executes for a qualified new owner while global trading is enabled":mode==="single"?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
+  const singleAction=mode!=="reviewed";
+  const savedEnv={...process.env};
+  const publicActive=mode==="public-active";
   const fixture=await setup(t);
   if(!fixture)return;
   try {
@@ -1486,6 +1489,12 @@ for(const singleAction of [false,true]) test(singleAction?"multi-key action exec
     // Real attempt/credential/provisioning tables; synthetic provider only.
     // No external request, funding transfer, or activation port is installed.
     await raw.exec(readFileSync("../../lib/db/drizzle/0047_owner_technical_setup_approval.sql","utf8"));
+    if(publicActive){
+      const sha="a".repeat(40);
+      Object.assign(process.env,{NODE_ENV:"production",RAILWAY_GIT_COMMIT_SHA:sha,STRATA_PUBLIC_SELF_SERVICE_ENABLED:"true",STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:sha});
+      await raw.exec("ALTER TABLE auth.users ADD COLUMN email_confirmed_at timestamptz; ALTER TABLE auth.users ADD COLUMN banned_until timestamptz; UPDATE auth.users SET email_confirmed_at=now();");
+      await raw.query("UPDATE live_execution_config SET live_execution_enabled=true,manual_kill_switch=false WHERE id='singleton'");
+    }
     await raw.query("DELETE FROM private.kalshi_connection_credentials WHERE id=$1::uuid",[OLD_RESTRICTED_A]);
     const keys=[] as {keyId:string;scopes:string[];subaccount:number|null;api_key_id:string}[];
     for(const [id,keyId,scopes] of [
@@ -1577,5 +1586,16 @@ for(const singleAction of [false,true]) test(singleAction?"multi-key action exec
     if(singleAction)assert.equal(repeat.stage,"EXISTING_ACCOUNT");else assert.equal(repeat.ok,false);
     assert.deepEqual((await raw.query("SELECT * FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A])).rows,before.rows);
     assert.equal(creates,1);assert.equal(generates,1);
-  } finally {await fixture.raw.close();}
+    if(publicActive){
+      const gate=(await raw.query("SELECT live_execution_enabled,manual_kill_switch FROM live_execution_config")).rows[0];
+      assert.deepEqual(gate,{live_execution_enabled:true,manual_kill_switch:false});
+    }
+  } finally {
+    if(publicActive){
+      for(const key of ["NODE_ENV","RAILWAY_GIT_COMMIT_SHA","STRATA_PUBLIC_SELF_SERVICE_ENABLED","STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA"]){
+        if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];
+      }
+    }
+    await fixture.raw.close();
+  }
 });
