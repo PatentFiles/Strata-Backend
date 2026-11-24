@@ -11,14 +11,14 @@ ALTER TABLE private.kalshi_account_operation_attempts
  );
 -- Once an attempt has been claimed, the reviewed digest cannot be overwritten.
 CREATE FUNCTION private.strata_owner_technical_approval_immutable() RETURNS trigger
-LANGUAGE plpgsql SET search_path=pg_catalog AS $
+LANGUAGE plpgsql SET search_path=pg_catalog AS $technical_approval$
 BEGIN
  IF OLD.state <> 'prepared' AND
     ROW(OLD.owner_technical_plan_digest,OLD.owner_technical_authorized_at)
     IS DISTINCT FROM ROW(NEW.owner_technical_plan_digest,NEW.owner_technical_authorized_at)
  THEN RAISE EXCEPTION 'owner_technical_approval_immutable'; END IF;
  RETURN NEW;
-END $;
+END $technical_approval$;
 REVOKE ALL ON FUNCTION private.strata_owner_technical_approval_immutable() FROM PUBLIC;
 CREATE TRIGGER strata_owner_technical_approval_immutable BEFORE UPDATE ON private.kalshi_account_operation_attempts
  FOR EACH ROW EXECUTE FUNCTION private.strata_owner_technical_approval_immutable();
