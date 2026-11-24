@@ -36,7 +36,7 @@ async function fixture(t: TestContext): Promise<CredentialFixtureDb | null> {
     CREATE TABLE public.v13_production_event(account_id text,cash_delta_micros bigint,pnl_micros bigint);
     CREATE TABLE public.v13_production_position(account_id text,quantity_hundredths bigint,basis_micros bigint,realized_pnl_micros bigint);
     CREATE TABLE public.v13_production_intent(account_id text,terminal boolean,state text,reserved_micros bigint);
-    CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,state text,arm_requested boolean,credential_fingerprint text);
+    CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,state text,arm_requested boolean,credential_fingerprint text,account_kill boolean);
     CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text);
     CREATE TABLE private.kalshi_owner_pilot_transfers(
       execution_account_id text,owner_user_id uuid,financial_account_id uuid,
@@ -54,7 +54,7 @@ async function fixture(t: TestContext): Promise<CredentialFixtureDb | null> {
   await db.query(`INSERT INTO public.v13_production_account
     (id,owner_user_id,kalshi_connection_id,subaccount,exchange_index,cash_micros,initial_cash_micros)
     VALUES($1,$2,$3,1,2,0,0)`, [ACCOUNT,OWNER,CONNECTION]);
-  await db.query("INSERT INTO private.kalshi_account_worker_lease VALUES($1,$2,'released',false,'fixture-fingerprint')",[ACCOUNT,OWNER]);
+  await db.query("INSERT INTO private.kalshi_account_worker_lease VALUES($1,$2,'released',false,'fixture-fingerprint',false)",[ACCOUNT,OWNER]);
   return db;
 }
 async function observe(db: CredentialFixtureDb, cents: number, time = NOW, owner = OWNER) {
@@ -187,4 +187,15 @@ test("authorized stopped account renews equal cash without changing authority; a
  }
  await db.exec("UPDATE public.v13_production_account SET blocked_reason='production_external_cash_mismatch'");assert.equal((await observe(db,2500)).ok,false);
  const after=await account(db);assert.equal(after.cash_micros,'25000000');assert.equal(after.initial_cash_micros,'25000000');assert.equal(after.execution_enabled,true);assert.equal(after.kill_switch,false);
+});
+
+
+test("killed commissioned account renews equal cash only with both account and worker gates closed",async t=>{
+ const db=await fixture(t);if(!db)return;
+ await db.exec("UPDATE public.v13_production_account SET cash_micros=25000000,initial_cash_micros=25000000,commissioned=true,cash_precision_verified=true,blocked_reason=NULL,execution_enabled=false,kill_switch=true");
+ await db.exec("UPDATE private.kalshi_account_worker_lease SET state='killed',account_kill=true");
+ assert.equal((await observe(db,2500)).ok,true);
+ await db.exec("UPDATE private.kalshi_account_worker_lease SET account_kill=false");assert.equal((await observe(db,2500)).ok,false);
+ await db.exec("UPDATE private.kalshi_account_worker_lease SET account_kill=true,arm_requested=true");assert.equal((await observe(db,2500)).ok,false);
+ const a=await account(db);assert.equal(a.execution_enabled,false);assert.equal(a.kill_switch,true);assert.equal(a.cash_micros,'25000000');
 });

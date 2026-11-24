@@ -10,12 +10,14 @@ export const RECORD_OWNED_CASH_CONFIRMATION = "RECORD_OWNED_SUBACCOUNT_CASH";
 const RECORD_SQL = `
   -- owned-cash:reconcile
   WITH cash_account AS MATERIALIZED (
-    SELECT a.id,a.owner_user_id,a.key_fingerprint FROM public.v13_production_account a
+    SELECT a.id,a.owner_user_id,a.key_fingerprint,a.execution_enabled,a.kill_switch FROM public.v13_production_account a
     WHERE a.id=$1 AND a.owner_user_id=$2::uuid FOR UPDATE
   ), stopped_worker AS MATERIALIZED (
     SELECT w.execution_account_id FROM private.kalshi_account_worker_lease w
     JOIN cash_account a ON a.id=w.execution_account_id AND a.owner_user_id=w.owner_user_id
-    WHERE w.state='released' AND w.arm_requested IS FALSE AND w.credential_fingerprint=a.key_fingerprint
+    WHERE w.arm_requested IS FALSE AND w.credential_fingerprint=a.key_fingerprint
+      AND (w.state='released' OR (w.state='killed' AND w.account_kill IS TRUE
+        AND a.execution_enabled IS FALSE AND a.kill_switch IS TRUE))
     FOR UPDATE OF w
   )
   UPDATE v13_production_account AS a
