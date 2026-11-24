@@ -30,7 +30,7 @@ export type Account = {
   blocked_reason: string | null; reconciled_at: Date | null; revision: string;
 };
 export type Intent = {
-  id: string; account_id: string; evaluation_id: string | null; parent_id: string | null;
+  id: string; account_id: string; evaluation_id: string | null; direct_source_id?: string|null; parent_id: string | null;
   kind: "ENTRY" | "EXIT"; market: string; side: "YES" | "NO"; state: string;
   request: Request; decision: Record<string, unknown>; policy_hash: string; fee_fingerprint: string;
   capability_digest: string; client_order_id: string; exchange_order_id: string | null;
