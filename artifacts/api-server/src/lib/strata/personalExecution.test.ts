@@ -79,7 +79,7 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
     id: "owner-1", subaccount: 1, exchange_index: 2,
     key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
     policy_id: "policy-1", policy_state: "APPROVED", configured_stake_cents: 100,
-    cash_precision_verified: true, cash_micros: "0",
+    cash_precision_verified: true, cash_micros: "0", initial_cash_micros: "0",
     reconciled_at: "2026-10-15T16:26:22.935Z",
     verified_funding_at: "2026-10-15T17:52:26.418Z",
     minimum_exit_micros: 10000, fee_artifact_digest: "a".repeat(64),
@@ -96,6 +96,10 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
   const stillStale = await reportOwnedActivation(db, USER);
   assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
   owner.reconciled_at = "2026-10-15T17:53:00.000Z";
+  const missingBasis = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
+  assert.equal(missingBasis.readyForCommissioning, false);
+  assert.ok(missingBasis.blockers.includes("cash_not_reconciled"));
+  owner.initial_cash_micros = "25000000";
   const fresh = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
   assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
   const tooOld = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T18:10:00.000Z"));
