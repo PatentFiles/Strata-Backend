@@ -1,17 +1,19 @@
 /**
- * Background issuer-document OBSERVER for exactly one explicitly configured
- * account. Makes no signed exchange requests, grants, orders, policy or cash
+ * Background issuer-document OBSERVER, platform-wide when opted in.
+ * Historical account-specific observer remains only for compatibility. Makes no signed exchange requests, grants, orders, policy or cash
  * writes; the original project-wide SQL capture lease serializes all egress.
  * It can never claim a PDF existed unless Railway really fetched its bytes.
  */
 import {pool} from "@workspace/db";
-import {captureIndependentOfficialFeeV5,capturePlatformOfficialFeeV5} from "./independentOfficialFeeV5";
-import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
+import {captureIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,platformFeeObservationRequested} from "./independentOfficialFeeV5";
 const ACCOUNT=/^strata-account-[0-9a-f]{24}$/;
 let started=false;
 export function startOwnerIndependentFeeV5Collector():void{
- if(started||process.env.STRATA_V5_RAILWAY_CAPTURE_ENABLED!=="true")return;
- const publicMode=publicSelfServiceRequested();
+ if(started)return;
+ const publicMode=platformFeeObservationRequested();
+ if(!publicMode&&process.env.STRATA_V5_RAILWAY_CAPTURE_ENABLED!=="true")return;
+ // Malformed public mode must not fall back to a customer-specific observer.
+ if(!publicMode&&process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED!==undefined&&process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED!=="false")return;
  const id=publicMode?null:process.env.STRATA_V5_RAILWAY_ACCOUNT_ID??"";
  if(!publicMode&&!ACCOUNT.test(id??""))return;
  started=true;

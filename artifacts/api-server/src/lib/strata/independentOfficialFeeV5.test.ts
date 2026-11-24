@@ -6,7 +6,7 @@ import {existsSync} from "node:fs";
 // Match the schema fixture root convention; works with bundled CommonJS output.
 const repositoryRoot=existsSync(resolve("lib/db/drizzle"))?resolve("."):resolve("../..");
 const feeFixturePath=resolve(repositoryRoot,"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
-import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,readPlatformOfficialFeeV5,V5_URL,V5_VERSION} from "./independentOfficialFeeV5";
+import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,readPlatformOfficialFeeV5,bindPlatformFeeV5ToOwner,V5_URL,V5_VERSION} from "./independentOfficialFeeV5";
 const owner="d06bc1ce-718b-42d1-8e3d-2779249661f2";
 const account="strata-account-2e3180472d83df50f13ce7f9";
 const t=Date.parse("2026-10-25T15:10:00Z");
@@ -126,7 +126,8 @@ test("real unchanged PDF fixture is parsed and recorded only with authenticated 
 });
 
 test("public collector needs no account or customer, honors the same global cooldown and never grants authority",async()=>{
- const old=process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED;process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED="true";
+ const old=process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED,oldPlatform=process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED;
+ process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED="false";process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED="true";
  try{
   const bytes=readFileSync(feeFixturePath);
   let calls=0,stored:Record<string,unknown>|null=null;
@@ -149,9 +150,11 @@ test("public collector needs no account or customer, honors the same global cool
   const d={db,enabled:()=>true,clock:()=>t,target:()=>{throw Error("customer configuration forbidden");},fetcher:(async()=>{calls++;return resp;}) as typeof fetch};
   assert.equal((await capturePlatformOfficialFeeV5(d)).ok,true);
   const first=await readPlatformOfficialFeeV5(d);assert.ok(first.ok);
+  assert.equal((await bindPlatformFeeV5ToOwner(owner,d)).ok,false,"read-only collection cannot bind owner receipts with public release disabled");
   const second=await capturePlatformOfficialFeeV5(d);assert.ok(second.ok);
   assert.equal(calls,1);assert.equal(second.originalCapturedAt,first.originalCapturedAt);assert.equal(second.tradingAuthorized,false);
   assert.equal(second.ordersSubmitted,false);
   assert.equal((await readPlatformOfficialFeeV5({...d,clock:()=>t+55*60000})).ok,false);
- }finally{if(old===undefined)delete process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED;else process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED=old;}
+ }finally{if(old===undefined)delete process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED;else process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED=old;
+  if(oldPlatform===undefined)delete process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED;else process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED=oldPlatform;}
 });
