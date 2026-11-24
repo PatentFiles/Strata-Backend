@@ -266,7 +266,8 @@ async function commissioningFixture(t:TestContext){
  const f=await fixture(t);if(!f)return null;
  await f.db.exec(`
  ALTER TABLE public.v13_live_money_policy ADD COLUMN fee_policy_version text;
- ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN holder_id text;
+ ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN holder_id text,ADD COLUMN credential_fingerprint text;
+ UPDATE private.kalshi_account_worker_lease SET credential_fingerprint=(SELECT key_fingerprint FROM public.v13_production_account LIMIT 1);
  ALTER TABLE public.v13_production_intent ADD COLUMN id text,ADD COLUMN state text;
  ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN state text;
  `);

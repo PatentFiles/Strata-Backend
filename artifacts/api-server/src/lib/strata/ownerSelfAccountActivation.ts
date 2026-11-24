@@ -289,17 +289,31 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   const lease=await tx.query(`SELECT state,account_kill,arm_requested,fencing_token::text
     FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
     AND owner_user_id=$2::uuid FOR UPDATE`,[raw.accountId,owner]);
-  if(lease.rows.length!==1||lease.rows[0]!.state!=='killed'||
-   lease.rows[0]!.account_kill!==true||lease.rows[0]!.arm_requested!==false)
+  const releasedRecovery=lease.rows.length===1&&lease.rows[0]!.state==='released'&&
+   lease.rows[0]!.account_kill===false&&lease.rows[0]!.arm_requested===false;
+  if(releasedRecovery){
+   // Recovery deliberately leaves the worker released, while closing account
+   // execution gates. A NEW build still needs all the owner activation checks
+   // above. Require the immutable recovery audit before accepting that lease.
+   const recovered=await tx.query(`SELECT payload,digest FROM public.v13_production_observation
+    WHERE account_id=$1 AND kind='OWNER_SETTLED_CASH_FREEZE_RECOVERY' ORDER BY observed_at DESC LIMIT 1`,[raw.accountId]);
+   const receipt=recovered.rows[0],p=receipt?.payload as Row|undefined;
+   if(!p||p.owner!==owner||p.accountId!==raw.accountId||p.priorReason!=='production_external_cash_mismatch'||
+    p.tradingAuthorized!==false||!/^\d+$/.test(String(p.priorRevision))||
+    BigInt(String(p.priorRevision))>=BigInt(String(local.rows[0]!.revision))||auditDigest(p)!==receipt!.digest)
+    return no('owner_self_released_recovery_receipt_unverified');
+  }
+  if(!releasedRecovery&&(lease.rows.length!==1||lease.rows[0]!.state!=='killed'||
+   lease.rows[0]!.account_kill!==true||lease.rows[0]!.arm_requested!==false))
    return no('owner_self_killed_lease_state_changed');
   // Move only THIS safely terminated lease to released, not owned or armed.
   const w=await tx.query(`UPDATE private.kalshi_account_worker_lease
     SET state='released',account_kill=false,arm_requested=false,
       fencing_token=fencing_token+1,heartbeat_at=clock_timestamp(),released_at=clock_timestamp()
     WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
-      AND state='killed' AND account_kill=true AND arm_requested=false
+      AND state=$4 AND account_kill=$5 AND arm_requested=false
       AND fencing_token=$3::bigint RETURNING fencing_token::text`,
-    [raw.accountId,owner,lease.rows[0]!.fencing_token]);
+    [raw.accountId,owner,lease.rows[0]!.fencing_token,releasedRecovery?'released':'killed',!releasedRecovery]);
   if(w.rows.length!==1)return no('owner_self_killed_lease_fence_conflict');
   diagnosticStage='account_enable';
   const enabled=await tx.query(`UPDATE public.v13_production_account

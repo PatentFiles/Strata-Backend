@@ -3,6 +3,10 @@ import {HELD_CONSENT_CONFIRM} from './heldConsentPolicy';
 import {standingAuthorityMatches} from './ownerSelfReviewMode';
 import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
+import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
+import {ProductionLedger,type Account} from '../v13-production/ledger';
+import type {Pool,PoolClient} from '@workspace/db';
+import type {Snapshot} from '../v13-production/types';
 import { V13_MIN_ENTRY_STAKE_CENTS } from "../v13LiveMoneyRisk";
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
@@ -106,6 +110,7 @@ export async function authorizeOwnerShaRelease(
  // causing lock starvation and transaction timeouts on Step 12.
  let preflight:null|{accountId:string;policyId:string;fingerprint:string;
    cashMicros:string;revision:string;observedAtMs:number}=null;
+ let retained:ReconciledReleaseHistory|null=null,restoreSnapshot:Snapshot|null=null;
  try{
   const visible=await readReleaseOwner(db,ownerId);
   if(!visible.ok)return reject(visible.reason);
@@ -141,11 +146,13 @@ export async function authorizeOwnerShaRelease(
       return reject("fresh_exchange_zero_exposure_unverified");
     const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(a.key_fingerprint)};
     const history=restoring?(await db.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id",[a.id])).rows.map(r=>typeof r.request==="string"?JSON.parse(r.request):r.request):[];
+    if(restoring&&history.length)retained=await readReconciledReleaseRenewalHistory(db,String(a.id),ownerId,false);
     const snapshot=personalAccountSnapshot(identity,feeds,history);
     if(!("identity" in snapshot)||(restoring
-      ? feeds.historicalCoverageComplete!==true||!migrationFlatHistoryCheck(snapshot,history).ok
+      ? feeds.historicalCoverageComplete!==true||(!retained&&!migrationFlatHistoryCheck(snapshot,history).ok)
       : snapshot.orders.length||snapshot.fills.length||snapshot.positions.length||snapshot.settlements.length))
       return reject("owner_release_snapshot_mismatch");
+    if(retained){verifyReconciledReleaseRenewalSnapshot(retained,snapshot);restoreSnapshot=snapshot;}
     preflight={accountId:String(a.id),policyId:String(a.policy_id),
       fingerprint:String(a.key_fingerprint),cashMicros:String(a.cash_micros),
       revision:String(a.revision),observedAtMs};
@@ -274,6 +281,16 @@ export async function authorizeOwnerShaRelease(
      }
    }
    if(restoring){
+    if(retained){
+     const lockedHistory=await readReconciledReleaseRenewalHistory(tx,accountId,ownerId,true);
+     if(lockedHistory.reconciliationDigest!==retained.reconciliationDigest||!restoreSnapshot)return reject('owner_restore_retained_history_changed');
+     verifyReconciledReleaseRenewalSnapshot(lockedHistory,restoreSnapshot);
+     const full=await tx.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[accountId,ownerId]);
+     if(full.rows.length!==1)return reject('owner_restore_account_scope_changed');
+     const ledger=new ProductionLedger(db as unknown as Pool,accountId);
+     await ledger.finalAccountProof(tx as unknown as PoolClient,full.rows[0] as Account,restoreSnapshot,(deps.now??Date.now)());
+     await ledger.assertConservation(tx as unknown as PoolClient,full.rows[0] as Account);
+    }
     if(current.policy_id!==args.expectedPolicyId)return reject("owner_restore_account_policy_scope_changed");
     if(isTrue(current.execution_enabled)||!isTrue(current.kill_switch)||current.blocked_reason!=null||
        reserved!==0n||!preflight||preflight.accountId!==accountId||
