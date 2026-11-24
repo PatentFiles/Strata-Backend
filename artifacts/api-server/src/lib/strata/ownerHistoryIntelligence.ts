@@ -34,12 +34,15 @@ const EVALUATION_COLUMNS=`
  e.down_bid AS "downBid",e.down_offer AS "downOffer",e.down_spread AS "downSpread",
  e.entry_offer AS "entryOffer",e.seconds_remaining AS "secondsRemaining",
  e.btc_provider_age_ms AS "btcProviderAgeMs",e.btc_receive_age_ms AS "btcReceiveAgeMs",
- e.market_age_ms AS "marketAgeMs",e.feed_freshness AS "feedFreshness"`;
+ e.market_age_ms AS "marketAgeMs",e.feed_freshness AS "feedFreshness",
+ CASE WHEN w.finalized THEN w.settlement_result ELSE NULL END AS "recordedMarketResult"`;
 
 export const OWNER_SQL=`SELECT a.id FROM public.v13_production_account a
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=$2 AND a.exchange_index=$3 LIMIT 2`;
 export const SOURCE_SQL=`SELECT ${EVALUATION_COLUMNS}
- FROM public.forward_test_evaluations e WHERE e.evaluation_source='paper'
+ FROM public.forward_test_evaluations e
+ LEFT JOIN public.forward_test_windows w ON w.ticker=e.market_ticker
+ WHERE e.evaluation_source='paper'
  AND ($4::text IS NULL OR e.id=$4::text)
  AND ($1::timestamptz IS NULL OR (e.evaluated_at,e.id)<($1::timestamptz,$2::text))
  ORDER BY e.evaluated_at DESC,e.id DESC LIMIT $3`;
@@ -61,6 +64,7 @@ export const LIVE_SQL=`WITH phases AS MATERIALIZED (
  i.exchange_order_id AS "exchangeOrderId",i.terminal AS "intentTerminal",
  pos.quantity_hundredths::text AS "positionHundredths",pos.realized_pnl_micros::text AS "realizedPnlMicros"
  FROM phases p JOIN public.forward_test_evaluations e ON e.id=p.evaluation_id AND e.evaluation_source='paper'
+ LEFT JOIN public.forward_test_windows w ON w.ticker=e.market_ticker
  LEFT JOIN public.v13_production_intent i ON i.account_id=p.execution_account_id AND i.evaluation_id=p.evaluation_id AND i.kind='ENTRY'
  LEFT JOIN public.v13_production_position pos ON pos.account_id=p.execution_account_id AND pos.id=i.id
  ORDER BY p.observed_at DESC,p.decision_id::text DESC`;
