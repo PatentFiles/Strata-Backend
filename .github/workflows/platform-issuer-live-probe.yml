@@ -1,12 +1,11 @@
 name: Genuine public issuer and market fee smoke
+# External issuer availability is an operational qualification, not deterministic PR CI.
+# Run deliberately after the latest provider Retry-After; a failure remains a failure.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'docs/platform-fee-native/issuer-probe.ts'
-      - '.github/workflows/platform-issuer-live-probe.yml'
-      - 'lib/db/drizzle/0049_strata_platform_official_fee_capture.sql'
   workflow_dispatch:
+concurrency:
+  group: genuine-platform-issuer-probe
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
