@@ -1,3 +1,4 @@
+import {registeredOpeningCapitalPreview,applyRegisteredOpeningCapital,registeredOpeningCapitalOutcome} from '../lib/strata/registeredOpeningCapitalRecovery';
 import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit} from '../lib/strata/capitalCreditRepair';
 import {durableFeeReauthorizationPreview,reauthorizeDurableFeeRelease,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization} from '../lib/strata/durableFeeReauthorization';
 import {migrateOwnedDurableFeePolicy,durableMigrationOutcome,previewDurableFeeMigration,cancelPendingDurableMigration} from '../lib/strata/durableFeeMigration';
@@ -336,6 +337,9 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   router.use(requireUser);
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
+  router.get('/registered-opening-capital/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await registeredOpeningCapitalPreview(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.post('/registered-opening-capital/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await applyRegisteredOpeningCapital(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.get('/registered-opening-capital/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await registeredOpeningCapitalOutcome(owner,String(req.query.repairId??''),String(req.query.sha??''))));});
   router.get('/capital-credit/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await capitalCreditPreview(owner);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.post('/capital-credit/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await applyCapitalCredit(owner,req.body);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.get('/capital-credit/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await capitalCreditOutcome(owner,String(req.query.repairId??''),String(req.query.sha??''))));});
