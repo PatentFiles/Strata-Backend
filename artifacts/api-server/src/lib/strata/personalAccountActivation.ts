@@ -29,6 +29,10 @@ import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
 import {deployedGitSha} from "./deployedGitSha";
+import {parseV3FeeSource,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
+import {parseDurableFeeSource,verifyDurableFeeStage} from "./durableFeeConsumers";
+import {isDurableFeeVersion} from "./durableOwnerFeePolicy";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -391,6 +395,93 @@ export async function readOwnedApprovedFeeEvidence(
     policyId: String(row.id), version };
 }
 
+/** V2 commissioning continuation can consume already-authorized runtime
+ * fee authority. V1 diagnostic remains on the original STEP_9 path.
+ * STEP_11 may renew ONLY a technical observation lease under the existing
+ * standing delegation; it cannot sign a human review or issue a new grant.
+ * Historical commissioning digests are not rewritten when a live API
+ * observation changes. */
+export async function readOwnedRuntimeFeeEvidence(db:Queryable,owner:string,ports={
+ initial:readOwnedApprovedFeeEvidence,
+ reviewed:verifyReviewedApiFeeSourceStage,
+ operator:verifyOwnerFeeSourceStage,
+ standing:verifyOwnerStandingFee,
+ durable:verifyDurableFeeStage,
+ monetary:verifyMonetaryFeeContract,
+ sha:deployedGitSha,
+}):Promise<Awaited<ReturnType<typeof readOwnedApprovedFeeEvidence>>>{
+ const refuse=(reason:string)=>({ok:false,reason});
+ const sql=`SELECT a.id AS account_id,a.commissioned,a.fee_artifact_digest,a.key_fingerprint,
+ a.revision::text AS account_revision,p.id,p.version,p.policy_hash,p.fee_policy_version,p.fee_source_url,p.fee_formula_version,
+ to_jsonb(p) AS policy
+ FROM public.v13_production_account a JOIN public.v13_live_money_policy p ON p.id=a.policy_id
+ AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
+ WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 AND p.state='APPROVED' LIMIT 2`;
+ try{
+  if(!/^[a-f0-9-]{36}$/i.test(owner))return refuse("authenticated_owner_required");
+  const rows=(await db.query(sql,[owner])).rows;
+  if(rows.length!==1)return refuse("policy_not_approved");
+  const r=rows[0]!,p=approvedFromRow(r.policy as Record<string,unknown>);
+  if(!p||p.policyHash!==computeV13LiveMoneyPolicyHash(p)||p.createdBy!==owner||p.approvedBy!==owner||
+   p.entryPolicyVersion!==V13_ENTRY_POLICY_VERSION||p.strategyParameterHash!==V13_CHAMPION_PARAMETER_HASH)
+   return refuse("production_entry_policy_revision_not_approved");
+  if(r.commissioned===false)return ports.initial(db,owner);
+  if(r.commissioned!==true||typeof r.fee_artifact_digest!=="string"||! /^[a-f0-9]{64}$/.test(r.fee_artifact_digest))
+   return refuse("commissioned_fee_artifact_missing");
+  const account=String(r.account_id),source=p.feeSourceUrl??"",version=p.feePolicyVersion??"",formula=p.feeFormulaVersion;
+  const historicalDigest=r.fee_artifact_digest,sha=ports.sha();
+  if(!/^[a-f0-9]{40}$/.test(sha))return refuse("runtime_deployed_sha_unverified");
+  let currentDigest:string;
+  const api=parseReviewedApiSource(source),v3=parseV3FeeSource(source),durable=parseDurableFeeSource(source),operator=parseOwnerFeeSource(source);
+  if(api){
+   if(version!==API_SOURCE_POLICY_VERSION||formula!==API_SOURCE_FORMULA_VERSION)return refuse("api_fee_source_identity_invalid");
+   const proof=await ports.reviewed(owner,"STEP_11",source);
+   if(!proof.ok)return refuse(proof.reason);
+   if(proof.identity.sourceUrl!==source||proof.identity.grantId!==api.grantId||
+    proof.identity.feePolicyVersion!==version||proof.identity.formulaVersion!==formula)return refuse("api_fee_source_identity_mismatch");
+   // The reviewCandidateDigest includes market + observation timestamp.
+   // A different genuine observation is NOT a different monetary consent.
+   currentDigest=proof.identity.digest;
+  }else if(v3){
+   if(version!==V3_FEE_POLICY_VERSION||formula!==V3_FEE_FORMULA_VERSION)return refuse("owner_v3_fee_policy_identity_invalid");
+   const proof=await ports.standing(owner,"STEP_11",source);
+   if(!proof.ok)return refuse(proof.reason);
+   if(!proof.monetaryFeeAuthorized||proof.identity.ownerId!==owner||proof.identity.accountId!==account||
+    proof.identity.sourceAuthorityId!==v3||proof.identity.policyHash!==p.policyHash||proof.identity.sha!==sha||
+    proof.identity.sourceDigest!==historicalDigest)return refuse("owner_standing_fee_source_release_unavailable");
+   currentDigest=proof.identity.sourceDigest;
+  }else if(durable){
+   if(!isDurableFeeVersion(version)||formula!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)return refuse("durable_fee_policy_identity_invalid");
+   const proof=await ports.durable(owner,account,source,"ENTRY");
+   if(!proof.ok)return refuse(proof.reason);
+   if(proof.sourceDigest!==historicalDigest||typeof proof.sourceFresh!=="function"||!proof.sourceFresh())
+    return refuse("durable_fee_startup_proof_unavailable");
+   currentDigest=proof.sourceDigest;
+  }else if(operator){
+   if(version!==OPERATOR_FEE_SOURCE_POLICY||formula!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)return refuse("fee_source_identity_invalid");
+   const proof=await ports.operator(owner,"STEP_11",source);
+   if(!proof.ok)return refuse(proof.reason);
+   if(proof.identity.sourceUrl!==source||proof.identity.digest!==historicalDigest)return refuse("operator_source_release_unavailable");
+   currentDigest=proof.identity.digest;
+  }else if(version==="strata_owner_provider_dynamic_fee_v4"){
+   // V4 hold repair is a separate verified owner operation. It is not a
+   // supported independent worker fee path; require a legitimate migration.
+   return refuse("owner_v4_requires_verified_hold_repair_and_runtime_fee_migration");
+  }else{
+   if(version!==STANDING_FEE_POLICY_VERSION||source!==CANONICAL_FEE_SCHEDULE_URL||
+    formula!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION)return refuse("fee_source_identity_invalid");
+   const proof=await ports.monetary("STEP_11");
+   if(!proof.ok)return refuse(proof.reason);
+   if(!proof.monetaryFeeAuthorized||proof.sourceDigest!==historicalDigest)return refuse("fee_artifact_unverified");
+   currentDigest=proof.sourceDigest;
+  }
+  if(!/^[a-f0-9]{64}$/.test(currentDigest))return refuse("fee_artifact_unverified");
+  const final=(await db.query(sql,[owner])).rows;
+  if(final.length!==1||digest(final[0])!==digest(r)||ports.sha()!==sha)return refuse("approved_fee_policy_changed_during_verification");
+  return {ok:true,reason:"owned_runtime_fee_authority_current",feeArtifactDigest:currentDigest,policyId:p.id,version:p.version};
+ }catch{return refuse("owned_runtime_fee_authority_unavailable");}
+}
+
 export async function approveOwnedPolicyForUser(
   db: Transactional,
   input: {
@@ -639,7 +730,9 @@ export async function readInitialCommissioningReview(db:Queryable,owner:string,f
   maxEntryAllInCents:p.maxEntryAllInCents,maxOpenPositions:p.maxOpenPositions,maxDailyLossCents:p.maxDailyLossCents,
   maxTotalLossCents:p.maxTotalLossCents,maxQuoteAgeMs:p.maxQuoteAgeMs,maxFeeEvidenceAgeMs:p.maxFeeEvidenceAgeMs,
   existingExitFloorMicros:floor};
- return {...scope,scopeDigest:digest({scope,keyFingerprint:r.key_fingerprint,accountRevision:r.revision})};
+ const stableReview=p.feePolicyVersion===API_SOURCE_POLICY_VERSION&&p.feeSourceUrl&&parseReviewedApiSource(p.feeSourceUrl)
+  ?{...scope,feeDigest:PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,feeSourceUrl:p.feeSourceUrl}:scope;
+ return {...scope,scopeDigest:digest({scope:stableReview,keyFingerprint:r.key_fingerprint,accountRevision:r.revision})};
 }
 
 export async function commissionOwnedAccount(
@@ -658,7 +751,10 @@ export async function commissionOwnedAccount(
   if (input.confirmation !== COMMISSION_OWNED_ACCOUNT_CONFIRMATION) {
     return { ok: false, reason: "explicit_authorization_required", blockers: ["explicit_authorization_required"] };
   }
-  const digest = typeof input.feeArtifactDigest === "string" ? input.feeArtifactDigest : "";
+  let digest = typeof input.feeArtifactDigest === "string" ? input.feeArtifactDigest : "";
+  const submittedDigest=digest;
+  if(input.initialReview&&input.initialReview.feeDigest!==submittedDigest)
+    return {ok:false,reason:"commissioning_review_scope_changed",blockers:["commissioning_review_scope_changed"]};
   if (!/^[0-9a-f]{64}$/.test(digest)) {
     return { ok: false, reason: "fee_evidence_missing", blockers: ["fee_evidence_missing"] };
   }
@@ -690,9 +786,13 @@ export async function commissionOwnedAccount(
     // For a signed PDF-free source, re-check signed reviewer authority,
     // owner consent and fresh exact-market API metadata, not unavailable PDF.
     const checked=await verifyReviewedApiFeeSourceStage(input.ownerUserId,"STEP_11",policySource);
-    if(!checked.ok||checked.identity.digest!==digest)
+    if(!checked.ok||checked.identity.sourceUrl!==policySource||checked.identity.grantId!==apiIdentity.grantId||
+      (!input.initialReview&&checked.identity.digest!==digest))
       return {ok:false,reason:checked.ok?"api_fee_digest_mismatch":checked.reason,
         blockers:[checked.ok?"api_fee_digest_mismatch":checked.reason]};
+    // Exact versioned initial review pins the approved grant/model, not a
+    // timestamped market observation. Persist only the newly verified digest.
+    if(input.initialReview)digest=checked.identity.digest;
     apiGrantId=checked.identity.grantId;
   }else if(operatorIdentity){
     if(text(row?.fee_policy_version)!==OPERATOR_FEE_SOURCE_POLICY ||
@@ -745,7 +845,7 @@ export async function commissionOwnedAccount(
     const expected=input.initialReview,connect=(db as Transactional).connect;
     const refused=(reason:string)=>({ok:false,reason,blockers:[reason]});
     if(!connect||expected.ownerId!==input.ownerUserId||expected.accountId!==report.accountId||
-      expected.feeDigest!==digest||(expected.existingExitFloorMicros!==null&&expected.existingExitFloorMicros!==minimumExitMicros))
+      expected.feeDigest!==submittedDigest||(expected.existingExitFloorMicros!==null&&expected.existingExitFloorMicros!==minimumExitMicros))
       return refused("commissioning_review_scope_changed");
     const tx=await connect.call(db);
     let committed=false,commitSent=false,discard:Error|undefined;
