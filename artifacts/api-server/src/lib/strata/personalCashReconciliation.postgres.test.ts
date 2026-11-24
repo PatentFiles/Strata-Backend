@@ -64,7 +64,7 @@ async function observe(db: CredentialFixtureDb, cents: number, time = NOW, owner
 }
 async function receipt(db: CredentialFixtureDb, owner = OWNER, cents = 2500) {
   await db.query(`INSERT INTO private.kalshi_owner_pilot_transfers VALUES
-    ($1,$2,$3,$4,0,1,2,'completed',0,$4,'synthetic-receipt-1',$5,$5)`,
+    ($1,$2,$3,$4::integer,0,1,2,'completed',0,$4::integer::bigint,'synthetic-receipt-1',$5,$5)`,
     [ACCOUNT,owner,CONNECTION,cents,FUNDING]);
 }
 async function account(db: CredentialFixtureDb): Promise<Record<string, unknown>> {
