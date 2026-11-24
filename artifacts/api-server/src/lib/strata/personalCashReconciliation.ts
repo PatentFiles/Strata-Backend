@@ -105,14 +105,31 @@ export async function persistOwnedCashReconciliation(
   }
   const read = readSubaccountSpendableCash(input);
   if (!read.ok) return { ok: false, reason: read.reason, cashCents: null, transferAttempted: false };
-  const recorded = await db.query(RECORD_SQL, [
-    input.executionAccountId,
-    input.ownerUserId,
-    read.cashMicros,
-    new Date(input.observedAtMs).toISOString(),
-  ]);
-  if ((recorded.rowCount ?? recorded.rows.length) !== 1) {
-    return { ok: false, reason: "cash_not_reconciled", cashCents: null, transferAttempted: false };
+  const recorded=await persistVerifiedOwnedCashMicros(db,{...input,cashMicros:read.cashMicros});
+  if (!recorded.ok) {
+    return { ok: false, reason: recorded.reason, cashCents: null, transferAttempted: false };
   }
   return { ok: true, reason: "cash_reconciled", cashCents: read.cashCents, transferAttempted: false };
+}
+
+/** Shared persistence for the established balance path and internal full-history
+ * commissioning proof. Accepts normalized exact micros, never a browser
+ * amount or manufactured exchange response. Callers of the full-history path
+ * must hold the owner/account/credential and ledger proof transaction. */
+export async function persistVerifiedOwnedCashMicros(
+ db:{query(text:string,params?:unknown[]):Promise<{rows:Array<Record<string,unknown>>;rowCount?:number|null}>},
+ input:{ownerUserId:string;executionAccountId:string;confirmation:unknown;subaccount:number;exchangeIndex:number;
+ observedAtMs:number;nowMs:number;maxAgeMs:number;cashMicros:string},
+){
+ const refuse=(reason:string)=>({ok:false as const,reason,transferAttempted:false as const});
+ if(input.confirmation!==RECORD_OWNED_CASH_CONFIRMATION)return refuse("explicit_authorization_required");
+ if(input.subaccount!==1||input.exchangeIndex!==2)return refuse("account_target_pair_mismatch");
+ if(!Number.isSafeInteger(input.observedAtMs)||input.observedAtMs<=0||!Number.isSafeInteger(input.nowMs)||
+   !Number.isSafeInteger(input.maxAgeMs)||input.maxAgeMs<=0||input.nowMs<input.observedAtMs||
+   input.nowMs-input.observedAtMs>Math.min(input.maxAgeMs,15000))return refuse("cash_evidence_stale");
+ if(typeof input.cashMicros!=="string"||!/^(0|[1-9]\d{0,18})$/.test(input.cashMicros)||BigInt(input.cashMicros)>9223372036854775807n)
+   return refuse("cash_unproven");
+ const recorded=await db.query(RECORD_SQL,[input.executionAccountId,input.ownerUserId,input.cashMicros,new Date(input.observedAtMs).toISOString()]);
+ if((recorded.rowCount??recorded.rows.length)!==1)return refuse("cash_not_reconciled");
+ return {ok:true as const,reason:"cash_reconciled",transferAttempted:false as const};
 }
