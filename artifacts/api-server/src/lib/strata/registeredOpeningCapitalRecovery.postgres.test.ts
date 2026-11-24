@@ -6,7 +6,7 @@ import { dedicatedSignerFingerprint } from "./commissioning";
 import { approvedFromRow } from "./ownerStakePolicyAmendment";
 import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { CREDIT_CONFIRM, CREDIT_CANCEL } from "./capitalCreditTransfers";
-import { applyRegisteredOpeningCapital, registeredOpeningCapitalPreview,
+import { registeredOpeningRecoveryScope, applyRegisteredOpeningCapital, registeredOpeningCapitalPreview,
   registeredOpeningCapitalOutcome, cancelRegisteredOpeningCapital } from "./registeredOpeningCapitalRecovery";
 import { validRegisteredOpeningScope, type RegisteredOpeningScope } from "./registeredOpeningCapitalProof";
 import type { Db } from "./capitalCreditProof";
@@ -225,4 +225,17 @@ test("interrupted pre-COMMIT attempt can be canceled exactly and recovered",asyn
  const next=await preview(f.deps);
  assert.equal((await applyRegisteredOpeningCapital(OWNER,body(next),f.deps)).ok,true);
  await expectRecorded(f);
+});
+
+test("registered opening recovery enrollment is independent of live entry and exact to owner, account and SHA",()=>{
+ const entries=[{ownerId:OWNER,accountId:ACCOUNT,releaseSha:SHA},{ownerId:OTHER,accountId:"other-account",releaseSha:SHA}];
+ const env=(value:unknown):NodeJS.ProcessEnv=>({STRATA_REGISTERED_OPENING_RECOVERY_SCOPES_V1:JSON.stringify(value),STRATA_INDEPENDENT_LIVE_SOURCE_V1:"false"});
+ assert.deepEqual(registeredOpeningRecoveryScope(OWNER,SHA,env(entries)),{ownerId:OWNER,accountId:ACCOUNT});
+ assert.deepEqual(registeredOpeningRecoveryScope(OTHER,SHA,env(entries)),{ownerId:OTHER,accountId:"other-account"});
+ assert.equal(registeredOpeningRecoveryScope(OWNER,"b".repeat(40),env(entries)),undefined);
+ assert.equal(registeredOpeningRecoveryScope(OWNER,SHA,env([entries[1]])),undefined);
+ for(const bad of [[],{},[entries[0],entries[0]],[entries[0],{...entries[1],accountId:ACCOUNT}],[entries[0],{...entries[1],releaseSha:"b".repeat(40)}]]){
+  assert.equal(registeredOpeningRecoveryScope(OWNER,SHA,env(bad)),undefined);
+ }
+ assert.equal(registeredOpeningRecoveryScope(OWNER,SHA,{STRATA_REGISTERED_OPENING_RECOVERY_SCOPES_V1:"bad-json"}),undefined);
 });
