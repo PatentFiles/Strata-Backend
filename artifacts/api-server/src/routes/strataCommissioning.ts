@@ -1,3 +1,5 @@
+import {PLATFORM_UPLOAD_CONFIRM} from "../lib/strata/platformFeeUploadMode";
+import {publishPlatformUploadedFeeSchedule} from "../lib/strata/platformUploadedFeeSchedule";
 import express, { Router, type IRouter, type RequestHandler } from "express";
 import { MAX_FEE_SCHEDULE_BYTES } from "../lib/microLiveFeeArtifact";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
@@ -301,7 +303,7 @@ export function createStrataCommissioningRouter(
       res.status(415).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_invalid")));
       return;
     }
-    if (req.get("x-strata-confirmation") !== VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION) {
+    if (req.get("x-strata-confirmation") !== VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION&&req.get("x-strata-confirmation")!==PLATFORM_UPLOAD_CONFIRM) {
       res.status(400).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_confirmation_required")));
       return;
     }
@@ -319,6 +321,14 @@ export function createStrataCommissioningRouter(
   }, async (req, res) => {
     const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     try {
+      if(req.get("x-strata-confirmation")===PLATFORM_UPLOAD_CONFIRM){
+        res.setHeader("Cache-Control","private, no-store");
+        const actor=res.locals.strata;
+        if(actor?.role!=="ADMIN"||typeof actor.subject!=="string"){res.status(403).json(sanitizePublic(uploadedFeeFailure("platform_fee_upload_admin_required")));return;}
+        const result=await publishPlatformUploadedFeeSchedule(actor.subject,bytes);
+        res.status(result.ok?200:422).json(sanitizePublic({feeVerification:result}));
+        return;
+      }
       const result = await port.verifyFeeUpload(bytes);
       res.status(result.feeVerification.ok ? 200 : 422).json(sanitizePublic({
         feeVerification: result.feeVerification,

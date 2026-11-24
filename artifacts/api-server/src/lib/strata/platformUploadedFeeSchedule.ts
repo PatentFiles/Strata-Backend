@@ -1,0 +1,84 @@
+/** Admin-supplied document provenance, distinct from a canonical HTTP capture.
+ * This service only publishes an approved-format document. It never issues a
+ * policy, account authority, worker lease or order.
+ */
+import {pool,type PoolClient} from "@workspace/db";
+import {createHash} from "node:crypto";
+import {platformFeeUploadEnabled,isUploadedBaselineId,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
+type Row=Record<string,unknown>;
+type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
+const HASH=/^[a-f0-9]{64}$/;
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const deny=(reason:string)=>({ok:false as const,reason,digestStored:false,sourceMode:null,effectiveDate:null,formulaVersion:null,tradingAuthorized:false as const});
+const latestSql=`SELECT u.baseline_id,u.uploaded_at,b.content_sha256,b.effective_date::text AS effective_date,b.formula_version,
+ pg_catalog.encode(pg_catalog.sha256(b.original_bytes),'hex') AS actual_digest,b.original_bytes
+ FROM private.strata_platform_uploaded_fee_schedule u JOIN private.strata_durable_historical_baseline b USING(baseline_id)
+ ORDER BY u.upload_id DESC LIMIT 1`;
+async function parse(bytes:Buffer){
+ const {verifyOfficialFeePdfBytes}=await import("../microLiveFeeArtifact");
+ return verifyOfficialFeePdfBytes(bytes);
+}
+export async function readActiveUploadedFeeSchedule(db:Query=pool){
+ if(!platformFeeUploadEnabled())return null;
+ try{
+  const rows=(await db.query(latestSql)).rows;
+  const r=rows[0];if(rows.length!==1||!r||!isUploadedBaselineId(r.baseline_id)||!Buffer.isBuffer(r.original_bytes)||
+    typeof r.content_sha256!=="string"||!HASH.test(r.content_sha256)||r.actual_digest!==r.content_sha256||
+    r.baseline_id!=="platform-upload-"+r.content_sha256||r.formula_version!=="standard-quadratic-0.07-v1")return null;
+  const parsed=await parse(r.original_bytes);
+  if(!parsed.ok||parsed.digest!==r.content_sha256||parsed.effectiveDate!==r.effective_date||parsed.formulaVersion!==r.formula_version)return null;
+  const conflict=await db.query("SELECT 1 FROM private.strata_platform_official_fee_capture_v1 WHERE content_sha256<>$1 LIMIT 1",[parsed.digest]);
+  if(conflict.rows.length)return null;
+  return {...parsed,bytes:r.original_bytes,baselineId:r.baseline_id,sourceKind:UPLOADED_FEE_PROVENANCE,
+    sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const};
+ }catch{return null;}
+}
+/** Runtime reads only immutable digest and active version identity, no PDF IO. */
+export async function activeUploadedBaselineMatches(db:Query,id:unknown,digest:unknown):Promise<boolean>{
+ if(!platformFeeUploadEnabled()||!isUploadedBaselineId(id)||typeof digest!=="string"||id!=="platform-upload-"+digest)return false;
+ try{
+ const r=await db.query(`SELECT u.baseline_id,b.content_sha256 FROM private.strata_platform_uploaded_fee_schedule u
+ JOIN private.strata_durable_historical_baseline b USING(baseline_id)
+ ORDER BY u.upload_id DESC LIMIT 1`);
+ return r.rows.length===1&&r.rows[0]!.baseline_id===id&&r.rows[0]!.content_sha256===digest;
+ }catch{return false;}
+}
+export async function publishPlatformUploadedFeeSchedule(admin:string,bytes:Buffer){
+ if(!platformFeeUploadEnabled()||!UUID.test(admin))return deny("platform_fee_upload_disabled");
+ if(!Buffer.isBuffer(bytes)||bytes.length<100||bytes.length>2_000_000)return deny("uploaded_fee_pdf_invalid");
+ const authorized=async(db:Query,lock=false)=> (await db.query(`SELECT u.id FROM auth.users u
+ JOIN public.profiles p ON p.id=u.id
+ JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
+ WHERE u.id=$1::uuid AND p.role='ADMIN' AND ra.role='ADMIN' AND u.email_confirmed_at IS NOT NULL
+ AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) LIMIT 2`+(lock?" FOR SHARE OF u,p,ra":""),[admin])).rows.length===1;
+ let tx:PoolClient|undefined,committed=false,commitSent=false,discard:Error|undefined;
+ try{
+  if(!await authorized(pool))return deny("platform_fee_upload_admin_required");
+  const parsed=await parse(bytes);
+  if(!parsed.ok)return deny("uploaded_fee_pdf_"+parsed.reason);
+  const digest=createHash("sha256").update(bytes).digest("hex");
+  if(parsed.digest!==digest||parsed.formulaVersion!=="standard-quadratic-0.07-v1")return deny("uploaded_fee_model_unverified");
+  const id="platform-upload-"+digest;
+  tx=await pool.connect();await tx.query("BEGIN");
+  await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='8000ms'");
+  await tx.query("SELECT pg_advisory_xact_lock(1958371201,1)");
+  if(!await authorized(tx,true))return deny("platform_fee_upload_admin_required");
+  const latest=(await tx.query(latestSql)).rows[0];
+  if(latest&&String(latest.effective_date)>parsed.effectiveDate)return deny("uploaded_fee_schedule_rollback_refused");
+  const conflict=await tx.query("SELECT 1 FROM private.strata_platform_official_fee_capture_v1 WHERE content_sha256<>$1 LIMIT 1",[digest]);
+  if(conflict.rows.length)return deny("uploaded_fee_conflicts_with_known_issuer_observation");
+  if(latest?.baseline_id!==id){
+   if((await tx.query("SELECT 1 FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=$1",[id])).rows.length)return deny("uploaded_fee_schedule_rollback_refused");
+   await tx.query(`INSERT INTO private.strata_durable_historical_baseline
+    (baseline_id,source_kind,content_sha256,original_bytes,effective_date,formula_version)
+    VALUES($1,'OWNER_ATTESTED_HISTORICAL_BASELINE',$2,$3,$4,$5)`,[id,digest,bytes,parsed.effectiveDate,parsed.formulaVersion]);
+   await tx.query(`INSERT INTO private.strata_platform_uploaded_fee_schedule(baseline_id,uploader_user_id)
+    VALUES($1,$2::uuid)`,[id,admin]);
+  }
+  commitSent=true;await tx.query("COMMIT");committed=true;
+  return {ok:true as const,reason:"platform_uploaded_fee_schedule_recorded",digestStored:true,sourceMode:UPLOADED_FEE_PROVENANCE,
+   feeArtifactDigest:digest,effectiveDate:parsed.effectiveDate,formulaVersion:parsed.formulaVersion,
+   sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,expiresAutomatically:false as const,tradingAuthorized:false as const};
+ }catch{if(commitSent)discard=Error("platform_upload_commit_unknown");return deny(commitSent?"platform_upload_commit_unknown_refresh_status":"platform_fee_upload_unavailable");}
+ finally{if(tx){if(!committed&&!discard)try{await tx.query("ROLLBACK");}catch{discard=Error("platform_upload_rollback_unknown");}tx.release(discard);}}
+}
