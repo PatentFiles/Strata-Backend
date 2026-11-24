@@ -23,16 +23,35 @@ export type IndependentLiveRolloutScope = Readonly<{
   accountId:string;
   releaseSha:string;
 }>;
+function validRolloutScope(value:unknown):value is IndependentLiveRolloutScope{
+  if(!value||typeof value!=="object"||Array.isArray(value))return false;
+  const s=value as Record<string,unknown>;
+  return Object.keys(s).sort().join(",")==="accountId,ownerId,releaseSha" &&
+    typeof s.ownerId==="string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.ownerId) &&
+    typeof s.accountId==="string" && /^[A-Za-z0-9._:-]{1,128}$/.test(s.accountId) &&
+    typeof s.releaseSha==="string" && /^[a-f0-9]{40}$/.test(s.releaseSha);
+}
 export function independentLiveRolloutAllowed(scope:IndependentLiveRolloutScope,env:NodeJS.ProcessEnv=process.env):boolean{
-  return env.NODE_ENV==="production" &&
-    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1==="true" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(scope.ownerId) &&
-    /^[A-Za-z0-9._:-]{1,128}$/.test(scope.accountId) &&
-    /^[a-f0-9]{40}$/.test(scope.releaseSha) &&
-    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_OWNER===scope.ownerId &&
+  if(env.NODE_ENV!=="production"||env.STRATA_INDEPENDENT_LIVE_SOURCE_V1!=="true"||
+     !validRolloutScope(scope)||env.RAILWAY_GIT_COMMIT_SHA!==scope.releaseSha)return false;
+  // Explicit list takes precedence. Empty, malformed, duplicate or ambiguous
+  // configuration never falls back to the old single-account authorization.
+  const configured=env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES;
+  if(configured!==undefined){
+    if(configured.length>65536)return false;
+    let entries:unknown;
+    try{entries=JSON.parse(configured);}catch{return false;}
+    if(!Array.isArray(entries)||entries.length>256||!entries.every(validRolloutScope))return false;
+    const accounts=new Set<string>();
+    for(const e of entries){
+      if(accounts.has(e.accountId)||e.releaseSha!==env.RAILWAY_GIT_COMMIT_SHA)return false;
+      accounts.add(e.accountId);
+    }
+    return entries.some(e=>e.ownerId===scope.ownerId&&e.accountId===scope.accountId&&e.releaseSha===scope.releaseSha);
+  }
+  return env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_OWNER===scope.ownerId &&
     env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_ACCOUNT===scope.accountId &&
-    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_SHA===scope.releaseSha &&
-    env.RAILWAY_GIT_COMMIT_SHA===scope.releaseSha;
+    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_SHA===scope.releaseSha;
 }
 function assertProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit,entry?: (body:unknown)=>void):void {
   if(typeof input!=="string"||!init||typeof init.method!=="string")assertIndependentEntryAvailable();
