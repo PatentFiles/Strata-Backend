@@ -2329,6 +2329,20 @@ test('single final projection preserves native timestamp precision, history floo
 
 test("commissioned cash observation preserves ledger and rejects mismatch, running, stale and foreign owner",async()=>{
   await fixture();
+  // PostgreSQL resolves every referenced relation even on the commissioned branch.
+  // These isolated fixture tables represent empty funding/repair registries;
+  // actual funding transitions are independently tested in the native suite.
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_topups(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.strata_capital_credit_repair(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_pilot_transfers(
+      execution_account_id text,owner_user_id uuid,financial_account_id uuid,
+      from_subaccount smallint,to_subaccount smallint,exchange_index smallint,state text,
+      verified_exchange_transfer_id text,verified_at timestamptz,completed_at timestamptz,
+      bot_before_cents bigint,bot_after_cents bigint,amount_cents integer);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding(
+      execution_account_id text,owner_user_id uuid,exchange_transfer_id text,
+      transfer_created_at timestamptz,verified_at timestamptz,primary_after_cents bigint,bot_after_cents bigint);`);
   const owner=randomUUID(),at=Date.now();
   await pool.query("UPDATE v13_production_account SET owner_user_id=$1,execution_enabled=false,kill_switch=true,reconciled_at=$2 WHERE id='test-account'",[owner,new Date(at-5000)]);
   const read=(dollars:string,observedAtMs=at,ownerUserId=owner)=>persistOwnedCashReconciliation(pool,{
