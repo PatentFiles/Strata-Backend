@@ -7,6 +7,9 @@ import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
 import {DirectEntrySource} from "./directEntrySource";
+import {AccountScopedExchange} from "../strata/accountProductionSession";
+import {createIndependentProductionFetch} from "./liveEntryContainment";
+import {dedicatedSignerFingerprint} from "../strata/commissioning";
 import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
@@ -17,7 +20,7 @@ import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "../strata/ap
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
-import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
+import { randomUUID, generateKeyPairSync, createHash, createVerify, constants } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
@@ -1251,6 +1254,77 @@ test("LIVE book receipts bind both sides and both champion signals through real 
   await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.side,side==="UP"?"YES":"NO");
  }
 });
+// Real owner-scoped signer and exact final-wire capability. Only provider
+// observations, release approval and the final network transport are isolated.
+// The source label remains SIMULATION, and all financial SQL is real PG.
+for(const variant of ["fresh","changed-body","expired-after-signing"] as const)
+test("independent owner signed entry: "+variant,async()=>{
+ const f=await liveReceiptFixture(),owner=f.executor.accountOwnerUserId!;
+ const ticker="KXBTC15M-TEST-000",pair=generateKeyPairSync("rsa",{modulusLength:2048});
+ const material={keyId:"disposable-signing-key",privateKey:pair.privateKey.export({type:"pkcs8",format:"pem"}).toString()};
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
+ assert.ok(fingerprint);
+ await pool.query("UPDATE v13_production_account SET key_fingerprint=$1 WHERE id='test-account'",[fingerprint]);
+ f.exchange.evidence.identity.keyFingerprint=fingerprint;
+ await pool.query("DELETE FROM forward_test_evaluations; DELETE FROM forward_test_windows");
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000;
+ let btc=99999;
+ function clock(at:number){f.exchange.now=at;f.exchange.evidence.observedAtMs=at;f.exchange.book.observedAtMs=at;f.exchange.book.fee.verifiedAtMs=at;}
+ clock(open+10000);
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:owner},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]})
+ },()=>f.exchange.now);
+ let posts=0,releaseChecks=0;
+ let wire:typeof fetch;
+ const raw:typeof fetch=async(input,init)=>{
+   posts++;
+   assert.equal(String(input),"https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders");
+   assert.equal(init?.redirect,"error");
+   const headers=new Headers(init?.headers),body=JSON.parse(String(init?.body));
+   assert.equal(headers.get("KALSHI-ACCESS-KEY"),material.keyId);
+   const check=createVerify("sha256");
+   check.update(headers.get("KALSHI-ACCESS-TIMESTAMP")!+"POST"+new URL(String(input)).pathname);check.end();
+   assert.equal(check.verify({key:pair.publicKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},headers.get("KALSHI-ACCESS-SIGNATURE")!,"base64"),true);
+   assert.equal(body.reduce_only,false);assert.equal(body.ticker,ticker);assert.equal(body.subaccount,1);assert.equal(body.exchange_index,2);
+   // A second invocation using the exact same signed bytes cannot send.
+   await assert.rejects(wire(input,init),/direct_entry_wire_authority_missing_or_spent/);
+   return Response.json({synthetic:true},{status:201});
+ };
+ wire=createIndependentProductionFetch(()=>f.ledger,raw);
+ const signedBoundary:typeof fetch=async(input,init)=>{
+   if(variant==="expired-after-signing")clock(f.exchange.now+5001);
+   if(variant==="changed-body"){
+    const changed=JSON.parse(String(init?.body));changed.count="99.00";
+    return wire(input,{...init,body:JSON.stringify(changed)});
+   }
+   return wire(input,init);
+ };
+ const exchange=new AccountScopedExchange({leaseState:"owned",armRequested:true,accountKill:false,globalKill:false,
+  fencingToken:1,presentedToken:1,workerActuallyScheduled:true,authenticatedUserId:owner,ownerUserId:owner,
+  credentialFingerprint:fingerprint,presentedFingerprint:fingerprint,uncertainOrderCount:0,duplicateClientOrder:false,
+  entriesAuthorized:true,liveExecutionEnabled:true},material,async id=>f.exchange.snapshot(id),signedBoundary,null,
+  async()=>f.exchange.market(),()=>true);
+ const executor=new ProductionExecutor(f.ledger,exchange,()=>f.exchange.now);
+ executor.accountOwnerUserId=owner;executor.bindIndependentLiveSource(source);
+ executor.authorizeFinalEntry=async tx=>{assert.equal(f.ledger.currentTransaction(),tx);releaseChecks++;};
+ const worker=new ProductionWorker(executor);
+ await worker.tick();assert.equal(posts,0);
+ btc=100010;clock(f.exchange.now+1000);
+ if(variant==="fresh")await worker.tick();
+ else await assert.rejects(worker.tick(),/direct_entry_wire_authority_missing_or_spent|direct_entry_original_source_expired/);
+ assert.equal(posts,variant==="fresh"?1:0);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state,request,decision FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal(rows[0].decision.source.execution_environment,"SIMULATION");assert.ok(releaseChecks>=2);
+ await executor.dispatch(rows[0].id);assert.equal(posts,variant==="fresh"?1:0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ await invariant(f.ledger);
+});
+
 test("LIVE missing or inconsistent compact evidence rejects before any reservation and preserves historical NULL",async()=>{
  for(const bad of [null,{}, {...receiptFixture().entry_quote_evidence,evidenceDigest:'f'.repeat(64)}]){
   const f=await liveReceiptFixture();await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,bad]);
