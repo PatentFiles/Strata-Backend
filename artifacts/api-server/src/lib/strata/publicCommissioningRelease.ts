@@ -66,8 +66,7 @@ async function review(owner:string,sha:string){
    const monetary=await verifyMonetaryFeeContract("STEP_11");
    const migration=await previewDurableFeeMigration(owner,UPLOADED_FEE_PROVENANCE);
    if(!monetary.ok||monetary.sourceKind!==UPLOADED_FEE_PROVENANCE||!migration.ok||!migration.candidateBaseline||
-      migration.expectedPolicyHash!==a.policyHash||migration.candidateBaseline.digest!==monetary.sourceDigest||
-      p.fee_artifact_digest!==monetary.sourceDigest)return null;
+      migration.expectedPolicyHash!==a.policyHash||migration.candidateBaseline.digest!==monetary.sourceDigest)return null;
    mode="uploaded_durable_migration";feeDigest=migration.candidateBaseline.digest;
    baselineId=migration.candidateBaseline.baselineId;feeEffectiveDate=migration.candidateBaseline.effectiveDate;
   }else{

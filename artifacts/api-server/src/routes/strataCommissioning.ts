@@ -1,5 +1,4 @@
 import {PLATFORM_UPLOAD_CONFIRM} from "../lib/strata/platformFeeUploadMode";
-import {publishPlatformUploadedFeeSchedule} from "../lib/strata/platformUploadedFeeSchedule";
 import express, { Router, type IRouter, type RequestHandler } from "express";
 import { MAX_FEE_SCHEDULE_BYTES } from "../lib/microLiveFeeArtifact";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
@@ -325,6 +324,7 @@ export function createStrataCommissioningRouter(
         res.setHeader("Cache-Control","private, no-store");
         const actor=res.locals.strata;
         if(actor?.role!=="ADMIN"||typeof actor.subject!=="string"){res.status(403).json(sanitizePublic(uploadedFeeFailure("platform_fee_upload_admin_required")));return;}
+        const {publishPlatformUploadedFeeSchedule}=await import("../lib/strata/platformUploadedFeeSchedule");
         const result=await publishPlatformUploadedFeeSchedule(actor.subject,bytes);
         res.status(result.ok?200:422).json(sanitizePublic({feeVerification:result}));
         return;

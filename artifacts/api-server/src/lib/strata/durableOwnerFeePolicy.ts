@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled,isUploadedBaselineId,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
 import {consumeDurablePhaseMetadata,type DurablePhaseMetadata} from './durablePhaseMetadata';
 import {durablePrepareMetadataClock,type PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import {durableReleaseMatch} from './durableFeeReleaseBinding';
@@ -9,7 +10,7 @@ export const DURABLE_FEE_VERSION='owner_approved_canonical_terms_v1';
 export const isDurableFeeVersion=(v:unknown)=>v===DURABLE_FEE_VERSION||v===HISTORICAL_FEE_VERSION;
 export type DurableModel={owner:string;account:string;sha:string;policyHash:string;digest:string;
  sourceKind?:string;version:string;formula:string;effectiveDate:string;approved:boolean;entryRevoked:boolean;
- integrityValid:boolean;knownPublicationChange:boolean;monitorState:'unchanged'|'unavailable'|'changed'|'never_checked'};
+ manualBaselineCurrent?:boolean;integrityValid:boolean;knownPublicationChange:boolean;monitorState:'unchanged'|'unavailable'|'changed'|'never_checked'};
 export type Intent='ENTRY'|'PROTECTIVE_EXIT';
 const deny=(reason:string)=>({ok:false as const,reason,feeProofOnly:true as const,tradingAuthorized:false as const});
 /** A network error conveys no document content. Once a genuine change is
@@ -26,7 +27,9 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
  if(model.owner!==scope.owner||model.account!==scope.account||model.sha!==scope.sha||model.policyHash!==scope.policyHash)
   return deny('durable_fee_scope_mismatch');
  if(!model.integrityValid||!model.approved||!/^([a-f0-9]{64})$/.test(model.digest)||
- !isDurableFeeVersion(model.version)||(model.version===HISTORICAL_FEE_VERSION&&(!historicalBaselineEnabled()||model.sourceKind!==HISTORICAL_SOURCE_KIND||model.digest!==HISTORICAL_BASELINE_SHA256))||model.formula!=='standard-quadratic-0.07-v1'||model.effectiveDate!=='2026-07-07')
+ !isDurableFeeVersion(model.version)||(model.version===HISTORICAL_FEE_VERSION&&
+ !(model.sourceKind===HISTORICAL_SOURCE_KIND&&historicalBaselineEnabled()&&model.digest===HISTORICAL_BASELINE_SHA256||
+ model.sourceKind===UPLOADED_FEE_PROVENANCE&&platformFeeUploadEnabled()&&model.manualBaselineCurrent===true))||model.formula!=='standard-quadratic-0.07-v1'||model.effectiveDate!=='2026-07-07')
   return deny('durable_fee_genuine_approved_terms_required');
  // An actual new publication may change a base coefficient not represented
  // in series metadata. Neither entries nor fee-uncapped exits may guess.
@@ -35,7 +38,7 @@ export function assessDurableFee(model:DurableModel,scope:{owner:string;account:
  if(!market.ok||!/^KXBTC15M-[A-Za-z0-9-]+$/.test(market.ticker)||!Number.isSafeInteger(now)||
  !Number.isFinite(market.verifiedAt)||market.verifiedAt>now||now-market.verifiedAt>5000)
   return deny(intent==='ENTRY'?'durable_fee_current_market_unverified':'protective_fee_unavailable_no_verified_bound');
- return {ok:true as const,reason:model.version===HISTORICAL_FEE_VERSION?'owner_attested_historical_baseline_and_fresh_market_metadata':'approved_durable_terms_and_fresh_market_metadata',sourceDigest:model.digest,
+ return {ok:true as const,reason:model.sourceKind===UPLOADED_FEE_PROVENANCE?'admin_uploaded_fee_schedule_and_fresh_market_metadata':model.version===HISTORICAL_FEE_VERSION?'owner_attested_historical_baseline_and_fresh_market_metadata':'approved_durable_terms_and_fresh_market_metadata',sourceDigest:model.digest,
  policyVersion:model.version,sourceKind:model.sourceKind??'FRESH_CANONICAL_CAPTURE',sourceAuthenticityVerified:model.version!==HISTORICAL_FEE_VERSION,
  verifiedAtMs:market.verifiedAt,marketTicker:market.ticker,intent,
  publicationKnownCurrent:false as const,publicationMonitorState:model.monitorState,
@@ -96,7 +99,11 @@ async function verifyLockedDurableOwnerFee(tx:FeeDb,locked:LockedScope,ticker:st
   if(intent==='ENTRY'&&r.entry_revoked===true)return deny('durable_fee_entry_consent_revoked');
  }
  const historical=r.policy_version===HISTORICAL_FEE_VERSION;
- const historicalIntegrity=historical&&historicalBaselineEnabled()&&r.source_kind===HISTORICAL_SOURCE_KIND&&r.genuine_source_verified===false&&r.source_capture_id===null&&r.historical_baseline_id===HISTORICAL_BASELINE_ID&&r.historical_digest===HISTORICAL_BASELINE_SHA256&&r.historical_actual_digest===HISTORICAL_BASELINE_SHA256;
+ const manual=historical&&isUploadedBaselineId(r.historical_baseline_id);
+ const manualCurrent=manual&&await (await import("./platformUploadedFeeSchedule")).activeUploadedBaselineMatches(tx,r.historical_baseline_id,r.official_source_digest);
+ const historicalIntegrity=historical&&r.source_kind===HISTORICAL_SOURCE_KIND&&r.genuine_source_verified===false&&r.source_capture_id===null&&
+ (manual?manualCurrent&&r.historical_digest===r.official_source_digest&&r.historical_actual_digest===r.official_source_digest:
+ historicalBaselineEnabled()&&r.historical_baseline_id===HISTORICAL_BASELINE_ID&&r.historical_digest===HISTORICAL_BASELINE_SHA256&&r.historical_actual_digest===HISTORICAL_BASELINE_SHA256);
  if(historical&&!historicalIntegrity)return deny('historical_fee_baseline_provenance_unverified');
  // Only distinct process-local exact-scope capabilities may supply public bytes.
  // Model/revocation reads above always run at consumption. Phase capabilities
@@ -120,7 +127,7 @@ async function verifyLockedDurableOwnerFee(tx:FeeDb,locked:LockedScope,ticker:st
  !Number.isFinite(elapsedMono)||elapsedMono<0||elapsedMono>5000)
   return deny('durable_fee_market_observation_deadline_exceeded');
  const proof=assessDurableFee({owner:String(r.owner_user_id),account:String(r.execution_account_id),sha:String(r.authorized_release_sha??r.release_commit_sha),
- sourceKind:String(r.source_kind??'FRESH_CANONICAL_CAPTURE'),policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
+ sourceKind:manual?UPLOADED_FEE_PROVENANCE:String(r.source_kind??'FRESH_CANONICAL_CAPTURE'),manualBaselineCurrent:manualCurrent,policyHash:String(r.approved_policy_hash),digest:String(r.official_source_digest),version:String(r.policy_version),formula:String(r.formula_version),
  effectiveDate:String(r.effective_date_text),approved:r.policy_state==='APPROVED',entryRevoked:r.entry_revoked===true,
  integrityValid:historical?historicalIntegrity:r.genuine_source_verified===true&&(!r.source_kind||r.source_kind==='FRESH_CANONICAL_CAPTURE'),knownPublicationChange:r.known_publication_change===true,
  monitorState:r.monitor_state as DurableModel['monitorState']},scope,intent,

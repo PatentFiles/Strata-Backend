@@ -39,7 +39,7 @@ export async function activeUploadedBaselineMatches(db:Query,id:unknown,digest:u
  try{
  const r=await db.query(`SELECT u.baseline_id,b.content_sha256 FROM private.strata_platform_uploaded_fee_schedule u
  JOIN private.strata_durable_historical_baseline b USING(baseline_id)
- ORDER BY u.upload_id DESC LIMIT 1`);
+ ORDER BY u.upload_id DESC LIMIT 1`,[]);
  return r.rows.length===1&&r.rows[0]!.baseline_id===id&&r.rows[0]!.content_sha256===digest;
  }catch{return false;}
 }
@@ -68,6 +68,13 @@ export async function publishPlatformUploadedFeeSchedule(admin:string,bytes:Buff
   const conflict=await tx.query("SELECT 1 FROM private.strata_platform_official_fee_capture_v1 WHERE content_sha256<>$1 LIMIT 1",[digest]);
   if(conflict.rows.length)return deny("uploaded_fee_conflicts_with_known_issuer_observation");
   if(latest?.baseline_id!==id){
+   if(latest){
+    const exposure=await tx.query(`SELECT
+     EXISTS(SELECT 1 FROM public.v13_production_position WHERE quantity_hundredths<>0) OR
+     EXISTS(SELECT 1 FROM public.v13_production_intent WHERE NOT terminal) OR
+     EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease WHERE state='owned' OR arm_requested) AS active`);
+    if(exposure.rows.length!==1||exposure.rows[0]!.active!==false)return deny("uploaded_fee_replacement_requires_safe_cutover");
+   }
    if((await tx.query("SELECT 1 FROM private.strata_platform_uploaded_fee_schedule WHERE baseline_id=$1",[id])).rows.length)return deny("uploaded_fee_schedule_rollback_refused");
    await tx.query(`INSERT INTO private.strata_durable_historical_baseline
     (baseline_id,source_kind,content_sha256,original_bytes,effective_date,formula_version)

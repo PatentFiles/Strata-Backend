@@ -1,0 +1,7 @@
+# Manual platform fee publication candidate
+
+The administrator downloads and explicitly uploads a supported official fee schedule once. The original bytes, digest, effective date and uploader attestation remain immutable. A successful upload is not proof of a fresh issuer HTTP response, not automatically current at the issuer, and not a customer trading grant. The existing durable owner model uses content-addressed uploaded evidence and explicit consent. Its normal exact market API/financial checks remain; there is no periodic PDF download requirement in manual mode.
+
+Migration: lib/db/owner-self-release/007_platform_uploaded_fee_schedule.sql (after 0049 and the existing durable-fee migrations). Feature: STRATA_PLATFORM_FEE_UPLOAD_ENABLED=true only after qualification. Keep the public execution flags off until native schema, upload, full integration and runtime qualification pass. Disable the periodic collector in manual mode. Do not apply migration or set the flag on production without qualification.
+
+The strict parser and existing schema currently support July 7, 2026 monetary terms only. A different monetary model needs explicit review and validation against the calculation engine. Prior uploads remain immutable; a conflicting version latches old fee authorities closed. Replacement of a changed digest and future release reauthorization require dedicated safe cutover and owner consent tests. Do not call this a qualified public release until those tests pass.

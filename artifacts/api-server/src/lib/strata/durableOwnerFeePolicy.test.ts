@@ -239,3 +239,25 @@ test('source-bound FINAL rejects forged or other-phase capability without fresh 
  const proof=await verifyDurableOwnerFeeSource({async query(){return {rows:[row]};}},scope,exactSource,marketTicker,'ENTRY',{clock:()=>fixtureClock,fetcher:async()=>{calls++;throw Error('no fallback');}},undefined,{phase:'FINAL_MARKET',handle});
  assert.equal(proof.ok,false);assert.equal(calls,0);
 });
+
+// Manual documents remain usable beyond the old 55-minute PDF lease, but the
+// same current exact-market, owner consent and invalidation checks still apply.
+test("admin-uploaded durable terms have no recurring PDF age lease",()=>{
+ const old=process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED;
+ process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED="true";
+ try{
+  const now=Date.parse("2026-11-24T18:00:00Z");
+  const scope={owner:"owner",account:"account",sha:"a".repeat(40),policyHash:"b".repeat(64)};
+  const model={...scope,sourceKind:"ADMIN_UPLOADED_FEE_SCHEDULE",digest:"c".repeat(64),
+   version:"owner_attested_historical_terms_v1",formula:"standard-quadratic-0.07-v1",effectiveDate:"2026-07-07",
+   approved:true,entryRevoked:false,integrityValid:true,manualBaselineCurrent:true,knownPublicationChange:false,monitorState:"never_checked" as const};
+  const market={ok:true,ticker:"KXBTC15M-26NOV24",verifiedAt:now-1};
+  const valid=assessDurableFee(model,scope,"ENTRY",market,now);
+  assert.equal(valid.ok,true);
+  if(valid.ok){assert.equal(valid.sourceAuthenticityVerified,false);assert.equal(valid.publicationKnownCurrent,false);assert.equal(valid.tradingAuthorized,false);}
+  assert.equal(assessDurableFee({...model,manualBaselineCurrent:false},scope,"ENTRY",market,now).ok,false);
+  assert.equal(assessDurableFee({...model,knownPublicationChange:true},scope,"ENTRY",market,now).ok,false);
+  assert.equal(assessDurableFee({...model,entryRevoked:true},scope,"ENTRY",market,now).ok,false);
+  assert.equal(assessDurableFee(model,scope,"ENTRY",{...market,verifiedAt:now-5001},now).ok,false);
+ }finally{if(old===undefined)delete process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED;else process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED=old;}
+});
