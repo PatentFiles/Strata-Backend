@@ -119,7 +119,7 @@ async function fixture(t:TestContext,amount=2500) {
   await db.query("INSERT INTO private.kalshi_connection_credentials VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8,'credential_verified')",
    [randomUUID(),OWNER,FINANCIAL,PROVIDER,role,fingerprint,vault,verified]);
  }
- await db.query("INSERT INTO private.kalshi_owner_pilot_transfers VALUES($1,$2,$3,$4,$5,'completed',$6,0,1,2,0,$6,$7,$8,$9,$9)",
+ await db.query("INSERT INTO private.kalshi_owner_pilot_transfers VALUES($1,$2,$3,$4,$5,'completed',$6::integer,0,1,2,0,$6::integer::bigint,$7,$8,$9,$9)",
   [randomUUID(),ACCOUNT,OWNER,FINANCIAL,PROVIDER,amount,RECEIPT,attempted,verified]);
  const transfers=[{transfer_id:RECEIPT,from_subaccount:0,to_subaccount:1,exchange_index:2,amount_cents:amount,created_ts:created}];
  const feed:Omit<OwnedKalshiRead,"observedAtMs">={ok:true,cashMicros:cash,historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]};
