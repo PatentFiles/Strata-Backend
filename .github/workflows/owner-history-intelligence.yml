@@ -1,0 +1,27 @@
+name: Owner history intelligence
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/ownerHistoryIntelligence*'
+      - 'artifacts/api-server/src/routes/strata*'
+      - '.github/workflows/owner-history-intelligence.yml'
+permissions:
+  contents: read
+jobs:
+  native-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: sudo apt-get update && sudo apt-get install -y postgresql
+      - run: echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+      - run: node artifacts/api-server/scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerHistoryIntelligence.postgres.test.ts
+      - run: pnpm run typecheck
