@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {randomUUID,createHash} from "node:crypto";
 import {openCredentialFixture} from "./credentialFixtureDb.testHelper";
-import {resolveOwnerSelfScope,readOwnedSelfServiceScope} from "./ownerSelfServiceEligibility";
+import {resolveOwnerSelfScope,readOwnedSelfServiceScope,initializePublicStoppedLease} from "./ownerSelfServiceEligibility";
 import {qualifyPublicIndependentLiveScope,independentLiveRolloutAllowed} from "../v13-production/liveEntryContainment";
 const fingerprint=(v:string)=>createHash("sha256").update(v).digest("hex");
 test("new STANDARD owners admitted independently after deployment without customer configuration (native PostgreSQL)",async t=>{
@@ -27,6 +27,12 @@ test("new STANDARD owners admitted independently after deployment without custom
    policy_hash text,max_entry_stake_cents int,max_entry_all_in_cents int);
  CREATE TABLE public.strata_configured_stake(execution_account_id text,configured_stake_cents int);
  CREATE TABLE public.v13_production_event(account_id text,cash_delta_micros bigint);
+ CREATE TABLE public.v13_production_intent(account_id text);
+ CREATE TABLE public.v13_production_position(account_id text);
+ CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY,owner_user_id uuid,
+  financial_account_id uuid,provider_connection_id uuid,holder_id text,fencing_token bigint,state text,
+  heartbeat_at timestamptz,released_at timestamptz,account_kill boolean,arm_requested boolean,
+  credential_fingerprint text,vault_secret_id uuid);
  CREATE TABLE private.kalshi_connection_credentials(owner_user_id uuid,financial_account_id uuid,provider_connection_id uuid,
    role text,key_fingerprint text,vault_secret_id uuid,revoked_at timestamptz,verified_at timestamptz,verification_reason text);
  `);
@@ -70,6 +76,21 @@ test("new STANDARD owners admitted independently after deployment without custom
   assert.ok(await qualifyPublicIndependentLiveScope(f,two,env),"other customer remains isolated");
   await f.query(restore!,[a]);
  }
+ // Initial release preparation can create a stopped lease without an
+ // administrator, but must not enable a worker, reset a fence or erase history.
+ await f.query("UPDATE public.v13_production_account SET execution_enabled=false,kill_switch=true WHERE owner_user_id=$1",[a]);
+ await f.exec("BEGIN");
+ try{
+  await f.query("SELECT id FROM public.v13_production_account WHERE owner_user_id=$1 FOR UPDATE",[a]);
+  assert.equal(await initializePublicStoppedLease(f,a,two.accountId,sha,env),false);
+  assert.equal(await initializePublicStoppedLease(f,a,one.accountId,sha,env),true);
+  assert.equal(await initializePublicStoppedLease(f,a,one.accountId,sha,env),false);
+  await f.exec("COMMIT");
+ }catch(e){await f.exec("ROLLBACK");throw e;}
+ const lease=await f.query("SELECT owner_user_id::text,state,account_kill,arm_requested,fencing_token::text FROM private.kalshi_account_worker_lease");
+ assert.deepEqual(lease.rows,[{owner_user_id:a,state:"killed",account_kill:true,arm_requested:false,fencing_token:"1"}]);
+ assert.equal(await qualifyPublicIndependentLiveScope(f,one,env),null);
+ assert.ok(await qualifyPublicIndependentLiveScope(f,two,env));
  await f.query("UPDATE public.v13_production_account SET initial_cash_micros=0 WHERE owner_user_id=$1",[a]);
  const recovery=await readOwnedSelfServiceScope(f,a,sha,"recovery",{...env,STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:undefined});
  assert.ok(recovery);assert.equal(recovery.cashConserved,false);assert.equal(await qualifyPublicIndependentLiveScope(f,one,env),null);

@@ -109,3 +109,39 @@ export async function resolveOwnerSelfScope(db:EligibilityQuery,owner:string,sha
  }
  return configuredOwnerSelfScope(owner,sha,env);
 }
+
+
+/** Initialize the stopped lease for a newly commissioned, never-run account.
+ * The caller MUST hold its execution-account row lock and transaction.
+ * Do not use this to repair existing leases, orders or financial history.
+ * A concurrent insert fails closed; no mutation of an existing lease. */
+export async function initializePublicStoppedLease(tx:EligibilityQuery,owner:string,account:string,sha:string,
+ env:NodeJS.ProcessEnv=process.env):Promise<boolean>{
+ const scope=await readOwnedSelfServiceScope(tx,owner,sha,"authority",env);
+ if(!scope||scope.accountId!==account||!scope.commissioned||scope.executionEnabled||
+  !scope.killSwitchOn||scope.blocked||!scope.cashConserved||!scope.cashReconciled||
+  BigInt(scope.reservedMicros)!==0n)return false;
+ const r=await tx.query(INSERT_PUBLIC_STOPPED_LEASE_SQL,[owner,account,scope.keyFingerprint]);
+ return r.rows.length===1;
+}
+export const INSERT_PUBLIC_STOPPED_LEASE_SQL=`
+ INSERT INTO private.kalshi_account_worker_lease
+ (execution_account_id,owner_user_id,financial_account_id,provider_connection_id,holder_id,
+  fencing_token,state,heartbeat_at,released_at,account_kill,arm_requested,credential_fingerprint,vault_secret_id)
+ SELECT a.id,a.owner_user_id,a.kalshi_connection_id,pc.id,'initial-commissioning',1,'killed',
+  clock_timestamp(),clock_timestamp(),true,false,c.key_fingerprint,c.vault_secret_id
+ FROM public.v13_production_account a
+ JOIN public.financial_accounts f ON f.id=a.kalshi_connection_id AND f.user_id=a.owner_user_id AND f.provider='kalshi'
+ JOIN private.provider_connections pc ON pc.financial_account_id=f.id
+ JOIN private.kalshi_connection_credentials c ON c.provider_connection_id=pc.id AND c.financial_account_id=f.id
+  AND c.owner_user_id=a.owner_user_id AND c.role='restricted_execution'
+  AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
+  AND c.key_fingerprint=a.key_fingerprint AND c.vault_secret_id IS NOT NULL
+ WHERE a.owner_user_id=$1::uuid AND a.id=$2 AND a.key_fingerprint=$3
+  AND a.subaccount=1 AND a.exchange_index=2 AND a.commissioned AND NOT a.execution_enabled
+  AND a.kill_switch AND a.blocked_reason IS NULL AND a.reserved_micros=0
+  AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=a.id)
+  AND NOT EXISTS(SELECT 1 FROM public.v13_production_event e WHERE e.account_id=a.id)
+  AND NOT EXISTS(SELECT 1 FROM public.v13_production_position p WHERE p.account_id=a.id)
+ ON CONFLICT (execution_account_id) DO NOTHING RETURNING execution_account_id
+`;

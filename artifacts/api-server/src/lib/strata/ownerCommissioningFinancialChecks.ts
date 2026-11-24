@@ -5,6 +5,8 @@ import {readOwnedApprovedFeeEvidence,readOwnedRuntimeFeeEvidence,readInitialComm
 import {refreshOwnerCommissioningCash} from "./ownerCommissioningCashTransition";
 import {verifyOwnedHistoricalFunding} from "./ownedPilotTransfer";
 import {pool} from "@workspace/db";
+import {deployedGitSha} from "./deployedGitSha";
+import {initializePublicStoppedLease,publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
 import {qualifyProtectiveRelease} from "./inAppProtectiveRelease";
 
 export const VERIFY_FINANCIAL_CHECKS="VERIFY_AND_COMMISSION_FINANCIAL_EVIDENCE_V1";
@@ -125,7 +127,12 @@ async function prepareActivationRequest(owner:string){
    AND a.cash_micros=a.initial_cash_micros+COALESCE((SELECT SUM(e.cash_delta_micros) FROM public.v13_production_event e WHERE e.account_id=a.id),0)
    FOR UPDATE OF a`,[owner]);
   if(locked.rows.length!==1)return refuse("stopped_commissioned_release_scope_required");
-  await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[locked.rows[0].id]);
+  const lease=await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[locked.rows[0].id]);
+  // Public customers do not have an administrator-created worker. Initialize
+  // only a never-run account, with both execution gates closed.
+  if(publicSelfServiceRequested()&&lease.rows.length===0&&
+   !await initializePublicStoppedLease(tx,owner,String(locked.rows[0].id),deployedGitSha()))
+   return refuse("initial_stopped_worker_lease_unavailable");
   const active=await tx.query(`SELECT 1 FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
    AND (owner_user_id IS DISTINCT FROM $2::uuid OR state NOT IN ('released','killed') OR arm_requested IS DISTINCT FROM false)`,[locked.rows[0].id,owner]);
   if(active.rows.length)return refuse("release_preparation_worker_not_stopped");
