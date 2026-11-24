@@ -125,3 +125,17 @@ test("commissioned opening-capital discrepancy and provisional hold remain separ
  f.status.openingBasis.differenceMicros="0";f.status.account.provisionalHold=true;f.calls.length=0;
  assert.equal((await f.run()).stage,"COMMISSIONING_REQUIRED");assert.ok(!f.calls.includes("commission"));
 });
+
+test("V2 can renew already-authorized runtime fee evidence without making V1 write or renew",async()=>{
+ const f=transitionFixture();
+ f.status.account.commissioned=true;f.status.funding.historicalOrCompletedTransferRecorded=true;
+ f.audit.cash.persistedReconciliationFresh=true;f.fee.ok=false;
+ const ports={...f.ports,runtimeFee:async(id:string)=>{assert.equal(id,owner);f.calls.push("runtime-fee");return {...f.fee,ok:true};}};
+ const v1=await advanceOwnerFinancialCommissioning(owner,consent,ports as never);
+ assert.equal(v1.stage,"FEE_AUTHORITY_REQUIRED");assert.equal(v1.readOnly,true);assert.ok(!f.calls.includes("runtime-fee"));assert.ok(!f.calls.includes("cash"));
+ f.calls.length=0;
+ const v2=await advanceOwnerFinancialCommissioning(owner,advanceConsent,ports as never);
+ assert.equal(v2.stage,"CHECKS_COMPLETE");assert.equal(v2.checks.approvedFeeSourceVerified,true);
+ assert.equal(f.calls.filter(c=>c==="runtime-fee").length,1);assert.ok(!f.calls.includes("fee"));
+ assert.equal(v2.tradingAuthorized,false);assert.equal(v2.workerStarted,false);assert.equal(v2.ordersSubmitted,false);
+});

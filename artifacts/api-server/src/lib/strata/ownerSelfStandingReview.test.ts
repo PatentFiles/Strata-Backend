@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {recordOwnerSelfStandingReview} from './ownerSelfStandingReview';
-import {OWNER_SELF_REVIEW_CONFIRM,standingAuthorityMatches} from './ownerSelfReviewMode';
+import {OWNER_SELF_REVIEW_CONFIRM,standingAuthorityMatches,configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
 const owner='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222',sha='a'.repeat(40),hash='b'.repeat(64);
 const body={expectedSha:sha,accountId:'acct',policyHash:hash,qualificationId:owner,confirmation:OWNER_SELF_REVIEW_CONFIRM};
 test('authority modes never relabel owner as independent or accept unknown modes',()=>{
@@ -29,4 +29,19 @@ test('unset or foreign server enrollment scope refuses before database activity'
  for(const scope of [undefined,{ownerId:other,accountId:'acct'},{ownerId:owner,accountId:'foreign'}]){
   const r=await recordOwnerSelfStandingReview(owner,body,{db,sha:()=>sha,scope:()=>scope});assert.equal(r.reason,'owner_self_account_not_enabled');
  }
+});
+
+test('release enrollment supports two distinct owners, fails closed on duplicate or foreign scope',()=>{
+ const rows=[{ownerId:owner,accountId:'acct',releaseSha:sha},{ownerId:other,accountId:'acct-2',releaseSha:sha}];
+ const env={RAILWAY_GIT_COMMIT_SHA:sha,STRATA_OWNER_SELF_RELEASE_OWNER_ID:owner,STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID:'legacy',STRATA_OWNER_SELF_RELEASE_SCOPES_V1:JSON.stringify(rows)};
+ assert.deepEqual(configuredOwnerSelfScope(owner,sha,env),{ownerId:owner,accountId:'acct'});
+ assert.deepEqual(configuredOwnerSelfScope(other,sha,env),{ownerId:other,accountId:'acct-2'});
+ assert.equal(ownerSelfEnrollmentAllowed(owner,'acct-2',configuredOwnerSelfScope(owner,sha,env)),false);
+ assert.equal(configuredOwnerSelfScope('33333333-3333-4333-8333-333333333333',sha,env),undefined);
+ assert.equal(configuredOwnerSelfScope(owner,'b'.repeat(40),env),undefined);
+ for(const malformed of ['{','[]',JSON.stringify([rows[0],{...rows[1],accountId:'acct'}]),JSON.stringify([rows[0],{...rows[0],accountId:'new'}]),JSON.stringify([rows[0],{...rows[1],releaseSha:'b'.repeat(40)}]),JSON.stringify([{...rows[0],unexpected:true}])]){
+  assert.equal(configuredOwnerSelfScope(owner,sha,{...env,STRATA_OWNER_SELF_RELEASE_SCOPES_V1:malformed}),undefined);
+ }
+ const {STRATA_OWNER_SELF_RELEASE_SCOPES_V1:_,...legacy}=env;
+ assert.deepEqual(configuredOwnerSelfScope(owner,sha,legacy),{ownerId:owner,accountId:'legacy'});
 });

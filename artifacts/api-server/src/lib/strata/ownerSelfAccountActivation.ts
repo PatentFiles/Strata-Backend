@@ -92,7 +92,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
  if(!UUID.test(owner)||!validBody(raw))return no('owner_self_explicit_activation_consent_required');
  const sha=(deps.sha??deployedGitSha)();
  if(!SHA.test(sha)||raw.expectedSha!==sha)return no('owner_self_deployed_sha_changed');
- if(!ownerSelfEnrollmentAllowed(owner,raw.accountId,(deps.scope??configuredOwnerSelfScope)()))
+ if(!ownerSelfEnrollmentAllowed(owner,raw.accountId,(deps.scope?deps.scope():configuredOwnerSelfScope(owner,sha))))
   return no('owner_self_account_not_enrolled');
  if(process.env.STRATA_OWNER_SELF_ACTIVATION_ENABLED!=='true')
   return no('owner_self_activation_feature_disabled');

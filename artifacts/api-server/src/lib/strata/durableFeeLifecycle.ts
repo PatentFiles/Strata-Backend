@@ -26,7 +26,7 @@ export async function enrollDurableOwnerFee(owner:string,raw:unknown,d:Deps={}){
  if(Object.keys(b).sort().join(',')!=='accountId,captureId,confirmation,expectedSha,modelId,policyHash'||b.confirmation!==CONFIRM||
  !UUID.test(String(b.modelId))||!/^\d{1,18}$/.test(String(b.captureId))||!HASH.test(String(b.policyHash))||
  !/^[a-f0-9]{40}$/.test(String(b.expectedSha))||b.expectedSha!==(d.sha??deployedGitSha)()||
- !ownerSelfEnrollmentAllowed(owner,String(b.accountId),(d.scope??configuredOwnerSelfScope)()))return deny('durable_fee_scope_or_consent_invalid');
+ !ownerSelfEnrollmentAllowed(owner,String(b.accountId),(d.scope?d.scope():configuredOwnerSelfScope(owner,String(b.expectedSha)))))return deny('durable_fee_scope_or_consent_invalid');
  const c=await(d.db??pool).connect();let commitAttempted=false,committed=false,discard:Error|undefined;
  try{
  await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='1500ms'");
@@ -119,7 +119,7 @@ export async function durableFeeEnrollmentOutcome(owner:string,modelId:string,sh
 
 export async function durableFeeStatus(owner:string){
  if(!UUID.test(owner))return deny('durable_fee_owner_invalid');
- const sha=deployedGitSha(),configured=configuredOwnerSelfScope();
+ const sha=deployedGitSha(),configured=configuredOwnerSelfScope(owner,sha);
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return deny('durable_fee_feature_disabled');
  if(!configured||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return deny('durable_fee_scope_not_enrolled');
  try{

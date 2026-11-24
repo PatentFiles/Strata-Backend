@@ -14,7 +14,7 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
  const no=(reason:string)=>({ok:false,reason,ordersSubmitted:false,workerStarted:false,tradingAuthorized:false,independentHumanReview:false});
  const b=raw as Record<string,unknown>,sha=(deps.sha??deployedGitSha)(),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
  if(!uuid.test(owner)||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==5||Object.keys(b).some(k=>!['expectedSha','accountId','policyHash','qualificationId','confirmation'].includes(k))||b.confirmation!==OWNER_SELF_REVIEW_CONFIRM||b.expectedSha!==sha||!/^[a-f0-9]{40}$/.test(sha)||!uuid.test(String(b.qualificationId)))return no('explicit_owner_self_review_required');
- const scope=(deps.scope??configuredOwnerSelfScope)();
+ const scope=(deps.scope?deps.scope():configuredOwnerSelfScope(owner,sha));
  if(!ownerSelfEnrollmentAllowed(owner,b.accountId,scope))return no('owner_self_account_not_enabled');
  let tx:Client|undefined,commitAttempted=false,done=false,discard:Error|undefined;
  try{
