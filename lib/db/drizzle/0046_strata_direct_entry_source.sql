@@ -19,11 +19,11 @@ CREATE TABLE public.strata_direct_entry_source (
 );
 ALTER TABLE public.strata_direct_entry_source ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.strata_direct_entry_source FROM PUBLIC;
-DO $ BEGIN
+DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN REVOKE ALL ON public.strata_direct_entry_source FROM anon; END IF;
  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN REVOKE ALL ON public.strata_direct_entry_source FROM authenticated; END IF;
  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='service_role') THEN REVOKE ALL ON public.strata_direct_entry_source FROM service_role; END IF;
-END $;
+END $$;
 CREATE FUNCTION public.strata_direct_source_immutable() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN
  RAISE EXCEPTION 'direct_source_immutable';

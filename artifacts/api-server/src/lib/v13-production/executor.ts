@@ -667,6 +667,7 @@ export class ProductionExecutor {
               const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
               try {
               assertChampionSourceReference(source);
+              if(direct)requireProof(Number.isSafeInteger(source.original_oldest_ms)&&now>=source.original_oldest_ms&&now-source.original_oldest_ms<=5000&&now<source.market_close_ms,"direct_entry_original_source_expired");
               if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>

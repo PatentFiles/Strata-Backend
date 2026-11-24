@@ -22,7 +22,7 @@ type Environment="LIVE_OBSERVATION"|"SIMULATION";
 export type DirectEvaluation={
  id:string;evaluation_source:"direct_live_v1"|"direct_simulation_v1";execution_environment:Environment;
  market_ticker:string;crossing_key:string;entry_policy_version:string;strategy_parameter_set_id:string;strategy_parameter_hash:string;
- evaluated_at:string;market_open_ms:number;market_close_ms:number;
+ evaluated_at:string;original_oldest_ms:number;market_open_ms:number;market_close_ms:number;
  btc_price:number;target:number;signed_buffer:number;velocity:number;previous_side:"UP"|"DOWN"|"AT";
  up_offer:number;down_offer:number;entry_offer:number;signal:"SCOUT"|"CONFIRM";direction:"UP"|"DOWN";
  qualifying_trigger:true;fresh_cross:true;crossing_consumed:true;position_was_open:false;feed_freshness:"current";
@@ -143,7 +143,7 @@ export class DirectEntrySource{
    const source:DirectEvaluation={id,evaluation_source:this.#environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1",
     execution_environment:this.#environment,market_ticker:ticker,crossing_key:crossing,
     entry_policy_version:V13_ENTRY_POLICY_VERSION,strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,
-    strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,evaluated_at:new Date(observed).toISOString(),market_open_ms:open,market_close_ms:close,
+    strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_open_ms:open,market_close_ms:close,
     btc_price:btc.price,target,signed_buffer:btc.price-target,velocity,previous_side:previousBuffer>0?"UP":previousBuffer<0?"DOWN":"AT",
     up_offer:up,down_offer:down,entry_offer:decision.entrySideOffer,signal:decision.signal,direction:decision.direction,
     qualifying_trigger:true,fresh_cross:true,crossing_consumed:true,position_was_open:false,feed_freshness:"current",
@@ -188,7 +188,7 @@ export class DirectEntrySource{
     receipt.oldest>receipt.observed||receipt.observed>now||now-receipt.oldest>AGE||now>=receipt.closesAt||
     new Date(row.oldest_source_at).getTime()!==receipt.oldest||new Date(row.observed_at).getTime()!==receipt.observed||
     new Date(row.closes_at).getTime()!==receipt.closesAt||Date.parse(s.evaluated_at)!==receipt.observed||
-    s.market_close_ms!==receipt.closesAt||s.market_open_ms>receipt.oldest||s.entry_policy_version!==V13_ENTRY_POLICY_VERSION||
+    s.original_oldest_ms!==receipt.oldest||s.market_close_ms!==receipt.closesAt||s.market_open_ms>receipt.oldest||s.entry_policy_version!==V13_ENTRY_POLICY_VERSION||
     s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
     !s.qualifying_trigger||!s.fresh_cross||!s.crossing_consumed||s.position_was_open||s.feed_freshness!=="current")return null;
    assertChampionSourceReference(s);
