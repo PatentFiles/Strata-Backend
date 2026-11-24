@@ -303,8 +303,11 @@ test("cash reconciliation records the subaccount read and does not transfer or e
   assert.equal(recorded.ok, true);
   assert.equal(recorded.cashCents, 100_000);
   assert.equal(recorded.transferAttempted, false);
-  assert.equal(sql.includes("execution_enabled"), false);
-  assert.equal(sql.includes("kill_switch"), false);
+  // Safety predicates may read the switches; the UPDATE must never set them.
+  const assignments = sql.slice(sql.indexOf("SET "), sql.indexOf("WHERE "));
+  assert.doesNotMatch(assignments, /execution_enabled|kill_switch|blocked_reason/);
+  assert.match(sql, /a.cash_micros = \$3::bigint/);
+  assert.match(sql, /a.execution_enabled IS FALSE AND a.kill_switch IS TRUE/);
   const skipped = await persistOwnedCashReconciliation({
     query: async () => { throw new Error("write_not_allowed"); },
   }, {
@@ -1246,7 +1249,8 @@ test("owner cash refresh preserves original signed-read clock and refuses elapse
         assert.equal(params?.[0], "acct-a");
         assert.equal(params?.[1], USER);
         assert.equal(params?.[3], new Date(NOW).toISOString());
-        assert.doesNotMatch(sql, /blocked_reason|execution_enabled|kill_switch/);
+        assert.doesNotMatch(sql.slice(sql.indexOf("SET "),sql.indexOf("WHERE ")), /blocked_reason|execution_enabled|kill_switch/);
+        assert.match(sql, /a.reconciled_at <= \$4::timestamptz/);
         writes++;
         return { rows: [{ id: "acct-a" }], rowCount: 1 };
       },

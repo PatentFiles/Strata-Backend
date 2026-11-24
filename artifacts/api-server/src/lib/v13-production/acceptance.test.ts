@@ -9,6 +9,7 @@ import {receiptFixture} from "./entryQuoteEvidence.fixture";
 import {DirectEntrySource} from "./directEntrySource";
 import {AccountScopedExchange} from "../strata/accountProductionSession";
 import {createIndependentProductionFetch} from "./liveEntryContainment";
+import {persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION} from "../strata/personalCashReconciliation";
 import {dedicatedSignerFingerprint} from "../strata/commissioning";
 import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
@@ -2323,4 +2324,27 @@ test('single final projection preserves native timestamp precision, history floo
  assert.equal((await f.ledger.readAccount()).revision,before.revision);
  assert.deepEqual((await pool.query('SELECT * FROM v13_production_position WHERE account_id=$1',[before.id])).rows,beforePositions);
  assert.equal(f.exchange.posts.length,0);
+});
+
+
+test("commissioned cash observation preserves ledger and rejects mismatch, running, stale and foreign owner",async()=>{
+  await fixture();
+  const owner=randomUUID(),at=Date.now();
+  await pool.query("UPDATE v13_production_account SET owner_user_id=$1,execution_enabled=false,kill_switch=true,reconciled_at=$2 WHERE id='test-account'",[owner,new Date(at-5000)]);
+  const read=(dollars:string,observedAtMs=at,ownerUserId=owner)=>persistOwnedCashReconciliation(pool,{
+    ownerUserId,executionAccountId:"test-account",confirmation:RECORD_OWNED_CASH_CONFIRMATION,
+    subaccount:1,exchangeIndex:2,observedAtMs,nowMs:at,maxAgeMs:15000,
+    subaccountBalance:{balance_dollars:dollars},primaryBalance:{balance:0},
+  });
+  const ledger=async()=>(await pool.query("SELECT cash_micros::text,initial_cash_micros::text,reconciled_at,execution_enabled,kill_switch FROM v13_production_account WHERE id='test-account'")).rows[0];
+  const before=await ledger();
+  assert.equal((await read("99.0000")).ok,false);
+  assert.equal((await read("100.0000",at-6000)).ok,false);
+  assert.equal((await read("100.0000",at,randomUUID())).ok,false);
+  assert.deepEqual(await ledger(),before);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=true,kill_switch=false WHERE id='test-account'");
+  assert.equal((await read("100.0000")).ok,false);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=false,kill_switch=true WHERE id='test-account'");
+  const matched=await read("100.0000");assert.equal(matched.ok,true,JSON.stringify(matched));
+  assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
 });
