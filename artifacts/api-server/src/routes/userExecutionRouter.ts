@@ -1,3 +1,5 @@
+import {advanceOwnerFinancialCommissioning} from "../lib/strata/ownerCommissioningFinancialChecks";
+import {registeredOpeningCapitalPreview,applyRegisteredOpeningCapital,registeredOpeningCapitalOutcome,cancelRegisteredOpeningCapital} from '../lib/strata/registeredOpeningCapitalRecovery';
 import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit} from '../lib/strata/capitalCreditRepair';
 import {durableFeeReauthorizationPreview,reauthorizeDurableFeeRelease,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization} from '../lib/strata/durableFeeReauthorization';
 import {migrateOwnedDurableFeePolicy,durableMigrationOutcome,previewDurableFeeMigration,cancelPendingDurableMigration} from '../lib/strata/durableFeeMigration';
@@ -147,6 +149,7 @@ export interface UserScopePort {
   registerCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   revokeCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
   verifyCredential(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false }>;
+  advanceTechnicalSetup?(userId:string,body:unknown):Promise<import("../lib/strata/technicalSetupAdvance").TechnicalSetupResult>;
   authorizeFunding(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   recordFundingEvidence(userId: string, body: unknown): Promise<{ ok: boolean; reason: string; executable: false; transferAttempted: false }>;
   authorizeOperation(userId: string, body: unknown): Promise<{
@@ -335,6 +338,10 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   });
   router.use(requireUser);
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
+  router.get('/registered-opening-capital/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await registeredOpeningCapitalPreview(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.post('/registered-opening-capital/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await applyRegisteredOpeningCapital(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});
+  router.get('/registered-opening-capital/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await registeredOpeningCapitalOutcome(owner,String(req.query.repairId??''),String(req.query.sha??''))));});
+  router.post('/registered-opening-capital/cancel',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await cancelRegisteredOpeningCapital(owner,req.body);res.status(result.outcome==='UNKNOWN'?409:200).json(sanitizePublic(result));});
   router.get('/capital-credit/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await capitalCreditPreview(owner);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.post('/capital-credit/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const r=await applyCapitalCredit(owner,req.body);res.status(r.ok?200:409).json(sanitizePublic(r));});
   router.get('/capital-credit/outcome',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');res.json(sanitizePublic(await capitalCreditOutcome(owner,String(req.query.repairId??''),String(req.query.sha??''))));});
@@ -775,8 +782,32 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const out=await revokeWalletV4FeeConsent(owner,req.body);
     res.status(out.ok?200:409).json(sanitizePublic(out));
   });
+  // Technical advancement verifies saved keys and prepares an existing durable
+  // operation only. No exchange mutation, transfer, approval or worker control.
+  router.post("/onboarding/advance-technical-setup",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    if(!port.advanceTechnicalSetup)return void res.status(503).json({reason:"technical_setup_unavailable"});
+    try{
+      const out=await port.advanceTechnicalSetup(owner,req.body??{});
+      res.status(out.ok?200:409).json(sanitizePublic(out));
+    }catch{
+      res.status(503).json({reason:"technical_setup_unavailable"});
+    }
+  });
   // Early personal account onboarding is not Steps 12-13 or trading
   // authorization. No exchange calls, credentials, fee PDF or mutations.
+  // Versioned continuation: V1 is read-only; V2 allows bounded financial
+  // transitions for the authenticated owner. No grants, transfers, policy
+  // approval, protective-release authority or START.
+  router.post("/onboarding/verify-financial-evidence",async(req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({error:"Unauthorized"});
+    res.setHeader("Cache-Control","private, no-store");
+    const out=await advanceOwnerFinancialCommissioning(owner,req.body);
+    res.status(out.ok?200:409).json(sanitizePublic(out));
+  });
   router.get("/onboarding/my-setup-readiness",async (_req,res)=>{
     const owner=subject(res);
     if(!owner)return void res.status(401).json({error:"Unauthorized"});

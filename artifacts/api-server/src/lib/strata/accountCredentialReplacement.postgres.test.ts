@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import {openCredentialFixture} from "./credentialFixtureDb.testHelper";
 import test from "node:test";
 import { planCommission, emptySnapshot } from "./commissioning";
 import {
@@ -23,19 +23,9 @@ const SECRET_MISSING = "90909090-9090-4909-8909-909090909090";
 const FINGERPRINT = "ab".repeat(32);
 
 test("ordered replacement SQL commits and rolls back on disposable PostgreSQL", async (t) => {
-  let PGlite: new () => {
-    exec(query: string): Promise<unknown>;
-    query(query: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
-    close(): Promise<void>;
-  };
-  try {
-    const loaded = createRequire(process.cwd() + "/package.json")("@electric-sql/pglite") as { PGlite: typeof PGlite };
-    PGlite = loaded.PGlite;
-  } catch {
-    t.skip("disposable PostgreSQL is not installed");
-    return;
-  }
-  const db = new PGlite();
+  const db=await openCredentialFixture();
+  if(!db){t.skip("disposable PostgreSQL is not installed");return;}
+
   try {
     await db.exec(`
       CREATE SCHEMA IF NOT EXISTS private;

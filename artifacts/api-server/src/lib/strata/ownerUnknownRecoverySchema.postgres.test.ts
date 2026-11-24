@@ -194,7 +194,12 @@ test('all checked-in migrations, production constraints, RLS and backend-owner g
   });
   await t.test('real FK integrity rejects orphan history and contradictory account cash',async()=>{
    await reset();
-   await assert.rejects(db.query(`UPDATE v13_production_intent SET evaluation_id='absent' WHERE id=$1`,[target]),{code:'23503'});
+   await assert.rejects(db.query(`UPDATE v13_production_intent SET evaluation_id='absent' WHERE id=$1`,[target]),{message:'intent_source_immutable'});
+   // A new orphan intent must still be rejected by the original evaluation FK.
+   await assert.rejects(db.query(`INSERT INTO v13_production_intent
+    (id,account_id,evaluation_id,crossing_key,kind,market,side,state,request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
+    SELECT 'orphan-intent',account_id,'absent','orphan-cross',kind,market,side,'PREPARED',request,decision,policy_hash,fee_fingerprint,capability_digest,'orphan-client',0,0
+    FROM v13_production_intent WHERE id=$1`,[target]),{code:'23503'});
    await assert.rejects(db.query(`UPDATE v13_production_position SET account_id='absent' WHERE id=$1`,[target]),{code:'23503'});
    await assert.rejects(db.query(`UPDATE v13_production_account SET reserved_micros=cash_micros+1 WHERE id=$1`,[account]),{code:'23514'});
   });

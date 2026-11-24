@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { openCredentialFixture } from "./credentialFixtureDb.testHelper";
+import { TECHNICAL_SETUP_CONFIRMATION, EXECUTE_TECHNICAL_SETUP_CONFIRMATION } from "./technicalSetupAdvance";
+import type {PgPoolLike} from "./accountCredentialStore";
 import test from "node:test";
 import { accountCredentialControls } from "./accountCredentialControls";
 import {
@@ -56,6 +58,7 @@ type DisposablePg = {
     rowCount?: number | null;
   }>;
   close(): Promise<void>;
+  nativePool?:PgPoolLike;
 };
 
 test("fixed live key-generation transport sends only the documented restricted request", async () => {
@@ -881,17 +884,15 @@ async function setup(t: { skip(message: string): void }): Promise<{
   raw: DisposablePg;
   db: CredentialDatabase;
 } | null> {
-  let PGlite: new () => DisposablePg;
-  try {
-    const loaded = createRequire(process.cwd() + "/package.json")("@electric-sql/pglite") as {
-      PGlite: typeof PGlite;
-    };
-    PGlite = loaded.PGlite;
-  } catch {
+  const raw=await openCredentialFixture();
+  if (!raw) {
+    // Native qualification must never be reported as a successful skip.
+    assert.notEqual(process.env.STRATA_CREDENTIAL_NATIVE_TESTS, "1",
+      "Mandatory native PostgreSQL fixture is unavailable");
     t.skip("disposable PostgreSQL is not installed");
     return null;
   }
-  const raw = new PGlite();
+  try {
   await raw.exec(`
     CREATE SCHEMA auth;
     CREATE SCHEMA private;
@@ -1033,6 +1034,7 @@ async function setup(t: { skip(message: string): void }): Promise<{
     );
   }
   return { raw, db: serialDatabase(raw) };
+  }catch(error){await raw.close();throw error;}
 }
 
 function serialDatabase(raw: DisposablePg): CredentialDatabase {
@@ -1467,3 +1469,113 @@ function executeKeyGeneration(
     transport,
   });
 }
+
+
+for(const singleAction of [false,true]) test(singleAction?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
+  const fixture=await setup(t);
+  if(!fixture)return;
+  try {
+    const {raw}=fixture;
+    const nativePool = raw.nativePool;
+    if (!nativePool) {
+      assert.notEqual(process.env.STRATA_CREDENTIAL_NATIVE_TESTS, "1",
+        "Mandatory native PostgreSQL pool is unavailable");
+      t.skip("native PostgreSQL pool required");
+      return;
+    }
+    // Real attempt/credential/provisioning tables; synthetic provider only.
+    // No external request, funding transfer, or activation port is installed.
+    await raw.exec(readFileSync("../../lib/db/drizzle/0047_owner_technical_setup_approval.sql","utf8"));
+    await raw.query("DELETE FROM private.kalshi_connection_credentials WHERE id=$1::uuid",[OLD_RESTRICTED_A]);
+    const keys=[] as {keyId:string;scopes:string[];subaccount:number|null;api_key_id:string}[];
+    for(const [id,keyId,scopes] of [
+      [PROVISIONING_A,"provisioning-technical",["read"]],
+      [VERIFICATION_A,"verification-technical",["read"]],
+      [SETUP_EXECUTION_A,"execution-technical",["read","write"]],
+    ] as const){
+      const privateKey=rsaPrivateKey(),fingerprint=dedicatedSignerFingerprint(keyId,privateKey);
+      assert.ok(fingerprint);
+      const r=await raw.query("SELECT vault_secret_id::text AS id FROM private.kalshi_connection_credentials WHERE id=$1::uuid",[id]);
+      await raw.query("UPDATE vault.secrets SET secret=$1 WHERE id=$2::uuid",[JSON.stringify({api_key_id:keyId,private_key:privateKey}),r.rows[0]?.id]);
+      await raw.query("UPDATE private.kalshi_connection_credentials SET key_fingerprint=$1 WHERE id=$2::uuid",[fingerprint,id]);
+      keys.push({keyId,api_key_id:keyId,scopes:[...scopes],subaccount:null});
+    }
+    if(singleAction){
+      const keyId="primary-technical",privateKey=rsaPrivateKey();
+      const secret=await raw.query("INSERT INTO vault.secrets(secret,name) VALUES ($1,'primary-synthetic') RETURNING id::text AS id",[JSON.stringify({api_key_id:keyId,private_key:privateKey})]);
+      await raw.query("UPDATE private.provider_connections SET vault_secret_id=$1::uuid WHERE id=$2::uuid",[secret.rows[0]?.id,CONNECTION_A]);
+      keys.push({keyId,api_key_id:keyId,scopes:["read"],subaccount:null});
+    }
+    const generated=generatedCredential();
+    let subaccount=false,creates=0,generates=0;
+    const controls=accountCredentialControls(nativePool,{
+      async kalshiGet(material,path,query){
+        assert.ok(keys.some(k=>k.keyId===material.keyId));
+        if(path.endsWith("/api_keys"))return {api_keys:keys.map(({api_key_id,scopes,subaccount})=>({api_key_id,scopes,subaccount}))};
+        if(path.endsWith("/account/limits"))return {usage_tier:"advanced"};
+        if(path.endsWith("/portfolio/subaccounts/balances"))return {subaccount_balances:[
+          {subaccount_number:0,exchange_index:2,balance:"0.0000"},
+          ...(subaccount?[{subaccount_number:1,exchange_index:2,balance:"0.0000"}]:[])]};
+        if(path.endsWith("/portfolio/balance")){
+          assert.equal(subaccount,true);assert.equal(query,"?subaccount=1&exchange_index=2");
+          return {balance_dollars:"0.0000",subaccount:1,exchange_index:2};
+        }
+        throw Error("unexpected synthetic provider GET "+path);
+      },
+      async kalshiCreateSubaccount(material){
+        assert.equal(material.keyId,"execution-technical");assert.equal(subaccount,false);
+        const r=await raw.query("SELECT state,owner_technical_plan_digest FROM private.kalshi_account_operation_attempts WHERE owner_user_id=$1::uuid AND operation='create_subaccount'",[USER_A]);
+        assert.equal(r.rows[0]?.state,"attempted");assert.match(String(r.rows[0]?.owner_technical_plan_digest),/^[a-f0-9]{64}$/);
+        creates++;subaccount=true;return {status:201,unreadable:false,body:{subaccount_number:1,exchange_index:2}};
+      },
+      async kalshiGenerateRestrictedKey(material){
+        assert.equal(material.keyId,"execution-technical");assert.equal(subaccount,true);assert.equal(generates,0);
+        const r=await raw.query("SELECT state,owner_technical_plan_digest FROM private.kalshi_account_operation_attempts WHERE owner_user_id=$1::uuid AND operation='generate_api_key'",[USER_A]);
+        assert.equal(r.rows[0]?.state,"attempted");assert.match(String(r.rows[0]?.owner_technical_plan_digest),/^[a-f0-9]{64}$/);
+        generates++;keys.push({keyId:generated.keyId,api_key_id:generated.keyId,scopes:["read","write::trade"],subaccount:1});
+        return {status:201,unreadable:false,body:{api_key_id:generated.keyId,private_key:generated.privateKey}};
+      },
+    });
+    const verify=()=>controls.advanceTechnicalSetup(USER_A,{expectedOwnerId:USER_A,confirmation:TECHNICAL_SETUP_CONFIRMATION});
+    const expectedOperations=["create_subaccount","generate_api_key","provision_execution_account"];
+    const combined={expectedOwnerId:USER_A,confirmation:"VERIFY_AND_COMMISSION_TECHNICAL_SETUP_V1",credentials:[]};
+    let body:Record<string,unknown>,planDigest:string|undefined;
+    if(singleAction){
+      body=combined;
+      assert.equal((await controls.advanceTechnicalSetup(USER_B,body)).ok,false);
+      assert.equal((await controls.advanceTechnicalSetup(USER_A,{...body,allowFunding:true})).ok,false);
+    }else{
+      const preview=await verify();
+      assert.equal(preview.stage,"PREPARED",JSON.stringify(preview));assert.ok(preview.review);
+      assert.deepEqual(preview.review.operations,expectedOperations);
+      planDigest=preview.review.digest;
+      body={expectedOwnerId:USER_A,confirmation:EXECUTE_TECHNICAL_SETUP_CONFIRMATION,attemptId:preview.review.attemptId,planDigest};
+      assert.equal((await controls.advanceTechnicalSetup(USER_B,body)).ok,false);
+      assert.equal((await controls.advanceTechnicalSetup(USER_A,{...body,planDigest:"f".repeat(64)})).ok,false);
+    }
+    assert.equal(creates+generates,0);
+    const start=performance.now(),outcome=await controls.advanceTechnicalSetup(USER_A,body);
+    assert.equal(outcome.reason,"technical_setup_provisioned_owner_review_required",JSON.stringify(outcome));
+    assert.deepEqual(outcome.completedOperations,expectedOperations);
+    assert.equal(creates,1);assert.equal(generates,1);
+    t.diagnostic("Actual disposable database + synthetic provider provisioning elapsedMs="+Math.round(performance.now()-start));
+    const attempts=await raw.query("SELECT operation,state,owner_technical_plan_digest FROM private.kalshi_account_operation_attempts WHERE owner_user_id=$1::uuid ORDER BY operation",[USER_A]);
+    assert.equal(attempts.rows.length,3);
+    planDigest=planDigest??String(attempts.rows[0]?.owner_technical_plan_digest);
+    assert.match(planDigest,/^[a-f0-9]{64}$/);
+    assert.ok(attempts.rows.every(row=>row.state==="completed"&&row.owner_technical_plan_digest===planDigest));
+    await assert.rejects(raw.query("UPDATE private.kalshi_account_operation_attempts SET owner_technical_plan_digest=$1 WHERE owner_user_id=$2::uuid",["a".repeat(64),USER_A]));
+    const account=await raw.query("SELECT id,subaccount,exchange_index,commissioned,execution_enabled,kill_switch,cash_micros::text AS cash,reserved_micros::text AS reserved,key_fingerprint FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A]);
+    assert.equal(account.rows.length,1);
+    assert.deepEqual({...account.rows[0],id:undefined},{id:undefined,subaccount:1,exchange_index:2,commissioned:false,execution_enabled:false,kill_switch:true,cash:"0",reserved:"0",key_fingerprint:generated.fingerprint});
+    // An existing commissioned account is read, not sent through provisioning.
+    // This UPDATE is synthetic fixture state only, never a deployed operation.
+    await raw.query("UPDATE v13_production_account SET commissioned=true,cash_micros=25000000,initial_cash_micros=25000000 WHERE owner_user_id=$1::uuid",[USER_A]);
+    const before=await raw.query("SELECT * FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A]);
+    assert.equal((await verify()).stage,"EXISTING_ACCOUNT");
+    const repeat=await controls.advanceTechnicalSetup(USER_A,body);
+    if(singleAction)assert.equal(repeat.stage,"EXISTING_ACCOUNT");else assert.equal(repeat.ok,false);
+    assert.deepEqual((await raw.query("SELECT * FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A])).rows,before.rows);
+    assert.equal(creates,1);assert.equal(generates,1);
+  } finally {await fixture.raw.close();}
+});

@@ -68,10 +68,10 @@ test("unset and exact false retain OFF at the actual shared supervisor construct
 
 test("exact true opts the same supervisor into its existing reviewed public-only coordinator",async()=>{
   const c=construct("true");c.run();verifySharedConstruction(c,true);assert.equal(c.diagnostics.length,0);
-  // Static integration assertion: this is the unchanged reviewed hook, not a
-  // new coordinator, book cache, alternate worker construction or bypass.
+  // The reviewed coordinator is available only on the non-direct source path.
+  // Independent direct-source sessions must not install this legacy hook.
   const text=await readFile(supervisor,"utf8");
-  assert.match(text,/if\(\(apiSource\|\|durableSource\)&&options\.publicMetadataPrefetch===true\)\{/);
+  assert.match(text,/if\(!directSource&&\(apiSource\|\|durableSource\)&&options\.publicMetadataPrefetch===true\)\{/);
   assert.match(text,/const attempt=processCommittedPublicMetadata\.start\(metadataScope\(\),hint\)/);
 });
 

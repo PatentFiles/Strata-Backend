@@ -1,3 +1,4 @@
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {logCapitalFailure,capitalPublicReason} from './capitalCreditDiagnostic';
 import {performance} from 'node:perf_hooks';
 import {pool} from '@workspace/db';
@@ -14,9 +15,9 @@ const no=(reason:string)=>({ok:false as const,reason,...capitalNoAuthority});
 const unknown=()=>({outcome:'UNKNOWN' as const,...capitalNoAuthority});
 type Deps=ProofDeps&{sha?:()=>string;scope?:typeof configuredOwnerSelfScope};
 const str=(x:unknown)=>typeof x==='string'?x:'';
-function context(owner:string,d:Deps){if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)throw Error('capital_production_override_forbidden');const c=(d.scope??configuredOwnerSelfScope)(),sha=(d.sha??deployedGitSha)();if(!UUID.test(owner)||!c||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,c.accountId,c))throw Error('capital_owner_scope_unavailable');return {account:c.accountId,sha};}
+async function context(owner:string,d:Deps){if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)throw Error('capital_production_override_forbidden');const sha=(d.sha??deployedGitSha)(),c=d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,sha,'recovery');if(!UUID.test(owner)||!c||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,c.accountId,c))throw Error('capital_owner_scope_unavailable');return {account:c.accountId,sha};}
 const safeReason=capitalPublicReason;
-export async function capitalCreditPreview(owner:string,d:Deps={}){try{const c=context(owner,d);const pending=await(d.db??pool).query("SELECT repair_id FROM private.strata_capital_credit_repair WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state='PENDING' LIMIT 1",[c.account,owner]);if(pending.rows.length)return no('capital_existing_attempt_requires_readback');const proof=await capitalCreditProof(owner,c.account,c.sha,d);return {ok:true as const,...proof.scope,confirmation:CREDIT_CONFIRM,observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,...capitalNoAuthority};}catch(e){const diagnostic=logCapitalFailure(e,'preview');return {...no(safeReason(e)),diagnostic};}}
+export async function capitalCreditPreview(owner:string,d:Deps={}){try{const c=await context(owner,d);const pending=await(d.db??pool).query("SELECT repair_id FROM private.strata_capital_credit_repair WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state='PENDING' LIMIT 1",[c.account,owner]);if(pending.rows.length)return no('capital_existing_attempt_requires_readback');const proof=await capitalCreditProof(owner,c.account,c.sha,d);return {ok:true as const,...proof.scope,confirmation:CREDIT_CONFIRM,observedAt:new Date(proof.start).toISOString(),expiresAt:proof.deadline,...capitalNoAuthority};}catch(e){const diagnostic=logCapitalFailure(e,'preview');return {...no(safeReason(e)),diagnostic};}}
 export async function capitalCreditOutcome(owner:string,id:string,sha:string,db:Query=pool){
  if(!UUID.test(owner)||!UUID.test(id)||!SHA.test(sha))return unknown();
  try{const r=await db.query('SELECT * FROM private.strata_capital_credit_repair WHERE repair_id=$1::uuid AND owner_user_id=$2::uuid AND release_commit_sha=$3',[id,owner,sha]);if(r.rows.length!==1)return unknown();const row=r.rows[0];if(!validCreditScope(row.scope))return unknown();const scope=row.scope;
@@ -32,7 +33,7 @@ async function terminalize(db:Db,owner:string,id:string,scope?:{account:string;s
  }catch{if(commit)discard=Error('capital_finalization_unknown');return false;}finally{if(tx){if(!done&&!discard)try{await tx.query('ROLLBACK')}catch{discard=Error('capital_rollback_unknown')}tx.release(discard);}}
 }
 export async function applyCapitalCredit(owner:string,raw:unknown,d:Deps={}){
- let ctx;try{ctx=context(owner,d);}catch(e){return no(safeReason(e));}
+ let ctx;try{ctx=await context(owner,d);}catch(e){return no(safeReason(e));}
  const b=raw as Row;if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join(',')!=='confirmation,repairId,scope'||!UUID.test(str(b.repairId))||b.confirmation!==CREDIT_CONFIRM||!validCreditScope(b.scope))return no('capital_explicit_scope_consent_required');
  const scope=b.scope;if(scope.ownerId!==owner||scope.accountId!==ctx.account||scope.sha!==ctx.sha)return no('capital_scope_changed');const db=d.db??pool;
  try{const r=await db.query(`INSERT INTO private.strata_capital_credit_repair(repair_id,owner_user_id,execution_account_id,release_commit_sha,receipt_id,scope_digest,scope,confirmation) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING repair_id`,[b.repairId,owner,ctx.account,ctx.sha,scope.receiptId,scope.scopeDigest,scope,CREDIT_CONFIRM]);if(r.rows.length!==1)return no('capital_existing_attempt_requires_readback');}catch{return no('capital_claim_unknown');}

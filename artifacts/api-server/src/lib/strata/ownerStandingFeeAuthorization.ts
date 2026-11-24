@@ -1,3 +1,4 @@
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {parseDurableFeeSource} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
 /**
@@ -387,7 +388,7 @@ export async function authorizeOwnerStandingFee(owner:string,raw:unknown,deps:De
   Object.keys(b).length!==5||Object.keys(b).some(k=>![
    'expectedSha','sourceAuthorityId','accountId','policyHash','confirmation'].includes(k)))
   return fail('owner_standing_fee_explicit_owner_scope_consent_required');
- if(!ownerSelfEnrollmentAllowed(owner,account,(deps.scope??configuredOwnerSelfScope)()))
+ if(!ownerSelfEnrollmentAllowed(owner,account,(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,sha))))
   return fail('owner_standing_fee_account_not_enabled');
  if(process.env.NODE_ENV!=='test'&&
   (deps.db||deps.verify||deps.sha||deps.clock||deps.scope||deps.enabled))

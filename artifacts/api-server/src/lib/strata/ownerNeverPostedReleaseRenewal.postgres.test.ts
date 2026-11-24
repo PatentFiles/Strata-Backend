@@ -79,6 +79,9 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
  INSERT INTO private.strata_standing_execution_reviews VALUES('${review}','${owner}','a','${oldSha}','${hash}','${reviewer}','approved',NULL,now()-interval '23 hours 54 minutes');
  INSERT INTO private.strata_continuous_execution_grants VALUES('${grant}','${owner}','a','${oldSha}','${hash}','${reviewer}','${review}',NULL,'I_AUTHORIZE_REVOCABLE_CONTINUOUS_EXECUTION_FOR_MY_REVIEWED_EXACT_SHA_V1',now()-interval '23 hours 53 minutes');
  INSERT INTO private.strata_protective_release_qualification VALUES('${qualification}','${owner}','a','${sha}','${hash}',now(),now()+interval '15 minutes');`);
+ // The signed diagnostic now reads opening capital in every invocation.
+ // Match the real account schema, including outside the settled-history test.
+ await db.query("ALTER TABLE public.v13_production_account ADD COLUMN initial_cash_micros bigint NOT NULL DEFAULT 25000000");
  // Use actual immutable receipt DDL and validated account FK/internal triggers.
  await db.query(readFileSync(resolve(process.cwd(),'../../sql/strata_protective_exit_reconciliation_private.sql'),'utf8'));
  await db.query('INSERT INTO vault.decrypted_secrets VALUES($1,$2)',[secret,JSON.stringify({api_key_id:keyId,private_key:privateKey})]);
@@ -88,7 +91,7 @@ async function setup(){await db.query(`CREATE SCHEMA private;CREATE SCHEMA vault
 async function reset(){beforeRead=async()=>{};afterRead=async()=>{};extraFeeds={};clock=()=>Date.now();
  await db.query(`DELETE FROM private.strata_owner_sha_approvals WHERE approval_id<>'${oldApproval}';UPDATE private.strata_owner_sha_approvals SET revoked_at=NULL,qualification_digest='${hash}';
  UPDATE private.strata_standing_execution_reviews SET revoked_at=NULL,policy_hash='${hash}';UPDATE private.strata_continuous_execution_grants SET revoked_at=NULL,policy_hash='${hash}';
- UPDATE public.v13_production_account SET owner_user_id='${owner}',execution_enabled=true,kill_switch=false,blocked_reason=NULL,reserved_micros=0,cash_micros=25000000,key_fingerprint='${fingerprint}',revision=1;
+ UPDATE public.v13_production_account SET owner_user_id='${owner}',execution_enabled=true,kill_switch=false,blocked_reason=NULL,reserved_micros=0,cash_micros=25000000,initial_cash_micros=25000000,key_fingerprint='${fingerprint}',revision=1;
  UPDATE public.v13_live_money_policy SET policy_hash='${hash}';
  UPDATE private.kalshi_account_worker_lease SET state='released',arm_requested=false,account_kill=false,credential_fingerprint='${fingerprint}',fencing_token=25;
  UPDATE private.kalshi_connection_credentials SET revoked_at=NULL;
@@ -164,7 +167,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   await db.query("INSERT INTO public.v13_production_position VALUES('settled-parent','a',0,0,950000)");
   // Candidate proof composition only: reuse existing read-only reconciliation
   // checks without wiring or minting any new authorization.
-  await db.query("ALTER TABLE public.v13_production_account ADD COLUMN initial_cash_micros bigint DEFAULT 24050000;ALTER TABLE public.v13_production_position ADD COLUMN market text;ALTER TABLE public.v13_production_position ADD COLUMN side text;UPDATE public.v13_production_position SET market='KXBTC15M-TEST',side='YES'");
+  await db.query("UPDATE public.v13_production_account SET initial_cash_micros=24050000;ALTER TABLE public.v13_production_position ADD COLUMN market text;ALTER TABLE public.v13_production_position ADD COLUMN side text;UPDATE public.v13_production_position SET market='KXBTC15M-TEST',side='YES'");
   const ledger=new ProductionLedger(db,'a'),c=await db.connect();
   try{
    await c.query('BEGIN');const a=(await c.query("SELECT * FROM public.v13_production_account WHERE id='a' FOR UPDATE")).rows[0];
@@ -307,7 +310,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
   }finally{
    await db.query('UPDATE public.v13_live_money_policy SET fee_source_url=NULL');
    await reset();
-   await db.query('ALTER TABLE public.v13_production_account DROP COLUMN IF EXISTS initial_cash_micros;ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS market;ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS side');
+   await db.query('ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS market;ALTER TABLE public.v13_production_position DROP COLUMN IF EXISTS side');
   }
  });
  await t.test('unexpected SQLSTATE diagnostic is bounded and contains no raw error fields',()=>{

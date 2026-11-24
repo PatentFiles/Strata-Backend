@@ -5,7 +5,8 @@ import {resolve} from 'node:path';
 import {activityTables,migrationManifest,schemaRoot,sourceManifest} from './ownerUnknownRecoverySchema.fixture';
 
 test('full-schema manifest covers every checked-in migration and sidecar, including both 0043s',()=>{
- const manifest=sourceManifest();assert.equal(manifest.length,64);
+ const manifest=sourceManifest();assert.equal(manifest.length,67);
+ assert.equal(manifest.filter(m=>m.path==='lib/db/drizzle/0048_strata_one_kalshi_connection_per_owner.sql').length,1);
  assert.equal(manifest.filter(m=>m.path.includes('/0043_')).length,2);
  assert.ok(manifest.every(m=>/^[a-f0-9]{64}$/.test(m.sha256)));
 });

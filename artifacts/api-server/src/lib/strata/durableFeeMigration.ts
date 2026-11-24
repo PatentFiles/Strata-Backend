@@ -1,3 +1,4 @@
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,HISTORICAL_MIGRATION_CONFIRM,HISTORICAL_RISK_ACCEPTANCE,HISTORICAL_MODEL_CONFIRM,readHistoricalBaselineBytes,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Isolated, default-off atomic durable migration. No ARM, START or orders.
  * Preserves approved limits. Original V2/V3 consent is never relabeled. */
@@ -55,7 +56,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
  if(!validSourceBody(b)||!UUID.test(ownerId)||!POLICY_ID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
  !Number.isSafeInteger(b.expectedPolicyVersion)||Number(b.expectedPolicyVersion)<1||!UUID.test(txt(b.modelId))||
  !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||
- b.expectedSha!==(deps.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(ownerId,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))
+ b.expectedSha!==(deps.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(ownerId,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,ownerId,txt(b.expectedSha)))))
  return fail('explicit_durable_migration_scope_consent_required');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return fail('durable_fee_feature_disabled');
  const db=deps.db??pool;
@@ -308,7 +309,7 @@ export async function durableMigrationOutcome(owner:string,modelId:string,sha:st
 }
 /** Non-mutating preview. Confirmation still performs signed history + locked CAS. */
 export async function previewDurableFeeMigration(owner:string,sourceKind:string='FRESH_CANONICAL_CAPTURE'){
- const scope=configuredOwnerSelfScope(),sha=deployedGitSha();
+ const sha=deployedGitSha(),scope=await resolveOwnerSelfScope(pool,owner,sha);
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!scope||
  !ownerSelfEnrollmentAllowed(owner,scope.accountId,scope)||!/^[a-f0-9]{40}$/.test(sha))return fail('durable_migration_scope_or_feature_unavailable');
  try{const r=await pool.query(`SELECT p.*,a.id AS account_id,a.execution_enabled,a.kill_switch,a.blocked_reason,a.commissioned
@@ -348,7 +349,7 @@ export async function migrateOwnedDurableFeePolicy(owner:string,raw:unknown,deps
  if(!validSourceBody(b))return fail('durable_migration_attempt_body_invalid');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!UUID.test(txt(b.modelId))||
  !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||b.expectedSha!==(deps.sha??deployedGitSha)()||
- !ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))return fail('durable_migration_attempt_scope_unavailable');
+ !ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,deployedGitSha()))))return fail('durable_migration_attempt_scope_unavailable');
  const db=deps.db??pool;let claim:Awaited<ReturnType<Db['connect']>>|null=null;
  try{claim=await db.connect();const c=await claim.query(`INSERT INTO private.strata_durable_fee_migration_attempt
  (model_id,owner_user_id,execution_account_id,release_commit_sha,body_hash,request)
@@ -385,7 +386,7 @@ export async function cancelPendingDurableMigration(owner:string,raw:unknown,dep
  const b=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw as Row:{};
  if(Object.keys(b).sort().join(',')!=='accountId,confirmation,expectedSha,modelId'||
  b.confirmation!==DURABLE_PENDING_CANCEL_CONFIRM||!UUID.test(owner)||!UUID.test(txt(b.modelId))||
- !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||!ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))
+ !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||!ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,deployedGitSha()))))
  return unknown('explicit_pending_migration_cancellation_required');
  let c:Awaited<ReturnType<Db['connect']>>|null=null,done=false,commitAttempted=false,discard:Error|undefined;
  try{c=await(deps.db??pool).connect();await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='1500ms'");await c.query("SET LOCAL statement_timeout='4000ms'");

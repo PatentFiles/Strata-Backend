@@ -1,4 +1,6 @@
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
+import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
+import {encodeProductionOrder} from "./transport";
 import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
 import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
@@ -50,6 +52,68 @@ export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled
 
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
+  /** Set by actual production factories until independent source qualification. */
+  private independentEntryHold = false;
+  #directSource:DirectEntrySource|null=null;
+  /** Test-only binding. Real factories remain contained; a source label or
+   * environment flag alone cannot turn on independent live orders. */
+  bindIndependentSimulationSource(source:DirectEntrySource):void {
+    requireProof(this.exchange.mode==="SIMULATION"&&!this.#directSource&&source instanceof DirectEntrySource,
+      "direct_entry_simulation_binding_invalid");
+    source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    this.#directSource=source;
+  }
+  /** The actual owner factory supplies the source after existing release and
+   * startup checks. The general unbound network transport stays contained. */
+  bindIndependentLiveSource(source:DirectEntrySource):void{
+    requireProof(this.exchange.mode==="LIVE"&&this.accountOwnerUserId&&!this.#directSource&&source instanceof DirectEntrySource,
+      "direct_live_source_binding_invalid");
+    source.assertExecutorBinding("LIVE",{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    this.#directSource=source;
+  }
+  get independentSourceBound():boolean{return this.#directSource!==null;}
+  get independentSimulationBound():boolean{return this.independentSourceBound&&this.exchange.mode==="SIMULATION";}
+  private assertDirectBinding(source:DirectEntrySource):void{
+    source.assertExecutorBinding(this.exchange.mode,{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+  }
+  private assertLiveSourceQuote(source:unknown):void{
+    if(this.exchange.mode!=="LIVE")return;
+    if(this.#directSource)assertDirectEntryQuoteEvidence(source,this.now());
+    else assertCanonicalEntryQuoteEvidence(source,this.now());
+  }
+  async captureIndependentEntry():Promise<string|null>{
+    const source=this.#directSource;
+    requireProof(source,"direct_entry_source_binding_invalid");
+    this.assertDirectBinding(source);
+    return source.capture(this.ledger.pool);
+  }
+  async captureIndependentExit(parentId:string):Promise<string|null>{
+    const source=this.#directSource;
+    requireProof(source,"direct_held_source_binding_invalid");
+    this.assertDirectBinding(source);
+    return source.captureHeld(this.ledger.pool,parentId);
+  }
+  private assertIntentSourceKind(i:Intent):void {
+    if(i.kind==="EXIT"){
+      const owned=i.decision?.ownedEvaluation as {sourceDirectHeldId?:unknown}|undefined;
+      if(this.#directSource||owned?.sourceDirectHeldId!=null){
+        requireProof(this.#directSource&&typeof owned?.sourceDirectHeldId==="string","direct_held_intent_source_mismatch");
+        this.assertDirectBinding(this.#directSource);
+      }
+      return;
+    }
+    if(i.kind!=="ENTRY")return;
+    if(this.#directSource||i.direct_source_id!=null){
+      requireProof(this.#directSource&&i.direct_source_id&&i.evaluation_id===null,
+        "direct_entry_intent_source_mismatch");
+      this.assertDirectBinding(this.#directSource);
+    }
+  }
+  containLiveEntries():void { this.independentEntryHold=true; }
+  get liveEntryContained():boolean { return this.independentEntryHold; }
+  private assertEntrySourceAvailable():void {
+    requireProof(!this.independentEntryHold, "production_independent_entry_source_unavailable");
+  }
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
   constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
@@ -77,7 +141,7 @@ export class ProductionExecutor {
     if(!invocation)return null;
     const source=i.decision?.source as Record<string,any>|undefined;
     if(!source||typeof source!=="object")return null;
-    try{return {intentId:i.id,invocation,source:{evaluationId:i.evaluation_id!,marketTicker:i.market,
+    try{return {intentId:i.id,invocation,source:{evaluationId:(i.direct_source_id??i.evaluation_id)!,marketTicker:i.market,
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),btcProviderAgeMs:source.btc_provider_age_ms,
       btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms}};}catch{return null;}
   }
@@ -192,6 +256,7 @@ export class ProductionExecutor {
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
+    this.assertEntrySourceAvailable();
     const done=this.startTiming("prepare_entry",{evaluationId});
     const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
     try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
@@ -199,8 +264,11 @@ export class ProductionExecutor {
   }
   private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
     const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
-    const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
-    requireProof(source && source.evaluation_source === "paper" &&
+    const direct=this.#directSource;
+    if(direct)this.assertDirectBinding(direct);
+    const source = direct?await direct.readExact(this.ledger.pool,evaluationId,this.now()):
+      (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
+    requireProof(source && source.evaluation_source === (direct?(direct.environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1"):"paper") &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
       source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
@@ -214,7 +282,7 @@ export class ProductionExecutor {
     let initialSourceElapsed: number | null = null;
     if(this.exchange.mode==="LIVE") {
       const sampledNow = this.now();
-      assertCanonicalEntryQuoteEvidence(source,sampledNow);
+      if(direct)assertDirectEntryQuoteEvidence(source,sampledNow);else assertCanonicalEntryQuoteEvidence(source,sampledNow);
       const elapsed = sampledNow - new Date(source.evaluated_at).getTime();
       initialSourceElapsed = elapsed;
       const ages = [source.btc_provider_age_ms,source.btc_receive_age_ms,source.market_age_ms];
@@ -234,8 +302,8 @@ export class ProductionExecutor {
     subtimings.mark("transaction_acquire");
     const prepare = () => this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
-      const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
-      if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
+      const prior = await tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
+      if (prior.rows.length) {this.assertIntentSourceKind(prior.rows[0]!);return prior.rows[0]!.id;} // duplicate event: no new reservation/capability
       await this.gate(tx, a);
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
@@ -249,7 +317,7 @@ export class ProductionExecutor {
         requireProof(source.crossing_consumed &&
           source.crossing_key === `${source.market_ticker}:first`,
           "production_entry_policy_claim_not_proven");
-        await this.assertEntryPolicyWindow(tx, source);
+        if(!direct)await this.assertEntryPolicyWindow(tx, source);
       }
       subtimings.mark("source_pin_and_classification");
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
@@ -258,7 +326,7 @@ export class ProductionExecutor {
       admission(sourceCurrent?"eligible":"rejected",{sourceAgeMs:sourceAge,
         ...(sourceCurrent?{}:{error:"production_evaluation_stale"})});
       requireProof(sourceCurrent, "production_evaluation_stale");
-      const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
+      const pinnedSource = direct?await direct.readExact(tx,evaluationId,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
       // Preserve prior-intent replay and all authority/policy/window checks above.
       // An expired observation cannot become eligible after a wall-clock rollback.
       // Provider-error precedence is intentionally omitted on this stale-only path.
@@ -281,7 +349,7 @@ export class ProductionExecutor {
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);
-      if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+      this.assertLiveSourceQuote(source);
       subtimings.mark("exposure_and_stake");
       const b = await readPrepareEntryCapacity((sql,params)=>tx.query(sql,params),a.id,
         new Date(new Date(this.now()).toISOString().slice(0,10)));
@@ -317,7 +385,8 @@ export class ProductionExecutor {
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
       a.reserved_micros = String(money(a.reserved_micros) + reservation);
       subtimings.mark("reservation_and_conservation");
-      await tx.query(`INSERT INTO v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,
+      // Fixed server-side column choice. Existing paper-linked records remain intact.
+      await tx.query(`INSERT INTO v13_production_intent(id,account_id,${direct?"direct_source_id":"evaluation_id"},crossing_key,kind,market,side,
         request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [id, a.id, evaluationId, source.crossing_key, request.market, side, JSON.stringify(request), JSON.stringify(decision),
@@ -339,7 +408,10 @@ export class ProductionExecutor {
     return retried;
   }
 
-  async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {
+  async prepareExit(parentId: string, minimumExitPrice: number, directHeldId?:string): Promise<string> {
+    const direct=this.#directSource;
+    requireProof((direct!==null)=== (directHeldId!==undefined),"direct_held_intent_source_mismatch");
+    if(direct)this.assertDirectBinding(direct);
     const parent = (await this.ledger.pool.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2", [parentId, this.ledger.accountId])).rows[0];
     requireProof(parent?.kind === "ENTRY", "production_exit_parent_missing");
     const book = await this.exchange.market(parent.market, parent.side, undefined, "EXIT");
@@ -352,7 +424,7 @@ export class ProductionExecutor {
       requireProof(active.rows.length === 0, "production_exit_already_pending");
       const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [parentId])).rows[0];
       requireProof(pos && money(pos.quantity_hundredths) > 0n, "production_exit_not_owned");
-      const source = (await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
+      const source = direct?await direct.readHeldExact(tx,directHeldId!,parentId,this.now()):(await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
         AND market_ticker=$1 ORDER BY evaluated_at DESC,id DESC LIMIT 1 FOR SHARE`, [parent.market])).rows[0];
       const age = source ? this.now() - new Date(source.evaluated_at).getTime() : Infinity;
       requireProof(source && source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -384,7 +456,7 @@ export class ProductionExecutor {
         quantityVersion:EXIT_QUANTITY_VERSION,quantityHundredths:plan.plan.plannedHundredths,limitMicros:plan.plan.limitMicros,
         timeInForce: "IOC", reduceOnly: true, clientOrderId: `v13p-${id}` };
       const decision = { book, plan: plan.plan, minimumExitPrice, policy: p, identity: identity(a), parentId,
-        ownedEvaluation: { position: pos, source, sourcePaperEvaluationId: source.id, decision: ownedDecision } };
+        ownedEvaluation: { position: pos, source, ...(direct?{sourceDirectHeldId:source.id}:{sourcePaperEvaluationId:source.id}), decision: ownedDecision } };
       await tx.query(`INSERT INTO v13_production_intent(id,account_id,parent_id,kind,market,side,request,decision,
         policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,'EXIT',$4,$5,$6,$7,$8,$9,$10,$11,0,0)`,
@@ -412,6 +484,9 @@ export class ProductionExecutor {
       const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
       requireProof(i, "production_intent_missing");
       if (i.state !== "PREPARED") return false;
+      requireProof(!(this.#directSource&&this.exchange.mode==="LIVE"&&i.kind==="EXIT"),"direct_live_exit_requires_signed_protective_dispatch");
+      this.assertIntentSourceKind(i);
+      if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
       if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
       await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
@@ -444,24 +519,25 @@ export class ProductionExecutor {
           if(this.exchange.mode==="LIVE")requireProof((i.decision.preflight as {cashRisk?:unknown}|undefined)?.cashRisk&&
             (i.decision.book as MarketEvidence).fee.cashRisk,"production_cash_risk_unproven");
           assertChampionSourceReference(i.decision.source);
-          if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(i.decision.source,this.now());
+          this.assertLiveSourceQuote(i.decision.source);
         }
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
         const final = async () => {
-          const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
+          const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id});
           let finalComparison:FinalComparisonDiagnostics|undefined;
           let finalMarketReads:MarketEvidenceReadTiming|undefined;
           let pendingSnapshot:Promise<{ok:true;snapshot:Snapshot}|{ok:false;error:unknown}>|undefined;
           let snapshotHistoryFloor:Date|null|undefined;
           const readFinalSnapshot=async(oldest:Date|null)=>{
-            const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
+            const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
             try{const snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
               () => this.exchange.snapshot(identity(a), new Date(oldest as Date).getTime())));
               snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});return snapshot;}
             catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
           };
           try {
+          if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");
@@ -546,8 +622,10 @@ export class ProductionExecutor {
             const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.parent_id])).rows[0];
             requireProof(pos && money(pos.quantity_hundredths) >= requestQuantityHundredths(i.request) && i.request.reduceOnly,
               "production_exit_ownership_changed");
-            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown> };
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
+            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown>; sourceDirectHeldId?:string };
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSource;
+            const source = direct?await direct.readHeldExact(tx,owned.sourceDirectHeldId!,i.parent_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
             const age = this.now() - new Date(source?.evaluated_at ?? 0).getTime();
             requireProof(source && canonical(source) === canonical(owned.source) &&
               age >= 0 && age <= p.maxQuoteAgeMs &&
@@ -566,16 +644,18 @@ export class ProductionExecutor {
             this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
             this.now() - a.reconciled_at!.getTime() <= 15_000, "production_final_evidence_expired");
           if (i.kind === "ENTRY") {
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSource;
+            const source = direct?await direct.readExact(tx,i.direct_source_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
             requireProof(canonical(source) === canonical(i.decision.source) &&
               this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs &&
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
                 source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
             "production_final_source_changed_or_expired");
             assertChampionSourceReference(source);
-            if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+            this.assertLiveSourceQuote(source);
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
-              await this.assertEntryPolicyWindow(tx, source);
+              if(!direct)await this.assertEntryPolicyWindow(tx, source);
             }
             const losses = (await tx.query(`SELECT
               (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
@@ -622,10 +702,11 @@ export class ProductionExecutor {
             // HTTP send, without repeating network proof or extending its age.
             this.ledger.setFinalWireClock(()=>{
               const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
-              const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
+              const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id});
               try {
               assertChampionSourceReference(source);
-              if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+              if(direct)requireProof(Number.isSafeInteger(source.original_oldest_ms)&&now>=source.original_oldest_ms&&now-source.original_oldest_ms<=5000&&now<source.market_close_ms,"direct_entry_original_source_expired");
+              this.assertLiveSourceQuote(source);
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
                   typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),
@@ -639,11 +720,25 @@ export class ProductionExecutor {
               }catch(error){wireAdmission("rejected",{error,sourceAgeMs:age,sourceToDecisionAgeMs:
                 Math.max(...["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].map(k=>source[k]+age))});throw error;}
             });
+            if(direct&&this.exchange.mode==="LIVE"){
+              requireProof(this.authorizeFinalEntry&&this.accountOwnerUserId,"direct_live_final_release_authority_missing");
+              this.ledger.pinIndependentEntryWire(a,i,source as DirectEvaluation,encodeProductionOrder(i.request));
+            }
           }
           // Trusted transports cannot send before this callback succeeds.
           // Earlier local failures therefore prove that no POST was attempted;
           // failures after success remain UNKNOWN unless an exact, private
           // downstream refusal proves its transport was never invoked.
+          if(i.kind==="ENTRY"&&this.#directSource){
+            const s=i.decision.source as {original_oldest_ms:number;market_close_ms:number};
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_entry_original_source_expired");
+          }
+          if(i.kind==="EXIT"&&this.#directSource){
+            const s=(i.decision.ownedEvaluation as {source:{original_oldest_ms:number;market_close_ms:number}}).source;
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_held_original_source_expired");
+          }
           invoked = true;
           finalTiming("completed",{finalMarketReads});
           }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}

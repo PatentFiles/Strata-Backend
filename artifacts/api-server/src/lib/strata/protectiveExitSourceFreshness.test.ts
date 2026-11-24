@@ -25,3 +25,17 @@ test('missing, malformed, mismatched and weaker source/policy evidence fails clo
  assert.equal(remaining(owned,3000,2999,market),1,'stricter approved policy preserved');
  assert.equal(remaining({...owned,source:{...source,market_age_ms:Number.MAX_VALUE}},5000,Number.MAX_VALUE,market),null,'overflow is invalid, not authenticated expiry');
 });
+
+test('independent held receipt consumes original book/cycle clock and contract close',()=>{
+ const evaluated=Date.parse(source.evaluated_at);
+ const held={...source,evaluation_source:'direct_held_live_v1',execution_environment:'LIVE_OBSERVATION',
+  original_oldest_ms:evaluated-1000,market_close_ms:evaluated+3000};
+ const direct={sourceDirectHeldId:held.id,source:held};
+ assert.equal(remaining(direct,5000,0,market),2999);
+ assert.equal(remaining(direct,5000,2999,market),0);
+ assert.equal(remaining(direct,5000,3000,market),-1);
+ assert.equal(remaining({...direct,sourcePaperEvaluationId:held.id},5000,0,market),null);
+ assert.equal(remaining({...direct,source:{...held,execution_environment:'SIMULATION'}},5000,0,market),null);
+ assert.equal(remaining({...direct,source:{...held,original_oldest_ms:evaluated+1}},5000,0,market),null);
+ assert.equal(remaining({...direct,source:{...held,market_close_ms:evaluated+15000}},5000,4001,market),-1);
+});

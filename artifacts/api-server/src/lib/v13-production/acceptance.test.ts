@@ -6,6 +6,11 @@ import "./finalAccountProofProjection.test";
 import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
+import {DirectEntrySource} from "./directEntrySource";
+import {AccountScopedExchange} from "../strata/accountProductionSession";
+import {createIndependentProductionFetch} from "./liveEntryContainment";
+import {persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION} from "../strata/personalCashReconciliation";
+import {dedicatedSignerFingerprint} from "../strata/commissioning";
 import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
@@ -16,7 +21,7 @@ import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "../strata/ap
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
-import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
+import { randomUUID, generateKeyPairSync, createHash, createVerify, constants } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
@@ -167,6 +172,76 @@ test("a partial parameter identity is rejected without altering an evaluation", 
   assert.equal(row.strategy_parameter_hash, V13_CHAMPION_PARAMETER_HASH);
 });
 
+test("independent market crossing reaches the existing isolated executor without a paper evaluation or window",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-TEST-000";
+ f.exchange.now=open+10000;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ let btc=99999;
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);
+ const worker=new ProductionWorker(f.executor);
+ // No paper worker, history, or window. The first sample is not a crossing.
+ await worker.tick();assert.equal(f.exchange.posts.length,0);
+ f.exchange.now+=1000;btc=100010;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ await worker.tick();
+ assert.equal(f.exchange.posts.length,1);
+ assert.equal(f.exchange.posts[0]!.market,ticker);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_windows")).rows[0].n,0);
+ await assert.rejects(f.executor.prepareEntry(randomUUID()),/production_source_not_qualifying_champion/);
+ const other=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await other.readExact(pool,rows[0].direct_source_id,f.exchange.now),null);
+ assert.equal(await source.readExact(pool,rows[0].direct_source_id,f.exchange.now+5001),null);
+ await f.executor.dispatch(rows[0].id);assert.equal(f.exchange.posts.length,1);
+ // Reconcile real simulator fills, then close only the owned quantity on the
+ // exact held contract, even when new entries are explicitly disallowed.
+ f.exchange.fill(f.exchange.posts[0]!,"200");await f.executor.reconcile();
+ f.exchange.now+=1000;btc=99980;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ const heldWorker=new ProductionWorker(f.executor,2500,()=>{},()=>false);
+ await heldWorker.tick();
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal(f.exchange.posts[1]!.market,ticker);assert.equal(f.exchange.posts[1]!.action,"SELL");assert.equal(f.exchange.posts[1]!.reduceOnly,true);
+ f.exchange.fill(f.exchange.posts[1]!,"100");await f.executor.reconcile();
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
+ const exit=(await pool.query("SELECT id,decision FROM v13_production_intent WHERE kind='EXIT'")).rows[0];
+ assert.ok(exit.decision.ownedEvaluation.sourceDirectHeldId);assert.equal(exit.decision.ownedEvaluation.sourcePaperEvaluationId,undefined);
+ await f.executor.dispatch(exit.id);assert.equal(f.exchange.posts.length,2);
+ // A restarted producer cannot reuse the earlier producer's custody or
+ // invent a velocity. Only consecutive new held samples can trigger momentum.
+ const restarted=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readHeldExact(pool,exit.decision.ownedEvaluation.sourceDirectHeldId,rows[0].id,f.exchange.now),null);
+ f.exchange.now+=1000;btc=100030;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ f.exchange.now+=1000;btc=100025;
+ const momentum=await restarted.captureHeld(pool,rows[0].id);assert.ok(momentum);
+ const momentumSource=await restarted.readHeldExact(pool,momentum,rows[0].id,f.exchange.now);
+ assert.equal(momentumSource?.signed_buffer,25);assert.equal(momentumSource?.velocity,-300);
+ // A long gap resets momentum instead of deriving a sell from stale samples.
+ f.exchange.now+=5001;btc=100020;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ // The exact held market's closure cannot become a new order or market.
+ f.exchange.now=close;btc=99980;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ await invariant(f.ledger);
+});
 async function invariant(l: ProductionLedger) {
   await l.transaction(async (tx, a) => l.assertConservation(tx, a));
 }
@@ -1029,7 +1104,6 @@ test("approved champion boundary prices remain executable with consistent refere
 
 import {readFileSync} from "node:fs";
 import {dispatchReviewedProtectiveExitOnce} from "../strata/ownerFeeEmergencyExitSignedDispatch";
-import {dedicatedSignerFingerprint} from "../strata/commissioning";
 test("owned no-send finalizer atomically preserves exposure, forbids audit forgery and permits fresh exit identity",async()=>{
  const f=await fixture(),ticker="KXBTC15M-26OCT311315-15",owner="11111111-1111-4111-8111-111111111111";
  const source=await f.source();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE id=$2",[ticker,source]);
@@ -1180,6 +1254,77 @@ test("LIVE book receipts bind both sides and both champion signals through real 
   await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.side,side==="UP"?"YES":"NO");
  }
 });
+// Real owner-scoped signer and exact final-wire capability. Only provider
+// observations, release approval and the final network transport are isolated.
+// The source label remains SIMULATION, and all financial SQL is real PG.
+for(const variant of ["fresh","changed-body","expired-after-signing"] as const)
+test("independent owner signed entry: "+variant,async()=>{
+ const f=await liveReceiptFixture(),owner=f.executor.accountOwnerUserId!;
+ const ticker="KXBTC15M-TEST-000",pair=generateKeyPairSync("rsa",{modulusLength:2048});
+ const material={keyId:"disposable-signing-key",privateKey:pair.privateKey.export({type:"pkcs8",format:"pem"}).toString()};
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
+ assert.ok(fingerprint);
+ await pool.query("UPDATE v13_production_account SET key_fingerprint=$1 WHERE id='test-account'",[fingerprint]);
+ f.exchange.evidence.identity.keyFingerprint=fingerprint;
+ await pool.query("DELETE FROM forward_test_evaluations; DELETE FROM forward_test_windows");
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000;
+ let btc=99999;
+ function clock(at:number){f.exchange.now=at;f.exchange.evidence.observedAtMs=at;f.exchange.book.observedAtMs=at;f.exchange.book.fee.verifiedAtMs=at;}
+ clock(open+10000);
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:owner},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]})
+ },()=>f.exchange.now);
+ let posts=0,releaseChecks=0;
+ let wire:typeof fetch;
+ const raw:typeof fetch=async(input,init)=>{
+   posts++;
+   assert.equal(String(input),"https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders");
+   assert.equal(init?.redirect,"error");
+   const headers=new Headers(init?.headers),body=JSON.parse(String(init?.body));
+   assert.equal(headers.get("KALSHI-ACCESS-KEY"),material.keyId);
+   const check=createVerify("sha256");
+   check.update(headers.get("KALSHI-ACCESS-TIMESTAMP")!+"POST"+new URL(String(input)).pathname);check.end();
+   assert.equal(check.verify({key:pair.publicKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},headers.get("KALSHI-ACCESS-SIGNATURE")!,"base64"),true);
+   assert.equal(body.reduce_only,false);assert.equal(body.ticker,ticker);assert.equal(body.subaccount,1);assert.equal(body.exchange_index,2);
+   // A second invocation using the exact same signed bytes cannot send.
+   await assert.rejects(wire(input,init),/direct_entry_wire_authority_missing_or_spent/);
+   return Response.json({synthetic:true},{status:201});
+ };
+ wire=createIndependentProductionFetch(()=>f.ledger,raw);
+ const signedBoundary:typeof fetch=async(input,init)=>{
+   if(variant==="expired-after-signing")clock(f.exchange.now+5001);
+   if(variant==="changed-body"){
+    const changed=JSON.parse(String(init?.body));changed.count="99.00";
+    return wire(input,{...init,body:JSON.stringify(changed)});
+   }
+   return wire(input,init);
+ };
+ const exchange=new AccountScopedExchange({leaseState:"owned",armRequested:true,accountKill:false,globalKill:false,
+  fencingToken:1,presentedToken:1,workerActuallyScheduled:true,authenticatedUserId:owner,ownerUserId:owner,
+  credentialFingerprint:fingerprint,presentedFingerprint:fingerprint,uncertainOrderCount:0,duplicateClientOrder:false,
+  entriesAuthorized:true,liveExecutionEnabled:true},material,async id=>f.exchange.snapshot(id),signedBoundary,null,
+  async()=>f.exchange.market(),()=>true);
+ const executor=new ProductionExecutor(f.ledger,exchange,()=>f.exchange.now);
+ executor.accountOwnerUserId=owner;executor.bindIndependentLiveSource(source);
+ executor.authorizeFinalEntry=async tx=>{assert.equal(f.ledger.currentTransaction(),tx);releaseChecks++;};
+ const worker=new ProductionWorker(executor);
+ await worker.tick();assert.equal(posts,0);
+ btc=100010;clock(f.exchange.now+1000);
+ if(variant==="fresh")await worker.tick();
+ else await assert.rejects(worker.tick(),/direct_entry_wire_authority_missing_or_spent|direct_entry_original_source_expired/);
+ assert.equal(posts,variant==="fresh"?1:0);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state,request,decision FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal(rows[0].decision.source.execution_environment,"SIMULATION");assert.ok(releaseChecks>=2);
+ await executor.dispatch(rows[0].id);assert.equal(posts,variant==="fresh"?1:0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ await invariant(f.ledger);
+});
+
 test("LIVE missing or inconsistent compact evidence rejects before any reservation and preserves historical NULL",async()=>{
  for(const bad of [null,{}, {...receiptFixture().entry_quote_evidence,evidenceDigest:'f'.repeat(64)}]){
   const f=await liveReceiptFixture();await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,bad]);
@@ -2179,4 +2324,41 @@ test('single final projection preserves native timestamp precision, history floo
  assert.equal((await f.ledger.readAccount()).revision,before.revision);
  assert.deepEqual((await pool.query('SELECT * FROM v13_production_position WHERE account_id=$1',[before.id])).rows,beforePositions);
  assert.equal(f.exchange.posts.length,0);
+});
+
+
+test("commissioned cash observation preserves ledger and rejects mismatch, running, stale and foreign owner",async()=>{
+  await fixture();
+  // PostgreSQL resolves every referenced relation even on the commissioned branch.
+  // These isolated fixture tables represent empty funding/repair registries;
+  // actual funding transitions are independently tested in the native suite.
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_topups(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.strata_capital_credit_repair(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_pilot_transfers(
+      execution_account_id text,owner_user_id uuid,financial_account_id uuid,
+      from_subaccount smallint,to_subaccount smallint,exchange_index smallint,state text,
+      verified_exchange_transfer_id text,verified_at timestamptz,completed_at timestamptz,
+      bot_before_cents bigint,bot_after_cents bigint,amount_cents integer);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding(
+      execution_account_id text,owner_user_id uuid,exchange_transfer_id text,
+      transfer_created_at timestamptz,verified_at timestamptz,primary_after_cents bigint,bot_after_cents bigint);`);
+  const owner=randomUUID(),at=Date.now();
+  await pool.query("UPDATE v13_production_account SET owner_user_id=$1,execution_enabled=false,kill_switch=true,reconciled_at=$2 WHERE id='test-account'",[owner,new Date(at-5000)]);
+  const read=(dollars:string,observedAtMs=at,ownerUserId=owner)=>persistOwnedCashReconciliation(pool,{
+    ownerUserId,executionAccountId:"test-account",confirmation:RECORD_OWNED_CASH_CONFIRMATION,
+    subaccount:1,exchangeIndex:2,observedAtMs,nowMs:at,maxAgeMs:15000,
+    subaccountBalance:{balance_dollars:dollars},primaryBalance:{balance:0},
+  });
+  const ledger=async()=>(await pool.query("SELECT cash_micros::text,initial_cash_micros::text,reconciled_at,execution_enabled,kill_switch FROM v13_production_account WHERE id='test-account'")).rows[0];
+  const before=await ledger();
+  assert.equal((await read("99.0000")).ok,false);
+  assert.equal((await read("100.0000",at-6000)).ok,false);
+  assert.equal((await read("100.0000",at,randomUUID())).ok,false);
+  assert.deepEqual(await ledger(),before);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=true,kill_switch=false WHERE id='test-account'");
+  assert.equal((await read("100.0000")).ok,false);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=false,kill_switch=true WHERE id='test-account'");
+  const matched=await read("100.0000");assert.equal(matched.ok,true,JSON.stringify(matched));
+  assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
 });

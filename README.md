@@ -1,5 +1,7 @@
 # BTC Kalshi V1.3 — technical handoff
 
+> **Current product direction:** [AGENTS.md](./AGENTS.md) supersedes historical fixed-customer pilot and manual enrollment requirements. This historical handoff does not establish current release readiness.
+
 > **Production live-money handoff:** Brit should start with [V13_LIVE_MONEY_HANDOFF.md](./V13_LIVE_MONEY_HANDOFF.md). That document is the authoritative production-executor contract. The existing micro-live commissioning harness remains intentionally bounded and must not be scaled to the production ceiling by changing its small-dollar constants.
 
 > **Strategy tuning/research:** [V13_STRATEGY_RESEARCH.md](./V13_STRATEGY_RESEARCH.md) defines the locked champion, zero-authority challengers, prospective shadow evaluation, and the reviewed promotion process for changing opportunity thresholds without weakening execution/risk controls.

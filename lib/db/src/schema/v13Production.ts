@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { v13LiveMoneyPolicyTable } from "./v13LiveMoneyPolicy";
 import { forwardTestEvaluationTable } from "./forwardTestEvaluation";
 
@@ -35,10 +35,30 @@ export const v13ProductionAccountTable = pgTable("v13_production_account", {
   check("v13_production_account_authority", sql`NOT ${t.commissioned} OR (${t.policyId} IS NOT NULL AND ${t.commissioningDigest} IS NOT NULL AND ${t.commissioningDigest} ~ '^[0-9a-f]{64}$' AND ${t.minimumExitMicros} IS NOT NULL AND ${t.minimumExitMicros} BETWEEN 1 AND 999999)`),
 ]);
 
+// Migration additionally installs immutable source and intent triggers.
+export const strataDirectEntrySourceTable=pgTable("strata_direct_entry_source",{
+ id:text("id").primaryKey(),
+ accountId:text("account_id").notNull().references(()=>v13ProductionAccountTable.id),
+ marketTicker:text("market_ticker").notNull(),
+ crossingKey:text("crossing_key").notNull(),
+ observedAt:timestamp("observed_at",{withTimezone:true}).notNull(),
+ oldestSourceAt:timestamp("oldest_source_at",{withTimezone:true}).notNull(),
+ closesAt:timestamp("closes_at",{withTimezone:true}).notNull(),
+ evidenceBytes:text("evidence_bytes").notNull(),
+ evidenceSha256:text("evidence_sha256").notNull(),
+},t=>[
+ unique("strata_direct_entry_source_account_id_crossing_key_key").on(t.accountId,t.crossingKey),
+ unique("strata_direct_entry_source_id_account_id_crossing_key_key").on(t.id,t.accountId,t.crossingKey),
+ check("strata_direct_entry_source_check",sql`${t.crossingKey}=${t.marketTicker}||':first'`),
+ check("strata_direct_entry_source_check1",sql`${t.oldestSourceAt}<=${t.observedAt} AND ${t.observedAt}<${t.closesAt}`),
+ check("strata_direct_entry_source_check2",sql`${t.evidenceSha256}=encode(sha256(convert_to(${t.evidenceBytes},'UTF8')),'hex')`),
+]).enableRLS();
+
 export const v13ProductionIntentTable = pgTable("v13_production_intent", {
   id: text("id").primaryKey(),
   accountId: text("account_id").notNull().references(() => v13ProductionAccountTable.id),
   evaluationId: text("evaluation_id").references(() => forwardTestEvaluationTable.id),
+  directSourceId: text("direct_source_id"),
   crossingKey: text("crossing_key"),
   parentId: text("parent_id"),
   kind: text("kind").notNull(),
@@ -67,7 +87,9 @@ export const v13ProductionIntentTable = pgTable("v13_production_intent", {
   check("v13_production_intent_kind", sql`${t.kind} IN ('ENTRY','EXIT') AND ${t.side} IN ('YES','NO')`),
   check("v13_production_intent_state", sql`${t.state} IN ('PREPARED','DISPATCHED','UNKNOWN','TERMINAL','BLOCKED')`),
   check("v13_production_intent_amounts", sql`${t.reservedMicros}>=0 AND ${t.exitFeeMicros}>=0 AND ${t.filledHundredths}>=0`),
-  check("v13_production_entry_source", sql`(${t.kind}='ENTRY' AND ${t.evaluationId} IS NOT NULL AND ${t.crossingKey} IS NOT NULL AND ${t.parentId} IS NULL) OR (${t.kind}='EXIT' AND ${t.parentId} IS NOT NULL)`),
+  check("v13_production_entry_source", sql`(${t.kind}='ENTRY' AND num_nonnulls(${t.evaluationId},${t.directSourceId})=1 AND ${t.crossingKey} IS NOT NULL AND ${t.parentId} IS NULL) OR (${t.kind}='EXIT' AND ${t.parentId} IS NOT NULL AND ${t.directSourceId} IS NULL)`),
+  foreignKey({name:"v13_production_direct_source_fk",columns:[t.directSourceId,t.accountId,t.crossingKey],foreignColumns:[strataDirectEntrySourceTable.id,strataDirectEntrySourceTable.accountId,strataDirectEntrySourceTable.crossingKey]}),
+  uniqueIndex("v13_production_direct_source_unique").on(t.accountId,t.directSourceId).where(sql`${t.kind}='ENTRY'`),
 ]);
 
 export const v13ProductionPositionTable = pgTable("v13_production_position", {
