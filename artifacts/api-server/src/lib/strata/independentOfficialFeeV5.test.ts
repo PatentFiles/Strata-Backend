@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {resolve} from "node:path";
+import {fileURLToPath} from "node:url";
+// Resolve the unchanged issuer fixture from this module, independent of the test runner cwd.
+const feeFixturePath=resolve(fileURLToPath(new URL("../../../../../",import.meta.url)),"attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
 import {captureIndependentOfficialFeeV5,readIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,readPlatformOfficialFeeV5,V5_URL,V5_VERSION} from "./independentOfficialFeeV5";
 const owner="d06bc1ce-718b-42d1-8e3d-2779249661f2";
 const account="strata-account-2e3180472d83df50f13ce7f9";
@@ -85,7 +89,7 @@ test("stored bytes must have original timestamp, expiry, exact digest and source
 });
 
 test("real unchanged PDF fixture is parsed and recorded only with authenticated fixed-source HTTP 200",async()=>{
- const bytes=readFileSync("attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
+ const bytes=readFileSync(feeFixturePath);
  let persisted=false;
  const db={query:async(sql:string,args?:unknown[])=>{
    if(sql.includes("SELECT id FROM public.v13_production_account"))return {rows:[{id:account}]};
@@ -123,7 +127,7 @@ test("real unchanged PDF fixture is parsed and recorded only with authenticated 
 test("public collector needs no account or customer, honors the same global cooldown and never grants authority",async()=>{
  const old=process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED;process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED="true";
  try{
-  const bytes=readFileSync("attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
+  const bytes=readFileSync(feeFixturePath);
   let calls=0,stored:Record<string,unknown>|null=null;
   const db={query:async(sql:string,args?:unknown[])=>{
    assert.ok(!sql.includes("v13_production_account")&&!sql.includes("strata_railway_fee_retry_v5"));
