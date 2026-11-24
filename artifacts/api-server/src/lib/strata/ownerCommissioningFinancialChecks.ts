@@ -1,7 +1,9 @@
 import {inspectOwnerAccountOnboardingReadiness} from "./ownerAccountOnboardingReadiness";
 import {inspectOwnerSignedExchangeReleaseProof} from "./ownerSignedExchangeReleaseProof";
 import {inspectOwnerFiveGateReleaseAudit} from "./ownerFiveGateReleaseAudit";
-import {readOwnedApprovedFeeEvidence} from "./personalAccountActivation";
+import {readOwnedApprovedFeeEvidence,readInitialCommissioningReview,commissionOwnedAccount,COMMISSION_OWNED_ACCOUNT_CONFIRMATION,type InitialCommissioningReview} from "./personalAccountActivation";
+import {refreshOwnerCommissioningCash} from "./ownerCommissioningCashTransition";
+import {verifyOwnedHistoricalFunding} from "./ownedPilotTransfer";
 import {pool} from "@workspace/db";
 
 export const VERIFY_FINANCIAL_CHECKS="VERIFY_AND_COMMISSION_FINANCIAL_EVIDENCE_V1";
@@ -95,4 +97,107 @@ export async function verifyCommissioningFinancialChecks(owner:string,raw:unknow
   // A composite read is not an execution lease, one-use permit or START.
   return result("CHECKS_COMPLETE","recorded_checks_complete_independent_execution_preflight_still_required",checks);
  }catch{return result("BLOCKED","financial_evidence_unavailable",checks);}
+}
+
+/** V1 remains read-only. V2 explicitly authorizes recording genuinely verified
+ * existing funding and cash evidence, including first-time opening capital
+ * from one registered transfer. No transfer, recovery of a commissioned basis,
+ * policy amendment, fee grant, protective release or START is authorized. */
+export const ADVANCE_FINANCIAL_COMMISSIONING="ADVANCE_OWNED_FINANCIAL_COMMISSIONING_V2";
+export const CONFIRM_INITIAL_COMMISSIONING="CONFIRM_OWNED_INITIAL_COMMISSIONING_V2";
+type TransitionPorts=Ports&{
+ funding:(owner:string)=>ReturnType<typeof verifyOwnedHistoricalFunding>;
+ refreshCash:(owner:string)=>ReturnType<typeof refreshOwnerCommissioningCash>;
+ review:(owner:string,fee:FeeResult)=>Promise<InitialCommissioningReview|null>;
+ commission:(owner:string,review:InitialCommissioningReview,floor:number,observedAt:string)=>ReturnType<typeof commissionOwnedAccount>;
+};
+const transitionPorts:TransitionPorts={
+ status:inspectOwnerAccountOnboardingReadiness,
+ signed:id=>inspectOwnerSignedExchangeReleaseProof(id,{allowStoppedUncommissioned:true}),
+ fee:id=>readOwnedApprovedFeeEvidence(pool,id),
+ release:inspectOwnerFiveGateReleaseAudit,
+ funding:id=>verifyOwnedHistoricalFunding(pool,id),
+ refreshCash:refreshOwnerCommissioningCash,
+ review:(id,fee)=>readInitialCommissioningReview(pool,id,fee),
+ commission:(id,review,floor,observedAt)=>commissionOwnedAccount(pool,{
+  ownerUserId:id,confirmation:COMMISSION_OWNED_ACCOUNT_CONFIRMATION,
+  feeArtifactDigest:review.feeDigest,minimumExitMicros:floor,initialReview:review,signedCashObservedAt:observedAt,
+ }),
+};
+function transitionConsent(owner:string,raw:unknown){
+ if(!UUID.test(owner)||!raw||typeof raw!=="object"||Array.isArray(raw))return null;
+ const b=raw as Record<string,unknown>,keys=Object.keys(b).sort().join(",");
+ if(b.expectedOwnerId!==owner)return null;
+ if(b.confirmation===ADVANCE_FINANCIAL_COMMISSIONING&&keys==="confirmation,expectedOwnerId")
+  return {mode:"advance" as const};
+ if(b.confirmation===CONFIRM_INITIAL_COMMISSIONING&&keys==="confirmation,expectedOwnerId,minimumExitMicros,scopeDigest"&&
+  typeof b.scopeDigest==="string"&&/^[a-f0-9]{64}$/.test(b.scopeDigest)&&typeof b.minimumExitMicros==="number"&&
+  Number.isSafeInteger(b.minimumExitMicros)&&b.minimumExitMicros>=1&&b.minimumExitMicros<=999999)
+  return {mode:"commission" as const,scopeDigest:b.scopeDigest,floor:b.minimumExitMicros};
+ return null;
+}
+type EvidenceResult=Awaited<ReturnType<typeof verifyCommissioningFinancialChecks>>;
+function eligibleForCash(status:Awaited<ReturnType<Ports["status"]>>){
+ return status.ok&&status.emailVerified&&status.ownedAccountUnique&&status.credentials.allFourRecorded&&
+  status.keyInventory.connection==="saved"&&status.account.killSwitchOn&&!status.account.otherFreeze&&
+  status.openingBasis?.differenceMicros==="0";
+}
+/** Existing durable database records are the checkpoint. A bounded invocation
+ * can register historical evidence, commit a fresh cash observation, then
+ * prepare or apply the exact initial commission. A new request always reads
+ * the authoritative state first. Never replay an uncertain mutation inside
+ * this invocation or claim that a recorded approval constitutes live authority. */
+export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknown,ports:TransitionPorts=transitionPorts){
+ if(validFinancialChecksConsent(owner,raw))return verifyCommissioningFinancialChecks(owner,raw,ports);
+ const consent=transitionConsent(owner,raw);
+ let cashRecordPersisted=false,fundingRecordPersisted=false,commissioningPerformed=false;
+ const wrap=(out:EvidenceResult,review:InitialCommissioningReview|null=null)=>({
+  ...out,readOnly:false as const,version:"OWNED_FINANCIAL_COMMISSIONING_V2" as const,
+  cashRecordPersisted,fundingRecordPersisted,commissioningPerformed,commissioningReview:review,
+ });
+ const blocked=(reason:string,checks=empty())=>wrap(result("BLOCKED",reason,checks));
+ if(!consent)return {...blocked("financial_transition_exact_owner_consent_required"),ok:false as const};
+ if(process.env.NODE_ENV!=="test"&&ports!==transitionPorts)
+  return {...blocked("financial_transition_production_override_forbidden"),ok:false as const};
+ try{
+  let before=await ports.status(owner);
+  const v1={expectedOwnerId:owner,confirmation:VERIFY_FINANCIAL_CHECKS};
+  if(!eligibleForCash(before))return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+  // A previously commissioned account missing a receipt needs its genuine
+  // recovery path; the fixed initial-funding verifier cannot repair it.
+  if(!before.funding.historicalOrCompletedTransferRecorded&&!before.account.commissioned&&consent.mode==="advance"){
+   const found=await ports.funding(owner);
+   if(!found.ok||!found.historicalVerified)return wrap(result("FUNDING_REQUIRED",found.reason,empty()));
+   fundingRecordPersisted=true;before=await ports.status(owner);
+   if(!eligibleForCash(before)||!before.funding.historicalOrCompletedTransferRecorded)return blocked("financial_funding_readback_unverified");
+  }
+  if(!before.funding.historicalOrCompletedTransferRecorded||!before.policy.approvedRecord||
+    !Number.isSafeInteger(before.policy.configuredStakeCents)||Number(before.policy.configuredStakeCents)<=0)
+   return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+  // Repeat confirmations of a completed commission are readback, never a
+  // second commissioning write or a different floor/policy approval.
+  if(consent.mode==="commission"&&before.account.commissioned)
+   return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+  const cash=await ports.refreshCash(owner);
+  if(!cash.ok)return wrap(result("CASH_RECONCILIATION_REQUIRED",cash.reason,empty()));
+  cashRecordPersisted=true;
+  const feeCapture:{value:FeeResult|null}={value:null};
+  const evidence=await verifyCommissioningFinancialChecks(owner,v1,{
+   ...ports,fee:async id=>{const f=await ports.fee(id);feeCapture.value=f;return f;},
+  });
+  if(evidence.stage!=="COMMISSIONING_REQUIRED"||evidence.checks.commissioned||!feeCapture.value?.ok)
+   return wrap(evidence);
+  const review=await ports.review(owner,feeCapture.value);
+  if(!review)return blocked("initial_commissioning_review_scope_unverified",evidence.checks);
+  if(consent.mode==="advance")return wrap(evidence,review);
+  if(review.scopeDigest!==consent.scopeDigest||
+    (review.existingExitFloorMicros!==null&&review.existingExitFloorMicros!==consent.floor))
+   return blocked("initial_commissioning_review_scope_changed",evidence.checks);
+  const done=await ports.commission(owner,review,consent.floor,cash.observedAt);
+  if(!done.ok)return blocked(done.reason,evidence.checks);
+  commissioningPerformed=true;
+  // Resume through existing evidence and release checks after the real
+  // financial state transition, never grant a worker or trading permit.
+  return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+ }catch{return blocked("financial_transition_outcome_unconfirmed_refresh_records");}
 }
