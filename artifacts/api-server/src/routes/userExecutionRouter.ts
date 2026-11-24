@@ -1,4 +1,6 @@
 import {advanceOwnerFinancialCommissioning} from "../lib/strata/ownerCommissioningFinancialChecks";
+import {publicInitialRiskAction,REVIEW_INITIAL_RISK,APPROVE_INITIAL_RISK} from "../lib/strata/publicInitialRiskSetup";
+import {publicReleaseAction,REVIEW_PUBLIC_RELEASE,CONFIRM_PUBLIC_RELEASE} from "../lib/strata/publicCommissioningRelease";
 import {registeredOpeningCapitalPreview,applyRegisteredOpeningCapital,registeredOpeningCapitalOutcome,cancelRegisteredOpeningCapital} from '../lib/strata/registeredOpeningCapitalRecovery';
 import {capitalCreditPreview,applyCapitalCredit,capitalCreditOutcome,cancelCapitalCredit} from '../lib/strata/capitalCreditRepair';
 import {durableFeeReauthorizationPreview,reauthorizeDurableFeeRelease,durableFeeReauthorizationOutcome,cancelDurableFeeReauthorization} from '../lib/strata/durableFeeReauthorization';
@@ -805,7 +807,12 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     const owner=subject(res);
     if(!owner)return void res.status(401).json({error:"Unauthorized"});
     res.setHeader("Cache-Control","private, no-store");
-    const out=await advanceOwnerFinancialCommissioning(owner,req.body);
+    const confirmation=req.body?.confirmation;
+    const out=confirmation===REVIEW_INITIAL_RISK||confirmation===APPROVE_INITIAL_RISK
+      ?await publicInitialRiskAction(owner,req.body)
+      :confirmation===REVIEW_PUBLIC_RELEASE||confirmation===CONFIRM_PUBLIC_RELEASE
+        ?await publicReleaseAction(owner,req.body)
+        :await advanceOwnerFinancialCommissioning(owner,req.body);
     res.status(out.ok?200:409).json(sanitizePublic(out));
   });
   router.get("/onboarding/my-setup-readiness",async (_req,res)=>{

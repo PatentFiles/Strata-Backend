@@ -111,7 +111,7 @@ export const CONFIRM_INITIAL_COMMISSIONING="CONFIRM_OWNED_INITIAL_COMMISSIONING_
 // This is NOT owner release consent or activation eligibility. It permits
 // preparing the existing activation request and technical qualification only.
 export const PREPARE_RELEASE_QUALIFICATION="PREPARE_OWNED_RELEASE_QUALIFICATION_V1";
-async function prepareActivationRequest(owner:string){
+export async function prepareActivationRequest(owner:string){
  const refuse=(reason:string)=>({ok:false,reason,executionEnabled:false as const,killSwitchCleared:false as const,liveEnabled:false as const});
  const tx=await pool.connect();
  let committed=false,commitAttempted=false,discard:Error|undefined;

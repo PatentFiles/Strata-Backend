@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {generateKeyPairSync} from 'node:crypto';
+import {generateKeyPairSync,createHash,randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {digest,type Request} from '../v13-production/types';
 import {dedicatedSignerFingerprint} from './commissioning';
@@ -28,7 +28,10 @@ const input={ownerId:owner,targetIntentId:target,confirmation:OWNER_UNKNOWN_ACCO
 async function reset(){
  // Fresh disposable cluster only. TRUNCATE is fixture reset, not a recovery path.
  await db.query(`TRUNCATE public.v13_production_account,public.v13_live_money_policy,
-  public.financial_accounts,auth.users,vault.secrets,public.forward_test_evaluations CASCADE`);
+  public.financial_accounts,auth.users,vault.secrets,public.forward_test_evaluations,
+  private.strata_v13_execution_trace,private.strata_platform_official_fee_capture_v1 CASCADE`);
+ // The immutable trace has deliberately no account FK; prove isolation before seeding.
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_v13_execution_trace')).rows[0].n,0);
  await db.query('INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,\'owner@example.invalid\',now())',[owner]);
  await db.query('INSERT INTO vault.secrets(id) VALUES($1)',[secret]);
  await db.query('INSERT INTO public.financial_accounts(id,user_id,provider) VALUES($1,$2,\'kalshi\')',[financial,owner]);
@@ -173,6 +176,32 @@ test('all checked-in migrations, production constraints, RLS and backend-owner g
     assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n,0,table);
    const gate=(await db.query('SELECT manual_kill_switch,live_execution_enabled FROM live_execution_config')).rows[0];
    assert.deepEqual(gate,{manual_kill_switch:true,live_execution_enabled:false});
+  });
+  await t.test('shared issuer receipt preserves original timestamp across two new accounts and refuses stale or tampered source',async()=>{
+   await reset();
+   // Synthetic bytes exist ONLY in this credential-stripped disposable DB.
+   // This validates schema constraints, not the authenticity of an issuer PDF.
+   const a2=randomUUID(),f2=randomUUID(),account2='offline-shared-issuer-account-2';
+   await db.query("INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,'second@example.invalid',now())",[a2]);
+   await db.query("INSERT INTO public.financial_accounts(id,user_id,provider) VALUES($1,$2,'kalshi')",[f2,a2]);
+   await db.query("INSERT INTO public.v13_production_account(id,owner_user_id,kalshi_connection_id,subaccount,exchange_index,key_fingerprint,cash_micros,reserved_micros,initial_cash_micros,revision) VALUES($1,$2,$3,1,2,$4,0,0,0,1)",[account2,a2,f2,'b'.repeat(64)]);
+   const bytes=Buffer.from('%PDF-1.7 synthetic database fixture only '+ 'x'.repeat(160)),hash=createHash('sha256').update(bytes).digest('hex');
+   const insertSource=async(b:Buffer,supported:boolean)=>db.query("INSERT INTO private.strata_platform_official_fee_capture_v1 (canonical_url,source_kind,policy_version,content_sha256,original_bytes,byte_length,effective_date,captured_at,expires_at) SELECT 'https://kalshi.com/docs/kalshi-fee-schedule.pdf','railway_canonical_https_direct','issuer_pdf_55m_signed_api_recheck_v2',$1,$2,$3,CASE WHEN $4::boolean THEN CURRENT_DATE ELSE NULL END,at,at+interval '55 minutes' FROM (SELECT clock_timestamp() AS at) t RETURNING capture_id::text,captured_at::text,expires_at::text",[createHash('sha256').update(b).digest('hex'),b,b.length,supported]);
+   const source=(await insertSource(bytes,true)).rows[0];
+   const bind="INSERT INTO private.strata_railway_official_fee_capture_v5 (execution_account_id,platform_capture_id,canonical_url,source_kind,policy_version,content_sha256,original_bytes,byte_length,effective_date,captured_at,expires_at) SELECT $1,capture_id,canonical_url,source_kind,policy_version,content_sha256,original_bytes,byte_length,effective_date,captured_at,expires_at FROM private.strata_platform_official_fee_capture_v1 WHERE capture_id=$2::bigint RETURNING captured_at::text,expires_at::text";
+   for(const accountId of [account,account2]){
+    const r=await db.query(bind,[accountId,source.capture_id]);
+    assert.deepEqual(r.rows,[{captured_at:source.captured_at,expires_at:source.expires_at}]);
+   }
+   await assert.rejects(db.query(bind,[account,source.capture_id]),{code:'23505'});
+   await assert.rejects(db.query("UPDATE private.strata_platform_official_fee_capture_v1 SET effective_date=CURRENT_DATE WHERE capture_id=$1",[source.capture_id]),/immutable issuer evidence/);
+   const changed=Buffer.from('%PDF-1.7 unsupported synthetic publication '+ 'y'.repeat(160));
+   const next=(await insertSource(changed,false)).rows[0];
+   await assert.rejects(db.query(bind,[account,source.capture_id]),/current exact platform issuer observation required/);
+   await assert.rejects(db.query(bind,[account,next.capture_id]));
+   for(const role of ['anon','authenticated','service_role'])assert.equal((await db.query("SELECT has_table_privilege($1,'private.strata_platform_official_fee_capture_v1','SELECT') AS allowed",[role])).rows[0].allowed,false);
+   assert.equal((await db.query("SELECT count(*)::int AS n FROM private.strata_railway_official_fee_capture_v5 WHERE content_sha256=$1",[hash])).rows[0].n,2);
+   console.info('PUBLIC_ISSUER_NATIVE_RESULT',{accounts:2,originalTimestampPreserved:true,duplicateRefused:true,staleSourceRefused:true,unsupportedSourceRefused:true});
   });
   await t.test('actual durable KILL and ledger reconcile losing settlement under complete application constraints',async()=>{
    await reset();const held=await frozen(),r=recovery();const result=await r.recover(held);

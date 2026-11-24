@@ -3,7 +3,8 @@ import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
-import { readIndependentOfficialFeeV5 } from "./strata/independentOfficialFeeV5";
+import { readIndependentOfficialFeeV5,readPlatformOfficialFeeV5,capturePlatformOfficialFeeV5 } from "./strata/independentOfficialFeeV5";
+import {publicSelfServiceRequested} from "./strata/ownerSelfServiceEligibility";
 export { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 // Capture the real transport before any tests can monkeypatch global fetch.
@@ -333,7 +334,7 @@ export async function readUnapprovedOfficialFeePublication(
    // Missing independent evidence may use the ordinary existing Edge path.
    // A present but corrupted or unverifiable independent artifact is a
    // security failure, never an excuse to fall back to another origin.
-   if(proof.reason!=="v5_genuine_issuer_capture_missing")
+   if(publicSelfServiceRequested()||proof.reason!=="v5_genuine_issuer_capture_missing")
      return {ok:false,reason:proof.reason};
  }
 
@@ -873,6 +874,20 @@ export async function establishOfficialFeeDigest(
 ): Promise<EstablishedOfficialFeeDigest> {
   const running = officialFeeInFlight.get(fetchImpl);
   if (running) return running;
+  // Public V5 shares genuine publisher bytes, not owner monetary authority.
+  // The strict reviewed parser and current market API proof remain required.
+  if(publicSelfServiceRequested()&&fetchImpl===PRODUCTION_FEE_FETCH&&globalThis.fetch===PRODUCTION_FEE_FETCH){
+    const task:Promise<EstablishedOfficialFeeDigest>=(async():Promise<EstablishedOfficialFeeDigest>=>{
+      let proof=await readPlatformOfficialFeeV5();
+      if(!proof.ok){const captured=await capturePlatformOfficialFeeV5();if(captured.ok)proof=await readPlatformOfficialFeeV5();}
+      if(!proof.ok)return {ok:false,reason:proof.reason,diagnostic:{...EMPTY_FEE_FETCH,retryAt:proof.retryAt}};
+      const verified=await verifyOfficialFeePdfBytes(proof.bytes);
+      const fresh=await readPlatformOfficialFeeV5();
+      if(!verified.ok||verified.digest!==proof.digest||!fresh.ok||fresh.captureId!==proof.captureId)return {ok:false,reason:"v5_platform_monetary_terms_unverified",diagnostic:{...EMPTY_FEE_FETCH}};
+      return {ok:true,digest:verified.digest,diagnostic:{...EMPTY_FEE_FETCH,httpStatus:200,contentType:"application/pdf",finalOrigin:"https://kalshi.com",finalPathname:"/docs/kalshi-fee-schedule.pdf"}};
+    })().finally(()=>{officialFeeInFlight.delete(fetchImpl);});
+    officialFeeInFlight.set(fetchImpl,task);return task;
+  }
 
   const retryAt = officialFee429CooldownUntil.get(fetchImpl) ?? 0;
   const now = nowMs();
