@@ -217,6 +217,24 @@ test("independent market crossing reaches the existing isolated executor without
  const exit=(await pool.query("SELECT id,decision FROM v13_production_intent WHERE kind='EXIT'")).rows[0];
  assert.ok(exit.decision.ownedEvaluation.sourceDirectHeldId);assert.equal(exit.decision.ownedEvaluation.sourcePaperEvaluationId,undefined);
  await f.executor.dispatch(exit.id);assert.equal(f.exchange.posts.length,2);
+ // A restarted producer cannot reuse the earlier producer's custody or
+ // invent a velocity. Only consecutive new held samples can trigger momentum.
+ const restarted=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readHeldExact(pool,exit.decision.ownedEvaluation.sourceDirectHeldId,rows[0].id,f.exchange.now),null);
+ f.exchange.now+=1000;btc=100030;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ f.exchange.now+=1000;btc=100025;
+ const momentum=await restarted.captureHeld(pool,rows[0].id);assert.ok(momentum);
+ const momentumSource=await restarted.readHeldExact(pool,momentum,rows[0].id,f.exchange.now);
+ assert.equal(momentumSource?.signed_buffer,25);assert.equal(momentumSource?.velocity,-300);
+ // A long gap resets momentum instead of deriving a sell from stale samples.
+ f.exchange.now+=5001;btc=100020;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ // The exact held market's closure cannot become a new order or market.
+ f.exchange.now=close;btc=99980;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
  assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
  await invariant(f.ledger);
 });

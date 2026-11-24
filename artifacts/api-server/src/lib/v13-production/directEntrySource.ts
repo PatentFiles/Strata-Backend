@@ -30,6 +30,14 @@ export type DirectEvaluation={
 };
 type Point={price:number;provider:number;received:number};
 type Prior={ticker:string;target:number;open:number;close:number;point:Point};
+// Match champion research's 30-second receipt-time velocity, using only
+// this producer's own validated, consecutive observations.
+function observedVelocity(points:Point[]):number|null{
+ const first=points[0],last=points.at(-1);
+ if(!first||!last||last.received<=first.received)return null;
+ const velocity=(last.price-first.price)/((last.received-first.received)/60000);
+ return finite(velocity)?velocity:null;
+}
 type Quote={timestampAuthority:"LOCAL_RECEIPT_ONLY";started:number;headers:number;completed:number;
  digest:string;yesBid:number;noBid:number};
 type Unsigned={version:1;account:string;owner:string|null;ticker:string;evaluation:string;oldest:number;observed:number;closesAt:number;
@@ -85,6 +93,8 @@ export class DirectEntrySource{
  readonly #scope:DirectScope;
  readonly #environment:Environment;
  #prior:Prior|null=null;#points:Point[]=[];#running=false;#lastClock=-1;
+ #heldPrior:(Prior&{positionId:string})|null=null;#heldPoints:Point[]=[];
+ #clearHeld(){this.#heldPrior=null;this.#heldPoints=[];}
  private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number){
   requireProof(typeof scope.accountId==="string"&&scope.accountId.length>0&&scope.accountId.length<=128&&
    (scope.ownerId===null||UUID.test(scope.ownerId)),"direct_entry_scope_invalid");
@@ -134,11 +144,10 @@ export class DirectEntrySource{
    const continuous=!!prior&&prior.ticker===market.ticker&&provider>prior.point.provider&&
     received>prior.point.received&&provider-prior.point.provider<=AGE&&received-prior.point.received<=AGE;
    if(!continuous)this.#points=[];
-   this.#points=[...this.#points.filter(p=>provider-p.provider<=30000),point].slice(-180);
+   this.#points=[...this.#points.filter(p=>received-p.received<=30000),point].slice(-180);
    this.#prior={ticker:market.ticker,target,open,close,point};
    if(!continuous||!prior)return null;
-   const oldestPoint=this.#points[0]!,minutes=(provider-oldestPoint.provider)/60000;
-   const velocity=minutes>0?(btc.price-oldestPoint.price)/minutes:null,previousBuffer=prior.point.price-target;
+   const velocity=observedVelocity(this.#points),previousBuffer=prior.point.price-target;
    const input={marketTicker:market.ticker,btcPrice:btc.price,target,previousBuffer,velocity,
     freshness:"current" as const,position:null};
    if(!needsV13EntryPrice(input)||velocity===null||!this.feeds.book)return null;
@@ -223,15 +232,29 @@ export class DirectEntrySource{
   try{
    await this.#assertDatabase(db);
    const pos=await this.#heldPosition(db,parentId);
-   if(!pos||!TICKER.test(pos.market)||!["YES","NO"].includes(pos.side))return null;
+   if(!pos||!TICKER.test(pos.market)||!["YES","NO"].includes(pos.side)){this.#clearHeld();return null;}
    const cycle=this.#now(),deadline=AbortSignal.timeout(AGE);
    const {btc,market}=await readForwardCycleFeeds(this.feeds,pos.market,signal,deadline);
    const now=this.#now(),provider=btc.providerAt.getTime(),received=btc.receivedAt.getTime(),fetched=market.fetchedAt.getTime(),
     open=market.startsAt?.getTime(),close=market.endsAt?.getTime();
-   requireProof(market.ticker===pos.market&&time(open)&&time(close)&&close-open===900000&&open<=cycle&&now<close&&
-    ["open","active"].includes(market.status)&&market.result===null&&finite(market.target)&&market.target>0&&
-    finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&provider<=received&&cycle<=received&&cycle<=fetched&&
+   requireProof(market.ticker===pos.market&&time(open)&&time(close)&&close-open===900000&&open<=cycle&&
+    time(fetched)&&cycle<=fetched&&fetched<=now&&now-fetched<=AGE,"direct_held_market_or_feed_invalid");
+   // Closure is not a strategy exit. Leave the held quantity intact for
+   // authenticated settlement reconciliation; never switch to a new ticker.
+   if(now>=close||market.result!==null){this.#clearHeld();return null;}
+   requireProof(["open","active"].includes(market.status)&&finite(market.target)&&market.target>0&&
+    finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&provider<=received&&cycle<=received&&
     [cycle,provider,received,fetched].every(x=>time(x)&&x<=now&&now-x<=AGE),"direct_held_market_or_feed_invalid");
+   const point={price:btc.price,provider,received},prior=this.#heldPrior,target=market.target;
+   if(prior&&prior.positionId===parentId&&prior.ticker===pos.market&&
+     (prior.target!==target||prior.open!==open||prior.close!==close))throw Error("direct_held_market_identity_changed");
+   const continuous=!!prior&&prior.positionId===parentId&&prior.ticker===pos.market&&
+    provider>prior.point.provider&&received>prior.point.received&&
+    provider-prior.point.provider<=AGE&&received-prior.point.received<=AGE;
+   if(!continuous)this.#heldPoints=[];
+   this.#heldPoints=[...this.#heldPoints.filter(p=>received-p.received<=30000),point].slice(-180);
+   this.#heldPrior={positionId:parentId,ticker:pos.market,target,open,close,point};
+   const velocity=observedVelocity(this.#heldPoints);
    requireProof(this.feeds.book,"direct_held_book_missing");
    const book=await this.feeds.book(pos.market,signal?AbortSignal.any([signal,deadline]):deadline);
    const observed=this.#now();deadline.throwIfAborted();signal?.throwIfAborted();
@@ -240,7 +263,7 @@ export class DirectEntrySource{
    const up=(10000-quote.noBid)/10000,down=(10000-quote.yesBid)/10000;
    // A first held observation cannot infer historical velocity. The approved
    // wrong-side recross rule remains eligible from current evidence alone.
-   const input={marketTicker:pos.market,btcPrice:btc.price,target:market.target,previousBuffer:null,velocity:null,
+   const input={marketTicker:pos.market,btcPrice:btc.price,target:market.target,previousBuffer:null,velocity,
     upOffer:up,downOffer:down,freshness:"current" as const,position:{status:"open" as const,direction:pos.side==="YES"?"up" as const:"down" as const}};
    const decision=evaluateV13Strategy(input);
    if(decision.signal!=="EXIT"||!decision.positionExitReason)return null;
@@ -248,7 +271,7 @@ export class DirectEntrySource{
     position_id:parentId,account_id:this.#scope.accountId,market_ticker:pos.market,side:pos.side,quantity_hundredths:pos.quantity_hundredths,
     strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
     evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_close_ms:close,
-    btc_price:btc.price,target:market.target,signed_buffer:btc.price-market.target,velocity:null,up_offer:up,down_offer:down,feed_freshness:"current",
+    btc_price:btc.price,target:market.target,signed_buffer:btc.price-market.target,velocity,up_offer:up,down_offer:down,feed_freshness:"current",
     btc_provider_age_ms:observed-provider,btc_receive_age_ms:observed-received,market_age_ms:observed-fetched};
    const unsigned={version:1 as const,account:this.#scope.accountId,owner:this.#scope.ownerId,source,quote};
    const receipt:HeldReceipt={...unsigned,producerSeal:this.#seal(JSON.stringify(unsigned))};
@@ -259,7 +282,7 @@ export class DirectEntrySource{
     "VALUES($1,$2,'DIRECT_HELD_SIMULATION_V1',$3,$4)",
     [id,this.#scope.accountId,JSON.stringify({bytes}),sha(bytes)]);
    return await this.readHeldExact(db,id,parentId,this.#now())?id:null;
-  }finally{this.#running=false;}
+  }catch(e){this.#clearHeld();throw e;}finally{this.#running=false;}
  }
  async readHeldExact(db:Query,id:string,parentId:string,now:number):Promise<DirectHeldEvaluation|null>{
   this.assertSimulationBinding(this.#scope);
