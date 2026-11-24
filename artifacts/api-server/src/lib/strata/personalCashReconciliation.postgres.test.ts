@@ -67,7 +67,7 @@ async function receipt(db: CredentialFixtureDb, owner = OWNER, cents = 2500) {
     ($1,$2,$3,$4,0,1,2,'completed',0,$4,'synthetic-receipt-1',$5,$5)`,
     [ACCOUNT,owner,CONNECTION,cents,FUNDING]);
 }
-async function account(db: CredentialFixtureDb) {
+async function account(db: CredentialFixtureDb): Promise<Record<string, unknown>> {
   const r = await db.query("SELECT * FROM public.v13_production_account WHERE id=$1",[ACCOUNT]);
   const a=r.rows[0]!;
   return {...a,cash_micros:String(a.cash_micros),initial_cash_micros:String(a.initial_cash_micros),reserved_micros:String(a.reserved_micros)};
