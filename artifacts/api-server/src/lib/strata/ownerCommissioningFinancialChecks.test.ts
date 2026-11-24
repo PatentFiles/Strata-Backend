@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS,advanceOwnerFinancialCommissioning,ADVANCE_FINANCIAL_COMMISSIONING,CONFIRM_INITIAL_COMMISSIONING} from "./ownerCommissioningFinancialChecks";
+import {verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS,advanceOwnerFinancialCommissioning,ADVANCE_FINANCIAL_COMMISSIONING,CONFIRM_INITIAL_COMMISSIONING,PREPARE_RELEASE_QUALIFICATION} from "./ownerCommissioningFinancialChecks";
 const owner="11111111-1111-4111-8111-111111111111";
 const consent={expectedOwnerId:owner,confirmation:VERIFY_FINANCIAL_CHECKS};
 function fixture(){
@@ -138,4 +138,24 @@ test("V2 can renew already-authorized runtime fee evidence without making V1 wri
  assert.equal(v2.stage,"CHECKS_COMPLETE");assert.equal(v2.checks.approvedFeeSourceVerified,true);
  assert.equal(f.calls.filter(c=>c==="runtime-fee").length,1);assert.ok(!f.calls.includes("fee"));
  assert.equal(v2.tradingAuthorized,false);assert.equal(v2.workerStarted,false);assert.equal(v2.ordersSubmitted,false);
+});
+
+test("explicit preparation records the activation request and technical qualification without granting live authority",async()=>{
+ const f=transitionFixture();f.status.account.commissioned=true;f.status.funding.historicalOrCompletedTransferRecorded=true;
+ f.audit.cash.persistedReconciliationFresh=true;f.audit.exit.protectiveRelease.recordPresent=false;
+ const ports={...f.ports,prepareActivation:async(id:string)=>{assert.equal(id,owner);f.calls.push("prepare-activation");return {ok:true,reason:"activation_requested"};},
+ qualify:async(id:string)=>{assert.equal(id,owner);f.calls.push("qualify");return {ok:true,qualificationId:owner,expiresAt:new Date(Date.now()+60000).toISOString()};}};
+ for(const body of [consent,advanceConsent,{...advanceConsent,confirmation:PREPARE_RELEASE_QUALIFICATION,expectedOwnerId:"22222222-2222-4222-8222-222222222222"},{...advanceConsent,confirmation:PREPARE_RELEASE_QUALIFICATION,start:true}]){
+  f.calls.length=0;await advanceOwnerFinancialCommissioning(owner,body,ports as never);
+  assert.ok(!f.calls.includes("prepare-activation"));assert.ok(!f.calls.includes("qualify"));
+ }
+ f.calls.length=0;
+ const out=await advanceOwnerFinancialCommissioning(owner,{expectedOwnerId:owner,confirmation:PREPARE_RELEASE_QUALIFICATION},ports as never);
+ assert.equal(out.stage,"RELEASE_REQUIRED");assert.ok("qualificationPrepared" in out&&out.qualificationPrepared);assert.ok("activationRequestRecorded" in out&&out.activationRequestRecorded);
+ assert.deepEqual(f.calls.slice(-2),["prepare-activation","qualify"]);
+ assert.ok(!f.calls.includes("cash"));assert.ok(!f.calls.includes("commission"));
+ assert.equal(out.tradingAuthorized,false);assert.equal(out.workerStarted,false);assert.equal(out.ordersSubmitted,false);
+ f.calls.length=0;f.signed.exchangeCashMatchesLedger=false;
+ const blocked=await advanceOwnerFinancialCommissioning(owner,{expectedOwnerId:owner,confirmation:PREPARE_RELEASE_QUALIFICATION},ports as never);
+ assert.equal(blocked.stage,"CASH_RECONCILIATION_REQUIRED");assert.ok(!f.calls.includes("prepare-activation"));assert.ok(!f.calls.includes("qualify"));
 });

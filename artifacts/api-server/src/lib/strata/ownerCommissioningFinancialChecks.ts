@@ -1,10 +1,11 @@
 import {inspectOwnerAccountOnboardingReadiness} from "./ownerAccountOnboardingReadiness";
 import {inspectOwnerSignedExchangeReleaseProof} from "./ownerSignedExchangeReleaseProof";
 import {inspectOwnerFiveGateReleaseAudit} from "./ownerFiveGateReleaseAudit";
-import {readOwnedApprovedFeeEvidence,readOwnedRuntimeFeeEvidence,readInitialCommissioningReview,commissionOwnedAccount,COMMISSION_OWNED_ACCOUNT_CONFIRMATION,type InitialCommissioningReview} from "./personalAccountActivation";
+import {readOwnedApprovedFeeEvidence,readOwnedRuntimeFeeEvidence,readInitialCommissioningReview,commissionOwnedAccount,COMMISSION_OWNED_ACCOUNT_CONFIRMATION,requestOwnedAccountActivation,REQUEST_OWNED_ACTIVATION_CONFIRMATION,type InitialCommissioningReview} from "./personalAccountActivation";
 import {refreshOwnerCommissioningCash} from "./ownerCommissioningCashTransition";
 import {verifyOwnedHistoricalFunding} from "./ownedPilotTransfer";
 import {pool} from "@workspace/db";
+import {qualifyProtectiveRelease} from "./inAppProtectiveRelease";
 
 export const VERIFY_FINANCIAL_CHECKS="VERIFY_AND_COMMISSION_FINANCIAL_EVIDENCE_V1";
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -105,8 +106,45 @@ export async function verifyCommissioningFinancialChecks(owner:string,raw:unknow
  * policy amendment, fee grant, protective release or START is authorized. */
 export const ADVANCE_FINANCIAL_COMMISSIONING="ADVANCE_OWNED_FINANCIAL_COMMISSIONING_V2";
 export const CONFIRM_INITIAL_COMMISSIONING="CONFIRM_OWNED_INITIAL_COMMISSIONING_V2";
+// This is NOT owner release consent or activation eligibility. It permits
+// preparing the existing activation request and technical qualification only.
+export const PREPARE_RELEASE_QUALIFICATION="PREPARE_OWNED_RELEASE_QUALIFICATION_V1";
+async function prepareActivationRequest(owner:string){
+ const refuse=(reason:string)=>({ok:false,reason,executionEnabled:false as const,killSwitchCleared:false as const,liveEnabled:false as const});
+ const tx=await pool.connect();
+ let committed=false,commitAttempted=false,discard:Error|undefined;
+ try{
+  await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  await tx.query("SET LOCAL lock_timeout='1500ms'");
+  await tx.query("SET LOCAL statement_timeout='12000ms'");
+  const locked=await tx.query(`SELECT a.id FROM public.v13_production_account a
+   WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
+   AND a.commissioned=true AND a.execution_enabled=false AND a.kill_switch=true
+   AND a.blocked_reason IS NULL AND a.reserved_micros=0 AND a.minimum_exit_micros=10000
+   AND a.cash_precision_verified=true AND a.reconciled_at BETWEEN now()-interval '15 minutes' AND now()
+   AND a.cash_micros=a.initial_cash_micros+COALESCE((SELECT SUM(e.cash_delta_micros) FROM public.v13_production_event e WHERE e.account_id=a.id),0)
+   FOR UPDATE OF a`,[owner]);
+  if(locked.rows.length!==1)return refuse("stopped_commissioned_release_scope_required");
+  await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[locked.rows[0].id]);
+  const active=await tx.query(`SELECT 1 FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
+   AND (owner_user_id IS DISTINCT FROM $2::uuid OR state NOT IN ('released','killed') OR arm_requested IS DISTINCT FROM false)`,[locked.rows[0].id,owner]);
+  if(active.rows.length)return refuse("release_preparation_worker_not_stopped");
+  const recorded=await requestOwnedAccountActivation(tx,{ownerUserId:owner,confirmation:REQUEST_OWNED_ACTIVATION_CONFIRMATION});
+  if(!recorded.ok)return recorded;
+  commitAttempted=true;await tx.query("COMMIT");committed=true;
+  return recorded;
+ }catch{
+  if(commitAttempted){discard=new Error("release_preparation_commit_unknown");return refuse("release_preparation_outcome_unknown");}
+  return refuse("release_preparation_account_request_unavailable");
+ }finally{
+  if(!committed&&!discard){try{await tx.query("ROLLBACK");}catch{discard=new Error("release_preparation_rollback_failed");}}
+  tx.release(discard);
+ }
+}
 type TransitionPorts=Ports&{
  runtimeFee?:(owner:string)=>Promise<FeeResult>;
+ prepareActivation?:(owner:string)=>ReturnType<typeof prepareActivationRequest>;
+ qualify?:(owner:string)=>ReturnType<typeof qualifyProtectiveRelease>;
  funding:(owner:string)=>ReturnType<typeof verifyOwnedHistoricalFunding>;
  refreshCash:(owner:string)=>ReturnType<typeof refreshOwnerCommissioningCash>;
  review:(owner:string,fee:FeeResult)=>Promise<InitialCommissioningReview|null>;
@@ -114,6 +152,8 @@ type TransitionPorts=Ports&{
 };
 const transitionPorts:TransitionPorts={
  runtimeFee:id=>readOwnedRuntimeFeeEvidence(pool,id),
+ prepareActivation:prepareActivationRequest,
+ qualify:id=>qualifyProtectiveRelease(id),
  status:inspectOwnerAccountOnboardingReadiness,
  signed:id=>inspectOwnerSignedExchangeReleaseProof(id,{allowStoppedUncommissioned:true}),
  fee:id=>readOwnedApprovedFeeEvidence(pool,id),
@@ -130,6 +170,7 @@ function transitionConsent(owner:string,raw:unknown){
  if(!UUID.test(owner)||!raw||typeof raw!=="object"||Array.isArray(raw))return null;
  const b=raw as Record<string,unknown>,keys=Object.keys(b).sort().join(",");
  if(b.expectedOwnerId!==owner)return null;
+ if(b.confirmation===PREPARE_RELEASE_QUALIFICATION&&keys==="confirmation,expectedOwnerId")return {mode:"prepare" as const};
  if(b.confirmation===ADVANCE_FINANCIAL_COMMISSIONING&&keys==="confirmation,expectedOwnerId")
   return {mode:"advance" as const};
  if(b.confirmation===CONFIRM_INITIAL_COMMISSIONING&&keys==="confirmation,expectedOwnerId,minimumExitMicros,scopeDigest"&&
@@ -152,10 +193,11 @@ function eligibleForCash(status:Awaited<ReturnType<Ports["status"]>>){
 export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknown,ports:TransitionPorts=transitionPorts){
  if(validFinancialChecksConsent(owner,raw))return verifyCommissioningFinancialChecks(owner,raw,ports);
  const consent=transitionConsent(owner,raw);
- let cashRecordPersisted=false,fundingRecordPersisted=false,commissioningPerformed=false;
+ let cashRecordPersisted=false,fundingRecordPersisted=false,commissioningPerformed=false,activationRequestRecorded=false,qualificationPrepared=false;
  const wrap=(out:EvidenceResult,review:InitialCommissioningReview|null=null)=>({
   ...out,readOnly:false as const,version:"OWNED_FINANCIAL_COMMISSIONING_V2" as const,
   cashRecordPersisted,fundingRecordPersisted,commissioningPerformed,commissioningReview:review,
+  ...(consent?.mode==="prepare"?{activationRequestRecorded,qualificationPrepared}:{}),
  });
  const blocked=(reason:string,checks=empty())=>wrap(result("BLOCKED",reason,checks));
  if(!consent)return {...blocked("financial_transition_exact_owner_consent_required"),ok:false as const};
@@ -165,6 +207,26 @@ export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknow
   let before=await ports.status(owner);
   const v1={expectedOwnerId:owner,confirmation:VERIFY_FINANCIAL_CHECKS};
   if(!eligibleForCash(before))return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+  if(consent.mode==="prepare"){
+   // An explicit preparation request never performs funding, reconciliation
+   // writes, initial commission, repair, owner activation or continuous grant.
+   if(!before.account.commissioned||before.account.provisionalHold)
+    return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+   const evidence=await verifyCommissioningFinancialChecks(owner,v1,{...ports,fee:ports.runtimeFee??ports.fee});
+   if(evidence.stage!=="RELEASE_REQUIRED"&&evidence.stage!=="CHECKS_COMPLETE")return wrap(evidence);
+   if(!ports.prepareActivation||!ports.qualify)return blocked("release_preparation_unavailable",evidence.checks);
+   const requested=await ports.prepareActivation(owner);
+   if(!requested.ok)return wrap(result("RELEASE_REQUIRED",requested.reason,evidence.checks));
+   activationRequestRecorded=true;
+   const qualification=await ports.qualify(owner);
+   if(!qualification.ok||!("qualificationId" in qualification)||!UUID.test(String(qualification.qualificationId))||
+    !Number.isFinite(Date.parse(String(qualification.expiresAt)))||Date.parse(String(qualification.expiresAt))<=Date.now())
+    return wrap(result("RELEASE_REQUIRED",qualification.ok?"release_qualification_readback_unverified":qualification.reason,evidence.checks));
+   qualificationPrepared=true;
+   // This records technical proof, NOT release permission. Owner-specific
+   // approvals, final execution preflight and explicit START remain separate.
+   return wrap(result("RELEASE_REQUIRED","signed_protective_qualification_prepared_owner_release_required",evidence.checks));
+  }
   // A previously commissioned account missing a receipt needs its genuine
   // recovery path; the fixed initial-funding verifier cannot repair it.
   if(!before.funding.historicalOrCompletedTransferRecorded&&!before.account.commissioned&&consent.mode==="advance"){
