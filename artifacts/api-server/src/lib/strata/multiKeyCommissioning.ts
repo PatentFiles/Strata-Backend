@@ -20,7 +20,7 @@ export function parseMultiKeyInput(raw:unknown,owner:string):MultiKeyInput|null{
     Object.keys(raw).some(k=>!["expectedOwnerId","confirmation","primary","credentials"].includes(k))||
     !Array.isArray(raw.credentials)||raw.credentials.length>4)return null;
  const primary=raw.primary===undefined?undefined:key(raw.primary);
- if(raw.primary!==undefined&&!primary)return null;
+ if(raw.primary!==undefined&&(!primary||!record(raw.primary)||Object.keys(raw.primary).some(k=>k!=="apiKeyId"&&k!=="privateKey")))return null;
  const credentials: Array<KeyInput&{role:SetupRole}>=[];
  for(const item of raw.credentials){
   const parsed=key(item);
@@ -37,5 +37,7 @@ export function parseMultiKeyInput(raw:unknown,owner:string):MultiKeyInput|null{
 export function inventoryContainsKeys(payload:unknown,ids:readonly string[]):boolean{
  if(!record(payload)||!Array.isArray(payload.api_keys))return false;
  const rows=payload.api_keys;
- return new Set(ids).size===ids.length&&ids.every(id=>rows.filter(v=>record(v)&&v.api_key_id===id).length===1);
+ return rows.every(v=>record(v)&&typeof v.api_key_id==="string"&&v.api_key_id.length>0)&&
+   new Set(rows.map(v=>(v as Record<string,unknown>).api_key_id)).size===rows.length&&
+   new Set(ids).size===ids.length&&ids.every(id=>rows.some(v=>record(v)&&v.api_key_id===id));
 }
