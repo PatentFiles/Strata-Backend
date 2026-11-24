@@ -170,6 +170,20 @@ test("cross-replica competing attempt IDs cannot double-credit the same receipt"
  const results=await Promise.all([applyRegisteredOpeningCapital(OWNER,body(scope),f.deps),applyRegisteredOpeningCapital(OWNER,body(scope),f.deps)]);
  assert.equal(results.filter(r=>r.ok).length,1);await expectRecorded(f);
 });
+
+test("registered preview identifies budget and database stages without leaking sensitive errors",async t=>{
+ const f=await fixture(t);if(!f)return;
+ const before=await state(f.db);
+ const budget=await registeredOpeningCapitalPreview(OWNER,{...f.deps,get:async()=>{throw Error('kalshi_member_budget_unavailable');}});
+ assert.equal(budget.ok,false);
+ if(!budget.ok)assert.deepEqual(budget.diagnostic,{stage:'transfer_history',failureCode:'kalshi_member_budget_unavailable'});
+ const db={...f.native,query:async()=>{throw Object.assign(Error('private SQL and account details'),{code:'42501',detail:'sensitive'});}};
+ const denied=await registeredOpeningCapitalPreview(OWNER,{...f.deps,db});
+ assert.equal(denied.ok,false);
+ if(!denied.ok)assert.deepEqual(denied.diagnostic,{stage:'local_ledger',failureCode:'capital_internal_failure',sqlState:'42501'});
+ assert.equal(JSON.stringify(denied).includes('sensitive'),false);
+ assert.deepEqual(await state(f.db),before);
+});
 test("wrong receipt, incomplete signed history, deposits, withdrawals and local exposure are refused",async t=>{
  const f=await fixture(t);if(!f)return;
  const scope=await preview(f.deps);

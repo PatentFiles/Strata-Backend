@@ -8,6 +8,9 @@ on:
       - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
       - 'artifacts/api-server/src/lib/strata/personalExecution.test.ts'
       - 'artifacts/api-server/src/lib/strata/registeredOpeningCapital*'
+      - 'artifacts/api-server/src/lib/strata/kalshiMemberReadBudget*'
+      - 'artifacts/api-server/src/lib/strata/capitalCreditDiagnostic*'
+      - 'artifacts/api-server/src/lib/kalshiAccountClient.ts'
       - 'artifacts/api-server/src/lib/strata/ownerCommissioningFinancialChecks*'
       - 'artifacts/api-server/src/lib/strata/ownerSelfServiceEligibility*'
       - 'artifacts/api-server/src/lib/v13-production/liveEntryContainment*'
@@ -88,3 +91,9 @@ jobs:
           node --test dist/public-commissioning/*.test.cjs
       - name: Full workspace typecheck
         run: pnpm run typecheck
+      - name: Public owner budget binding and unchanged quota fences
+        working-directory: artifacts/api-server
+        run: |
+          pnpm run test:member-read-budget
+          pnpm exec esbuild src/lib/strata/kalshiMemberReadBudget.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiMemberReadBudget.postgres.test.cjs --external:pg-native
+          node --test dist/kalshiMemberReadBudget.postgres.test.cjs

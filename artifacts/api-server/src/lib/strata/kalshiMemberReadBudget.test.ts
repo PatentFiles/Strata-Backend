@@ -50,3 +50,24 @@ test('opaque tickets single use, deadline, cancellation, exact batch scope and c
  let lost=0;await assert.rejects(withMemberHistoryCredits(fp,new AbortController().signal,async()=>{lost++;},async()=>{throw Error('lost_ack');}),/lost_ack/);assert.equal(lost,0);
  delete process.env.STRATA_MEMBER_READ_BUDGET;
 });
+
+test('public scope ignores legacy tuple but rejects mode drift at admission and dispatch',async()=>{
+ const {dispatchMemberRead}=await import('./kalshiMemberReadBudget');enabled();
+ process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED='true';
+ delete process.env.STRATA_MEMBER_BUDGET_ACCOUNT_ID;delete process.env.STRATA_MEMBER_BUDGET_OWNER_ID;delete process.env.STRATA_MEMBER_BUDGET_CONNECTION_ID;
+ let sends=0;
+ const yes=async(_sql:string,args:unknown[])=>{assert.deepEqual(args,[null,owner,null,fp,false,10]);return {rows:[{admitted:true,binding_verified:true}]};};
+ const request={host:'https://external-api.kalshi.com',query:'',ownerId:owner};
+ try{
+  const ticket=await reserveMemberRead(path,fp,yes,undefined,request);
+  process.env.STRATA_MEMBER_BUDGET_ACCOUNT_ID='irrelevant-legacy-account';
+  dispatchMemberRead(ticket,()=>sends++);assert.equal(sends,1);
+  await assert.rejects(reserveMemberRead(path,fp,async(sql,args)=>{const r=await yes(sql,args);process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED='false';return r;},undefined,request),/configuration_changed/);
+  process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED='true';
+  const stale=await reserveMemberRead(path,fp,yes,undefined,request);
+  process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED='false';
+  assert.throws(()=>dispatchMemberRead(stale,()=>sends++),/configuration_changed/);assert.equal(sends,1);
+  process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED='invalid';
+  await assert.rejects(reserveMemberRead(path,fp,yes,undefined,request),/configuration_invalid/);
+ }finally{delete process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED;delete process.env.STRATA_MEMBER_READ_BUDGET;}
+});

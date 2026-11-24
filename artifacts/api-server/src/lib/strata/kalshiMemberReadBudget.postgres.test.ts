@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';
-import {generateKeyPairSync} from 'node:crypto';import {getScopedKalshiJson} from '../kalshiAccountClient';import {dedicatedSignerFingerprint} from './commissioning';
+import {generateKeyPairSync,constants,verify} from 'node:crypto';import {getScopedKalshiJson} from '../kalshiAccountClient';import {dedicatedSignerFingerprint} from './commissioning';
 import {readOwnedKalshiFeeds} from './personalExchangeRead';
 import {pool} from '@workspace/db';import {reserveMemberRead,withMemberHistoryCredits,dispatchMemberRead,MEMBER_READ_BINDING_SQL} from './kalshiMemberReadBudget';
 const owner='11111111-1111-1111-1111-111111111111',connection='22222222-2222-2222-2222-222222222222',fin='33333333-3333-3333-3333-333333333333';
@@ -7,7 +7,7 @@ test('shared member admission: cold start, roles, replicas, scope, no refunds an
  assert.match(process.env.DATABASE_URL??'',/@(?:127\.0\.0\.1|localhost):/);
  await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
  DROP TABLE IF EXISTS public.v13_production_account, public.financial_accounts, private.provider_connections, private.kalshi_connection_credentials CASCADE;
- CREATE TABLE public.v13_production_account(id text,owner_user_id uuid,kalshi_connection_id uuid,subaccount integer,exchange_index integer);
+ CREATE TABLE public.v13_production_account(id text,owner_user_id uuid,kalshi_connection_id uuid,subaccount integer,exchange_index integer,key_fingerprint text);
  CREATE TABLE public.financial_accounts(id uuid,user_id uuid,provider text);
  CREATE TABLE private.provider_connections(id uuid,financial_account_id uuid);
  CREATE TABLE private.kalshi_connection_credentials(id text,financial_account_id uuid,owner_user_id uuid,provider_connection_id uuid,key_fingerprint text,revoked_at timestamptz,verified_at timestamptz,verification_reason text,role text);
@@ -148,4 +148,65 @@ test('shared member admission: cold start, roles, replicas, scope, no refunds an
  }
  delete process.env.STRATA_MEMBER_READ_BUDGET;
 });
+test('public owners spend the same budget with their own current verified credentials, not the pilot tuple',async()=>{
+ const old=Object.fromEntries(['STRATA_MEMBER_READ_BUDGET','STRATA_PUBLIC_SELF_SERVICE_ENABLED','STRATA_MEMBER_BUDGET_OWNER_ID','STRATA_MEMBER_BUDGET_ACCOUNT_ID','STRATA_MEMBER_BUDGET_CONNECTION_ID'].map(k=>[k,process.env[k]]));
+ const users=[1,2].map(n=>{
+  const id=String(n+3).repeat(8)+'-1111-4111-8111-'+String(n).repeat(12);
+  const finId=String(n+5).repeat(8)+'-1111-4111-8111-'+String(n).repeat(12);
+  const connectionId=String(n+7).repeat(8)+'-1111-4111-8111-'+String(n).repeat(12);
+  const keys=generateKeyPairSync('rsa',{modulusLength:2048});
+  const material={keyId:'independent-owner-'+n,privateKey:keys.privateKey.export({type:'pkcs8',format:'pem'}).toString()};
+  return {owner:id,financial:finId,connection:connectionId,account:'independent-account-'+n,material,publicKey:keys.publicKey,fp:dedicatedSignerFingerprint(material.keyId,material.privateKey)!};
+ });
+ try{
+  await pool.query('TRUNCATE public.v13_production_account,public.financial_accounts,private.provider_connections,private.kalshi_connection_credentials');
+  await pool.query('ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS key_fingerprint text');
+  for(const u of users){
+   await pool.query('INSERT INTO public.v13_production_account(id,owner_user_id,kalshi_connection_id,subaccount,exchange_index,key_fingerprint) VALUES($1,$2,$3,1,2,$4)',[u.account,u.owner,u.financial,u.fp]);
+   await pool.query("INSERT INTO public.financial_accounts VALUES($1,$2,'kalshi')",[u.financial,u.owner]);
+   await pool.query('INSERT INTO private.provider_connections VALUES($1,$2)',[u.connection,u.financial]);
+   await pool.query("INSERT INTO private.kalshi_connection_credentials VALUES($1,$2,$3,$4,$5,NULL,now(),'credential_verified','restricted_execution')",[u.account,u.financial,u.owner,u.connection,u.fp]);
+  }
+  Object.assign(process.env,{STRATA_MEMBER_READ_BUDGET:'experimental_v1',STRATA_PUBLIC_SELF_SERVICE_ENABLED:'true',STRATA_MEMBER_BUDGET_OWNER_ID:users[0].owner,STRATA_MEMBER_BUDGET_ACCOUNT_ID:users[0].account,STRATA_MEMBER_BUDGET_CONNECTION_ID:users[0].connection});
+  await pool.query("UPDATE private.strata_member_read_budget SET tokens=750,measured_at=clock_timestamp()+interval '1 hour'");
+  const calls=[0,0];
+  const transport=(u:typeof users[number],index:number):typeof fetch=>async(input,init)=>{
+   calls[index]++;const url=new URL(String(input)),headers=new Headers(init?.headers);
+   assert.equal(init?.method,'GET');assert.equal(headers.get('KALSHI-ACCESS-KEY'),u.material.keyId);
+   assert.equal(verify('sha256',Buffer.from(headers.get('KALSHI-ACCESS-TIMESTAMP')+'GET'+url.pathname),{key:u.publicKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:constants.RSA_PSS_SALTLEN_DIGEST},Buffer.from(headers.get('KALSHI-ACCESS-SIGNATURE')!,'base64')),true);
+   const key=url.pathname.endsWith('/positions')?'market_positions':url.pathname.split('/').at(-1)!;
+   return new Response(JSON.stringify(key==='balance'?{subaccount:1,exchange_index:2,balance_dollars:'25.0000'}:{[key]:[]}),{status:200});
+  };
+  await Promise.all(users.map(async(u,index)=>{
+   const send=transport(u,index);
+   await getScopedKalshiJson(u.material,'/trade-api/v2/portfolio/subaccounts/transfers','?limit=100',send,'https://external-api.kalshi.com',u.owner);
+   const feeds=await readOwnedKalshiFeeds(u.material,Date.now(),(c,p,q,_f,_h,o,s)=>getScopedKalshiJson(c,p,q,send,'https://external-api.kalshi.com',o,s),{mode:'bounded_history_reads_v1'});
+   assert.equal(feeds.ok,true,JSON.stringify(feeds));
+  }));
+  assert.deepEqual(calls,[8,8]);
+  assert.equal(Number((await pool.query('SELECT tokens FROM private.strata_member_read_budget')).rows[0].tokens),610,'both owners debit one shared bucket');
+  const u=users[1],send=transport(u,1),path='/trade-api/v2/portfolio/subaccounts/transfers';
+  await assert.rejects(getScopedKalshiJson(u.material,path,'?limit=100',send,'https://external-api.kalshi.com',users[0].owner));
+  assert.deepEqual(calls,[8,8],'a supplied owner must match the signing credential');
+  await pool.query('UPDATE private.kalshi_connection_credentials SET revoked_at=now() WHERE id=$1',[u.account]);
+  await assert.rejects(getScopedKalshiJson(u.material,path,'',send,'https://external-api.kalshi.com',u.owner));
+  await pool.query('UPDATE private.kalshi_connection_credentials SET revoked_at=NULL WHERE id=$1',[u.account]);
+  await pool.query('UPDATE public.v13_production_account SET key_fingerprint=$2 WHERE id=$1',[u.account,'0'.repeat(64)]);
+  await assert.rejects(getScopedKalshiJson(u.material,path,'',send,'https://external-api.kalshi.com',u.owner));
+  await pool.query('UPDATE public.v13_production_account SET key_fingerprint=$2 WHERE id=$1',[u.account,u.fp]);
+  await withMemberHistoryCredits(u.fp,new AbortController().signal,async()=>{
+   await pool.query('UPDATE public.v13_production_account SET id=$2 WHERE id=$1',[u.account,u.account+'-rebound']);
+   try{await assert.rejects(reserveMemberRead('/trade-api/v2/portfolio/orders',u.fp,undefined,undefined,
+    {host:'https://external-api.kalshi.com',query:'?limit=200&subaccount=1&exchange_index=2',ownerId:u.owner}),/scope_unverified/);}
+   finally{await pool.query('UPDATE public.v13_production_account SET id=$2 WHERE id=$1',[u.account+'-rebound',u.account]);}
+  });
+  await pool.query('INSERT INTO public.v13_production_account SELECT id || $2,owner_user_id,kalshi_connection_id,subaccount,exchange_index,key_fingerprint FROM public.v13_production_account WHERE id=$1',[u.account,'-ambiguous']);
+  await assert.rejects(getScopedKalshiJson(u.material,path,'',send,'https://external-api.kalshi.com',u.owner),/budget_unavailable/);
+  await pool.query('DELETE FROM public.v13_production_account WHERE id=$1',[u.account+'-ambiguous']);
+  await pool.query("UPDATE private.strata_member_read_budget SET tokens=0,measured_at=clock_timestamp()+interval '1 hour'");
+  await assert.rejects(getScopedKalshiJson(u.material,path,'',send,'https://external-api.kalshi.com',u.owner),/budget_unavailable/);
+  assert.deepEqual(calls,[8,8],'revocation, stale execution key and exhausted quota send nothing');
+ }finally{for(const [k,v] of Object.entries(old)){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
+});
+
 test.after(async()=>{await pool.end();});
