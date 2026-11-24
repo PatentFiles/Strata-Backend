@@ -185,8 +185,17 @@ const platformLatest=String.raw`SELECT capture_id::text,content_sha256,original_
  FROM private.strata_platform_official_fee_capture_v1
  ORDER BY captured_at DESC,capture_id DESC LIMIT 1`;
 const publicEnabled=()=>process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true";
+// Collection is a public-document observation, not owner execution approval.
+// A separate opt-in permits genuine evidence collection while live release is off.
+export function platformFeeObservationRequested(env:NodeJS.ProcessEnv=process.env):boolean{
+ return env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true"||
+  (env.STRATA_V5_RAILWAY_CAPTURE_ENABLED==="true"&&env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true");
+}
+const platformSourceEnabled=(d:Deps)=>d.enabled
+ ?d.enabled()&&(publicEnabled()||process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true")
+ :platformFeeObservationRequested();
 export async function readPlatformOfficialFeeV5(d:Deps={}):Promise<PlatformProof|ReturnType<typeof no>>{
- if(!ports(d)||!can(d)||!publicEnabled())return no("v5_platform_source_disabled");
+ if(!ports(d)||!platformSourceEnabled(d))return no("v5_platform_source_disabled");
  const db=d.db??pool,now=(d.clock??Date.now)();
  try{
   const rows=(await db.query(platformLatest)).rows;
@@ -218,7 +227,7 @@ export async function readPlatformOfficialFeeV5(d:Deps={}):Promise<PlatformProof
  * publisher observation. Unsupported genuine bytes are kept as evidence but
  * never represented as an approved monetary model. */
 export async function capturePlatformOfficialFeeV5(d:Deps={}){
- if(!ports(d)||!can(d)||!publicEnabled())return no("v5_platform_source_disabled");
+ if(!ports(d)||!platformSourceEnabled(d))return no("v5_platform_source_disabled");
  const db=d.db??pool,now=d.clock??Date.now;
  try{
   const cached=await readPlatformOfficialFeeV5(d);
@@ -267,7 +276,7 @@ export async function capturePlatformOfficialFeeV5(d:Deps={}){
  * lease. The model/fee grant is still a separate informed owner decision.
  * Do not bind to a client account selector or mint an approval. */
 export async function bindPlatformFeeV5ToOwner(owner:string,d:Deps={}){
- if(!ports(d)||!publicEnabled()||!can(d)||!UUID.test(owner))return no("v5_owner_or_feature_unavailable");
+ if(!ports(d)||!publicEnabled()||!platformSourceEnabled(d)||!UUID.test(owner))return no("v5_owner_or_feature_unavailable");
  const db=d.db??pool;
  try{
   const scope=await resolveOwnerSelfScope(db,owner,deployedGitSha());
