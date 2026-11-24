@@ -133,11 +133,16 @@ function call(port: number, path: string, method: string, bearer?: string, body?
 test("missing, invalid, expired and wrong-issuer Supabase tokens are denied", async () => {
   const { privateKey, keys } = await signingKeys();
   const h = harness();
+  const historySubjects:string[]=[];
   const app = express();
   app.use(express.json());
   app.use("/api/strata", createStrataRouter({
     verifyToken: (value) => verifySupabaseAccessToken(value, { supabaseUrl: SUPABASE_URL, keys }),
     roleOf,
+    ownerHistory:async(subject,view,_cursor,evaluationId)=>{
+      historySubjects.push(subject);
+      return {version:1 as const,view,scope:view==="source"?"SHARED_PAPER_SOURCE":"OWNER_LIVE_LEDGER",accountExists:view==="source"?null:true,rows:[],next:null,evaluationId:evaluationId??null,linkedSettlements:[],linkedSettlementsTruncated:false,executionTrace:[],executionTraceTruncated:false,stageTimingsPersisted:false,readOnly:true as const};
+    },
     control: h.supervisor,
     status: async () => h.supervisor.view(),
     positions: async () => ({ positions: [] }),
@@ -174,6 +179,15 @@ test("missing, invalid, expired and wrong-issuer Supabase tokens are denied", as
     // A standard owner's valid AAL2 token can now read the route without
     // a Clerk session, signer, trade permission, or any database mutation.
     const standardJwt = await token(privateKey, { sub: STANDARD_ID });
+    const history="/api/strata/me/history-intelligence";
+    assert.equal((await call(server.port,history+"?view=live","GET")).status,401);
+    assert.equal((await call(server.port,history+"?view=live","GET",aal1)).status,401);
+    assert.equal((await call(server.port,history+"?view=invalid","GET",standardJwt)).status,400);
+    assert.equal((await call(server.port,history+"?view=live&evaluationId=invalid","GET",standardJwt)).status,400);
+    assert.equal((await call(server.port,history+"?view=live&accountId=legacy&ownerUserId="+ADMIN_ID,"GET",standardJwt)).status,200);
+    const adminJwt=await token(privateKey,{sub:ADMIN_ID});
+    assert.equal((await call(server.port,history+"?view=trades&ownerUserId="+STANDARD_ID,"GET",adminJwt)).status,200);
+    assert.deepEqual(historySubjects,[STANDARD_ID,ADMIN_ID]);
     const ref = await call(server.port, referencePath, "GET", standardJwt);
     assert.equal(ref.status, 200);
     assert.equal(ref.body.indexId, "BRTI");
