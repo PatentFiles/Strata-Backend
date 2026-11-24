@@ -20,6 +20,7 @@ export type OwnerOnboardingReadiness={
  phase:Phase;
  emailVerified:boolean;ownedAccountUnique:boolean;
  credentials:{verifiedRoles:string[];allFourRecorded:boolean};
+ keyInventory:{connection:"missing"|"saved"|"ambiguous"|"unknown";primaryMaskedId:string|null;storedRoles:string[]};
  funding:{historicalOrCompletedTransferRecorded:boolean;freshExchangeCashRequired:true};
  policy:{approvedRecord:boolean;configuredStakeCents:number|null};
  account:{commissioned:boolean;killSwitchOn:boolean;provisionalHold:boolean;otherFreeze:boolean};
@@ -30,6 +31,7 @@ const empty=(reason:string):OwnerOnboardingReadiness=>({
  ok:false,reason,readOnly:true,tradingAuthorized:false,ordersSubmitted:false,
  signedKalshiEvidenceRefreshed:false,phase:"account_missing",emailVerified:false,
  ownedAccountUnique:false,credentials:{verifiedRoles:[],allFourRecorded:false},
+ keyInventory:{connection:"unknown",primaryMaskedId:null,storedRoles:[]},
  funding:{historicalOrCompletedTransferRecorded:false,freshExchangeCashRequired:true},
  policy:{approvedRecord:false,configuredStakeCents:null},
  account:{commissioned:false,killSwitchOn:true,provisionalHold:false,otherFreeze:false},
@@ -46,6 +48,14 @@ export const OWNER_ONBOARDING_READ_SQL=[
  "SELECT u.email_confirmed_at IS NOT NULL AS email_verified,",
  "a.id IS NOT NULL AS account_exists,a.commissioned,a.kill_switch,a.blocked_reason,",
  "p.state AS policy_state, s.configured_stake_cents,",
+ "(SELECT count(*) FROM public.financial_accounts f WHERE f.user_id=u.id AND f.provider='kalshi') AS connection_count,",
+ "(SELECT count(*) FROM public.financial_accounts f JOIN private.provider_connections pc ON pc.financial_account_id=f.id WHERE f.user_id=u.id AND f.provider='kalshi') AS linked_connection_count,",
+ "(SELECT min(f.masked_key_id) FROM public.financial_accounts f WHERE f.user_id=u.id AND f.provider='kalshi') AS primary_masked_id,",
+ "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
+ " JOIN public.financial_accounts f ON f.id=c.financial_account_id AND f.user_id=u.id AND f.provider='kalshi'",
+ " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=f.id",
+ " WHERE c.owner_user_id=u.id AND c.revoked_at IS NULL AND c.vault_secret_id IS NOT NULL",
+ " AND (a.id IS NULL OR c.financial_account_id=a.kalshi_connection_id)) AS stored_roles,",
  "a.cash_micros::text AS cash_micros,a.initial_cash_micros::text AS initial_cash_micros,",
  "(SELECT COALESCE(SUM(e.cash_delta_micros),0)::text FROM public.v13_production_event e WHERE e.account_id=a.id) AS cash_movement_micros,",
  "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
@@ -86,6 +96,19 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.ok=true;r.nextActions=[];
   r.emailVerified=isTrue(a.email_verified);
   r.ownedAccountUnique=isTrue(a.account_exists);
+  const connectionCount=asInt(a.connection_count),linkedCount=asInt(a.linked_connection_count);
+  r.keyInventory.connection=connectionCount===0&&linkedCount===0?"missing":
+    connectionCount===1&&linkedCount===1?"saved":
+    connectionCount!==null&&linkedCount!==null?"ambiguous":"unknown";
+  // Expose only the existing masked ID, never provider secret or raw key ID.
+  if(r.keyInventory.connection==="saved"&&typeof a.primary_masked_id==="string"&&/^••••[A-Za-z0-9-]{4}$/.test(a.primary_masked_id))
+    r.keyInventory.primaryMaskedId=a.primary_masked_id;
+  if(r.keyInventory.connection==="saved"&&Array.isArray(a.stored_roles)){
+    const saved=a.stored_roles as unknown[];
+    if(saved.some(role=>!ROLES.includes(role as typeof ROLES[number]))||new Set(saved).size!==saved.length)
+      r.keyInventory.connection="ambiguous";
+    else r.keyInventory.storedRoles=ROLES.filter(role=>saved.includes(role));
+  }
   const roles:string[]=Array.isArray(a.active_roles)?a.active_roles.filter((v:unknown):v is string=>typeof v==="string"):[];
   r.credentials.verifiedRoles=ROLES.filter(role=>roles.filter((x:string)=>x===role).length===1);
   r.credentials.allFourRecorded=r.credentials.verifiedRoles.length===ROLES.length&&
