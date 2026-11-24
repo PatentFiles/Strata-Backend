@@ -19,6 +19,9 @@ type ProofDeps={
  material?:typeof loadedMaterial;read?:typeof readOwnedKalshiFeeds;
  map?:typeof personalAccountSnapshot;flat?:typeof migrationFlatHistoryCheck;
  feeProbe?:typeof probeCurrentKalshiFeeApi;v4?:typeof inspectWalletV4Readiness;
+ // Internal caller only: a stopped, approved, not-yet-commissioned account
+ // can collect read-only evidence. HTTP callers cannot set this option.
+ allowStoppedUncommissioned?:boolean;
 };
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const digits=(x:unknown)=>typeof x==="string"&&/^(0|[1-9]\d*)$/.test(x);
@@ -45,7 +48,7 @@ export type SignedReleaseProof=ReturnType<typeof no>|{
 // ARM -> DISARM ABA, which does not advance the worker fencing_token.
 export const OWNER_SIGNED_PROOF_ACCOUNT_SQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.kalshi_connection_id,
- a.key_fingerprint,a.commissioned,a.kill_switch,a.blocked_reason,
+ a.key_fingerprint,a.commissioned,a.execution_enabled,a.kill_switch,a.blocked_reason,
  a.cash_precision_verified,a.cash_micros,a.reserved_micros,
  a.policy_id,p.state AS policy_state,p.fee_policy_version,
  jsonb_build_object('account',a.xmin::text,'policy',p.xmin::text,
@@ -98,7 +101,9 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   const a=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
   if(a.rows.length!==1)return no("owned_execution_account_missing_or_ambiguous");
   account=a.rows[0]!;
-  if(account.commissioned!==true||account.policy_state!=="APPROVED")
+  const eligible=account.commissioned===true||(deps.allowStoppedUncommissioned===true&&
+    account.commissioned===false&&account.execution_enabled===false&&account.kill_switch===true);
+  if(!eligible||account.policy_state!=="APPROVED")
    return no("approved_commissioned_account_required");
   if(account.diagnostic_held!==true||!account.hold_revision)
    return no("account_must_be_killed_or_stopped_and_flat_for_diagnostic");
