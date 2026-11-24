@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS} from "./ownerCommissioningFinancialChecks";
+import {verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS,advanceOwnerFinancialCommissioning,ADVANCE_FINANCIAL_COMMISSIONING,CONFIRM_INITIAL_COMMISSIONING} from "./ownerCommissioningFinancialChecks";
 const owner="11111111-1111-4111-8111-111111111111";
 const consent={expectedOwnerId:owner,confirmation:VERIFY_FINANCIAL_CHECKS};
 function fixture(){
@@ -65,4 +65,63 @@ test("a concurrent change in the owner policy refuses the composite report",asyn
  const f=fixture();
  f.ports.fee=async id=>{assert.equal(id,owner);f.status.policy.configuredStakeCents=600;return f.fee;};
  assert.equal((await f.run()).stage,"BLOCKED");
+});
+
+const advanceConsent={expectedOwnerId:owner,confirmation:ADVANCE_FINANCIAL_COMMISSIONING};
+const scopeDigest="b".repeat(64);
+const observedAt="2026-11-23T12:00:00.123Z";
+function transitionFixture(){
+ const f=fixture();f.status.account.commissioned=false;
+ f.status.funding.historicalOrCompletedTransferRecorded=false;
+ f.audit.cash.persistedReconciliationFresh=false;
+ const ports={...f.ports,
+ funding:async(id:string)=>{assert.equal(id,owner);f.calls.push("funding");f.status.funding.historicalOrCompletedTransferRecorded=true;return {ok:true,historicalVerified:true};},
+ refreshCash:async(id:string)=>{assert.equal(id,owner);f.calls.push("cash");f.audit.cash.persistedReconciliationFresh=true;return {ok:true,observedAt};},
+ review:async(id:string,fee:unknown)=>{assert.equal(id,owner);assert.equal(fee,f.fee);f.calls.push("review");return {scopeDigest,existingExitFloorMicros:1000};},
+ commission:async(id:string,r:{scopeDigest:string},floor:number,at:string)=>{assert.equal(id,owner);assert.equal(r.scopeDigest,scopeDigest);assert.equal(floor,1000);assert.equal(at,observedAt);f.calls.push("commission");f.status.account.commissioned=true;return {ok:true};},
+ };
+ const run=(body:unknown=advanceConsent)=>advanceOwnerFinancialCommissioning(owner,body,ports as never);
+ return {...f,ports,run};
+}
+const confirmConsent={expectedOwnerId:owner,confirmation:CONFIRM_INITIAL_COMMISSIONING,scopeDigest,minimumExitMicros:1000};
+test("financial V1 and malformed V2 cannot invoke writes",async()=>{
+ const f=transitionFixture();
+ assert.equal((await f.run(consent)).readOnly,true);
+ assert.deepEqual(f.calls,["status"]);f.calls.length=0;
+ for(const body of [{...advanceConsent,expectedOwnerId:"22222222-2222-4222-8222-222222222222"},{...advanceConsent,start:true},{...confirmConsent,minimumExitMicros:0}]){
+  assert.equal((await f.run(body)).ok,false);
+ }
+ assert.deepEqual(f.calls,[]);
+});
+test("V2 records funding and cash, then requires exact owner commission; replay only reads",async()=>{
+ const f=transitionFixture();
+ const review=await f.run();
+ assert.equal(review.stage,"COMMISSIONING_REQUIRED");
+ assert.ok("commissioningReview" in review&&review.commissioningReview?.scopeDigest===scopeDigest);
+ assert.deepEqual(f.calls.filter(x=>["funding","cash","review","commission"].includes(x)),["funding","cash","review"]);
+ f.calls.length=0;
+ const out=await f.run(confirmConsent);
+ assert.equal(out.stage,"CHECKS_COMPLETE");assert.ok("commissioningPerformed" in out&&out.commissioningPerformed);
+ assert.equal(out.tradingAuthorized,false);assert.equal(out.workerStarted,false);
+ assert.deepEqual(f.calls.filter(x=>["funding","cash","review","commission"].includes(x)),["cash","review","commission"]);
+ f.calls.length=0;await f.run(confirmConsent);
+ assert.ok(!f.calls.some(x=>["funding","cash","review","commission"].includes(x)));
+});
+test("V2 does not commission changed scope, changed floor, missing policy or unreconciled cash",async()=>{
+ const f=transitionFixture();f.status.funding.historicalOrCompletedTransferRecorded=true;
+ for(const body of [{...confirmConsent,scopeDigest:"c".repeat(64)},{...confirmConsent,minimumExitMicros:1001}]){
+  assert.equal((await f.run(body)).stage,"BLOCKED");assert.ok(!f.calls.includes("commission"));
+ }
+ f.calls.length=0;f.status.policy.approvedRecord=false;
+ assert.equal((await f.run()).stage,"POLICY_REQUIRED");assert.ok(!f.calls.includes("cash"));
+ f.status.policy.approvedRecord=true;
+ f.ports.refreshCash=async()=>({ok:false,observedAt});
+ assert.equal((await f.run()).stage,"CASH_RECONCILIATION_REQUIRED");assert.ok(!f.calls.includes("commission"));
+});
+test("commissioned opening-capital discrepancy and provisional hold remain separately authorized",async()=>{
+ const f=transitionFixture();f.status.account.commissioned=true;f.status.funding.historicalOrCompletedTransferRecorded=true;
+ f.status.openingBasis.differenceMicros="25000000";
+ assert.equal((await f.run()).stage,"OPENING_CAPITAL_RECOVERY_REQUIRED");assert.ok(!f.calls.includes("cash"));
+ f.status.openingBasis.differenceMicros="0";f.status.account.provisionalHold=true;f.calls.length=0;
+ assert.equal((await f.run()).stage,"COMMISSIONING_REQUIRED");assert.ok(!f.calls.includes("commission"));
 });
