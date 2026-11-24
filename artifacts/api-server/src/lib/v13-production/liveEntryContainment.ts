@@ -14,6 +14,26 @@ export function assertIndependentEntryAvailable():never {
  * serialized order object. Reject other input shapes rather than guess whether
  * a request is reducing. This is a narrowing fence, not an exit authorization. */
 import type {ProductionLedger} from "./ledger";
+
+/** A rollout is configuration, never owner consent or a trading permit.
+ * Exact owner, execution account and running Railway build are all required.
+ * A bare process-wide switch cannot opt any account into independent entry. */
+export type IndependentLiveRolloutScope = Readonly<{
+  ownerId:string;
+  accountId:string;
+  releaseSha:string;
+}>;
+export function independentLiveRolloutAllowed(scope:IndependentLiveRolloutScope,env:NodeJS.ProcessEnv=process.env):boolean{
+  return env.NODE_ENV==="production" &&
+    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1==="true" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(scope.ownerId) &&
+    /^[A-Za-z0-9._:-]{1,128}$/.test(scope.accountId) &&
+    /^[a-f0-9]{40}$/.test(scope.releaseSha) &&
+    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_OWNER===scope.ownerId &&
+    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_ACCOUNT===scope.accountId &&
+    env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_SHA===scope.releaseSha &&
+    env.RAILWAY_GIT_COMMIT_SHA===scope.releaseSha;
+}
 function assertProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit,entry?: (body:unknown)=>void):void {
   if(typeof input!=="string"||!init||typeof init.method!=="string")assertIndependentEntryAvailable();
   const method=init.method.toUpperCase();
@@ -42,8 +62,9 @@ export function assertContainedProductionRequest(input:Parameters<typeof fetch>[
 /** The ordinary transport stays contained. Only the currently locked,
  * exact-source, one-shot permit can admit a BUY. A synthetic source can
  * NEVER use the default external HTTP transport. */
-export function createIndependentProductionFetch(ledger:()=>ProductionLedger|null,isolatedRaw?:typeof fetch):typeof fetch{
+export function createIndependentProductionFetch(ledger:()=>ProductionLedger|null,isolatedRaw?:typeof fetch,liveScope?:IndependentLiveRolloutScope):typeof fetch{
  const isolated=isolatedRaw!==undefined;
+ const boundScope=liveScope?Object.freeze({...liveScope}):undefined;
  if(isolated&&!(process.env.NODE_ENV==="test"&&!process.env.RAILWAY_ENVIRONMENT_ID&&
   !process.env.RAILWAY_SERVICE_ID&&!process.env.RAILWAY_PROJECT_ID&&
   /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(process.env.V13_DISPOSABLE_DATABASE_URL??"")))
@@ -51,7 +72,7 @@ export function createIndependentProductionFetch(ledger:()=>ProductionLedger|nul
  return async(input,init)=>{
   assertProductionRequest(input,init,body=>{
    const current=ledger();if(!current)assertIndependentEntryAvailable();
-   if(!isolated&&process.env.STRATA_INDEPENDENT_LIVE_SOURCE_V1!=="true")assertIndependentEntryAvailable();
+   if(!isolated&&(!boundScope||!independentLiveRolloutAllowed(boundScope)))assertIndependentEntryAvailable();
    current.consumeIndependentEntryWire(body,isolated?"SIMULATION":"LIVE_OBSERVATION");
   });
   return (isolatedRaw??fetch)(input,{...init,redirect:"error"});

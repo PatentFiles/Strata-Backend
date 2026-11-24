@@ -159,7 +159,7 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-import {containedProductionFetch,createIndependentProductionFetch} from "../v13-production/liveEntryContainment";
+import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed} from "../v13-production/liveEntryContainment";
 import {DirectEntrySource} from "../v13-production/directEntrySource";
 
 /** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
@@ -481,10 +481,11 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
-    const directSource=process.env.STRATA_INDEPENDENT_LIVE_SOURCE_V1==="true"
+    const directRolloutScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,releaseSha:startupSha});
+    const directSource=independentLiveRolloutAllowed(directRolloutScope)
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}}):null;
-    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger):personalProductionFetch;
+    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
         const tx=finalLedger?.currentTransaction();
