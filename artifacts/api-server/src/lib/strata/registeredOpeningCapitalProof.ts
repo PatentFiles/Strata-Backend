@@ -50,7 +50,7 @@ export type RegisteredReceipt = {
   earliestCreatedMs: number; latestCreatedMs: number; verifiedAtMs: number;
   completedAtMs: number; providerConnectionId: string | null; registryDigest: string;
 };
-function registeredReceipt(pilot: Row[], historical: Row[], owner: string, account: Row): RegisteredReceipt {
+export function registeredReceipt(pilot: Row[], historical: Row[], owner: string, account: Row): RegisteredReceipt {
   requireOpening(pilot.length + historical.length === 1, "initial_receipt_ambiguous");
   const t = (pilot[0] ?? historical[0])!;
   requireOpening(t.owner_user_id === owner && t.execution_account_id === account.id, "receipt_scope_mismatch");
