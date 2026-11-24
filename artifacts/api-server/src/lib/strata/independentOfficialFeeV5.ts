@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled} from "./platformFeeUploadMode";
 /**
  * #165 V5 alternate issuer collector; genuine Railway TLS fetch only, no uploads.
  * It is not an Edge capture, fee grant, owner release or order authorizer.
@@ -188,12 +189,13 @@ const publicEnabled=()=>process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true";
 // Collection is a public-document observation, not owner execution approval.
 // A separate opt-in permits genuine evidence collection while live release is off.
 export function platformFeeObservationRequested(env:NodeJS.ProcessEnv=process.env):boolean{
+ if(platformFeeUploadEnabled(env))return false;
  return env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true"||
   (env.STRATA_V5_RAILWAY_CAPTURE_ENABLED==="true"&&env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true");
 }
-const platformSourceEnabled=(d:Deps)=>d.enabled
+const platformSourceEnabled=(d:Deps)=>!platformFeeUploadEnabled()&&(d.enabled
  ?d.enabled()&&(publicEnabled()||process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true")
- :platformFeeObservationRequested();
+ :platformFeeObservationRequested());
 export async function readPlatformOfficialFeeV5(d:Deps={}):Promise<PlatformProof|ReturnType<typeof no>>{
  if(!ports(d)||!platformSourceEnabled(d))return no("v5_platform_source_disabled");
  const db=d.db??pool,now=(d.clock??Date.now)();

@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled} from "./strata/platformFeeUploadMode";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
@@ -238,6 +239,7 @@ export type OfficialFeePdfByteVerification =
     digest: string;
     effectiveDate: string;
     formulaVersion: typeof STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
+    feeRule: string;
   }
   | { ok: false; reason: OfficialFeePdfByteFailure };
 
@@ -282,6 +284,7 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
     digest: createHash("sha256").update(bytes).digest("hex"),
     effectiveDate: parsed.effectiveDate,
     formulaVersion: parsed.formulaVersion,
+    feeRule: parsed.feeRule,
   };
 }
 
@@ -316,6 +319,7 @@ export async function readUnapprovedOfficialFeePublication(
   nowMs:()=>number=Date.now,
 ):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
  {ok:false;reason:string}> {
+ if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return {ok:false,reason:"manual_fee_schedule_mode_no_issuer_download"};
  const start=nowMs();
  // Shared producer lease also gates V4; never issue a separate production
  // canonical PDF GET ahead of its atomic Supabase claim.
@@ -441,6 +445,7 @@ export async function verifyCurrentFeeArtifact(
   approval: FeeArtifactApprovalIdentity,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<FeeArtifactVerification> {
+  if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return failure("unavailable","manual_fee_schedule_requires_durable_owner_consent");
   if (approval.sourceUrl !== CANONICAL_FEE_SCHEDULE_URL ||
       approval.policyVersion !== STANDING_FEE_POLICY_VERSION ||
       approval.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION ||
@@ -872,6 +877,7 @@ export async function establishOfficialFeeDigest(
   fetchImpl: typeof fetch = globalThis.fetch,
   nowMs: () => number = Date.now,
 ): Promise<EstablishedOfficialFeeDigest> {
+  if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return {ok:false,reason:"manual_fee_schedule_mode_no_issuer_download",diagnostic:{...EMPTY_FEE_FETCH}};
   const running = officialFeeInFlight.get(fetchImpl);
   if (running) return running;
   // Public V5 shares genuine publisher bytes, not owner monetary authority.

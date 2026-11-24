@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled} from "./platformFeeUploadMode";
 /**
  * Background issuer-document OBSERVER, platform-wide when opted in.
  * Historical account-specific observer remains only for compatibility. Makes no signed exchange requests, grants, orders, policy or cash
@@ -9,7 +10,7 @@ import {captureIndependentOfficialFeeV5,capturePlatformOfficialFeeV5,platformFee
 const ACCOUNT=/^strata-account-[0-9a-f]{24}$/;
 let started=false;
 export function startOwnerIndependentFeeV5Collector():void{
- if(started)return;
+ if(started||platformFeeUploadEnabled())return;
  const publicMode=platformFeeObservationRequested();
  if(!publicMode&&process.env.STRATA_V5_RAILWAY_CAPTURE_ENABLED!=="true")return;
  // Malformed public mode must not fall back to a customer-specific observer.

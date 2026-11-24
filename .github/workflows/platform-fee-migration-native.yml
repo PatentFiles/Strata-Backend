@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'docs/platform-fee-native/**'
+      - 'lib/db/owner-self-release/007_platform_uploaded_fee_schedule.sql'
       - 'lib/db/drizzle/0049_strata_platform_official_fee_capture.sql'
       - '.github/workflows/platform-fee-migration-native.yml'
   workflow_dispatch:

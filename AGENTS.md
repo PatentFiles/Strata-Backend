@@ -39,3 +39,6 @@ historical evidence. Use two new independent STANDARD customers in native
 disposable PostgreSQL and isolated browser tests, no live orders. Validate
 migrations, exact-head CI, cross-tenant and restart behavior before protected
 main merges. Distinguish recovery software release from live activation.
+
+## Manual platform fee publication (supersedes recurring PDF retrieval)
+In the explicit manual upload mode the platform administrator publishes the applicable official fee schedule, retaining original bytes, effective date, digest and uploader attestation. An upload is NOT a fresh issuer capture. No routine PDF downloads are required for approved durable terms. Preserve exact current market API checks, account-bound owner consent, changed-document invalidation, order and accounting safeguards. Only supported monetary rules may be accepted. Never claim issuer freshness or silently expand existing owner financial consent.

@@ -1,3 +1,5 @@
+import {platformFeeUploadEnabled,UPLOADED_FEE_PROVENANCE,UPLOADED_FEE_MIGRATION_CONFIRM} from "./platformFeeUploadMode";
+import {HISTORICAL_SOURCE_KIND,HISTORICAL_RISK_ACCEPTANCE} from "./historicalOwnerFeeBaseline";
 /** Compose the real owner release services, not a second execution engine.
  * All authority writes follow a versioned, exact owner consent. Each underlying
  * service retains its own locks, signed evidence, risk and freshness checks.
@@ -57,9 +59,17 @@ const riskColumns=["capital_limit_cents","max_entry_stake_cents","max_entry_all_
 async function review(owner:string,sha:string){
  const scope=await current(owner,sha);if(!scope)return null;
  const {a,p}=scope;
- let mode:"existing"|"durable_migration"="existing",feeDigest=txt(p.fee_artifact_digest),captureId:string|null=null;
+ let mode:"existing"|"durable_migration"|"uploaded_durable_migration"="existing",feeDigest=txt(p.fee_artifact_digest),captureId:string|null=null,baselineId:string|null=null,feeEffectiveDate:string|null=null;
  if(!isDurableFeeVersion(p.fee_policy_version)&&!parseV3FeeSource(txt(p.fee_source_url))){
   if(!a.killSwitchOn||a.executionEnabled)return null;
+  if(platformFeeUploadEnabled()){
+   const monetary=await verifyMonetaryFeeContract("STEP_11");
+   const migration=await previewDurableFeeMigration(owner,UPLOADED_FEE_PROVENANCE);
+   if(!monetary.ok||monetary.sourceKind!==UPLOADED_FEE_PROVENANCE||!migration.ok||!migration.candidateBaseline||
+      migration.expectedPolicyHash!==a.policyHash||migration.candidateBaseline.digest!==monetary.sourceDigest)return null;
+   mode="uploaded_durable_migration";feeDigest=migration.candidateBaseline.digest;
+   baselineId=migration.candidateBaseline.baselineId;feeEffectiveDate=migration.candidateBaseline.effectiveDate;
+  }else{
   // Publisher evidence preparation does not create a fee authority.
   await capturePlatformOfficialFeeV5();
   const binding=await bindPlatformFeeV5ToOwner(owner);
@@ -70,6 +80,7 @@ async function review(owner:string,sha:string){
   if(!migration.ok||!migration.candidateCapture||migration.expectedPolicyHash!==a.policyHash||
     migration.candidateCapture.digest!==binding.digest||String(migration.candidateCapture.captureId)!==binding.captureId)return null;
   mode="durable_migration";feeDigest=binding.digest;captureId=binding.captureId;
+  }
  }else{
   const fee=await readOwnedRuntimeFeeEvidence(pool,owner);
   if(!fee.ok||fee.feeArtifactDigest!==feeDigest)return null;
@@ -84,8 +95,9 @@ async function review(owner:string,sha:string){
  if(!latest||digest(latest)!==digest(scope))return null;
  const core={ownerId:owner,accountId:a.accountId,releaseSha:sha,policyHash:a.policyHash,
   policyVersion:Number(p.version),stakeCents:a.stakeCents,cashMicros:a.cashMicros,minimumExitMicros:10000,
-  feeDigest,feeMode:mode,limits};
- return {scope,captureId,review:{...core,scopeDigest:digest({core,keyFingerprint:a.keyFingerprint,policyId:p.id})}};
+  feeDigest,feeMode:mode,limits,
+  ...(mode==="uploaded_durable_migration"?{feeSourceKind:UPLOADED_FEE_PROVENANCE,feeEffectiveDate,feeSourceAuthenticityVerified:false,baselineId}: {})};
+ return {scope,captureId,baselineId,review:{...core,scopeDigest:digest({core,keyFingerprint:a.keyFingerprint,policyId:p.id})}};
 }
 async function finishRelease(owner:string,sha:string,scope:Current){
  const a=scope.a,account=a.accountId,policyHash=a.policyHash;
@@ -149,18 +161,21 @@ export async function publicReleaseAction(owner:string,raw:unknown){
   if(!verified)return no("public_release_verified_account_or_fee_scope_unavailable");
   if(consent.preview)return {...no("public_release_review_ready"),ok:true as const,review:verified.review};
   if(verified.review.scopeDigest!==consent.scopeDigest)return no("public_release_review_scope_changed");
-  if(verified.review.feeMode==="durable_migration"){
+  if(verified.review.feeMode==="durable_migration"||verified.review.feeMode==="uploaded_durable_migration"){
    const p=verified.scope.p,a=verified.scope.a;
-   const migrated=await migrateOwnedDurableFeePolicy(owner,{accountId:a.accountId,captureId:verified.captureId,
-    confirmation:DURABLE_MIGRATION_CONFIRM,expectedPolicyHash:a.policyHash,expectedPolicyId:p.id,
-    expectedPolicyVersion:Number(p.version),expectedSha:sha,modelId:attemptId(verified.review.scopeDigest),riskAcceptance:DURABLE_PUBLICATION_RISK_ACCEPTANCE});
+   const source=verified.review.feeMode==="uploaded_durable_migration"?
+    {sourceKind:HISTORICAL_SOURCE_KIND,baselineId:verified.baselineId,confirmation:UPLOADED_FEE_MIGRATION_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE}:
+    {captureId:verified.captureId,confirmation:DURABLE_MIGRATION_CONFIRM,riskAcceptance:DURABLE_PUBLICATION_RISK_ACCEPTANCE};
+   const migrated=await migrateOwnedDurableFeePolicy(owner,{accountId:a.accountId,...source,
+    expectedPolicyHash:a.policyHash,expectedPolicyId:p.id,
+    expectedPolicyVersion:Number(p.version),expectedSha:sha,modelId:attemptId(verified.review.scopeDigest)});
    if(!migrated.ok)return no(migrated.reason);
   }
   const next=await current(owner,sha);
   if(!next||next.a.accountId!==verified.scope.a.accountId||next.a.keyFingerprint!==verified.scope.a.keyFingerprint||
    next.a.stakeCents!==verified.scope.a.stakeCents||next.a.cashMicros!==verified.scope.a.cashMicros||
    next.p.fee_artifact_digest!==verified.review.feeDigest)return no("public_release_policy_migration_readback_unverified");
-  if(verified.review.feeMode==="durable_migration"&&!isDurableFeeVersion(next.p.fee_policy_version))return no("public_release_durable_model_not_recorded");
+  if(verified.review.feeMode!=="existing"&&!isDurableFeeVersion(next.p.fee_policy_version))return no("public_release_durable_model_not_recorded");
   if(verified.review.feeMode==="existing"&&next.a.policyHash!==verified.scope.a.policyHash)return no("public_release_policy_changed");
   if(riskColumns.some(k=>String(next.p[k])!==String(verified.scope.p[k])))return no("public_release_risk_settings_changed");
   return await finishRelease(owner,sha,next);

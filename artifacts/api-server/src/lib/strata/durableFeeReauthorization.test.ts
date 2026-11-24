@@ -15,3 +15,9 @@ test('outcome malformed fails without DB; zero/duplicates/DB errors all UNKNOWN 
  const result=await durableFeeReauthorizationOutcome(owner,id,body.expectedSha,{query});assert.deepEqual(result,{outcome:'UNKNOWN',tradingAuthorized:false,workerStarted:false,ordersSubmitted:false,retryAuthorized:false});
  }
 });
+
+test('exact-build outcome identifies the actual immutable uploaded baseline, not the repository baseline',async()=>{
+ const baseline='platform-upload-'+body.sourceDigest;
+ const result=await durableFeeReauthorizationOutcome(owner,id,body.expectedSha,{query:async()=>({rows:[{authorization_id:id,owner_user_id:owner,execution_account_id:body.accountId,model_id:body.modelId,original_release_sha:body.originalSha,release_commit_sha:body.expectedSha,policy_hash:body.policyHash,source_digest:body.sourceDigest,confirmation:body.confirmation,risk_acceptance:body.riskAcceptance,historical_baseline_id:baseline,state:'RECORDED'}]})});
+ assert.equal(result.outcome,'RECORDED');if(result.outcome==='RECORDED'){assert.equal(result.baselineId,baseline);assert.equal(result.sourceAuthenticityVerified,false);assert.equal(result.tradingAuthorized,false);}
+});
