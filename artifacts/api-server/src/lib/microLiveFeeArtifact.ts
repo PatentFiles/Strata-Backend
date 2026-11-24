@@ -877,7 +877,7 @@ export async function establishOfficialFeeDigest(
   // Public V5 shares genuine publisher bytes, not owner monetary authority.
   // The strict reviewed parser and current market API proof remain required.
   if(publicSelfServiceRequested()&&fetchImpl===PRODUCTION_FEE_FETCH&&globalThis.fetch===PRODUCTION_FEE_FETCH){
-    const task:Promise<EstablishedOfficialFeeDigest>=(async()=>{
+    const task:Promise<EstablishedOfficialFeeDigest>=(async():Promise<EstablishedOfficialFeeDigest>=>{
       let proof=await readPlatformOfficialFeeV5();
       if(!proof.ok){const captured=await capturePlatformOfficialFeeV5();if(captured.ok)proof=await readPlatformOfficialFeeV5();}
       if(!proof.ok)return {ok:false,reason:proof.reason,diagnostic:{...EMPTY_FEE_FETCH,retryAt:proof.retryAt}};
