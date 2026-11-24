@@ -1,7 +1,7 @@
 import {inspectOwnerAccountOnboardingReadiness} from "./ownerAccountOnboardingReadiness";
 import {inspectOwnerSignedExchangeReleaseProof} from "./ownerSignedExchangeReleaseProof";
 import {inspectOwnerFiveGateReleaseAudit} from "./ownerFiveGateReleaseAudit";
-import {readOwnedApprovedFeeEvidence,readInitialCommissioningReview,commissionOwnedAccount,COMMISSION_OWNED_ACCOUNT_CONFIRMATION,type InitialCommissioningReview} from "./personalAccountActivation";
+import {readOwnedApprovedFeeEvidence,readOwnedRuntimeFeeEvidence,readInitialCommissioningReview,commissionOwnedAccount,COMMISSION_OWNED_ACCOUNT_CONFIRMATION,type InitialCommissioningReview} from "./personalAccountActivation";
 import {refreshOwnerCommissioningCash} from "./ownerCommissioningCashTransition";
 import {verifyOwnedHistoricalFunding} from "./ownedPilotTransfer";
 import {pool} from "@workspace/db";
@@ -106,12 +106,14 @@ export async function verifyCommissioningFinancialChecks(owner:string,raw:unknow
 export const ADVANCE_FINANCIAL_COMMISSIONING="ADVANCE_OWNED_FINANCIAL_COMMISSIONING_V2";
 export const CONFIRM_INITIAL_COMMISSIONING="CONFIRM_OWNED_INITIAL_COMMISSIONING_V2";
 type TransitionPorts=Ports&{
+ runtimeFee?:(owner:string)=>Promise<FeeResult>;
  funding:(owner:string)=>ReturnType<typeof verifyOwnedHistoricalFunding>;
  refreshCash:(owner:string)=>ReturnType<typeof refreshOwnerCommissioningCash>;
  review:(owner:string,fee:FeeResult)=>Promise<InitialCommissioningReview|null>;
  commission:(owner:string,review:InitialCommissioningReview,floor:number,observedAt:string)=>ReturnType<typeof commissionOwnedAccount>;
 };
 const transitionPorts:TransitionPorts={
+ runtimeFee:id=>readOwnedRuntimeFeeEvidence(pool,id),
  status:inspectOwnerAccountOnboardingReadiness,
  signed:id=>inspectOwnerSignedExchangeReleaseProof(id,{allowStoppedUncommissioned:true}),
  fee:id=>readOwnedApprovedFeeEvidence(pool,id),
@@ -182,8 +184,11 @@ export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknow
   if(!cash.ok)return wrap(result("CASH_RECONCILIATION_REQUIRED",cash.reason,empty()));
   cashRecordPersisted=true;
   const feeCapture:{value:FeeResult|null}={value:null};
+  // V1 remains on STEP_9. Only the explicitly authorized continuation uses
+  // current runtime authority, including existing standing lease renewal.
+  const runtimePorts:Ports={...ports,fee:ports.runtimeFee??ports.fee};
   const evidence=await verifyCommissioningFinancialChecks(owner,v1,{
-   ...ports,fee:async id=>{const f=await ports.fee(id);feeCapture.value=f;return f;},
+   ...runtimePorts,fee:async id=>{const f=await runtimePorts.fee(id);feeCapture.value=f;return f;},
   });
   if(evidence.stage!=="COMMISSIONING_REQUIRED"||evidence.checks.commissioned||!feeCapture.value?.ok)
    return wrap(evidence);
@@ -198,6 +203,6 @@ export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknow
   commissioningPerformed=true;
   // Resume through existing evidence and release checks after the real
   // financial state transition, never grant a worker or trading permit.
-  return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
+  return wrap(await verifyCommissioningFinancialChecks(owner,v1,runtimePorts));
  }catch{return blocked("financial_transition_outcome_unconfirmed_refresh_records");}
 }
