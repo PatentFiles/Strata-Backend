@@ -6,7 +6,7 @@ import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
  */
 import {pool} from "@workspace/db";
 import {loadedMaterial} from "./inAppProtectiveRelease";
-import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
+import {readOwnedKalshiFeeds,personalAccountSnapshot,type OwnedKalshiRead} from "./personalExchangeRead";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
 import {inspectWalletV4Readiness} from "./walletV4CommissioningReadiness";
@@ -15,7 +15,7 @@ import {dedicatedSignerFingerprint} from "./commissioning";
 
 type Row=Record<string,unknown>;
 type Db={query(sql:string,params?:unknown[]):Promise<{rows:Row[]}>};
-export type MatchingCommissioningEvidence={account:Row;snapshot:Snapshot;historyDigest:string;initialFundingCandidate:boolean};
+export type MatchingCommissioningEvidence={account:Row;snapshot:Snapshot;feeds:OwnedKalshiRead;historyDigest:string;initialFundingCandidate:boolean};
 type ProofDeps={
  db?:Db;now?:()=>number;
  material?:typeof loadedMaterial;read?:typeof readOwnedKalshiFeeds;
@@ -186,7 +186,7 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   return no("signed_exchange_read_stale",true);
  if(deps.captureCommissioningEvidence&&exchangeFlat&&(cashMatch||initialFundingCandidate)&&
    account.execution_enabled===false&&account.kill_switch===true&&completed-started<=15000){
-  deps.captureCommissioningEvidence({account:structuredClone(account),snapshot:structuredClone(mapped),historyDigest:history!.historyDigest,initialFundingCandidate:!cashMatch&&initialFundingCandidate});
+  deps.captureCommissioningEvidence({account:structuredClone(account),snapshot:structuredClone(mapped),feeds:structuredClone(read),historyDigest:history!.historyDigest,initialFundingCandidate:!cashMatch&&initialFundingCandidate});
  }
  const blockedReasons:string[]=[];
  if(!exchangeFlat)blockedReasons.push(flat.ok?"exchange_flatness_unverified":flat.reason);
