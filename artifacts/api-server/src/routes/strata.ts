@@ -1,3 +1,4 @@
+import {readOwnerHistory} from "../lib/strata/ownerHistoryIntelligence";
 import {createOwnerUnknownRecoveryService} from "../lib/strata/ownerUnknownRecoveryService";
 import {loadedMaterial} from "../lib/strata/inAppProtectiveRelease";
 import {readOwnedKalshiFeeds} from "../lib/strata/personalExchangeRead";
@@ -63,6 +64,7 @@ export default createStrataRouter({
   emergencyStop: () => emergencyStopMicroLive(),
   commissioning: createDatabaseCommissioningPort(() => supervisor().view().workerRunning),
   userScope: personalTradingControls,
+  ownerHistory: readOwnerHistory,
   unknownAccountingRecovery: createOwnerUnknownRecoveryService({
     db: pool, now: Date.now,
     isScheduled: (owner, account) => personalTradingSession.isScheduled(owner, account),
