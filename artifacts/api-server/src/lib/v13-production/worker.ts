@@ -113,9 +113,23 @@ export class ProductionWorker {
       if (this.recoveryOnly) return;
       if(this.executor.independentSimulationBound){
         // Explicit simulator integration. No paper exit or signal lookup.
-        // Held-position source integration is a separate release prerequisite.
-        const held=await this.executor.ledger.pool.query("SELECT 1 FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 LIMIT 1",[this.executor.ledger.accountId]);
-        if(held.rows.length||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
+        const held=await this.executor.ledger.pool.query("SELECT id FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY id",[this.executor.ledger.accountId]);
+        // Entry authorization is not a protective-exit gate. Existing account
+        // STOP/kill, reconciliation and reduce-only financial gates still apply.
+        if(held.rows.length){
+          for(const pos of held.rows){
+            if(this.lifecycle!==tickLifecycle)return;
+            const sourceId=await this.executor.captureIndependentSimulationExit(pos.id);
+            if(!sourceId||this.lifecycle!==tickLifecycle)continue;
+            const account=await this.executor.ledger.readAccount();
+            if(account.minimum_exit_micros===null)throw Error("production_exit_floor_not_approved");
+            const intent=await this.executor.prepareExit(pos.id,account.minimum_exit_micros/1000000,sourceId);
+            if(this.lifecycle!==tickLifecycle)return;
+            await this.executor.dispatch(intent);
+          }
+          return;
+        }
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
         const id=await this.executor.captureIndependentSimulationEntry();
         if(!id||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
         const intent=await this.executor.prepareEntry(id);

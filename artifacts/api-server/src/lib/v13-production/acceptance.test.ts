@@ -203,6 +203,21 @@ test("independent market crossing reaches the existing isolated executor without
  assert.equal(await other.readExact(pool,rows[0].direct_source_id,f.exchange.now),null);
  assert.equal(await source.readExact(pool,rows[0].direct_source_id,f.exchange.now+5001),null);
  await f.executor.dispatch(rows[0].id);assert.equal(f.exchange.posts.length,1);
+ // Reconcile real simulator fills, then close only the owned quantity on the
+ // exact held contract, even when new entries are explicitly disallowed.
+ f.exchange.fill(f.exchange.posts[0]!,"200");await f.executor.reconcile();
+ f.exchange.now+=1000;btc=99980;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ const heldWorker=new ProductionWorker(f.executor,2500,()=>{},()=>false);
+ await heldWorker.tick();
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal(f.exchange.posts[1]!.market,ticker);assert.equal(f.exchange.posts[1]!.action,"SELL");assert.equal(f.exchange.posts[1]!.reduceOnly,true);
+ f.exchange.fill(f.exchange.posts[1]!,"100");await f.executor.reconcile();
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
+ const exit=(await pool.query("SELECT id,decision FROM v13_production_intent WHERE kind='EXIT'")).rows[0];
+ assert.ok(exit.decision.ownedEvaluation.sourceDirectHeldId);assert.equal(exit.decision.ownedEvaluation.sourcePaperEvaluationId,undefined);
+ await f.executor.dispatch(exit.id);assert.equal(f.exchange.posts.length,2);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
  await invariant(f.ledger);
 });
 async function invariant(l: ProductionLedger) {

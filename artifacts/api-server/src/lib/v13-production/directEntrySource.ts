@@ -36,6 +36,18 @@ type Unsigned={version:1;account:string;owner:string|null;ticker:string;evaluati
  environment:Environment;source:DirectEvaluation;quote:Quote;};
 type Receipt=Unsigned&{producerSeal:string};
 type Query=Pick<Pool|PoolClient,"query">;
+/** A held position has its own market and quantity; current-window discovery
+ * cannot substitute for that contract, including during rollover. */
+export type DirectHeldEvaluation={
+ id:string;evaluation_source:"direct_held_simulation_v1";execution_environment:"SIMULATION";
+ position_id:string;account_id:string;market_ticker:string;side:"YES"|"NO";quantity_hundredths:string;
+ strategy_parameter_set_id:string;strategy_parameter_hash:string;
+ evaluated_at:string;original_oldest_ms:number;market_close_ms:number;
+ btc_price:number;target:number;signed_buffer:number;velocity:number|null;up_offer:number;down_offer:number;
+ feed_freshness:"current";btc_provider_age_ms:number;btc_receive_age_ms:number;market_age_ms:number;
+};
+type HeldReceipt={version:1;account:string;owner:string|null;source:DirectHeldEvaluation;quote:Quote;producerSeal:string};
+
 function top(book:ReadonlyResearchBook,market:string,cycle:number,now:number):Quote {
  requireProof(book.ticker===market&&book.source==="KALSHI_PUBLIC_REST"&&book.timestampAuthority==="LOCAL_RECEIPT_ONLY"&&
   time(book.requestStartedAtMs)&&time(book.receivedAtMs)&&time(book.bodyCompletedAtMs)&&
@@ -195,4 +207,83 @@ export class DirectEntrySource{
    return Object.freeze(s);
   }catch{return null;}
  }
+ async #heldPosition(db:Query,id:string){
+  const r=await db.query(
+   "SELECT p.id,p.account_id,p.market,p.side,p.quantity_hundredths::text AS quantity_hundredths "+
+   "FROM public.v13_production_position p JOIN public.v13_production_account a ON a.id=p.account_id "+
+   "JOIN public.v13_production_intent i ON i.id=p.id AND i.account_id=p.account_id "+
+   "WHERE p.id=$1 AND p.account_id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $3::uuid "+
+   "AND p.quantity_hundredths>0 AND i.kind='ENTRY' AND i.terminal IS TRUE",
+   [id,this.#scope.accountId,this.#scope.ownerId]);
+  return r.rows.length===1?r.rows[0]:null;
+ }
+ async captureHeld(db:Query,parentId:string,signal?:AbortSignal):Promise<string|null>{
+  this.assertSimulationBinding(this.#scope);
+  if(this.#running)return null;this.#running=true;
+  try{
+   await this.#assertDatabase(db);
+   const pos=await this.#heldPosition(db,parentId);
+   if(!pos||!TICKER.test(pos.market)||!["YES","NO"].includes(pos.side))return null;
+   const cycle=this.#now(),deadline=AbortSignal.timeout(AGE);
+   const {btc,market}=await readForwardCycleFeeds(this.feeds,pos.market,signal,deadline);
+   const now=this.#now(),provider=btc.providerAt.getTime(),received=btc.receivedAt.getTime(),fetched=market.fetchedAt.getTime(),
+    open=market.startsAt?.getTime(),close=market.endsAt?.getTime();
+   requireProof(market.ticker===pos.market&&time(open)&&time(close)&&close-open===900000&&open<=cycle&&now<close&&
+    ["open","active"].includes(market.status)&&market.result===null&&finite(market.target)&&market.target>0&&
+    finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&provider<=received&&cycle<=received&&cycle<=fetched&&
+    [cycle,provider,received,fetched].every(x=>time(x)&&x<=now&&now-x<=AGE),"direct_held_market_or_feed_invalid");
+   requireProof(this.feeds.book,"direct_held_book_missing");
+   const book=await this.feeds.book(pos.market,signal?AbortSignal.any([signal,deadline]):deadline);
+   const observed=this.#now();deadline.throwIfAborted();signal?.throwIfAborted();
+   const quote=top(book,pos.market,cycle,observed),oldest=Math.min(cycle,provider,received,fetched,quote.started);
+   requireProof(observed-oldest<=AGE&&oldest>=open&&observed<close,"direct_held_original_source_expired");
+   const up=(10000-quote.noBid)/10000,down=(10000-quote.yesBid)/10000;
+   // A first held observation cannot infer historical velocity. The approved
+   // wrong-side recross rule remains eligible from current evidence alone.
+   const input={marketTicker:pos.market,btcPrice:btc.price,target:market.target,previousBuffer:null,velocity:null,
+    upOffer:up,downOffer:down,freshness:"current" as const,position:{status:"open" as const,direction:pos.side==="YES"?"up" as const:"down" as const}};
+   const decision=evaluateV13Strategy(input);
+   if(decision.signal!=="EXIT"||!decision.positionExitReason)return null;
+   const id=randomUUID(),source:DirectHeldEvaluation={id,evaluation_source:"direct_held_simulation_v1",execution_environment:"SIMULATION",
+    position_id:parentId,account_id:this.#scope.accountId,market_ticker:pos.market,side:pos.side,quantity_hundredths:pos.quantity_hundredths,
+    strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
+    evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_close_ms:close,
+    btc_price:btc.price,target:market.target,signed_buffer:btc.price-market.target,velocity:null,up_offer:up,down_offer:down,feed_freshness:"current",
+    btc_provider_age_ms:observed-provider,btc_receive_age_ms:observed-received,market_age_ms:observed-fetched};
+   const unsigned={version:1 as const,account:this.#scope.accountId,owner:this.#scope.ownerId,source,quote};
+   const receipt:HeldReceipt={...unsigned,producerSeal:this.#seal(JSON.stringify(unsigned))};
+   const bytes=JSON.stringify(receipt);
+   // The existing financial audit journal holds the exact sealed bytes. JSONB
+   // key reordering cannot change the receipt digest because bytes are a string.
+   await db.query("INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) "+
+    "VALUES($1,$2,'DIRECT_HELD_SIMULATION_V1',$3,$4)",
+    [id,this.#scope.accountId,JSON.stringify({bytes}),sha(bytes)]);
+   return await this.readHeldExact(db,id,parentId,this.#now())?id:null;
+  }finally{this.#running=false;}
+ }
+ async readHeldExact(db:Query,id:string,parentId:string,now:number):Promise<DirectHeldEvaluation|null>{
+  this.assertSimulationBinding(this.#scope);
+  if(!UUID.test(id)||!time(now))return null;
+  await this.#assertDatabase(db);
+  const pos=await this.#heldPosition(db,parentId);
+  if(!pos)return null;
+  const r=await db.query("SELECT payload,digest FROM public.v13_production_observation WHERE id=$1 AND account_id=$2 "+
+   "AND kind='DIRECT_HELD_SIMULATION_V1' FOR SHARE",[id,this.#scope.accountId]);
+  const row=r.rows[0],bytes=row?.payload?.bytes;
+  if(r.rows.length!==1||typeof bytes!=="string"||Buffer.byteLength(bytes)>65536||sha(bytes)!==row.digest)return null;
+  try{
+   const receipt=JSON.parse(bytes) as HeldReceipt,{producerSeal,...unsigned}=receipt,s=receipt.source;
+   if(!HASH.test(producerSeal)||!timingSafeEqual(Buffer.from(producerSeal,"hex"),Buffer.from(this.#seal(JSON.stringify(unsigned)),"hex")))return null;
+   if(JSON.stringify(receipt)!==bytes||receipt.version!==1||receipt.account!==this.#scope.accountId||receipt.owner!==this.#scope.ownerId||
+    s.id!==id||s.position_id!==parentId||s.account_id!==this.#scope.accountId||s.market_ticker!==pos.market||s.side!==pos.side||
+    s.quantity_hundredths!==pos.quantity_hundredths||s.evaluation_source!=="direct_held_simulation_v1"||s.execution_environment!=="SIMULATION"||
+    s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
+    s.feed_freshness!=="current"||!time(s.original_oldest_ms)||!time(s.market_close_ms)||!time(Date.parse(s.evaluated_at))||
+    s.original_oldest_ms>Date.parse(s.evaluated_at)||Date.parse(s.evaluated_at)>now||now-s.original_oldest_ms>AGE||now>=s.market_close_ms)return null;
+   const decision=evaluateV13Strategy({marketTicker:s.market_ticker,btcPrice:s.btc_price,target:s.target,previousBuffer:null,
+    velocity:s.velocity,upOffer:s.up_offer,downOffer:s.down_offer,freshness:"current",position:{status:"open",direction:s.side==="YES"?"up":"down"}});
+   return decision.signal==="EXIT"&&decision.positionExitReason?Object.freeze(s):null;
+  }catch{return null;}
+ }
+
 }

@@ -69,7 +69,21 @@ export class ProductionExecutor {
     source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
     return source.capture(this.ledger.pool);
   }
+  async captureIndependentSimulationExit(parentId:string):Promise<string|null>{
+    const source=this.#directSimulationSource;
+    requireProof(source&&this.exchange.mode==="SIMULATION","direct_held_simulation_binding_invalid");
+    source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    return source.captureHeld(this.ledger.pool,parentId);
+  }
   private assertIntentSourceKind(i:Intent):void {
+    if(i.kind==="EXIT"){
+      const owned=i.decision?.ownedEvaluation as {sourceDirectHeldId?:unknown}|undefined;
+      if(this.#directSimulationSource||owned?.sourceDirectHeldId!=null){
+        requireProof(this.exchange.mode==="SIMULATION"&&this.#directSimulationSource&&typeof owned?.sourceDirectHeldId==="string","direct_held_intent_source_mismatch");
+        this.#directSimulationSource.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+      }
+      return;
+    }
     if(i.kind!=="ENTRY")return;
     if(this.#directSimulationSource||i.direct_source_id!=null){
       requireProof(this.exchange.mode==="SIMULATION"&&this.#directSimulationSource&&i.direct_source_id&&i.evaluation_id===null,
@@ -376,7 +390,10 @@ export class ProductionExecutor {
     return retried;
   }
 
-  async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {
+  async prepareExit(parentId: string, minimumExitPrice: number, directHeldId?:string): Promise<string> {
+    const direct=this.#directSimulationSource;
+    requireProof((direct!==null)=== (directHeldId!==undefined),"direct_held_intent_source_mismatch");
+    if(direct)direct.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
     const parent = (await this.ledger.pool.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2", [parentId, this.ledger.accountId])).rows[0];
     requireProof(parent?.kind === "ENTRY", "production_exit_parent_missing");
     const book = await this.exchange.market(parent.market, parent.side, undefined, "EXIT");
@@ -389,7 +406,7 @@ export class ProductionExecutor {
       requireProof(active.rows.length === 0, "production_exit_already_pending");
       const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [parentId])).rows[0];
       requireProof(pos && money(pos.quantity_hundredths) > 0n, "production_exit_not_owned");
-      const source = (await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
+      const source = direct?await direct.readHeldExact(tx,directHeldId!,parentId,this.now()):(await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
         AND market_ticker=$1 ORDER BY evaluated_at DESC,id DESC LIMIT 1 FOR SHARE`, [parent.market])).rows[0];
       const age = source ? this.now() - new Date(source.evaluated_at).getTime() : Infinity;
       requireProof(source && source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -421,7 +438,7 @@ export class ProductionExecutor {
         quantityVersion:EXIT_QUANTITY_VERSION,quantityHundredths:plan.plan.plannedHundredths,limitMicros:plan.plan.limitMicros,
         timeInForce: "IOC", reduceOnly: true, clientOrderId: `v13p-${id}` };
       const decision = { book, plan: plan.plan, minimumExitPrice, policy: p, identity: identity(a), parentId,
-        ownedEvaluation: { position: pos, source, sourcePaperEvaluationId: source.id, decision: ownedDecision } };
+        ownedEvaluation: { position: pos, source, ...(direct?{sourceDirectHeldId:source.id}:{sourcePaperEvaluationId:source.id}), decision: ownedDecision } };
       await tx.query(`INSERT INTO v13_production_intent(id,account_id,parent_id,kind,market,side,request,decision,
         policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,'EXIT',$4,$5,$6,$7,$8,$9,$10,$11,0,0)`,
@@ -586,8 +603,10 @@ export class ProductionExecutor {
             const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.parent_id])).rows[0];
             requireProof(pos && money(pos.quantity_hundredths) >= requestQuantityHundredths(i.request) && i.request.reduceOnly,
               "production_exit_ownership_changed");
-            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown> };
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
+            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown>; sourceDirectHeldId?:string };
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSimulationSource;
+            const source = direct?await direct.readHeldExact(tx,owned.sourceDirectHeldId!,i.parent_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
             const age = this.now() - new Date(source?.evaluated_at ?? 0).getTime();
             requireProof(source && canonical(source) === canonical(owned.source) &&
               age >= 0 && age <= p.maxQuoteAgeMs &&
@@ -691,6 +710,11 @@ export class ProductionExecutor {
             const s=i.decision.source as {original_oldest_ms:number;market_close_ms:number};
             const now=this.now();
             requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_entry_original_source_expired");
+          }
+          if(i.kind==="EXIT"&&this.#directSimulationSource){
+            const s=(i.decision.ownedEvaluation as {source:{original_oldest_ms:number;market_close_ms:number}}).source;
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_held_original_source_expired");
           }
           invoked = true;
           finalTiming("completed",{finalMarketReads});
