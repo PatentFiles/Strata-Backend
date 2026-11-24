@@ -754,7 +754,7 @@ export async function commissionOwnedAccount(
       await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
       const locked=await tx.query("SELECT id,key_fingerprint,reconciled_at FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[expected.accountId,input.ownerUserId]);
       const observed=locked.rows[0]?.reconciled_at;
-      if(locked.rows.length!==1||!input.signedCashObservedAt||new Date(String(observed)).toISOString()!==input.signedCashObservedAt||locked.rows[0]!.key_fingerprint!==row?.key_fingerprint||row?.policy_id!==expected.policyId)
+      if(locked.rows.length!==1||!input.signedCashObservedAt||(observed instanceof Date?observed.toISOString():new Date(String(observed)).toISOString())!==input.signedCashObservedAt||locked.rows[0]!.key_fingerprint!==row?.key_fingerprint||row?.policy_id!==expected.policyId)
         return refused("commissioning_signed_cash_scope_changed");
       await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[expected.accountId]);
       const current=await readInitialCommissioningReview(tx,input.ownerUserId,{feeArtifactDigest:digest,policyId:expected.policyId,version:expected.policyVersion},true);
