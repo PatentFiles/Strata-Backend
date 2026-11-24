@@ -14,6 +14,8 @@ import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAut
 import {persistAuthenticatedExitReconciliation} from "./ownerFeeEmergencyExitReconciliationCommit";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
+import type {DirectEntrySource} from "../v13-production/directEntrySource";
+import type {PoolClient} from "@workspace/db";
 
 /**
  * P0 protective-exit signed transport candidate. Never wired to a public route;
@@ -50,7 +52,7 @@ const fail=(reason:string,state:Result["state"]="BLOCKED",postAttempted=false):R
 type Receipt=IocRecoveryObservation["response"];
 type Material={keyId:string;privateKey:string};
 type Input={ownerId:string;accountId:string;reservationId:string;
-  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease};
+  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease;directHeldSource?:DirectEntrySource};
 /** Narrow seams are for isolated tests; not injectable by public controllers. */
 type Ports={
  db?:DB;now?:()=>number;monotonicNow?:()=>number;
@@ -223,7 +225,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
  EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
- i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,
+ i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-(i.decision#>>'{ownedEvaluation,source,evaluated_at}')::timestamptz))*1000::double precision AS source_age_ms,
  CASE WHEN $14::boolean THEN NULL ELSE
  EXTRACT(EPOCH FROM (code_release.expires_at-clock_timestamp()))*1000::double precision END AS release_remaining_ms
@@ -234,7 +236,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    AND p.policy_hash=i.policy_hash AND p.state='APPROVED'
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
- JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
+ JOIN public.v13_production_position pos ON pos.id=i.parent_id AND pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
  -- Account owner AAL2 approval is required at account activation, but NEVER
  -- constitutes independent review of the executable emergency exit.
  -- Every signed protective IOC must have a genuinely independent exact-SHA
@@ -301,6 +303,19 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   // The prepared strategy source is pinned to this exact financial EXIT.
   // A newly fetched book or fee response cannot refresh that source.
   const sourceLifetime=protectiveExitSourceRemainingMs(row.owned_evaluation,row.max_quote_age_ms,row.source_age_ms,String(input.order.ticker));
+  const owned=row.owned_evaluation as {sourceDirectHeldId?:unknown;source?:Record<string,unknown>}|null;
+  if(input.directHeldSource||owned?.sourceDirectHeldId!==undefined){
+   if(!input.directHeldSource||typeof owned?.sourceDirectHeldId!=="string"||typeof row.parent_id!=="string"||
+      !owned.source||owned.source.account_id!==input.accountId||owned.source.owner_user_id!==input.ownerId||
+      typeof owned.source.evaluated_at!=="string"||typeof row.source_age_ms!=="number"||sourceLifetime===null)
+     return {attempted:false,receipt:null};
+   input.directHeldSource.assertExecutorBinding("LIVE",{accountId:input.accountId,ownerId:input.ownerId});
+   // Read the sealed original receipt inside the actual locked final fence.
+   // Valid expiry remains distinguishable from tampering or lost custody.
+   if(!await input.directHeldSource.verifyHeldForFinalFence(c as unknown as Pick<PoolClient,"query">,
+       owned.sourceDirectHeldId,row.parent_id,Math.ceil(Date.parse(owned.source.evaluated_at)+row.source_age_ms),owned.source))
+     return {attempted:false,receipt:null};
+  }
   const releaseRemaining=standingAllowed?Infinity:row.release_remaining_ms;
   if(sourceLifetime===null||(!standingAllowed&&(typeof releaseRemaining!=="number"||
      !Number.isFinite(releaseRemaining)||releaseRemaining<=0)))return {attempted:false,receipt:null};
@@ -346,6 +361,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  const hosted=Boolean(process.env.RAILWAY_ENVIRONMENT_ID||
    process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID);
  const testMode=process.env.NODE_ENV==="test"&&!hosted;
+ if(input.directHeldSource&&(!testMode&&input.directHeldSource.environment!=="LIVE_OBSERVATION"))return fail("direct_held_simulation_forbidden");
  if(!testMode&&(process.env.NODE_ENV!=="production"||
     process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
   return fail("protective_exit_release_disabled");

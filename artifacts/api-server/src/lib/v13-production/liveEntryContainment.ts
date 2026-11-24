@@ -13,7 +13,8 @@ export function assertIndependentEntryAvailable():never {
 /** The production transport constructs a fixed string URL, explicit method and
  * serialized order object. Reject other input shapes rather than guess whether
  * a request is reducing. This is a narrowing fence, not an exit authorization. */
-export function assertContainedProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit):void {
+import type {ProductionLedger} from "./ledger";
+function assertProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit,entry?: (body:unknown)=>void):void {
   if(typeof input!=="string"||!init||typeof init.method!=="string")assertIndependentEntryAvailable();
   const method=init.method.toUpperCase();
   let url:URL;
@@ -29,9 +30,32 @@ export function assertContainedProductionRequest(input:Parameters<typeof fetch>[
   try{value=JSON.parse(init.body);}catch{assertIndependentEntryAvailable();}
   if(!value||typeof value!=="object"||Array.isArray(value))assertIndependentEntryAvailable();
   const order=value as Record<string,unknown>;
-  if(order.reduce_only!==true||order.subaccount!==1||order.exchange_index!==2||
-    order.time_in_force!=="immediate_or_cancel"||order.post_only!==false)
+  if(order.subaccount!==1||order.exchange_index!==2||order.time_in_force!=="immediate_or_cancel"||order.post_only!==false)
     assertIndependentEntryAvailable();
+  if(order.reduce_only===true)return;
+  if(order.reduce_only!==false||!entry)assertIndependentEntryAvailable();
+  entry(order);
+}
+export function assertContainedProductionRequest(input:Parameters<typeof fetch>[0],init?:RequestInit):void{
+  assertProductionRequest(input,init);
+}
+/** The ordinary transport stays contained. Only the currently locked,
+ * exact-source, one-shot permit can admit a BUY. A synthetic source can
+ * NEVER use the default external HTTP transport. */
+export function createIndependentProductionFetch(ledger:()=>ProductionLedger|null,isolatedRaw?:typeof fetch):typeof fetch{
+ const isolated=isolatedRaw!==undefined;
+ if(isolated&&!(process.env.NODE_ENV==="test"&&!process.env.RAILWAY_ENVIRONMENT_ID&&
+  !process.env.RAILWAY_SERVICE_ID&&!process.env.RAILWAY_PROJECT_ID&&
+  /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/.test(process.env.V13_DISPOSABLE_DATABASE_URL??"")))
+  throw Error("independent_wire_test_transport_forbidden");
+ return async(input,init)=>{
+  assertProductionRequest(input,init,body=>{
+   const current=ledger();if(!current)assertIndependentEntryAvailable();
+   if(!isolated&&process.env.STRATA_INDEPENDENT_LIVE_SOURCE_V1!=="true")assertIndependentEntryAvailable();
+   current.consumeIndependentEntryWire(body,isolated?"SIMULATION":"LIVE_OBSERVATION");
+  });
+  return (isolatedRaw??fetch)(input,{...init,redirect:"error"});
+ };
 }
 export const containedProductionFetch:typeof fetch=async(input,init)=>{
   assertContainedProductionRequest(input,init);

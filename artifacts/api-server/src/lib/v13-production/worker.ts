@@ -72,7 +72,7 @@ export class ProductionWorker {
    * it cannot submit orders, reopen entries, or schedule a trading tick.
    */
   private scheduleTraceSweep(observedAt: number): void {
-    if (!this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
+    if (this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
         observedAt - this.lastTraceSweepAt < 30_000) return;
     this.lastTraceSweepAt = observedAt;
     const trace = this.signalTrace;
@@ -111,26 +111,33 @@ export class ProductionWorker {
       if(renewal?.technicalRenewal === "deferred")this.technicalRenewalDebt=true;
       else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
-      if(this.executor.independentSimulationBound){
-        // Explicit simulator integration. No paper exit or signal lookup.
-        const held=await this.executor.ledger.pool.query("SELECT id FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY id",[this.executor.ledger.accountId]);
+      if(this.executor.independentSourceBound){
+        // The independent owner source never reads a paper window, evaluation or wake.
+        const held=await this.executor.ledger.pool.query("SELECT id,market,side,quantity_hundredths::text FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY id",[this.executor.ledger.accountId]);
         // Entry authorization is not a protective-exit gate. Existing account
         // STOP/kill, reconciliation and reduce-only financial gates still apply.
         if(held.rows.length){
           for(const pos of held.rows){
             if(this.lifecycle!==tickLifecycle)return;
-            const sourceId=await this.executor.captureIndependentSimulationExit(pos.id);
+            const sourceId=await this.executor.captureIndependentExit(pos.id);
             if(!sourceId||this.lifecycle!==tickLifecycle)continue;
             const account=await this.executor.ledger.readAccount();
             if(account.minimum_exit_micros===null)throw Error("production_exit_floor_not_approved");
-            const intent=await this.executor.prepareExit(pos.id,account.minimum_exit_micros/1000000,sourceId);
-            if(this.lifecycle!==tickLifecycle)return;
-            await this.executor.dispatch(intent);
+            if(this.executor.exchange.mode==="LIVE"){
+              if(!this.dispatchProtectiveExit)throw Error("reviewed_protective_exit_worker_not_bound");
+              if(pos.side!=="YES"&&pos.side!=="NO")throw Error("protective_exit_side_unverified");
+              await this.dispatchProtectiveExit({positionId:pos.id,market:pos.market,side:pos.side,
+                quantityHundredths:pos.quantity_hundredths,minimumExitMicros:account.minimum_exit_micros,directHeldId:sourceId});
+            }else{
+              const intent=await this.executor.prepareExit(pos.id,account.minimum_exit_micros/1000000,sourceId);
+              if(this.lifecycle!==tickLifecycle)return;
+              await this.executor.dispatch(intent);
+            }
           }
           return;
         }
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
-        const id=await this.executor.captureIndependentSimulationEntry();
+        const id=await this.executor.captureIndependentEntry();
         if(!id||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
         const intent=await this.executor.prepareEntry(id);
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
@@ -310,7 +317,7 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=this.executor.liveEntryContained||this.executor.independentSimulationBound?null:onCommittedForwardSignal((hint)=>{
+    this.detachWake=this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
       if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;

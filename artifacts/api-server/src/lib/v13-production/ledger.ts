@@ -89,7 +89,8 @@ export const FINAL_ACCOUNT_PROJECTION_SQL = `SELECT
 export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
   private readonly finalSnapshotIntent = new AsyncLocalStorage<{ active: boolean; entryIntentId: string | null }>();
-  private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null;connection:ReturnType<typeof transactionConnectionFence>}>();
+  private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null;connection:ReturnType<typeof transactionConnectionFence>;
+    independentEntry:null|{body:string;sourceId:string;environment:"LIVE_OBSERVATION"|"SIMULATION";spent:boolean}}>();
   constructor(readonly pool: Pool, readonly accountId: string) {}
   // Read providers invoked inside a final fence MUST use its existing client,
   // not open another transaction/connection behind the held account lock.
@@ -120,6 +121,25 @@ export class ProductionLedger {
     scope.connection.assertLive();
     // Original source clock remains the final check before raw transport.
     scope.check();
+  }
+  /** Only the locked executor may pin an independent entry. Its complete
+   * canonical order is bound to this one-use transaction-local permit. */
+  pinIndependentEntryWire(account:Account,intent:Intent,source:import("./directEntrySource").DirectEvaluation,encoded:unknown):void{
+    const scope=this.wireContext.getStore();
+    requireProof(this.currentTransaction()&&scope?.active&&scope.check&&!scope.independentEntry&&
+      account.id===this.accountId&&intent.account_id===account.id&&intent.kind==="ENTRY"&&intent.state==="DISPATCHED"&&
+      intent.evaluation_id===null&&intent.direct_source_id===source.id&&source.account_id===account.id&&
+      source.owner_user_id===(account.owner_user_id??null)&&intent.request.reduceOnly===false&&
+      intent.client_order_id===intent.request.clientOrderId&&canonical(intent.decision.source)===canonical(source),
+      "direct_entry_wire_pin_invalid");
+    scope.independentEntry={body:canonical(encoded),sourceId:source.id,environment:source.execution_environment,spent:false};
+  }
+  consumeIndependentEntryWire(encoded:unknown,environment:"LIVE_OBSERVATION"|"SIMULATION"):void{
+    const scope=this.wireContext.getStore(),permit=scope?.independentEntry;
+    requireProof(this.currentTransaction()&&scope?.active&&permit&&!permit.spent&&
+      permit.environment===environment&&canonical(encoded)===permit.body,"direct_entry_wire_authority_missing_or_spent");
+    this.assertFinalWireClock();
+    permit.spent=true; // Burn before HTTP, even when the response is ambiguous.
   }
   /** Only the currently locked ENTRY may be discounted from its own final
    * snapshot uncertainty check. This context never survives the callback and
@@ -153,9 +173,9 @@ export class ProductionLedger {
     options: { lockTimeoutMs?: number } = {}): Promise<T> {
     const tx = await this.pool.connect();
     const connection=transactionConnectionFence(tx);
-    const wireScope={active:true,check:null as (()=>void)|null,connection};
+    const wireScope={active:true,check:null as (()=>void)|null,connection,independentEntry:null};
     let discard=false,failed=false;
-    const close=()=>{wireScope.active=false;wireScope.check=null;connection.close();};
+    const close=()=>{wireScope.active=false;wireScope.check=null;wireScope.independentEntry=null;connection.close();};
     try {
       let rows: Account[];
       // No application decision occurs between BEGIN and the first lock. Send

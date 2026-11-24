@@ -159,7 +159,8 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-import {containedProductionFetch} from "../v13-production/liveEntryContainment";
+import {containedProductionFetch,createIndependentProductionFetch} from "../v13-production/liveEntryContainment";
+import {DirectEntrySource} from "../v13-production/directEntrySource";
 
 /** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
 export async function personalProductionFetch(
@@ -478,6 +479,12 @@ export function createProductionPersonalSession(
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    // Rollout OFF until the replacement has completed signed qualification.
+    // The flag is not consent, fee authority or a release approval.
+    const directSource=process.env.STRATA_INDEPENDENT_LIVE_SOURCE_V1==="true"
+      ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
+        holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}}):null;
+    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
         const tx=finalLedger?.currentTransaction();
@@ -499,7 +506,7 @@ export function createProductionPersonalSession(
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
-    },personalProductionFetch,timingObserver,timingContext);
+    },rawOwnedTransport,timingObserver,timingContext);
     let activeMetadata:MetadataPrefetchAttempt|null=null;
     let heldReadAbort:AbortSignal|null=null;
     let recoveryAbort:AbortController|null=null;
@@ -538,7 +545,7 @@ export function createProductionPersonalSession(
           // DOES NOT send an order. It independently rechecks position,
           // strategy, approved policy/fees, book, stake and exit floor.
           const financialId = await session.executor.prepareExit(
-            selection.positionId,selection.minimumExitMicros/1_000_000,
+            selection.positionId,selection.minimumExitMicros/1_000_000,selection.directHeldId,
           );
           const financialRows = await db.query(
             "SELECT request FROM public.v13_production_intent "+
@@ -565,6 +572,7 @@ export function createProductionPersonalSession(
           const outcome = await dispatchReviewedProtectiveExitOnce({
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
+            ...(directSource?{directHeldSource:directSource}:{}),
           });
           // Preserve a known local no-send as a temporary reconciliation hold,
           // never as entry authority. UNKNOWN and failed reads remain sticky.
@@ -743,16 +751,17 @@ export function createProductionPersonalSession(
       }),
       fetchImpl: measuredFetch,
     });
-    session.executor.containLiveEntries();
+    if(directSource)session.executor.bindIndependentLiveSource(directSource);
+    else session.executor.containLiveEntries();
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
-    if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
+    if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if((apiSource||durableSource)&&options.publicMetadataPrefetch===true){
+    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){
       session.executor.prefetchCommittedPublicMetadata=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
