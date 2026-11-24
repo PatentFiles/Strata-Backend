@@ -885,7 +885,13 @@ async function setup(t: { skip(message: string): void }): Promise<{
   db: CredentialDatabase;
 } | null> {
   const raw=await openCredentialFixture();
-  if(!raw){t.skip("disposable PostgreSQL is not installed");return null;}
+  if (!raw) {
+    // Native qualification must never be reported as a successful skip.
+    assert.notEqual(process.env.STRATA_CREDENTIAL_NATIVE_TESTS, "1",
+      "Mandatory native PostgreSQL fixture is unavailable");
+    t.skip("disposable PostgreSQL is not installed");
+    return null;
+  }
   try {
   await raw.exec(`
     CREATE SCHEMA auth;
@@ -1469,8 +1475,14 @@ test("reviewed technical setup executes the real three-operation controls on dis
   const fixture=await setup(t);
   if(!fixture)return;
   try {
-    if(!fixture.raw.nativePool){t.skip("native PostgreSQL pool required");return;}
     const {raw}=fixture;
+    const nativePool = raw.nativePool;
+    if (!nativePool) {
+      assert.notEqual(process.env.STRATA_CREDENTIAL_NATIVE_TESTS, "1",
+        "Mandatory native PostgreSQL pool is unavailable");
+      t.skip("native PostgreSQL pool required");
+      return;
+    }
     // Real attempt/credential/provisioning tables; synthetic provider only.
     // No external request, funding transfer, or activation port is installed.
     await raw.exec(readFileSync("../../lib/db/drizzle/0047_owner_technical_setup_approval.sql","utf8"));
@@ -1490,7 +1502,7 @@ test("reviewed technical setup executes the real three-operation controls on dis
     }
     const generated=generatedCredential();
     let subaccount=false,creates=0,generates=0;
-    const controls=accountCredentialControls(raw.nativePool,{
+    const controls=accountCredentialControls(nativePool,{
       async kalshiGet(material,path,query){
         assert.ok(keys.some(k=>k.keyId===material.keyId));
         if(path.endsWith("/api_keys"))return {api_keys:keys.map(({api_key_id,scopes,subaccount})=>({api_key_id,scopes,subaccount}))};
