@@ -5,7 +5,7 @@ set -euo pipefail
 : "${TEST_SCENARIO:?}"
 : "${TEST_PG_MAJOR:?}"
 [[ "$GITHUB_ACTIONS" == true && "$TEST_CONTAINER" =~ ^[a-f0-9]{64}$ && "$TEST_PG_MAJOR" =~ ^(16|17)$ ]]
-[[ "$TEST_SCENARIO" == fresh || "$TEST_SCENARIO" == upgrade ]]
+[[ "$TEST_SCENARIO" == fresh || "$TEST_SCENARIO" == upgrade || "$TEST_SCENARIO" == issuer ]]
 cd "$(git rev-parse --show-toplevel)"
 db() { docker exec -i "$TEST_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d strata_platform_fee_disposable "$@"; }
 [[ "$(db -Atc 'SELECT current_database()')" == strata_platform_fee_disposable ]]
@@ -30,6 +30,10 @@ done
 # not synthetic stand-ins that would skip the conditional guard.
 db < docs/durable-fee/schema.sql
 db < lib/db/owner-self-release/005_durable_fee_release_authorization.sql
+if [[ "$TEST_SCENARIO" == issuer ]]; then
+  db < "$migration"
+  exit 0
+fi
 # Fingerprint the exact tested migration and database inputs.
 sha256sum "$migration" docs/durable-fee/schema.sql
 snapshot() {

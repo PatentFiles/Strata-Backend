@@ -1,0 +1,55 @@
+name: Genuine public issuer and market fee smoke
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/platform-fee-native/issuer-probe.ts'
+      - '.github/workflows/platform-issuer-live-probe.yml'
+      - 'lib/db/drizzle/0049_strata_platform_official_fee_capture.sql'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  issuer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable_ci_only
+          POSTGRES_DB: strata_platform_fee_disposable
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d strata_platform_fee_disposable"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install exact application and durable fee schema without synthetic fee receipts
+        env:
+          TEST_CONTAINER: ${{ job.services.postgres.id }}
+          TEST_SCENARIO: issuer
+          TEST_PG_MAJOR: '17'
+        run: bash docs/platform-fee-native/run.sh
+      - name: Actual collector with unmodified TLS GET and public market API
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:disposable_ci_only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/strata_platform_fee_disposable
+          STRATA_PUBLIC_SELF_SERVICE_ENABLED: 'true'
+          STRATA_V5_RAILWAY_CAPTURE_ENABLED: 'true'
+        run: |
+          artifacts/api-server/node_modules/.bin/esbuild docs/platform-fee-native/issuer-probe.ts --bundle --platform=node --format=cjs --outfile=artifacts/api-server/dist/platform-issuer-probe.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* --external:pino --external:pino-pretty
+          node artifacts/api-server/dist/platform-issuer-probe.cjs
