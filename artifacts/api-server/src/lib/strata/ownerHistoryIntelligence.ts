@@ -12,6 +12,9 @@ const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function parseHistoryView(value:unknown):HistoryView|null {
  return value==="source"||value==="live"||value==="trades"?value:null;
 }
+export function parseHistoryEvaluationId(value:unknown):string|null {
+ return typeof value==="string"&&UUID.test(value)?value:null;
+}
 export type HistoryCursor={at:string;id:string};
 export function parseHistoryCursor(at:unknown,id:unknown):HistoryCursor|null {
  if(typeof at!=="string"||typeof id!=="string"||!id.length||id.length>200||
@@ -37,6 +40,7 @@ export const OWNER_SQL=`SELECT a.id FROM public.v13_production_account a
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=$2 AND a.exchange_index=$3 LIMIT 2`;
 export const SOURCE_SQL=`SELECT ${EVALUATION_COLUMNS}
  FROM public.forward_test_evaluations e WHERE e.evaluation_source='paper'
+ AND ($4::text IS NULL OR e.id=$4::text)
  AND ($1::timestamptz IS NULL OR (e.evaluated_at,e.id)<($1::timestamptz,$2::text))
  ORDER BY e.evaluated_at DESC,e.id DESC LIMIT $3`;
 
@@ -47,6 +51,7 @@ export const SOURCE_SQL=`SELECT ${EVALUATION_COLUMNS}
 export const LIVE_SQL=`WITH phases AS MATERIALIZED (
  SELECT decision_id,execution_account_id,evaluation_id,observed_at,phase,source_age_ms,reason,release_commit_sha
  FROM private.strata_v13_signal_decisions WHERE execution_account_id=$1
+ AND ($5::text IS NULL OR evaluation_id=$5::text)
  AND ($2::timestamptz IS NULL OR (observed_at,decision_id::text)<($2::timestamptz,$3::text))
  ORDER BY observed_at DESC,decision_id::text DESC LIMIT $4
  ) SELECT ${EVALUATION_COLUMNS},
@@ -102,8 +107,8 @@ export const LINKED_TRACE_SQL=`SELECT t.trace_id::text AS "traceId",t.evaluation
 type Row=Record<string,unknown>;
 type Client={query(sql:string,values?:unknown[]):Promise<{rows:Row[]}>;release(error?:Error):void};
 type Database={connect():Promise<Client>};
-export async function readOwnerHistory(subject:string,view:HistoryView,cursor:HistoryCursor|null,db:Database=pool) {
- if(!UUID.test(subject)||!parseHistoryView(view))throw new Error("history_scope_invalid");
+export async function readOwnerHistory(subject:string,view:HistoryView,cursor:HistoryCursor|null,evaluationId:string|null=null,db:Database=pool) {
+ if(!UUID.test(subject)||!parseHistoryView(view)||(evaluationId!==null&&(!parseHistoryEvaluationId(evaluationId)||view==="trades")))throw new Error("history_scope_invalid");
  if(view==="source")assertPaperAnalyticsAvailable();
  const client=await db.connect();
  let discard:Error|undefined;
@@ -119,8 +124,8 @@ export async function readOwnerHistory(subject:string,view:HistoryView,cursor:Hi
    if(owner.length===1&&typeof owner[0]?.id==="string")accountId=owner[0].id;
    if(owner.length>1)throw new Error("history_account_ambiguous");
   }
-  const rows=view==="source"?(await client.query(SOURCE_SQL,[cursor?.at??null,cursor?.id??null,HISTORY_LIMIT+1])).rows:
-   accountId?(await client.query(view==="live"?LIVE_SQL:TRADES_SQL,[accountId,cursor?.at??null,cursor?.id??null,HISTORY_LIMIT+1])).rows:[];
+  const rows=view==="source"?(await client.query(SOURCE_SQL,[cursor?.at??null,cursor?.id??null,HISTORY_LIMIT+1,evaluationId])).rows:
+   accountId?(await client.query(view==="live"?LIVE_SQL:TRADES_SQL,[accountId,cursor?.at??null,cursor?.id??null,HISTORY_LIMIT+1,...(view==="live"?[evaluationId]:[])])).rows:[];
   const page=rows.slice(0,HISTORY_LIMIT);
   const last=page[page.length-1];
   const next=rows.length>HISTORY_LIMIT&&last?{
@@ -132,7 +137,7 @@ export async function readOwnerHistory(subject:string,view:HistoryView,cursor:Hi
   const executionTrace=accountId&&ids.length?(await client.query(LINKED_TRACE_SQL,[accountId,ids])).rows:[];
   await client.query("COMMIT");
   return {version:1 as const,view,scope:view==="source"?"SHARED_PAPER_SOURCE":"OWNER_LIVE_LEDGER",
-   accountExists:view==="source"?null:accountId!==null,rows:page,next,
+   accountExists:view==="source"?null:accountId!==null,rows:page,next,evaluationId,
    linkedSettlements:settlements.slice(0,HISTORY_LIMIT),linkedSettlementsTruncated:settlements.length>HISTORY_LIMIT,
    // This is a page of persisted observations, not proof of complete telemetry.
    executionTrace:executionTrace.slice(0,300),executionTraceTruncated:executionTrace.length>300,
