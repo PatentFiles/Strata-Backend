@@ -1,3 +1,4 @@
+import {parseHistoryView,parseHistoryCursor,type readOwnerHistory} from "../lib/strata/ownerHistoryIntelligence";
 import { paperAnalyticsPaused, PAPER_ANALYTICS_PAUSE_MESSAGE } from "../lib/paperAnalyticsMaintenance";
 import {createOwnerUnknownRecoveryRouter} from "./ownerUnknownRecoveryRouter";
 import type {OwnerUnknownRecoveryPort} from "../lib/strata/ownerUnknownRecoveryService";
@@ -43,6 +44,7 @@ export interface StrataHttpDeps extends ProductionHttpDeps, StrataAccessDeps {
   emergencyStop: () => Promise<unknown>;
   commissioning?: CommissioningPort;
   userScope?: UserScopePort;
+  ownerHistory?: typeof readOwnerHistory;
   unknownAccountingRecovery?: OwnerUnknownRecoveryPort;
 }
 
@@ -173,6 +175,20 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
   router.use("/me/release", createStoppedCashDiagnosticRouter(access.requireUser));
+  router.get("/me/history-intelligence",access.requireUser,async(req,res)=>{
+    res.setHeader("Cache-Control","private, no-store");
+    const subject=res.locals.strata?.subject;
+    if(typeof subject!=="string"){res.status(401).json({error:"Unauthorized"});return;}
+    const view=parseHistoryView(req.query.view);
+    const {beforeAt,beforeId}=req.query;
+    const cursor=beforeAt===undefined&&beforeId===undefined?null:parseHistoryCursor(beforeAt,beforeId);
+    if(!view||((beforeAt!==undefined||beforeId!==undefined)&&!cursor)){
+      res.status(400).json({error:"Invalid history view or cursor"});return;
+    }
+    if(!deps.ownerHistory){res.status(503).json({error:"Owner history unavailable"});return;}
+    try{res.json(sanitizePublic(await deps.ownerHistory(subject,view,cursor)));}
+    catch{res.status(503).json({error:"Owner history temporarily unavailable"});}
+  });
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
   router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {
