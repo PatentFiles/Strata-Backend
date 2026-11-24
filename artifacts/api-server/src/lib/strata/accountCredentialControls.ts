@@ -1,3 +1,4 @@
+import { VERIFY_AND_COMMISSION, parseMultiKeyInput, inventoryContainsKeys, type MultiKeyInput } from "./multiKeyCommissioning";
 import { advanceTechnicalSetup, createTechnicalSetupAdmission, SETUP_ROLE_ORDER, TECHNICAL_SETUP_CONFIRMATION,
   technicalSetupResult, buildTechnicalSetupPlan, publicTechnicalSetupReview, executeAuthorizedTechnicalSetup,
   EXECUTE_TECHNICAL_SETUP_CONFIRMATION, type ReviewedSetupAttempt, type TechnicalSetupPlan, type TechnicalSetupSnapshot, type SetupRole } from "./technicalSetupAdvance";
@@ -1060,11 +1061,107 @@ export function accountCredentialControls(
       return snapshot;
     },
   });
+  /** First-party signed reads and create-only storage; never opens a trading
+   * session. The same technical journal/plan used by the reviewed two-step
+   * flow is used here. No funds, order, risk approval or rotation authority. */
+  const verifyAndCommission=async(userId:string,input:MultiKeyInput)=>{
+    let observed:SetupRole[]=[];
+    const stop=(reason:string,role?:SetupRole)=>technicalSetupResult("BLOCKED",reason,observed,role?"verify_"+role:null);
+    try{
+      // Do not allow a partial request to create a new primary connection.
+      const accounts=await db.query("SELECT id FROM public.financial_accounts WHERE user_id=$1::uuid AND provider='kalshi' LIMIT 2",[userId]);
+      if(accounts.rows.length>1)return stop("owned_connection_ambiguous");
+      if(accounts.rows.length===0){
+        if(!input.primary)return technicalSetupResult("NEEDS_CREDENTIAL","primary_connection_required",[],"register_primary");
+        if(!SETUP_ROLE_ORDER.slice(0,3).every(role=>input.credentials.some(c=>c.role===role)))
+          return stop("required_setup_credentials_missing");
+        if(!options.kalshiGet)return stop("verification_transport_not_enabled");
+        const material={keyId:input.primary.apiKeyId,privateKey:input.primary.privateKey};
+        const inventory=await options.kalshiGet(material,"/trade-api/v2/api_keys","");
+        if(!inventoryContainsKeys(inventory,[material.keyId,...input.credentials.map(c=>c.apiKeyId)]))
+          return stop("credential_account_membership_unverified");
+        const proof=await inspectProvisioningCredential(dedicatedSignerFingerprint(material.keyId,material.privateKey)!,material,options.kalshiGet);
+        if(!proof.ok)return stop("primary_connection_permission_unverified");
+        // The exact unique index is a deployment prerequisite. Legacy account
+        // creation also races against this constraint; never silently rotate.
+        const uniqueness=await db.query("SELECT EXISTS(SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.oid=to_regclass('public.strata_one_kalshi_connection_per_owner') AND i.indisunique AND i.indisvalid AND i.indisready AND pg_get_expr(i.indpred,i.indrelid) IS NOT NULL) AS ready");
+        if(uniqueness.rows[0]?.ready!==true)return stop("primary_connection_uniqueness_migration_required");
+        await database.transaction(async tx=>{
+          await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('strata-primary-onboarding:'||$1::text,0))",[userId]);
+          const existing=await tx.query("SELECT id FROM public.financial_accounts WHERE user_id=$1::uuid AND provider='kalshi' LIMIT 2",[userId]);
+          if(existing.rows.length!==0)throw Error("primary_connection_changed");
+          const saved=await tx.query("SELECT account_id FROM public.register_kalshi_credential($1::uuid,NULL::uuid,$2::text,$3::text,$4::text)",[userId,"Strata Primary",material.keyId,material.privateKey]);
+          if(saved.rows.length!==1)throw Error("primary_connection_unconfirmed");
+        });
+      }else if(input.primary){
+        return stop("existing_primary_connection_preserved");
+      }
+      const context=await scopeContext(userId);
+      // Prove every submitted/saved role belongs to this owner's actual
+      // primary provider inventory before registering or verifying any role.
+      const base=await db.query("SELECT s.decrypted_secret FROM public.financial_accounts f JOIN private.provider_connections p ON p.financial_account_id=f.id JOIN vault.decrypted_secrets s ON s.id=p.vault_secret_id WHERE f.user_id=$1::uuid AND f.id=$2::uuid AND p.id=$3::uuid AND f.provider='kalshi' LIMIT 2",[userId,context.financialAccountId,context.providerConnectionId]);
+      const material=base.rows.length===1?parseSecret(base.rows[0]?.decrypted_secret):null;
+      if(!material||!options.kalshiGet)return stop("primary_connection_unverified");
+      const ids=[material.keyId];
+      for(const ref of context.credentials){
+        const saved=await readOwnedSecret(db,userId,ref.vaultSecretId);
+        if(!saved||dedicatedSignerFingerprint(saved.keyId,saved.privateKey)!==ref.keyFingerprint)return stop("saved_credential_binding_unverified");
+        if(input.credentials.some(c=>c.role===ref.role))return stop("existing_credential_preserved",ref.role as SetupRole);
+        ids.push(saved.keyId);
+      }
+      ids.push(...input.credentials.map(c=>c.apiKeyId));
+      // The primary connection may intentionally reuse an existing read key.
+      // Only the four independent execution roles must be mutually distinct.
+      const roleIds=ids.slice(1);
+      if(new Set(roleIds).size!==roleIds.length)return stop("credential_roles_not_independent");
+      const inventory=await options.kalshiGet(material,"/trade-api/v2/api_keys","");
+      if(!inventoryContainsKeys(inventory,[...new Set(ids)]))return stop("credential_account_membership_unverified");
+      const afterRead=await scopeContext(userId);
+      if(scopeOf(afterRead)!==scopeOf(context))return stop("technical_setup_scope_changed");
+      for(const role of SETUP_ROLE_ORDER){
+        const item=input.credentials.find(c=>c.role===role);
+        const existing=context.credentials.find(c=>c.role===role);
+        if(!item&&!existing){
+          if(role==="restricted_execution"&&!context.executionAccountId)continue;
+          return technicalSetupResult("NEEDS_CREDENTIAL","setup_role_missing",observed,"register_"+role);
+        }
+        if(item){
+          const saved=await controls.registerCredential(userId,{...item,expectedOwnerId:userId,verifyAfterSave:"VERIFY_ACCOUNT_CREDENTIAL"});
+          if(!saved.ok)return stop(saved.reason,role);
+        }else{
+          // No re-registration or rotation of an existing role.
+          const status=await listAccountCredentialStatus(database,ports(),userId);
+          const current=status.roles.filter(c=>c.role===role&&!c.revoked);
+          if(!status.ok||current.length!==1||current[0]?.fingerprint!==existing?.keyFingerprint)return stop("technical_setup_scope_changed",role);
+          if(!current[0]?.verified||current[0]?.verificationReason!=="credential_verified"){
+            const verified=await verifySavedRole(userId,{role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"});
+            if(!verified.ok)return stop(verified.reason,role);
+          }
+        }
+        observed.push(role);
+      }
+      // Existing account returns EXISTING_ACCOUNT, never re-provisions it.
+      const prepared=await advanceOnce(userId);
+      if((prepared.stage==="PREPARED"||prepared.stage==="NEEDS_OWNER_ACTION")&&prepared.attemptId){
+        const plan=await reviewPlan(userId,prepared.attemptId);
+        if(!plan)return stop("technical_setup_plan_unverified");
+        return executeReview(userId,plan);
+      }
+      return prepared;
+    }catch{return technicalSetupResult("UNKNOWN","technical_setup_outcome_unconfirmed",observed);}
+  };
   return {
     ...controls,
     async advanceTechnicalSetup(userId:string,body:unknown){
       if(!body||typeof body!=="object"||Array.isArray(body))return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
       const input=body as Record<string,unknown>,execute=input.confirmation===EXECUTE_TECHNICAL_SETUP_CONFIRMATION;
+      if(input.confirmation===VERIFY_AND_COMMISSION){
+        const parsed=parseMultiKeyInput(body,userId);
+        if(!parsed)return technicalSetupResult("BLOCKED","multi_key_input_invalid");
+        if(!await credentialTablesReady(db))return technicalSetupResult("BLOCKED","credential_migration_missing");
+        if(!("connect" in db)||typeof (db as PgPoolLike).connect!=="function")return technicalSetupResult("BLOCKED","technical_setup_admission_unavailable");
+        return admitTechnicalSetup(userId,()=>verifyAndCommission(userId,parsed));
+      }
       if(input.expectedOwnerId!==userId||(!execute&&input.confirmation!==TECHNICAL_SETUP_CONFIRMATION)||
         Object.keys(input).some(key=>!["expectedOwnerId","confirmation",...(execute?["attemptId","planDigest"]:[])].includes(key))||
         (execute&&(typeof input.attemptId!=="string"||!UUID.test(input.attemptId)||typeof input.planDigest!=="string"||!/^[a-f0-9]{64}$/.test(input.planDigest))))
