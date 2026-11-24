@@ -17,7 +17,7 @@ const policy = {
   blocked_reason: "awaiting_account_commissioning",
   subaccount: 1, exchange_index: 2,
   key_fingerprint: digest, credential_fingerprint: digest,
-  cash_precision_verified: true, cash_micros: "25000000",
+  cash_precision_verified: true, cash_micros: "25000000", initial_cash_micros: "25000000",
   reconciled_at: new Date(Date.now() - 10_000).toISOString(),
   verified_funding_at: new Date(Date.now() - 20_000).toISOString(),
   policy_id: "policy-1", policy_state: "APPROVED",
