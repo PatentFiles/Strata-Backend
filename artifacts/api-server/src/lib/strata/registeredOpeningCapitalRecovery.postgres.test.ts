@@ -267,7 +267,7 @@ async function commissioningFixture(t:TestContext){
  await f.db.exec(`
  ALTER TABLE public.v13_live_money_policy ADD COLUMN fee_policy_version text;
  ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN holder_id text,ADD COLUMN credential_fingerprint text;
- UPDATE private.kalshi_account_worker_lease SET credential_fingerprint=(SELECT key_fingerprint FROM public.v13_production_account LIMIT 1);
+ INSERT INTO private.kalshi_account_worker_lease(execution_account_id,owner_user_id,state,account_kill,arm_requested,fencing_token,credential_fingerprint) SELECT id,owner_user_id,'killed',true,false,1,key_fingerprint FROM public.v13_production_account;
  ALTER TABLE public.v13_production_intent ADD COLUMN id text,ADD COLUMN state text;
  ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN state text;
  `);
