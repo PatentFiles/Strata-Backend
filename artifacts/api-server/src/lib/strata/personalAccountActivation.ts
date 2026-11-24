@@ -39,7 +39,7 @@ type Queryable = {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 };
 type Transactional = Queryable & {
-  connect?: () => Promise<Queryable & { release(): void }>;
+  connect?: () => Promise<Queryable & { release(error?:Error): void }>;
 };
 
 const READINESS_SQL = `
@@ -650,6 +650,7 @@ export async function commissionOwnedAccount(
     feeArtifactDigest: unknown;
     minimumExitMicros: unknown;
     initialReview?:InitialCommissioningReview;
+    signedCashObservedAt?:string;
     verifyFee?: typeof verifyCurrentFeeArtifact;
     verifyMonetary?: typeof verifyMonetaryFeeContract;
   },
@@ -747,19 +748,22 @@ export async function commissionOwnedAccount(
       expected.feeDigest!==digest||(expected.existingExitFloorMicros!==null&&expected.existingExitFloorMicros!==minimumExitMicros))
       return refused("commissioning_review_scope_changed");
     const tx=await connect.call(db);
-    let committed=false,commitSent=false;
+    let committed=false,commitSent=false,discard:Error|undefined;
     try{
       await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
-      await tx.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[expected.accountId,input.ownerUserId]);
+      const locked=await tx.query("SELECT id,key_fingerprint,reconciled_at FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[expected.accountId,input.ownerUserId]);
+      const observed=locked.rows[0]?.reconciled_at;
+      if(locked.rows.length!==1||!input.signedCashObservedAt||new Date(String(observed)).toISOString()!==input.signedCashObservedAt||locked.rows[0]!.key_fingerprint!==row?.key_fingerprint||row?.policy_id!==expected.policyId)
+        return refused("commissioning_signed_cash_scope_changed");
       await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[expected.accountId]);
       const current=await readInitialCommissioningReview(tx,input.ownerUserId,{feeArtifactDigest:digest,policyId:expected.policyId,version:expected.policyVersion},true);
       if(!current||current.scopeDigest!==expected.scopeDigest)return refused("commissioning_review_scope_changed");
       written=await tx.query(sql.replace("  RETURNING id","  AND commissioned=false\n  RETURNING id"),parameters);
       if((written.rowCount??written.rows.length)!==1)return refused("commissioning_not_applied");
       commitSent=true;await tx.query("COMMIT");committed=true;
-    }catch{return refused(commitSent?"commissioning_commit_unknown_refresh_records":"commissioning_not_applied");}
-    finally{if(!committed&&!commitSent)try{await tx.query("ROLLBACK");}catch{/* refused */}tx.release();}
+    }catch{if(commitSent)discard=Error("commissioning_commit_unknown");return refused(commitSent?"commissioning_commit_unknown_refresh_records":"commissioning_not_applied");}
+    finally{if(!committed&&!commitSent)try{await tx.query("ROLLBACK");}catch{discard=Error("commissioning_rollback_unknown");}tx.release(discard);}
   }else written=await db.query(sql,parameters);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
