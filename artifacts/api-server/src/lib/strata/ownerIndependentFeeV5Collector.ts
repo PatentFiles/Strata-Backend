@@ -5,19 +5,28 @@
  * It can never claim a PDF existed unless Railway really fetched its bytes.
  */
 import {pool} from "@workspace/db";
-import {captureIndependentOfficialFeeV5} from "./independentOfficialFeeV5";
+import {captureIndependentOfficialFeeV5,capturePlatformOfficialFeeV5} from "./independentOfficialFeeV5";
+import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
 const ACCOUNT=/^strata-account-[0-9a-f]{24}$/;
 let started=false;
 export function startOwnerIndependentFeeV5Collector():void{
  if(started||process.env.STRATA_V5_RAILWAY_CAPTURE_ENABLED!=="true")return;
- const id=process.env.STRATA_V5_RAILWAY_ACCOUNT_ID??"";
- if(!ACCOUNT.test(id))return;
+ const publicMode=publicSelfServiceRequested();
+ const id=publicMode?null:process.env.STRATA_V5_RAILWAY_ACCOUNT_ID??"";
+ if(!publicMode&&!ACCOUNT.test(id??""))return;
  started=true;
  let busy=false;
  async function tick():Promise<void>{
   if(busy)return;
   busy=true;
   try{
+   if(publicMode){
+    const result=await capturePlatformOfficialFeeV5();
+    if(result.ok&&result.reason==="v5_genuine_railway_issuer_capture_recorded")
+      console.info(JSON.stringify({event:"v5_platform_issuer_capture_verified",originalCapturedAt:result.originalCapturedAt,digest:result.digest}));
+    else if(!result.ok&&result.reason!=="v5_issuer_shared_cooldown")console.warn(JSON.stringify({event:"v5_platform_issuer_capture_pending",reason:result.reason,retryAt:result.retryAt}));
+    return;
+   }
    const {rows}=await pool.query<{owner_user_id:string}>(
      "SELECT owner_user_id::text FROM public.v13_production_account WHERE id=$1 AND subaccount=1 AND exchange_index=2 AND commissioned=true LIMIT 2",[id]);
    if(rows.length!==1||typeof rows[0]?.owner_user_id!=="string")return;
