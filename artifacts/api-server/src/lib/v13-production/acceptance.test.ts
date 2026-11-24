@@ -6,6 +6,7 @@ import "./finalAccountProofProjection.test";
 import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
+import {DirectEntrySource} from "./directEntrySource";
 import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
@@ -167,6 +168,43 @@ test("a partial parameter identity is rejected without altering an evaluation", 
   assert.equal(row.strategy_parameter_hash, V13_CHAMPION_PARAMETER_HASH);
 });
 
+test("independent market crossing reaches the existing isolated executor without a paper evaluation or window",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
+ const open=Math.floor(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-TEST-000";
+ f.exchange.now=open+10000;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ let btc=99999;
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);
+ const worker=new ProductionWorker(f.executor);
+ // No paper worker, history, or window. The first sample is not a crossing.
+ await worker.tick();assert.equal(f.exchange.posts.length,0);
+ f.exchange.now+=1000;btc=100010;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ await worker.tick();
+ assert.equal(f.exchange.posts.length,1);
+ assert.equal(f.exchange.posts[0]!.market,ticker);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_windows")).rows[0].n,0);
+ await assert.rejects(f.executor.prepareEntry(randomUUID()),/production_source_not_qualifying_champion/);
+ const other=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await other.readExact(pool,rows[0].direct_source_id,f.exchange.now),null);
+ assert.equal(await source.readExact(pool,rows[0].direct_source_id,f.exchange.now+5001),null);
+ await f.executor.dispatch(rows[0].id);assert.equal(f.exchange.posts.length,1);
+ await invariant(f.ledger);
+});
 async function invariant(l: ProductionLedger) {
   await l.transaction(async (tx, a) => l.assertConservation(tx, a));
 }

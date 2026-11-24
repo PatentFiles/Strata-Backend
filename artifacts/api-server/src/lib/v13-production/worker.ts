@@ -87,6 +87,7 @@ export class ProductionWorker {
   async tick(origin: "normal" | "committed_signal" = "normal"): Promise<void> {
     if (this.running) return;
     this.running = true;
+    const tickLifecycle=this.lifecycle;
     try {
       // Resolve or retain UNKNOWN protective exits BEFORE ordinary reconciliation
       // and before any chance of a new entry. Failures stop this tick; never POST.
@@ -110,6 +111,18 @@ export class ProductionWorker {
       if(renewal?.technicalRenewal === "deferred")this.technicalRenewalDebt=true;
       else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
+      if(this.executor.independentSimulationBound){
+        // Explicit simulator integration. No paper exit or signal lookup.
+        // Held-position source integration is a separate release prerequisite.
+        const held=await this.executor.ledger.pool.query("SELECT 1 FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 LIMIT 1",[this.executor.ledger.accountId]);
+        if(held.rows.length||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
+        const id=await this.executor.captureIndependentSimulationEntry();
+        if(!id||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
+        const intent=await this.executor.prepareEntry(id);
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
+        await this.executor.dispatch(intent);
+        return;
+      }
       await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
       if(this.executor.liveEntryContained){
         if(!this.entryHoldReported){
@@ -283,7 +296,7 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=this.executor.liveEntryContained?null:onCommittedForwardSignal((hint)=>{
+    this.detachWake=this.executor.liveEntryContained||this.executor.independentSimulationBound?null:onCommittedForwardSignal((hint)=>{
       if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;

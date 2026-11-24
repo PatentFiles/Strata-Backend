@@ -1,4 +1,5 @@
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
+import {DirectEntrySource} from "./directEntrySource";
 import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
 import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
@@ -52,6 +53,30 @@ export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
   /** Set by actual production factories until independent source qualification. */
   private independentEntryHold = false;
+  #directSimulationSource:DirectEntrySource|null=null;
+  /** Test-only binding. Real factories remain contained; a source label or
+   * environment flag alone cannot turn on independent live orders. */
+  bindIndependentSimulationSource(source:DirectEntrySource):void {
+    requireProof(this.exchange.mode==="SIMULATION"&&!this.#directSimulationSource&&source instanceof DirectEntrySource,
+      "direct_entry_simulation_binding_invalid");
+    source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    this.#directSimulationSource=source;
+  }
+  get independentSimulationBound():boolean {return this.#directSimulationSource!==null;}
+  async captureIndependentSimulationEntry():Promise<string|null>{
+    const source=this.#directSimulationSource;
+    requireProof(source&&this.exchange.mode==="SIMULATION","direct_entry_simulation_binding_invalid");
+    source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    return source.capture(this.ledger.pool);
+  }
+  private assertIntentSourceKind(i:Intent):void {
+    if(i.kind!=="ENTRY")return;
+    if(this.#directSimulationSource||i.direct_source_id!=null){
+      requireProof(this.exchange.mode==="SIMULATION"&&this.#directSimulationSource&&i.direct_source_id&&i.evaluation_id===null,
+        "direct_entry_intent_source_mismatch");
+      this.#directSimulationSource.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    }
+  }
   containLiveEntries():void { this.independentEntryHold=true; }
   get liveEntryContained():boolean { return this.independentEntryHold; }
   private assertEntrySourceAvailable():void {
@@ -207,8 +232,11 @@ export class ProductionExecutor {
   }
   private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
     const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
-    const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
-    requireProof(source && source.evaluation_source === "paper" &&
+    const direct=this.#directSimulationSource;
+    if(direct){requireProof(this.exchange.mode==="SIMULATION","direct_entry_simulation_binding_invalid");direct.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});}
+    const source = direct?await direct.readExact(this.ledger.pool,evaluationId,this.now()):
+      (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
+    requireProof(source && source.evaluation_source === (direct?"direct_simulation_v1":"paper") &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
       source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
@@ -242,8 +270,8 @@ export class ProductionExecutor {
     subtimings.mark("transaction_acquire");
     const prepare = () => this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
-      const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
-      if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
+      const prior = await tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
+      if (prior.rows.length) {this.assertIntentSourceKind(prior.rows[0]!);return prior.rows[0]!.id;} // duplicate event: no new reservation/capability
       await this.gate(tx, a);
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
@@ -257,7 +285,7 @@ export class ProductionExecutor {
         requireProof(source.crossing_consumed &&
           source.crossing_key === `${source.market_ticker}:first`,
           "production_entry_policy_claim_not_proven");
-        await this.assertEntryPolicyWindow(tx, source);
+        if(!direct)await this.assertEntryPolicyWindow(tx, source);
       }
       subtimings.mark("source_pin_and_classification");
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
@@ -266,7 +294,7 @@ export class ProductionExecutor {
       admission(sourceCurrent?"eligible":"rejected",{sourceAgeMs:sourceAge,
         ...(sourceCurrent?{}:{error:"production_evaluation_stale"})});
       requireProof(sourceCurrent, "production_evaluation_stale");
-      const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
+      const pinnedSource = direct?await direct.readExact(tx,evaluationId,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
       // Preserve prior-intent replay and all authority/policy/window checks above.
       // An expired observation cannot become eligible after a wall-clock rollback.
       // Provider-error precedence is intentionally omitted on this stale-only path.
@@ -325,7 +353,8 @@ export class ProductionExecutor {
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
       a.reserved_micros = String(money(a.reserved_micros) + reservation);
       subtimings.mark("reservation_and_conservation");
-      await tx.query(`INSERT INTO v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,
+      // Fixed server-side column choice. Existing paper-linked records remain intact.
+      await tx.query(`INSERT INTO v13_production_intent(id,account_id,${direct?"direct_source_id":"evaluation_id"},crossing_key,kind,market,side,
         request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [id, a.id, evaluationId, source.crossing_key, request.market, side, JSON.stringify(request), JSON.stringify(decision),
@@ -420,6 +449,7 @@ export class ProductionExecutor {
       const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
       requireProof(i, "production_intent_missing");
       if (i.state !== "PREPARED") return false;
+      this.assertIntentSourceKind(i);
       if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
       if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
@@ -576,7 +606,9 @@ export class ProductionExecutor {
             this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
             this.now() - a.reconciled_at!.getTime() <= 15_000, "production_final_evidence_expired");
           if (i.kind === "ENTRY") {
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSimulationSource;
+            const source = direct?await direct.readExact(tx,i.direct_source_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
             requireProof(canonical(source) === canonical(i.decision.source) &&
               this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs &&
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
@@ -585,7 +617,7 @@ export class ProductionExecutor {
             assertChampionSourceReference(source);
             if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
-              await this.assertEntryPolicyWindow(tx, source);
+              if(!direct)await this.assertEntryPolicyWindow(tx, source);
             }
             const losses = (await tx.query(`SELECT
               (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
