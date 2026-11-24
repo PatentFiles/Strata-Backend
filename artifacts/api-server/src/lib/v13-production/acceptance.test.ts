@@ -1103,7 +1103,6 @@ test("approved champion boundary prices remain executable with consistent refere
 
 import {readFileSync} from "node:fs";
 import {dispatchReviewedProtectiveExitOnce} from "../strata/ownerFeeEmergencyExitSignedDispatch";
-import {dedicatedSignerFingerprint} from "../strata/commissioning";
 test("owned no-send finalizer atomically preserves exposure, forbids audit forgery and permits fresh exit identity",async()=>{
  const f=await fixture(),ticker="KXBTC15M-26OCT311315-15",owner="11111111-1111-4111-8111-111111111111";
  const source=await f.source();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE id=$2",[ticker,source]);
