@@ -1471,7 +1471,7 @@ function executeKeyGeneration(
 }
 
 
-test("reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
+for(const singleAction of [false,true]) test(singleAction?"multi-key action executes the real three-operation controls once on disposable PostgreSQL":"reviewed technical setup executes the real three-operation controls on disposable PostgreSQL",async(t)=>{
   const fixture=await setup(t);
   if(!fixture)return;
   try {
@@ -1499,6 +1499,12 @@ test("reviewed technical setup executes the real three-operation controls on dis
       await raw.query("UPDATE vault.secrets SET secret=$1 WHERE id=$2::uuid",[JSON.stringify({api_key_id:keyId,private_key:privateKey}),r.rows[0]?.id]);
       await raw.query("UPDATE private.kalshi_connection_credentials SET key_fingerprint=$1 WHERE id=$2::uuid",[fingerprint,id]);
       keys.push({keyId,api_key_id:keyId,scopes:[...scopes],subaccount:null});
+    }
+    if(singleAction){
+      const keyId="primary-technical",privateKey=rsaPrivateKey();
+      const secret=await raw.query("INSERT INTO vault.secrets(secret,name) VALUES ($1,'primary-synthetic') RETURNING id::text AS id",[JSON.stringify({api_key_id:keyId,private_key:privateKey})]);
+      await raw.query("UPDATE private.provider_connections SET vault_secret_id=$1::uuid WHERE id=$2::uuid",[secret.rows[0]?.id,CONNECTION_A]);
+      keys.push({keyId,api_key_id:keyId,scopes:["read"],subaccount:null});
     }
     const generated=generatedCredential();
     let subaccount=false,creates=0,generates=0;
@@ -1531,22 +1537,33 @@ test("reviewed technical setup executes the real three-operation controls on dis
       },
     });
     const verify=()=>controls.advanceTechnicalSetup(USER_A,{expectedOwnerId:USER_A,confirmation:TECHNICAL_SETUP_CONFIRMATION});
-    const preview=await verify();
-    assert.equal(preview.stage,"PREPARED",JSON.stringify(preview));assert.ok(preview.review);
-    assert.deepEqual(preview.review.operations,["create_subaccount","generate_api_key","provision_execution_account"]);
-    assert.equal(creates+generates,0);
-    const body={expectedOwnerId:USER_A,confirmation:EXECUTE_TECHNICAL_SETUP_CONFIRMATION,attemptId:preview.review.attemptId,planDigest:preview.review.digest};
-    assert.equal((await controls.advanceTechnicalSetup(USER_B,body)).ok,false);
-    assert.equal((await controls.advanceTechnicalSetup(USER_A,{...body,planDigest:"f".repeat(64)})).ok,false);
+    const expectedOperations=["create_subaccount","generate_api_key","provision_execution_account"];
+    const combined={expectedOwnerId:USER_A,confirmation:"VERIFY_AND_COMMISSION_TECHNICAL_SETUP_V1",credentials:[]};
+    let body:Record<string,unknown>,planDigest:string|undefined;
+    if(singleAction){
+      body=combined;
+      assert.equal((await controls.advanceTechnicalSetup(USER_B,body)).ok,false);
+      assert.equal((await controls.advanceTechnicalSetup(USER_A,{...body,allowFunding:true})).ok,false);
+    }else{
+      const preview=await verify();
+      assert.equal(preview.stage,"PREPARED",JSON.stringify(preview));assert.ok(preview.review);
+      assert.deepEqual(preview.review.operations,expectedOperations);
+      planDigest=preview.review.digest;
+      body={expectedOwnerId:USER_A,confirmation:EXECUTE_TECHNICAL_SETUP_CONFIRMATION,attemptId:preview.review.attemptId,planDigest};
+      assert.equal((await controls.advanceTechnicalSetup(USER_B,body)).ok,false);
+      assert.equal((await controls.advanceTechnicalSetup(USER_A,{...body,planDigest:"f".repeat(64)})).ok,false);
+    }
     assert.equal(creates+generates,0);
     const start=performance.now(),outcome=await controls.advanceTechnicalSetup(USER_A,body);
     assert.equal(outcome.reason,"technical_setup_provisioned_owner_review_required",JSON.stringify(outcome));
-    assert.deepEqual(outcome.completedOperations,preview.review.operations);
+    assert.deepEqual(outcome.completedOperations,expectedOperations);
     assert.equal(creates,1);assert.equal(generates,1);
     t.diagnostic("Actual disposable database + synthetic provider provisioning elapsedMs="+Math.round(performance.now()-start));
     const attempts=await raw.query("SELECT operation,state,owner_technical_plan_digest FROM private.kalshi_account_operation_attempts WHERE owner_user_id=$1::uuid ORDER BY operation",[USER_A]);
     assert.equal(attempts.rows.length,3);
-    assert.ok(attempts.rows.every(row=>row.state==="completed"&&row.owner_technical_plan_digest===preview.review!.digest));
+    planDigest=planDigest??String(attempts.rows[0]?.owner_technical_plan_digest);
+    assert.match(planDigest,/^[a-f0-9]{64}$/);
+    assert.ok(attempts.rows.every(row=>row.state==="completed"&&row.owner_technical_plan_digest===planDigest));
     await assert.rejects(raw.query("UPDATE private.kalshi_account_operation_attempts SET owner_technical_plan_digest=$1 WHERE owner_user_id=$2::uuid",["a".repeat(64),USER_A]));
     const account=await raw.query("SELECT id,subaccount,exchange_index,commissioned,execution_enabled,kill_switch,cash_micros::text AS cash,reserved_micros::text AS reserved,key_fingerprint FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A]);
     assert.equal(account.rows.length,1);
@@ -1556,7 +1573,8 @@ test("reviewed technical setup executes the real three-operation controls on dis
     await raw.query("UPDATE v13_production_account SET commissioned=true,cash_micros=25000000,initial_cash_micros=25000000 WHERE owner_user_id=$1::uuid",[USER_A]);
     const before=await raw.query("SELECT * FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A]);
     assert.equal((await verify()).stage,"EXISTING_ACCOUNT");
-    assert.equal((await controls.advanceTechnicalSetup(USER_A,body)).ok,false);
+    const repeat=await controls.advanceTechnicalSetup(USER_A,body);
+    if(singleAction)assert.equal(repeat.stage,"EXISTING_ACCOUNT");else assert.equal(repeat.ok,false);
     assert.deepEqual((await raw.query("SELECT * FROM v13_production_account WHERE owner_user_id=$1::uuid",[USER_A])).rows,before.rows);
     assert.equal(creates,1);assert.equal(generates,1);
   } finally {await fixture.raw.close();}
