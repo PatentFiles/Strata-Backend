@@ -26,6 +26,9 @@ import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POL
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
+import {approvedFromRow} from "./ownerStakePolicyAmendment";
+import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
+import {deployedGitSha} from "./deployedGitSha";
 
 export const COMMISSION_OWNED_ACCOUNT_CONFIRMATION = "COMMISSION_OWNED_STRATA_ACCOUNT";
 export const REQUEST_OWNED_ACTIVATION_CONFIRMATION = "REQUEST_OWNED_ACCOUNT_ACTIVATION";
@@ -586,6 +589,59 @@ export async function reconcileOwnedSubaccountCash(
   return { ok: recorded.ok, reason: recorded.reason, transferAttempted: false };
 }
 
+export type InitialCommissioningReview={
+ scopeDigest:string;accountId:string;ownerId:string;releaseSha:string;policyId:string;policyVersion:number;
+ policyHash:string;cashMicros:string;stakeCents:number;feeDigest:string;feePolicyVersion:string;
+ capitalLimitCents:number;maxEntryStakeCents:number;maxEntryAllInCents:number;maxOpenPositions:number;
+ maxDailyLossCents:number;maxTotalLossCents:number;maxQuoteAgeMs:number;maxFeeEvidenceAgeMs:number;
+ existingExitFloorMicros:number|null;
+};
+/** Exact owner-approved policy and current account identity, independently
+ * reconstructed on approval. Key fingerprint and account revision are bound
+ * in the digest but not exposed. Fee evidence is obtained server-side. */
+export async function readInitialCommissioningReview(db:Queryable,owner:string,fee:{feeArtifactDigest?:string;policyId?:string;version?:number},lock=false):Promise<InitialCommissioningReview|null>{
+ const sha=deployedGitSha();
+ if(!/^[a-f0-9]{40}$/.test(sha)||typeof fee.feeArtifactDigest!=="string"||! /^[a-f0-9]{64}$/.test(fee.feeArtifactDigest))return null;
+ const q=await db.query(`SELECT a.id,a.owner_user_id::text AS owner_id,a.revision::text AS revision,
+ a.cash_micros::text AS cash_micros,a.key_fingerprint,a.minimum_exit_micros,s.configured_stake_cents,to_jsonb(p) AS policy
+ FROM public.v13_production_account a
+ JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
+ JOIN public.strata_configured_stake s ON s.execution_account_id=a.id
+ JOIN public.financial_accounts fa ON fa.id=a.kalshi_connection_id AND fa.user_id=a.owner_user_id AND fa.provider='kalshi'
+ JOIN private.provider_connections pc ON pc.financial_account_id=fa.id
+ JOIN private.kalshi_connection_credentials c ON c.financial_account_id=fa.id AND c.provider_connection_id=pc.id AND c.owner_user_id=a.owner_user_id
+ WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2
+ AND a.commissioned=false AND a.execution_enabled=false AND a.kill_switch=true AND a.reserved_micros=0
+ AND (a.blocked_reason IS NULL OR a.blocked_reason='awaiting_account_commissioning')
+ AND a.cash_precision_verified AND a.cash_micros>=25000000 AND a.initial_cash_micros=a.cash_micros
+ AND a.reconciled_at BETWEEN now()-interval '15 minutes' AND now()
+ AND p.state='APPROVED' AND p.approved_by=a.owner_user_id::text
+ AND c.role='restricted_execution' AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
+ AND c.verification_reason='credential_verified' AND c.key_fingerprint=a.key_fingerprint
+ AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=a.id)
+ AND NOT EXISTS(SELECT 1 FROM public.v13_production_event e WHERE e.account_id=a.id)
+ AND NOT EXISTS(SELECT 1 FROM public.v13_production_position v WHERE v.account_id=a.id)
+ AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=a.id)
+ AND NOT EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease w WHERE w.execution_account_id=a.id AND
+ (w.owner_user_id IS DISTINCT FROM a.owner_user_id OR w.state NOT IN ('released','killed') OR w.arm_requested IS DISTINCT FROM false))
+ LIMIT 2 ${lock?"FOR UPDATE OF a FOR SHARE OF p,s,fa,pc,c":""}`,[owner]);
+ if(q.rows.length!==1)return null;
+ const r=q.rows[0]!,p=approvedFromRow(r.policy as Record<string,unknown>),stake=Number(r.configured_stake_cents);
+ if(!p||!p.policyHash||p.policyHash!==computeV13LiveMoneyPolicyHash(p)||p.createdBy!==owner||p.approvedBy!==owner||
+  p.entryPolicyVersion!==V13_ENTRY_POLICY_VERSION||p.strategyParameterHash!==V13_CHAMPION_PARAMETER_HASH||
+  p.id!==fee.policyId||p.version!==fee.version||!Number.isSafeInteger(stake)||stake<1||stake>p.maxEntryStakeCents||
+  !p.feePolicyVersion||! /^[a-f0-9]{64}$/.test(String(r.key_fingerprint)))return null;
+ const floor=r.minimum_exit_micros===null?null:Number(r.minimum_exit_micros);
+ if(floor!==null&&(!Number.isSafeInteger(floor)||floor<1||floor>999999))return null;
+ const scope:Omit<InitialCommissioningReview,"scopeDigest">={ownerId:owner,accountId:String(r.id),releaseSha:sha,
+  policyId:p.id,policyVersion:p.version,policyHash:p.policyHash,cashMicros:String(r.cash_micros),stakeCents:stake,feeDigest:fee.feeArtifactDigest,
+  feePolicyVersion:p.feePolicyVersion,capitalLimitCents:p.capitalLimitCents,maxEntryStakeCents:p.maxEntryStakeCents,
+  maxEntryAllInCents:p.maxEntryAllInCents,maxOpenPositions:p.maxOpenPositions,maxDailyLossCents:p.maxDailyLossCents,
+  maxTotalLossCents:p.maxTotalLossCents,maxQuoteAgeMs:p.maxQuoteAgeMs,maxFeeEvidenceAgeMs:p.maxFeeEvidenceAgeMs,
+  existingExitFloorMicros:floor};
+ return {...scope,scopeDigest:digest({scope,keyFingerprint:r.key_fingerprint,accountRevision:r.revision})};
+}
+
 export async function commissionOwnedAccount(
   db: Queryable,
   input: {
@@ -593,6 +649,7 @@ export async function commissionOwnedAccount(
     confirmation: unknown;
     feeArtifactDigest: unknown;
     minimumExitMicros: unknown;
+    initialReview?:InitialCommissioningReview;
     verifyFee?: typeof verifyCurrentFeeArtifact;
     verifyMonetary?: typeof verifyMonetaryFeeContract;
   },
@@ -676,11 +733,34 @@ export async function commissionOwnedAccount(
     fee: digest,
     policyId: text(row?.policy_id),
   })).digest("hex");
-  const written = await db.query(apiGrantId?COMMISSION_API_SQL:COMMISSION_SQL, [
-    report.accountId, input.ownerUserId, commissioningDigest, digest, minimumExitMicros,
-    alternateGrantId,
-    ...(apiGrantId?[apiGrantId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]:[]),
-  ]);
+  const sql=apiGrantId?COMMISSION_API_SQL:COMMISSION_SQL;
+  const parameters=[report.accountId,input.ownerUserId,commissioningDigest,digest,minimumExitMicros,alternateGrantId,
+    ...(apiGrantId?[apiGrantId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256]:[])];
+  let written:Awaited<ReturnType<Queryable["query"]>>;
+  if(input.initialReview){
+    // The new inline action is an INITIAL commission only. All upstream
+    // fee verification finished before locks. Reconstruct the exact owner
+    // review inside a serializable transaction immediately before the write.
+    const expected=input.initialReview,connect=(db as Transactional).connect;
+    const refused=(reason:string)=>({ok:false,reason,blockers:[reason]});
+    if(!connect||expected.ownerId!==input.ownerUserId||expected.accountId!==report.accountId||
+      expected.feeDigest!==digest||(expected.existingExitFloorMicros!==null&&expected.existingExitFloorMicros!==minimumExitMicros))
+      return refused("commissioning_review_scope_changed");
+    const tx=await connect.call(db);
+    let committed=false,commitSent=false;
+    try{
+      await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+      await tx.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[expected.accountId,input.ownerUserId]);
+      await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[expected.accountId]);
+      const current=await readInitialCommissioningReview(tx,input.ownerUserId,{feeArtifactDigest:digest,policyId:expected.policyId,version:expected.policyVersion},true);
+      if(!current||current.scopeDigest!==expected.scopeDigest)return refused("commissioning_review_scope_changed");
+      written=await tx.query(sql.replace("  RETURNING id","  AND commissioned=false\n  RETURNING id"),parameters);
+      if((written.rowCount??written.rows.length)!==1)return refused("commissioning_not_applied");
+      commitSent=true;await tx.query("COMMIT");committed=true;
+    }catch{return refused(commitSent?"commissioning_commit_unknown_refresh_records":"commissioning_not_applied");}
+    finally{if(!committed&&!commitSent)try{await tx.query("ROLLBACK");}catch{/* refused */}tx.release();}
+  }else written=await db.query(sql,parameters);
   if ((written.rowCount ?? written.rows.length) !== 1) {
     return { ok: false, reason: "commissioning_not_applied", blockers: ["commissioning_not_applied"] };
   }
