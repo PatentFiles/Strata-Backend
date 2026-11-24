@@ -1,4 +1,5 @@
-import {PLATFORM_UPLOAD_CONFIRM} from "../lib/strata/platformFeeUploadMode";
+import {PLATFORM_UPLOAD_CONFIRM,PLATFORM_UPLOAD_PREVIEW} from "../lib/strata/platformFeeUploadMode";
+import {createHash} from "node:crypto";
 import express, { Router, type IRouter, type RequestHandler } from "express";
 import { MAX_FEE_SCHEDULE_BYTES } from "../lib/microLiveFeeArtifact";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
@@ -296,13 +297,23 @@ export function createStrataCommissioningRouter(
     }
   });
 
+  router.get("/platform-fee-schedule",async(req,res)=>{
+    res.setHeader("Cache-Control","private, no-store");
+    const actor=res.locals.strata;
+    if(actor?.role!=="ADMIN"||typeof actor.subject!=="string"){res.status(403).json({error:"Administrator required"});return;}
+    try{
+      const {platformUploadedFeeScheduleHistory}=await import("../lib/strata/platformUploadedFeeSchedule");
+      const result=await platformUploadedFeeScheduleHistory(actor.subject,req.query.before===undefined?undefined:String(req.query.before));
+      res.status(result.ok?200:422).json(result);
+    }catch{res.status(503).json({error:"Platform fee history is unavailable"});}
+  });
   router.post("/verify-fee-upload", (req, res, next) => {
     const mediaType = req.get("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (mediaType !== "application/pdf") {
       res.status(415).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_invalid")));
       return;
     }
-    if (req.get("x-strata-confirmation") !== VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION&&req.get("x-strata-confirmation")!==PLATFORM_UPLOAD_CONFIRM) {
+    if (![VERIFY_OFFICIAL_FEE_PDF_UPLOAD_CONFIRMATION,PLATFORM_UPLOAD_CONFIRM,PLATFORM_UPLOAD_PREVIEW].includes(req.get("x-strata-confirmation")??"")) {
       res.status(400).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_pdf_confirmation_required")));
       return;
     }
@@ -320,12 +331,16 @@ export function createStrataCommissioningRouter(
   }, async (req, res) => {
     const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     try {
-      if(req.get("x-strata-confirmation")===PLATFORM_UPLOAD_CONFIRM){
+      if([PLATFORM_UPLOAD_CONFIRM,PLATFORM_UPLOAD_PREVIEW].includes(req.get("x-strata-confirmation")??"")){
         res.setHeader("Cache-Control","private, no-store");
         const actor=res.locals.strata;
         if(actor?.role!=="ADMIN"||typeof actor.subject!=="string"){res.status(403).json(sanitizePublic(uploadedFeeFailure("platform_fee_upload_admin_required")));return;}
-        const {publishPlatformUploadedFeeSchedule}=await import("../lib/strata/platformUploadedFeeSchedule");
-        const result=await publishPlatformUploadedFeeSchedule(actor.subject,bytes);
+        const {publishPlatformUploadedFeeSchedule,previewPlatformUploadedFeeSchedule}=await import("../lib/strata/platformUploadedFeeSchedule");
+        const expected=req.get("x-strata-fee-digest");
+        if(expected!==undefined&&expected!==createHash("sha256").update(bytes).digest("hex")){
+          res.status(409).json(sanitizePublic(uploadedFeeFailure("uploaded_fee_review_digest_changed")));return;
+        }
+        const result=await (req.get("x-strata-confirmation")===PLATFORM_UPLOAD_PREVIEW?previewPlatformUploadedFeeSchedule:publishPlatformUploadedFeeSchedule)(actor.subject,bytes);
         res.status(result.ok?200:422).json(sanitizePublic({feeVerification:result}));
         return;
       }

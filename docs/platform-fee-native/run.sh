@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # This workflow never uses DATABASE_URL or any production credentials.
-: "${TEST_CONTAINER:?GitHub service container required}"
+: "${TEST_CONTAINER:?Disposable container required}"
 : "${TEST_SCENARIO:?}"
 : "${TEST_PG_MAJOR:?}"
-[[ "$GITHUB_ACTIONS" == true && "$TEST_CONTAINER" =~ ^[a-f0-9]{64}$ && "$TEST_PG_MAJOR" =~ ^(16|17)$ ]]
+[[ "$TEST_CONTAINER" =~ ^[a-f0-9]{64}$ && "$TEST_PG_MAJOR" =~ ^(16|17)$ ]]
+if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
+  [[ "${STRATA_NATIVE_FEE_RUN:-}" =~ ^[a-f0-9]{64}$ ]]
+  [[ "$(docker inspect --format '{{ index .Config.Labels "strata.native-fee-run" }}' "$TEST_CONTAINER")" == "$STRATA_NATIVE_FEE_RUN" ]]
+  [[ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$TEST_CONTAINER")" == none ]]
+fi
 [[ "$TEST_SCENARIO" == fresh || "$TEST_SCENARIO" == upgrade || "$TEST_SCENARIO" == issuer ]]
 cd "$(git rev-parse --show-toplevel)"
 db() { docker exec -i "$TEST_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d strata_platform_fee_disposable "$@"; }

@@ -67,3 +67,5 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+docs/platform-fee-native/local-evidence/
+local-*.log

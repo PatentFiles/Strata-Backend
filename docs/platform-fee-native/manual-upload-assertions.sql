@@ -40,7 +40,8 @@ BEGIN
  INSERT INTO private.strata_durable_historical_baseline(baseline_id,source_kind,content_sha256,original_bytes,effective_date,formula_version)
  VALUES(second_id,'OWNER_ATTESTED_HISTORICAL_BASELINE',digest,bytes,'2026-07-07','standard-quadratic-0.07-v1');
  INSERT INTO private.strata_platform_uploaded_fee_schedule(baseline_id,uploader_user_id) VALUES(second_id,'11111111-1111-4111-8111-111111111111');
- IF NOT (SELECT known_publication_change FROM private.strata_durable_owner_fee_state WHERE model_id='88888888-8888-4888-8888-888888888888') THEN RAISE EXCEPTION 'superseded upload did not latch'; END IF;
+ IF (SELECT known_publication_change FROM private.strata_durable_owner_fee_state WHERE model_id='88888888-8888-4888-8888-888888888888') THEN RAISE EXCEPTION 'equivalent supported publication invalidated unchanged owner terms'; END IF;
+ IF NOT (SELECT known_publication_change FROM private.strata_durable_owner_fee_state WHERE model_id='55555555-5555-4555-8555-555555555555') THEN RAISE EXCEPTION 'replacement cleared prior changed-publication latch'; END IF;
  BEGIN
   INSERT INTO private.strata_durable_owner_fee_model(model_id,owner_user_id,execution_account_id,release_commit_sha,approved_policy_hash,official_source_digest,source_kind,historical_baseline_id,policy_version,formula_version,effective_date,confirmation,genuine_source_verified)
   SELECT '99999999-9999-4999-8999-999999999999','22222222-2222-4222-8222-222222222222','platform-fee-two',repeat('a',40),repeat('d',64),content_sha256,source_kind,baseline_id,'owner_attested_historical_terms_v1',formula_version,effective_date,'I_APPROVE_OWNER_ATTESTED_HISTORICAL_FEE_TERMS_V1',false FROM private.strata_durable_historical_baseline WHERE baseline_id=first_id;

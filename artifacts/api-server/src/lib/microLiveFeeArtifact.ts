@@ -239,6 +239,7 @@ export type OfficialFeePdfByteVerification =
     digest: string;
     effectiveDate: string;
     formulaVersion: typeof STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
+    feeRule: string;
   }
   | { ok: false; reason: OfficialFeePdfByteFailure };
 
@@ -283,6 +284,7 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
     digest: createHash("sha256").update(bytes).digest("hex"),
     effectiveDate: parsed.effectiveDate,
     formulaVersion: parsed.formulaVersion,
+    feeRule: parsed.feeRule,
   };
 }
 

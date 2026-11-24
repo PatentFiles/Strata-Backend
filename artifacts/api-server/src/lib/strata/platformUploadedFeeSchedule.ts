@@ -18,6 +18,39 @@ async function parse(bytes:Buffer){
  const {verifyOfficialFeePdfBytes}=await import("../microLiveFeeArtifact");
  return verifyOfficialFeePdfBytes(bytes);
 }
+export async function platformFeeAdministrator(admin:string,db:Query=pool,lock=false){
+ if(!UUID.test(admin))return false;
+ return (await db.query(`SELECT u.id FROM auth.users u
+ JOIN public.profiles p ON p.id=u.id
+ JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
+ WHERE u.id=$1::uuid AND p.role='ADMIN' AND ra.role='ADMIN' AND u.email_confirmed_at IS NOT NULL
+ AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) LIMIT 2`+(lock?" FOR SHARE OF u,p,ra":""),[admin])).rows.length===1;
+}
+export async function previewPlatformUploadedFeeSchedule(admin:string,bytes:Buffer){
+ if(!platformFeeUploadEnabled())return deny("platform_fee_upload_disabled");
+ if(!await platformFeeAdministrator(admin))return deny("platform_fee_upload_admin_required");
+ const parsed=await parse(bytes);
+ if(!parsed.ok)return deny("uploaded_fee_pdf_"+parsed.reason);
+ return {ok:true as const,reason:"platform_fee_upload_review_ready",digestStored:false,
+  sourceMode:UPLOADED_FEE_PROVENANCE,feeArtifactDigest:parsed.digest,effectiveDate:parsed.effectiveDate,
+  formulaVersion:parsed.formulaVersion,feeRule:parsed.feeRule,
+  sourceAuthenticityVerified:false,publicationKnownCurrent:false,expiresAutomatically:false,tradingAuthorized:false};
+}
+export async function platformUploadedFeeScheduleHistory(admin:string,before?:string){
+ if(!platformFeeUploadEnabled())return {ok:false,reason:"platform_fee_upload_disabled"};
+ if(!await platformFeeAdministrator(admin))return {ok:false,reason:"platform_fee_upload_admin_required"};
+ if(before!==undefined&&!/^[1-9][0-9]{0,17}$/.test(before))return {ok:false,reason:"invalid_history_cursor"};
+ const active=await readActiveUploadedFeeSchedule();
+ const rows=(await pool.query(`SELECT u.upload_id::text AS "uploadId",u.uploaded_at AS "uploadedAt",
+  u.uploader_user_id::text AS "uploaderId",u.source_url AS "sourceUrl",u.attestation,
+  b.effective_date::text AS "effectiveDate",b.content_sha256 AS digest,b.formula_version AS "formulaVersion",
+  b.content_sha256=pg_catalog.encode(pg_catalog.sha256(b.original_bytes),'hex') AS "integrityVerified"
+  FROM private.strata_platform_uploaded_fee_schedule u JOIN private.strata_durable_historical_baseline b USING(baseline_id)
+  WHERE ($1::bigint IS NULL OR u.upload_id<$1::bigint) ORDER BY u.upload_id DESC LIMIT 26`,[before??null])).rows;
+ return {ok:true,sourceMode:UPLOADED_FEE_PROVENANCE,sourceAuthenticityVerified:false,publicationKnownCurrent:false,
+  expiresAutomatically:false,tradingAuthorized:false,activeDigest:active?.digest??null,
+  feeRule:active?.feeRule??null,history:rows.slice(0,25),nextCursor:rows.length>25?rows[24]!.uploadId:null};
+}
 export async function readActiveUploadedFeeSchedule(db:Query=pool){
  if(!platformFeeUploadEnabled())return null;
  try{
@@ -37,20 +70,18 @@ export async function readActiveUploadedFeeSchedule(db:Query=pool){
 export async function activeUploadedBaselineMatches(db:Query,id:unknown,digest:unknown):Promise<boolean>{
  if(!platformFeeUploadEnabled()||!isUploadedBaselineId(id)||typeof digest!=="string"||id!=="platform-upload-"+digest)return false;
  try{
- const r=await db.query(`SELECT u.baseline_id,b.content_sha256 FROM private.strata_platform_uploaded_fee_schedule u
+ const r=await db.query(`SELECT approved.baseline_id,b.content_sha256 FROM private.strata_platform_uploaded_fee_schedule approved
  JOIN private.strata_durable_historical_baseline b USING(baseline_id)
- ORDER BY u.upload_id DESC LIMIT 1`,[]);
+ JOIN (SELECT supported_terms_id FROM private.strata_platform_uploaded_fee_schedule ORDER BY upload_id DESC LIMIT 1) active
+ ON active.supported_terms_id=approved.supported_terms_id
+ WHERE approved.baseline_id=$1 AND b.content_sha256=$2`,[id,digest]);
  return r.rows.length===1&&r.rows[0]!.baseline_id===id&&r.rows[0]!.content_sha256===digest;
  }catch{return false;}
 }
 export async function publishPlatformUploadedFeeSchedule(admin:string,bytes:Buffer){
  if(!platformFeeUploadEnabled()||!UUID.test(admin))return deny("platform_fee_upload_disabled");
  if(!Buffer.isBuffer(bytes)||bytes.length<100||bytes.length>2_000_000)return deny("uploaded_fee_pdf_invalid");
- const authorized=async(db:Query,lock=false)=> (await db.query(`SELECT u.id FROM auth.users u
- JOIN public.profiles p ON p.id=u.id
- JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
- WHERE u.id=$1::uuid AND p.role='ADMIN' AND ra.role='ADMIN' AND u.email_confirmed_at IS NOT NULL
- AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) LIMIT 2`+(lock?" FOR SHARE OF u,p,ra":""),[admin])).rows.length===1;
+ const authorized=(db:Query,lock=false)=>platformFeeAdministrator(admin,db,lock);
  let tx:PoolClient|undefined,committed=false,commitSent=false,discard:Error|undefined;
  try{
   if(!await authorized(pool))return deny("platform_fee_upload_admin_required");

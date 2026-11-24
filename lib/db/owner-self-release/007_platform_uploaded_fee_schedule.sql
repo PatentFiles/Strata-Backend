@@ -15,6 +15,10 @@ CREATE TABLE private.strata_platform_uploaded_fee_schedule(
  CHECK(baseline_id~'^platform-upload-[a-f0-9]{64}$'),
  uploader_user_id uuid NOT NULL REFERENCES auth.users(id),
  uploaded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ -- This version certifies the entire reviewed normalized PDF text, including
+ -- applicability and rounding, not just the headline 0.07 coefficient.
+ supported_terms_id text NOT NULL DEFAULT 'kalshi-july-07-2026-eea4ebde-v1'
+ CHECK(supported_terms_id='kalshi-july-07-2026-eea4ebde-v1'),
  source_url text NOT NULL DEFAULT 'https://kalshi.com/docs/kalshi-fee-schedule.pdf' CHECK(source_url='https://kalshi.com/docs/kalshi-fee-schedule.pdf'),
  attestation text NOT NULL DEFAULT 'PUBLISH_PLATFORM_KALSHI_FEE_PDF_V1' CHECK(attestation='PUBLISH_PLATFORM_KALSHI_FEE_PDF_V1')
 );
@@ -46,7 +50,12 @@ BEGIN
  UPDATE private.strata_durable_owner_fee_state s SET known_publication_change=true,monitor_state='changed'
  FROM private.strata_durable_owner_fee_model m,private.strata_durable_historical_baseline b
  WHERE m.model_id=s.model_id AND b.baseline_id=NEW.baseline_id AND s.known_publication_change=false
- AND m.official_source_digest<>b.content_sha256;
+ AND m.official_source_digest<>b.content_sha256
+ -- Existing administrator-upload consent survives an equivalent publication.
+ -- Never clear a prior change/revocation latch or convert issuer provenance.
+ AND NOT EXISTS(SELECT 1 FROM private.strata_platform_uploaded_fee_schedule prior
+  WHERE prior.baseline_id=m.historical_baseline_id AND prior.supported_terms_id=NEW.supported_terms_id
+  AND m.source_kind='OWNER_ATTESTED_HISTORICAL_BASELINE' AND m.genuine_source_verified=false);
  RETURN NEW;
 END $$;
 CREATE TRIGGER strata_platform_uploaded_fee_latch AFTER INSERT ON private.strata_platform_uploaded_fee_schedule

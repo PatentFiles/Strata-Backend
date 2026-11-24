@@ -78,7 +78,8 @@ export async function durableFeeReauthorizationOutcome(owner:string,id:string,sh
  if(v.state==='REJECTED')return {outcome:'REJECTED' as const,...tuple(v),reason:v.reason,noCommit:true};return unknown();
  }catch{return unknown();}
 }
-async function execute(owner:string,b:Row,d:Deps){
+type ReauthorizationResult=ReturnType<typeof no>|{ok:true;reason:string;authorizationId:unknown;tradingAuthorized:false;workerStarted:false;ordersSubmitted:false;retryAuthorized:false};
+async function execute(owner:string,b:Row,d:Deps,attemptNumber=0):Promise<ReauthorizationResult>{
  const db=d.db??pool,now=d.now??Date.now;let tx:Client|undefined,done=false,commitAttempted=false,discard:Error|undefined;
  try{
  const found=await scopeRow(db,owner,str(b.accountId));if(!found||!matches(found.m,b))return no('durable_reauthorization_prior_model_changed_or_revoked');
@@ -91,7 +92,16 @@ async function execute(owner:string,b:Row,d:Deps){
  const marketMono=performance.now(),marketStarted=now(),market=await(d.probe??probeCurrentKalshiFeeApi)();const fee=preparePdfFreeApiFeePolicyReview(market,now());if(!fee.ok||now()<marketStarted||now()-marketStarted>5000)return no('durable_reauthorization_fresh_market_unverified');
  tx=await db.connect();await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
  const attempt=await tx.query("SELECT authorization_id FROM private.strata_durable_fee_release_authorization WHERE authorization_id=$1 AND owner_user_id=$2 AND state='PENDING' FOR UPDATE",[b.authorizationId,owner]);if(attempt.rows.length!==1)return no('durable_reauthorization_attempt_not_pending');
- const locked=await scopeRow(tx,owner,str(b.accountId),true);if(!locked||!matches(locked.m,b)||String(locked.m.account_revision)!==String(m.account_revision)||locked.m.policy_id!==m.policy_id||locked.m.key_fingerprint!==m.key_fingerprint||locked.m.kalshi_connection_id!==m.kalshi_connection_id)return no('durable_reauthorization_scope_changed');
+ const locked=await scopeRow(tx,owner,str(b.accountId),true);if(!locked||!matches(locked.m,b)||locked.m.policy_id!==m.policy_id||locked.m.key_fingerprint!==m.key_fingerprint||locked.m.kalshi_connection_id!==m.kalshi_connection_id)return no('durable_reauthorization_scope_changed');
+ if(String(locked.m.account_revision)!==String(m.account_revision)){
+  // STOP closes execution immediately; an already-running signed cash
+  // reconciliation may still finish. No authorization has been written here.
+  // Reacquire all signed evidence for the same immutable owner/model/policy
+  // consent after a confirmed rollback; do not relax the revision comparison.
+  if(attemptNumber>=2)return no('durable_reauthorization_account_revision_changed');
+  await tx.query('ROLLBACK');tx.release();tx=undefined;
+  return execute(owner,b,d,attemptNumber+1);
+ }
  const credential=await tx.query("SELECT 1 FROM private.kalshi_connection_credentials WHERE owner_user_id=$1 AND financial_account_id=$2 AND key_fingerprint=$3 AND role='restricted_execution' AND revoked_at IS NULL AND verified_at IS NOT NULL AND verification_reason='credential_verified' FOR SHARE",[owner,m.kalshi_connection_id,m.key_fingerprint]);if(credential.rows.length!==1)return no('durable_reauthorization_signer_changed');
  const lockedHistory=await readNeverPostedReleaseHistory(tx,str(b.accountId),true,{expiredExitOwnerId:owner});if(lockedHistory.historyDigest!==history.historyDigest)return no('durable_reauthorization_history_changed');
  if(String(feeds.cashMicros)!==String(locked.m.cash_micros))return no('durable_reauthorization_signed_cash_mismatch');
