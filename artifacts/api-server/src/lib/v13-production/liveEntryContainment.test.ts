@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {assertContainedProductionRequest,containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,LIVE_ENTRY_SOURCE_UNAVAILABLE} from "./liveEntryContainment";
+import {assertContainedProductionRequest,containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope,LIVE_ENTRY_SOURCE_UNAVAILABLE} from "./liveEntryContainment";
 const url="https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders";
 const reducing={reduce_only:true,subaccount:1,exchange_index:2,time_in_force:"immediate_or_cancel",post_only:false};
 const post=(value:unknown):RequestInit=>({method:"POST",body:JSON.stringify(value)});
@@ -70,4 +70,16 @@ test("multi-account rollout is exact, fails closed, and never grants cross-owner
   }
   assert.equal(independentLiveRolloutAllowed(rolloutScope,{...rolloutEnv,STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:"broken"}),false);
   assert.equal(independentLiveRolloutAllowed(rolloutScope,{...env([rolloutScope,other]),STRATA_INDEPENDENT_LIVE_SOURCE_V1:"false"}),false);
+});
+
+test("public platform qualification does not grant admission from a client scope or legacy allowlist",async()=>{
+ const env={...rolloutEnv,STRATA_PUBLIC_SELF_SERVICE_ENABLED:"true",STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:rolloutScope.releaseSha};
+ assert.equal(independentLiveRolloutAllowed(rolloutScope,env),false);
+ assert.equal(independentLiveRolloutAllowed(rolloutScope,env,{...rolloutScope,keyFingerprint:"a".repeat(64),policyHash:"b".repeat(64)}),false);
+ let queried=0;
+ const db={query:async()=>{queried++;return {rows:[]};}};
+ assert.equal(await qualifyPublicIndependentLiveScope(db,rolloutScope,env),null);
+ assert.equal(queried,1);
+ assert.equal(await qualifyPublicIndependentLiveScope(db,rolloutScope,{...env,STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:"b".repeat(40)}),null);
+ assert.equal(queried,1);
 });

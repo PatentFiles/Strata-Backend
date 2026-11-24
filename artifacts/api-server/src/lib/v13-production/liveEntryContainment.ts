@@ -14,6 +14,7 @@ export function assertIndependentEntryAvailable():never {
  * serialized order object. Reject other input shapes rather than guess whether
  * a request is reducing. This is a narrowing fence, not an exit authorization. */
 import type {ProductionLedger} from "./ledger";
+import {readOwnedSelfServiceScope,publicSelfServiceRequested,publicSelfServiceReleaseQualified,type EligibilityQuery} from "../strata/ownerSelfServiceEligibility";
 
 /** A rollout is configuration, never owner consent or a trading permit.
  * Exact owner, execution account and running Railway build are all required.
@@ -31,10 +32,34 @@ function validRolloutScope(value:unknown):value is IndependentLiveRolloutScope{
     typeof s.accountId==="string" && /^[A-Za-z0-9._:-]{1,128}$/.test(s.accountId) &&
     typeof s.releaseSha==="string" && /^[a-f0-9]{40}$/.test(s.releaseSha);
 }
-export function independentLiveRolloutAllowed(scope:IndependentLiveRolloutScope,env:NodeJS.ProcessEnv=process.env):boolean{
+/** A server-minted capability authenticates a newly discovered account's
+ * scope. It is not an order permit: START, current continuous grant, worker
+ * lease, per-order risk/fee checks and the one-shot ledger wire pin still
+ * have to pass. It cannot be serialized or reconstructed from client JSON. */
+export type PublicLiveAdmission=Readonly<IndependentLiveRolloutScope&{keyFingerprint:string;policyHash:string}>;
+const publicAdmissions=new WeakSet<object>();
+export async function qualifyPublicIndependentLiveScope(db:EligibilityQuery,scope:IndependentLiveRolloutScope,
+ env:NodeJS.ProcessEnv=process.env):Promise<PublicLiveAdmission|null>{
+ if(!validRolloutScope(scope)||!publicSelfServiceReleaseQualified(scope.releaseSha,env)||
+  env.STRATA_INDEPENDENT_LIVE_SOURCE_V1!=="true")return null;
+ const a=await readOwnedSelfServiceScope(db,scope.ownerId,scope.releaseSha,"authority",env);
+ if(!a||a.accountId!==scope.accountId||!a.commissioned||!a.executionEnabled||a.killSwitchOn||
+  a.blocked||!a.cashConserved||!a.cashReconciled||a.reservedMicros!=="0"||
+  BigInt(a.cashMicros)<BigInt(a.stakeCents)*10000n)return null;
+ const admission=Object.freeze({...scope,keyFingerprint:a.keyFingerprint,policyHash:a.policyHash});
+ publicAdmissions.add(admission);return admission;
+}
+export function independentLiveRolloutAllowed(scope:IndependentLiveRolloutScope,env:NodeJS.ProcessEnv=process.env,admission?:PublicLiveAdmission|null):boolean{
   if(env.NODE_ENV!=="production"||env.STRATA_INDEPENDENT_LIVE_SOURCE_V1!=="true"||
      !validRolloutScope(scope)||env.RAILWAY_GIT_COMMIT_SHA!==scope.releaseSha)return false;
-  // Explicit list takes precedence. Empty, malformed, duplicate or ambiguous
+  // In public mode the old manually enrolled scopes are never consulted.
+  // Only a qualified platform release and a real server-owned admission
+  // can select the live source. Final order authorization remains locked.
+  if(publicSelfServiceRequested(env)){
+   return publicSelfServiceReleaseQualified(scope.releaseSha,env)&&!!admission&&publicAdmissions.has(admission)&&
+    admission.ownerId===scope.ownerId&&admission.accountId===scope.accountId&&admission.releaseSha===scope.releaseSha;
+  }
+  // Historical pilot mode only. Explicit list takes precedence. Empty, malformed, duplicate or ambiguous
   // configuration never falls back to the old single-account authorization.
   const configured=env.STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES;
   if(configured!==undefined){
@@ -81,7 +106,7 @@ export function assertContainedProductionRequest(input:Parameters<typeof fetch>[
 /** The ordinary transport stays contained. Only the currently locked,
  * exact-source, one-shot permit can admit a BUY. A synthetic source can
  * NEVER use the default external HTTP transport. */
-export function createIndependentProductionFetch(ledger:()=>ProductionLedger|null,isolatedRaw?:typeof fetch,liveScope?:IndependentLiveRolloutScope):typeof fetch{
+export function createIndependentProductionFetch(ledger:()=>ProductionLedger|null,isolatedRaw?:typeof fetch,liveScope?:IndependentLiveRolloutScope,publicAdmission?:PublicLiveAdmission|null):typeof fetch{
  const isolated=isolatedRaw!==undefined;
  const boundScope=liveScope?Object.freeze({...liveScope}):undefined;
  if(isolated&&!(process.env.NODE_ENV==="test"&&!process.env.RAILWAY_ENVIRONMENT_ID&&
@@ -91,8 +116,9 @@ export function createIndependentProductionFetch(ledger:()=>ProductionLedger|nul
  return async(input,init)=>{
   assertProductionRequest(input,init,body=>{
    const current=ledger();if(!current)assertIndependentEntryAvailable();
-   if(!isolated&&(!boundScope||!independentLiveRolloutAllowed(boundScope)))assertIndependentEntryAvailable();
-   current.consumeIndependentEntryWire(body,isolated?"SIMULATION":"LIVE_OBSERVATION");
+   if(!isolated&&(!boundScope||!independentLiveRolloutAllowed(boundScope,process.env,publicAdmission)))assertIndependentEntryAvailable();
+   current.consumeIndependentEntryWire(body,isolated?"SIMULATION":"LIVE_OBSERVATION",
+    isolated?undefined:{...boundScope!,keyFingerprint:publicAdmission?.keyFingerprint,policyHash:publicAdmission?.policyHash});
   });
   return (isolatedRaw??fetch)(input,{...init,redirect:"error"});
  };

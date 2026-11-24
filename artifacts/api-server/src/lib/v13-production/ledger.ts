@@ -90,7 +90,7 @@ export class ProductionLedger {
   private readonly context = new AsyncLocalStorage<PoolClient>();
   private readonly finalSnapshotIntent = new AsyncLocalStorage<{ active: boolean; entryIntentId: string | null }>();
   private readonly wireContext = new AsyncLocalStorage<{active:boolean;check:(()=>void)|null;connection:ReturnType<typeof transactionConnectionFence>;
-    independentEntry:null|{body:string;sourceId:string;environment:"LIVE_OBSERVATION"|"SIMULATION";spent:boolean}}>();
+    independentEntry:null|{body:string;sourceId:string;environment:"LIVE_OBSERVATION"|"SIMULATION";spent:boolean;ownerId:string|null;accountId:string;releaseSha:string|null;keyFingerprint:string;policyHash:string}}>();
   constructor(readonly pool: Pool, readonly accountId: string) {}
   // Read providers invoked inside a final fence MUST use its existing client,
   // not open another transaction/connection behind the held account lock.
@@ -132,12 +132,17 @@ export class ProductionLedger {
       source.owner_user_id===(account.owner_user_id??null)&&intent.request.reduceOnly===false&&
       intent.client_order_id===intent.request.clientOrderId&&canonical(intent.decision.source)===canonical(source),
       "direct_entry_wire_pin_invalid");
-    scope.independentEntry={body:canonical(encoded),sourceId:source.id,environment:source.execution_environment,spent:false};
+    scope.independentEntry={body:canonical(encoded),sourceId:source.id,environment:source.execution_environment,spent:false,
+      ownerId:source.owner_user_id,accountId:account.id,releaseSha:source.worker_pin?.releaseSha??null,
+      keyFingerprint:account.key_fingerprint,policyHash:intent.policy_hash};
   }
-  consumeIndependentEntryWire(encoded:unknown,environment:"LIVE_OBSERVATION"|"SIMULATION"):void{
+  consumeIndependentEntryWire(encoded:unknown,environment:"LIVE_OBSERVATION"|"SIMULATION",expected?:{ownerId:string;accountId:string;releaseSha:string;keyFingerprint?:string;policyHash?:string}):void{
     const scope=this.wireContext.getStore(),permit=scope?.independentEntry;
     requireProof(this.currentTransaction()&&scope?.active&&permit&&!permit.spent&&
       permit.environment===environment&&canonical(encoded)===permit.body,"direct_entry_wire_authority_missing_or_spent");
+    if(expected)requireProof(permit.ownerId===expected.ownerId&&permit.accountId===expected.accountId&&
+      permit.releaseSha===expected.releaseSha&&(!expected.keyFingerprint||permit.keyFingerprint===expected.keyFingerprint)&&
+      (!expected.policyHash||permit.policyHash===expected.policyHash),"direct_entry_wire_scope_changed");
     this.assertFinalWireClock();
     permit.spent=true; // Burn before HTTP, even when the response is ambiguous.
   }

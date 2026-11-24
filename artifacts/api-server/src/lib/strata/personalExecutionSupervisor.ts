@@ -159,8 +159,9 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed} from "../v13-production/liveEntryContainment";
+import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
 import {DirectEntrySource} from "../v13-production/directEntrySource";
+import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
 
 /** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
 export async function personalProductionFetch(
@@ -460,6 +461,14 @@ export function createProductionPersonalSession(
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
     }
+    const directRolloutScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,releaseSha:startupSha});
+    // Existing startup already checked signed cash, current fees and the
+    // standing bootstrap grant. Public admission adds verified account
+    // linkage without a manually configured customer. No grant is minted.
+    const publicAdmission=publicSelfServiceRequested()&&standingMode
+      ?await qualifyPublicIndependentLiveScope(db,directRolloutScope):null;
+    if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
+      return {ok:false,reason:"public_live_account_scope_changed"};
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
     if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
@@ -481,11 +490,10 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
-    const directRolloutScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,releaseSha:startupSha});
-    const directSource=independentLiveRolloutAllowed(directRolloutScope)
+    const directSource=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission)
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}}):null;
-    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope):personalProductionFetch;
+    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
         const tx=finalLedger?.currentTransaction();
