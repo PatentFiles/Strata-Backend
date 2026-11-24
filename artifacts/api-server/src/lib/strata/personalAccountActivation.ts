@@ -43,6 +43,7 @@ const READINESS_SQL = `
   -- personal-activation:readiness
   SELECT a.id, a.commissioned, a.execution_enabled, a.kill_switch,
          a.cash_precision_verified, a.cash_micros::text AS cash_micros,
+         a.initial_cash_micros::text AS initial_cash_micros,
          a.reconciled_at, a.blocked_reason,
          (SELECT MAX(proof_at) FROM (
            SELECT t.completed_at AS proof_at FROM private.kalshi_owner_pilot_transfers t
@@ -100,6 +101,8 @@ const COMMISSION_SQL = `
     AND kill_switch = true
     AND cash_precision_verified = true
     AND cash_micros >= 25000000
+    -- New commissioning must not finalize an unfunded or nonconserving basis.
+    AND (commissioned OR (initial_cash_micros > 0 AND initial_cash_micros = cash_micros))
     AND reconciled_at IS NOT NULL
     -- Authenticated Kalshi cash proof must be newly observed at commissioning,
     -- not a years-old reconciliation that merely postdates a funding receipt.
@@ -168,6 +171,8 @@ const COMMISSION_API_SQL = `
     AND kill_switch = true
     AND cash_precision_verified = true
     AND cash_micros >= 25000000
+    -- New commissioning must not finalize an unfunded or nonconserving basis.
+    AND (commissioned OR (initial_cash_micros > 0 AND initial_cash_micros = cash_micros))
     AND reconciled_at IS NOT NULL
     -- Authenticated Kalshi cash proof must be newly observed at commissioning,
     -- not a years-old reconciliation that merely postdates a funding receipt.
@@ -710,6 +715,7 @@ function activationBlockers(
       // action. Existing commissioned accounts retain their independent
       // per-order exchange reconciliation and pre-POST safety checks.
       (!flag(row.commissioned) && (
+        String(row.initial_cash_micros) !== String(row.cash_micros) ||
         !Number.isFinite(nowMs) ||
         reconciledAt > nowMs + 10_000 ||
         nowMs - reconciledAt > 15 * 60_000
