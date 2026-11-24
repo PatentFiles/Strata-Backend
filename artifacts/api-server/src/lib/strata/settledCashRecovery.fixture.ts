@@ -51,6 +51,8 @@ export async function seedSettledCashHistory(db:DB,account:string,owner:string,f
   [id,account,new Date(at-50000),request,decision,posted?'TERMINAL':realSchema&&local?'DISPATCHED':'BLOCKED',clientOrderId,posted?`order-${n}`:null,posted?300:0,
    entry?'ENTRY':'EXIT',market,entry?null:ids[0],entry||local?new Date(at-30000):null,fee,digest({id,request,decision,policyHash:fee,fee}),...(realSchema?[entry?id:null,entry?market+'-'+n+':first':null]:[])]);
   if(realSchema&&local)await db.query("UPDATE public.v13_production_intent SET terminal=false WHERE id=$1",[id]);
+  // ENTRY preparation retains a zero position row even when it never posts.
+  if(realSchema&&entry&&!posted)await db.query("INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros,realized_pnl_micros) VALUES($1,$2,$3,'YES',0,0,0)",[id,account,market]);
   if(realSchema&&posted)await db.query("INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros,realized_pnl_micros) VALUES($1,$2,$3,'YES',300,1350000,0)",[id,account,market]);
   const reservationId=marker?randomUUID():null;
   if(marker){
