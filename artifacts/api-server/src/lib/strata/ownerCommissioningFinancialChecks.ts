@@ -12,6 +12,19 @@ import {qualifyProtectiveRelease} from "./inAppProtectiveRelease";
 export const VERIFY_FINANCIAL_CHECKS="VERIFY_AND_COMMISSION_FINANCIAL_EVIDENCE_V1";
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const safeReason=(v:unknown)=>typeof v==="string"&&/^[a-z][a-z0-9_]{0,119}$/.test(v)?v:"financial_evidence_unavailable";
+/** Only this refusal is known to come from a pre-commit signed diagnostic
+ * whose final revision fence changed. Re-acquire fresh evidence instead of
+ * accepting the old snapshot. Never replay an uncertain commit or provider
+ * mutation. Stop on any other refusal, or after three total attempts. */
+export async function retrySignedDiagnosticRace<T extends {ok:boolean;reason?:string}>(read:()=>Promise<T>):Promise<T>{
+ const started=performance.now();
+ let out=await read();
+ for(let retry=0;retry<2&&!out.ok&&out.reason==="account_changed_during_signed_diagnostic"&&performance.now()-started<12000;retry++){
+  await new Promise<void>(resolve=>setTimeout(resolve,125*(retry+1)));
+  out=await read();
+ }
+ return out;
+}
 type FeeResult=Awaited<ReturnType<typeof readOwnedApprovedFeeEvidence>>;
 type Ports={
  status:(owner:string)=>ReturnType<typeof inspectOwnerAccountOnboardingReadiness>;
@@ -64,7 +77,7 @@ export async function verifyCommissioningFinancialChecks(owner:string,raw:unknow
    return result("OPENING_CAPITAL_RECOVERY_REQUIRED","opening_capital_difference_requires_signed_owner_recovery",checks);
   if(!checks.fundingRecordPresent)return result("FUNDING_REQUIRED","verify_existing_funding_without_repeating_transfer",checks);
   if(!checks.approvedPolicyPresent)return result("POLICY_REQUIRED","owner_approved_strategy_and_risk_configuration_required",checks);
-  const signed=await ports.signed(owner);
+  const signed=await retrySignedDiagnosticRace(()=>ports.signed(owner));
   if(!signed.ok)return result("CASH_RECONCILIATION_REQUIRED",signed.reason,checks);
   checks.signedHistoryFlat=signed.authenticatedExchangeFlat===true;
   checks.signedCashMatches=signed.exchangeCashMatchesLedger===true;
@@ -249,7 +262,9 @@ export async function advanceOwnerFinancialCommissioning(owner:string,raw:unknow
   // second commissioning write or a different floor/policy approval.
   if(consent.mode==="commission"&&before.account.commissioned)
    return wrap(await verifyCommissioningFinancialChecks(owner,v1,ports));
-  const cash=await ports.refreshCash(owner);
+  // A scope-revision refusal from refreshCash occurs before its write phase.
+  // Each retry performs new signed reads and the original transactional fences.
+  const cash=await retrySignedDiagnosticRace(()=>ports.refreshCash(owner));
   if(!cash.ok)return wrap(result("CASH_RECONCILIATION_REQUIRED",cash.reason,empty()));
   cashRecordPersisted=true;
   const feeCapture:{value:FeeResult|null}={value:null};
