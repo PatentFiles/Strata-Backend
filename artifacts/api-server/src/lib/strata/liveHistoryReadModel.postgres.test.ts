@@ -2,7 +2,7 @@ import test,{after,before} from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {pool} from "@workspace/db";
-import {normalizeLiveDecision,writeLiveDecisionBatch,liveAnalyticsFailure} from "../v13-production/liveDecisionAnalytics";
+import {normalizeLiveDecision,writeLiveDecisionBatch,liveAnalyticsFailure,normalizeLinkedLiveDecision,confirmedBatch} from "../v13-production/liveDecisionAnalytics";
 import {readLiveHistory,parseLiveHistoryQuery,LiveHistoryRequestError} from "./liveHistoryReadModel";
 const url=process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.match(url??"",/^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/);
@@ -166,4 +166,40 @@ test('filtered ledger export advances past empty batches and retains exact micro
  const ids=new Set();cursor=undefined;pages=0;
  do{const p=await readLiveHistoryExportBatch(owner,{...raw,status:'BLOCKED',cursor});for(const row of p.rows){assert.ok(!ids.has(row.row_id));ids.add(row.row_id);assert.match(row.observed_at,/123456/);}cursor=p.nextCursor??undefined;assert.ok(++pages<10);}while(cursor);
  assert.equal(ids.size,5);
+});
+
+test('record-type filtering is identical for screen and export and cannot change tenant scope',async()=>{
+ const dates={from:new Date(now-60000).toISOString(),to:new Date().toISOString()};
+ for(const recordType of ['LEDGER_INTENT','LIVE_DECISION']){
+  const screen=await readLiveHistory(owner,{...dates,recordType,limit:'100'});
+  assert.equal(screen.recordType,recordType);assert.ok(screen.rows.every(r=>r.record_type===recordType&&r.account_id==='account-a'));
+  if(recordType==='LEDGER_INTENT'){assert.equal(screen.summary.evaluations,0);assert.equal(screen.summary.passes,0);}
+  else{assert.equal(screen.summary.submittedOrders,0);assert.equal(screen.summary.netPnlMicros,null);}
+  let cursor:string|undefined;const rows:any[]=[];let n=0;
+  do{const p=await readLiveHistoryExportBatch(owner,{...dates,recordType,limit:'1000',cursor});rows.push(...p.rows);cursor=p.nextCursor??undefined;assert.ok(++n<100);}while(cursor);
+  assert.ok(rows.every(r=>r.record_type===recordType&&r.account_id==='account-a'));
+  for(const row of screen.rows)assert.deepEqual(rows.find(r=>r.row_id===row.row_id),row);
+ }
+ assert.throws(()=>parseLiveHistoryQuery({recordType:'PAPER'},owner),LiveHistoryRequestError);
+ const first=await readLiveHistoryExportBatch(owner,{...dates,limit:'1'});
+ if(first.nextCursor)await assert.rejects(readLiveHistoryExportBatch(owner,{...dates,limit:'1',recordType:'LEDGER_INTENT',cursor:first.nextCursor}),LiveHistoryRequestError);
+});
+test('journal delivery retries confirm an identical retained row and reject different payloads',async()=>{
+ const row=normalizeLiveDecision({...base,reasonCode:'delivery_retry_fixture'})!;
+ const c=await pool.connect();try{
+  assert.equal(await confirmedBatch(c,[row]),1);assert.equal(await confirmedBatch(c,[row]),1);
+  assert.equal(await confirmedBatch(c,[{...row,reason_code:'different_payload'}]),0);
+  assert.equal((await c.query('SELECT count(*)::int AS n FROM private.strata_live_decision_log_v1 WHERE id=$1',[row.id])).rows[0].n,1);
+ }finally{c.release();}
+});
+test('stage context is original, sanitized, and isolated by owner/account/release/source',()=>{
+ const sourceId='40000000-0000-4000-8000-000000000004';
+ const original=normalizeLinkedLiveDecision({...base,sourceId,outcome:'QUALIFIED',market:'KXBTC15M-CONTEXT',direction:'DOWN',signal:'SCOUT',facts:{btcPrice:50000,target:50001,velocity:-2,previousBuffer:3}})!;
+ const blocked=normalizeLinkedLiveDecision({...base,sourceId,observedAtMs:now,stage:'PREPARE',outcome:'BLOCKED',market:undefined,facts:{}})!;
+ assert.equal(blocked.market_ticker,original.market_ticker);assert.equal(blocked.facts.previousBuffer,3);assert.equal(blocked.facts.velocity,-2);
+ assert.equal(blocked.facts.sourceObservationAtMs,base.observedAtMs);assert.equal(blocked.observed_at,new Date(now).toISOString());
+ for(const change of [{ownerId:B},{accountId:'account-b'},{releaseSha:'b'.repeat(40)}]){
+  const foreign=normalizeLinkedLiveDecision({...base,...change,sourceId,stage:'DISPATCH',facts:{}})!;
+  assert.equal(foreign.facts.previousBuffer,undefined);
+ }
 });

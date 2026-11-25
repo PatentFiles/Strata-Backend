@@ -223,6 +223,7 @@ export interface SchedulableWorker {
   start(): Promise<void>;
   startRecovery(): Promise<void>;
   stop(): void;
+  whenIdle?(): Promise<void>;
 }
 
 /**

@@ -39,6 +39,8 @@ export class ProductionWorker {
   heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private readonly idleWaiters=new Set<()=>void>();
+  whenIdle():Promise<void>{return this.running?new Promise(resolve=>this.idleWaiters.add(resolve)):Promise.resolve();}
   private lifecycle = 0;
   private starting: Promise<void> | null = null;
   private recoveryOnly = false;
@@ -269,6 +271,7 @@ export class ProductionWorker {
         // an abort-ignoring adapter cannot start replacement speculative work.
         void metadata?.drained.catch(()=>{});
         this.running = false;
+        for(const resolve of this.idleWaiters)resolve();this.idleWaiters.clear();
       }
     }
   }

@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {heldConsentScope,exactConsentReceipt,HELD_CONSENT_RESULT} from './heldConsentPolicy';
 import {sameStandingAuthoritySql,standingAuthorityMatches,OWNER_SELF_MODE,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
 import {logger} from '../logger';
@@ -113,9 +114,9 @@ async function reconciledAuthorityProof(db:Query,owner:string,a:Row,authority:{r
    requireProof(r.owner_authorizer_id===owner&&r.independent_reviewer_id===null,
     'held_consent_owner_authority_scope_unverified');
   }else{
-   const role=await db.query(`SELECT u.id FROM auth.users u JOIN public.profiles p ON p.id=u.id
+   const role=await db.query(runtimeAuthSql(`SELECT u.id FROM auth.users u JOIN public.profiles p ON p.id=u.id
     WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND p.role IN ('ADMIN','DEVELOPER')
-    ${lock?'FOR SHARE OF u,p':''}`,[r.independent_reviewer_id]);
+    ${lock?'FOR SHARE OF u,p':''}`),[r.independent_reviewer_id]);
    requireProof(role.rows.length===1,'held_consent_historical_reviewer_authority_unverified');
   }
  }

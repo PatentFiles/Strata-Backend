@@ -1,3 +1,4 @@
+import {BoundedAnalyticsQueue} from './boundedAnalyticsQueue';
 import {randomUUID} from "node:crypto";
 import {pool,type Pool,type PoolClient} from "@workspace/db";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET} from "@workspace/v13-strategy";
@@ -32,7 +33,7 @@ const code=/^[a-z][a-z0-9_]{0,127}$/;
 const numberOrNull=(n:unknown)=>typeof n==="number"&&Number.isFinite(n)?n:null;
 const positiveInt=(n:unknown)=>typeof n==="number"&&Number.isSafeInteger(n)&&n>0&&n<=2147483647?n:null;
 const text=(v:unknown,max:number)=>typeof v==="string"&&v.length>0&&v.length<=max?v:null;
-const observedKeys=new Set(["btcPrice","target","distance","previousBuffer","velocity","separation","upOffer","downOffer","entryOffer","candidateOffer","marketOpenMs","marketCloseMs","btcProviderAgeMs","btcReceiveAgeMs","marketAgeMs","freshCross","qualifyingTrigger","continuous","needsEntryPrice"]);
+const observedKeys=new Set(["btcPrice","target","distance","previousBuffer","velocity","separation","upOffer","downOffer","entryOffer","candidateOffer","marketOpenMs","marketCloseMs","btcProviderAgeMs","btcReceiveAgeMs","marketAgeMs","freshCross","qualifyingTrigger","continuous","needsEntryPrice","sourceObservationAtMs"]);
 /** Fixed code-owned error categories only. Never persist arbitrary exception text. */
 export function liveAnalyticsFailure(error:unknown):string{
  const m=error instanceof Error?error.message:"";
@@ -81,56 +82,71 @@ export async function writeLiveDecisionBatch(db:Query,rows:Stored[]):Promise<num
  ON CONFLICT(id) DO NOTHING RETURNING id`,[JSON.stringify(rows)]);
  return out.rows.length;
 }
-// Analytics is intentionally advisory. One bounded, batched writer; no awaited
-// telemetry or additional provider reads in the five-second execution window.
-// Failures are logged without customer identifiers. Do not infer complete
-// historical coverage when telemetry was disabled or delivery failed.
-const queue:Stored[]=[];
-const MAX_QUEUE=256;
-let timer:ReturnType<typeof setTimeout>|null=null;
-let draining=false;
-let dropped=0;
-let lastFailureLog=0;
-function noteDrop(n:number){
- dropped+=n;
+// Keep the exact observed context for linked stage refusals without adding a
+// provider read or an awaited database request to the order-admission window.
+// This cache is telemetry-only: it never returns a trading source/capability.
+const contexts=new Map<string,{at:number;row:Stored}>();
+const contextKey=(v:{owner_user_id:string;execution_account_id:string;direct_source_id:string|null;release_commit_sha:string})=>
+ JSON.stringify([v.owner_user_id,v.execution_account_id,v.direct_source_id,v.release_commit_sha]);
+export function normalizeLinkedLiveDecision(input:LiveDecisionInput):Stored|null{
+ const row=normalizeLiveDecision(input);if(!row)return null;
  const now=Date.now();
- if(now-lastFailureLog>=60_000){
-  lastFailureLog=now;
-  console.warn("strata_live_analytics_delivery_gap",{droppedSinceLastLog:dropped});
-  dropped=0;
+ for(const [key,value] of contexts){if(now-value.at>60_000)contexts.delete(key);else break;}
+ if(row.direct_source_id){
+  const key=contextKey(row);
+  if(row.stage==='OBSERVATION'){
+   contexts.delete(key);contexts.set(key,{at:now,row});
+   while(contexts.size>256)contexts.delete(contexts.keys().next().value!);
+  }else{
+   const original=contexts.get(key)?.row;
+   if(original){
+    row.market_ticker??=original.market_ticker;row.direction??=original.direction;row.signal??=original.signal;
+    row.policy_hash??=original.policy_hash;row.policy_revision??=original.policy_revision;
+    row.configured_stake_cents??=original.configured_stake_cents;row.allocation_preset??=original.allocation_preset;
+    row.facts={...original.facts,...row.facts,sourceObservationAtMs:Date.parse(original.observed_at)};
+   }
+  }
  }
+ return row;
 }
-function schedule(){
- if(timer||draining||!queue.length)return;
- timer=setTimeout(()=>{timer=null;void drain();},1000);
- timer.unref();
+let invalid=0,lastFailureLog=0;
+function noteGap(){
+ const now=Date.now();if(now-lastFailureLog<60_000)return;lastFailureLog=now;
+ try{console.warn('strata_live_analytics_delivery_gap',liveDecisionDeliveryStatus());}catch{}
 }
-async function drain(){
- if(draining||!queue.length)return;
- draining=true;
- const rows=queue.splice(0,64);
- let client:PoolClient|undefined;
- let discard:Error|undefined;
+// Exact retained identity is checked after an uncertain commit retry. The UUID
+// is generated at enqueue, not at each attempt; an existing different row does
+// not count as successful delivery. No financial record is updated here.
+export async function confirmedBatch(client:PoolClient,rows:Stored[]):Promise<number>{
+ await writeLiveDecisionBatch(client,rows);
+ const result=await client.query<{confirmed:number}>(`SELECT count(*)::integer AS confirmed
+  FROM jsonb_to_recordset($1::jsonb) AS r(id uuid,execution_account_id text,owner_user_id uuid,
+   observed_at timestamptz,release_commit_sha text,stage text,outcome text,reason_code text,reason_detail text,
+   market_ticker text,direction text,signal text,direct_source_id text,policy_hash text,policy_revision integer,
+   configured_stake_cents integer,allocation_preset text,strategy_version text,strategy_parameter_hash text,facts jsonb)
+  JOIN private.strata_live_decision_log_v1 d ON d.id=r.id AND (to_jsonb(d)-'recorded_at')=to_jsonb(r)
+  JOIN public.v13_production_account a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+  WHERE a.subaccount=1 AND a.exchange_index=2`,[JSON.stringify(rows)]);
+ return result.rows[0]?.confirmed??0;
+}
+const queue=new BoundedAnalyticsQueue<Stored>(async rows=>{
+ let client:PoolClient|undefined,discard:Error|undefined;
  try{
-  client=await pool.connect();
-  await client.query("BEGIN");
+  client=await pool.connect();await client.query('BEGIN');
   await client.query("SET LOCAL statement_timeout='1500ms'; SET LOCAL lock_timeout='500ms'");
-  const inserted=await writeLiveDecisionBatch(client,rows);
-  await client.query("COMMIT");
-  if(inserted!==rows.length)noteDrop(rows.length-inserted);
- }catch{
-  noteDrop(rows.length);
-  if(client)try{await client.query("ROLLBACK");}catch{discard=new Error("live_analytics_rollback_failed");}
- }finally{client?.release(discard);draining=false;schedule();}
-}
+  const confirmed=await confirmedBatch(client,rows);await client.query('COMMIT');return confirmed;
+ }catch(error){
+  if(client)try{await client.query('ROLLBACK');}catch{discard=Error('live_analytics_rollback_failed');}
+  throw error;
+ }finally{client?.release(discard);}
+},{onGap:noteGap});
+export function liveDecisionDeliveryStatus(){return {...queue.snapshot(),invalid,mode:'bounded_retried_async' as const};}
+export const flushLiveDecisionAnalytics=(timeoutMs=5000)=>queue.flush(timeoutMs);
 export function liveDecisionAnalyticsEnabled(){
- return process.env.NODE_ENV==="production"&&process.env.STRATA_LIVE_DECISION_ANALYTICS_ENABLED==="true"&&SHA.test(deployedGitSha());
+ return process.env.NODE_ENV==='production'&&process.env.STRATA_LIVE_DECISION_ANALYTICS_ENABLED==='true'&&SHA.test(deployedGitSha());
 }
 export function enqueueLiveDecision(input:LiveDecisionInput):void{
  if(!liveDecisionAnalyticsEnabled())return;
- try{
-  const row=normalizeLiveDecision(input);
-  if(!row||queue.length>=MAX_QUEUE){noteDrop(1);return;}
-  queue.push(row);schedule();
- }catch{noteDrop(1);}
+ try{const row=normalizeLinkedLiveDecision(input);if(row)queue.enqueue(row);else{invalid++;noteGap();}}
+ catch{invalid++;noteGap();}
 }

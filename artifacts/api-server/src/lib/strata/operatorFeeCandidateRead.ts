@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { pool } from "@workspace/db";
 import { validateOperatorFeeRelease, REVIEWED_FEE_DIGEST,
   type FeeReleaseCandidate, type FeeReview } from "./operatorAttestedFeeEligibility";
@@ -26,7 +27,7 @@ export async function inspectOperatorFeeCandidate(): Promise<{
     if (release.rows.length === 0) return blocked("candidate_missing");
     if (release.rows.length !== 1) return blocked("multiple_active_candidates_fail_closed");
     const item = release.rows[0]!;
-    const reviews = await pool.query(`
+    const reviews = await pool.query(runtimeAuthSql(`
       SELECT r.review_id, r.reviewer_user_id, r.content_sha256, r.expires_at,
              u.email_confirmed_at,
              EXISTS(SELECT 1 FROM private.role_assignments ra
@@ -34,7 +35,7 @@ export async function inspectOperatorFeeCandidate(): Promise<{
                AS is_current_admin
       FROM public.strata_fee_operator_source_reviews r
       JOIN auth.users u ON u.id=r.reviewer_user_id
-      WHERE r.review_id IN ($1::uuid,$2::uuid)`,
+      WHERE r.review_id IN ($1::uuid,$2::uuid)`),
       [item.reviewer_1, item.reviewer_2]);
     const asTime = (value: unknown): string =>
       value instanceof Date ? value.toISOString() : String(value ?? "");
