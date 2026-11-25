@@ -517,3 +517,15 @@ test("fresh genuine fractional YES and NO reductions preserve zero, partial and 
  assert.equal(result.state,"UNKNOWN");assert.equal(result.postAttempted,true);
  assert.equal(result.mayRetry,false);assert.equal(h.calls.post,1);
  });
+
+
+test("final fence reports code-owned missing row and ambiguous COMMIT categories without sending",async()=>{
+ for(const [options,diagnosticStage] of [[{denyLock:true},"locked_fence_no_exact_row"],
+  [{failCommit:true},"commit_unacknowledged"]] as const){
+  const h=harness(options);
+  const r=await h.run();
+  assert.equal(r.state,"UNKNOWN");assert.equal(r.reason,"protective_exit_final_fence_closed");
+  assert.equal(r.diagnosticStage,diagnosticStage);
+  assert.equal(r.mayRetry,false);assert.equal(r.postAttempted,false);
+ }
+});
