@@ -1,3 +1,4 @@
+import {protectiveHistoryPreviewHandler} from "./ownerProtectiveHistoryPreviewRoute";
 import {advanceOwnerFinancialCommissioning} from "../lib/strata/ownerCommissioningFinancialChecks";
 import {publicInitialRiskAction,REVIEW_INITIAL_RISK,APPROVE_INITIAL_RISK} from "../lib/strata/publicInitialRiskSetup";
 import {publicReleaseAction,REVIEW_PUBLIC_RELEASE,CONFIRM_PUBLIC_RELEASE} from "../lib/strata/publicCommissioningRelease";
@@ -339,6 +340,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  router.get("/release/protective-history-preview",protectiveHistoryPreviewHandler());
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
   router.get('/registered-opening-capital/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await registeredOpeningCapitalPreview(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
   router.post('/registered-opening-capital/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await applyRegisteredOpeningCapital(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});
