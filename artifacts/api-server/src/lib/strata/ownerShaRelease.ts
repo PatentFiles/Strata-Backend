@@ -405,7 +405,13 @@ export async function authorizeOwnerShaRelease(
           AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
             AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
         RETURNING fencing_token::text AS fencing_token`,[accountId,ownerId,killedLeaseToken,current.key_fingerprint,preflight!.observedAtMs]);
-      if(released.rows.length!==1)return reject("owner_restore_killed_lease_fence_failed");
+      if(released.rows.length!==1){
+        // This failure occurs after account admission was updated. Explicitly
+        // roll back both rows before returning the refusal.
+        await tx.query("ROLLBACK");
+        done=true;
+        return reject("owner_restore_killed_lease_fence_failed");
+      }
       const leaseEvidence={ownerId,accountId,sha,oldFencingToken:killedLeaseToken,
         nextFencingToken:String(released.rows[0]?.fencing_token),state:"released",accountKill:false,armRequested:false};
       await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
