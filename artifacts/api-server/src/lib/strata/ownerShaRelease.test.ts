@@ -349,10 +349,12 @@ test("post-recovery owner reauthorization reuses exact-SHA approval and preserve
 });
 
 test("explicit restore only reuses current consent and rejects revoked, changed, active or exposed scope",async()=>{
- for(const scenario of ["valid","global_kill","no_history","review_without_grant","no_approval","revoked_standing","revoked_review","wrong_scope","wrong_sha","running","armed","position","prepared","cash_changed","locked_policy_changed","revision_changed","stale","freeze","stale_qualification","duplicate_approval","missing_worker","final_cas"]){
+ for(const scenario of ["valid","global_kill","no_history","review_without_grant","no_approval","revoked_standing","revoked_review","wrong_scope","wrong_sha","running","armed","position","prepared","cash_changed","locked_policy_changed","revision_changed","stale","freeze","stale_qualification","duplicate_approval","missing_worker","final_cas","killed_valid","killed_revoked_grant","killed_global_kill","killed_fence_conflict","killed_wrong_signer","killed_inconsistent","killed_armed","killed_position","killed_missing_fence"]){
   const calls:{sql:string;params?:unknown[]}[]=[];
   const fingerprint="f".repeat(64),now=1_800_000_000_000;
   let clock=now;
+  const killed=scenario.startsWith("killed_");
+  const globalKilled=scenario==="global_kill"||scenario==="killed_global_kill";
   const account={id:ACCOUNT,owner_id:OWNER,commissioned:true,execution_enabled:false,kill_switch:true,
    blocked_reason:null,cash_precision_verified:true,minimum_exit_micros:10000,cash_micros:"5000000",reserved_micros:"0",
    fee_artifact_digest:feeDigest,policy_state:"APPROVED",policy_id:policyId,policy_hash:feeDigest,
@@ -372,24 +374,32 @@ test("explicit restore only reuses current consent and rejects revoked, changed,
      blocked_reason:scenario==="freeze"?"risk_freeze":null}]};
    }
    if(sql.includes("FROM public.live_execution_config"))return {rows:[{mode:"V13_PRODUCTION",
-    live_execution_enabled:scenario!=="global_kill",manual_kill_switch:scenario==="global_kill"}]};
+    live_execution_enabled:!globalKilled,manual_kill_switch:globalKilled}]};
    if(sql.includes("FROM private.strata_protective_release_qualification")){
     assert.match(sql,/observed_at>now\(\)-interval '60 seconds'/);return {rows:scenario==="stale_qualification"?[]:[{qualification_id:QID,evidence_digest:feeDigest}]};
    }
    if(sql.includes("WITH unresolved_intents"))return {rows:[{n:"0"}]};
-   if(sql.includes("FROM private.kalshi_account_worker_lease"))return {rows:scenario==="missing_worker"?[]:[{state:scenario==="running"?"owned":"released",
-    arm_requested:scenario==="armed",credential_fingerprint:fingerprint}]};
-   if(sql.includes("quantity_hundredths<>0"))return {rows:[{intents:scenario==="prepared"?"1":"0",positions:scenario==="position"?"1":"0",exits:"0"}]};
+   if(sql.includes("UPDATE private.kalshi_account_worker_lease")){
+    assert.deepEqual(params,[ACCOUNT,OWNER,"7",fingerprint,now]);
+    assert.match(sql,/fencing_token=fencing_token\+1/);
+    assert.match(sql,/state='killed' AND account_kill=true AND arm_requested=false/);
+    assert.match(sql,/SET state='released',account_kill=false,arm_requested=false/);
+    return {rows:scenario==="killed_fence_conflict"?[]:[{fencing_token:"8"}]};
+   }
+   if(sql.includes("FROM private.kalshi_account_worker_lease"))return {rows:scenario==="missing_worker"?[]:[{state:scenario==="running"?"owned":killed?"killed":"released",
+    account_kill:killed&&scenario!=="killed_inconsistent",arm_requested:scenario==="armed"||scenario==="killed_armed",
+    credential_fingerprint:scenario==="killed_wrong_signer"?"wrong":fingerprint,fencing_token:scenario==="killed_missing_fence"?null:"7"}]};
+   if(sql.includes("quantity_hundredths<>0"))return {rows:[{intents:scenario==="prepared"?"1":"0",positions:scenario==="position"||scenario==="killed_position"?"1":"0",exits:"0"}]};
    if(sql.includes("SELECT policy_hash FROM public.v13_live_money_policy"))return {rows:[{policy_hash:feeDigest}]};
    if(sql.includes("AS created_current FROM private.strata_standing_execution_reviews"))return {rows:scenario==="no_history"?[]:[{state:"approved",revoked_at:scenario==="revoked_review"?"now":null,policy_hash:feeDigest,created_current:true,independent_reviewer_id:QID}]};
    if(sql.includes("SELECT grant_id FROM private.strata_continuous_execution_grants"))return {rows:["no_history","review_without_grant","revoked_review"].includes(scenario)?[]:[{grant_id:"existing-grant"}]};
    if(sql.includes("SELECT g.grant_id")){
     assert.match(sql,/a.execution_enabled=false/);assert.match(sql,/a.kill_switch=true/);
-    assert.match(sql,/FOR SHARE OF g,r,p,oa/);return {rows:scenario==="revoked_standing"?[]:[{grant_id:"existing-grant"}]};
+    assert.match(sql,/FOR SHARE OF g,r,p,oa/);return {rows:scenario==="revoked_standing"||scenario==="killed_revoked_grant"?[]:[{grant_id:"existing-grant"}]};
    }
    if(sql.includes("SELECT approval_id::text FROM private.strata_owner_sha_approvals"))return {rows:scenario==="no_approval"?[]:scenario==="duplicate_approval"?[{approval_id:QID},{approval_id:QID}]:[{approval_id:QID}]};
    if(sql.includes("UPDATE public.v13_production_account")){
-    assert.deepEqual(params,[ACCOUNT,OWNER,scenario==="global_kill",now]);
+    assert.deepEqual(params,[ACCOUNT,OWNER,globalKilled,now]);
     assert.match(sql,/clock_timestamp\(\) BETWEEN/);return {rows:scenario==="final_cas"?[]:[{id:ACCOUNT}]};
    }
    if(sql.includes("INSERT INTO public.v13_production_observation"))return {rows:[]};
@@ -402,7 +412,10 @@ test("explicit restore only reuses current consent and rejects revoked, changed,
    expectedPolicyId:policyId,expectedPolicyHash:feeDigest},{db:db as never,sha:()=>SHA,now:()=>clock,
    readFeeds:(async(_material:unknown,observedAtMs:number)=>({ok:true,observedAtMs,cashMicros:"5000000",
     historicalCoverageComplete:true,orders:[],fills:[],positions:[],settlements:[]})) as never});
-  const success=["valid","global_kill","no_history","review_without_grant","revoked_standing"].includes(scenario);
+  const success=["valid","global_kill","no_history","review_without_grant","revoked_standing","killed_valid"].includes(scenario);
+  const leaseWrites=calls.filter(c=>c.sql.includes("UPDATE private.kalshi_account_worker_lease"));
+  assert.equal(leaseWrites.length,["killed_valid","killed_fence_conflict"].includes(scenario)?1:0,scenario);
+  if(scenario==="killed_fence_conflict")assert.ok(calls.some(c=>c.sql==="ROLLBACK"));
   assert.equal(result.ok,success,scenario+": "+JSON.stringify(result));
   if(success)assert.equal('approvalId' in result?result.approvalId:null,QID);
   assert.equal(calls.some(c=>/INSERT INTO private\.strata_(owner_sha_approvals|continuous_execution_grants|standing_execution_reviews)/.test(c.sql)),false,scenario);

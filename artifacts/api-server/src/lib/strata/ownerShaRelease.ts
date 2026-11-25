@@ -1,6 +1,6 @@
 import {authorizeHeldHistoryConsent} from './ownerNeverPostedReleaseRenewal';
 import {HELD_CONSENT_CONFIRM} from './heldConsentPolicy';
-import {standingAuthorityMatches} from './ownerSelfReviewMode';
+import {standingAuthorityMatches,sameStandingAuthoritySql} from './ownerSelfReviewMode';
 import {authorizeReconciledHistoryReleaseRenewal} from "./ownerNeverPostedReleaseRenewal";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
@@ -159,6 +159,7 @@ export async function authorizeOwnerShaRelease(
   }
  }catch{return reject("owner_release_preflight_unavailable");}
  let tx:Client|null=null,done=false;
+ let killedLeaseToken:string|null=null;
  try{
   tx=await db.connect();
   await tx.query("BEGIN");
@@ -298,12 +299,26 @@ export async function authorizeOwnerShaRelease(
        preflight.cashMicros!==String(current.cash_micros)||preflight.revision!==String(current.revision)||
        (deps.now??Date.now)()<preflight.observedAtMs||(deps.now??Date.now)()-preflight.observedAtMs>5000)
       return reject("owner_restore_fresh_flat_account_proof_required");
-    const lease=await tx.query(`SELECT state,arm_requested,credential_fingerprint
+    // KILL creates a terminal killed lease. Reusing valid current authority
+    // must accept that exact state, not require the impossible precondition
+    // that KILL has already been cleared. Owned/armed/ambiguous leases refuse.
+    const lease=await tx.query(`SELECT state,account_kill,arm_requested,credential_fingerprint,fencing_token::text AS fencing_token
       FROM private.kalshi_account_worker_lease
       WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[accountId,ownerId]);
-    if(lease.rows.length!==1||lease.rows[0]?.state!=="released"||lease.rows[0]?.arm_requested!==false||
-       lease.rows[0]?.credential_fingerprint!==current.key_fingerprint)
-      return reject("owner_restore_worker_must_be_released_and_disarmed");
+    const stoppedLease=lease.rows[0];
+    const released=stoppedLease?.state==="released"&&stoppedLease.account_kill===false;
+    const killed=stoppedLease?.state==="killed"&&stoppedLease.account_kill===true;
+    if(lease.rows.length!==1||(!released&&!killed)||stoppedLease?.arm_requested!==false||
+       stoppedLease?.credential_fingerprint!==current.key_fingerprint)
+      return reject("owner_restore_worker_must_be_stopped_and_disarmed");
+    if(killed){
+      // A global halt remains binding. Only explicit owner consent, current
+      // grant and signed flatness can restore this one terminated lease.
+      if(!globalLive||globalKilled)return reject("owner_restore_global_kill_active");
+      if(typeof stoppedLease.fencing_token!=="string"||!/^[1-9][0-9]{0,18}$/.test(stoppedLease.fencing_token))
+        return reject("owner_restore_worker_fence_unverified");
+      killedLeaseToken=stoppedLease.fencing_token;
+    }
     const flat=await tx.query(`SELECT
       (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1 AND
        (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) intents,
@@ -324,6 +339,26 @@ export async function authorizeOwnerShaRelease(
     // stays revoked; START still requires a separately consented active grant.
     if(!await restoreReviewCurrent(tx,ownerId,accountId,sha,a.policy_hash,true,history.rows.length>0))
       return reject("owner_restore_current_standing_review_required");
+    if(killedLeaseToken!==null){
+      // This new KILL restoration path cannot revive revoked, superseded or
+      // foreign authority. Preserve the original legacy released-lease path.
+      const grant=await tx.query(`SELECT g.grant_id
+        FROM private.strata_continuous_execution_grants g
+        JOIN private.strata_standing_execution_reviews r ON r.release_id=g.reviewed_release_id
+        JOIN public.v13_production_account a ON a.id=g.execution_account_id AND a.owner_user_id=g.owner_user_id
+        JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
+        JOIN private.strata_owner_sha_approvals oa ON oa.owner_user_id=g.owner_user_id
+          AND oa.execution_account_id=a.id AND oa.release_commit_sha=g.release_commit_sha
+        WHERE g.owner_user_id=$1::uuid AND g.execution_account_id=$2 AND g.release_commit_sha=$3
+          AND g.policy_hash=$4 AND p.policy_hash=g.policy_hash AND p.state='APPROVED'
+          AND g.revoked_at IS NULL AND oa.revoked_at IS NULL AND r.revoked_at IS NULL
+          AND r.state='approved' AND r.created_at<=now() AND r.release_commit_sha=g.release_commit_sha
+          AND r.owner_user_id=g.owner_user_id AND r.execution_account_id=g.execution_account_id
+          AND r.policy_hash=g.policy_hash AND ${sameStandingAuthoritySql()}
+          AND a.execution_enabled=false AND a.kill_switch=true AND a.blocked_reason IS NULL
+        LIMIT 2 FOR SHARE OF g,r,p,oa`,[ownerId,accountId,sha,a.policy_hash]);
+      if(grant.rows.length!==1)return reject("owner_restore_current_standing_grant_required");
+    }
    }
    const existing=await tx.query(`SELECT approval_id::text FROM private.strata_owner_sha_approvals
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
@@ -349,6 +384,34 @@ export async function authorizeOwnerShaRelease(
         AND kill_switch=true AND commissioned=true AND blocked_reason IS NULL
       RETURNING id`,restoring?[accountId,ownerId,globalKilled,preflight!.observedAtMs]:[accountId,ownerId,globalKilled]);
     if(enabled.rows.length!==1)return reject("owner_account_activation_fence_failed");
+    if(killedLeaseToken!==null){
+      // Both account and worker rows are locked. Clear only the terminal
+      // killed lease, increment its fence, and keep it released/disarmed.
+      // Failure rolls back the account update as well. Never acquire a lease.
+      const released=await tx.query(`UPDATE private.kalshi_account_worker_lease
+        SET state='released',account_kill=false,arm_requested=false,
+          fencing_token=fencing_token+1,heartbeat_at=clock_timestamp(),released_at=clock_timestamp()
+        WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
+          AND state='killed' AND account_kill=true AND arm_requested=false
+          AND fencing_token=$3::bigint AND credential_fingerprint=$4
+          AND clock_timestamp() BETWEEN to_timestamp($5::double precision/1000)
+            AND to_timestamp($5::double precision/1000)+interval '5 seconds'
+          AND EXISTS(SELECT 1 FROM public.v13_production_account a
+            WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.commissioned=true
+              AND a.execution_enabled=true AND a.kill_switch=false AND a.blocked_reason IS NULL AND a.reserved_micros=0)
+          AND NOT EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0)
+          AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1
+            AND (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0))
+          AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
+            AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+        RETURNING fencing_token::text AS fencing_token`,[accountId,ownerId,killedLeaseToken,current.key_fingerprint,preflight!.observedAtMs]);
+      if(released.rows.length!==1)return reject("owner_restore_killed_lease_fence_failed");
+      const leaseEvidence={ownerId,accountId,sha,oldFencingToken:killedLeaseToken,
+        nextFencingToken:String(released.rows[0]?.fencing_token),state:"released",accountKill:false,armRequested:false};
+      await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+        VALUES($1,$2,'OWNER_RELEASE_FENCED_TERMINAL_LEASE',$3::jsonb,$4)`,
+        [randomUUID(),accountId,JSON.stringify(leaseEvidence),v13Digest(leaseEvidence)]);
+    }
    } else {
      // Already eligible but stopped: owner authorization is a recorded
      // receipt only. Never silently clear the account kill switch here.
