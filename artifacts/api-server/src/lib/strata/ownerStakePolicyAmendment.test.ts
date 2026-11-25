@@ -42,7 +42,7 @@ const policyRow={
  entry_limit_source:old.entryLimitSource,policy_hash:old.policyHash,created_by:old.createdBy,
  approved_by:old.approvedBy,approved_at:old.approvedAt,
 };
-type Scenario={reviewedV2?:boolean;storedStakeCents?:number;leaseAccountKill?:boolean};
+type Scenario={durableFee?:boolean;reviewedV2?:boolean;storedStakeCents?:number;leaseAccountKill?:boolean};
 function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="released",armRequested=false,accountKill=leaseState==="killed",previousStakePresent=true,reconciledAt=new Date().toISOString(),scenario:Scenario={}) {
  const sqls:string[]=[];
  const policyInsertArgs:unknown[][]=[];
@@ -66,15 +66,17 @@ function mock(availableMicros="5000000",leaseState:"released"|"owned"|"killed"="
    return {rows:[{positions:0,unresolved:0,running:0}]};
   if(sql.includes("SELECT revision FROM public.strata_configured_stake"))return {rows:previousStakePresent?[{revision:1}]:[]};
   if(sql.includes("SELECT * FROM public.v13_live_money_policy")) {
-    if(!scenario.reviewedV2)return {rows:[policyRow]};
+    if(!scenario.reviewedV2&&!scenario.durableFee)return {rows:[policyRow]};
     const current:V13ApprovedLiveMoneyPolicy={...old,
-      feePolicyVersion:API_POLICY_SIGNED_REVIEW_V1,
+      feePolicyVersion:scenario.durableFee?"owner_attested_historical_terms_v1":API_POLICY_SIGNED_REVIEW_V1,
+      feeSourceUrl:scenario.durableFee?"strata-durable-owner-fee://test-model":old.feeSourceUrl,
       capitalLimitCents:2500,maxEntryStakeCents:500,maxEntryAllInCents:625,
       maxDailyLossCents:1000,maxTotalLossCents:1500,
       policyHash:null};
     current.policyHash=computeV13LiveMoneyPolicyHash(current);
     return {rows:[{...policyRow,
       fee_policy_version:current.feePolicyVersion,
+      fee_source_url:current.feeSourceUrl,
       capital_limit_cents:current.capitalLimitCents,
       max_entry_stake_cents:current.maxEntryStakeCents,
       max_entry_all_in_cents:current.maxEntryAllInCents,
@@ -330,4 +332,15 @@ test("real reviewed V2 stake increase is refused instead of silently migrating f
  assert.deepEqual(result,{ok:false,reason:"reviewed_api_v2_stake_change_requires_versioned_review"});
  assert.ok(!h.sqls.includes("COMMIT"));
  assert.equal(h.sqls.some(q=>/UPDATE public.v13_live_money_policy|INSERT INTO public.v13_live_money_policy|UPDATE private.strata_owner_sha_approvals/.test(q)),false);
+});
+
+
+test("durable fee policy cannot be downgraded by the legacy stake amendment",async()=>{
+ const h=mock("50000000","released",false,false,true,new Date().toISOString(),{durableFee:true,storedStakeCents:500});
+ const p=TEST_TWENTY_PERCENT_PRESET;
+ const result=await amendOwnedStakePolicy(h.db,OWNER,ACCOUNT,1000,1,OWNER_STAKE_POLICY_CONFIRM,
+   {presetId:p.id,presetRevision:p.revision,capitalBudgetCents:5000});
+ assert.deepEqual(result,{ok:false,reason:"durable_fee_stake_change_requires_versioned_owner_reauthorization"});
+ assert.ok(h.sqls.includes("ROLLBACK"));
+ assert.ok(!h.sqls.some(q=>/^\s*(UPDATE|INSERT|DELETE)\b/i.test(q)));
 });

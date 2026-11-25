@@ -6,6 +6,7 @@ import {createPublicBookReader,type ReadonlyResearchBook} from "../forwardTestOr
 import {readForwardCycleFeeds} from "../forwardFeedReadScope";
 import {assertChampionSourceReference} from "./sourceReference";
 import {canonical,requireProof} from "./types";
+import {enqueueLiveDecision,liveAnalyticsFailure,type LiveDecisionPolicy,type LiveDecisionInput} from "./liveDecisionAnalytics";
 
 const AGE=5000;
 const TICKER=/^KXBTC15M-[A-Z0-9-]{5,90}$/;
@@ -129,20 +130,20 @@ export class DirectEntrySource{
  #prior:Prior|null=null;#points:Point[]=[];#running=false;#lastClock=-1;
  #heldPrior:(Prior&{positionId:string})|null=null;#heldPoints:Point[]=[];
  #clearHeld(){this.#heldPrior=null;this.#heldPoints=[];}
- private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number){
+ private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number,private readonly auditPolicy:LiveDecisionPolicy={}){
   requireProof(typeof scope.accountId==="string"&&scope.accountId.length>0&&scope.accountId.length<=128&&
    (scope.ownerId===null||UUID.test(scope.ownerId)),"direct_entry_scope_invalid");
   this.#scope=Object.freeze({...scope,...(scope.worker?{worker:Object.freeze({...scope.worker})}:{})});this.#environment=environment;
  }
  get environment(){return this.#environment;}
  matches(scope:DirectScope){return this.#scope.accountId===scope.accountId&&this.#scope.ownerId===scope.ownerId;}
- static marketObservation(scope:DirectScope){
+ static marketObservation(scope:DirectScope,auditPolicy:LiveDecisionPolicy={}){
   requireProof(scope.ownerId&&scope.worker&&/^[A-Za-z0-9._:-]{1,128}$/.test(scope.worker.holderId)&&
    /^[1-9]\d*$/.test(scope.worker.fencingToken)&&HASH.test(scope.worker.credentialFingerprint)&&
    /^[a-f0-9]{40}$/.test(scope.worker.releaseSha)&&scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
    "direct_live_worker_scope_invalid");
   const feeds=createPublicForwardTestFeeds();
-  return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now);
+  return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
  }
  static isolatedSimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
   requireProof(simulationEnvironment(),"direct_entry_simulation_requires_disposable");
@@ -188,12 +189,23 @@ export class DirectEntrySource{
  #seal(bytes:string){return createHmac("sha256",this.#secret).update(bytes,"utf8").digest("hex");}
  async capture(db:Query,signal?:AbortSignal):Promise<string|null>{
   if(this.#running)return null;this.#running=true;
+  const audit:Pick<LiveDecisionInput,"outcome"|"reasonCode"|"reasonDetail"|"market"|"direction"|"signal"|"sourceId"|"facts">={
+   outcome:"ERROR",reasonCode:"live_evaluation_incomplete",facts:{}
+  };
+  const facts=audit.facts!;
+  let auditAt=Date.now();
   try{
    await this.#assertDatabase(db);
    const cycle=this.#now(),deadline=AbortSignal.timeout(AGE);
    const {btc,market}=await readForwardCycleFeeds(this.feeds,undefined,signal,deadline);
    const now=this.#now(),provider=btc.providerAt.getTime(),received=btc.receivedAt.getTime(),
     fetched=market.fetchedAt.getTime(),open=market.startsAt?.getTime(),close=market.endsAt?.getTime();
+   auditAt=now;
+   audit.market=typeof market.ticker==="string"&&TICKER.test(market.ticker)?market.ticker:null;
+   Object.assign(facts,{btcPrice:btc.price,target:market.target,
+    distance:typeof btc.price==="number"&&typeof market.target==="number"?btc.price-market.target:null,
+    marketOpenMs:open??null,marketCloseMs:close??null,btcProviderAgeMs:now-provider,
+    btcReceiveAgeMs:now-received,marketAgeMs:now-fetched});
    requireProof(time(open)&&time(close)&&close-open===900000&&open<=cycle&&now<close&&
     TICKER.test(market.ticker)&&["open","active"].includes(market.status)&&market.result===null&&
     finite(market.target)&&market.target>0&&finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&
@@ -208,11 +220,33 @@ export class DirectEntrySource{
    if(!continuous)this.#points=[];
    this.#points=[...this.#points.filter(p=>received-p.received<=30000),point].slice(-180);
    this.#prior={ticker:market.ticker,target,open,close,point};
-   if(!continuous||!prior)return null;
+   facts.continuous=continuous;
+   if(!continuous||!prior){
+    audit.outcome="PASS";audit.reasonCode="continuous_crossing_history_required";
+    audit.reasonDetail="No consecutive validated observations for this market; no fresh crossing can be established.";
+    return null;
+   }
    const velocity=observedVelocity(this.#points),previousBuffer=prior.point.price-target;
+   Object.assign(facts,{velocity,previousBuffer});
    const input={marketTicker:market.ticker,btcPrice:btc.price,target,previousBuffer,velocity,
     freshness:"current" as const,position:null};
-   if(!needsV13EntryPrice(input)||velocity===null||!this.feeds.book)return null;
+   const needsPrice=needsV13EntryPrice(input);
+   facts.needsEntryPrice=needsPrice;
+   if(!needsPrice||velocity===null||!this.feeds.book){
+    // Preserve the existing no-book-read prefilter. A missing quote is not
+    // evidence of repricing or insufficient liquidity.
+    const diagnostic=evaluateV13Strategy({...input,upOffer:null,downOffer:null});
+    audit.direction=diagnostic.direction;audit.signal=diagnostic.signal;
+    Object.assign(facts,{freshCross:diagnostic.freshCross,separation:diagnostic.separation,qualifyingTrigger:false});
+    audit.outcome=!this.feeds.book&&needsPrice?"ERROR":"PASS";
+    audit.reasonCode=velocity===null?"velocity_unavailable":!diagnostic.freshCross?"no_fresh_cross":
+      !this.feeds.book&&needsPrice?"entry_book_reader_unavailable":"price_independent_entry_filter_not_met";
+    audit.reasonDetail=audit.reasonCode==="price_independent_entry_filter_not_met"?
+      "Observed crossing, separation or directional velocity did not meet the champion prefilter; no entry quote requested.":
+      audit.reasonCode==="no_fresh_cross"?"No new directional crossing in consecutive observations.":
+      audit.reasonCode==="velocity_unavailable"?"Directional velocity unavailable.":"Entry order-book reader unavailable.";
+    return null;
+   }
    const book=await this.feeds.book(market.ticker,signal?AbortSignal.any([signal,deadline]):deadline);
    const observed=this.#now();deadline.throwIfAborted();signal?.throwIfAborted();
    const quote=top(book,market.ticker,cycle,observed);
@@ -220,6 +254,11 @@ export class DirectEntrySource{
    requireProof(observed-oldest<=AGE&&oldest>=open&&observed<close,"direct_entry_original_source_expired");
    const up=(10000-quote.noBid)/10000,down=(10000-quote.yesBid)/10000;
    const decision=evaluateV13Strategy({...input,upOffer:up,downOffer:down});
+   auditAt=observed;audit.signal=decision.signal;audit.direction=decision.direction;
+   audit.reasonDetail=decision.reason;
+   Object.assign(facts,{upOffer:up,downOffer:down,entryOffer:decision.entrySideOffer,candidateOffer:decision.candidateOffer,
+    freshCross:decision.freshCross,separation:decision.separation,qualifyingTrigger:decision.qualifyingTrigger});
+   audit.outcome="PASS";audit.reasonCode=decision.signal==="PASS"?"strategy_pass":"strategy_trigger_not_qualified";
    if(!decision.qualifyingTrigger||!decision.freshCross||decision.entrySideOffer===null||
     (decision.signal!=="SCOUT"&&decision.signal!=="CONFIRM")||(decision.direction!=="UP"&&decision.direction!=="DOWN"))return null;
    const id=randomUUID(),account=this.#scope.accountId,ticker=market.ticker,crossing=ticker+":first";
@@ -243,10 +282,26 @@ export class DirectEntrySource{
     "WHERE a.id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $10::uuid "+
     "ON CONFLICT(account_id,crossing_key) DO NOTHING RETURNING id",
     [id,account,ticker,crossing,new Date(observed),new Date(oldest),new Date(close),bytes,sha(bytes),this.#scope.ownerId]);
-   if(r.rows.length!==1||r.rows[0].id!==id)return null;
-   return await this.readExact(db,id,this.#now())?id:null;
-  }catch(e){this.#prior=null;this.#points=[];throw e;}
-  finally{this.#running=false;}
+   if(r.rows.length!==1||r.rows[0].id!==id){
+    audit.outcome="BLOCKED";audit.reasonCode="crossing_already_consumed";
+    audit.reasonDetail="Existing immutable entry-source claim prevented a duplicate crossing.";
+    return null;
+   }
+   audit.sourceId=id;
+   const exact=await this.readExact(db,id,this.#now());
+   audit.outcome=exact?"QUALIFIED":"BLOCKED";
+   audit.reasonCode=exact?"qualifying_live_trigger":"direct_source_readback_unverified";
+   if(!exact)audit.reasonDetail="The source did not pass exact readback.";
+   return exact?id:null;
+  }catch(e){
+   audit.outcome="ERROR";audit.reasonCode=liveAnalyticsFailure(e);audit.reasonDetail=null;
+   this.#prior=null;this.#points=[];throw e;
+  }finally{
+   this.#running=false;
+   if(this.#environment==="LIVE_OBSERVATION"&&this.#scope.ownerId&&this.#scope.worker)
+    enqueueLiveDecision({...audit,...this.auditPolicy,accountId:this.#scope.accountId,ownerId:this.#scope.ownerId,
+     releaseSha:this.#scope.worker.releaseSha,observedAtMs:auditAt,stage:"OBSERVATION"});
+  }
  }
  async readExact(db:Query,id:string,now:number):Promise<DirectEvaluation|null>{
   if(!UUID.test(id)||!time(now))return null;

@@ -138,7 +138,7 @@ const SIGNER_SQL = `
          c.vault_secret_id::text AS vault_secret_id,
          s.decrypted_secret,
          p.policy_hash, p.fee_policy_version, p.fee_source_url, p.fee_formula_version, p.state AS policy_state,
-         stake.configured_stake_cents
+         stake.configured_stake_cents, stake.risk_preset_id, p.version AS risk_policy_revision
   FROM v13_production_account a
   JOIN private.kalshi_connection_credentials c
     ON c.owner_user_id = a.owner_user_id
@@ -492,7 +492,8 @@ export function createProductionPersonalSession(
     // The flag is not consent, fee authority or a release approval.
     const directSource=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission)
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
-        holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}}):null;
+        holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
+        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
     const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
