@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {createHash} from 'node:crypto';
 import {pool} from '@workspace/db';
@@ -20,6 +21,7 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
  let tx:Client|undefined,commitAttempted=false,done=false,discard:Error|undefined;
  try{
   tx=await(deps.db??pool).connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='3000ms'");
+  await assertOwnerArmFence(tx,owner);
   const r=await tx.query(`SELECT a.id,p.policy_hash,q.evidence_digest FROM public.v13_production_account a
    JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
    JOIN private.strata_protective_release_qualification q ON q.execution_account_id=a.id AND q.owner_user_id=a.owner_user_id

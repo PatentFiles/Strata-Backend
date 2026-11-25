@@ -86,6 +86,8 @@ export interface SafetyAccountRef {
 export interface AccountSafetyPort {
   listAccounts(authenticatedUserId: string): Promise<SafetyAccountRef[]>;
   markKilled(authenticatedUserId: string, executionAccountId: string, client?: CredentialClient): Promise<void>;
+  /** Additive lifecycle cancellation, atomic with the owner safety transition. */
+  invalidatePreparation?(authenticatedUserId:string,client:CredentialClient):Promise<void>;
 }
 
 export interface AccountExecutionResult {
@@ -456,14 +458,17 @@ export async function operateAccountWorker(
   }
   const now = new Date(deps.now()).toISOString();
   const staleBefore = new Date(deps.now() - (deps.leaseTtlMs ?? ACCOUNT_WORKER_LEASE_TTL_MS)).toISOString();
-  return deps.leases.transaction((client) => applyLeaseAction(client, {
+  return deps.leases.transaction(async (client) => {
+    if(safetyAction)await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
+    return applyLeaseAction(client, {
     action: input.action,
     holderId: input.holderId,
     account: bound.account,
     vaultSecretId: bound.vaultSecretId,
     now,
     staleBefore,
-  }));
+  });
+  });
 }
 
 export async function renewAccountWorkerLease(
@@ -510,6 +515,9 @@ async function unboundSafety(
       await client.query("SET LOCAL statement_timeout='5000ms'");
     }
     const lockedAccounts=(input.action === "STOP" || input.action === "KILL") ? await lockStopOwnerAccounts(client,input.authenticatedUserId) : null;
+    // The callback locks accounts before any lease, preserving dispatch order.
+    // It also covers a stopped account whose lease fields do not change.
+    await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
     const locked = await client.query(LOCK_OWNER_LEASES_SQL, [input.authenticatedUserId]);
     if (input.action === "KILL") {
       for (const row of locked.rows) {

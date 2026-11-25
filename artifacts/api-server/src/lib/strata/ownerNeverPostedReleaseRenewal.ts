@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {runtimeAuthSql} from './runtimeAuthRelation';
 import {heldConsentScope,exactConsentReceipt,HELD_CONSENT_RESULT} from './heldConsentPolicy';
 import {sameStandingAuthoritySql,standingAuthorityMatches,OWNER_SELF_MODE,OWNER_SELF_REVIEW_CONFIRM} from './ownerSelfReviewMode';
@@ -202,6 +203,7 @@ async function authorizeRetainedReleaseRenewal(owner:string,qualification:string
    'owner_renewal_signed_history_conflicts_or_cash_changed');
   phase="transaction_begin";
   tx=await deps.db.connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,owner);
   if(held){
    const guard=await tx.query(`SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
     JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace

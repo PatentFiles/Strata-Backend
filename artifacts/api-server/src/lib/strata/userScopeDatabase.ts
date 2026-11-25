@@ -1,3 +1,4 @@
+import {recoverOwnerStaleLease,OWNER_STALE_LEASE_CONFIRMATION} from './ownerStaleLeaseRecovery';
 import {runtimeAuthSql} from './runtimeAuthRelation';
 import { normalizePrimaryDisplayMoney, normalizeWalletDisplayMoney } from "./primaryDisplayMoney";
 import { ownedCashProjection } from "./ownedCashPrecision";
@@ -481,6 +482,15 @@ export function createDatabaseUserScopePort(
 
   return {
     migrationReady,
+    async recoverArmLease(userId) {
+      if (!options.session) return {ok:false,reason:'worker_registry_unavailable'};
+      const transactional=db as UserScopeQuery & {connect?:()=>Promise<{query:UserScopeQuery['query'];release():void}>};
+      if (!transactional.connect) return {ok:false,reason:'worker_recovery_transaction_unavailable'};
+      return recoverOwnerStaleLease(userId,OWNER_STALE_LEASE_CONFIRMATION,{
+        db:{query:(sql,args)=>db.query(sql,args),connect:()=>transactional.connect!.call(db)},
+        isScheduled:(owner,account)=>options.session!.isScheduled(owner,account),
+      });
+    },
     async settings(userId) {
       if (!await migrationReady()) return emptyUserExecutionView(userId);
       const account = await ownedAccount(userId);

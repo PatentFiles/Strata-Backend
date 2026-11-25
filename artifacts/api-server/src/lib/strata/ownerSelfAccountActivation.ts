@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {terminalDisarmedLease} from './terminalWorkerLease';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 /**
@@ -157,6 +158,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   tx=await db.connect();await tx.query('BEGIN');
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,owner);
   diagnosticStage='deadline_guard';
   const guard=await tx.query(`SELECT 1 FROM pg_catalog.pg_trigger t
     JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid

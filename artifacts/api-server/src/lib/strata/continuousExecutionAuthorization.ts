@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
 import {standingAuthoritySql,sameStandingAuthoritySql,OWNER_SELF_MODE} from './ownerSelfReviewMode';
@@ -37,6 +38,7 @@ export async function enrollContinuousGrant(ownerId:string,raw:unknown,
   c=await db.connect();await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='1500ms'");
   await c.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(c,ownerId);
   const ac=await c.query(`
    SELECT a.id,a.owner_user_id,a.commissioned,a.execution_enabled,a.kill_switch,
      a.blocked_reason,p.policy_hash,p.state AS policy_state

@@ -109,7 +109,8 @@
     "test:balance-quota-fusion": "esbuild src/lib/strata/kalshiBalanceQuota.test.ts src/lib/strata/kalshiBalanceQuotaSaturation.test.ts src/lib/strata/kalshiBalanceQuotaBoundary.test.ts --bundle --platform=node --format=cjs --outdir=dist/balance-quota-fusion --out-extension:.js=.cjs --external:pg-native --external:pino --external:pino-pretty && node --test dist/balance-quota-fusion/*.cjs && node scripts/run-v13-disposable-postgres.mjs src/lib/strata/kalshiBalanceQuotaFusion.postgres.test.ts",
     "test:member-read-budget": "esbuild src/lib/strata/kalshiMemberReadBudget.test.ts --bundle --platform=node --format=cjs --outfile=dist/member-read-budget.test.cjs --external:pg-native && node --test dist/member-read-budget.test.cjs && node --test scripts/member-budget-legacy.test.mjs",
     "test:member-read-budget-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/kalshiMemberReadBudget.postgres.test.ts",
-    "test:audit-remediation": "node scripts/audit-remediation.test.mjs"
+    "test:audit-remediation": "node scripts/audit-remediation.test.mjs",
+    "test:owner-arm-lifecycle": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerArmPreparation.postgres.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",
