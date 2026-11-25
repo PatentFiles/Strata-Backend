@@ -1,7 +1,7 @@
 import {terminalDisarmedLease} from './terminalWorkerLease';
 import {platformFeeUploadEnabled,isUploadedBaselineId} from './platformFeeUploadMode';
 import {activeUploadedBaselineMatches} from './platformUploadedFeeSchedule';
-import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
+import {resolveOwnerSelfScope,publicSelfServiceRequested,publicSelfServiceReleaseQualified} from './ownerSelfServiceEligibility';
 import {performance} from 'node:perf_hooks';
 import {createHash} from 'node:crypto';
 import {pool} from '@workspace/db';
@@ -25,6 +25,17 @@ const noAuthority={tradingAuthorized:false as const,workerStarted:false as const
 const no=(reason:string)=>({ok:false as const,reason,...noAuthority});
 const str=(v:unknown)=>typeof v==='string'?v:'';
 const enabled=()=>process.env.STRATA_DURABLE_OWNER_FEE_ENABLED==='true'&&(historicalBaselineEnabled()||platformFeeUploadEnabled());
+/** Diagnose deployment admission without exposing environment values or weakening it.
+ * Recovery must not attempt owner operations when the platform build is unqualified.
+ */
+export function durableReauthorizationAdmissionReason(owner:string,sha:string,feeEnabled:boolean,env:NodeJS.ProcessEnv=process.env,hasTestScope=false):string|null{
+ if(!UUID.test(owner))return 'durable_reauthorization_owner_unverified';
+ if(!SHA.test(sha))return 'durable_reauthorization_deployed_build_unavailable';
+ if(!feeEnabled)return 'durable_reauthorization_fee_path_disabled';
+ if(!hasTestScope&&publicSelfServiceRequested(env)&&!publicSelfServiceReleaseQualified(sha,env))
+  return 'durable_reauthorization_platform_release_unqualified';
+ return null;
+}
 export function validDurableReauthorizationBody(raw:unknown):raw is Row{
  if(!raw||typeof raw!=='object'||Array.isArray(raw))return false;const b=raw as Row;
  return Object.keys(b).sort().join(',')==='accountId,authorizationId,confirmation,expectedSha,modelId,originalSha,policyHash,riskAcceptance,sourceDigest'&&
@@ -64,7 +75,11 @@ function matches(m:Row,b:Row){return m.model_id===b.modelId&&m.release_commit_sh
 function tuple(r:Row){return {authorizationId:r.authorization_id,ownerId:r.owner_user_id,accountId:r.execution_account_id,modelId:r.model_id,originalSha:r.original_release_sha,sha:r.release_commit_sha,policyHash:r.policy_hash,sourceDigest:r.source_digest,confirmation:r.confirmation,riskAcceptance:r.risk_acceptance,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:r.historical_baseline_id,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,...noAuthority};}
 export async function durableFeeReauthorizationPreview(owner:string,d:Pick<Deps,'db'|'sha'|'scope'>={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)return no('production_override_forbidden');
- const sha=(d.sha??deployedGitSha)(),configured=d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,sha);if(!enabled()||!UUID.test(owner)||!configured||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
+ const sha=(d.sha??deployedGitSha)();
+ const admission=durableReauthorizationAdmissionReason(owner,sha,enabled(),process.env,!!d.scope);
+ if(admission)return no(admission);
+ const configured=d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,sha);
+ if(!configured||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
  try{const db=d.db??pool,found=await scopeRow(db,owner,configured.accountId);if(!found)return no('durable_reauthorization_historical_stopped_scope_unverified');const {m,p}=found;
  const reconciled=new Date(String(m.reconciled_at)).getTime();if(!Number.isFinite(reconciled)||reconciled>Date.now()+10000||Date.now()-reconciled>900000)return no('durable_reauthorization_fresh_reconciliation_required');
  if(m.release_commit_sha===sha)return no('durable_reauthorization_different_release_required');
