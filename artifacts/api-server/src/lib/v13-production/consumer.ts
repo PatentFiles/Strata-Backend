@@ -17,15 +17,11 @@ import { digest, money, requireProof } from "./types";
  * Feed observations are provenance, not commands. Re-evaluate the unchanged
  * champion against the separately reconciled owned production position.
  */
-export async function consumeOwnedPosition(executor: ProductionExecutor, dispatchProtectiveExit?: ProtectiveExitDispatch,
-  legacyHeldIds?:ReadonlySet<string>): Promise<void> {
-  if(executor.exchange?.mode==="LIVE" && !legacyHeldIds)
-    throw Error("legacy_held_protection_not_pinned");
+export async function consumeOwnedPosition(executor: ProductionExecutor, dispatchProtectiveExit?: ProtectiveExitDispatch): Promise<void> {
   const l = executor.ledger;
   const owned = (await l.pool.query(`SELECT * FROM v13_production_position
     WHERE account_id=$1 AND quantity_hundredths>0`, [l.accountId])).rows;
   for (const pos of owned) {
-    if(legacyHeldIds && !legacyHeldIds.has(pos.id))continue;
     const source = (await l.pool.query(`SELECT * FROM forward_test_evaluations
       WHERE evaluation_source='paper' AND market_ticker=$1 ORDER BY evaluated_at DESC,id DESC LIMIT 1`,
     [pos.market])).rows[0];

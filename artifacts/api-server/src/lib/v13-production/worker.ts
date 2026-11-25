@@ -3,7 +3,7 @@ import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
 import {enqueueLiveDecision,liveAnalyticsFailure} from "./liveDecisionAnalytics";
-import {deployedGitSha} from "../strata/deployedGitSha";
+import {deployedGitSha,requireIndependentPaperCutover} from "../strata/deployedGitSha";
 import {getOwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
@@ -42,10 +42,6 @@ export class ProductionWorker {
   private lifecycle = 0;
   private starting: Promise<void> | null = null;
   private recoveryOnly = false;
-  // A contained protective exception may act on only the reconciled position
-  // IDs that already existed at this START, never on a later acquisition.
-  private legacyHeldIds: ReadonlySet<string>|null=null;
-  isLegacyHeldProtectionOnly():boolean{return this.isScheduled() && this.legacyHeldIds!==null;}
   private pendingSourceHint:CommittedForwardSourceHint|undefined;
   private mandatoryReconcileActive=false;
   private metadataAttempt:ReturnType<NonNullable<ProductionExecutor["prefetchCommittedPublicMetadata"]>>=null;
@@ -68,7 +64,8 @@ export class ProductionWorker {
     readonly recoverProtectiveExits: () => Promise<void> = async () => {},
     /** Trusted owner-scoped IOC exit, never obtained from user requests. */
     readonly dispatchProtectiveExit?: ProtectiveExitDispatch,
-    readonly signalTrace: SignalTracePort|null=null) {}
+    readonly signalTrace: SignalTracePort|null=null,
+    readonly independentPaperCutover=requireIndependentPaperCutover()) {}
   private async recordDecision(input:Parameters<SignalTracePort["record"]>[0]):Promise<boolean>{
     return this.signalTrace?this.signalTrace.record(input):true;
   }
@@ -79,7 +76,7 @@ export class ProductionWorker {
    * it cannot submit orders, reopen entries, or schedule a trading tick.
    */
   private scheduleTraceSweep(observedAt: number): void {
-    if (this.executor.exchange?.mode === "LIVE" || this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
+    if ((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
         observedAt - this.lastTraceSweepAt < 30_000) return;
     this.lastTraceSweepAt = observedAt;
     const trace = this.signalTrace;
@@ -166,11 +163,9 @@ export class ProductionWorker {
         catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id,error);throw error;}
         return;
       }
-      if(this.executor.exchange?.mode==="LIVE"){
-        if(this.legacyHeldIds && this.lifecycle===tickLifecycle)
-          await consumeOwnedPosition(this.executor,this.dispatchProtectiveExit,this.legacyHeldIds);
-      } else await consumeOwnedPosition(this.executor,this.dispatchProtectiveExit);
-      if(this.executor.exchange?.mode === "LIVE" || this.executor.liveEntryContained){
+      if(!this.independentPaperCutover||this.executor.exchange?.mode!=="LIVE")
+        await consumeOwnedPosition(this.executor,this.dispatchProtectiveExit);
+      if((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.liveEntryContained){
         if(!this.entryHoldReported){
           this.entryHoldReported=true;
           this.report(new Error("production_independent_entry_source_unavailable"));
@@ -286,7 +281,6 @@ export class ProductionWorker {
     if (this.starting) return this.starting;
     const lifecycle = this.lifecycle;
     const current = () => lifecycle === this.lifecycle;
-    let pendingHeldIds:ReadonlySet<string>|null=null;
     const pending = Promise.resolve().then(async () => {
       if (!current()) return;
       if (recoveryOnly) {
@@ -304,33 +298,14 @@ export class ProductionWorker {
         if (!current()) return;
         await this.executor.reconcile();
         if (!current()) return;
-        // A contained, flat LIVE worker cannot trade. Do not misreport START as
-        // successful, or let it substitute paper discovery. Recovery-only startup
-        // above must still reconcile previously dispatched/UNKNOWN attempts.
-        // A trusted, already active held-reconciliation episode may complete
-        // even if a snapshot is flat. With no pinned IDs it cannot consult paper.
-        if(this.executor.exchange?.mode==="LIVE" && !this.executor.independentSourceBound &&
-           typeof this.executor.heldReconcile!=="function"){
-          const held=await this.executor.ledger.pool.query(
-            "SELECT id FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY id",
-            [this.executor.ledger.accountId]);
-          if(!current())return;
-          if(!held.rows.length)throw Error("production_independent_entry_source_unavailable");
-          if(held.rows.some(row=>typeof row.id!=="string" || !row.id))
-            throw Error("existing_position_needs_owner_protective_session");
-          // Preserve only the existing owner-scoped protective path for a
-          // position already exposed. This is not an independently qualified
-          // release; never start a legacy singleton without a protective port.
-          if(!this.dispatchProtectiveExit)throw Error("existing_position_needs_owner_protective_session");
-          this.executor.containLiveEntries();
-          pendingHeldIds=new Set(held.rows.map(row=>row.id as string));
-        }
+        // The API must never read a paper position or enable a normal
+        // unbound LIVE worker. UNKNOWN recovery uses startRecovery instead.
+        if(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE"&&!this.executor.independentSourceBound)
+          throw Error("production_independent_entry_source_unavailable");
         await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
       }
       if (!current()) return;
       this.recoveryOnly = recoveryOnly;
-      this.legacyHeldIds=pendingHeldIds;
-      if(pendingHeldIds)this.report(new Error("legacy_held_protection_only_not_release_ready"));
       this.schedule();
     }).catch(error => { if (current()) throw error; })
       .finally(() => { if (this.starting === pending) this.starting = null; });
@@ -366,7 +341,7 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=this.executor.exchange?.mode==="LIVE"||this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
+    this.detachWake=(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE")||this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
       if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;
@@ -379,7 +354,7 @@ export class ProductionWorker {
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.legacyHeldIds=null;this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void {this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }

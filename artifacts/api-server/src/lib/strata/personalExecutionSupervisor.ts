@@ -47,7 +47,7 @@ import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSigne
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
 import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
-import {deployedGitSha} from "./deployedGitSha";
+import {deployedGitSha,requireIndependentPaperCutover} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -234,8 +234,7 @@ export function createOwnedTradingSupervisor(
         return { ok: false, reason: "foreign_execution_account", workerStarted: false };
       }
       if (existing?.worker.isScheduled()) {
-        return { ok: true, reason: existing.worker.isLegacyHeldProtectionOnly?.()
-          ?"legacy_held_protection_only_not_release_ready":"worker_already_running", workerStarted: true };
+        return { ok: true, reason: "worker_already_running", workerStarted: true };
       }
       // Register before invoking open, including a synchronously completing
       // adapter. Promise continuations then apply pending STOP before the
@@ -250,8 +249,7 @@ export function createOwnedTradingSupervisor(
         workers.set(input.accountId, {
           ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
         });
-        return { ok: true, reason: opened.worker.isLegacyHeldProtectionOnly?.()
-          ?"legacy_held_protection_only_not_release_ready":"worker_scheduled", workerStarted: true };
+        return { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
       starts.set(input.accountId, { ownerUserId: input.userId, result });
       try { return await result; }
@@ -461,11 +459,11 @@ export function createProductionPersonalSession(
     if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
       return {ok:false,reason:"public_live_account_scope_changed"};
     const directAllowed=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission);
-    // No lease, order or normal START for a flat owner on a release that
-    // cannot use its independent entry/exit source. Preserve read-only
-    // recovery of a prior uncertain order; recheck the mode under the lease.
-    if(!directAllowed && snapshot.positions.length===0 &&
-       snapshot.orders.every(order=>order.terminal)){
+    // A known holding requires qualified direct held protection. For an
+    // unbound API account, admit only authentic read-only UNKNOWN recovery.
+    if(requireIndependentPaperCutover()&&!directAllowed){
+      if(snapshot.positions.length>0)
+        return {ok:false,reason:"existing_position_requires_independent_protection"};
       const unresolved=await readUnresolvedIntentMode((sql,values)=>db.query(sql,values),input.accountId);
       if(!unresolved.ok)return unresolved;
       if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
@@ -763,7 +761,7 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     if(directSource)session.executor.bindIndependentLiveSource(directSource);
-    else { session.executor.containLiveEntries(); state.entriesAuthorized=false; }
+    else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
     if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){

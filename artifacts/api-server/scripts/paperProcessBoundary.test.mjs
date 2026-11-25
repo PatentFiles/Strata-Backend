@@ -8,7 +8,9 @@ const source = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
 const paper = fileURLToPath(new URL("../dist/paperWorkerMain.mjs", import.meta.url));
 
 test("the API never imports or starts the paper scheduler", () => {
-  assert.doesNotMatch(source("../src/index.ts"), /forwardTestWorker|startServerForwardTestWorker\s*\(/);
+  const api=source("../src/index.ts");
+  assert.doesNotMatch(api, /forwardTestWorker|startServerForwardTestWorker\s*\(|reconcileMicroLiveAtStartup|auditMicroLiveReadOnly/);
+  assert.match(api,/activatePaperFreeApiRuntime\(\);[\s\S]*app\.listen\(/);
 });
 
 test("the deployed paper bundle contains no live execution or wake module", () => {

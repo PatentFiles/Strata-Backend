@@ -772,8 +772,17 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   // Matching cash and a clean signed read are still not an independent
   // source. Refuse the real owned START before it can claim a lease.
   observedBalance="1.0000";
-  const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
-  assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  const originalCutover={...process.env};
+  try{
+    process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+    process.env.STRATA_PAPER_ISOLATION_QUALIFIED_SHA=process.env.RAILWAY_GIT_COMMIT_SHA;
+    const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
+    assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  }finally{
+    for(const k of ["RAILWAY_GIT_COMMIT_SHA","STRATA_PAPER_ISOLATION_QUALIFIED_SHA"]){
+      if(originalCutover[k]===undefined)delete process.env[k];else process.env[k]=originalCutover[k];
+    }
+  }
   assert.equal(feeChecks,1);assert.equal(leaseWrites,0);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
@@ -1287,15 +1296,4 @@ test("owner cash refresh preserves original signed-read clock and refuses elapse
     assert.equal(result.transferAttempted, false);
     assert.equal(writes, fixture.writes);
   }
-});
-
-test("owner sees protection-only status on initial and repeated start; it is not release readiness",async()=>{
- let openCount=0;
- const control=createOwnedTradingSupervisor(async()=>{openCount++;return {ok:true,worker:{
-   isScheduled:()=>true,isLegacyHeldProtectionOnly:()=>true,async start(){},async startRecovery(){},stop(){},
- }};});
- const arg={userId:USER,accountId:"held",action:"START" as const};
- for(let attempt=0;attempt<2;attempt++)assert.deepEqual(await control.start(arg),{
-  ok:true,reason:"legacy_held_protection_only_not_release_ready",workerStarted:true});
- assert.equal(openCount,1);
 });

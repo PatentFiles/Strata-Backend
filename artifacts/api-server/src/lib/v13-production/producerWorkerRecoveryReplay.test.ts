@@ -71,7 +71,7 @@ function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;pr
  if(options.held)executor.heldReconcile=async()=>{counts.heldReconciles++;order.push('held-reconcile');return undefined as never;};
  const worker=new ProductionWorker(executor,2500,error=>{reports.push(error);},()=>!options.held,
   async()=>{order.push('unknown-audit');},async()=>{counts.protected++;order.push('protect');},
-  {record:async d=>{decisions.push(d);return true;},sweep:async()=>0});
+  {record:async d=>{decisions.push(d);return true;},sweep:async()=>0},true);
  return {source,original,executor,worker,counts,order,events,reports,decisions,now:()=>now};
 }
 

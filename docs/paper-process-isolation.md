@@ -46,3 +46,15 @@ path still uses legacy paper evidence, is not a qualified independent deployment
 and must be resolved before cutover. Do not arm on a legacy protection-only
 status. A passing local split test does not prove hosted process identities or
 a genuine protective exit.
+
+## Live runtime contract
+
+The API entrypoint always chooses the independent-only LIVE worker before
+listening. An unbound session cannot start normal entry or exit, cannot read
+paper, and cannot use the old protection fallback even if paper is running.
+Read-only UNKNOWN recovery may still reconcile. The legacy compatibility
+fixtures do not boot the API entrypoint. Verify a qualified direct held path
+on the authorized release, then cut over only when venue reads show every
+affected account is flat with no unresolved position/order/intent. If an
+active position lacks verified direct protection, keep the old deployment;
+do not hand it to the new release. This never grants order authority.
