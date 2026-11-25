@@ -81,6 +81,7 @@ test("actual ledger P&L and fees counted once; no fill or P&L for PASS/blocked",
  assert.equal(page.rows.find(r=>r.status==="PASS")?.net_pnl_micros,null);
  assert.equal(page.rows.find(r=>r.status==="BLOCKED")?.submitted_orders,0);
  assert.equal(page.rows.find(r=>r.status==="SETTLED_WIN")?.net_pnl_micros,"1477500");
+ assert.equal((page.rows.find(r=>r.status==="SETTLED_WIN")?.details as Record<string,unknown>)?.closedTradeGrossPnlMicros,"1530000");
  assert.equal(page.coverage.historicalPassesBackfilled,false);
 });
 test("cursor pages retain distinct rows",async()=>{
@@ -94,4 +95,26 @@ test("normalization strips unknown fields and arbitrary error text",()=>{
  const v=normalizeLiveDecision({...base,facts:{btcPrice:1,secret:"fixture-private-value"}})!;
  assert.equal(v.facts.btcPrice,1);assert.equal("secret" in v.facts,false);
  assert.equal(liveAnalyticsFailure(new Error("fixture-private-value")),"live_evaluation_or_execution_failed");
+});
+
+test("linked exit fills and parent settlement reconcile gross and net without double counting",async()=>{
+ await pool.query(`INSERT INTO public.v13_production_intent VALUES
+ ('entry-2','account-a','KXBTC15M-LINKED','YES','ENTRY','TERMINAL',true,clock_timestamp()-interval '4 seconds',200,'entry-order',NULL,NULL,NULL,'{}','{}','policy-hash'),
+ ('exit-2','account-a','KXBTC15M-LINKED','YES','EXIT','TERMINAL',true,clock_timestamp()-interval '3 seconds',100,'exit-order','entry-2',NULL,NULL,'{}','{}','policy-hash');
+ INSERT INTO public.v13_production_position VALUES('entry-2','account-a',0,670000);
+ INSERT INTO public.v13_production_event VALUES
+ ('account-a','fill:entry2','entry-2','FILL','{"action":"BUY","feeMicros":"20000","grossMicros":"800000","priceMicros":400000,"quantityHundredths":"200"}',-820000,0,clock_timestamp()-interval '4 seconds'),
+ ('account-a','fill:exit2','exit-2','FILL','{"action":"SELL","feeMicros":"10000","grossMicros":"500000","priceMicros":500000,"quantityHundredths":"100"}',490000,80000,clock_timestamp()-interval '3 seconds'),
+ ('account-a','settlement:entry2','entry-2','SETTLEMENT','{"feeMicros":"0","payoutMicros":"1000000"}',1000000,590000,clock_timestamp()-interval '2 seconds');`);
+ const page=await readLiveHistory(owner,{market:"LINKED"});
+ assert.equal(page.summary.submittedOrders,2);
+ assert.equal(page.summary.fills,2);
+ assert.equal(page.summary.netPnlMicros,"670000");
+ assert.equal(page.summary.feeMicros,"30000");
+ assert.equal(page.summary.wins,1);
+ const entry=page.rows.find(r=>r.row_id==="intent:entry-2")?.details as Record<string,unknown>;
+ assert.equal(entry.closedTradeNetPnlMicros,"670000");
+ assert.equal(entry.closedTradeGrossPnlMicros,"700000");
+ assert.equal(entry.closedTradeTotalFeesMicros,"30000");
+ assert.equal((entry.linkedExitEvents as unknown[]).length,1);
 });

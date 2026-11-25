@@ -105,10 +105,15 @@ WITH accounts AS MATERIALIZED (
     'marketOpenMs',i.decision->'source'->>'market_open_ms','marketCloseMs',i.decision->'source'->>'market_close_ms',
     'releaseSha',i.decision->'source'->'worker_pin'->>'releaseSha',
     'filledHundredths',i.filled_hundredths::text,'executedEntryGrossMicros',ev.buy_gross::text,
-    'entryFillPriceMicros',ev.buy_price::text,'exitFillPriceMicros',ev.sell_price::text,
-    'entryAt',ev.first_buy,'exitAt',ev.last_exit,'settledAt',ev.last_settlement,
-    'entryFeesMicros',ev.buy_fees::text,'exitFeesMicros',ev.exit_fees::text,
+    'entryFillPriceMicros',ev.buy_price::text,'exitFillPriceMicros',CASE WHEN i.kind='ENTRY' THEN linked.sell_price::text ELSE ev.sell_price::text END,
+    'entryAt',ev.first_buy,'exitAt',CASE WHEN i.kind='ENTRY' THEN linked.last_exit ELSE ev.last_exit END,'settledAt',ev.last_settlement,
+    'entryFeesMicros',ev.buy_fees::text,'exitFeesMicros',CASE WHEN i.kind='ENTRY' THEN linked.exit_fees::text ELSE ev.exit_fees::text END,
     'closedTradeNetPnlMicros',CASE WHEN i.kind='ENTRY' AND pos.quantity_hundredths=0 AND i.filled_hundredths>0 AND i.terminal THEN pos.realized_pnl_micros::text ELSE NULL END,
+    'closedTradeGrossPnlMicros',CASE WHEN i.kind='ENTRY' AND pos.quantity_hundredths=0 AND i.filled_hundredths>0 AND i.terminal
+     AND linked.net_pnl=pos.realized_pnl_micros AND linked.fees IS NOT NULL THEN (pos.realized_pnl_micros+linked.fees)::text ELSE NULL END,
+    'closedTradeTotalFeesMicros',CASE WHEN i.kind='ENTRY' AND pos.quantity_hundredths=0 AND i.filled_hundredths>0 AND i.terminal
+     AND linked.net_pnl=pos.realized_pnl_micros THEN linked.fees::text ELSE NULL END,
+    'linkedExitEvents',COALESCE(linked.exit_events,'[]'::jsonb),
     'financialEvents',COALESCE(ev.events,'[]'::jsonb),'reasonObservationId',obs.id
    ) AS details
  FROM intents i
@@ -143,6 +148,489 @@ WITH accounts AS MATERIALIZED (
     ORDER BY e.occurred_at,e.event_id) AS events
   FROM public.v13_production_event e WHERE e.account_id=i.account_id AND e.intent_id=i.id
  ) ev ON true
+ LEFT JOIN LATERAL (
+  -- Position P&L includes child exit fills and settlement on the parent.
+  -- Aggregate linked fees for display only. The summary above counts each
+  -- actual event on its own intent exactly once.
+  SELECT sum(e.pnl_micros) AS net_pnl,
+   CASE WHEN bool_and(COALESCE(e.payload->>'feeMicros','') ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+)
+    THEN sum((e.payload->>'feeMicros')::numeric) END AS fees,
+   CASE WHEN bool_and(COALESCE(e.payload->>'feeMicros','') ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+)
+     FILTER(WHERE e.kind='SETTLEMENT' OR e.payload->>'action'='SELL')
+    THEN sum(CASE WHEN e.payload->>'feeMicros' ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+ THEN (e.payload->>'feeMicros')::numeric END)
+     FILTER(WHERE e.kind='SETTLEMENT' OR e.payload->>'action'='SELL') END AS exit_fees,
+   sum(CASE WHEN e.payload->>'priceMicros' ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+ AND e.payload->>'quantityHundredths' ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+
+      THEN (e.payload->>'priceMicros')::numeric*(e.payload->>'quantityHundredths')::numeric END)
+     FILTER(WHERE e.kind='FILL' AND e.payload->>'action'='SELL')/
+    NULLIF(sum(CASE WHEN e.payload->>'quantityHundredths' ~ '^[0-9]+
+ SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
+   COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
+   d.market_ticker AS market,d.direction,d.signal,d.outcome AS status,d.reason_code,d.reason_detail,d.strategy_version,
+   'LIVE_DECISION'::text AS record_type,0 AS submitted_orders,0::bigint AS fill_count,NULL::numeric AS net_pnl,NULL::numeric AS fees,
+   jsonb_build_object('decisionId',d.id,'stage',d.stage,'directSourceId',d.direct_source_id,
+    'releaseSha',d.release_commit_sha,'policyHash',d.policy_hash,'policyRevision',d.policy_revision,
+    'configuredStakeCents',d.configured_stake_cents,'allocationPreset',d.allocation_preset,
+    'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
+ FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
+ WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+), rows AS (
+ SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
+), filtered AS MATERIALIZED (
+ SELECT * FROM rows
+ WHERE ($6::text IS NULL OR status=$6) AND ($7::text IS NULL OR direction=$7)
+ AND ($8::text IS NULL OR position(upper($8) in upper(market))>0)
+ AND ($9::text IS NULL OR strategy_version=$9)
+ AND ($10::text IS NULL OR position(lower($10) in lower(coalesce(reason_code,'')||' '||coalesce(reason_detail,'')))>0)
+), page AS (
+ SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
+  strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
+ FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
+), reasons AS (
+ SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
+ GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
+)
+SELECT
+ COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY observed_at::timestamptz DESC,row_id DESC) FROM page),'[]'::jsonb) AS rows,
+ (SELECT jsonb_build_object('evaluations',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND details->>'stage'='OBSERVATION'),
+  'passes',count(*) FILTER(WHERE record_type='LIVE_DECISION' AND status='PASS'),
+  'blockedRecords',count(*) FILTER(WHERE status='BLOCKED'),
+  'errors',count(*) FILTER(WHERE status='ERROR'),
+  'submittedOrders',coalesce(sum(submitted_orders),0),'fills',coalesce(sum(fill_count),0),
+  'wins',count(*) FILTER(WHERE status IN ('SETTLED_WIN','CLOSED_WIN')),
+  'losses',count(*) FILTER(WHERE status IN ('SETTLED_LOSS','CLOSED_LOSS')),
+  'breakeven',count(*) FILTER(WHERE status='BREAKEVEN'),
+  'netPnlMicros',sum(net_pnl)::text,'feeMicros',sum(fees)::text,
+  'intentsWithUnavailableFees',count(*) FILTER(WHERE record_type='LEDGER_INTENT' AND fill_count>0 AND fees IS NULL))
+ FROM filtered) AS summary,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
+ (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
+`;
+type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
+export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
+ const q=parseLiveHistoryQuery(raw,actor);
+ const c=await db.connect();
+ let discard:Error|undefined;
+ try{
+  await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await c.query("SET LOCAL statement_timeout='4s'; SET LOCAL lock_timeout='500ms'");
+  // Recheck current database role in this read transaction for all-account reads.
+  if(q.scope==="all"){
+   const role=await c.query("SELECT role FROM public.profiles WHERE id=$1::uuid",[actor.subject]);
+   if(role.rows.length!==1||role.rows[0]?.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
+  }
+  const accounts=await c.query(`SELECT a.id,COALESCE(NULLIF(btrim(p.display_name),''),'Unnamed account') AS name
+   FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
+   WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+   AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
+  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const row=r.rows[0];
+  if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
+  const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  await c.query("COMMIT");
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+   from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
+   coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
+    historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_async_live_observation",
+    note:"Live observations are recorded prospectively. Historical rows are retained production intents. Missing past live PASS decisions are not reconstructed. Delivery gaps can occur during process or database outages."}};
+ }catch(e){
+  try{await c.query("ROLLBACK");}catch{discard=new Error("live_history_rollback_failed");}
+  throw e;
+ }finally{c.release(discard);}
+}
+ THEN (e.payload->>'quantityHundredths')::numeric END)
+      FILTER(WHERE e.kind='FILL' AND e.payload->>'action'='SELL'),0) AS sell_price,
+   max(e.occurred_at) FILTER(WHERE e.kind='SETTLEMENT' OR e.payload->>'action'='SELL') AS last_exit,
+   jsonb_agg(jsonb_build_object('intentId',child.id,'eventId',e.event_id,'kind',e.kind,'at',e.occurred_at,
+    'exchangeOrderId',child.exchange_order_id,'priceMicros',e.payload->>'priceMicros',
+    'quantityHundredths',e.payload->>'quantityHundredths','feeMicros',e.payload->>'feeMicros',
+    'cashDeltaMicros',e.cash_delta_micros::text,'pnlMicros',e.pnl_micros::text)
+    ORDER BY e.occurred_at,e.event_id) FILTER(WHERE child.parent_id=i.id) AS exit_events
+  FROM public.v13_production_intent child JOIN public.v13_production_event e
+   ON e.account_id=child.account_id AND e.intent_id=child.id
+  WHERE i.kind='ENTRY' AND i.filled_hundredths>0 AND child.account_id=i.account_id
+    AND (child.id=i.id OR (child.parent_id=i.id AND child.kind='EXIT'))
+ ) linked ON true
 ), decisions AS (
  SELECT 'decision:'||d.id::text AS row_id,d.observed_at,d.execution_account_id AS account_id,
    COALESCE(NULLIF(btrim(a.display_name),''),'Unnamed account') AS account_name,
