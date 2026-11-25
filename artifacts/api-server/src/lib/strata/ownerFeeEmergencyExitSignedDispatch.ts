@@ -122,7 +122,7 @@ export function isDurableProtectiveExitNoSend(value:unknown,scope:{ownerId:strin
  const proof=value!==null&&typeof value==="object"?durableLocalNoSend.get(value):undefined;
  return !!proof&&proof.ownerId===scope.ownerId&&proof.accountId===scope.accountId&&proof.reservationId===scope.reservationId;
 }
-type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"}>;
+type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"|"final_fence_no_exact_row_before_commit"}>;
 const neverSentProofs=new WeakMap<object,NeverSentProof>();
 /** Only explicit control-flow branches before raw POST mint this one-use proof.
  * Nothing from a caller/provider response, error string or database row can mint it. */
@@ -185,9 +185,12 @@ async function finalizeNeverSent(token:object,db:DB):Promise<boolean>{
  }catch{return false;}
  finally{if(c){if(!committed){try{await c.query("ROLLBACK");}catch{}}c.release();}}
 }
-async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB):Promise<Result>{
+async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB,diagnosticStage?:FinalFenceStage):Promise<Result>{
  const terminal=await finalizeNeverSent(mintNeverSent(input,reason),db);
- const result=Object.freeze(fail(terminal?"protective_exit_proven_not_posted_refresh_required":"protective_exit_local_abort_persistence_unverified",terminal?"BLOCKED":"UNKNOWN"));
+ const result=Object.freeze({
+  ...fail(terminal?"protective_exit_proven_not_posted_refresh_required":"protective_exit_local_abort_persistence_unverified",terminal?"BLOCKED":"UNKNOWN"),
+  ...(diagnosticStage?{diagnosticStage}:{})
+ });
  if(terminal)durableLocalNoSend.set(result,Object.freeze({ownerId:input.ownerId,accountId:input.accountId,reservationId:input.reservationId}));
  return result;
 }
@@ -197,7 +200,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
 async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
- Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;diagnosticStage?:FinalFenceStage}>{
+ Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;noExactRowBeforeCommit?:true;diagnosticStage?:FinalFenceStage}>{
  let c:DBClient|null=null,committed=false,eligible=false,commitStarted=false;
  const denied=(diagnosticStage:FinalFenceStage)=>({attempted:false,receipt:null,diagnosticStage});
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
@@ -300,6 +303,10 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
     input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed]);
+  // Only a successful query with zero rows proves this invocation did not
+  // reach FINAL COMMIT or POST. The diagnostic alone also describes ambiguous
+  // rows and is never the authorization for clearing the one-use marker.
+  if(rows.rows.length===0)return {...denied("locked_fence_no_exact_row"),noExactRowBeforeCommit:true};
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return denied("locked_fence_no_exact_row");
   const row=rows.rows[0]!;
@@ -457,6 +464,8 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
       verify:(ownerDurable?verifyDurableProtectiveAuthority:ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
       providerFresh:isCurrentProviderFee}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
+ if(outcome.noExactRowBeforeCommit)return refuseNeverSent(input,"final_fence_no_exact_row_before_commit",
+  ports.db??(pool as unknown as DB),outcome.diagnosticStage);
  if(!outcome.attempted)return {...fail("protective_exit_final_fence_closed","UNKNOWN"),
    ...(outcome.diagnosticStage?{diagnosticStage:outcome.diagnosticStage}:{})};
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);
