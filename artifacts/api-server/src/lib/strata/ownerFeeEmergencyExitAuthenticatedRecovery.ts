@@ -20,7 +20,66 @@ type DB={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const COUNT=/^\d{1,9}\.\d{2}$/;
 const SIGNED=/^-?\d{1,9}\.\d{2}$/;
-function fail(reason:string):never {throw Error(reason);}
+const readRefusalStages=[
+ "exit_recovery_baseline_not_unique",
+ "exit_recovery_baseline_stale",
+ "exit_recovery_concurrent_fill_unattributable",
+ "exit_recovery_concurrent_order_unattributable",
+ "exit_recovery_count_invalid",
+ "exit_recovery_duplicate_fill_id",
+ "exit_recovery_exchange_history_incomplete",
+ "exit_recovery_exchange_history_unavailable",
+ "exit_recovery_exchange_snapshot_stale",
+ "exit_recovery_fill_receipt_disagreement",
+ "exit_recovery_fill_scope_unproven",
+ "exit_recovery_fill_time_unproven",
+ "exit_recovery_matched_fill_market_mismatch",
+ "exit_recovery_order_digest_mismatch",
+ "exit_recovery_order_mismatch",
+ "exit_recovery_order_not_unique",
+ "exit_recovery_order_scope_unproven",
+ "exit_recovery_order_time_unproven",
+ "exit_recovery_original_position_invalid",
+ "exit_recovery_position_invalid",
+ "exit_recovery_position_not_attributable",
+ "exit_recovery_position_not_unique",
+ "exit_recovery_receipt_or_owner_invalid",
+ "exit_recovery_requested_count_mismatch",
+ "exit_recovery_row_invalid",
+ "exit_recovery_signer_invalid",
+ "exit_recovery_terminal_quantity_mismatch",
+ "exit_recovery_text_invalid",
+ "exit_recovery_zero_quantity_fill",
+ "signed_history_malformed_or_incomplete",
+ "signed_history_scope_mismatch",
+ "signed_history_rate_limited",
+ "signed_history_auth_or_permission",
+ "signed_history_network_or_provider",
+] as const;
+export type ProtectiveHistoryDiagnosticStage=typeof readRefusalStages[number];
+const readDiagnostics = new WeakMap<object,ProtectiveHistoryDiagnosticStage>();
+export function protectiveHistoryReadDiagnostic(error:unknown):ProtectiveHistoryDiagnosticStage|undefined{
+ return error!==null&&typeof error==="object"?readDiagnostics.get(error):undefined;
+}
+function fail(reason:ProtectiveHistoryDiagnosticStage,diagnostic=reason):never {
+ const error=Error(reason);
+ readDiagnostics.set(error,diagnostic);
+ throw error;
+}
+function signedHistoryStage(reason:string):ProtectiveHistoryDiagnosticStage{
+ switch(reason){
+ case "personal_exchange_history_unreconciled":return "signed_history_malformed_or_incomplete";
+ case "account_target_pair_mismatch":return "signed_history_scope_mismatch";
+ case "kalshi_read_rate_limited":return "signed_history_rate_limited";
+ case "kalshi_read_signer_not_configured":
+ case "kalshi_read_signer_invalid":
+ case "kalshi_read_authentication_rejected":
+ case "kalshi_read_permission_denied":return "signed_history_auth_or_permission";
+ case "kalshi_read_network_unavailable":
+ case "kalshi_read_provider_unavailable":return "signed_history_network_or_provider";
+ default:return "exit_recovery_exchange_history_unavailable";
+ }
+}
 function object(x:unknown):Record<string,unknown>{
  if(!x||typeof x!=="object"||Array.isArray(x))return fail("exit_recovery_row_invalid");
  return x as Record<string,unknown>;
@@ -128,7 +187,7 @@ export async function readAuthenticatedProtectiveExitOutcome(
     (initialUnits<0n&&input.order.side!=="bid"))
   return fail("exit_recovery_original_position_invalid");
  const feed=await (deps.readFeeds??readOwnedKalshiFeeds)(input.material,now);
- if(!feed.ok)return fail("exit_recovery_exchange_history_unavailable");
+ if(!feed.ok)return fail("exit_recovery_exchange_history_unavailable",signedHistoryStage(feed.reason));
  if(feed.historicalCoverageComplete!==true)return fail("exit_recovery_exchange_history_incomplete");
  // Keep the original observation time; completing a slow signed scan must not
  // renew its three-second lifetime. Monotonic elapsed also bounds wall-clock

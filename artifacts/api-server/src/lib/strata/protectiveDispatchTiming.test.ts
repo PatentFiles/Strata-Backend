@@ -34,6 +34,7 @@ for(const spec of cases)test(spec.name,async t=>{
  const advance=(ms:number)=>{wall+=ms;monotonic+=ms;dbClock+=ms;};
  let feeCalls=0,providerCalls=0,markerCalls=0,connections=0,signCalls=0,posts=0,fetchAttempts=0,phase='PREPARED';
  let markerOutcome:any=null,firstProof:any=null;
+ const auditReasons:string[]=[];
  const events:string[]=[],sqlErrors:Array<{code:string;message:string}>=[];
  t.mock.method(performance,'now',()=>monotonic);
  t.mock.method(globalThis,'fetch',async()=>{fetchAttempts++;throw Error('clock_regression_fetch_must_not_run');});
@@ -48,7 +49,7 @@ for(const spec of cases)test(spec.name,async t=>{
   connections++;
   if(connections===1)advance(spec.poolWait??0);
   let transactionStart=NaN;
-  return {release:()=>events.push('release'),query:async(sql:string)=>{
+  return {release:()=>events.push('release'),query:async(sql:string,values?:unknown[])=>{
    events.push(sql);
    if(sql==='BEGIN'){transactionStart=dbClock;return {rows:[]};}
    if(sql==='COMMIT'){
@@ -72,7 +73,9 @@ for(const spec of cases)test(spec.name,async t=>{
    if(sql.includes('AS reservation_age_ms'))return {rows:spec.signDelay===undefined?[]:[{reservation_id:reservation,reservation_age_ms:0,heartbeat_age_ms:0,source_age_ms:0,max_quote_age_ms:5000,release_remaining_ms:null,owned_evaluation:{sourcePaperEvaluationId:'source',source:{id:'source',market_ticker:market,evaluated_at:new Date(base).toISOString(),feed_freshness:'current',strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}}]};
    if(sql.startsWith('SELECT execution_account_id FROM private.kalshi_account_worker_lease'))return {rows:[{execution_account_id:account}]};
    if(sql.includes('AS intent_id'))return {rows:[{reservation_id:reservation,intent_id:'exit'}]};
-   if(sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send'))return {rows:[{reservation_id:reservation}]};
+   if(sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')){
+    auditReasons.push(String(values?.[7]));return {rows:[{reservation_id:reservation}]};
+   }
    if(sql.startsWith("UPDATE public.v13_production_intent SET state='BLOCKED'"))return {rows:[{id:'exit'}]};
    if(sql.startsWith("UPDATE private.strata_emergency_exit_reservations SET state='VOID'")){phase='VOID';return {rows:[{reservation_id:reservation}]};}
    throw Error('unmodeled_sql:'+sql);
@@ -123,7 +126,10 @@ for(const spec of cases)test(spec.name,async t=>{
   assert.equal(signCalls,1);assert.equal(phase,'VOID');assert.equal(result.state,'BLOCKED');
   assert.equal(result.reason,'protective_exit_proven_not_posted_refresh_required');
  }else if(spec.expectedFee===2){
-  assert.equal(signCalls,0);assert.equal(phase,'UNKNOWN');assert.equal(result.reason,'protective_exit_final_fence_closed');
+  // The non-signing controls deliberately return an acknowledged zero-row final SELECT.
+  assert.equal(signCalls,0);assert.equal(phase,'VOID');assert.equal(result.state,'BLOCKED');
+  assert.equal(result.reason,'protective_exit_proven_not_posted_refresh_required');
+  assert.deepEqual(auditReasons,['final_fence_no_exact_row_before_commit']);
  }
  if(spec.signDelay!==undefined){
   const beforeAudits=events.filter(s=>s.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')).length;

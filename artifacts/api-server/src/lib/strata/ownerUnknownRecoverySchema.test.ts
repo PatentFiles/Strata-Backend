@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 import {activityTables,migrationManifest,schemaRoot,sourceManifest} from './ownerUnknownRecoverySchema.fixture';
 
 test('full-schema manifest covers every checked-in migration and sidecar, including both 0043s',()=>{
- const manifest=sourceManifest();assert.equal(manifest.length,69);
+ const manifest=sourceManifest();assert.equal(manifest.length,70);
  assert.equal(manifest.filter(m=>m.path==='lib/db/drizzle/0050_strata_live_decision_history.sql').length,1);
  assert.equal(manifest.filter(m=>m.path==='lib/db/drizzle/0049_strata_platform_official_fee_capture.sql').length,1);
  assert.equal(manifest.filter(m=>m.path==='lib/db/drizzle/0048_strata_one_kalshi_connection_per_owner.sql').length,1);
@@ -17,6 +17,9 @@ test('dependency ordering preserves fee, protective and trace function prerequis
  order('strata_fee_source_policy_independent_reviews.sql','0035_fee_trigger_search_path_hardening.sql');
  order('strata_in_app_protective_release_approval.sql','0044_v13_signal_decision_trace.sql');
  order('strata_protective_exit_local_no_send.sql','strata_protective_exit_fractional_quantity.sql');
+ const finalFenceNoSend='strata_protective_exit_final_fence_no_send_reason.sql';
+ assert.equal(migrationManifest.filter(p=>p==='sql/'+finalFenceNoSend).length,1);
+ order('strata_protective_exit_fractional_quantity.sql',finalFenceNoSend);
  order('0043_strata_continuous_execution_grants.sql','maintenance-hardening-20261028.sql');
  order('strata_in_app_protective_release_approval.sql','held-consent-deadlines.sql');
  assert.equal(migrationManifest.filter(p=>p==='sql/held-consent-deadlines.sql').length,1);

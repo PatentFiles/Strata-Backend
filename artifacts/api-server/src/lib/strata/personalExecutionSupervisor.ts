@@ -1,5 +1,6 @@
 import {ownerArmFence,assertOwnerArmFence,withoutOwnerArmFence} from './ownerArmContext';
 import {armTransaction,type ArmDatabase} from './ownerArmStore';
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -526,6 +527,19 @@ export function createProductionPersonalSession(
     // maintenance and protective-exit failures. A fresh, independently reviewed
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
+    // Emit only on a closed fence, after the no-send/unknown decision. Bound
+    // duplicate stage reports per worker; logging must never change the gate.
+    const protectiveDiagnosticLastAt=new Map<string,number>();
+    const reportProtectiveDiagnostic=(phase:"final_fence"|"restart",stage:string)=>{
+      try{
+        const now=performance.now(),key=phase+":"+stage;
+        if(!Number.isFinite(now))return;
+        const last=protectiveDiagnosticLastAt.get(key);
+        if(last!==undefined&&now-last<60_000)return;
+        protectiveDiagnosticLastAt.set(key,now);
+        logger.warn({event:"protective_exit_diagnostic",phase,stage},"Protective exit remains unverified");
+      }catch{/* reporting cannot give or revoke authority */}
+    };
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
@@ -623,6 +637,7 @@ export function createProductionPersonalSession(
             reservationId: reservation.reservationId, material, order, lease,
             ...(directSource?{directHeldSource:directSource}:{}),
           });
+          if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);
           // Preserve a known local no-send as a temporary reconciliation hold,
           // never as entry authority. UNKNOWN and failed reads remain sticky.
           await reconcileOwnedProtectiveExitOutcome({
@@ -643,7 +658,16 @@ export function createProductionPersonalSession(
           ownerId:input.userId,accountId:input.accountId,material,
         },db);
         if(!recovery.ok){
+          if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
+              state.presentedToken===claimed.fencingToken,
+            recovery,
+          });
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
+          // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
       },

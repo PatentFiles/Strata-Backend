@@ -6,7 +6,7 @@ import {validateLocalExitNoSend} from './localExitNoSendEvidence';
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const owner='11111111-1111-4111-8111-111111111111',account='isolated-no-send';
 type Row=Record<string,any>;
-function fixture(fractional=false){
+function fixture(fractional=false,reason='final_evidence_expired'){
  const qty=fractional?'150':'300',fingerprint='a'.repeat(64),at=new Date('2026-11-18T20:00:00Z');
  const parent:Row={id:'parent',account_id:account,kind:'ENTRY',terminal:true,market:'KXBTC15M-FIXTURE',side:'YES',exchange_order_id:'order',filled_hundredths:'300'};
  const request={clientOrderId:'v13p-exit',market:parent.market,side:'YES',action:'SELL',reduceOnly:true,timeInForce:'IOC',limitMicros:450000,
@@ -19,9 +19,9 @@ function fixture(fractional=false){
   time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,reduce_only:true,subaccount:1,exchange_index:2});
  const marker:Row={reservation_id:'reservation',owner_user_id:owner,execution_account_id:account,client_order_id:request.clientOrderId,state:'VOID',trading_authorized:false,
   market_ticker:parent.market,reducing_side:'YES',quantity_hundredths:qty,order_request_json:raw,order_digest:hash(raw),worker_holder_id:'holder',worker_fencing_token:'22'};
- const receipt:Row={...marker,limit_micros:'450000',signer_fingerprint:fingerprint,reason:'final_evidence_expired',recorded_at:at,
+ const receipt:Row={...marker,limit_micros:'450000',signer_fingerprint:fingerprint,reason,recorded_at:at,
   evidence_sha256:hash(JSON.stringify({version:1,ownerId:owner,accountId:account,reservationId:'reservation',clientOrderId:request.clientOrderId,
-   orderDigest:hash(raw),market:parent.market,side:'YES',quantity:qty,limitMicros:450000,signerFingerprint:fingerprint,holderId:'holder',fencingToken:22,reason:'final_evidence_expired'}))};
+   orderDigest:hash(raw),market:parent.market,side:'YES',quantity:qty,limitMicros:450000,signerFingerprint:fingerprint,holderId:'holder',fencingToken:22,reason}))};
  const f={i,parent,marker,receipt,markers:[marker],receipts:[receipt],observations:[] as Row[]};
  return {...f,check:()=>validateLocalExitNoSend(i,[parent,i],f.observations,f.markers,f.receipts,account,owner)};
 }
@@ -40,3 +40,10 @@ const invalid:Array<[string,(f:ReturnType<typeof fixture>)=>void]>=[
  ...['POST_ATTEMPT','POST_UNCERTAIN','CANCEL_ATTEMPT','PROVEN_NOT_POSTED'].map(kind=>[kind+' contradiction',(f:ReturnType<typeof fixture>)=>{f.observations.push({kind});}] as [string,(f:ReturnType<typeof fixture>)=>void]),
 ];
 for(const [label,change] of invalid)test(`local no-send refuses ${label}`,()=>{const f=fixture();change(f);assert.throws(f.check);});
+
+test("exact pre-COMMIT locked-no-row audit validates; generic label does not",()=>{
+ const f=fixture(true,"final_fence_no_exact_row_before_commit");
+ assert.equal(f.check(),f.receipt);
+ const bad=fixture(true,"protective_exit_final_fence_closed");
+ assert.throws(bad.check);
+});
