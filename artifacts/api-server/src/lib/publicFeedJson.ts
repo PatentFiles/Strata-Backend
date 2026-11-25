@@ -2,7 +2,7 @@ import {feedAbortCause,type FeedAbortCause} from "./forwardFeedReadScope";
 /** Public GETs only. Cooldowns reject without returning cached observations;
  * neither source timestamps nor the live five-second freshness rule change. */
 type Provider='coinbase'|'kalshi';
-type Endpoint='btc_ticker'|'market_discovery'|'market_detail';
+type Endpoint='btc_ticker'|'market_discovery'|'market_detail'|'market_event_metadata';
 type Cooldown={until:number;failures:number};
 export type PublicFeedReadEvidence={provider:Provider;endpoint:Endpoint;status:number|null;
  outcome:'response'|'request_failed'|'cooldown'|'body_failed'|'complete';receivedAt:string|null;roundTripMs:number|null;

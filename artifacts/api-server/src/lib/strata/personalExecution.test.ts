@@ -727,7 +727,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
   const material = keyMaterial();
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
-  let feeChecks = 0;
+  let feeChecks = 0, leaseWrites = 0;
+  let observedBalance="50.0000";
   const session = createProductionPersonalSession({
     async query(text: string) {
       if (text.includes("personal-session:signer")) {
@@ -742,6 +743,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
         }] };
       }
       if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      if (text.includes("WITH unresolved_intents AS")) return {rows:[{n:"0"}]};
+      if (/INSERT INTO private.kalshi_account_worker_lease|UPDATE private.kalshi_account_worker_lease/i.test(text)) leaseWrites++;
       return { rows: [] };
     },
   }, {
@@ -754,7 +757,7 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
       };
     },
     kalshiGet: async (_creds, path) => {
-      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("balance")) return { balance_dollars: observedBalance };
       if (path.includes("orders")) return { orders: [] };
       if (path.includes("positions")) return { market_positions: [] };
       if (path.includes("fills")) return { fills: [] };
@@ -766,6 +769,21 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(refused.reason, "cash_evidence_mismatch");
   assert.equal(feeChecks, 0);
   assert.equal(session.isScheduled(USER, "acct-a"), false);
+  // Matching cash and a clean signed read are still not an independent
+  // source. Refuse the real owned START before it can claim a lease.
+  observedBalance="1.0000";
+  const originalCutover={...process.env};
+  try{
+    process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+    process.env.STRATA_PAPER_ISOLATION_QUALIFIED_SHA=process.env.RAILWAY_GIT_COMMIT_SHA;
+    const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
+    assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  }finally{
+    for(const k of ["RAILWAY_GIT_COMMIT_SHA","STRATA_PAPER_ISOLATION_QUALIFIED_SHA"]){
+      if(originalCutover[k]===undefined)delete process.env[k];else process.env[k]=originalCutover[k];
+    }
+  }
+  assert.equal(feeChecks,1);assert.equal(leaseWrites,0);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
     { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },

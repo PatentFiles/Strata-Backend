@@ -7,7 +7,7 @@ import {db,pool,forwardTestEngineTable,type PoolClient} from '@workspace/db';
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH,V13_ENTRY_POLICY_VERSION} from '@workspace/v13-strategy';
 import {ensureWorkerEngine,acquireWorkerLease} from '../forwardTestRepository';
 import {runForwardTestCycle,type CycleResult} from '../forwardTestWorker';
-import {onCommittedForwardSignal,type CommittedForwardSourceHint} from '../forwardTestSignalWake';
+import {onCommittedForwardSignal,notifyCommittedForwardSignal as emitSyntheticLegacyWake,type CommittedForwardSourceHint} from '../forwardTestSignalWake';
 import type {ForwardTestFeeds,MarketObservation} from '../forwardTestFeeds';
 import {computeV13LiveMoneyPolicyHash,type V13ApprovedLiveMoneyPolicy} from '../v13LiveMoneyRisk';
 import {ProductionLedger} from './ledger';
@@ -17,8 +17,9 @@ import {assertCanonicalEntryQuoteEvidence} from './entryQuoteEvidence';
 import type {Exchange,MarketEvidence,Snapshot} from './types';
 import type {StageTiming} from './stageTiming';
 
-// NATIVE DISPOSABLE TEST ONLY. No substitutes for producer SQL, commit, wake,
-// scheduler, worker discovery, entry gate, reconciliation or reservation SQL.
+// NATIVE DISPOSABLE TEST ONLY. Verify that a real paper commit does not wake
+// the live worker. Then inject an explicit legacy hint in the fixture only
+// to preserve coverage of the existing worker admission/compatibility code.
 // Provider/fee responses are synthetic. Execution stops before order dispatch.
 const url=process.env.V13_DISPOSABLE_DATABASE_URL;
 assert.match(url??'',/^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v13_disposable_\d+$/);
@@ -152,6 +153,15 @@ async function runScenario(scenario:Scenario){
    assert.equal(events.filter(e=>e.stage==='signal_discovery').length,discoveriesBefore);
   }else{
    assert.equal(result.error,null);assert.equal(result.signal,'SCOUT');assert.ok(result.evaluationId);
+   await delay(30);
+   assert.equal(hints.length,0);
+   assert.equal(boundaryIntents.length,0);
+   assert.equal(counters.books,0);
+   assert.equal(events.filter(e=>e.stage==='signal_discovery').length,discoveriesBefore);
+   const committed=(await observer.query('SELECT id FROM forward_test_evaluations WHERE id=$1',[result.evaluationId])).rows[0];
+   assert.equal(committed?.id,result.evaluationId);
+   emitSyntheticLegacyWake({evaluationId:result.evaluationId,marketTicker:ticker,evaluatedAtMs:sourceAt,
+    committedAtMs:sourceAt,qualifyingTrigger:true,btcProviderAgeMs:0,btcReceiveAgeMs:0,marketAgeMs:0});
    assert.equal(hints.length,1);assert.equal(hints[0]?.evaluationId,result.evaluationId);
    assert.equal(hints[0]?.evaluatedAtMs,sourceAt);
    const visible=await visibility[0]!;assert.deepEqual(wakeErrors,[]);assert.equal(visible?.rows.length,1);
@@ -203,7 +213,7 @@ async function runScenario(scenario:Scenario){
  if(failures.length)throw new AggregateError(failures,'producer_commit_wake_scenario_failed:'+scenario);
 }
 
-test('native producer COMMIT publishes a wake into real worker admission, never an order',{timeout:120000},async t=>{
+test('native paper COMMIT is isolated from live wakes; explicit legacy fixture tests admission',{timeout:120000},async t=>{
  await assertTarget();
  const previousFetch=globalThis.fetch;globalThis.fetch=async()=>{throw Error('producer_commit_wake_fetch_forbidden');};
  try{

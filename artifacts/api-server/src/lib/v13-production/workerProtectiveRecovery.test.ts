@@ -107,7 +107,7 @@ test("LIVE owned exits require reviewed dispatcher, never generic fallback, even
   btc_price:99999,target:100000,signed_buffer:-1,velocity:-1,up_offer:.5,down_offer:.5};
  let generic=0,reviewed=0,reconciles=0;
  const tx={query:async()=>({rows:[pos]})};
- const executor={startTiming:()=>()=>{},now:()=>1000,exchange:{mode:"LIVE"},gate:async()=>{},
+ const executor={startTiming:()=>()=>{},now:()=>1000,exchange:{mode:"LIVE"},gate:async()=>{},containLiveEntries:()=>{},
   ledger:{accountId:"account",pool:{query:async(sql:string)=>({rows:sql.includes("forward_test_evaluations")?[source]:[pos]})},
    transaction:async(fn:(t:unknown,a:unknown)=>Promise<unknown>)=>fn(tx,{minimum_exit_micros:400000}),
    policy:async()=>({maxQuoteAgeMs:5000,policyHash:"test"}),observe:async()=>{}},
@@ -115,5 +115,40 @@ test("LIVE owned exits require reviewed dispatcher, never generic fallback, even
  };
  await assert.rejects(consumeOwnedPosition(executor as never),/reviewed_protective_exit_worker_not_bound/);
  const worker=new ProductionWorker(executor as never,2500,()=>{},()=>false,async()=>{},async()=>{reviewed++;});
- await worker.tick();assert.equal(reconciles,1);assert.equal(reviewed,1);assert.equal(generic,0);
+ try{await worker.tick();assert.equal(reconciles,1);assert.equal(reviewed,1);assert.equal(generic,0);}
+ finally{worker.stop();}
+});
+
+test("flat unbound live startup is refused; UNKNOWN recovery stays paper-free",async()=>{
+ let recoveries=0,reconciles=0,traceReads=0,entries=0;
+ const queries:string[]=[];
+ const executor={exchange:{mode:"LIVE"},liveEntryContained:true,
+  now:()=>100000,ledger:{accountId:"scoped-account",readAccount:async()=>{},
+    pool:{query:async(sql:string,args:unknown[])=>{queries.push(sql);assert.deepEqual(args,["scoped-account"]);
+      assert.match(sql,/FROM v13_production_position/);return {rows:[]};}},
+    transaction:async()=>{throw Error("unbound_should_not_enter");}},
+  reconcile:async()=>{reconciles++;},prepareEntry:async()=>{entries++;}};
+ const trace={record:async()=>true,sweep:async()=>{traceReads++;return 0;}};
+ const worker=new ProductionWorker(executor as never,60000,()=>{},()=>true,async()=>{recoveries++;},undefined,trace,true);
+ try{
+   await assert.rejects(worker.start(),{message:"production_independent_entry_source_unavailable"});
+   assert.equal(worker.isScheduled(),false);assert.equal(queries.length,0);
+   await worker.startRecovery();await worker.tick();
+   assert.ok(recoveries>=3 && reconciles>=3);assert.equal(queries.length,0);
+   assert.equal(traceReads,0);assert.equal(entries,0);
+ }finally{worker.stop();}
+});
+
+test("API startup with an existing unbound holding cannot consult paper",async()=>{
+ let paper=0,protectedCalls=0;
+ const executor={exchange:{mode:"LIVE"},independentSourceBound:false,liveEntryContained:true,
+   ledger:{accountId:"acct",pool:{query:async()=>{paper++;return {rows:[{id:"existing-owned"}]};}},
+    transaction:async()=>{}},reconcile:async()=>{}};
+ const worker=new ProductionWorker(executor as never,60000,()=>{},()=>false,
+   async()=>{},async()=>{protectedCalls++;},null,true);
+ try{
+   await assert.rejects(worker.start(),{message:"production_independent_entry_source_unavailable"});
+   await worker.tick();
+   assert.equal(worker.isScheduled(),false);assert.equal(paper,0);assert.equal(protectedCalls,0);
+ }finally{worker.stop();}
 });

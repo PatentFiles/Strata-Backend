@@ -81,6 +81,14 @@ export class RolloverStrikeDiagnostics {
  }
 }
 
+/** Production direct-entry label, independent of the paper scheduler.
+ * Skip the normal-window ready event, but retain recovery for an observed gap.
+ * The caller supplies only the bounded, typed public-feed event. */
+export function emitDirectEntryRolloverGap(event:RolloverStrikeEvent,emit:(line:string)=>void=console.info):void {
+ if(event.phase==="ready"&&event.invalidStrikeReads===0&&event.transportFailures===0)return;
+ try{emit(JSON.stringify({...event,source:"direct_entry"}));}catch{/* diagnostic sink never controls decisions */}
+}
+
 // At most one explicit held probe. Observers cannot alter the producer decision.
 let heldObserver:((event:RolloverStrikeEvent)=>void)|null=null;
 export function subscribeHeldRolloverDiagnostics(observer:(event:RolloverStrikeEvent)=>void):()=>void {

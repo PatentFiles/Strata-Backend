@@ -47,7 +47,7 @@ import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSigne
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
 import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
-import {deployedGitSha} from "./deployedGitSha";
+import {deployedGitSha,requireIndependentPaperCutover} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -458,6 +458,16 @@ export function createProductionPersonalSession(
       ?await qualifyPublicIndependentLiveScope(db,directRolloutScope):null;
     if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
       return {ok:false,reason:"public_live_account_scope_changed"};
+    const directAllowed=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission);
+    // A known holding requires qualified direct held protection. For an
+    // unbound API account, admit only authentic read-only UNKNOWN recovery.
+    if(requireIndependentPaperCutover()&&!directAllowed){
+      if(snapshot.positions.length>0)
+        return {ok:false,reason:"existing_position_requires_independent_protection"};
+      const unresolved=await readUnresolvedIntentMode((sql,values)=>db.query(sql,values),input.accountId);
+      if(!unresolved.ok)return unresolved;
+      if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
+    }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
     if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
@@ -479,7 +489,7 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
-    const directSource=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission)
+    const directSource=directAllowed
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
         {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
@@ -751,7 +761,7 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     if(directSource)session.executor.bindIndependentLiveSource(directSource);
-    else session.executor.containLiveEntries();
+    else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
     if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){

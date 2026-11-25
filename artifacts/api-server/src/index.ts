@@ -5,16 +5,18 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
 import { isV13DevelopmentStaged } from "./lib/v13DevelopmentStaging";
-import { startServerForwardTestWorker } from "./lib/forwardTestWorker";
 import { startKalshiBrtiShadowFeed } from "./lib/kalshiBrtiShadowStream";
 import { startTriangulatedMarketObserver } from "./lib/strataResearchMarketObserver";
 import { startShadowObserver } from "./lib/shadowLive";
 import { startFeeArtifactMonitor } from "./lib/microLiveFeeApproval";
 import { verifyProductionShadowReads } from "./lib/productionShadowPreflight";
-import { auditMicroLiveReadOnly, reconcileMicroLiveAtStartup } from "./lib/microLive";
 import { establishOfficialFeeDigest } from "./lib/microLiveFeeArtifact";
 import { startAutoSweepWorker } from "./lib/strata/autoProfitWithdrawals";
 import {startOwnerIndependentFeeV5Collector} from "./lib/strata/ownerIndependentFeeV5Collector";
+
+import {activatePaperFreeApiRuntime} from "./lib/strata/deployedGitSha";
+
+activatePaperFreeApiRuntime();
 
 const rawPort = process.env["PORT"];
 
@@ -77,8 +79,7 @@ app.listen(port, "0.0.0.0", (err) => {
     );
   }
   startShadowObserver();
-  // Paper processing does not depend on the separately gated live recovery.
-  startServerForwardTestWorker();
+  // The paper scheduler is started only by the standalone paper-worker entry point.
   // Opt-in, bounded signed GET diagnostics; requires a released account.
   startHeldExchangeLatencyProbe();
   startHeldLifecycleShadowProbe();
@@ -87,23 +88,4 @@ app.listen(port, "0.0.0.0", (err) => {
   startKalshiBrtiShadowFeed();
   // Research-only market-data sockets: default OFF; no trade/order authority.
   startTriangulatedMarketObserver();
-  void reconcileMicroLiveAtStartup().then((result) => {
-    logger.info({ ready: result.ready, reason: result.reason },
-      "Micro-live startup reconciliation barrier completed");
-    if (["environment_flags_not_both_true", "database_flags_not_both_enabled",
-      "micro_live_kill_switch_on"].includes(result.reason)) {
-      void auditMicroLiveReadOnly().then((audit) => {
-        logger.info({ reason: audit.reason },
-          "Micro-live GET-only startup audit completed; execution remains blocked");
-      }, (error: unknown) => {
-        logger.error({ errorType: error instanceof Error ? error.name : "UnknownError" },
-          "Micro-live GET-only startup audit failed; execution remains blocked");
-      });
-    }
-  }, (error: unknown) => {
-    logger.error(
-      { errorType: error instanceof Error ? error.name : "UnknownError" },
-      "Micro-live startup reconciliation failed; execution remains blocked",
-    );
-  });
 });

@@ -8,6 +8,7 @@ import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
 import {ENTRY_CASH_RISK_VERSION,DIRECT_ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "../v13-production/requestQuantity";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import {ownedFeeFailure} from "./ownedFeeFailureDiagnostic";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros, maximumEntryCashDebitPerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
@@ -405,14 +406,15 @@ export function ownedMarketEvidence(input: {
     observedAtMs: input.observedAtMs, nowMs: input.nowMs,
     ...(input.metadataCapture !== undefined?{metadataCapture:input.metadataCapture}:{}),
   });
-  if (!feeProof.ok) throw new Error(feeProof.reason);
+  if (!feeProof.ok) throw ownedFeeFailure(feeProof.diagnosticStage);
   const seriesBody = object(input.seriesPayload);
   const marketBody = object(input.marketPayload);
   const series = object(seriesBody.series);
   const metadata = object(marketBody.market);
   const structure = metadata.price_level_structure;
-  requireProof(series.ticker === "KXBTC15M" && series.fee_type === "quadratic" &&
-    String(series.fee_multiplier) === "1" && metadata.ticker === input.market &&
+  // feeProof above already enforces the exact series, exchange and approved
+  // unit-multiplier encodings; do not re-parse or coerce its fee terms here.
+  requireProof(metadata.ticker === input.market &&
     metadata.exchange_index === 2 && metadata.status === "active" &&
     (structure === "deci_cent" || structure === "tapered_deci_cent"), "production_fee_or_market_grid_unproven");
   const ticks = structure === "deci_cent" && metadata.price_ranges === undefined

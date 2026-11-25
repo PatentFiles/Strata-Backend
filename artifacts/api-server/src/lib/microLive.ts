@@ -1,3 +1,4 @@
+import {requireIndependentPaperCutover} from "./strata/deployedGitSha";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { and, desc, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
@@ -848,7 +849,7 @@ export async function processMicroLiveForwardTestCycle(
   paperEvaluationId: string | null,
   dependencies: MicroLiveDependencies = {},
 ): Promise<MicroLiveDecision | null> {
-  if (!paperEvaluationId) return null;
+  if (requireIndependentPaperCutover() || !paperEvaluationId) return null;
   const workerObservationTime = dependencies.now?.() ?? new Date();
   const workerLease = await currentLease(workerObservationTime);
   if (workerLease.held && workerLease.owner && workerLease.expiresAt) {
@@ -1240,6 +1241,8 @@ export async function reconcileMicroLiveAtStartup(
     "dedicatedPairRecovery" | "readOnlyAudit" |
     "readDedicatedPairEvidenceForTest"> = {},
 ): Promise<{ ready: boolean; reason: string }> {
+  if (requireIndependentPaperCutover())
+    return {ready:false,reason:"legacy_paper_execution_retired"};
   const invocationNow = (dependencies.now?.() ?? new Date()).getTime();
   const readinessWasCurrentAtInvocation = startupReadiness.ready &&
     invocationNow - startupReadiness.checkedAt >= 0 &&

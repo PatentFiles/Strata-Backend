@@ -6,6 +6,7 @@ import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entry
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
 import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
+import {getOwnedFeeFailureStage,type OwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import {OwnedFeedTimingCapture} from "../strata/ownedFeedReadTiming";
 import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import {ExecutionSubtimings} from "./executionSubtimings";
@@ -50,8 +51,37 @@ export type ReconcileSchedulingContext = Readonly<{
 }>;
 export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled"} | void;
 
+/** Diagnostic, process-local proof of the exact first market read boundary.
+ * Not a durable receipt, a replacement permission, or an order capability.
+ */
+export type FirstOwnedMarketFeeRefusal = Readonly<{
+  accountId:string;
+  sourceId:string;
+  crossingKey:string;
+  sourceSha256:string;
+  failureStage:OwnedFeeFailureStage;
+}>;
+export type FirstReadReceiptWorkerPin = Readonly<{
+ ownerId:string; releaseSha:string; holderId:string; fencingToken:string; credentialFingerprint:string;
+}>;
+/** Explicit trusted bootstrap only, never a route, flag or the ordinary ledger pool. */
+export type FirstReadReceiptWriter = Readonly<{
+ pin:FirstReadReceiptWorkerPin;
+ database:Pick<ProductionLedger["pool"],"query">;
+}>;
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
+  static readonly #seenFirstReadErrors = new WeakSet<object>();
+  static readonly #ambiguousFirstReadErrors = new WeakSet<object>();
+  static readonly #simulationFirstRead = new WeakMap<object,FirstOwnedMarketFeeRefusal>();
+  readonly #liveFirstRead = new WeakMap<object,FirstOwnedMarketFeeRefusal>();
+  #firstReadWriter:FirstReadReceiptWriter|null=null;
+  static readFirstMarketFeeRefusal(error:unknown):FirstOwnedMarketFeeRefusal|undefined{
+    if(error===null||typeof error!=="object")return undefined;
+    const receipt=this.#simulationFirstRead.get(error);
+    this.#simulationFirstRead.delete(error);
+    return this.#ambiguousFirstReadErrors.has(error)?undefined:receipt;
+  }
   /** Set by actual production factories until independent source qualification. */
   private independentEntryHold = false;
   #directSource:DirectEntrySource|null=null;
@@ -70,6 +100,38 @@ export class ProductionExecutor {
       "direct_live_source_binding_invalid");
     source.assertExecutorBinding("LIVE",{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
     this.#directSource=source;
+  }
+  /** Disabled unless a trusted server bootstrap explicitly supplies a scoped writer.
+   * No known production entry point calls this method. The SQL wrapper checks the
+   * actual session ACL, current owner/lease/fence and exact release independently.
+   */
+  bindFirstReadReceiptWriter(binding:FirstReadReceiptWriter):void{
+    const source=this.#directSource;
+    requireProof(source&&this.exchange.mode==="LIVE"&&
+      !this.#firstReadWriter&&binding.database!==this.ledger.pool,
+      "direct_fee_refusal_writer_binding_invalid");
+    this.assertDirectBinding(source);
+    source.assertFirstReadReceiptWorkerPin(binding.pin);
+    this.#firstReadWriter=Object.freeze({database:binding.database,pin:Object.freeze({...binding.pin})});
+  }
+  async recordPinnedFirstReadReceipt(error:unknown):Promise<boolean>{
+    if(error===null||typeof error!=="object")return false;
+    const receipt=this.#liveFirstRead.get(error);
+    // Consume before any await. Lost result, rejection or expired lease can
+    // never turn into a source-replacement retry on an ambiguous outcome.
+    this.#liveFirstRead.delete(error);
+    const source=this.#directSource,writer=this.#firstReadWriter;
+    if(ProductionExecutor.#ambiguousFirstReadErrors.has(error)||!receipt||!source||!writer||this.exchange.mode!=="LIVE"||
+      receipt.accountId!==this.ledger.accountId)return false;
+    this.assertDirectBinding(source);
+    const pin=writer.pin;
+    source.assertFirstReadReceiptWorkerPin(pin);
+    const result=await writer.database.query(
+      "SELECT CASE WHEN current_user='strata_direct_retry_receipt_writer' AND session_user='strata_direct_retry_receipt_writer' "+
+      "THEN private.strata_record_worker_first_market_fee_refusal($1,$2::uuid,$3,$4,$5::bigint,$6,$7,$8,$9) ELSE false END AS recorded",
+      [receipt.accountId,pin.ownerId,pin.releaseSha,pin.holderId,pin.fencingToken,pin.credentialFingerprint,
+       receipt.crossingKey,receipt.sourceId,receipt.sourceSha256]);
+    return result.rows.length===1&&result.rows[0]?.recorded===true;
   }
   get independentSourceBound():boolean{return this.#directSource!==null;}
   get independentSimulationBound():boolean{return this.independentSourceBound&&this.exchange.mode==="SIMULATION";}
@@ -296,7 +358,30 @@ export class ProductionExecutor {
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),
       btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
     });
-    let book = feedAlreadyExpired ? null : await readBook();
+    let book:MarketEvidence|null;
+    try{book=feedAlreadyExpired?null:await readBook();}
+    catch(error){
+      // Only this await is before transaction acquisition. The later
+      // compatibility read and FINAL/dispatch must never mark this proof.
+      const failureStage=getOwnedFeeFailureStage(error);
+      const sourceSha256=direct&&failureStage?DirectEntrySource.validatedSourceDigest(source):undefined;
+      if(error!==null&&typeof error==="object"&&failureStage&&sourceSha256){
+        const seen=ProductionExecutor.#seenFirstReadErrors;
+        if(seen.has(error)){
+          ProductionExecutor.#ambiguousFirstReadErrors.add(error);
+          ProductionExecutor.#simulationFirstRead.delete(error);
+          this.#liveFirstRead.delete(error);
+        }else{
+          seen.add(error);
+          const receipt=Object.freeze({accountId:this.ledger.accountId,sourceId:evaluationId,
+            crossingKey:source.crossing_key,sourceSha256,failureStage});
+          // A LIVE diagnostic never escapes through the simulation accessor.
+          if(this.exchange.mode==="SIMULATION")ProductionExecutor.#simulationFirstRead.set(error,receipt);
+          else if(this.#firstReadWriter)this.#liveFirstRead.set(error,receipt);
+        }
+      }
+      throw error;
+    }
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     if(book) diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");

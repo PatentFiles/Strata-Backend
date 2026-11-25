@@ -3,6 +3,7 @@ import type {Pool,PoolClient} from "@workspace/db";
 import {evaluateV13Strategy,needsV13EntryPrice,V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {createPublicForwardTestFeeds,type ForwardTestFeeds} from "../forwardTestFeeds";
 import {createPublicBookReader,type ReadonlyResearchBook} from "../forwardTestOrderbookDepth";
+import {emitDirectEntryRolloverGap,publishHeldRolloverDiagnostics} from "../rolloverStrikeDiagnostics";
 import {readForwardCycleFeeds} from "../forwardFeedReadScope";
 import {assertChampionSourceReference} from "./sourceReference";
 import {canonical,requireProof} from "./types";
@@ -124,10 +125,15 @@ export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
  * The live factory pins the actual owner-worker lease. It never restores custody after restart.
  */
 export class DirectEntrySource{
+ static readonly #validatedDigests=new WeakMap<object,string>();
+ static validatedSourceDigest(source:unknown):string|undefined{
+  return source!==null&&typeof source==="object"?this.#validatedDigests.get(source):undefined;
+ }
  readonly #secret=randomBytes(32);
  readonly #scope:DirectScope;
  readonly #environment:Environment;
  #prior:Prior|null=null;#points:Point[]=[];#running=false;#lastClock=-1;
+ #retryRehearsal=false;
  #heldPrior:(Prior&{positionId:string})|null=null;#heldPoints:Point[]=[];
  #clearHeld(){this.#heldPrior=null;this.#heldPoints=[];}
  private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number,private readonly auditPolicy:LiveDecisionPolicy={}){
@@ -142,12 +148,33 @@ export class DirectEntrySource{
    /^[1-9]\d*$/.test(scope.worker.fencingToken)&&HASH.test(scope.worker.credentialFingerprint)&&
    /^[a-f0-9]{40}$/.test(scope.worker.releaseSha)&&scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
    "direct_live_worker_scope_invalid");
-  const feeds=createPublicForwardTestFeeds();
+  // The direct-entry lane owns its own public-feed diagnostics when paper is separate.
+  const feeds=createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{
+   emitDirectEntryRolloverGap(event);
+   queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
+  });
   return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
  }
  static isolatedSimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
   requireProof(simulationEnvironment(),"direct_entry_simulation_requires_disposable");
   return new DirectEntrySource(scope,"SIMULATION",feeds,clock);
+ }
+ /** This exercise cannot be reached from Railway startup or a LIVE worker. */
+ static isolatedRetryRehearsal(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
+  const source=this.isolatedSimulation(scope,feeds,clock);
+  source.#retryRehearsal=true;
+  return source;
+ }
+ assertFirstReadReceiptWorkerPin(pin:Readonly<{
+  ownerId:string;releaseSha:string;holderId:string;fencingToken:string;credentialFingerprint:string;
+ }>):void{
+  requireProof(this.#environment==="LIVE_OBSERVATION"&&this.#scope.worker,
+   "direct_fee_refusal_requires_live_observation");
+  this.assertExecutorBinding("LIVE",this.#scope);
+  const own=this.#scope.worker;
+  requireProof(this.#scope.ownerId===pin.ownerId&&own.releaseSha===pin.releaseSha&&
+   own.holderId===pin.holderId&&own.fencingToken===pin.fencingToken&&
+   own.credentialFingerprint===pin.credentialFingerprint,"direct_fee_refusal_worker_pin_mismatch");
  }
  assertSimulationBinding(scope:DirectScope){
   requireProof(this.#environment==="SIMULATION"&&simulationEnvironment()&&this.matches(scope),
@@ -157,6 +184,7 @@ export class DirectEntrySource{
   * existing disposable environment. The real HTTP wrapper rejects them. */
  assertExecutorBinding(mode:"LIVE"|"SIMULATION",scope:DirectScope):void{
   requireProof(this.matches(scope),"direct_source_account_mismatch");
+  if(this.#retryRehearsal)requireProof(mode==="SIMULATION","direct_retry_rehearsal_requires_simulation");
   if(this.#environment==="SIMULATION"){this.assertSimulationBinding(scope);return;}
   requireProof(mode==="LIVE"&&this.#scope.ownerId!==null&&this.#scope.worker&&
     this.#scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
@@ -280,7 +308,7 @@ export class DirectEntrySource{
     "INSERT INTO public.strata_direct_entry_source (id,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256) "+
     "SELECT $1,a.id,$3,$4,$5,$6,$7,$8,$9 FROM public.v13_production_account a "+
     "WHERE a.id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $10::uuid "+
-    "ON CONFLICT(account_id,crossing_key) DO NOTHING RETURNING id",
+    (this.#retryRehearsal?"ON CONFLICT(id) DO NOTHING RETURNING id":"ON CONFLICT(account_id,crossing_key) DO NOTHING RETURNING id"),
     [id,account,ticker,crossing,new Date(observed),new Date(oldest),new Date(close),bytes,sha(bytes),this.#scope.ownerId]);
    if(r.rows.length!==1||r.rows[0].id!==id){
     audit.outcome="BLOCKED";audit.reasonCode="crossing_already_consumed";
@@ -309,7 +337,9 @@ export class DirectEntrySource{
   const r=await db.query(
    "SELECT s.*,a.owner_user_id::text AS owner_id FROM public.strata_direct_entry_source s "+
    "JOIN public.v13_production_account a ON a.id=s.account_id "+
-   "WHERE s.id=$1 AND s.account_id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $3::uuid FOR SHARE OF s",
+   "WHERE s.id=$1 AND s.account_id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $3::uuid "+
+   (this.#retryRehearsal?"AND EXISTS(SELECT 1 FROM public.strata_direct_entry_current c WHERE c.source_id=s.id AND c.account_id=s.account_id AND c.crossing_key=s.crossing_key) AND NOT EXISTS(SELECT 1 FROM public.strata_direct_entry_refusal f WHERE f.source_id=s.id) ":"")+
+   "FOR SHARE OF s",
    [id,this.#scope.accountId,this.#scope.ownerId]);
   if(r.rows.length!==1)return null;
   const row=r.rows[0],bytes=row.evidence_bytes;
@@ -333,6 +363,7 @@ export class DirectEntrySource{
     s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
     !s.qualifying_trigger||!s.fresh_cross||!s.crossing_consumed||s.position_was_open||s.feed_freshness!=="current")return null;
    assertDirectEntryQuoteEvidence(s,now);
+   DirectEntrySource.#validatedDigests.set(s,row.evidence_sha256);
    return Object.freeze(s);
   }catch{return null;}
  }
