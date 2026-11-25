@@ -1,3 +1,4 @@
+import "./lib/strata/denyDiagnosticOrdinaryBoot";
 import {startHeldLifecycleShadowProbe} from './lib/strata/heldLifecycleShadowProbe';
 import {startHeldPrimaryBalanceProbe} from "./lib/strata/heldPrimaryBalanceProbe";
 import {startHeldExchangeLatencyProbe} from "./lib/strata/heldExchangeLatencyProbe";

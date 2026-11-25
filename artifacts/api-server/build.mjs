@@ -25,7 +25,12 @@ async function buildAll() {
     'attached_assets/0_kalshi-fee-schedule_1790474920034.pdf',
   ]);
   await esbuild({
-    entryPoints: ["src/index.ts", "src/paperWorkerMain.ts"].map((entry) => path.resolve(artifactDir, entry)),
+    entryPoints: [
+      {in:"src/strataApiBootstrap.ts",out:"index"},
+      {in:"src/index.ts",out:"normalApiMain"},
+      {in:"src/paperWorkerMain.ts",out:"paperWorkerMain"},
+      {in:"src/protectiveHistoryDiagnosticMain.ts",out:"protectiveHistoryDiagnosticMain"},
+    ].map(({in:entry,out})=>({in:path.resolve(artifactDir,entry),out})),
     platform: "node",
     bundle: true,
     define: { __BTC_RELEASE__: JSON.stringify(buildReleaseIdentity(path.resolve(artifactDir, "../.."))), __STRATA_BUILD__:JSON.stringify(metadata) },

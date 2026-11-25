@@ -1,3 +1,4 @@
+import "./lib/strata/denyDiagnosticOrdinaryBoot";
 import { V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { forwardTestStartupDecision } from "./lib/forwardTestStartupGate";
 
