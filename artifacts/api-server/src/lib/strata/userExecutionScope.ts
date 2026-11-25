@@ -64,6 +64,8 @@ export interface UserExecutionView {
   armed: boolean;
   workerArmRequested?: boolean | null;
   workerLeaseState?: string | null;
+  /** Null only when the current release authority was verified; omitted when not checked. */
+  startupReleaseBlockReason?: string | null;
   killSwitch: boolean | null;
   commissioningState: string | null;
   reconciledAt: string | null;
