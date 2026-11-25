@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {generateKeyPairSync,createHash} from "node:crypto";
-import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
+import {readAuthenticatedProtectiveExitOutcome,inspectAuthenticatedProtectiveExitHistory} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
 import {reconcileUnknownProtectiveExitAfterRestart} from "./ownerFeeEmergencyExitRestartRecovery";
 import type {readOwnedKalshiFeeds} from "./personalExchangeRead";
 const NOW=Date.parse("2026-10-19T20:00:00Z");
@@ -28,7 +28,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
  missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
  wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;
- receiptWaitMs?:number;fullyClosed?:boolean;omitPosition?:boolean;settled?:boolean;
+ receiptWaitMs?:number;fullyClosed?:boolean;omitOrder?:boolean;omitPosition?:boolean;settled?:boolean;
  wallElapsedMs?:number;monotonicElapsedMs?:number;observationAgeMs?:number;
  startMonotonicMs?:number;baselineWallElapsedMs?:number;baselineMonotonicElapsedMs?:number;
  startWallMs?:number;throwWallAt?:number;throwMonotonicAt?:number;}={}){
@@ -62,7 +62,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
   monotonic+=options.monotonicElapsedMs??0;
   if(options.failPages)return {ok:false as const,reason:"exchange_history_unavailable"};
   return {ok:true as const,historicalCoverageComplete:true,observedAtMs:startedAt-(options.observationAgeMs??0),cashMicros:"0",
-   orders:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
+   orders:options.omitOrder?[]:[{client_order_id:ID,order_id:"order-1",ticker:MARKET,
      book_side:selected.order.side,
      subaccount_number:options.missingOrderScope?undefined:options.wrongOrderScope?0:1,
      exchange_index:options.missingOrderScope?undefined:2,
@@ -82,9 +82,9 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
    positions:options.omitPosition?[]:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
    settlements:options.settled?[{ticker:MARKET,subaccount_number:1,exchange_index:2,
-     yes_count_fp:position,no_count_fp:"0.00",market_result:"yes",payout:"1.00",settled_time:new Date(NOW).toISOString()}]:[]};
+     yes_count_fp:position,no_count_fp:"0.00",market_result:"yes",revenue:300,settled_time:new Date(NOW).toISOString()}]:[]};
  }) as typeof readOwnedKalshiFeeds;
- return {calls,run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
+ return {calls,preview:(pin:()=>Promise<string|null>)=>inspectAuthenticatedProtectiveExitHistory(selected,pin,{db,readFeeds,now:()=>wall,monotonicNow:()=>monotonic}),run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
   {db,readFeeds,now:()=>{
     if(++calls.wall===options.throwWallAt)throw Error("test_wall_clock_failed");return wall;
    },monotonicNow:()=>{
@@ -313,4 +313,19 @@ test("restart diagnostic does not reflect untrusted exception text",async()=>{
  }));
  assert.equal(r.diagnosticStage,"signed_history_reader_exception");
  assert.doesNotMatch(JSON.stringify(r),/USER_SECRET/);
+});
+test("incident restricted preview reports categories only; refuses changed pin and stale read",async()=>{
+ const pin=async()=> "a".repeat(64);
+ const x=await withRestartTestPorts(()=>harness({restart:true,fill:"0.00",differentPosition:true,settled:true}).preview(pin));
+ assert.deepEqual(x,{order:"EXACT_TERMINAL",settlement:"MATCHES_DELTA",exposure:"FLAT_ECHO",readOnly:true,accountingPosted:false,tradingAuthorized:false});
+ let calls=0;
+ const raced=await withRestartTestPorts(()=>harness({restart:true,fill:"0.00",differentPosition:true,settled:true}).preview(async()=> (++calls===1?"a":"b").repeat(64)));
+ assert.equal(raced.order,"AMBIGUOUS_OR_UNVERIFIED");
+ const stale=await withRestartTestPorts(()=>harness({restart:true,fill:"0.00",differentPosition:true,settled:true,monotonicElapsedMs:3001}).preview(pin));
+ assert.equal(stale.settlement,"UNVERIFIED");
+});
+test("authenticated complete no exact terminal order returns NOT_FOUND without treating settlement as authority",async()=>{
+ const h=harness({restart:true,fill:"0.00",differentPosition:true,settled:true,omitOrder:true});
+ const out=await withRestartTestPorts(()=>h.preview(async()=> "a".repeat(64)));
+ assert.deepEqual(out,{order:"NOT_FOUND",settlement:"UNVERIFIED",exposure:"UNVERIFIED",readOnly:true,accountingPosted:false,tradingAuthorized:false});
 });
