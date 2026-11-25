@@ -9,7 +9,7 @@ export class LiveHistoryRequestError extends Error {
 type Actor={subject:string;role:string|null};
 type Query={scope:"own"|"all";account:string|null;from:string;to:string;status:string|null;direction:string|null;market:string|null;strategy:string|null;reason:string|null;beforeAt:string|null;beforeId:string|null;limit:number};
 function invalid():never{throw new LiveHistoryRequestError(400,"invalid_live_history_filters");}
-export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now=Date.now()):Query {
+export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now=Date.now(),mode:"screen"|"export"="screen"):Query {
  if(!UUID.test(actor.subject))throw new LiveHistoryRequestError(403,"live_history_owner_required");
  const keys=["scope","account","from","to","status","direction","market","strategy","reason","cursor","limit"];
  if(Object.keys(raw).some(k=>!keys.includes(k)))invalid();
@@ -26,12 +26,12 @@ export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now
  if(!Number.isFinite(Date.parse(to)))invalid();
  const from=get("from")??new Date(Date.parse(to)-30*DAY).toISOString();
  const start=Date.parse(from),end=Date.parse(to);
- if(!Number.isFinite(start)||!Number.isFinite(end)||end<start||end-start>90*DAY||end>now+60000)invalid();
+ if(!Number.isFinite(start)||!Number.isFinite(end)||end<start||(mode==="screen"&&end-start>90*DAY)||start<0||end>now+60000)invalid();
  const status=get("status"),direction=get("direction"),account=get("account");
  if(status&&!STATUSES.has(status))invalid();
  if(direction&&!["UP","DOWN","NONE"].includes(direction))invalid();
  const rawLimit=get("limit"),limit=rawLimit===null?50:Number(rawLimit);
- if(rawLimit!==null&&!/^\d+$/.test(rawLimit)||!Number.isSafeInteger(limit)||limit<1||limit>100)invalid();
+ if(rawLimit!==null&&!/^\d+$/.test(rawLimit)||!Number.isSafeInteger(limit)||limit<1||limit>(mode==="export"?1000:100))invalid();
  let beforeAt:string|null=null,beforeId:string|null=null;
  const cursor=get("cursor",1024);
  if(cursor){
@@ -50,7 +50,7 @@ export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now
 // independent-observation journal. Historical source facts are projected
 // only from an actual retained intent, never from the paper evaluations table.
 // Realized event amounts are counted ONCE, separately from closed-trade totals.
-const HISTORY_SQL=`
+function historySql(intentIdsOnly=false){return `
 WITH accounts AS MATERIALIZED (
  SELECT a.id,p.display_name AS display_name,a.owner_user_id
  FROM public.v13_production_account a
@@ -62,6 +62,7 @@ WITH accounts AS MATERIALIZED (
  SELECT i.*,a.display_name,a.owner_user_id
  FROM public.v13_production_intent i JOIN accounts a ON a.id=i.account_id
  WHERE i.created_at BETWEEN $4::timestamptz AND $5::timestamptz
+ ${intentIdsOnly?"AND i.id=ANY($14::text[])":""}
 ), ledger_rows AS (
  SELECT 'intent:'||i.id AS row_id,i.created_at AS observed_at,
    i.account_id,COALESCE(NULLIF(btrim(i.display_name),''),'Unnamed account') AS account_name,
@@ -186,6 +187,7 @@ WITH accounts AS MATERIALIZED (
     'strategyParameterHash',d.strategy_parameter_hash,'facts',d.facts,'recordedAt',d.recorded_at) AS details
  FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id
  WHERE d.observed_at BETWEEN $4::timestamptz AND $5::timestamptz
+ ${intentIdsOnly?"AND false":""}
 ), rows AS (
  SELECT * FROM ledger_rows UNION ALL SELECT * FROM decisions
 ), filtered AS MATERIALIZED (
@@ -218,7 +220,7 @@ SELECT
  FROM filtered) AS summary,
  COALESCE((SELECT jsonb_agg(jsonb_build_object('reason',reason_code,'count',count) ORDER BY count DESC,reason_code) FROM reasons),'[]'::jsonb) AS reasons,
  (SELECT min(d.observed_at)::text FROM private.strata_live_decision_log_v1 d JOIN accounts a ON a.id=d.execution_account_id AND a.owner_user_id=d.owner_user_id) AS earliest_recorded_live_decision
-`;
+`;}
 type HistoryPageRow={row_id:string;observed_at:string;[key:string]:unknown};
 export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
  const q=parseLiveHistoryQuery(raw,actor);
@@ -236,7 +238,7 @@ export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:
    FROM public.v13_production_account a LEFT JOIN public.profiles p ON p.id=a.owner_user_id
    WHERE a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
    AND ($2::boolean OR a.owner_user_id=$1::uuid) ORDER BY name,a.id LIMIT 1000`,[actor.subject,q.scope==="all"]);
-  const r=await c.query(HISTORY_SQL,[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
+  const r=await c.query(historySql(),[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.beforeAt,q.beforeId,q.limit+1]);
   const row=r.rows[0];
   if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
   const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
@@ -251,3 +253,5 @@ export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:
   throw e;
  }finally{c.release(discard);}
 }
+
+export const projectHistoryIntentBatchSql=()=>historySql(true);
