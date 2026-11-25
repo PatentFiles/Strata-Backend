@@ -459,13 +459,13 @@ test("expired-source cleanup failure or invalid evidence retains UNKNOWN without
   assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);
   assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')));
  }
- for(const change of [{denyLock:true},{standing:true,revokedStanding:true},
+ for(const change of [{denyLock:true,leaseChanged:true},{standing:true,revokedStanding:true},
   ...[0,-1,null,NaN,Infinity,'60000'].map(releaseRemainingMs=>({releaseRemainingMs}))]){
   const h=harness({sourceAgeMs:6001,finalize:true,...change}),r=await h.run();
   assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);
   assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
   assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')),
-   'source expiry cannot bypass denied final SQL or missing/revoked release authority');
+   'no-send cleanup cannot bypass changed lease or missing/revoked release authority');
  }
 });
 test("finite technical release expires at the final send boundary without borrowing owner authority",async()=>{
@@ -517,3 +517,21 @@ test("fresh genuine fractional YES and NO reductions preserve zero, partial and 
  assert.equal(result.state,"UNKNOWN");assert.equal(result.postAttempted,true);
  assert.equal(result.mayRetry,false);assert.equal(h.calls.post,1);
  });
+
+
+test("explicit empty locked fence records local no-send, not a fabricated exchange result",async()=>{
+ const h=harness({denyLock:true,finalize:true});
+ const r=await h.run();
+ assert.equal(r.state,"BLOCKED");assert.equal(r.reason,"protective_exit_proven_not_posted_refresh_required");
+ assert.equal(r.postAttempted,false);assert.equal(r.mayRetry,false);assert.equal(h.calls.post,0);assert.equal(h.calls.read,0);
+ assert.equal(h.calls.sql.filter(q=>q==="COMMIT").length,1,"only no-send audit COMMIT");
+ assert.ok(h.calls.sql.some(q=>q.startsWith("INSERT INTO private.strata_protective_exit_local_no_send")));
+ await h.run();assert.equal(h.calls.post,0);
+});
+test("unverified on an explicit no-row cleanup failure; no retry or wire",async()=>{
+ const h=harness({denyLock:true,finalize:true,finalizeFail:"insert"});
+ const r=await h.run();
+ assert.equal(r.state,"UNKNOWN");assert.equal(r.reason,"protective_exit_local_abort_persistence_unverified");
+ assert.equal(r.postAttempted,false);assert.equal(r.mayRetry,false);assert.equal(h.calls.post,0);
+ assert.equal(h.calls.sql.filter(q=>q==="COMMIT").length,0);
+});
