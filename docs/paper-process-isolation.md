@@ -15,9 +15,11 @@ fee, and quote-age checks are unchanged. No runtime migration is automatic.
   HTTP health check. Set the ordinary exact paper entry-policy approval,
   `NODE_ENV=production`, and `FORWARD_TEST_PRODUCTION_WORKER_ENABLED=true`
   explicitly for that service. Set `STRATA_PAPER_DATABASE_URL` to a distinct
-  least-privilege paper role. Do not inherit API database or credential
-  settings, live provider signing keys, or live flags. Verify paper tables and
-  optional research grants in staging; do not grant execution or credential
+  least-privilege paper login authorized through the scoped role in
+  docs/strata-paper-cutover/reviewed-role.sql. The worker refuses an unisolated
+  role at startup, before acquiring the lease. Do not inherit API database or credential
+  settings, live provider signing keys, or live flags. Verify paper and zero-authority shadow results in staging;
+  leave autonomous learning disabled until separately qualified; do not grant execution or credential
   storage access. A separate runtime can still share database resources if both
   services use the same database.
 - Before a controlled live release, inventory active users and any legacy

@@ -1,0 +1,8 @@
+CREATE SCHEMA private;
+ALTER TABLE v13_production_account ADD COLUMN owner_user_id uuid, ADD COLUMN key_fingerprint text, ADD COLUMN kill_switch boolean NOT NULL DEFAULT true, ADD COLUMN execution_enabled boolean NOT NULL DEFAULT false, ADD COLUMN kalshi_connection_id uuid;
+CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY, owner_user_id uuid, holder_id text, fencing_token bigint, credential_fingerprint text, state text, account_kill boolean, arm_requested boolean, heartbeat_at timestamptz, provider_connection_id uuid, vault_secret_id uuid);
+CREATE TABLE private.kalshi_connection_credentials(owner_user_id uuid, financial_account_id uuid, provider_connection_id uuid, vault_secret_id uuid, key_fingerprint text, role text,revoked_at timestamptz,verified_at timestamptz,verification_reason text);
+INSERT INTO v13_production_account(id,owner_user_id,key_fingerprint,kill_switch,execution_enabled,kalshi_connection_id)
+ VALUES('w','10000000-0000-4000-a000-000000000001',repeat('a',64),false,true,'10000000-0000-4000-a000-000000000002');
+INSERT INTO private.kalshi_account_worker_lease VALUES('w','10000000-0000-4000-a000-000000000001','worker',11,repeat('a',64),'owned',false,true,clock_timestamp(),'10000000-0000-4000-a000-000000000003','10000000-0000-4000-a000-000000000004');
+INSERT INTO private.kalshi_connection_credentials VALUES('10000000-0000-4000-a000-000000000001','10000000-0000-4000-a000-000000000002','10000000-0000-4000-a000-000000000003','10000000-0000-4000-a000-000000000004',repeat('a',64),'restricted_execution',null,clock_timestamp(),'credential_verified');

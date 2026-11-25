@@ -13,6 +13,29 @@ async function main() {
 
   const { pool } = await import("@workspace/db");
   try {
+    // A distinct URL is not proof of isolation. Fail before taking the lease
+    // if a deployment mistakenly points paper at an API or privileged role.
+    const privilege = await pool.query<{restricted:boolean}>(`
+      SELECT
+        NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication)
+        AND r.rolcanlogin
+        AND coalesce(pg_has_role(current_user,to_regrole('strata_paper_runtime'),'USAGE'),false)
+        AND NOT EXISTS(
+          SELECT 1 FROM (VALUES
+            ('public','v13_production_account'), ('public','v13_production_intent'),
+            ('public','v13_production_position'), ('public','v13_production_event'),
+            ('public','strata_direct_entry_source'), ('private','kalshi_connection_credentials'),
+            ('private','kalshi_account_worker_lease'), ('vault','decrypted_secrets')
+          ) AS protected(schema_name, relation_name)
+          JOIN pg_namespace n ON n.nspname=protected.schema_name
+          JOIN pg_class c ON c.relnamespace=n.oid AND c.relname=protected.relation_name
+          WHERE has_table_privilege(current_user,c.oid,
+                                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        ) AS restricted
+      FROM pg_roles r WHERE r.rolname=current_user
+    `);
+    if(privilege.rows.length!==1||privilege.rows[0]?.restricted!==true)
+      throw new Error("paper_database_role_not_isolated");
     const { startServerForwardTestWorker } = await import("./lib/forwardTestWorker");
     const worker = startServerForwardTestWorker();
     if (!worker.running) throw new Error("paper_scheduler_not_started");

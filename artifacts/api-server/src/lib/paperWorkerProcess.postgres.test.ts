@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,16 +19,35 @@ test("restricted standalone paper command commits a cycle and releases its lease
   const target = new URL(url!);
   const actual = (await pool.query("SELECT current_database() AS name, current_user AS username, host(inet_server_addr()) AS host, inet_server_port() AS port")).rows[0];
   assert.deepEqual(actual, { name: target.pathname.slice(1), username: "v13_test", host: "127.0.0.1", port: Number(target.port) });
+  const privileged = spawn(process.execPath, [resolve("dist/paperWorkerMain.mjs")], {
+    env: {
+      NODE_ENV: "production", NODE_OPTIONS: process.env.NODE_OPTIONS,
+      STRATA_PAPER_DATABASE_URL: target.href,
+      V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION,
+      FORWARD_TEST_PRODUCTION_WORKER_ENABLED: "true",
+    },
+    stdio:["ignore","pipe","pipe"],
+  });
+  let denial="";
+  privileged.stderr.on("data",v=>{denial=(denial+v).slice(-2000);});
+  assert.deepEqual(await once(privileged,"close"),[1,null]);
+  assert.match(denial,/paper_database_role_not_isolated/);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_engine")).rows[0].n,0);
   // Use a separate login, not SET ROLE in a privileged child connection.
+  await pool.query(readFileSync("../../docs/strata-paper-cutover/reviewed-role.sql","utf8"));
   await pool.query(`
-    CREATE ROLE strata_paper_test LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-    GRANT USAGE ON SCHEMA public TO strata_paper_test;
-    GRANT SELECT, INSERT, UPDATE ON forward_test_engine, forward_test_windows,
-      forward_test_positions TO strata_paper_test;
-    GRANT SELECT, INSERT ON forward_test_evaluations, forward_test_btc_points,
-      forward_test_book_snapshots, v13_strategy_parameter_set TO strata_paper_test;
-    GRANT DELETE ON forward_test_btc_points TO strata_paper_test;
+    CREATE ROLE strata_paper_test LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
+    GRANT strata_paper_runtime TO strata_paper_test;
   `);
+  const roleCheck=await pool.connect();
+  try {
+    await roleCheck.query("SET ROLE strata_paper_test");
+    await assert.rejects(roleCheck.query("INSERT INTO public.forward_test_engine(id,enabled) VALUES('other-engine',true)"),{code:"42501"});
+    await assert.rejects(roleCheck.query("SELECT 1 FROM public.v13_production_intent LIMIT 1"),{code:"42501"});
+  } finally {
+    await roleCheck.query("RESET ROLE");
+    roleCheck.release();
+  }
   const paperUrl = new URL(target);
   paperUrl.username = "strata_paper_test";
   const protectedTables = [
@@ -70,23 +90,25 @@ test("restricted standalone paper command commits a cycle and releases its lease
       STRATA_PAPER_DATABASE_URL: paperUrl.href,
       V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION,
       FORWARD_TEST_PRODUCTION_WORKER_ENABLED: "true",
-      STRATA_SHADOW_EVALUATION_WRITES_ENABLED: "false",
+      STRATA_SHADOW_EVALUATION_WRITES_ENABLED: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let logs = "";
   for (const stream of [child.stdout, child.stderr]) stream.on("data", (v) => { logs = (logs + v).slice(-5000); });
   const exited = once(child, "exit");
+  const shadow = async () => (await pool.query("SELECT count(*)::int AS n FROM v13_strategy_shadow_evaluation WHERE market_ticker=$1 AND execution_authority IS FALSE",[ticker])).rows[0].n;
   const engine = async () => (await pool.query("SELECT lease_owner,last_successful_cycle_at FROM forward_test_engine WHERE id='v1.3-paper'")).rows[0];
   try {
     let row;
     for (let i = 0; i < 160; i++) {
       row = await engine();
-      if ((row?.last_successful_cycle_at && row.lease_owner) || child.exitCode !== null) break;
+      if ((row?.last_successful_cycle_at && row.lease_owner && await shadow() > 0) || child.exitCode !== null) break;
       await delay(50);
     }
     assert.ok(row?.lease_owner, logs);
     assert.ok(row.last_successful_cycle_at, logs);
+    assert.ok(await shadow() > 0, logs);
     const committed = await pool.query("SELECT signal FROM forward_test_evaluations WHERE market_ticker=$1", [ticker]);
     assert.ok(committed.rows.some(row => row.signal === "PASS"), logs);
     assert.match(logs, /Strategy evaluation producer scheduler enabled/);
@@ -97,6 +119,5 @@ test("restricted standalone paper command commits a cycle and releases its lease
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await exited.catch(() => {});
-    await pool.query("DROP OWNED BY strata_paper_test; DROP ROLE strata_paper_test");
   }
 });
