@@ -161,6 +161,14 @@ export class ProductionWorker {
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_before_dispatch",id);return;}
         try{await this.executor.dispatch(intent);}
         catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id,error);throw error;}
+        // A resolved dispatcher is not evidence that an order was posted or
+        // filled. Record only the qualifying source, off the dispatch path.
+        try{
+          if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
+            enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"OBSERVATION",outcome:"QUALIFIED",
+              reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
+        }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
         return;
       }
       if(!this.independentPaperCutover||this.executor.exchange?.mode!=="LIVE")
