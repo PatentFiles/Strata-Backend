@@ -750,6 +750,8 @@ export function createDatabaseUserScopePort(
       if (!scheduled.workerStarted || options.session.isScheduled(userId, account.id) !== true) {
         return refused(userId, scheduled.reason || "worker_not_scheduled", account);
       }
+      if(scheduled.reason==="legacy_held_protection_only_not_release_ready")
+        return refused(userId,scheduled.reason,{...account,workerRunning:true});
       return {
         ok: true as const,
         reason: "worker_scheduled",

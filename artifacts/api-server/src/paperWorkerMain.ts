@@ -21,16 +21,15 @@ async function main() {
         AND r.rolcanlogin
         AND coalesce(pg_has_role(current_user,to_regrole('strata_paper_runtime'),'USAGE'),false)
         AND NOT EXISTS(
-          SELECT 1 FROM (VALUES
-            ('public','v13_production_account'), ('public','v13_production_intent'),
-            ('public','v13_production_position'), ('public','v13_production_event'),
-            ('public','strata_direct_entry_source'), ('private','kalshi_connection_credentials'),
-            ('private','kalshi_account_worker_lease'), ('vault','decrypted_secrets')
-          ) AS protected(schema_name, relation_name)
-          JOIN pg_namespace n ON n.nspname=protected.schema_name
-          JOIN pg_class c ON c.relnamespace=n.oid AND c.relname=protected.relation_name
-          WHERE has_table_privilege(current_user,c.oid,
-                                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE c.relkind IN ('r','p','v','m','f')
+            AND (n.nspname IN ('private','vault') OR (n.nspname='public'
+              AND c.relname ~ '^(v13_(production|live_money)|strata_direct_|strata_configured_stake|kalshi_|micro_live)'))
+            AND (
+              has_table_privilege(current_user,c.oid,
+                                  'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+              OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
+            )
         ) AS restricted
       FROM pg_roles r WHERE r.rolname=current_user
     `);

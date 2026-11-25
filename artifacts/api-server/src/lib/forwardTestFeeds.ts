@@ -2,7 +2,6 @@ import {rolloverEventScope,verifiedRolloverEventStrike} from "./rolloverEventStr
 import {rolloverReadShapeEvidence} from './rolloverReadShapeEvidence';
 import {beginSourceQuoteRead} from "./sourceQuoteProvenance";
 import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
-import {publishHeldRolloverDiagnostics} from './rolloverStrikeDiagnostics';
 import {marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from "./rolloverStrikeDiagnostics";
 import {createPublicFeedJsonReader,type PublicFeedReadEvidence} from "./publicFeedJson";
 import { fetchKalshiPublicBook, type OrderbookRead } from "./forwardTestOrderbookDepth";
@@ -268,4 +267,4 @@ return {
   },
 };
 }
-export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{console.info(JSON.stringify(event));publishHeldRolloverDiagnostics(event);},event=>{console.info(JSON.stringify(event));});
+export const publicForwardTestFeeds: ForwardTestFeeds = createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{console.info(JSON.stringify(event));},event=>{console.info(JSON.stringify(event));});

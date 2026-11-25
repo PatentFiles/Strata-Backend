@@ -19,19 +19,26 @@ test("restricted standalone paper command commits a cycle and releases its lease
   const target = new URL(url!);
   const actual = (await pool.query("SELECT current_database() AS name, current_user AS username, host(inet_server_addr()) AS host, inet_server_port() AS port")).rows[0];
   assert.deepEqual(actual, { name: target.pathname.slice(1), username: "v13_test", host: "127.0.0.1", port: Number(target.port) });
-  const privileged = spawn(process.execPath, [resolve("dist/paperWorkerMain.mjs")], {
-    env: {
-      NODE_ENV: "production", NODE_OPTIONS: process.env.NODE_OPTIONS,
-      STRATA_PAPER_DATABASE_URL: target.href,
-      V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION,
-      FORWARD_TEST_PRODUCTION_WORKER_ENABLED: "true",
-    },
-    stdio:["ignore","pipe","pipe"],
-  });
-  let denial="";
-  privileged.stderr.on("data",v=>{denial=(denial+v).slice(-2000);});
-  assert.deepEqual(await once(privileged,"close"),[1,null]);
-  assert.match(denial,/paper_database_role_not_isolated/);
+  const assertUnsafeRoleRefused=async(database:string)=>{
+    const privileged = spawn(process.execPath, [resolve("dist/paperWorkerMain.mjs")], {
+      env: {
+        NODE_ENV: "production", NODE_OPTIONS: process.env.NODE_OPTIONS,
+        STRATA_PAPER_DATABASE_URL: database,
+        V13_ENTRY_POLICY_RUNTIME_APPROVED: V13_ENTRY_POLICY_VERSION,
+        FORWARD_TEST_PRODUCTION_WORKER_ENABLED: "true",
+      },
+      stdio:["ignore","pipe","pipe"],
+    });
+    let denial="";
+    privileged.stderr.on("data",v=>{denial=(denial+v).slice(-2000);});
+    try {
+      assert.deepEqual(await once(privileged,"close"),[1,null]);
+      assert.match(denial,/paper_database_role_not_isolated/);
+    } finally {
+      if(privileged.exitCode===null&&privileged.signalCode===null)privileged.kill("SIGKILL");
+    }
+  };
+  await assertUnsafeRoleRefused(target.href);
   assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_engine")).rows[0].n,0);
   // Use a separate login, not SET ROLE in a privileged child connection.
   await pool.query(readFileSync("../../docs/strata-paper-cutover/reviewed-role.sql","utf8"));
@@ -50,6 +57,10 @@ test("restricted standalone paper command commits a cycle and releases its lease
   }
   const paperUrl = new URL(target);
   paperUrl.username = "strata_paper_test";
+  // Named group membership must not obscure a separate column-level grant.
+  await pool.query("GRANT SELECT (id) ON public.v13_production_observation TO strata_paper_test");
+  try { await assertUnsafeRoleRefused(paperUrl.href); }
+  finally { await pool.query("REVOKE SELECT (id) ON public.v13_production_observation FROM strata_paper_test"); }
   const protectedTables = [
     "v13_production_account", "v13_production_intent", "v13_production_position",
     "v13_production_event", "strata_direct_entry_source",

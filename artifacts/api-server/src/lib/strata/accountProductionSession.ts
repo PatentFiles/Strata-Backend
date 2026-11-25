@@ -220,6 +220,7 @@ export function bindAccountProductionWorker(input: {
 
 export interface SchedulableWorker {
   isScheduled(): boolean;
+  isLegacyHeldProtectionOnly?():boolean;
   start(): Promise<void>;
   startRecovery(): Promise<void>;
   stop(): void;

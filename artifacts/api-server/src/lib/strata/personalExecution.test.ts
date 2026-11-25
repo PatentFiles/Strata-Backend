@@ -727,7 +727,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
   const material = keyMaterial();
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
-  let feeChecks = 0;
+  let feeChecks = 0, leaseWrites = 0;
+  let observedBalance="50.0000";
   const session = createProductionPersonalSession({
     async query(text: string) {
       if (text.includes("personal-session:signer")) {
@@ -742,6 +743,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
         }] };
       }
       if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      if (text.includes("WITH unresolved_intents AS")) return {rows:[{n:"0"}]};
+      if (/INSERT INTO private.kalshi_account_worker_lease|UPDATE private.kalshi_account_worker_lease/i.test(text)) leaseWrites++;
       return { rows: [] };
     },
   }, {
@@ -754,7 +757,7 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
       };
     },
     kalshiGet: async (_creds, path) => {
-      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("balance")) return { balance_dollars: observedBalance };
       if (path.includes("orders")) return { orders: [] };
       if (path.includes("positions")) return { market_positions: [] };
       if (path.includes("fills")) return { fills: [] };
@@ -766,6 +769,12 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(refused.reason, "cash_evidence_mismatch");
   assert.equal(feeChecks, 0);
   assert.equal(session.isScheduled(USER, "acct-a"), false);
+  // Matching cash and a clean signed read are still not an independent
+  // source. Refuse the real owned START before it can claim a lease.
+  observedBalance="1.0000";
+  const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
+  assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  assert.equal(feeChecks,1);assert.equal(leaseWrites,0);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
     { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
@@ -1278,4 +1287,15 @@ test("owner cash refresh preserves original signed-read clock and refuses elapse
     assert.equal(result.transferAttempted, false);
     assert.equal(writes, fixture.writes);
   }
+});
+
+test("owner sees protection-only status on initial and repeated start; it is not release readiness",async()=>{
+ let openCount=0;
+ const control=createOwnedTradingSupervisor(async()=>{openCount++;return {ok:true,worker:{
+   isScheduled:()=>true,isLegacyHeldProtectionOnly:()=>true,async start(){},async startRecovery(){},stop(){},
+ }};});
+ const arg={userId:USER,accountId:"held",action:"START" as const};
+ for(let attempt=0;attempt<2;attempt++)assert.deepEqual(await control.start(arg),{
+  ok:true,reason:"legacy_held_protection_only_not_release_ready",workerStarted:true});
+ assert.equal(openCount,1);
 });

@@ -107,13 +107,55 @@ test("LIVE owned exits require reviewed dispatcher, never generic fallback, even
   btc_price:99999,target:100000,signed_buffer:-1,velocity:-1,up_offer:.5,down_offer:.5};
  let generic=0,reviewed=0,reconciles=0;
  const tx={query:async()=>({rows:[pos]})};
- const executor={startTiming:()=>()=>{},now:()=>1000,exchange:{mode:"LIVE"},gate:async()=>{},
+ const executor={startTiming:()=>()=>{},now:()=>1000,exchange:{mode:"LIVE"},gate:async()=>{},containLiveEntries:()=>{},
   ledger:{accountId:"account",pool:{query:async(sql:string)=>({rows:sql.includes("forward_test_evaluations")?[source]:[pos]})},
    transaction:async(fn:(t:unknown,a:unknown)=>Promise<unknown>)=>fn(tx,{minimum_exit_micros:400000}),
    policy:async()=>({maxQuoteAgeMs:5000,policyHash:"test"}),observe:async()=>{}},
   reconcile:async()=>{reconciles++;},prepareExit:async()=>{generic++;throw Error("generic forbidden");},dispatch:async()=>{generic++;},
  };
- await assert.rejects(consumeOwnedPosition(executor as never),/reviewed_protective_exit_worker_not_bound/);
+ await assert.rejects(consumeOwnedPosition(executor as never),/legacy_held_protection_not_pinned/);
+ await assert.rejects(consumeOwnedPosition(executor as never,undefined,new Set([pos.id])),/reviewed_protective_exit_worker_not_bound/);
  const worker=new ProductionWorker(executor as never,2500,()=>{},()=>false,async()=>{},async()=>{reviewed++;});
- await worker.tick();assert.equal(reconciles,1);assert.equal(reviewed,1);assert.equal(generic,0);
+ try{
+   await worker.tick();assert.equal(reviewed,0,"ad hoc unbound ticks have no legacy position authority");
+   await worker.start();assert.equal(worker.isLegacyHeldProtectionOnly(),true);
+   await worker.tick();assert.equal(reconciles,3);assert.equal(reviewed,1);assert.equal(generic,0);
+   pos.id="new-position";await worker.tick();assert.equal(reviewed,1,"a later position cannot inherit protection-only admission");
+ }finally{worker.stop();}
+});
+
+test("flat unbound live startup is refused; UNKNOWN recovery stays paper-free",async()=>{
+ let recoveries=0,reconciles=0,traceReads=0,entries=0;
+ const queries:string[]=[];
+ const executor={exchange:{mode:"LIVE"},liveEntryContained:true,
+  now:()=>100000,ledger:{accountId:"scoped-account",readAccount:async()=>{},
+    pool:{query:async(sql:string,args:unknown[])=>{queries.push(sql);assert.deepEqual(args,["scoped-account"]);
+      assert.match(sql,/FROM v13_production_position/);return {rows:[]};}},
+    transaction:async()=>{throw Error("unbound_should_not_enter");}},
+  reconcile:async()=>{reconciles++;},prepareEntry:async()=>{entries++;}};
+ const trace={record:async()=>true,sweep:async()=>{traceReads++;return 0;}};
+ const worker=new ProductionWorker(executor as never,60000,()=>{},()=>true,async()=>{recoveries++;},undefined,trace);
+ try{
+   await assert.rejects(worker.start(),{message:"production_independent_entry_source_unavailable"});
+   assert.equal(worker.isScheduled(),false);assert.equal(queries.length,1);
+   await worker.startRecovery();await worker.tick();
+   assert.ok(recoveries>=3 && reconciles>=3);assert.equal(queries.length,1);
+   assert.equal(traceReads,0);assert.equal(entries,0);
+ }finally{worker.stop();}
+});
+
+test("pre-existing exposure retains its owner-scoped protective lane, but not an unbound entry",async()=>{
+ const reports:string[]=[];let contained=0;
+ const executor={exchange:{mode:"LIVE"},independentSourceBound:false,liveEntryContained:true,
+   ledger:{accountId:"acct",pool:{query:async()=>({rows:[{id:"existing-owned"}]})},
+    transaction:async()=>{}},reconcile:async()=>{},containLiveEntries:()=>{contained++;}};
+ const worker=new ProductionWorker(executor as never,60000,(e)=>reports.push((e as Error).message),()=>false,
+   async()=>{},async()=>{throw Error("no test order");});
+ try{
+   await worker.start();assert.equal(worker.isScheduled(),true);assert.equal(contained,1);
+   assert.deepEqual(reports,["legacy_held_protection_only_not_release_ready"]);
+ }finally{worker.stop();}
+ const noOwnerExit=new ProductionWorker(executor as never);
+ await assert.rejects(noOwnerExit.start(),{message:"existing_position_needs_owner_protective_session"});
+ assert.equal(noOwnerExit.isScheduled(),false);
 });

@@ -3,7 +3,7 @@ import type {Pool,PoolClient} from "@workspace/db";
 import {evaluateV13Strategy,needsV13EntryPrice,V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
 import {createPublicForwardTestFeeds,type ForwardTestFeeds} from "../forwardTestFeeds";
 import {createPublicBookReader,type ReadonlyResearchBook} from "../forwardTestOrderbookDepth";
-import {emitDirectEntryRolloverGap} from "../rolloverStrikeDiagnostics";
+import {emitDirectEntryRolloverGap,publishHeldRolloverDiagnostics} from "../rolloverStrikeDiagnostics";
 import {readForwardCycleFeeds} from "../forwardFeedReadScope";
 import {assertChampionSourceReference} from "./sourceReference";
 import {canonical,requireProof} from "./types";
@@ -149,7 +149,10 @@ export class DirectEntrySource{
    /^[a-f0-9]{40}$/.test(scope.worker.releaseSha)&&scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
    "direct_live_worker_scope_invalid");
   // The direct-entry lane owns its own public-feed diagnostics when paper is separate.
-  const feeds=createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),emitDirectEntryRolloverGap);
+  const feeds=createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{
+   emitDirectEntryRolloverGap(event);
+   queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
+  });
   return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
  }
  static isolatedSimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
@@ -161,6 +164,17 @@ export class DirectEntrySource{
   const source=this.isolatedSimulation(scope,feeds,clock);
   source.#retryRehearsal=true;
   return source;
+ }
+ assertFirstReadReceiptWorkerPin(pin:Readonly<{
+  ownerId:string;releaseSha:string;holderId:string;fencingToken:string;credentialFingerprint:string;
+ }>):void{
+  requireProof(this.#environment==="LIVE_OBSERVATION"&&this.#scope.worker,
+   "direct_fee_refusal_requires_live_observation");
+  this.assertExecutorBinding("LIVE",this.#scope);
+  const own=this.#scope.worker;
+  requireProof(this.#scope.ownerId===pin.ownerId&&own.releaseSha===pin.releaseSha&&
+   own.holderId===pin.holderId&&own.fencingToken===pin.fencingToken&&
+   own.credentialFingerprint===pin.credentialFingerprint,"direct_fee_refusal_worker_pin_mismatch");
  }
  assertSimulationBinding(scope:DirectScope){
   requireProof(this.#environment==="SIMULATION"&&simulationEnvironment()&&this.matches(scope),

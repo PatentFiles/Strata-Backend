@@ -598,6 +598,7 @@ test("START reports running only after the session schedules a worker, and produ
     max_entry_stake_cents: 2_500_000,
   };
   let posts = 0;
+  let scheduledReason="worker_scheduled";
   const session = {
     running: false,
     isScheduled(userId: string, accountId: string) {
@@ -605,7 +606,7 @@ test("START reports running only after the session schedules a worker, and produ
     },
     async start() {
       this.running = true;
-      return { ok: true, reason: "worker_scheduled", workerStarted: true };
+      return { ok: true, reason: scheduledReason, workerStarted: true };
     },
     async stopOwner() {
       this.running = false;
@@ -702,6 +703,12 @@ test("START reports running only after the session schedules a worker, and produ
   assert.equal(refused.reason, "personal_signer_unavailable");
   assert.equal(refused.view.workerRunning, false);
   assert.equal(posts, 0);
+  scheduledReason="legacy_held_protection_only_not_release_ready";
+  const legacy=await port.control(USER_A,"START");
+  assert.equal(legacy.ok,false);
+  assert.equal(legacy.reason,scheduledReason);
+  assert.equal(legacy.view.workerRunning,true);
+
 });
 
 test("wallet display coalesces repeated reads per authenticated owner without sharing cash",async()=>{

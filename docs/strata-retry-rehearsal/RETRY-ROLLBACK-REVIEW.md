@@ -11,3 +11,11 @@ Do not redeploy #372, #374, or unmodified #375 after the retry DDL activation: t
 A compatible rollback release must use the activated storage contract (`ON CONFLICT(id)` and current/unretired exact reads), must never record refusals, and must deny entries until the owner has completed an exact release authorization. Turning off receipt writes alone is insufficient: an already committed first receipt may leave this market eligible to select its one replacement. Add a distinct replacement-admission stop fence, enforced at claim in the same account transaction, and test disabling while capture races. Existing EXIT and order reconciliation remain on the existing path. Freeze and drain entries, verify venue/account outcomes, and preserve the active migration plus all source and intent rows. If there is no prequalified bridge, do not activate retry in production.
 
 This packet does not provide an integrated trusted role, a continuity-tested rollback bridge or any production release evidence.
+
+A retry switch is not an exchange STOP. A previously committed PREPARED intent has
+already passed the insert fence. Before migration/rollback, close the actual
+account entry gate, drain in-flight prepares and dispatches, and reconcile the
+venue results. The exact future runtime must also deny an unsent generation-2
+PREPARED intent at dispatch after the retry stop; test both prepare-before-stop
+and dispatch-before-stop with the authenticated outcome unknown case. Neither
+the switch nor the fixtures in this folder grant permission to retry a wire call.

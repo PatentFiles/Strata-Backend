@@ -36,3 +36,13 @@ fee, and quote-age checks are unchanged. No runtime migration is automatic.
   paper/PASS rows do not prove order latency.
 - Roll back only with the same stopped-account checks. Stop the dedicated
   paper service first so the previous API revision does not compete for its lease.
+
+## Fresh live starts vs legacy exposure
+A flat owner with no authorized independent source cannot start an entry
+scheduler. A previous uncertain order can still enter reconciliation-only
+recovery, without a paper wake or paper trace sweep. An already open legacy
+position must not lose its existing owner-scoped protection: this exceptional
+path still uses legacy paper evidence, is not a qualified independent deployment,
+and must be resolved before cutover. Do not arm on a legacy protection-only
+status. A passing local split test does not prove hosted process identities or
+a genuine protective exit.

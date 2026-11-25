@@ -412,8 +412,9 @@ export function ownedMarketEvidence(input: {
   const series = object(seriesBody.series);
   const metadata = object(marketBody.market);
   const structure = metadata.price_level_structure;
-  requireProof(series.ticker === "KXBTC15M" && series.fee_type === "quadratic" &&
-    String(series.fee_multiplier) === "1" && metadata.ticker === input.market &&
+  // feeProof above already enforces the exact series, exchange and approved
+  // unit-multiplier encodings; do not re-parse or coerce its fee terms here.
+  requireProof(metadata.ticker === input.market &&
     metadata.exchange_index === 2 && metadata.status === "active" &&
     (structure === "deci_cent" || structure === "tapered_deci_cent"), "production_fee_or_market_grid_unproven");
   const ticks = structure === "deci_cent" && metadata.price_ranges === undefined

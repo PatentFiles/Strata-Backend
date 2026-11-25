@@ -258,6 +258,10 @@ test("owned fee refusal identifies first direct market read without an intent or
    yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
  },()=>f.exchange.now);
  f.executor.bindIndependentSimulationSource(source);
+ const invalidPin={ownerId:"10000000-0000-4000-a000-000000000001",releaseSha:"b".repeat(40),
+  holderId:"fixture",fencingToken:"1",credentialFingerprint:"a".repeat(64)};
+ assert.throws(()=>source.assertFirstReadReceiptWorkerPin(invalidPin),/direct_fee_refusal_requires_live_observation/);
+ assert.throws(()=>f.executor.bindFirstReadReceiptWriter({database:pool,pin:invalidPin}),/direct_fee_refusal_writer_binding_invalid/);
  assert.equal(await f.executor.captureIndependentEntry(),null);
  f.exchange.now+=1000;btc=100010;
  const id=await f.executor.captureIndependentEntry();assert.ok(id);
@@ -269,7 +273,9 @@ test("owned fee refusal identifies first direct market read without an intent or
  f.exchange.market=async()=>{throw refusal};
  await assert.rejects(f.executor.prepareEntry(id),error=>error===refusal);
  const row=(await pool.query("SELECT crossing_key,evidence_sha256 FROM strata_direct_entry_source WHERE id=$1",[id])).rows[0];
+ assert.equal(await f.executor.recordPinnedFirstReadReceipt(refusal),false);
  const receipt=ProductionExecutor.readFirstMarketFeeRefusal(refusal);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(refusal),undefined,"first-read receipt is one-use");
  assert.deepEqual(receipt,{accountId:"test-account",sourceId:id,crossingKey:row.crossing_key,
   sourceSha256:row.evidence_sha256,failureStage:"latest_expiration"});
  assert.equal(Object.isFrozen(receipt),true);

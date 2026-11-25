@@ -4,7 +4,7 @@ import {readEntryBookQuote,assertEntrySourceFresh,quoteFromEntryBook,type EntryB
 import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
 import {readForwardCycleFeeds} from "./forwardFeedReadScope";
 import {forwardTestFeedError} from "./forwardTestFeedValidation";
-import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery,drainPaperLanes} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
@@ -605,7 +605,10 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
       }
       if (!stopped) await pause(producerDelayMs(periodMs,performance.now()-cycleStarted));
     }
-    await researchLane.drain();
+    // Closing the pool or handing off the lease while POST_ACTION evidence
+    // or an autonomous research write is still running can lose its receipt.
+    // These lanes are single-flight; they never delay a trading or paper tick.
+    await drainPaperLanes(researchLane,bookCaptureLane,autonomousResearch);
     if (lease) await releaseWorkerLease(owner, lease.leaseEpoch);
   })();
   task.catch((error: unknown) => {

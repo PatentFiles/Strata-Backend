@@ -97,7 +97,8 @@ test('real normal scheduler consumes held flat positions, suppresses renewal and
   assert.equal(f.worker.isScheduled(),true);assert.equal(f.counts().renewals,0);assert.equal(f.counts().entryQueries,0);
   assert.equal(f.state.entriesAuthorized,false);assert.equal(f.gate.mayEnter(f.state.entriesAuthorized,false),false);
   assert.equal(f.a.blocked_reason,'personal_exchange_history_unreconciled');
-  assert(f.calls.some(sql=>sql.startsWith('SELECT * FROM v13_production_position')),'actual consumeOwnedPosition ran');
+  assert(!f.calls.some(sql=>sql.includes('FROM forward_test_evaluations')),'flat held reconciliation never relies on paper');
+  assert(!f.calls.some(sql=>sql.startsWith('SELECT * FROM v13_production_position')),'a new unbound worker cannot adopt a later legacy position');
   assert.equal(f.counts().guardLocks,f.counts().guardFinals);
  }finally{f.worker.stop();}
 });

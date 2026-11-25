@@ -11,3 +11,14 @@ test('reader rejects invalid supplied authority rather than reverting silently',
 test('explicit malformed optional hook is rejected',()=>{for(const directRounding of [undefined,null,false,0,''])assert.throws(()=>ownedMarketEvidence({...fixture(),directRounding} as any),/direct_account_rounding_authority_unproven/);});
 
 test('direct reader rejects missing explicit ranges',()=>{const f=fixture();delete (f.marketPayload.market as any).price_ranges;assert.throws(()=>ownedMarketEvidence({...f,directRounding}),/direct_account_rounding_grid_unproven/);});
+
+test("book adapter uses the fee verifier's exact unit-multiplier encodings, without coercion", () => {
+  const verify = (value: unknown) => {
+    const input=fixture();
+    return ownedMarketEvidence({...input,seriesPayload:{series:{...input.seriesPayload.series,fee_multiplier:value}}});
+  };
+  for (const v of [1,"1","1.0"]) assert.ok(verify(v).fee.cashRisk);
+  for (const v of [null,false,0,"0","1.00","1e0"," 1 ",[1],{},2]) {
+    assert.throws(()=>verify(v),/production_event_fee_evidence_unverified/);
+  }
+});
