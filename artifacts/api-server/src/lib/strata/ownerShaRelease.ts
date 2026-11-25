@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {authorizeHeldHistoryConsent} from './ownerNeverPostedReleaseRenewal';
 import {HELD_CONSENT_CONFIRM} from './heldConsentPolicy';
 import {standingAuthorityMatches,sameStandingAuthoritySql} from './ownerSelfReviewMode';
@@ -165,6 +166,7 @@ export async function authorizeOwnerShaRelease(
   await tx.query("BEGIN");
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,ownerId);
   const owner=await readReleaseOwner(tx,ownerId);
   if(!owner.ok)return reject(owner.reason);
   const a=owner.account;

@@ -1,3 +1,5 @@
+import {ownerArmFence,assertOwnerArmFence,withoutOwnerArmFence} from './ownerArmContext';
+import {armTransaction,type ArmDatabase} from './ownerArmStore';
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -954,7 +956,9 @@ export function createProductionPersonalSession(
     }
     const recovery = unresolved.mode === "recovery";
     if (recovery) state.entriesAuthorized = false;
-    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
+    // Request cancellation applies to admission, not to the recurring worker's
+    // async context. Its existing lease/STOP/KILL fences own subsequent ticks.
+    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, unresolved.mode));
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
@@ -1083,7 +1087,30 @@ function leaseIdentity(row: Record<string, unknown>): {
   return { financialAccountId, providerConnectionId, vaultSecretId };
 }
 
+/** A prepared START must atomically validate its cancellation epoch and
+ * acquire the worker fence. STOP/KILL before this transaction wins; STOP/KILL
+ * after it still uses the existing supervisor/lease fencing path. */
 async function claimWorkerLease(
+  db: Parameters<typeof claimWorkerLeaseUnfenced>[0],
+  input: Parameters<typeof claimWorkerLeaseUnfenced>[1],
+): ReturnType<typeof claimWorkerLeaseUnfenced> {
+  const fence=ownerArmFence();
+  if(!fence)return claimWorkerLeaseUnfenced(db,input);
+  if(fence.phase!=='STARTING'||fence.ownerId!==input.ownerUserId||fence.accountId!==input.executionAccountId)
+    return {ok:false,reason:'owner_start_scope_changed'};
+  if(typeof (db as Partial<ArmDatabase>).connect!=='function')
+    return {ok:false,reason:'owner_start_transaction_unavailable'};
+  try {
+    return await armTransaction(db as ArmDatabase,async tx=>{
+      await assertOwnerArmFence(tx,input.ownerUserId);
+      const result=await claimWorkerLeaseUnfenced(tx,input);
+      if(!result.ok)throw Error(result.reason);
+      return result;
+    });
+  }catch{return {ok:false,reason:'owner_start_interrupted_or_lease_unavailable'};}
+}
+
+async function claimWorkerLeaseUnfenced(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
     ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;
