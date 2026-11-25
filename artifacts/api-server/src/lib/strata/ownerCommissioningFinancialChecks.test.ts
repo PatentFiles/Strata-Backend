@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS,advanceOwnerFinancialCommissioning,ADVANCE_FINANCIAL_COMMISSIONING,CONFIRM_INITIAL_COMMISSIONING,PREPARE_RELEASE_QUALIFICATION} from "./ownerCommissioningFinancialChecks";
+import {retrySignedDiagnosticRace,verifyCommissioningFinancialChecks,VERIFY_FINANCIAL_CHECKS,advanceOwnerFinancialCommissioning,ADVANCE_FINANCIAL_COMMISSIONING,CONFIRM_INITIAL_COMMISSIONING,PREPARE_RELEASE_QUALIFICATION} from "./ownerCommissioningFinancialChecks";
 const owner="11111111-1111-4111-8111-111111111111";
 const consent={expectedOwnerId:owner,confirmation:VERIFY_FINANCIAL_CHECKS};
 function fixture(){
@@ -158,4 +158,27 @@ test("explicit preparation records the activation request and technical qualific
  f.calls.length=0;f.signed.exchangeCashMatchesLedger=false;
  const blocked=await advanceOwnerFinancialCommissioning(owner,{expectedOwnerId:owner,confirmation:PREPARE_RELEASE_QUALIFICATION},ports as never);
  assert.equal(blocked.stage,"CASH_RECONCILIATION_REQUIRED");assert.ok(!f.calls.includes("prepare-activation"));assert.ok(!f.calls.includes("qualify"));
+});
+
+test("bounded signed diagnostic recovery reacquires evidence, never retries ambiguous outcomes",async()=>{
+ const transient={ok:false,reason:"account_changed_during_signed_diagnostic"};
+ let calls=0;
+ const recovered=await retrySignedDiagnosticRace(async()=>++calls===1?transient:{ok:true,reason:"fresh_evidence"});
+ assert.equal(recovered.ok,true);assert.equal(calls,2);
+ calls=0;
+ assert.deepEqual(await retrySignedDiagnosticRace(async()=>{calls++;return transient;}),transient);
+ assert.equal(calls,3);
+ for(const reason of ["commissioning_cash_commit_unknown_refresh_records","commissioning_cash_mismatch","commissioning_cash_history_changed","financial_history_changed_during_signed_diagnostic","account_must_be_killed_or_stopped_and_flat_for_diagnostic","authenticated_exchange_rate_limited"]){
+  calls=0;const refusal={ok:false,reason};
+  assert.deepEqual(await retrySignedDiagnosticRace(async()=>{calls++;return refusal;}),refusal);assert.equal(calls,1);
+ }
+});
+test("explicit advance retries a pre-write reconciliation race without repeating funding or commissioning",async()=>{
+ const f=transitionFixture();f.status.account.commissioned=true;f.status.funding.historicalOrCompletedTransferRecorded=true;
+ let attempts=0;
+ const refreshCash=async(id:string)=>{assert.equal(id,owner);f.calls.push("cash");if(++attempts===1)return {ok:false,reason:"account_changed_during_signed_diagnostic"};f.audit.cash.persistedReconciliationFresh=true;return {ok:true,observedAt};};
+ const out=await advanceOwnerFinancialCommissioning(owner,advanceConsent,{...f.ports,refreshCash} as never);
+ assert.equal(out.stage,"CHECKS_COMPLETE");assert.equal(attempts,2);
+ assert.equal(out.tradingAuthorized,false);assert.equal(out.workerStarted,false);assert.equal(out.ordersSubmitted,false);
+ assert.ok(!f.calls.includes("funding")&&!f.calls.includes("commission"));
 });
