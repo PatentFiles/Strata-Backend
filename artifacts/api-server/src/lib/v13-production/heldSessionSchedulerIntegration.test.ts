@@ -20,7 +20,7 @@ async function until(check:()=>boolean){
  const end=Date.now()+3000;
  while(!check()){if(Date.now()>end)throw Error('scheduler_condition_timeout');await delay(5);}
 }
-function fixture(){
+function fixture(independentPaperCutover=false){
  const a={id:accountId,owner_user_id:owner,policy_id:'p',subaccount:'1',exchange_index:'2',key_fingerprint:hash,
   commissioning_digest:hash,kill_switch:false,execution_enabled:true,commissioned:true,minimum_exit_micros:10000,
   fee_artifact_digest:hash,cash_precision_verified:true,cash_micros:'25000000',reserved_micros:'0',initial_cash_micros:'25000000',
@@ -29,6 +29,7 @@ function fixture(){
  const gate=new TechnicalReleaseEntryGate();gate.beginReconciliation();
  let commitFailure=false,commits=0,renewals=0,snapshots=0,freezes=0,guardLocks=0,guardFinals=0,entryQueries=0;
  let staged:Account|null=null;
+ let latePosition=false;
  const query=async(sql:string,args:unknown[]=[])=>{
   calls.push(sql);
   if(sql==='BEGIN'){staged=structuredClone(a);return {rows:[]};}
@@ -43,7 +44,8 @@ function fixture(){
   if(sql===RECONCILE_ACCOUNT_HISTORY_SQL)return {rows:[{...structuredClone(a),reconciliation_history_floor:null}]};
   if(sql==='SELECT * FROM v13_production_account WHERE id=$1'||sql==='SELECT * FROM v13_production_account WHERE id=$1 FOR UPDATE')return {rows:[structuredClone(a)]};
   if(sql.startsWith("SELECT set_config('lock_timeout'"))return {rows:[]};
-  if(sql.startsWith('SELECT id,account_id,evaluation_id')||sql.startsWith('SELECT market,side,quantity_hundredths')||sql.startsWith('SELECT * FROM v13_production_position'))return {rows:[]};
+  if(sql.startsWith('SELECT * FROM v13_production_position'))return {rows:latePosition?[{id:'late-legacy-position'}]:[]};
+  if(sql.startsWith('SELECT id,account_id,evaluation_id')||sql.startsWith('SELECT market,side,quantity_hundredths'))return {rows:[]};
   if(sql.startsWith('SELECT e.cash'))return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
   if(sql.startsWith('INSERT INTO v13_production_observation'))return {rows:[]};
   if(sql.startsWith('UPDATE v13_production_account SET cash_micros=')){
@@ -78,7 +80,7 @@ function fixture(){
  let protectionPolls=0,recoveryRefusals=0;
  let poll=async()=>{};
  const worker=new ProductionWorker(executor,250,error=>reports.push(error),()=>gate.mayEnter(state.entriesAuthorized,state.accountKill),
-  async()=>{protectionPolls++;await poll();},async()=>{throw Error('flat_fixture_must_never_dispatch');});
+  async()=>{protectionPolls++;await poll();},async()=>{throw Error('flat_fixture_must_never_dispatch');},null,independentPaperCutover);
  worker.heldRecoveryActive=()=>true;
  worker.recoverUnreconciledEntry=async()=>{recoveryRefusals++;return false;};
  const outcome=(value:Parameters<typeof reconcileOwnedProtectiveExitOutcome>[0]['outcome'])=>reconcileOwnedProtectiveExitOutcome({
@@ -86,7 +88,7 @@ function fixture(){
   technicalRelease:gate,state,reconcile:()=>executor.reconcile(),
  });
  return {worker,executor,ledger,reports,state,gate,a,calls,outcome,
-  failCommit:()=>{commitFailure=true;},setPoll:(fn:()=>Promise<void>)=>{poll=fn;},
+  exposeLateLegacyPosition:()=>{latePosition=true;},failCommit:()=>{commitFailure=true;},setPoll:(fn:()=>Promise<void>)=>{poll=fn;},
   counts:()=>({commits,renewals,snapshots,freezes,guardLocks,guardFinals,entryQueries,protectionPolls,recoveryRefusals})};
 }
 
@@ -97,9 +99,26 @@ test('real normal scheduler consumes held flat positions, suppresses renewal and
   assert.equal(f.worker.isScheduled(),true);assert.equal(f.counts().renewals,0);assert.equal(f.counts().entryQueries,0);
   assert.equal(f.state.entriesAuthorized,false);assert.equal(f.gate.mayEnter(f.state.entriesAuthorized,false),false);
   assert.equal(f.a.blocked_reason,'personal_exchange_history_unreconciled');
+  assert(f.calls.some(sql=>sql.startsWith("SELECT * FROM v13_production_position")),"historical fixture exercises the original position consumer");
   assert(!f.calls.some(sql=>sql.includes('FROM forward_test_evaluations')),'flat held reconciliation never relies on paper');
-  assert(!f.calls.some(sql=>sql.startsWith('SELECT * FROM v13_production_position')),'a new unbound worker cannot adopt a later legacy position');
   assert.equal(f.counts().guardLocks,f.counts().guardFinals);
+ }finally{f.worker.stop();}
+});
+test('strict unbound UNKNOWN recovery cannot adopt a later legacy position',async()=>{
+ const f=fixture(true);
+ try{
+  await assert.rejects(f.worker.start(),{message:'production_independent_entry_source_unavailable'});
+  assert.equal(f.worker.isScheduled(),false);
+  await f.worker.startRecovery();
+  f.exposeLateLegacyPosition();
+  const before=f.counts().snapshots;
+  await until(()=>f.counts().snapshots>before);
+  assert.equal(f.worker.isScheduled(),true);
+  assert.equal(f.counts().entryQueries,0);
+  assert.equal(f.counts().renewals,0);
+  assert.equal(f.reports.length,0);
+  assert(!f.calls.some(sql=>sql.startsWith('SELECT * FROM v13_production_position')),'unbound recovery cannot adopt a later legacy position');
+  assert(!f.calls.some(sql=>sql.includes('FROM forward_test_evaluations')),'unbound recovery cannot read paper');
  }finally{f.worker.stop();}
 });
 for(const reason of ['protective_post_uncertain','exit_reconcile_commit_uncertain'])test(`actual outcome refusal ${reason} stops real held scheduler without replay`,async()=>{
