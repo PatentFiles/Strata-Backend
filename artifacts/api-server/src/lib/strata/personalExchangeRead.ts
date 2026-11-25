@@ -8,6 +8,7 @@ import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
 import {ENTRY_CASH_RISK_VERSION,DIRECT_ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "../v13-production/requestQuantity";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import {ownedFeeFailure} from "./ownedFeeFailureDiagnostic";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros, maximumEntryCashDebitPerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
@@ -405,7 +406,7 @@ export function ownedMarketEvidence(input: {
     observedAtMs: input.observedAtMs, nowMs: input.nowMs,
     ...(input.metadataCapture !== undefined?{metadataCapture:input.metadataCapture}:{}),
   });
-  if (!feeProof.ok) throw new Error(feeProof.reason);
+  if (!feeProof.ok) throw ownedFeeFailure(feeProof.diagnosticStage);
   const seriesBody = object(input.seriesPayload);
   const marketBody = object(input.marketPayload);
   const series = object(seriesBody.series);

@@ -17,7 +17,7 @@ async function buildAll() {
   await rm(distDir, { recursive: true, force: true });
 
   await esbuild({
-    entryPoints: [path.resolve(artifactDir, "src/index.ts")],
+    entryPoints: ["src/index.ts", "src/paperWorkerMain.ts"].map((entry) => path.resolve(artifactDir, entry)),
     platform: "node",
     bundle: true,
     define: { __BTC_RELEASE__: JSON.stringify(buildReleaseIdentity(path.resolve(artifactDir, "../.."))) },

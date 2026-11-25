@@ -1,3 +1,4 @@
+import {ownedFeeFailure} from "./ownedFeeFailureDiagnostic";
 import { createMarketEvidenceReadTiming, attachMarketEvidenceReadTiming } from "./marketEvidenceReadTiming";
 /**
  * Overlap independent, read-only evidence fetches for a qualifying market.
@@ -53,7 +54,7 @@ export async function gatherCompleteReadOnlyMarketEvidence<B>(sources: {
   if (!/^KXBTC15M-[A-Za-z0-9-]+$/.test(sources.market) ||
       record?.ticker !== sources.market || record.exchange_index !== 2 ||
       typeof event !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(event))
-   throw new Error("production_event_fee_evidence_unverified");
+   throw ownedFeeFailure("market_identity_before_event_read");
   const eventReads=[
    start(() => timing.read("event", () => sources.readPublic(`/events/${encodeURIComponent(event)}`))),
    start(() => timing.read("eventChanges", () => sources.readPublic(`/events/fee_changes?event_ticker=${encodeURIComponent(event)}&limit=100`))),

@@ -5,7 +5,6 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { REVIEWED_RELEASE } from "./lib/strata/reviewedRelease";
 import { isV13DevelopmentStaged } from "./lib/v13DevelopmentStaging";
-import { startServerForwardTestWorker } from "./lib/forwardTestWorker";
 import { startKalshiBrtiShadowFeed } from "./lib/kalshiBrtiShadowStream";
 import { startTriangulatedMarketObserver } from "./lib/strataResearchMarketObserver";
 import { startShadowObserver } from "./lib/shadowLive";
@@ -77,8 +76,7 @@ app.listen(port, "0.0.0.0", (err) => {
     );
   }
   startShadowObserver();
-  // Paper processing does not depend on the separately gated live recovery.
-  startServerForwardTestWorker();
+  // The paper scheduler is started only by the standalone paper-worker entry point.
   // Opt-in, bounded signed GET diagnostics; requires a released account.
   startHeldExchangeLatencyProbe();
   startHeldLifecycleShadowProbe();

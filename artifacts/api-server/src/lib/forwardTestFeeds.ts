@@ -1,3 +1,4 @@
+import {rolloverEventScope,verifiedRolloverEventStrike} from "./rolloverEventStrike";
 import {rolloverReadShapeEvidence} from './rolloverReadShapeEvidence';
 import {beginSourceQuoteRead} from "./sourceQuoteProvenance";
 import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
@@ -27,6 +28,7 @@ export type MarketObservation = {
   result: "yes" | "no" | null;
   status: string;
   fetchedAt: Date;
+  strikeSource?: "kalshi_nested_event_metadata";
 };
 
 export type ForwardTestFeeds = {
@@ -135,7 +137,8 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
 /** Lists route discovery only. Their cached quotes/status are never promoted
  * into a current snapshot; refresh the selected exact contract every cycle.
  */
-export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void,observeBtc?:(event:BtcFeedDiagnostic)=>void):ForwardTestFeeds {
+export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void,observeBtc?:(event:BtcFeedDiagnostic)=>void,
+  options?:{rolloverEventStrike?: "verified_recovery"}):ForwardTestFeeds {
 const getJson=createPublicFeedJsonReader(fetchImpl,()=>clock().getTime(),monotonicClock);
 const diagnostics=new RolloverStrikeDiagnostics(observe);
 const btcDiagnostics=new BtcFeedDiagnostics(observeBtc,monotonicClock);
@@ -143,6 +146,7 @@ const btcDiagnostics=new BtcFeedDiagnostics(observeBtc,monotonicClock);
 // bounds this hint to one window; every use still performs a fresh exact GET.
 let route: {ticker:string; window:number} | null = null;
 let lastCurrentReadAt = -Infinity;
+let metadataWindow=-Infinity,metadataReads=0,metadataRequestedAt=-Infinity;
 return {
   book: fetchKalshiPublicBook,
   async btc(signal) {
@@ -232,8 +236,34 @@ return {
     let detailEvidence=null;
     try{detailEvidence=rolloverReadShapeEvidence(rawMarket,selectedTicker,currentWindow,detail,transport);}catch{/* optional evidence never changes reads */}
     diagnostics.observe(detailMs,detail.ticker,marketStrikeEvidence(rawMarket),transport,detailEvidence);
-    // Strike/offer validity remains enforced by the producer feed gate.
-    // Never infer a strike or reuse list prices when the detail is incomplete.
+    // Default off; order-disabled observers must explicitly request this candidate.
+    // Cold path only; never used for an explicitly pinned held/settling contract.
+    const event=options?.rolloverEventStrike==="verified_recovery"&&detail.target===null
+      ?rolloverEventScope(rawMarket,selectedTicker,currentWindow):null;
+    if(event&&detailMs>=lastCurrentReadAt&&detailMs-currentWindow<30_000&&
+       detailMs>=metadataRequestedAt){
+      if(currentWindow>metadataWindow){metadataWindow=currentWindow;metadataReads=0;}
+      if(currentWindow===metadataWindow&&metadataReads<3&&detailMs-metadataRequestedAt>=2500){
+        metadataReads++;metadataRequestedAt=detailMs;
+        const timeout=AbortSignal.timeout(750);
+        const metadataSignal=signal?AbortSignal.any([signal,timeout]):timeout;
+        let metadataTransport:PublicFeedReadEvidence|null=null;
+        try{
+          metadataSignal.throwIfAborted();
+          const payload=await getJson("kalshi","market_event_metadata",
+            `https://external-api.kalshi.com/trade-api/v2/events/${encodeURIComponent(event)}?with_nested_markets=true`,
+            metadataSignal,receipt=>{metadataTransport=receipt;});
+          metadataSignal.throwIfAborted();
+          const receivedAt=clock().getTime();
+          if(startedMs===lastCurrentReadAt&&metadataWindow===currentWindow){
+            const strike=verifiedRolloverEventStrike({payload,detail:rawMarket,ticker:selectedTicker,window:currentWindow,
+              requestedAt:detailMs,receivedAt,transport:metadataTransport});
+            if(strike!==null){detail.target=strike;detail.strikeSource="kalshi_nested_event_metadata";}
+          }
+        }catch{/* failed metadata never rescues the incomplete exact detail */}
+      }
+    }
+    // Quotes, result and their receipt timestamps are never replaced by the metadata read.
     return detail;
   },
 };

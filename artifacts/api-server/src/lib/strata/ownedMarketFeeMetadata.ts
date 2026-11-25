@@ -1,3 +1,4 @@
+import {OWNED_FEE_UNVERIFIED,type OwnedFeeFailureStage} from "./ownedFeeFailureDiagnostic";
 import {validateMetadataCapture,type MetadataCaptureManifest,type ValidatedMetadataCapture} from "./metadataCapture";
 /**
  * Fail-closed fee metadata for the EXACT market about to be ordered by the
@@ -40,36 +41,38 @@ export type OwnedFeeMetadataInput = {
 };
 export type OwnedFeeMetadataProof =
   | { ok: true; fingerprint: string; eventTicker: string; verifiedAtMs: number; metadataCapture?: ValidatedMetadataCapture }
-  | { ok: false; reason: "production_event_fee_evidence_unverified" };
+  | { ok: false; reason: typeof OWNED_FEE_UNVERIFIED; diagnosticStage: OwnedFeeFailureStage };
 
 export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMetadataProof {
-  const fail = (): OwnedFeeMetadataProof =>
-    ({ok:false,reason:"production_event_fee_evidence_unverified"});
-  if (!/^KXBTC15M-[A-Za-z0-9-]+$/.test(input.marketTicker) ||
-      !Number.isSafeInteger(input.observedAtMs) || !Number.isSafeInteger(input.nowMs) ||
+  const fail = (diagnosticStage: OwnedFeeFailureStage): OwnedFeeMetadataProof =>
+    ({ok:false,reason:OWNED_FEE_UNVERIFIED,diagnosticStage});
+  if (!/^KXBTC15M-[A-Za-z0-9-]+$/.test(input.marketTicker)) return fail("market_identity");
+  if (!Number.isSafeInteger(input.observedAtMs) || !Number.isSafeInteger(input.nowMs) ||
       input.nowMs < input.observedAtMs || input.nowMs - input.observedAtMs > 15_000)
-    return fail();
+    return fail("clock");
   const market=obj(obj(input.marketPayload)?.market);
   const series=obj(obj(input.seriesPayload)?.series);
   const event=obj(obj(input.eventPayload)?.event);
   const eventTicker=market?.event_ticker;
-  if (!market || !series || !event ||
-      market.ticker !== input.marketTicker ||
-      market.exchange_index !== 2 ||
-      typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker) ||
-      event.event_ticker !== eventTicker || event.series_ticker !== "KXBTC15M" ||
-      (event.exchange_index !== undefined && event.exchange_index !== 2) ||
-      series.ticker !== "KXBTC15M" || series.exchange_index !== 2 ||
-      series.fee_type !== "quadratic" ||
-      ![1,"1","1.0"].includes(series.fee_multiplier as string|number) ||
-      (event.fee_type_override !== null && event.fee_type_override !== undefined) ||
-      (event.fee_multiplier_override !== null && event.fee_multiplier_override !== undefined) ||
-      Object.keys(market).some(key =>
+  if (!market || market.ticker !== input.marketTicker || market.exchange_index !== 2 ||
+      typeof eventTicker !== "string" || !/^KXBTC15M-[A-Za-z0-9-]+$/.test(eventTicker))
+    return fail("market_identity");
+  if (!event || event.event_ticker !== eventTicker || event.series_ticker !== "KXBTC15M" ||
+      (event.exchange_index !== undefined && event.exchange_index !== 2))
+    return fail("event_identity");
+  if (!series || series.ticker !== "KXBTC15M" || series.exchange_index !== 2)
+    return fail("series_identity");
+  if (series.fee_type !== "quadratic" || ![1,"1","1.0"].includes(series.fee_multiplier as string|number))
+    return fail("series_fee_terms");
+  if ((event.fee_type_override !== null && event.fee_type_override !== undefined) ||
+      (event.fee_multiplier_override !== null && event.fee_multiplier_override !== undefined))
+    return fail("event_fee_override");
+  if (Object.keys(market).some(key =>
         /fee|rebate/i.test(key) && market[key] !== null &&
         market[key] !== undefined && market[key] !== false))
-    return fail();
+    return fail("market_fee_fields");
   const closing=iso(market.close_time);
-  if (closing === null || closing <= input.nowMs) return fail();
+  if (closing === null || closing <= input.nowMs) return fail("close_time");
   // Current Kalshi market responses require latest_expiration_time but omit
   // legacy expiration_time. Optional timestamps are never synthesized. A
   // supplied malformed value still fails closed; the fee-change exclusion
@@ -77,18 +80,18 @@ export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMe
   // Keep the original array order so existing complete-response fingerprints
   // remain unchanged. Null/absent optional fields have identical semantics.
   const latest=iso(market.latest_expiration_time);
-  if(latest===null||latest<closing)return fail();
+  if(latest===null||latest<closing)return fail("latest_expiration");
   const expires=[market.expiration_time??null,market.latest_expiration_time,
     market.expected_expiration_time??null];
   const timeline=expires.filter(v=>v!==null).map(iso);
-  if(timeline.some(t=>t===null||(t as number)<closing))return fail();
+  if(timeline.some(t=>t===null||(t as number)<closing))return fail("optional_expiration");
   const end=Math.max(closing,...timeline as number[]);
-  if (!scheduledClear(input.seriesChangesPayload,"series_fee_change_arr",end) ||
-      !scheduledClear(input.eventChangesPayload,"event_fee_changes",end)) return fail();
+  if (!scheduledClear(input.seriesChangesPayload,"series_fee_change_arr",end)) return fail("series_fee_schedule");
+  if (!scheduledClear(input.eventChangesPayload,"event_fee_changes",end)) return fail("event_fee_schedule");
   const metadataCapture=input.metadataCapture !== undefined ? validateMetadataCapture({
     ...input,manifest:input.metadataCapture,eventTicker,
   }):undefined;
-  if(input.metadataCapture !== undefined && !metadataCapture)return fail();
+  if(input.metadataCapture !== undefined && !metadataCapture)return fail("metadata_capture");
   const sr=obj(input.seriesChangesPayload)!;
   const er=obj(input.eventChangesPayload)!;
   return {
