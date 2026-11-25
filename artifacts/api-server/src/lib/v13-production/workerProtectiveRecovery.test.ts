@@ -152,3 +152,28 @@ test("API startup with an existing unbound holding cannot consult paper",async()
    assert.equal(worker.isScheduled(),false);assert.equal(paper,0);assert.equal(protectedCalls,0);
  }finally{worker.stop();}
 });
+
+test("history held in recovery keeps one scheduled loop without ordinary order paths; STOP ends it",async()=>{
+ let polls=0,heartbeats=0,reconciles=0,dispatched=0,errors=0;
+ const {markBlockedProtectiveRecoveryLiveness}=await import("../strata/protectiveRecoveryLiveness");
+ const port={query:async()=>{heartbeats++;return {rows:[{}]};}};
+ const executor={ledger:{readAccount:async()=>({})},reconcile:async()=>{reconciles++;},
+  exchange:{mode:"LIVE"},dispatch:async()=>{dispatched++;},independentSourceBound:true};
+ const worker=new ProductionWorker(executor as never,250,()=>{errors++;},()=>false,async()=>{
+  polls++;
+  const reason="authenticated_restart_history_unproven";
+  const result=await markBlockedProtectiveRecoveryLiveness(port,{enabled:true,sameFencedSession:()=>true,
+   recovery:{reason,attempted:1},ownerId:"owner",accountId:"account",holderId:"worker",fencingToken:7,
+   fingerprint:"fixture",observedAt:new Date().toISOString()});
+  assert.equal(result,"RECOVERY_ONLY");throw Error(reason);
+ });
+ try{
+  await worker.startRecovery();
+  const until=Date.now()+2500;
+  while(errors<3&&Date.now()<until)await new Promise(r=>setTimeout(r,25));
+  assert.equal(worker.isScheduled(),true);
+  assert.ok(polls>=3);assert.equal(heartbeats,polls);assert.equal(reconciles,0);assert.equal(dispatched,0);
+  worker.stop();await worker.whenIdle();const stoppedPolls=polls;
+  await new Promise(r=>setTimeout(r,320));assert.equal(polls,stoppedPolls);
+ }finally{worker.stop();await worker.whenIdle();}
+});
