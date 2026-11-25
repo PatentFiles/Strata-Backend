@@ -2,6 +2,8 @@ import {IndependentWorkerReplay,type IndependentReplayPorts,type IndependentRepl
 import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
+import {enqueueLiveDecision,liveAnalyticsFailure} from "./liveDecisionAnalytics";
+import {deployedGitSha} from "../strata/deployedGitSha";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
 
@@ -136,12 +138,25 @@ export class ProductionWorker {
           }
           return;
         }
-        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
+        const audit=(stage:"ENTRY_GATE"|"PREPARE"|"DISPATCH",reasonCode:string,sourceId?:string)=>{
+          if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
+            enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId});
+        };
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){
+          if(!this.entryHoldReported){this.entryHoldReported=true;audit("ENTRY_GATE","production_entries_not_authorized");}
+          return;
+        }
+        this.entryHoldReported=false;
         const id=await this.executor.captureIndependentEntry();
-        if(!id||!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
-        const intent=await this.executor.prepareEntry(id);
-        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle)return;
-        await this.executor.dispatch(intent);
+        if(!id)return;
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_after_observation",id);return;}
+        let intent:string;
+        try{intent=await this.executor.prepareEntry(id);}
+        catch(error){audit("PREPARE",liveAnalyticsFailure(error),id);throw error;}
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_before_dispatch",id);return;}
+        try{await this.executor.dispatch(intent);}
+        catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id);throw error;}
         return;
       }
       await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
