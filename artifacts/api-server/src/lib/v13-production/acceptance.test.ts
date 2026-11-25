@@ -1170,6 +1170,7 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  await pool.query(readFileSync("../../sql/strata_emergency_exit_reservation_private.sql","utf8"));
  await pool.query(readFileSync("../../sql/strata_protective_exit_local_no_send.sql","utf8"));
  await pool.query(readFileSync("../../sql/strata_protective_exit_fractional_quantity.sql","utf8"));
+ await pool.query(readFileSync("../../sql/strata_protective_exit_final_fence_no_send_reason.sql","utf8"));
  const rid=randomUUID(),body=order as unknown as Record<string,unknown>,orderDigest=createHash("sha256").update(JSON.stringify(order)).digest("hex");
  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations
   (reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_holder_id,worker_fencing_token)
@@ -1201,10 +1202,9 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  const db={connect:async()=>{const c=await pool.connect(),isFence=++connections===1;
   return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
    if(isFence&&sql.startsWith("SELECT r.reservation_id")){
-    // This test stubs only the final authority read; use the actual producer's
-    // serialized source and an explicit fresh five-second synthetic budget.
-    const row=(await c.query("SELECT decision->'ownedEvaluation' AS owned_evaluation FROM v13_production_intent WHERE id=$1",[exit])).rows[0];
-    return {rows:[{reservation_id:rid,reservation_age_ms:0,heartbeat_age_ms:0,...row,max_quote_age_ms:5000,source_age_ms:0,release_remaining_ms:60000}]};
+    // Explicitly absent final admissibility row. The finalizer still uses
+    // actual native locked state, exact reservation and intent mutations.
+    return {rows:[]};
    }
    if(isFence&&sql.startsWith("SELECT"))return {rows:[]};
    const r=await c.query(sql,args);
@@ -1225,6 +1225,7 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  const before=(await f.ledger.readAccount()).reserved_micros;
  const result=await run();assert.equal(result.reason,"protective_exit_proven_not_posted_refresh_required");assert.equal(result.postAttempted,false);
  assert.equal(posts,0);assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[rid])).rows[0].state,"VOID");
+ assert.equal((await pool.query("SELECT reason FROM private.strata_protective_exit_local_no_send WHERE reservation_id=$1",[rid])).rows[0].reason,"final_fence_no_exact_row_before_commit");
  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[exit])).rows[0].state,"BLOCKED");
  assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[parent])).rows[0].quantity_hundredths,"200");
  assert.equal((await f.ledger.readAccount()).reserved_micros,before);

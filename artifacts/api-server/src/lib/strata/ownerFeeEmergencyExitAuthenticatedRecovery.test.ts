@@ -28,7 +28,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
  missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
  wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;
- receiptWaitMs?:number;fullyClosed?:boolean;omitPosition?:boolean;
+ receiptWaitMs?:number;fullyClosed?:boolean;omitPosition?:boolean;settled?:boolean;
  wallElapsedMs?:number;monotonicElapsedMs?:number;observationAgeMs?:number;
  startMonotonicMs?:number;baselineWallElapsedMs?:number;baselineMonotonicElapsedMs?:number;
  startWallMs?:number;throwWallAt?:number;throwMonotonicAt?:number;}={}){
@@ -81,7 +81,8 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
    positions:options.omitPosition?[]:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
-   settlements:[]};
+   settlements:options.settled?[{ticker:MARKET,subaccount_number:1,exchange_index:2,
+     yes_count_fp:position,no_count_fp:"0.00",market_result:"yes",payout:"1.00",settled_time:new Date(NOW).toISOString()}]:[]};
  }) as typeof readOwnedKalshiFeeds;
  return {calls,run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
   {db,readFeeds,now:()=>{
@@ -286,4 +287,30 @@ test("throwing either clock at start or completion keeps restart UNKNOWN",async(
    assert.equal(h.calls.baseline,0);assert.equal(h.calls.feed,0);
   }
  }
+});
+
+
+test("restart diagnostic distinguishes omitted position and unattributed settlement without persisting",async()=>{
+ for(const [options,diagnosticStage] of [
+  [{restart:true,fill:"2.00",fullyClosed:true,omitPosition:true},"exit_recovery_position_not_unique"],
+  [{restart:true,fill:"0.00",differentPosition:true,settled:true},"exit_recovery_position_not_attributable"],
+  [{restart:true,fill:"1.00",differentPosition:true,settled:true},"exit_recovery_position_not_attributable"],
+ ] as const){
+  let persisted=0;
+  const h=harness(options);
+  const r=await withRestartTestPorts(()=>reconcileUnknownProtectiveExitAfterRestart(input,{
+   readOutcome:h.run,
+   persistReconciled:async()=>{persisted++;throw Error("persistence forbidden");},
+  }));
+  assert.equal(r.state,"UNKNOWN");assert.equal(r.reason,"authenticated_restart_history_unproven");
+  assert.equal(r.diagnosticStage,diagnosticStage);
+  assert.equal(r.mayRetry,false);assert.equal(r.postAttempted,false);assert.equal(persisted,0);
+ }
+});
+test("restart diagnostic does not reflect untrusted exception text",async()=>{
+ const r=await withRestartTestPorts(()=>reconcileUnknownProtectiveExitAfterRestart(input,{
+  readOutcome:async()=>{throw Error("exit_recovery_position_not_unique USER_SECRET");},
+ }));
+ assert.equal(r.diagnosticStage,"signed_history_reader_exception");
+ assert.doesNotMatch(JSON.stringify(r),/USER_SECRET/);
 });
