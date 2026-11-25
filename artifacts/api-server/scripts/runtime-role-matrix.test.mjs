@@ -53,7 +53,10 @@ test('existing legacy session guard rejects known transaction-pool hints but doe
   assert.doesNotThrow(() => assertDirectSessionDatabase('postgresql://fixture@unverified.example.invalid:6432/disposable'));
   assert.throws(() => assertDirectSessionDatabase('https://example.invalid'), /production_database_url_invalid/);
   const poolSource = readFileSync(resolve(api, '../../lib/db/src/index.ts'), 'utf8');
-  assert.match(poolSource, /max: 10/);
+  const poolConfigSource = readFileSync(resolve(api, '../../lib/db/src/poolConfig.ts'), 'utf8');
+  assert.match(poolConfigSource, /max:\s*10/);
+  assert.match(poolConfigSource, /rejectUnauthorized:true/);
+  assert.match(poolSource, /import \{poolConfig\} from '\.\/poolConfig'/);
   assert.match(poolSource, /new Pool\(poolConfig\(process\.env\.DATABASE_URL\)\)/);
   const personal = readFileSync(resolve(api, 'src/lib/strata/personalExecutionSupervisor.ts'), 'utf8');
   assert.doesNotMatch(personal, /assertDirectSessionDatabase/);

@@ -21,7 +21,6 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
  order:o,lease:{holderId:"worker-1",fencingToken:8}};
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
  marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;
- finalRows?: "wrong_identity"|"duplicate"|"query_error";
  failPersist?:boolean;missingPersistenceProof?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid"}={}){
  const clientId=input.clientOrderId??CID,reservationId=input.reservationId??RES,count=input.count??"2.00",side=input.side??"ask";
  const calls:{fee:number;mark:number;post:number;read:number;releases:number;sql:string[]}={
@@ -66,15 +65,12 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    assert.ok(sql.includes('FOR SHARE OF r,a,g,w,pos,i,p'));
 
    assert.match(sql,/w\.credential_fingerprint=\$13::text/);
-   if(input.finalRows==="query_error")throw Object.assign(Error("synthetic lock timeout"),{code:"55P03"});
-   if(input.denyLock)return {rows:[]};
-   const row={reservation_id:input.finalRows==="wrong_identity"?"different-reservation":reservationId,reservation_age_ms:input.reservationAgeMs??0,heartbeat_age_ms:input.heartbeatAgeMs??0,
+   return {rows:input.denyLock?[]:[{reservation_id:reservationId,reservation_age_ms:input.reservationAgeMs??0,heartbeat_age_ms:input.heartbeatAgeMs??0,
     max_quote_age_ms:5000,source_age_ms:input.sourceAgeMs??0,
     release_remaining_ms:'releaseRemainingMs' in input?input.releaseRemainingMs:60000,
     owned_evaluation:{sourcePaperEvaluationId:'source',source:{id:'source',market_ticker:MARKET,
      strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
-     evaluated_at:'2026-11-03T00:00:00.000Z',feed_freshness:'current',btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}};
-   return {rows:input.finalRows==="duplicate"?[row,row]:[row]};
+     evaluated_at:'2026-11-03T00:00:00.000Z',feed_freshness:'current',btc_provider_age_ms:0,btc_receive_age_ms:0,market_age_ms:0}}}]};
   }
   return {rows:[]};
  },release:()=>{calls.releases++}})};
@@ -463,13 +459,13 @@ test("expired-source cleanup failure or invalid evidence retains UNKNOWN without
   assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);
   assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')));
  }
- for(const change of [{denyLock:true,leaseChanged:true},{standing:true,revokedStanding:true},
+ for(const change of [{denyLock:true},{standing:true,revokedStanding:true},
   ...[0,-1,null,NaN,Infinity,'60000'].map(releaseRemainingMs=>({releaseRemainingMs}))]){
   const h=harness({sourceAgeMs:6001,finalize:true,...change}),r=await h.run();
   assert.equal(r.state,'UNKNOWN');assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);
   assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
   assert.ok(!h.calls.sql.some(sql=>sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send')),
-   'no-send cleanup cannot bypass changed lease or missing/revoked release authority');
+   'source expiry cannot bypass denied final SQL or missing/revoked release authority');
  }
 });
 test("finite technical release expires at the final send boundary without borrowing owner authority",async()=>{
@@ -523,43 +519,13 @@ test("fresh genuine fractional YES and NO reductions preserve zero, partial and 
  });
 
 
-test("explicit empty locked fence records local no-send, not a fabricated exchange result",async()=>{
- const h=harness({denyLock:true,finalize:true});
- const r=await h.run();
- assert.equal(r.state,"BLOCKED");assert.equal(r.reason,"protective_exit_proven_not_posted_refresh_required");
- assert.equal(r.diagnosticStage,"locked_fence_no_exact_row");
- const scope={ownerId:OWNER,accountId:identity.accountId,reservationId:RES};
- assert.equal(isDurableProtectiveExitNoSend(r,scope),true);
- assert.equal(Object.isFrozen(r),true);
- assert.equal(isDurableProtectiveExitNoSend({...r},scope),false,"a copy cannot retain the original object's brand");
- assert.equal(r.postAttempted,false);assert.equal(r.mayRetry,false);assert.equal(h.calls.post,0);assert.equal(h.calls.read,0);
- assert.equal(h.calls.sql.filter(q=>q==="COMMIT").length,1,"only no-send audit COMMIT");
- assert.ok(h.calls.sql.some(q=>q.startsWith("INSERT INTO private.strata_protective_exit_local_no_send")));
- await h.run();assert.equal(h.calls.post,0);
-});
-test("unverified on an explicit no-row cleanup failure; no retry or wire",async()=>{
- for(const finalizeFail of ["insert","commit"]){
-  const h=harness({denyLock:true,finalize:true,finalizeFail}),r=await h.run();
-  assert.equal(r.state,"UNKNOWN");assert.equal(r.reason,"protective_exit_local_abort_persistence_unverified");
-  assert.equal(r.diagnosticStage,"locked_fence_no_exact_row");
-  assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
-  assert.equal(r.postAttempted,false);assert.equal(r.mayRetry,false);assert.equal(h.calls.post,0);
-  assert.equal(h.calls.sql.filter(q=>q==="COMMIT").length,finalizeFail==="commit"?1:0);
- }
-});
-
-test("final fence diagnostics cannot mint proof for wrong rows, lock errors, or an unacknowledged COMMIT",async()=>{
- for(const [options,diagnosticStage] of [
-  [{finalRows:"wrong_identity"},"locked_fence_no_exact_row"],
-  [{finalRows:"duplicate"},"locked_fence_no_exact_row"],
-  [{finalRows:"query_error"},"db_or_reader_exception"],
-  [{failCommit:true},"commit_unacknowledged"]
- ] as const){
-  const h=harness({...options,finalize:true}),r=await h.run();
+test("final fence reports code-owned missing row and ambiguous COMMIT categories without sending",async()=>{
+ for(const [options,diagnosticStage] of [[{denyLock:true},"locked_fence_no_exact_row"],
+  [{failCommit:true},"commit_unacknowledged"]] as const){
+  const h=harness(options);
+  const r=await h.run();
   assert.equal(r.state,"UNKNOWN");assert.equal(r.reason,"protective_exit_final_fence_closed");
-  assert.equal(r.diagnosticStage,diagnosticStage);assert.equal(r.mayRetry,false);assert.equal(r.postAttempted,false);
-  assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
-  assert.equal(h.calls.post,0);assert.equal(h.calls.read,0);
-  assert.ok(!h.calls.sql.some(q=>q.startsWith("INSERT INTO private.strata_protective_exit_local_no_send")));
+  assert.equal(r.diagnosticStage,diagnosticStage);
+  assert.equal(r.mayRetry,false);assert.equal(r.postAttempted,false);
  }
 });

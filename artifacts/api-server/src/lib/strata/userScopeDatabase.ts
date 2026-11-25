@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { normalizePrimaryDisplayMoney, normalizeWalletDisplayMoney } from "./primaryDisplayMoney";
 import { ownedCashProjection } from "./ownedCashPrecision";
 import {createWalletDisplayReads} from "./walletDisplayReads";
@@ -61,12 +62,12 @@ export interface UserScopeQuery {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 }
 
-const CAN_MANAGE_SHARED_PRESETS_SQL = `
+const CAN_MANAGE_SHARED_PRESETS_SQL = runtimeAuthSql(`
   SELECT 1 FROM public.profiles p
   JOIN auth.users u ON u.id = p.id
   JOIN private.role_assignments ra ON lower(ra.email) = lower(u.email)
   WHERE p.id = $1::uuid AND p.role = 'ADMIN' AND ra.role = 'ADMIN'
-`;
+`);
 
 const MIGRATION_SQL = `
   SELECT (

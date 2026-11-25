@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { randomUUID } from "node:crypto";
 import {
   V13_CHAMPION_PARAMETER_HASH,
@@ -99,7 +100,7 @@ const APPROVE_SQL = `
   RETURNING id
 `;
 
-const APPROVE_API_SQL = `
+const APPROVE_API_SQL = runtimeAuthSql(`
   -- owned-policy:approve
   UPDATE v13_live_money_policy
   SET state = 'APPROVED',
@@ -195,7 +196,7 @@ const APPROVE_API_SQL = `
           WHERE u.id=r1.reviewer_user_id AND u.email_confirmed_at IS NOT NULL)
     ))
   RETURNING id
-`;
+`);
 
 const LINK_SQL = `
   -- owned-policy:link

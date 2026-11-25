@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { inspectOperatorFeeCandidate } from "./operatorFeeCandidateRead";
@@ -19,9 +20,9 @@ const shaExpected=()=>createHash("sha256").update(FEE_SOURCE_DECISION_TEXT).dige
 async function adminVerified(id:string):Promise<boolean>{
   if(!UUID.test(id))return false;
   try{
-    const r=await pool.query(`SELECT 1 FROM auth.users u
+    const r=await pool.query(runtimeAuthSql(`SELECT 1 FROM auth.users u
       JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
-      WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND ra.role='ADMIN' LIMIT 1`,[id]);
+      WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND ra.role='ADMIN' LIMIT 1`),[id]);
     return r.rows.length===1;
   }catch{return false;}
 }
@@ -123,7 +124,7 @@ export async function issueReviewedOwnerFeeSourceGrant(
       AND content_sha256=$2 AND evidence_kind='operator_attested_commissioning_candidate'
       FOR SHARE`,[r.releaseId,REVIEWED_OPERATOR_FEE_SHA256]);
     if(release.rows.length!==1)return no("operator_release_revoked_or_expired");
-    const reviewers=await client.query(`
+    const reviewers=await client.query(runtimeAuthSql(`
       SELECT p.reviewer_user_id,p.expires_at
       FROM private.strata_fee_source_policy_reviews p
       JOIN auth.users u ON u.id=p.reviewer_user_id
@@ -132,7 +133,7 @@ export async function issueReviewedOwnerFeeSourceGrant(
       AND p.policy_decision_sha256=$3 AND p.reviewed_pdf_sha256=$4
       AND p.revoked_at IS NULL AND p.expires_at>now()
       AND u.email_confirmed_at IS NOT NULL AND ra.role='ADMIN'
-      ORDER BY p.reviewer_user_id FOR SHARE OF p`,
+      ORDER BY p.reviewer_user_id FOR SHARE OF p`),
       [r.releaseId,r.ownerUserId,FEE_SOURCE_DECISION_SHA256,REVIEWED_OPERATOR_FEE_SHA256]);
     const distinct=new Set(reviewers.rows.map(x=>String(x.reviewer_user_id)));
     if(distinct.size<2||reviewers.rows.length!==2)
@@ -212,7 +213,7 @@ export async function listEligibleFeeSourceOwners(adminId:string):
     ({ok:false,reason,ownerUserIds:[],owners:[]});
   if(!await adminVerified(adminId))return denied("administrator_required");
   try{
-    const rows=await pool.query(`
+    const rows=await pool.query(runtimeAuthSql(`
       SELECT a.owner_user_id::text AS owner_user_id,
              nullif(btrim(p.display_name),'') AS display_name,
              nullif(btrim(u.email),'') AS email
@@ -227,7 +228,7 @@ export async function listEligibleFeeSourceOwners(adminId:string):
         nullif(btrim(u.email),''),
         a.owner_user_id::text
       )),a.owner_user_id
-      LIMIT 100`);
+      LIMIT 100`));
     const owners:FeeSourceOwnerLabel[]=rows.rows
       .filter(row=>UUID.test(String(row.owner_user_id)))
       .map(row=>({
@@ -251,7 +252,7 @@ export async function inspectFeePolicySigningStatus(adminId:string,ownerUserId:s
   if(!release.ok||!release.releaseId)return denied("operator_release_not_current");
   try{
     const [reviews,grants]=await Promise.all([
-      pool.query(`
+      pool.query(runtimeAuthSql(`
         SELECT count(DISTINCT p.reviewer_user_id)::integer AS n
         FROM private.strata_fee_source_policy_reviews p
         JOIN auth.users u ON u.id=p.reviewer_user_id
@@ -259,7 +260,7 @@ export async function inspectFeePolicySigningStatus(adminId:string,ownerUserId:s
         WHERE p.owner_user_id=$1::uuid AND p.release_id=$2::uuid
           AND p.policy_decision_sha256=$3 AND p.revoked_at IS NULL
           AND p.expires_at>now() AND u.email_confirmed_at IS NOT NULL
-          AND ra.role='ADMIN'`,[ownerUserId,release.releaseId,FEE_SOURCE_DECISION_SHA256]),
+          AND ra.role='ADMIN'`),[ownerUserId,release.releaseId,FEE_SOURCE_DECISION_SHA256]),
       pool.query(`
         SELECT grant_id,expires_at
         FROM private.strata_fee_source_grants

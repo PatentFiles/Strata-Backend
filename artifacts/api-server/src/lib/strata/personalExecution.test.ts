@@ -1297,3 +1297,35 @@ test("owner cash refresh preserves original signed-read clock and refuses elapse
     assert.equal(writes, fixture.writes);
   }
 });
+
+
+test('process quiesce fences a pending START, waits its tick and never silently restarts',async()=>{
+ let open!:()=>void,idle!:()=>void;
+ const opening=new Promise<void>(resolve=>{open=resolve;}),draining=new Promise<void>(resolve=>{idle=resolve;});
+ const worker={...fakeWorker(),whenIdle:()=>draining};
+ const dispatch=state(true);const calls:string[]=[];
+ const supervisor=createOwnedTradingSupervisor(async()=>{
+  await opening;await worker.start();return {ok:true,worker,state:dispatch,disarm:async action=>{
+   calls.push(action);return {entriesBlocked:true,managingExposure:false};
+  }};
+ });
+ const started=supervisor.start({userId:USER,accountId:'shutdown-pending',action:'START'});
+ const stopped=supervisor.quiesce!();let complete=false;void stopped.then(()=>{complete=true;});
+ assert.equal(supervisor.quiesce!(),stopped);
+ assert.equal((await supervisor.start({userId:USER,accountId:'shutdown-other',action:'START'})).reason,'worker_process_shutting_down');
+ open();assert.equal((await started).workerStarted,false);
+ for(let i=0;i<10;i++)await Promise.resolve();
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(complete,false);
+ idle();assert.deepEqual(await stopped,{stopped:true,managingExposure:false});assert.deepEqual(calls,['STOP']);
+ assert.equal(worker.isScheduled(),false);assert.equal(dispatch.accountKill,false);
+});
+
+test('process quiesce retains an exposed protective worker and never reports flat',async()=>{
+ const worker=fakeWorker();await worker.start();const dispatch=state(true);
+ const supervisor=createOwnedTradingSupervisor(async()=>({ok:true,worker,state:dispatch,
+  disarm:async action=>{assert.equal(action,'STOP');return {entriesBlocked:true,managingExposure:true};}}));
+ await supervisor.start({userId:USER,accountId:'shutdown-exposure',action:'START'});
+ assert.deepEqual(await supervisor.quiesce!(),{stopped:false,managingExposure:true});
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(dispatch.accountKill,false);assert.equal(worker.isScheduled(),true);
+ worker.stop();
+});

@@ -39,6 +39,8 @@ export class ProductionWorker {
   heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private readonly idleWaiters=new Set<()=>void>();
+  whenIdle():Promise<void>{return this.running?new Promise(resolve=>this.idleWaiters.add(resolve)):Promise.resolve();}
   private lifecycle = 0;
   private starting: Promise<void> | null = null;
   private recoveryOnly = false;
@@ -161,12 +163,13 @@ export class ProductionWorker {
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_before_dispatch",id);return;}
         try{await this.executor.dispatch(intent);}
         catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id,error);throw error;}
-        // A resolved dispatcher is not evidence that an order was posted or
-        // filled. Record only the qualifying source, off the dispatch path.
+        // A dispatcher callback returning is not proof of an order or fill.
+        // This is advisory DISPATCH context; a second OBSERVATION would replace
+        // the richer source record used by the analytics normalizer.
         try{
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"OBSERVATION",outcome:"QUALIFIED",
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
               reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
         }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
         return;
@@ -277,6 +280,7 @@ export class ProductionWorker {
         // an abort-ignoring adapter cannot start replacement speculative work.
         void metadata?.drained.catch(()=>{});
         this.running = false;
+        for(const resolve of this.idleWaiters)resolve();this.idleWaiters.clear();
       }
     }
   }

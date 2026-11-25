@@ -16,6 +16,10 @@ import {startOwnerIndependentFeeV5Collector} from "./lib/strata/ownerIndependent
 
 import {activatePaperFreeApiRuntime} from "./lib/strata/deployedGitSha";
 
+import {pool} from '@workspace/db';
+import {personalTradingSession} from './lib/strata/sharedPersonalTradingControls';
+import {flushLiveDecisionAnalytics} from './lib/v13-production/liveDecisionAnalytics';
+import {createRuntimeShutdown} from './lib/runtimeShutdown';
 activatePaperFreeApiRuntime();
 
 const rawPort = process.env["PORT"];
@@ -32,7 +36,7 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, "0.0.0.0", (err) => {
+const server=app.listen(port, "0.0.0.0", (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
@@ -89,3 +93,12 @@ app.listen(port, "0.0.0.0", (err) => {
   // Research-only market-data sockets: default OFF; no trade/order authority.
   startTriangulatedMarketObserver();
 });
+
+const shutdown=createRuntimeShutdown({
+ closeHttp:()=>new Promise<void>((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeIdleConnections();}),
+ quiesce:()=>personalTradingSession.quiesce?.()??Promise.resolve({stopped:false,managingExposure:false}),
+ flush:()=>flushLiveDecisionAnalytics(5000),closePool:()=>pool.end(),
+ report:reason=>logger.info({reason},'Backend process drain'),exit:code=>process.exit(code),
+});
+process.once('SIGTERM',()=>{void shutdown();});
+process.once('SIGINT',()=>{void shutdown();});

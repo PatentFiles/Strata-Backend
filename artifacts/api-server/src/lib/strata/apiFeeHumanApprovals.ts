@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { probeCurrentKalshiFeeApi } from "./twoSourceFeeEvidence";
@@ -33,11 +34,11 @@ const bodyObject=(body:unknown):Record<string,unknown>|null=>
  body && typeof body==="object" && !Array.isArray(body) ? body as Record<string,unknown> : null;
 const validOwner=(s:unknown):s is string=>typeof s==="string" && UUID.test(s);
 async function confirmedAdmin(db:DbClient,userId:string):Promise<boolean>{
- const r=await db.query(`
+ const r=await db.query(runtimeAuthSql(`
  SELECT 1 FROM auth.users u JOIN private.role_assignments r
    ON lower(btrim(u.email))=lower(btrim(r.email))
  WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND r.role='ADMIN'
- LIMIT 1`,[userId]);
+ LIMIT 1`),[userId]);
  return r.rows.length===1;
 }
 async function singleOwnedPair(db:DbClient,ownerId:string):Promise<boolean>{
@@ -153,7 +154,7 @@ export async function issueApiFeeSourceGrant(
    WHERE owner_user_id=$1::uuid AND revoked_at IS NULL AND expires_at>now()
    LIMIT 1`,[b.ownerUserId]);
   if(existing.rows.length)return denied("active_api_fee_source_grant_already_exists");
-  const reviews=await c.query(`
+  const reviews=await c.query(runtimeAuthSql(`
    SELECT r.reviewer_user_id,r.expires_at FROM private.strata_api_fee_rate_reviews r
    JOIN auth.users u ON u.id=r.reviewer_user_id
    JOIN private.role_assignments role
@@ -165,7 +166,7 @@ export async function issueApiFeeSourceGrant(
      AND r.scope='KXBTC15M:INDEX2' AND r.confirmation=$5
      AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
      AND u.email_confirmed_at IS NOT NULL
-   ORDER BY r.reviewer_user_id FOR SHARE OF r`,[
+   ORDER BY r.reviewer_user_id FOR SHARE OF r`),[
    b.ownerUserId,adminId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
    PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM
   ]);
@@ -298,7 +299,7 @@ export async function inspectApiFeeSourceReadiness(
    return denied("administrator_required_for_other_owner");
   if(!await singleOwnedPair(db as DbClient,ownerId))
    return denied("owned_index2_account_missing_or_ambiguous");
-  const candidates=await db.query(`
+  const candidates=await db.query(runtimeAuthSql(`
    SELECT r.reviewer_user_id FROM private.strata_api_fee_rate_reviews r
    JOIN auth.users u ON u.id=r.reviewer_user_id
    JOIN private.role_assignments role
@@ -308,7 +309,7 @@ export async function inspectApiFeeSourceReadiness(
     AND r.confirmation=$4 AND r.scope='KXBTC15M:INDEX2'
     AND r.revoked_at IS NULL AND r.expires_at>now()+interval '60 seconds'
     AND u.email_confirmed_at IS NOT NULL
-    AND ($5::uuid IS NULL OR r.reviewer_user_id=$5::uuid)`,[
+    AND ($5::uuid IS NULL OR r.reviewer_user_id=$5::uuid)`),[
     ownerId,PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,
     PDF_FREE_RATE_REVIEW_VECTOR_VERSION,API_REVIEW_CONFIRM,
     viewerId!==ownerId?viewerId:null

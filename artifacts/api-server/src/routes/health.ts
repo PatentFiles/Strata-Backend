@@ -5,6 +5,7 @@ import path from "node:path";
 import { buildReleaseIdentity } from "../../../../lib/v13-strategy/build-release.mjs";
 import { deployedGitSha } from "../lib/strata/deployedGitSha";
 
+import {BUILD_PROVENANCE} from '../lib/buildProvenance';
 const router: IRouter = Router();
 const processRelease = BUILD_RELEASE.provenance !== "unavailable"
   ? BUILD_RELEASE
@@ -24,7 +25,7 @@ router.get("/healthz", (_req, res) => {
       executionAuthority: "NONE",
     },
   });
-  res.json({ ...data, deployedGitSha: deployedGitSha() });
+  res.json({ ...data, deployedGitSha: deployedGitSha(), build:BUILD_PROVENANCE });
 });
 
 export default router;

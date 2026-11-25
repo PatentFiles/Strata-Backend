@@ -76,6 +76,8 @@ import type { Identity, Request } from "../v13-production/types";
 type LeaseAction = "STOP" | "KILL";
 
 export interface PersonalSessionControl {
+  /** Process drain only. No automatic START and no unguarded lease release. */
+  quiesce?():Promise<{stopped:boolean;managingExposure:boolean}>;
   isScheduled(userId: string, accountId: string): boolean;
   start(input: {
     userId: string;
@@ -179,6 +181,8 @@ export function createOwnedTradingSupervisor(
   >,
 ): PersonalSessionControl {
   const workers = new Map<string, RunningWorker>();
+  let closing=false;
+  let shutdown:Promise<{stopped:boolean;managingExposure:boolean}>|null=null;
   // An opening session already owns a lifecycle operation even before its
   // worker is registered. Do not duplicate that operation or certify STOP
   // while it can still install a scheduled worker after the caller returns.
@@ -212,11 +216,43 @@ export function createOwnedTradingSupervisor(
     }
   };
   return {
+    quiesce(){
+      if(shutdown)return shutdown;
+      closing=true;
+      // Close entry gates synchronously, before any asynchronous STOP proof.
+      for(const r of workers.values())if(r.state)r.state.entriesAuthorized=false;
+      shutdown=(async()=>{
+        const identities=new Map<string,string>();
+        for(const [id,r] of workers)identities.set(id,r.ownerUserId);
+        for(const [id,r] of starts)identities.set(id,r.ownerUserId);
+        const running=new Set(workers.values());
+        const results=await Promise.allSettled([...identities].map(async([id,owner])=>{
+          const opening=starts.get(id);
+          if(opening)await opening.result;
+          // A pending factory can install a worker after the initial snapshot.
+          // Keep its idle barrier even when fenced STOP unregisters it.
+          const opened=workers.get(id);if(opened)running.add(opened);
+          return stopAccount(owner,id,'STOP');
+        }));
+        let stopped=true,managingExposure=false;
+        for(const result of results){
+          if(result.status==='rejected'){stopped=false;continue;}
+          if(!result.value.workerStopped)stopped=false;
+          if(result.value.managingExposure){stopped=false;managingExposure=true;}
+        }
+        // Await pre-existing ticks before closing their database pool. An
+        // uncertain dispatch remains durable; shutdown never replays it.
+        if(stopped)await Promise.all([...running].map(r=>r.worker.whenIdle?.()));
+        return {stopped,managingExposure};
+      })();
+      return shutdown;
+    },
     isScheduled(userId, accountId) {
       const running = workers.get(accountId);
       return running?.ownerUserId === userId && running.worker.isScheduled();
     },
     async start(input) {
+      if(closing)return {ok:false,reason:'worker_process_shutting_down',workerStarted:false};
       input = { ...input };
       const stopping = stops.get(input.accountId);
       if (stopping || ownerStops.has(input.userId)) {
@@ -242,6 +278,7 @@ export function createOwnedTradingSupervisor(
       const result = Promise.resolve().then(async () => {
         const opened = await open(input);
         if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if(closing&&opened.state)opened.state.entriesAuthorized=false;
         if (!opened.worker.isScheduled()) {
           opened.worker.stop();
           return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
@@ -249,7 +286,8 @@ export function createOwnedTradingSupervisor(
         workers.set(input.accountId, {
           ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
         });
-        return { ok: true, reason: "worker_scheduled", workerStarted: true };
+        return closing?{ok:false,reason:'worker_process_shutting_down',workerStarted:false}:
+          { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
       starts.set(input.accountId, { ownerUserId: input.userId, result });
       try { return await result; }

@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 /** Admin-supplied document provenance, distinct from a canonical HTTP capture.
  * This service only publishes an approved-format document. It never issues a
  * policy, account authority, worker lease or order.
@@ -21,11 +22,11 @@ async function parse(bytes:Buffer){
 }
 export async function platformFeeAdministrator(admin:string,db:Query=pool,lock=false){
  if(!UUID.test(admin))return false;
- return (await db.query(`SELECT u.id FROM auth.users u
+ return (await db.query(runtimeAuthSql(`SELECT u.id FROM auth.users u
  JOIN public.profiles p ON p.id=u.id
  JOIN private.role_assignments ra ON lower(btrim(ra.email))=lower(btrim(u.email))
  WHERE u.id=$1::uuid AND p.role='ADMIN' AND ra.role='ADMIN' AND u.email_confirmed_at IS NOT NULL
- AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) LIMIT 2`+(lock?" FOR SHARE OF u,p,ra":""),[admin])).rows.length===1;
+ AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) LIMIT 2`)+(lock?" FOR SHARE OF u,p,ra":""),[admin])).rows.length===1;
 }
 export async function previewPlatformUploadedFeeSchedule(admin:string,bytes:Buffer){
  if(!platformFeeUploadEnabled())return deny("platform_fee_upload_disabled");
