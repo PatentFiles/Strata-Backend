@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const base = fileURLToPath(new URL("../", import.meta.url));
 const dist = name => new URL("../dist/" + name, import.meta.url);
 const marker = "STRATA_PROTECTIVE_HISTORY_DIAGNOSTIC_SHA";
+const digestMarker = "STRATA_PROTECTIVE_HISTORY_DIAGNOSTIC_SOURCE_SHA256";
 const provenance = JSON.parse(readFileSync(dist("build-manifest.json"), "utf8"));
 const previewPath = "/api/strata/me/release/protective-history-preview";
 const expectedOrigin = "https://wallets.example.invalid";
@@ -31,16 +32,29 @@ new Function("module", "exports", "require", generated.text)(mod, mod.exports, r
 const { protectiveHistoryRuntimeMode, configuredDiagnosticOrigins, createProtectiveHistoryDiagnosticFetch,
   diagnosticJwksUrl, createProtectiveHistoryDiagnosticApp } = mod.exports;
 
-test("new switch pins clean embedded and injected Git SHAs, otherwise refuses without normal fallback", () => {
-  const sha = "a".repeat(40), clean = { revision: sha, tree: "c".repeat(40), dirty: false, provenance: "git-at-build" };
-  const enabled = { [marker]: sha, RAILWAY_GIT_COMMIT_SHA: sha };
+test("source and provider pins fail closed for every missing, mismatched, or inconsistent build field", () => {
+  const sha = "a".repeat(40), digest = "d".repeat(64);
+  const clean = { revision: sha, tree: "c".repeat(40), dirty: false, provenance: "git-at-build",
+    version: "STRATA_BUILD_V1", sourceSha256: digest, sourceFiles: 3,
+    digestPolicy: "sha256-path-length-lf-v1", executionAuthority: "NONE" };
+  const archive = { ...clean, provenance: "provider-commit-at-build", tree: null, dirty: null };
+  const enabled = { [marker]: sha, [digestMarker]: digest, RAILWAY_GIT_COMMIT_SHA: sha };
   assert.equal(protectiveHistoryRuntimeMode({}, null), "NORMAL");
   assert.equal(protectiveHistoryRuntimeMode(enabled, clean), "DIAGNOSTIC");
+  assert.equal(protectiveHistoryRuntimeMode(enabled, archive), "DIAGNOSTIC");
   for (const [env, stamp] of [
     [{ ...enabled, [marker]: "" }, clean], [{ ...enabled, [marker]: "false" }, clean],
-    [{ [marker]: sha }, clean], [{ ...enabled, RAILWAY_GIT_COMMIT_SHA: "b".repeat(40) }, clean],
+    [{ ...enabled, [marker]: undefined }, clean], [{ ...enabled, [digestMarker]: undefined }, clean],
+    [{ ...enabled, [digestMarker]: digest.slice(0, -1) }, archive], [{ ...enabled, [digestMarker]: "z".repeat(64) }, archive],
+    [{ ...enabled, [digestMarker]: "e".repeat(64) }, clean], [{ ...enabled, [digestMarker]: "e".repeat(64) }, archive],
+    [{ ...enabled, RAILWAY_GIT_COMMIT_SHA: undefined }, archive],
+    [{ ...enabled, RAILWAY_GIT_COMMIT_SHA: "b".repeat(40) }, archive],
     [enabled, null], [enabled, { ...clean, dirty: true }], [enabled, { ...clean, tree: null }],
-    [enabled, { ...clean, provenance: "provider-commit-at-build" }],
+    [enabled, { ...archive, dirty: false }], [enabled, { ...archive, tree: "c".repeat(40) }],
+    [enabled, { ...archive, revision: "b".repeat(40) }], [enabled, { ...archive, sourceSha256: undefined }],
+    [enabled, { ...archive, sourceSha256: "e".repeat(64) }], [enabled, { ...archive, sourceFiles: 0 }],
+    [enabled, { ...archive, digestPolicy: "unknown" }], [enabled, { ...archive, executionAuthority: "present" }],
+    [enabled, { ...archive, version: "unknown" }], [enabled, { ...archive, provenance: "source-digest-only" }],
   ]) assert.equal(protectiveHistoryRuntimeMode(env, stamp), "REFUSE");
 });
 
@@ -143,7 +157,15 @@ test("diagnostic web egress admits only pinned issuer keys and specified scoped 
 
 test("compiled diagnostic switch refuses mutation-capable bundles and does not start observers or external I/O", () => {
   assert.match(provenance.revision ?? "", /^[a-f0-9]{40}$/);
-  assert.equal(provenance.dirty, false);
+  assert.match(provenance.sourceSha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(provenance.executionAuthority, "NONE");
+  if (provenance.provenance === "provider-commit-at-build") {
+    assert.equal(provenance.dirty, null);
+    assert.equal(provenance.tree, null);
+  } else {
+    assert.equal(provenance.provenance, "git-at-build");
+    assert.equal(provenance.dirty, false);
+  }
   const normal = readFileSync(dist("normalApiMain.mjs"), "utf8");
   const diagnostic = readFileSync(dist("protectiveHistoryDiagnosticMain.mjs"), "utf8");
   const boot = readFileSync(dist("index.mjs"), "utf8");
@@ -175,12 +197,19 @@ test("compiled diagnostic switch refuses mutation-capable bundles and does not s
     });
   }
   const sha = provenance.revision;
+  const valid = { [marker]: sha, [digestMarker]: provenance.sourceSha256, RAILWAY_GIT_COMMIT_SHA: sha };
   for (const [entry, env] of [
-    ["index.mjs", { [marker]: "a".repeat(40), RAILWAY_GIT_COMMIT_SHA: sha }],
-    ["index.mjs", { [marker]: sha }],
+    ["index.mjs", { ...valid, [marker]: "a".repeat(40) }],
+    ["index.mjs", { ...valid, RAILWAY_GIT_COMMIT_SHA: undefined }],
+    ["index.mjs", { ...valid, [digestMarker]: undefined }],
+    ["index.mjs", { ...valid, [marker]: undefined }],
+    ["index.mjs", { ...valid, [digestMarker]: "f".repeat(64) }],
     ["protectiveHistoryDiagnosticMain.mjs", {}],
-    ["normalApiMain.mjs", { [marker]: sha, RAILWAY_GIT_COMMIT_SHA: sha }],
-    ["paperWorkerMain.mjs", { [marker]: sha, RAILWAY_GIT_COMMIT_SHA: sha }],
+    ["protectiveHistoryDiagnosticMain.mjs", { ...valid, [digestMarker]: "f".repeat(64) }],
+    ["normalApiMain.mjs", valid],
+    ["normalApiMain.mjs", { [digestMarker]: provenance.sourceSha256 }],
+    ["paperWorkerMain.mjs", valid],
+    ["paperWorkerMain.mjs", { [digestMarker]: provenance.sourceSha256 }],
   ]) {
     const r = bootResult(entry, env);
     assert.equal(r.error, undefined);
@@ -189,9 +218,11 @@ test("compiled diagnostic switch refuses mutation-capable bundles and does not s
     assert.doesNotMatch(r.stdout, /TEST_LISTENER/);
     assert.doesNotMatch(r.stderr, /qualification_worker_timer|qualification_external/);
   }
-  const positive = bootResult("index.mjs", { [marker]: sha, RAILWAY_GIT_COMMIT_SHA: sha });
-  assert.equal(positive.error, undefined);
-  assert.equal(positive.status, 0, positive.stderr);
-  assert.match(positive.stdout, /TEST_LISTENER_REACHED_WITHOUT_NETWORK/);
-  assert.equal(positive.stderr, "");
+  for (const entry of ["index.mjs", "protectiveHistoryDiagnosticMain.mjs"]) {
+    const positive = bootResult(entry, valid);
+    assert.equal(positive.error, undefined);
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.match(positive.stdout, /TEST_LISTENER_REACHED_WITHOUT_NETWORK/);
+    assert.equal(positive.stderr, "");
+  }
 });

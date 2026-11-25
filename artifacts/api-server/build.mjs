@@ -7,7 +7,7 @@ import { rm, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { buildReleaseIdentity } from "../../lib/v13-strategy/build-release.mjs";
 
-import {captureBuildMetadata} from '../../scripts/build-metadata.mjs';
+import {apiBuildSourceCovers,captureApiBuildMetadata} from '../../scripts/build-metadata.mjs';
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
@@ -18,13 +18,10 @@ async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
 
-  const metadata=captureBuildMetadata(path.resolve(artifactDir,'../..'),[
-    'lib','artifacts/api-server/src','artifacts/api-server/build.mjs','artifacts/api-server/package.json',
-    'artifacts/api-server/tsconfig.json','scripts/build-metadata.mjs','package.json','pnpm-lock.yaml',
-    'pnpm-workspace.yaml','tsconfig.base.json','tsconfig.json',
-    'attached_assets/0_kalshi-fee-schedule_1790474920034.pdf',
-  ]);
-  await esbuild({
+  const root=path.resolve(artifactDir,'../..');
+  const metadata=captureApiBuildMetadata(root);
+  const outputs=await esbuild({
+    metafile:true,
     entryPoints: [
       {in:"src/strataApiBootstrap.ts",out:"index"},
       {in:"src/index.ts",out:"normalApiMain"},
@@ -135,6 +132,22 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
     `,
     },
   });
+  // Both diagnostic executables must compile exclusively from hashed local
+  // input roots, or from dependencies tracked by the hashed frozen lock.
+  const diagnosis=new Set(['strataApiBootstrap.ts','protectiveHistoryDiagnosticMain.ts']);
+  const verified=new Set();
+  for(const output of Object.values(outputs.metafile.outputs)){
+    if(!output.entryPoint||!diagnosis.has(path.basename(output.entryPoint))) continue;
+    for(const input of Object.keys(output.inputs)){
+      // esbuild represents these two in-process values as virtual modules.
+      // They are derived above from the exact source and provider metadata.
+      if(input==='<'+'define:__STRATA_BUILD__>'||input==='<'+'define:__BTC_RELEASE__>') continue;
+      if(!apiBuildSourceCovers(path.relative(root,path.resolve(input))))
+        throw Error('protective_history_diagnostic_uncovered_build_input');
+    }
+    verified.add(path.basename(output.entryPoint));
+  }
+  if(verified.size!==diagnosis.size) throw Error('protective_history_diagnostic_build_inputs_unavailable');
   // Freeze the independently corroborated PDF as an immutable distribution
   // asset. Never ship a changed fee schedule under an old authorization.
   const source=path.resolve(artifactDir,"../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf");
