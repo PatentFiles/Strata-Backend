@@ -17,8 +17,10 @@ import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
 import {createGuardedReviewedApiFeeFetch} from "../strata/guardedReviewedApiFeeWire";
 import {annotateFeeFailure} from "../strata/feeFailureDiagnostics";
+import {ownedFeeFailure} from "../strata/ownedFeeFailureDiagnostic";
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "../strata/apiFeeSourceStage";
 import assert from "node:assert/strict";
+import {setTimeout as wait} from "node:timers/promises";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
 import { randomUUID, generateKeyPairSync, createHash, createVerify, constants } from "node:crypto";
@@ -241,6 +243,41 @@ test("independent market crossing reaches the existing isolated executor without
  assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
  assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
  await invariant(f.ledger);
+});
+test("owned fee refusal identifies first direct market read without an intent or reservation",async()=>{
+ const f=await fixture();
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-FEE-REFUSAL";
+ f.exchange.now=open+10000;
+ let btc=99999;
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),
+   yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST",timestampAuthority:"LOCAL_RECEIPT_ONLY",
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ },()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);
+ assert.equal(await f.executor.captureIndependentEntry(),null);
+ f.exchange.now+=1000;btc=100010;
+ const id=await f.executor.captureIndependentEntry();assert.ok(id);
+ const generic=Error("production_event_fee_evidence_unverified");
+ f.exchange.market=async()=>{throw generic};
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===generic);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(generic),undefined);
+ const refusal=ownedFeeFailure("latest_expiration");
+ f.exchange.market=async()=>{throw refusal};
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===refusal);
+ const row=(await pool.query("SELECT crossing_key,evidence_sha256 FROM strata_direct_entry_source WHERE id=$1",[id])).rows[0];
+ const receipt=ProductionExecutor.readFirstMarketFeeRefusal(refusal);
+ assert.deepEqual(receipt,{accountId:"test-account",sourceId:id,crossingKey:row.crossing_key,
+  sourceSha256:row.evidence_sha256,failureStage:"latest_expiration"});
+ assert.equal(Object.isFrozen(receipt),true);
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===refusal);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(refusal),undefined,"one error cannot prove two failed calls");
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM v13_production_intent")).rows[0].n,0);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+ assert.deepEqual(f.exchange.posts,[]);
 });
 async function invariant(l: ProductionLedger) {
   await l.transaction(async (tx, a) => l.assertConservation(tx, a));
@@ -2366,4 +2403,60 @@ test("commissioned cash observation preserves ledger and rejects mismatch, runni
   await pool.query("UPDATE v13_production_account SET execution_enabled=false,kill_switch=true WHERE id='test-account'");
   const matched=await read("100.0000");assert.equal(matched.ok,true,JSON.stringify(matched));
   assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
+});
+
+// Last: swaps out incumbent uniqueness only inside this disposable cluster.
+test("orders-off integrated retry preserves one order fence after a typed first fee refusal",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
+ const migration46=readFileSync("../../lib/db/drizzle/0046_strata_direct_entry_source.sql","utf8");
+ const immutability=migration46.slice(migration46.indexOf("CREATE FUNCTION public.strata_direct_source_immutable"),migration46.indexOf("ALTER TABLE public.v13_production_intent ADD COLUMN"));
+ assert.ok(immutability.includes("CREATE TRIGGER"));
+ await pool.query(immutability);
+ await pool.query(readFileSync("../../docs/strata-retry-rehearsal/retry-candidate.sql","utf8"));
+ await pool.query(readFileSync("../../docs/strata-retry-rehearsal/retry-activate-rehearsal.sql","utf8"));
+ const open=Date.now()-10_000,close=open+900000,ticker="KXBTC15M-ONE-RETRY";
+ let btc=99999;
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),
+    yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+    rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+    yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const source=DirectEntrySource.isolatedRetryRehearsal({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.throws(()=>source.assertExecutorBinding("LIVE",{accountId:"test-account",ownerId:null}),/rehearsal_requires_simulation/);
+ f.executor.bindIndependentSimulationSource(source);
+ const capture=async(price:number)=>{
+  await wait(21);f.exchange.now=Date.now();btc=price;f.exchange.book.observedAtMs=f.exchange.now;
+  f.exchange.book.fee.verifiedAtMs=f.exchange.now;return f.executor.captureIndependentEntry();
+ };
+ assert.equal(await capture(99999),null);
+ const first=await capture(100010);assert.ok(first);
+ const success=f.exchange.market.bind(f.exchange);
+ const refused=ownedFeeFailure("latest_expiration");
+ f.exchange.market=async()=>{throw refused};
+ await assert.rejects(f.executor.prepareEntry(first),error=>error===refused);
+ const receipt=ProductionExecutor.readFirstMarketFeeRefusal(refused);assert.ok(receipt);
+ const persist=async(r:typeof receipt)=>(await pool.query(
+  "SELECT strata_record_first_market_fee_refusal($1,$2,$3,$4) AS recorded",
+  [r.accountId,r.crossingKey,r.sourceId,r.sourceSha256])).rows[0].recorded;
+ assert.equal(await persist(receipt),true);
+ assert.equal(await persist(receipt),false);
+ assert.equal(await source.readExact(pool,first,f.exchange.now),null);
+ const restarted=DirectEntrySource.isolatedRetryRehearsal({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readExact(pool,first,f.exchange.now),null);
+ assert.equal(await capture(99999),null);
+ const second=await capture(100014);assert.ok(second&&second!==first);
+ assert.equal(await capture(99999),null);
+ assert.equal(await capture(100015),null,"a later fresh crossing cannot create a third immutable source");
+ f.exchange.market=success;
+ const prepared=await f.executor.prepareEntry(second);
+ assert.equal(await f.executor.prepareEntry(second),prepared,"same replacement cannot reserve twice");
+ const intents=(await pool.query("SELECT direct_source_id,state FROM v13_production_intent")).rows;
+ assert.deepEqual(intents,[{direct_source_id:second,state:"PREPARED"}]);
+ assert.deepEqual(f.exchange.posts,[]);
 });

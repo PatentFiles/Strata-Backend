@@ -6,6 +6,7 @@ import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entry
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
 import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
+import {getOwnedFeeFailureStage,type OwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import {OwnedFeedTimingCapture} from "../strata/ownedFeedReadTiming";
 import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import {ExecutionSubtimings} from "./executionSubtimings";
@@ -50,8 +51,23 @@ export type ReconcileSchedulingContext = Readonly<{
 }>;
 export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled"} | void;
 
+/** Diagnostic, process-local proof of the exact first market read boundary.
+ * Not a durable receipt, a replacement permission, or an order capability.
+ */
+export type FirstOwnedMarketFeeRefusal = Readonly<{
+  accountId:string;
+  sourceId:string;
+  crossingKey:string;
+  sourceSha256:string;
+  failureStage:OwnedFeeFailureStage;
+}>;
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
+  static readonly #firstMarketFeeRefusals = new WeakMap<object,FirstOwnedMarketFeeRefusal|null>();
+  static readFirstMarketFeeRefusal(error:unknown):FirstOwnedMarketFeeRefusal|undefined{
+    if(error===null||typeof error!=="object")return undefined;
+    return this.#firstMarketFeeRefusals.get(error)??undefined;
+  }
   /** Set by actual production factories until independent source qualification. */
   private independentEntryHold = false;
   #directSource:DirectEntrySource|null=null;
@@ -296,7 +312,23 @@ export class ProductionExecutor {
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),
       btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
     });
-    let book = feedAlreadyExpired ? null : await readBook();
+    let book:MarketEvidence|null;
+    try{book=feedAlreadyExpired?null:await readBook();}
+    catch(error){
+      // Only this await is before transaction acquisition. The later
+      // compatibility read and FINAL/dispatch must never mark this proof.
+      const failureStage=getOwnedFeeFailureStage(error);
+      const sourceSha256=direct&&failureStage?DirectEntrySource.validatedSourceDigest(source):undefined;
+      if(error!==null&&typeof error==="object"&&failureStage&&sourceSha256){
+        const receipts=ProductionExecutor.#firstMarketFeeRefusals;
+        // Reusing an exception across reads is ambiguous, never valid proof.
+        receipts.set(error,receipts.has(error)?null:Object.freeze({
+          accountId:this.ledger.accountId,sourceId:evaluationId,
+          crossingKey:source.crossing_key,sourceSha256,failureStage,
+        }));
+      }
+      throw error;
+    }
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     if(book) diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");
