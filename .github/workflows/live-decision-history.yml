@@ -3,7 +3,8 @@ on:
   pull_request:
     paths:
       - 'artifacts/api-server/src/lib/v13-production/**'
-      - 'artifacts/api-server/src/lib/strata/liveHistoryReadModel*'
+      - 'artifacts/api-server/src/lib/strata/liveHistory*'
+      - 'artifacts/api-server/src/routes/liveHistoryRouter.ts'
       - 'artifacts/api-server/src/routes/strataRouter.ts'
       - 'artifacts/api-server/scripts/run-v13-disposable-postgres.mjs'
       - 'lib/db/drizzle/0050_strata_live_decision_history.sql'

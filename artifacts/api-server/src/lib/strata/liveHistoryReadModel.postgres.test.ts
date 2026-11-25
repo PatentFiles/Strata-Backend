@@ -118,3 +118,52 @@ test("linked exit fills and parent settlement reconcile gross and net without do
  assert.equal(entry.closedTradeTotalFeesMicros,"30000");
  assert.equal((entry.linkedExitEvents as unknown[]).length,1);
 });
+
+import {readLiveHistoryExportBatch} from './liveHistoryExport';
+test('bounded export equals screen financial and decision projections without truncation or tenant leakage',async()=>{
+ const scope={scope:'all',from:new Date(now-60000).toISOString(),to:new Date().toISOString(),limit:'1'};
+ let cursor:string|undefined,rows:any[]=[],pages=0,watermark:string|undefined;
+ do{
+  const page=await readLiveHistoryExportBatch(admin,{...scope,cursor});pages++;
+  assert.equal(page.version,'LIVE_HISTORY_EXPORT_V1');
+  assert.ok(page.rows.length<=1);assert.ok(page.scannedRows<=1);
+  if(watermark)assert.equal(page.watermark,watermark);watermark=page.watermark;
+  rows.push(...page.rows);cursor=page.nextCursor??undefined;
+  assert.ok(pages<30,'bounded progress');
+ }while(cursor);
+ const screen=await readLiveHistory(admin,{...scope,limit:'100'});
+ assert.equal(rows.length,screen.rows.length);assert.equal(new Set(rows.map(r=>r.row_id)).size,rows.length);
+ for(const row of rows)assert.deepEqual(row,screen.rows.find(r=>r.row_id===row.row_id));
+ const own=await readLiveHistoryExportBatch(owner,{from:scope.from,to:scope.to,account:'account-b'});
+ assert.deepEqual(own.rows,[]);
+ await assert.rejects(readLiveHistoryExportBatch(owner,{...scope}),e=>e instanceof LiveHistoryRequestError&&e.status===403);
+ await assert.rejects(readLiveHistoryExportBatch({...owner,role:'ADMIN'},{...scope}),e=>e instanceof LiveHistoryRequestError&&e.status===403);
+});
+test('export supports all dates and binds cursors to owner, filters and immutable recording watermark',async()=>{
+ const raw={scope:'all',from:'1970-01-01T00:00:00.000Z',to:new Date().toISOString(),limit:'1'};
+ const page=await readLiveHistoryExportBatch(admin,raw);assert.ok(page.nextCursor);
+ await assert.rejects(readLiveHistoryExportBatch(admin,{...raw,cursor:page.nextCursor,reason:'changed'}),LiveHistoryRequestError);
+ await assert.rejects(readLiveHistoryExportBatch(owner,{...raw,scope:'own',cursor:page.nextCursor}),LiveHistoryRequestError);
+ await assert.rejects(readLiveHistoryExportBatch(admin,{...raw,cursor:'garbage'}),LiveHistoryRequestError);
+ await assert.rejects(readLiveHistoryExportBatch(admin,{...raw,limit:'1001'}),LiveHistoryRequestError);
+ // A decision arriving later with old observed_at must not enter this export.
+ const late=normalizeLiveDecision({...base,observedAtMs:now-5000,reasonCode:'late_export_fixture'})!;
+ await writeLiveDecisionBatch(pool,[late]);
+ let cursor:string|undefined=page.nextCursor??undefined,found=false,pages=0;
+ while(cursor){const next=await readLiveHistoryExportBatch(admin,{...raw,cursor});found ||= next.rows.some(r=>r.reason_code==='late_export_fixture');cursor=next.nextCursor??undefined;assert.ok(++pages<30);}
+ assert.equal(found,false);
+});
+test('filtered ledger export advances past empty batches and retains exact microsecond ties',async()=>{
+ const at='2026-11-24T00:00:00.123456Z';
+ for(let n=0;n<5;n++){
+  await pool.query(`INSERT INTO public.v13_production_intent(id,account_id,market,side,kind,state,terminal,created_at,filled_hundredths,decision,request,policy_hash)
+   VALUES($1,'account-a','KXBTC15M-FILTER','YES','ENTRY','BLOCKED',true,$2,0,'{}','{}','policy-hash')`,['filter-'+n,at]);
+ }
+ const raw={from:'2026-11-24T00:00:00Z',to:'2026-11-24T00:01:00Z',status:'PASS',limit:'2'};
+ let cursor:string|undefined,pages=0,scanned=0;
+ do{const p=await readLiveHistoryExportBatch(owner,{...raw,cursor});assert.equal(p.rows.length,0);scanned+=p.scannedRows;cursor=p.nextCursor??undefined;assert.ok(++pages<10);}while(cursor);
+ assert.equal(scanned,5);
+ const ids=new Set();cursor=undefined;pages=0;
+ do{const p=await readLiveHistoryExportBatch(owner,{...raw,status:'BLOCKED',cursor});for(const row of p.rows){assert.ok(!ids.has(row.row_id));ids.add(row.row_id);assert.match(row.observed_at,/123456/);}cursor=p.nextCursor??undefined;assert.ok(++pages<10);}while(cursor);
+ assert.equal(ids.size,5);
+});

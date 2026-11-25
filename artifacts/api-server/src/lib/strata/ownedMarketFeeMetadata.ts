@@ -70,10 +70,18 @@ export function verifyOwnedFeeMetadata(input: OwnedFeeMetadataInput): OwnedFeeMe
     return fail();
   const closing=iso(market.close_time);
   if (closing === null || closing <= input.nowMs) return fail();
-  const expires=[market.expiration_time, market.latest_expiration_time,
-    market.expected_expiration_time];
-  const timeline=expires.map(iso);
-  if (timeline.some(t => t===null || (t as number)<closing)) return fail();
+  // Current Kalshi market responses require latest_expiration_time but omit
+  // legacy expiration_time. Optional timestamps are never synthesized. A
+  // supplied malformed value still fails closed; the fee-change exclusion
+  // horizon covers the latest of ALL supplied valid lifecycle timestamps.
+  // Keep the original array order so existing complete-response fingerprints
+  // remain unchanged. Null/absent optional fields have identical semantics.
+  const latest=iso(market.latest_expiration_time);
+  if(latest===null||latest<closing)return fail();
+  const expires=[market.expiration_time??null,market.latest_expiration_time,
+    market.expected_expiration_time??null];
+  const timeline=expires.filter(v=>v!==null).map(iso);
+  if(timeline.some(t=>t===null||(t as number)<closing))return fail();
   const end=Math.max(closing,...timeline as number[]);
   if (!scheduledClear(input.seriesChangesPayload,"series_fee_change_arr",end) ||
       !scheduledClear(input.eventChangesPayload,"event_fee_changes",end)) return fail();

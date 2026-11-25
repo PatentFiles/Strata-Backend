@@ -61,7 +61,7 @@ test("rejects missing lists, timestamps, stale snapshot, and ambiguous market fe
     (p:OwnedFeeMetadataInput)=>{(p.seriesChangesPayload as any).series_fee_change_arr=undefined;},
     (p:OwnedFeeMetadataInput)=>{(p.eventChangesPayload as any).event_fee_changes=undefined;},
     (p:OwnedFeeMetadataInput)=>{(p.marketPayload as any).market.close_time="invalid";},
-    (p:OwnedFeeMetadataInput)=>{(p.marketPayload as any).market.expiration_time=undefined;},
+    (p:OwnedFeeMetadataInput)=>{(p.marketPayload as any).market.latest_expiration_time=undefined;},
     (p:OwnedFeeMetadataInput)=>{p.nowMs=at+15_001;},
     (p:OwnedFeeMetadataInput)=>{p.nowMs=at-1;},
     (p:OwnedFeeMetadataInput)=>{(p.seriesChangesPayload as any).series_fee_change_arr=Array(101).fill({id:"i",scheduled_ts:"2026-10-15T22:00:00Z"});},
@@ -94,4 +94,33 @@ test("event fee changes require an explicit empty cursor; series cursor remains 
   delete (p.eventPayload as any).event.fee_type_override;
   delete (p.eventPayload as any).event.fee_multiplier_override;
  }).ok,true,"absent overrides still mean inheritance");
+});
+
+// Current documented API shape, not an invented legacy expiry timestamp.
+test('accepts current lifecycle fields without legacy expiration; supplied bad fields still refuse',()=>{
+ for(const value of [undefined,null]){
+  assert.equal(verify(p=>{(p.marketPayload as any).market.expiration_time=value;}).ok,true);
+  assert.equal(verify(p=>{const m=(p.marketPayload as any).market;delete m.expiration_time;m.expected_expiration_time=value;}).ok,true);
+ }
+ for(const field of ['expiration_time','expected_expiration_time']){
+  for(const value of ['',42,{},'not-a-date','2026-10-15T21:14:00Z']){
+   assert.equal(verify(p=>{(p.marketPayload as any).market[field]=value;}).ok,false,field+' '+String(value));
+  }
+ }
+ for(const value of [undefined,null,'',42,'invalid','2026-10-15T21:14:00Z']){
+  assert.equal(verify(p=>{(p.marketPayload as any).market.latest_expiration_time=value;}).ok,false);
+ }
+});
+test('current response still excludes scheduled changes through latest expiry, not expected settlement',()=>{
+ const p=fixture(),m=(p.marketPayload as any).market;delete m.expiration_time;
+ m.latest_expiration_time='2026-10-22T21:15:00Z';m.expected_expiration_time='2026-10-15T21:20:00Z';
+ assert.equal(verifyOwnedFeeMetadata(p).ok,true);
+ for(const [key,field] of [['seriesChangesPayload','series_fee_change_arr'],['eventChangesPayload','event_fee_changes']] as const){
+  const q=structuredClone(p);(q[key] as any)[field]=[{id:'scheduled',scheduled_ts:'2026-10-16T00:00:00Z'}];
+  assert.equal(verifyOwnedFeeMetadata(q).ok,false,'must cover latest expiry');
+  (q[key] as any)[field]=[{id:'scheduled',scheduled_ts:m.latest_expiration_time}];assert.equal(verifyOwnedFeeMetadata(q).ok,false);
+  (q[key] as any)[field]=[{id:'scheduled',scheduled_ts:'2026-10-22T21:16:00Z'}];assert.equal(verifyOwnedFeeMetadata(q).ok,true);
+ }
+ const closed=structuredClone(p);closed.nowMs=Date.parse(m.close_time);closed.observedAtMs=closed.nowMs;
+ assert.equal(verifyOwnedFeeMetadata(closed).ok,false);
 });
