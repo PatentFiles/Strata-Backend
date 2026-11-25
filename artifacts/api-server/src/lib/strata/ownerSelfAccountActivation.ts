@@ -1,3 +1,4 @@
+import {terminalDisarmedLease} from './terminalWorkerLease';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 /**
  * Owner-only account activation, distinct from fee-source consent, technical
@@ -289,15 +290,15 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   const lease=await tx.query(`SELECT state,account_kill,arm_requested,fencing_token::text
     FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
     AND owner_user_id=$2::uuid FOR UPDATE`,[raw.accountId,owner]);
-  if(lease.rows.length!==1||lease.rows[0]!.state!=='killed'||
-   lease.rows[0]!.account_kill!==true||lease.rows[0]!.arm_requested!==false)
+  if(lease.rows.length!==1||!terminalDisarmedLease(lease.rows[0]))
    return no('owner_self_killed_lease_state_changed');
   // Move only THIS safely terminated lease to released, not owned or armed.
   const w=await tx.query(`UPDATE private.kalshi_account_worker_lease
     SET state='released',account_kill=false,arm_requested=false,
       fencing_token=fencing_token+1,heartbeat_at=clock_timestamp(),released_at=clock_timestamp()
     WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
-      AND state='killed' AND account_kill=true AND arm_requested=false
+      AND arm_requested=false
+      AND ((state='killed' AND account_kill=true) OR (state='released' AND account_kill=false))
       AND fencing_token=$3::bigint RETURNING fencing_token::text`,
     [raw.accountId,owner,lease.rows[0]!.fencing_token]);
   if(w.rows.length!==1)return no('owner_self_killed_lease_fence_conflict');

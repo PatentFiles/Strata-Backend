@@ -21,3 +21,13 @@ test('exact-build outcome identifies the actual immutable uploaded baseline, not
  const result=await durableFeeReauthorizationOutcome(owner,id,body.expectedSha,{query:async()=>({rows:[{authorization_id:id,owner_user_id:owner,execution_account_id:body.accountId,model_id:body.modelId,original_release_sha:body.originalSha,release_commit_sha:body.expectedSha,policy_hash:body.policyHash,source_digest:body.sourceDigest,confirmation:body.confirmation,risk_acceptance:body.riskAcceptance,historical_baseline_id:baseline,state:'RECORDED'}]})});
  assert.equal(result.outcome,'RECORDED');if(result.outcome==='RECORDED'){assert.equal(result.baselineId,baseline);assert.equal(result.sourceAuthenticityVerified,false);assert.equal(result.tradingAuthorized,false);}
 });
+
+import {terminalDisarmedLease} from './terminalWorkerLease';
+test('only internally consistent terminal disarmed leases permit fee renewal',()=>{
+ for(const state of ['killed','released','owned','expired','disarmed','unknown',null]){
+  for(const account_kill of [true,false,null])for(const arm_requested of [true,false,null]){
+   assert.equal(terminalDisarmedLease({state,account_kill,arm_requested}),arm_requested===false&&((state==='killed'&&account_kill===true)||(state==='released'&&account_kill===false)));
+  }
+ }
+ assert.equal(terminalDisarmedLease(null),false);assert.equal(terminalDisarmedLease(undefined),false);
+});
