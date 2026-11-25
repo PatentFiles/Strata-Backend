@@ -1,4 +1,4 @@
-import {markBlockedProtectiveRecoveryLiveness} from "./protectiveRecoveryLiveness";
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -658,16 +658,13 @@ export function createProductionPersonalSession(
         if(!recovery.ok){
           if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
-          technicalRelease.beginReconciliation();
-          const recoveryLiveness=await markBlockedProtectiveRecoveryLiveness(db,{
-            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_HEARTBEAT_ENABLED==="true",
-            sameFencedSession:()=>!state.accountKill&&!state.globalKill&&
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
               state.presentedToken===claimed.fencingToken,
-            recovery,ownerId:input.userId,accountId:input.accountId,holderId,
-            fencingToken:claimed.fencingToken,fingerprint,observedAt:new Date(now()).toISOString(),
+            recovery,
           });
-          if(recoveryLiveness==="STALE_FENCE")throw new Error("stale_worker_fence");
-          if(recoveryLiveness==="RECOVERY_ONLY")reportProtectiveDiagnostic("restart","recovery_only_entries_blocked");
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
           // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
