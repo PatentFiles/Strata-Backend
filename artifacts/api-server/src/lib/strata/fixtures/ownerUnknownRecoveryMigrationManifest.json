@@ -66,5 +66,6 @@
   "lib/db/drizzle/0046_strata_direct_entry_source.sql",
   "lib/db/drizzle/0047_owner_technical_setup_approval.sql",
   "lib/db/drizzle/0048_strata_one_kalshi_connection_per_owner.sql",
-  "lib/db/drizzle/0049_strata_platform_official_fee_capture.sql"
+  "lib/db/drizzle/0049_strata_platform_official_fee_capture.sql",
+  "lib/db/drizzle/0050_strata_live_decision_history.sql"
 ]
