@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
-import {readOwnedKalshiFeeds} from "./personalExchangeRead";
+import {getOwnedProductionKalshiJson,readOwnedKalshiFeeds} from "./personalExchangeRead";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 
@@ -20,7 +20,66 @@ type DB={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const COUNT=/^\d{1,9}\.\d{2}$/;
 const SIGNED=/^-?\d{1,9}\.\d{2}$/;
-function fail(reason:string):never {throw Error(reason);}
+const readRefusalStages=[
+ "exit_recovery_baseline_not_unique",
+ "exit_recovery_baseline_stale",
+ "exit_recovery_concurrent_fill_unattributable",
+ "exit_recovery_concurrent_order_unattributable",
+ "exit_recovery_count_invalid",
+ "exit_recovery_duplicate_fill_id",
+ "exit_recovery_exchange_history_incomplete",
+ "exit_recovery_exchange_history_unavailable",
+ "exit_recovery_exchange_snapshot_stale",
+ "exit_recovery_fill_receipt_disagreement",
+ "exit_recovery_fill_scope_unproven",
+ "exit_recovery_fill_time_unproven",
+ "exit_recovery_matched_fill_market_mismatch",
+ "exit_recovery_order_digest_mismatch",
+ "exit_recovery_order_mismatch",
+ "exit_recovery_order_not_unique",
+ "exit_recovery_order_scope_unproven",
+ "exit_recovery_order_time_unproven",
+ "exit_recovery_original_position_invalid",
+ "exit_recovery_position_invalid",
+ "exit_recovery_position_not_attributable",
+ "exit_recovery_position_not_unique",
+ "exit_recovery_receipt_or_owner_invalid",
+ "exit_recovery_requested_count_mismatch",
+ "exit_recovery_row_invalid",
+ "exit_recovery_signer_invalid",
+ "exit_recovery_terminal_quantity_mismatch",
+ "exit_recovery_text_invalid",
+ "exit_recovery_zero_quantity_fill",
+ "signed_history_malformed_or_incomplete",
+ "signed_history_scope_mismatch",
+ "signed_history_rate_limited",
+ "signed_history_auth_or_permission",
+ "signed_history_network_or_provider",
+] as const;
+export type ProtectiveHistoryDiagnosticStage=typeof readRefusalStages[number];
+const readDiagnostics = new WeakMap<object,ProtectiveHistoryDiagnosticStage>();
+export function protectiveHistoryReadDiagnostic(error:unknown):ProtectiveHistoryDiagnosticStage|undefined{
+ return error!==null&&typeof error==="object"?readDiagnostics.get(error):undefined;
+}
+function fail(reason:ProtectiveHistoryDiagnosticStage,diagnostic=reason):never {
+ const error=Error(reason);
+ readDiagnostics.set(error,diagnostic);
+ throw error;
+}
+function signedHistoryStage(reason:string):ProtectiveHistoryDiagnosticStage{
+ switch(reason){
+ case "personal_exchange_history_unreconciled":return "signed_history_malformed_or_incomplete";
+ case "account_target_pair_mismatch":return "signed_history_scope_mismatch";
+ case "kalshi_read_rate_limited":return "signed_history_rate_limited";
+ case "kalshi_read_signer_not_configured":
+ case "kalshi_read_signer_invalid":
+ case "kalshi_read_authentication_rejected":
+ case "kalshi_read_permission_denied":return "signed_history_auth_or_permission";
+ case "kalshi_read_network_unavailable":
+ case "kalshi_read_provider_unavailable":return "signed_history_network_or_provider";
+ default:return "exit_recovery_exchange_history_unavailable";
+ }
+}
 function object(x:unknown):Record<string,unknown>{
  if(!x||typeof x!=="object"||Array.isArray(x))return fail("exit_recovery_row_invalid");
  return x as Record<string,unknown>;
@@ -76,9 +135,40 @@ export function authenticatedProtectiveRecoveryFresh(
   return true;
  }catch{proof.invalid=true;return false;}
 }
-export async function readAuthenticatedProtectiveExitOutcome(
+type Diagnostic={
+ order:"EXACT_TERMINAL"|"NOT_FOUND"|"AMBIGUOUS_OR_UNVERIFIED";
+ settlement:"MATCHES_DELTA"|"PRESENT_UNVERIFIED"|"NOT_FOUND"|"UNVERIFIED";
+ exposure:"FLAT_ECHO"|"UNVERIFIED";
+ readOnly:true; accountingPosted:false; tradingAuthorized:false;
+};
+type DiagnosticSink=(value:Diagnostic)=>void;
+const diagnostic=(order:Diagnostic["order"]="AMBIGUOUS_OR_UNVERIFIED",settlement:Diagnostic["settlement"]="UNVERIFIED",exposure:Diagnostic["exposure"]="UNVERIFIED"):Diagnostic=>
+ ({order,settlement,exposure,readOnly:true,accountingPosted:false,tradingAuthorized:false});
+/** Server-only. Input and pin must be resolved by authenticated owner service, never JSON.
+ * Pin compares exact stopped account/lease, credential, build and UNKNOWN reservation/parent.
+ * Do not expose this until that request boundary is wired and reviewed. */
+export async function inspectAuthenticatedProtectiveExitHistory(input:Input,
+ pin:()=>Promise<string|null>, deps:ReadDeps={}):Promise<Diagnostic>{
+ try{
+  if(Object.keys(deps).length&&(process.env.NODE_ENV!=="test"||process.env.RAILWAY_ENVIRONMENT_ID||process.env.RAILWAY_SERVICE_ID))return diagnostic();
+  input={...input,material:Object.freeze({...input.material}),order:Object.freeze(structuredClone(input.order))};
+  const wall=deps.now??Date.now,mono=deps.monotonicNow??(()=>performance.now()),at=wall(),mt=mono();
+  const first=await pin();if(!first||!/^[a-f0-9]{64}$/.test(first))return diagnostic();
+  let observed:Diagnostic|null=null;
+  try{await readOutcome(input,null,deps,v=>{observed=v});}catch{/* intentionally redacted */}
+  if(!observed||await pin()!==first)return diagnostic();
+  const elapsed=Math.max(wall()-at,mono()-mt);
+  if(!Number.isSafeInteger(at)||!Number.isFinite(elapsed)||wall()<at||mono()<mt||elapsed>3000)return diagnostic();
+  return observed;
+ }catch{return diagnostic();}
+}
+type ReadDeps={db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;now?:()=>number;monotonicNow?:()=>number};
+export async function readAuthenticatedProtectiveExitOutcome(input:Input,receipt:Receipt,deps:ReadDeps={}):Promise<IocRecoveryObservation>{
+ return readOutcome(input,receipt,deps);
+}
+async function readOutcome(
  input:Input,receipt:Receipt,
- deps:{db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;now?:()=>number;monotonicNow?:()=>number}={},
+ deps:ReadDeps,diagnosticSink?:DiagnosticSink,
 ):Promise<IocRecoveryObservation>{
  // Capture scope and serialized request values before any await. A caller's
  // later mutation cannot change which signed baseline the deadline belongs to.
@@ -127,8 +217,16 @@ export async function readAuthenticatedProtectiveExitOutcome(
     (initialUnits>0n&&input.order.side!=="ask")||
     (initialUnits<0n&&input.order.side!=="bid"))
   return fail("exit_recovery_original_position_invalid");
- const feed=await (deps.readFeeds??readOwnedKalshiFeeds)(input.material,now);
- if(!feed.ok)return fail("exit_recovery_exchange_history_unavailable");
+ const signal=diagnosticSink&&!deps.readFeeds?AbortSignal.timeout(3000):undefined;
+ const feed=signal
+  ?await readOwnedKalshiFeeds(input.material,now,(...args)=>{
+   signal.throwIfAborted();
+   args[5]=input.ownerId;
+   args[6]=args[6]?AbortSignal.any([args[6],signal]):signal;
+   return getOwnedProductionKalshiJson(...args);
+  })
+  :await (deps.readFeeds??readOwnedKalshiFeeds)(input.material,now);
+ if(!feed.ok)return fail("exit_recovery_exchange_history_unavailable",signedHistoryStage(feed.reason));
  if(feed.historicalCoverageComplete!==true)return fail("exit_recovery_exchange_history_incomplete");
  // Keep the original observation time; completing a slow signed scan must not
  // renew its three-second lifetime. Monotonic elapsed also bounds wall-clock
@@ -139,10 +237,19 @@ export async function readAuthenticatedProtectiveExitOutcome(
     Math.max(completedAt-feed.observedAtMs,now-feed.observedAtMs+elapsed)>3000)
   return fail("exit_recovery_exchange_snapshot_stale");
  const matchingPositions=feed.positions.map(object).filter(x=>x.ticker===input.order.ticker);
- if(matchingPositions.length!==1)return fail("exit_recovery_position_not_unique");
- const observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);
+ if(!diagnosticSink&&matchingPositions.length!==1)return fail("exit_recovery_position_not_unique");
+ let observed:bigint|null=null;
+ if(matchingPositions.length===1){
+  if(!diagnosticSink)observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);
+  else try{observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);}catch{/* order presence is independent of the position echo */}
+ }
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
- if(orders.length!==1)return fail("exit_recovery_order_not_unique");
+ if(orders.length!==1){
+  if(orders.length===0&&diagnosticSink)diagnosticSink(diagnostic("NOT_FOUND",
+   feed.settlements.some(x=>object(x).ticker===input.order.ticker)?"PRESENT_UNVERIFIED":"NOT_FOUND",
+   observed===0n?"FLAT_ECHO":"UNVERIFIED"));
+  return fail("exit_recovery_order_not_unique");
+ }
  const order=orders[0]!;
  // Order history must explicitly echo the requested account scope. Filter
  // parameters alone are not sufficient evidence for a financial state change.
@@ -221,7 +328,29 @@ export async function readAuthenticatedProtectiveExitOutcome(
     (receipt!==null&&total!==count(receipt.fill_count)))
   return fail("exit_recovery_fill_receipt_disagreement");
  const expected=initialUnits>0n?initialUnits-total:initialUnits+total;
- if(expected!==observed)return fail("exit_recovery_position_not_attributable");
+ if(diagnosticSink){
+  const xs=feed.settlements.map(object).filter(x=>x.ticker===input.order.ticker);
+  let settlement:Diagnostic["settlement"]=xs.length?"PRESENT_UNVERIFIED":"NOT_FOUND";
+  const x=xs[0];
+  if(xs.length===1&&x&&observed===0n&&expected!==0n){
+   const gotAt=Date.parse(String(x.settled_time??"")), side=expected>0n?"yes":"no";
+   const residual=expected>0n?expected:-expected;
+   const matches=x.market_result==="yes"||x.market_result==="no";
+   if(matches&&(x.subaccount_number??x.subaccount)===1&&x.exchange_index===2&&
+      (x.subaccount===undefined||x.subaccount===1)&&
+      Number.isSafeInteger(gotAt)&&gotAt>=orderCreatedAt&&gotAt<=feed.observedAtMs&&
+      typeof x.yes_count_fp==="string"&&typeof x.no_count_fp==="string"&&
+      /^\d{1,9}\.\d{2}$/.test(x.yes_count_fp)&&/^\d{1,9}\.\d{2}$/.test(x.no_count_fp)&&
+      count(x.yes_count_fp)===(side==="yes"?residual:0n)&&count(x.no_count_fp)===(side==="no"?residual:0n)&&
+      typeof x.revenue==="number"&&Number.isSafeInteger(x.revenue)&&x.revenue>=0&&
+      BigInt(x.revenue)===(x.market_result===side?residual:0n))
+    settlement="MATCHES_DELTA";
+  }
+  diagnosticSink(diagnostic("EXACT_TERMINAL",settlement,observed===0n?"FLAT_ECHO":"UNVERIFIED"));
+  // Diagnostic is structurally unable to mint a branded financial observation.
+  return fail("exit_recovery_position_not_attributable");
+ }
+ if(observed===null||expected!==observed)return fail("exit_recovery_position_not_attributable");
  const observation:IocRecoveryObservation={
   clientOrderId:text(input.order.client_order_id),
   requestedCountFp:text(input.order.count),
