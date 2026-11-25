@@ -8,7 +8,7 @@ export class LiveHistoryRequestError extends Error {
 }
 type Actor={subject:string;role:string|null};
 type Query={scope:"own"|"all";account:string|null;from:string;to:string;status:string|null;direction:string|null;market:string|null;strategy:string|null;reason:string|null;beforeAt:string|null;beforeId:string|null;limit:number};
-const invalid=()=>{throw new LiveHistoryRequestError(400,"invalid_live_history_filters");};
+function invalid():never{throw new LiveHistoryRequestError(400,"invalid_live_history_filters");}
 export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now=Date.now()):Query {
  if(!UUID.test(actor.subject))throw new LiveHistoryRequestError(403,"live_history_owner_required");
  const keys=["scope","account","from","to","status","direction","market","strategy","reason","cursor","limit"];
@@ -22,7 +22,9 @@ export function parseLiveHistoryQuery(raw:Record<string,unknown>,actor:Actor,now
  const scope=get("scope")??"own";
  if(scope!=="own"&&scope!=="all")invalid();
  if(scope==="all"&&actor.role!=="ADMIN")throw new LiveHistoryRequestError(403,"administrator_scope_required");
- const to=get("to")??new Date(now).toISOString(),from=get("from")??new Date(Date.parse(to)-30*DAY).toISOString();
+ const to=get("to")??new Date(now).toISOString();
+ if(!Number.isFinite(Date.parse(to)))invalid();
+ const from=get("from")??new Date(Date.parse(to)-30*DAY).toISOString();
  const start=Date.parse(from),end=Date.parse(to);
  if(!Number.isFinite(start)||!Number.isFinite(end)||end<start||end-start>90*DAY||end>now+60000)invalid();
  const status=get("status"),direction=get("direction"),account=get("account");
@@ -164,7 +166,7 @@ WITH accounts AS MATERIALIZED (
  SELECT row_id,observed_at::text AS observed_at,account_id,account_name,market,direction,signal,status,reason_code,reason_detail,
   strategy_version,record_type,submitted_orders,fill_count::text,net_pnl::text AS net_pnl_micros,fees::text AS fee_micros,details
  FROM filtered WHERE ($11::timestamptz IS NULL OR (observed_at,row_id)<($11::timestamptz,$12::text))
- ORDER BY observed_at DESC,row_id DESC LIMIT $13
+ ORDER BY filtered.observed_at DESC,row_id DESC LIMIT $13
 ), reasons AS (
  SELECT reason_code,count(*) AS count FROM filtered WHERE reason_code IS NOT NULL AND status IN ('PASS','BLOCKED','ERROR')
  GROUP BY reason_code ORDER BY count DESC,reason_code LIMIT 10
