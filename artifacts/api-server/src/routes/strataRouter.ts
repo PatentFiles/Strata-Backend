@@ -7,7 +7,7 @@ import { entryPolicyRuntimeState } from "../lib/strata/configuredStake";
 import { deployedGitSha } from "../lib/strata/deployedGitSha";
 import { REVIEWED_RELEASE } from "../lib/strata/reviewedRelease";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
-import {readLiveHistory,LiveHistoryRequestError} from "../lib/strata/liveHistoryReadModel";
+import { createLiveHistoryRouter } from "./liveHistoryRouter";
 import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabaseAuth";
 import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
@@ -172,16 +172,7 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   router.use(createProductionRouter(deps, access.requireDeveloper));
   // All-account financial analytics is ADMIN-only; an authenticated standard
   // customer can read only their own execution records. No provider calls.
-  router.get("/live-history", access.requireUser, async (req,res)=>{
-    res.setHeader("Cache-Control","private, no-store");
-    const actor=res.locals.strata as {subject:string;role:string|null}|undefined;
-    if(!actor){res.status(401).json({error:"Unauthorized"});return;}
-    try{res.json(await readLiveHistory(actor,req.query));}
-    catch(e){
-      if(e instanceof LiveHistoryRequestError){res.status(e.status).json({error:e.message});return;}
-      res.status(503).json({error:"live_history_unavailable"});
-    }
-  });
+  router.use(createLiveHistoryRouter(access.requireUser));
   const userScope = deps.userScope ?? closedUserScopePort();
   router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
