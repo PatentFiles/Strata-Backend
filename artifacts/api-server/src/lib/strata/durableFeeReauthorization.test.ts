@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validDurableReauthorizationBody,DURABLE_REAUTH_CONFIRM,durableFeeReauthorizationOutcome} from './durableFeeReauthorization';
+import {validDurableReauthorizationBody,DURABLE_REAUTH_CONFIRM,durableFeeReauthorizationOutcome,durableReauthorizationAdmissionReason} from './durableFeeReauthorization';
 import {HISTORICAL_RISK_ACCEPTANCE} from './historicalOwnerFeeBaseline';
 const owner='11111111-1111-4111-8111-111111111111',id='22222222-2222-4222-8222-222222222222';
 const body={authorizationId:id,accountId:'account',modelId:id,originalSha:'a'.repeat(40),expectedSha:'b'.repeat(40),policyHash:'c'.repeat(64),sourceDigest:'d'.repeat(64),confirmation:DURABLE_REAUTH_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE};
@@ -30,4 +30,15 @@ test('only internally consistent terminal disarmed leases permit fee renewal',()
   }
  }
  assert.equal(terminalDisarmedLease(null),false);assert.equal(terminalDisarmedLease(undefined),false);
+});
+
+test('fee preview diagnoses deployment admission and never permits an unqualified public release',()=>{
+ const sha='a'.repeat(40),env={NODE_ENV:'production',STRATA_PUBLIC_SELF_SERVICE_ENABLED:'true',RAILWAY_GIT_COMMIT_SHA:sha,STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:sha};
+ assert.equal(durableReauthorizationAdmissionReason(owner,sha,true,env),null);
+ assert.equal(durableReauthorizationAdmissionReason(owner,sha,true,{...env,STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:'b'.repeat(40)}),'durable_reauthorization_platform_release_unqualified');
+ assert.equal(durableReauthorizationAdmissionReason(owner,sha,true,{...env,STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA:undefined}),'durable_reauthorization_platform_release_unqualified');
+ assert.equal(durableReauthorizationAdmissionReason(owner,sha,true,{...env,RAILWAY_GIT_COMMIT_SHA:'b'.repeat(40)}),'durable_reauthorization_platform_release_unqualified');
+ assert.equal(durableReauthorizationAdmissionReason(owner,sha,false,env),'durable_reauthorization_fee_path_disabled');
+ assert.equal(durableReauthorizationAdmissionReason(owner,'unknown',true,env),'durable_reauthorization_deployed_build_unavailable');
+ assert.equal(durableReauthorizationAdmissionReason('invalid',sha,true,env),'durable_reauthorization_owner_unverified');
 });
