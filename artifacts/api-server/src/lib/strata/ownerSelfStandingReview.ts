@@ -28,7 +28,9 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
    AND a.commissioned=true AND a.blocked_reason IS NULL AND p.state='APPROVED'
    AND w.arm_requested=false
    AND (
-    (w.state='released' AND w.account_kill=false AND a.kill_switch=false)
+    (w.state='released' AND w.account_kill=false AND
+      ((a.kill_switch=false AND a.execution_enabled=true) OR
+       (a.kill_switch=true AND a.execution_enabled=false)))
     OR
     (w.state='killed' AND w.account_kill=true AND a.kill_switch=true AND a.execution_enabled=false)
    )

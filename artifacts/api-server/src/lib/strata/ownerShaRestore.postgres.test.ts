@@ -22,7 +22,7 @@ const reset=async()=>{await db.query(`DELETE FROM private.strata_continuous_exec
  UPDATE private.strata_owner_sha_approvals SET revoked_at=NULL;
  UPDATE private.strata_standing_execution_reviews SET revoked_at=NULL;
  UPDATE private.strata_continuous_execution_grants SET revoked_at=NULL;
- UPDATE private.kalshi_account_worker_lease SET state='released',arm_requested=false;
+ UPDATE private.kalshi_account_worker_lease SET state='released',account_kill=false,arm_requested=false,fencing_token=7,heartbeat_at=now(),released_at=now();
  UPDATE public.live_execution_config SET live_execution_enabled=true,manual_kill_switch=false;
  DELETE FROM public.v13_production_position;DELETE FROM public.v13_production_intent;
  DELETE FROM private.strata_emergency_exit_reservations;
@@ -38,7 +38,7 @@ test('real disposable PostgreSQL owner restore preserves exact authority and clo
  fee_source_url text,fee_policy_version text,fee_formula_version text,approved_at timestamptz,max_entry_stake_cents int,max_entry_all_in_cents int);
  CREATE TABLE public.strata_configured_stake(execution_account_id text,configured_stake_cents int);
  CREATE TABLE public.live_execution_config(id text,mode text,live_execution_enabled boolean,manual_kill_switch boolean);
- CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,state text,arm_requested boolean,credential_fingerprint text);
+ CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,state text,arm_requested boolean,credential_fingerprint text,account_kill boolean NOT NULL,fencing_token bigint NOT NULL,heartbeat_at timestamptz,released_at timestamptz);
  CREATE TABLE private.kalshi_connection_credentials(owner_user_id uuid,financial_account_id text,role text,revoked_at timestamptz,
  verified_at timestamptz,verification_reason text,key_fingerprint text,vault_secret_id text);
  CREATE TABLE vault.decrypted_secrets(id text,decrypted_secret text);
@@ -55,7 +55,7 @@ test('real disposable PostgreSQL owner restore preserves exact authority and clo
  INSERT INTO public.v13_live_money_policy VALUES('p','a','${owner}','APPROVED','${hash}',NULL,NULL,NULL,now(),2500,2500);
  INSERT INTO public.strata_configured_stake VALUES('a',500);
  INSERT INTO public.live_execution_config VALUES('singleton','V13_PRODUCTION',true,false);
- INSERT INTO private.kalshi_account_worker_lease VALUES('a','${owner}','released',false,'${fingerprint}');
+ INSERT INTO private.kalshi_account_worker_lease VALUES('a','${owner}','released',false,'${fingerprint}',false,7,now(),now());
  INSERT INTO private.kalshi_connection_credentials VALUES('${owner}','connection','restricted_execution',NULL,now(),'credential_verified','${fingerprint}','secret');
  INSERT INTO vault.decrypted_secrets VALUES('secret','{"api_key_id":"offline-only","private_key":"offline-only"}');
  INSERT INTO private.strata_owner_sha_approvals VALUES('${approval}','${owner}','a','${sha}',NULL);
@@ -88,6 +88,24 @@ test('real disposable PostgreSQL owner restore preserves exact authority and clo
   assert.deepEqual((await db.query('SELECT execution_enabled,kill_switch FROM public.v13_production_account')).rows,[{execution_enabled:false,kill_switch:true}]);
   assert.equal(await checkContinuousBootstrap(db,owner,sha),false);
   assert.equal((await db.query('SELECT count(*)::int n FROM private.strata_owner_sha_approvals')).rows[0].n,1);
+ });
+ await t.test('terminal killed lease restores atomically with a new fence, existing consent and no worker',async()=>{
+  await reset();await db.query("UPDATE private.kalshi_account_worker_lease SET state='killed',account_kill=true");
+  const result=await restore();assert.equal(result.ok,true,JSON.stringify(result));
+  assert.deepEqual((await db.query('SELECT state,account_kill,arm_requested,fencing_token FROM private.kalshi_account_worker_lease')).rows,[{state:'released',account_kill:false,arm_requested:false,fencing_token:'8'}]);
+  assert.equal((await db.query('SELECT count(*)::int n FROM private.strata_owner_sha_approvals')).rows[0].n,1);
+  assert.equal(await checkContinuousBootstrap(db,owner,sha),true);
+ });
+ for(const [label,change] of [
+  ['revoked grant',"UPDATE private.strata_continuous_execution_grants SET revoked_at=now()"],
+  ['global KILL',"UPDATE public.live_execution_config SET live_execution_enabled=false,manual_kill_switch=true"],
+  ['contradictory flag',"UPDATE private.kalshi_account_worker_lease SET account_kill=false"],
+  ['armed lease',"UPDATE private.kalshi_account_worker_lease SET arm_requested=true"]
+ ] as const)await t.test('terminal killed restore rejects '+label,async()=>{
+  await reset();await db.query("UPDATE private.kalshi_account_worker_lease SET state='killed',account_kill=true");await db.query(change);
+  assert.equal((await restore()).ok,false);
+  assert.deepEqual((await db.query('SELECT execution_enabled,kill_switch FROM public.v13_production_account')).rows,[{execution_enabled:false,kill_switch:true}]);
+  assert.equal((await db.query('SELECT fencing_token FROM private.kalshi_account_worker_lease')).rows[0].fencing_token,'7');
  });
  await t.test('revoked grant remains revoked after readiness restore; START still blocked',async()=>{
   await reset();await db.query('UPDATE private.strata_continuous_execution_grants SET revoked_at=now()');

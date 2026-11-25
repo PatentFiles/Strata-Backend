@@ -1,3 +1,4 @@
+import {terminalDisarmedLease} from './terminalWorkerLease';
 import {platformFeeUploadEnabled,isUploadedBaselineId} from './platformFeeUploadMode';
 import {activeUploadedBaselineMatches} from './platformUploadedFeeSchedule';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
@@ -54,7 +55,8 @@ async function scopeRow(db:Q,owner:string,account:string,lock=false){
  if(uploaded?(!platformFeeUploadEnabled()||!await activeUploadedBaselineMatches(db,m.historical_baseline_id,m.official_source_digest)):
  (!historicalBaselineEnabled()||m.historical_baseline_id!==HISTORICAL_BASELINE_ID||m.official_source_digest!==HISTORICAL_BASELINE_SHA256))return null;
  const lease=await db.query(`SELECT state,account_kill,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND owner_user_id=$2::uuid ${lock?'FOR UPDATE':''}`,[account,owner]);
- if(lease.rows.length!==1||lease.rows[0].state!=='killed'||lease.rows[0].account_kill!==true||lease.rows[0].arm_requested!==false)return null;
+ // Recovery intentionally leaves a released lease under a killed account.
+ if(lease.rows.length!==1||!terminalDisarmedLease(lease.rows[0]))return null;
  const conflict=await db.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[account,m.official_source_digest]);if(conflict.rows.length)return null;
  return {m,p};
 }

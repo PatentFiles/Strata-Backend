@@ -85,13 +85,14 @@ const MIGRATION_SQL = `
 
 const ACCOUNT_SQL = `
   SELECT a.id, a.owner_user_id, a.kalshi_connection_id, a.subaccount, a.exchange_index,
-         a.commissioned, a.execution_enabled, a.kill_switch,
+         a.commissioned, a.execution_enabled, a.kill_switch, a.blocked_reason,
          a.cash_micros::text AS cash_micros, a.reserved_micros::text AS reserved_micros,
          a.minimum_exit_micros, a.reconciled_at,
          p.state AS policy_state, p.version AS policy_version, p.max_entry_stake_cents,
          s.configured_stake_cents, s.revision AS stake_revision,
          s.risk_preset_id, s.risk_preset_revision, s.risk_capital_cents,
-         wl.state AS worker_lease_state, wl.arm_requested AS worker_arm_requested
+         wl.state AS worker_lease_state, wl.arm_requested AS worker_arm_requested,
+         wl.account_kill AS worker_account_kill
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p ON p.id = a.policy_id
   LEFT JOIN strata_configured_stake s ON s.execution_account_id = a.id
@@ -273,6 +274,9 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
     exchangeIndex: integer(row.exchange_index) ?? BOT_EXCHANGE_INDEX,
     commissioned: flag(row.commissioned),
     executionEnabled: flag(row.execution_enabled),
+    financialHoldReason:row.blocked_reason===null?null:
+      typeof row.blocked_reason==="string"&&/^[a-z][a-z0-9_]{0,127}$/.test(row.blocked_reason)?row.blocked_reason:"account_hold_status_unavailable",
+    workerAccountKill:row.worker_account_kill===null||row.worker_account_kill===undefined?null:flag(row.worker_account_kill),
     workerArmRequested: row.worker_arm_requested===null||row.worker_arm_requested===undefined
       ?null:flag(row.worker_arm_requested),
     workerLeaseState: text(row.worker_lease_state),
@@ -331,6 +335,9 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
       account.killSwitch===false,
     workerArmRequested:account.workerArmRequested??null,
     workerLeaseState:account.workerLeaseState??null,
+    executionEnabled:account.executionEnabled,
+    financialHoldReason:account.financialHoldReason,
+    workerAccountKill:account.workerAccountKill??null,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
     reconciledAt: account.reconciledAt,

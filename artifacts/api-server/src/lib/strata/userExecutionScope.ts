@@ -10,6 +10,9 @@ export interface ScopedAccount {
   exchangeIndex: number;
   commissioned: boolean;
   executionEnabled: boolean;
+  /** Account hold and worker fencing are not the same as execution eligibility. */
+  financialHoldReason?: string | null;
+  workerAccountKill?: boolean | null;
   workerArmRequested?: boolean | null;
   workerLeaseState?: string | null;
   killSwitch: boolean;
@@ -64,6 +67,9 @@ export interface UserExecutionView {
   armed: boolean;
   workerArmRequested?: boolean | null;
   workerLeaseState?: string | null;
+  executionEnabled?: boolean | null;
+  financialHoldReason?: string | null;
+  workerAccountKill?: boolean | null;
   /** Null only when the current release authority was verified; omitted when not checked. */
   startupReleaseBlockReason?: string | null;
   killSwitch: boolean | null;
@@ -201,6 +207,9 @@ export function viewForCaller(callerUserId: string, account: ScopedAccount | nul
        account.killSwitch===false,
     workerArmRequested:account.workerArmRequested??null,
     workerLeaseState:account.workerLeaseState??null,
+    executionEnabled:account.executionEnabled,
+    financialHoldReason:account.financialHoldReason,
+    workerAccountKill:account.workerAccountKill??null,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
     reconciledAt: account.reconciledAt,
