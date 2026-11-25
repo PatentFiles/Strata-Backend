@@ -116,7 +116,7 @@ export function isDurableProtectiveExitNoSend(value:unknown,scope:{ownerId:strin
  const proof=value!==null&&typeof value==="object"?durableLocalNoSend.get(value):undefined;
  return !!proof&&proof.ownerId===scope.ownerId&&proof.accountId===scope.accountId&&proof.reservationId===scope.reservationId;
 }
-type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"}>;
+type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"|"final_fence_no_exact_row_before_commit"}>;
 const neverSentProofs=new WeakMap<object,NeverSentProof>();
 /** Only explicit control-flow branches before raw POST mint this one-use proof.
  * Nothing from a caller/provider response, error string or database row can mint it. */
@@ -191,7 +191,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
 async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
- Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
+ Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;noExactRowBeforeCommit?:true}>{
  let c:DBClient|null=null,committed=false,eligible=false;
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
@@ -293,6 +293,10 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
     input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed]);
+  // This invocation has the acknowledged one-use UNKNOWN marker, but the
+  // locked final query explicitly found no eligible row. This branch is before
+  // any fence COMMIT or network call; throws/mismatches do not share its proof.
+  if(rows.rows.length===0)return {attempted:false,receipt:null,noExactRowBeforeCommit:true};
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return {attempted:false,receipt:null};
   const row=rows.rows[0]!;
@@ -448,6 +452,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
       verify:(ownerDurable?verifyDurableProtectiveAuthority:ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
       providerFresh:isCurrentProviderFee}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
+ if(outcome.noExactRowBeforeCommit)return refuseNeverSent(input,"final_fence_no_exact_row_before_commit",ports.db??(pool as unknown as DB));
  if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);
 
