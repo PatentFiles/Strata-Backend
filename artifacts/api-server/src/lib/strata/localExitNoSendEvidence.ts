@@ -39,7 +39,7 @@ export function validateLocalExitNoSend(i:Row,rows:Row[],observations:Row[],mark
   String(n.quantity_hundredths)===String(qty)&&String(m.quantity_hundredths)===String(qty)&&
   String(n.limit_micros)===String(r.limitMicros)&&/^[a-f0-9]{64}$/.test(String(n.signer_fingerprint))&&
   object(d.identity)&&d.identity.keyFingerprint===n.signer_fingerprint&&Number(d.identity.subaccount)===1&&Number(d.identity.exchangeIndex)===2&&
-  ['final_evidence_expired','final_fee_rejected','final_fee_unavailable'].includes(String(n.reason))&&
+  ['final_evidence_expired','final_fee_rejected','final_fee_unavailable','final_fence_no_exact_row_before_commit'].includes(String(n.reason))&&
   Number.isSafeInteger(date(n.recorded_at))&&date(n.recorded_at)>=date(i.dispatch_at)&&typeof m.order_request_json==='string',fail);
  const expected={ticker:i.market,side:i.side==='YES'?'ask':'bid',count:formatContractHundredths(qty),
   price:((i.side==='YES'?Number(r.limitMicros):1_000_000-Number(r.limitMicros))/1_000_000).toFixed(4),
