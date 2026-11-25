@@ -1,3 +1,4 @@
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -657,6 +658,14 @@ export function createProductionPersonalSession(
         if(!recovery.ok){
           if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
+              state.presentedToken===claimed.fencingToken,
+            recovery,
+          });
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
+          // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
       },
