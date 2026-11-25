@@ -6,7 +6,7 @@ const runner = readFileSync(new URL('./run-v13-disposable-postgres.mjs', import.
 const fn = runner.slice(runner.indexOf('function run('), runner.indexOf('\nconsole.info("ISOLATED_FINAL_OVERLAP_ENV"'));
 function harness(fullSuite, result = {status: 0}) {
   const calls=[]; let tick=0;
-  const context={fullSuite, process:{platform:'linux'}, api:'/isolated',env:{NODE_ENV:'test'},performance:{now:()=>{tick+=10;return tick}},spawnSync:(...args)=>{calls.push(args);return result}};
+  const context={executable:()=>'/isolated/pg_ctl',bin:'/isolated',existsSync:()=>false,fullSuite, process:{platform:'linux'}, api:'/isolated',env:{NODE_ENV:'test'},performance:{now:()=>{tick+=10;return tick}},spawnSync:(...args)=>{calls.push(args);return result}};
   vm.runInNewContext(`${fn}; this.invoke=run`,context);
   return {run:context.invoke,calls};
 }

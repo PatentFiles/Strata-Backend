@@ -20,6 +20,7 @@ import {recordOwnerSelfStandingReview} from "./ownerSelfStandingReview";
 import {OWNER_SELF_REVIEW_CONFIRM} from "./ownerSelfReviewMode";
 import {activateOwnerSelfAccount,ownerSelfActivationOutcome,OWNER_SELF_ACTIVATION_CONFIRM} from "./ownerSelfAccountActivation";
 import {standingExecutionStatus} from "./standingExecutionReview";
+import {ownerRestoreStatus,authorizeOwnerShaRelease,OWNER_SHA_RELEASE_CONFIRM} from './ownerShaRelease';
 import {enrollContinuousGrant,checkContinuousBootstrap,CONTINUOUS_OWNER_CONFIRM} from "./continuousExecutionAuthorization";
 import {qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
 import {digest} from "../v13-production/types";
@@ -106,7 +107,21 @@ async function finishRelease(owner:string,sha:string,scope:Current){
  if(!standing.ok||standing.ownerId!==owner||standing.accountId!==account||standing.policyHash!==policyHash||standing.sha!==sha||!standing.ownerSelfAvailable)
   return no("public_release_owner_scope_changed");
  if(a.killSwitchOn){
-  if(a.executionEnabled||standing.grantExists||standing.grantRevoked)return no("public_release_existing_authority_requires_reconciliation");
+  if(a.executionEnabled||standing.grantRevoked)return no("public_release_existing_authority_requires_reconciliation");
+  if(standing.grantExists){
+   // The separate public owner confirmation already binds this exact build,
+   // account, policy and cash. Reuse current authority through the existing
+   // stopped-account restore service; never recreate or revive a grant.
+   if(!standing.grantActive)return no('public_release_existing_authority_requires_reconciliation');
+   const restore=await ownerRestoreStatus(owner,sha);
+   if(!restore.available||!('accountId' in restore)||restore.accountId!==account||restore.policyHash!==policyHash)return no(restore.reason);
+   const q=await qualifyProtectiveRelease(owner);
+   if(!q.ok||!('qualificationId' in q))return no(q.reason);
+   const restored=await authorizeOwnerShaRelease(owner,{restoreExistingApproval:true,expectedSha:sha,
+    expectedAccountId:account,expectedPolicyId:restore.policyId,expectedPolicyHash:policyHash,
+    qualificationId:q.qualificationId,confirmation:OWNER_SHA_RELEASE_CONFIRM});
+   if(!restored.ok)return no(restored.reason);
+  }else{
   const request=await prepareActivationRequest(owner);
   if(!request.ok)return no(request.reason);
   let qid=txt(standing.reviewQualificationId),rid=txt(standing.reviewId);
@@ -128,6 +143,7 @@ async function finishRelease(owner:string,sha:string,scope:Current){
   }
   const activation=await activateOwnerSelfAccount(owner,{...exact,qualificationId:qid,reviewId:rid,confirmation:OWNER_SELF_ACTIVATION_CONFIRM});
   if(!activation.ok)return no(activation.reason);
+  }
  }else if(!a.executionEnabled)return no("public_release_execution_state_inconsistent");
  const active=await ownerSelfActivationOutcome(owner,sha);
  if(active.outcome!=="RECORDED"||!active.eligibilityCurrent||active.accountId!==account)return no("public_release_activation_readback_unverified");

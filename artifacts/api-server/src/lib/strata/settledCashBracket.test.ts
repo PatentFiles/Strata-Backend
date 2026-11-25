@@ -7,7 +7,7 @@ const CREDS={keyId:'fixture-only',privateKey:'fixture-only'};
 const NOW=100000;
 const balance={balance:2648,balance_dollars:'26.4845',updated_ts:55};
 const BALANCE='/trade-api/v2/portfolio/balance';
-function fixture(options:{initial?:object;trailing?:object;clock?:()=>number;error?:Error}={}){
+function fixture(options:{initial?:object;trailing?:object;clock?:()=>number;error?:Error;changedHistory?:boolean;missingArchive?:boolean}={}){
  const calls:{path:string;query:string|undefined}[]=[];let count=0;
  const get:typeof getOwnedProductionKalshiJson=async(creds,path,query,_fetch,_host,_owner,signal)=>{
   assert.equal(creds,CREDS);assert.equal(signal?.aborted,false);
@@ -18,7 +18,8 @@ function fixture(options:{initial?:object;trailing?:object;clock?:()=>number;err
    if(options.error)throw options.error;
    return options.trailing??balance;
   }
-  if(path.endsWith('/orders'))return {orders:[]};
+  if(options.missingArchive&&path.includes('/historical/'))throw new KalshiApiError('HTTP_ERROR',503);
+  if(path.endsWith('/orders'))return {orders:options.changedHistory&&count===2?[{order_id:'different'}]:[]};
   if(path.endsWith('/fills'))return {fills:[]};
   if(path.endsWith('/positions'))return {market_positions:[]};
   if(path.endsWith('/settlements'))return {settlements:[]};
@@ -26,13 +27,13 @@ function fixture(options:{initial?:object;trailing?:object;clock?:()=>number;err
  };
  return {calls,result:()=>readBracketedSettledCash(CREDS,NOW,{get,now:options.clock??(()=>NOW)})};
 }
-test('accepts documented blank-scope body only from exact scoped request; two reads bracket one whole scan',async()=>{
+test('accepts documented blank-scope body only from exact scoped request; three balances bracket two complete scans',async()=>{
  const f=fixture(),r=await f.result();assert.ok(r.ok);assert.equal(r.cashMicros,'26484500');assert.equal(r.observedAtMs,NOW);
- assert.equal(f.calls.length,8);assert.equal(f.calls[0]?.path,BALANCE);assert.equal(f.calls.at(-1)?.path,BALANCE);
+ assert.equal(f.calls.length,15);assert.equal(f.calls[0]?.path,BALANCE);assert.equal(f.calls.at(-1)?.path,BALANCE);
 });
-test('same cash with changed provider cash version is not coherent',async()=>{
+test('advancing provider timestamps require equal cash and repeated complete histories',async()=>{
  const f=fixture({trailing:{...balance,updated_ts:56}});
- assert.deepEqual(await f.result(),{ok:false,reason:'recovery_signed_bracket_changed'});assert.equal(f.calls.length,8);
+ assert.equal((await f.result()).ok,true);assert.equal(f.calls.length,15);
 });
 test('changed cash, contradictory scope, and missing version fail closed',async()=>{
  for(const [trailing,reason] of [
@@ -57,4 +58,8 @@ test('cannot restart an expired clock or accept a regressed clock',async()=>{
  for(const clock of [()=>NOW+5001,()=>NOW-1]){
   const f=fixture({clock});assert.deepEqual(await f.result(),{ok:false,reason:'recovery_signed_bracket_clock_invalid'});assert.equal(f.calls.length,0);
  }
+});
+
+test('changed second history, regressing stamps and unavailable archive cannot qualify',async()=>{
+ for(const options of [{changedHistory:true},{trailing:{...balance,updated_ts:54}},{missingArchive:true}])assert.equal((await fixture(options).result()).ok,false);
 });

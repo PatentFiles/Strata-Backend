@@ -196,7 +196,7 @@ test('commissioned never-posted release renewal, actual PostgreSQL',async t=>{tr
    ADD COLUMN require_full_depth boolean DEFAULT true,ADD COLUMN entry_time_in_force text DEFAULT 'IOC',ADD COLUMN entry_limit_source text DEFAULT 'book';
    ALTER TABLE private.strata_standing_execution_reviews ADD COLUMN qualification_id uuid,ADD COLUMN evidence_digest text,ADD COLUMN review_url text,ADD COLUMN review_note text,ADD COLUMN confirmation text;
    ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN owner_user_id uuid,ADD COLUMN client_order_id text,
-   ADD COLUMN trading_authorized boolean,ADD COLUMN market_ticker text,ADD COLUMN reducing_side text,ADD COLUMN quantity_hundredths bigint,ADD COLUMN order_request_json text,ADD COLUMN order_digest text`);
+   ADD COLUMN trading_authorized boolean,ADD COLUMN market_ticker text,ADD COLUMN reducing_side text,ADD COLUMN quantity_hundredths bigint,ADD COLUMN order_request_json text,ADD COLUMN order_digest text,ADD COLUMN worker_holder_id text,ADD COLUMN worker_fencing_token bigint`);
   const policy=approvedFromRow((await db.query('SELECT * FROM public.v13_live_money_policy')).rows[0])!;
   const policyHash=computeV13LiveMoneyPolicyHash(policy),note='Synthetic independent review fixture. '.repeat(5),reviewUrl='https://github.com/PatentFiles/Strata-Backend/pull/1';
   const reviewDigest=createHash('sha256').update(JSON.stringify({actor:reviewer,owner,sha:oldSha,qid:oldQualification,account:'a',policy:policyHash,

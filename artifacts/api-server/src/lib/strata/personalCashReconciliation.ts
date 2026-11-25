@@ -9,6 +9,17 @@ export const RECORD_OWNED_CASH_CONFIRMATION = "RECORD_OWNED_SUBACCOUNT_CASH";
 // recovery operation. No balance-only overwrite of commissioned cash or basis.
 const RECORD_SQL = `
   -- owned-cash:reconcile
+  WITH cash_account AS MATERIALIZED (
+    SELECT a.id,a.owner_user_id,a.key_fingerprint,a.execution_enabled,a.kill_switch FROM public.v13_production_account a
+    WHERE a.id=$1 AND a.owner_user_id=$2::uuid FOR UPDATE
+  ), stopped_worker AS MATERIALIZED (
+    SELECT w.execution_account_id FROM private.kalshi_account_worker_lease w
+    JOIN cash_account a ON a.id=w.execution_account_id AND a.owner_user_id=w.owner_user_id
+    WHERE w.arm_requested IS FALSE AND w.credential_fingerprint=a.key_fingerprint
+      AND (w.state='released' OR (w.state='killed' AND w.account_kill IS TRUE
+        AND a.execution_enabled IS FALSE AND a.kill_switch IS TRUE))
+    FOR UPDATE OF w
+  )
   UPDATE v13_production_account AS a
   SET cash_micros = CASE WHEN a.commissioned THEN a.cash_micros ELSE $3::bigint END,
       initial_cash_micros = CASE WHEN a.commissioned THEN a.initial_cash_micros ELSE $3::bigint END,
@@ -71,7 +82,10 @@ const RECORD_SQL = `
     AND (NOT a.commissioned OR (
       a.cash_precision_verified IS TRUE
       AND a.cash_micros = $3::bigint
-      AND a.execution_enabled IS FALSE AND a.kill_switch IS TRUE
+      -- Execution eligibility is not worker activity. Renew equal cash while
+      -- the exact worker fence is released and disarmed, preserving all flags.
+      AND a.blocked_reason IS NULL
+      AND EXISTS (SELECT 1 FROM stopped_worker w WHERE w.execution_account_id=a.id)
       AND NOT EXISTS (
         SELECT 1 FROM public.v13_production_position p
         WHERE p.account_id = a.id AND p.quantity_hundredths > 0
@@ -80,6 +94,10 @@ const RECORD_SQL = `
         SELECT 1 FROM public.v13_production_intent i
         WHERE i.account_id = a.id
           AND (NOT i.terminal OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros <> 0)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=a.id
+        AND x.state IN ('PREPARED','DISPATCHED','UNKNOWN')
       )
     ))
   RETURNING a.id

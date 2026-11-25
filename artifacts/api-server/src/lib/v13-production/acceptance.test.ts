@@ -2344,7 +2344,9 @@ test("commissioned cash observation preserves ledger and rejects mismatch, runni
       execution_account_id text,owner_user_id uuid,exchange_transfer_id text,
       transfer_created_at timestamptz,verified_at timestamptz,primary_after_cents bigint,bot_after_cents bigint);`);
   const owner=randomUUID(),at=Date.now();
+  await pool.query("ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN IF NOT EXISTS arm_requested boolean NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS account_kill boolean NOT NULL DEFAULT false");
   await pool.query("UPDATE v13_production_account SET owner_user_id=$1,execution_enabled=false,kill_switch=true,reconciled_at=$2 WHERE id='test-account'",[owner,new Date(at-5000)]);
+  await pool.query("INSERT INTO private.kalshi_account_worker_lease(execution_account_id,owner_user_id,holder_id,fencing_token,state,credential_fingerprint,arm_requested) SELECT id,owner_user_id,'stopped',1,'released',key_fingerprint,false FROM v13_production_account WHERE id='test-account' ON CONFLICT(execution_account_id) DO UPDATE SET owner_user_id=EXCLUDED.owner_user_id,state='released',credential_fingerprint=EXCLUDED.credential_fingerprint,arm_requested=false");
   const read=(dollars:string,observedAtMs=at,ownerUserId=owner)=>persistOwnedCashReconciliation(pool,{
     ownerUserId,executionAccountId:"test-account",confirmation:RECORD_OWNED_CASH_CONFIRMATION,
     subaccount:1,exchangeIndex:2,observedAtMs,nowMs:at,maxAgeMs:15000,
@@ -2357,7 +2359,10 @@ test("commissioned cash observation preserves ledger and rejects mismatch, runni
   assert.equal((await read("100.0000",at,randomUUID())).ok,false);
   assert.deepEqual(await ledger(),before);
   await pool.query("UPDATE v13_production_account SET execution_enabled=true,kill_switch=false WHERE id='test-account'");
+  await pool.query("UPDATE private.kalshi_account_worker_lease SET state='owned' WHERE execution_account_id='test-account'");
   assert.equal((await read("100.0000")).ok,false);
+  await pool.query("UPDATE private.kalshi_account_worker_lease SET state='released' WHERE execution_account_id='test-account'");
+  assert.equal((await read("100.0000")).ok,true);
   await pool.query("UPDATE v13_production_account SET execution_enabled=false,kill_switch=true WHERE id='test-account'");
   const matched=await read("100.0000");assert.equal(matched.ok,true,JSON.stringify(matched));
   assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
