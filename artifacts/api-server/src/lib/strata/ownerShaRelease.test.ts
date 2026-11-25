@@ -363,7 +363,7 @@ test("explicit restore only reuses current consent and rejects revoked, changed,
   const query=async(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}>=>{
    calls.push({sql,params});
    if(["BEGIN","COMMIT","ROLLBACK"].includes(sql)||sql.startsWith("SET LOCAL"))return {rows:[]};
-   if(sql.includes("FROM public.v13_production_account a"))return {rows:[account]};
+   if(sql.trimStart().startsWith("SELECT")&&sql.includes("FROM public.v13_production_account a"))return {rows:[account]};
    if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{digest:evidence}]};
    if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{decrypted_secret:JSON.stringify({api_key_id:"offline-key-id",private_key:"offline-only"})}]};
    if(sql.startsWith("SELECT request FROM public.v13_production_intent"))return {rows:[]};
@@ -415,7 +415,7 @@ test("explicit restore only reuses current consent and rejects revoked, changed,
   const success=["valid","global_kill","no_history","review_without_grant","revoked_standing","killed_valid"].includes(scenario);
   const leaseWrites=calls.filter(c=>c.sql.includes("UPDATE private.kalshi_account_worker_lease"));
   assert.equal(leaseWrites.length,["killed_valid","killed_fence_conflict"].includes(scenario)?1:0,scenario);
-  if(scenario==="killed_fence_conflict")assert.ok(calls.some(c=>c.sql==="ROLLBACK"));
+  if(scenario==="killed_fence_conflict"){assert.equal(result.reason,"owner_restore_killed_lease_fence_failed");assert.ok(calls.some(c=>c.sql==="ROLLBACK"));}
   assert.equal(result.ok,success,scenario+": "+JSON.stringify(result));
   if(success)assert.equal('approvalId' in result?result.approvalId:null,QID);
   assert.equal(calls.some(c=>/INSERT INTO private\.strata_(owner_sha_approvals|continuous_execution_grants|standing_execution_reviews)/.test(c.sql)),false,scenario);
