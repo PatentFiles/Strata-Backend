@@ -2005,7 +2005,7 @@ import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
 import {verifyDurableFeeStage} from './durableFeeConsumers';
 import {verifyDurableOwnerFee,DURABLE_FEE_LOCK_SQL} from './durableOwnerFeePolicy';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256} from './historicalOwnerFeeBaseline';
-test('historical durable FINAL uses owning transaction; revocation, rollback and dispatch retain fences',async()=>{
+test('current Kalshi lifecycle without legacy expiration reaches durable FINAL; revocation, rollback and dispatch retain fences',async()=>{
  const posts:string[]=[],s=await tradingSession(500,posts),modelId='77777777-7777-4777-8777-777777777777',sha='a'.repeat(40),ticker='KXBTC15M-TEST-000';
  const sourceUrl='strata-durable-owner-fee://'+modelId;
  const approved={...policy(),executionAccountId:ACCOUNT,maxQuoteAgeMs:5000,feePolicyVersion:HISTORICAL_FEE_VERSION,feeSourceUrl:sourceUrl,feeFormulaVersion:'standard-quadratic-0.07-v1'};approved.policyHash=computeV13LiveMoneyPolicyHash(approved);
@@ -2026,7 +2026,7 @@ test('historical durable FINAL uses owning transaction; revocation, rollback and
  const saved=globalThis.fetch;let reads=0;
  const marketClock=Date.now();
  globalThis.fetch=async(input)=>{reads++;const at=marketClock,iso=(n:number)=>new Date(at+n).toISOString();const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');const pages:Record<string,unknown>={
- ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expiration_time:iso(660000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
+ ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
  ['/events/'+ticker]:{event:{event_ticker:ticker,series_ticker:'KXBTC15M',fee_type_override:null,fee_multiplier_override:null}},
  '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
  '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[],cursor:''},
@@ -2134,7 +2134,7 @@ for(const scenario of ['success','provider_failure','cancel','post_sign_expiry',
  const saved=globalThis.fetch;let reads=0;
  let wireFailure=false,failedReads=0;let delayed=false;const marketClock=Date.now();
  globalThis.fetch=async(input)=>{reads++;if(wireFailure){failedReads++;return Response.json({error:'synthetic'}, {status:503});}if(delayed)await new Promise(r=>setTimeout(r,181));const at=marketClock,iso=(n:number)=>new Date(at+n).toISOString();const path=String(input).replace('https://external-api.kalshi.com/trade-api/v2','');const pages:Record<string,unknown>={
- ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expiration_time:iso(660000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
+ ['/markets/'+ticker]:{market:{ticker,event_ticker:ticker,status:'active',exchange_index:2,price_level_structure:'deci_cent',open_time:iso(-60000),close_time:iso(600000),expected_expiration_time:iso(660000),latest_expiration_time:iso(660000)}},
  ['/events/'+ticker]:{event:{event_ticker:ticker,series_ticker:'KXBTC15M',fee_type_override:null,fee_multiplier_override:null}},
  '/series/KXBTC15M':{series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:1}},
  '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[],cursor:''},
