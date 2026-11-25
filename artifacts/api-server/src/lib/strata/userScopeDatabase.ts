@@ -34,6 +34,7 @@ import { readOwnerFundingMaintenanceReadiness } from "./ownerFundingMaintenanceR
 import {ownerTopupStatus,prepareOwnerTopup,executeOwnerTopup,reconcileOwnerTopup,cancelPreparedOwnerTopup} from "./ownerVariableTopup";
 import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
+import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
 import {
   approveOwnedPolicyForUser,
   readOwnedApprovedFeeEvidence,
@@ -476,7 +477,15 @@ export function createDatabaseUserScopePort(
       if (!await migrationReady()) return emptyUserExecutionView(userId);
       const account = await ownedAccount(userId);
       if (account && options.session?.isScheduled(userId, account.id) === true) account.workerRunning = true;
-      return viewFrom(userId, account);
+      const view = viewFrom(userId, account);
+      // The dashboard must not infer release eligibility from the cash or
+      // worker-arm flags. Avoid extra authorization reads on running accounts.
+      if (account && account.commissioned && account.executionEnabled &&
+          !account.killSwitch && !account.workerRunning) {
+        const release = await verifyPersonalStartupAuthority(db, userId);
+        view.startupReleaseBlockReason = release.ok ? null : release.reason;
+      }
+      return view;
     },
     async ownerTopupStatus(userId){return ownerTopupStatus(db as never,userId);},
     async prepareOwnerTopup(userId,amountCents){return prepareOwnerTopup(db as never,userId,amountCents);},
@@ -715,6 +724,9 @@ export function createDatabaseUserScopePort(
       }
       if (!options.session) return refused(userId, "worker_not_scheduled", account);
       if (action === "ARM") {
+        // Do not report ARM readiness on a build that START would refuse.
+        const release = await verifyPersonalStartupAuthority(db, userId);
+        if (!release.ok) return refused(userId, release.reason, account);
         // ARM is an authorization/readiness state, never a worker lifecycle
         // action. The previously shared START path could place orders on ARM.
         // Do not persist a forged approval or clear a kill switch here.

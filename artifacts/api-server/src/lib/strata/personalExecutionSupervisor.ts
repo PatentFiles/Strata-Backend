@@ -45,7 +45,8 @@ import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIn
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
-import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
+import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
+import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
 import {deployedGitSha} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
@@ -359,23 +360,11 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "live_execution_not_enabled" };
     }
     if (!flag(loaded.row.cash_precision_verified)) return { ok: false, reason: "cash_not_reconciled" };
-    // New exposure is forbidden until the exact Railway build has a genuine,
-    // unexpired independently reviewed protective EXIT release. The earlier
-    // implementation only checked this when the EXIT itself was attempted,
-    // which was too late for an already-opened position.
-    const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
-    // A standing grant can bootstrap START, but cannot admit ANY entry
-    // until a new signed exchange snapshot renews its short technical lease.
-    const startupSha=deployedGitSha();
-    let standingMode=false;
-    if(/^[a-f0-9]{40}$/.test(startupSha)){
-      try {standingMode=await hasContinuousGrantHistory(db,input.userId,startupSha);}
-      catch {return {ok:false,reason:"standing_authority_unavailable"};}
-    }
-    if(standingMode ? !(await checkContinuousBootstrap(db,input.userId,startupSha)) : !exitRelease.ok)
-      return {ok:false,reason:standingMode?"standing_grant_not_current":exitRelease.reason};
-    if(standingMode && process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true")
-      return {ok:false,reason:"protective_exit_release_disabled"};
+    // Match ARM's read-only authorization preflight, then independently
+    // reconcile signed exchange state and all remaining START requirements.
+    const authority = await verifyPersonalStartupAuthority(db, input.userId);
+    if (!authority.ok) return authority;
+    const { startupSha, standingMode } = authority;
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);

@@ -642,6 +642,27 @@ test("START reports running only after the session schedules a worker, and produ
     },
     session,
   });
+  // Reproduce a new deployment whose exact owner approval is absent.
+  // Basic cash/policy/lease checks alone must not return a successful ARM.
+  const releaseEnvKeys = ["NODE_ENV", "RAILWAY_PROJECT_ID", "RAILWAY_GIT_COMMIT_SHA", "STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE"] as const;
+  const priorReleaseEnv = releaseEnvKeys.map(key => [key, process.env[key]] as const);
+  try {
+    process.env.NODE_ENV = "production";
+    process.env.RAILWAY_PROJECT_ID = "isolated-test";
+    process.env.RAILWAY_GIT_COMMIT_SHA = "a".repeat(40);
+    process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE = "true";
+    const refusedArm = await port.control(USER_A, "ARM");
+    assert.equal(refusedArm.ok, false);
+    assert.equal(refusedArm.reason, "owner_code_approval_missing");
+    assert.equal((await port.settings(USER_A)).startupReleaseBlockReason, "owner_code_approval_missing");
+    assert.equal(session.running, false);
+    assert.equal(posts, 0);
+  } finally {
+    for (const [key, value] of priorReleaseEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   // ARM never schedules a worker or calls the exchange. Only START does.
   const armed = await port.control(USER_A, "ARM");
   assert.equal(armed.ok, true);
@@ -661,6 +682,10 @@ test("START reports running only after the session schedules a worker, and produ
   assert.equal(stopped.exchangeFlatVerified, false);
   assert.equal(stopped.protectiveExitState, "EXCHANGE_RECONCILIATION_REQUIRED");
   assert.equal(stopped.view.workerRunning, false);
+  // STOP does not invalidate a current approval or require recommissioning.
+  assert.equal((await port.control(USER_A, "ARM")).ok, true);
+  assert.equal((await port.control(USER_A, "START")).ok, true);
+  assert.equal((await port.control(USER_A, "STOP")).ok, true);
   const saved = await port.stake(USER_A, 500, 4);
   assert.equal(saved.ok, true);
   assert.equal(saved.view.configuredStakeCents, 500);
