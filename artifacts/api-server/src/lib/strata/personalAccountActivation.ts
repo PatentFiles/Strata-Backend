@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { createHash, randomUUID } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
@@ -155,7 +156,7 @@ const COMMISSION_SQL = `
   RETURNING id
 `;
 
-const COMMISSION_API_SQL = `
+const COMMISSION_API_SQL = runtimeAuthSql(`
   -- personal-activation:commission
   UPDATE v13_production_account
   SET commissioned = true,
@@ -275,7 +276,7 @@ const COMMISSION_API_SQL = `
             AND u.email_confirmed_at IS NOT NULL)
     ))
   RETURNING id
-`;
+`);
 
 export async function reportOwnedActivation(
   db: Queryable,

@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {deployedGitSha} from "./deployedGitSha";
 import {publicSelfServiceReleaseQualified} from "./ownerSelfServiceEligibility";
 
@@ -20,14 +21,14 @@ export async function technicalSetupMasterSafe(client:Query,master:{rows:Row[]},
  const args=[scope.authenticatedUserId,scope.financialAccountId,scope.providerConnectionId,scope.attemptId,operation];
  // The actual reviewed technical setup records this immutable plan in the
  // claim transaction. A direct/manual legacy request cannot use this path.
- const lock=await client.query(`
+ const lock=await client.query(runtimeAuthSql(`
  SELECT pc.id FROM private.provider_connections pc
  JOIN public.financial_accounts f ON f.id=pc.financial_account_id
  JOIN auth.users u ON u.id=f.user_id
  WHERE u.id=$1::uuid AND f.id=$2::uuid AND pc.id=$3::uuid AND f.provider='kalshi'
  AND u.email_confirmed_at IS NOT NULL AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp())
  AND pc.vault_secret_id IS NOT NULL
- FOR UPDATE OF pc`,args.slice(0,3));
+ FOR UPDATE OF pc`),args.slice(0,3));
  if(lock.rows.length!==1)return false;
  // Separate statement after locking: a waiting claimant must reread current
  // account/connection state, rather than rely on its earlier SQL snapshot.

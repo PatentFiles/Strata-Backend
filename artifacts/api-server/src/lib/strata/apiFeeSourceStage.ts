@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {beginFeeAuthorityTiming,withFinalFeePoolCheckout} from "./feeAuthorityTiming";
 import {annotateFeeFailure} from "./feeFailureDiagnostics";
 /**
@@ -48,7 +49,7 @@ const ms=(v:unknown):number=>v instanceof Date?v.getTime():Date.parse(String(v??
 const txt=(v:unknown):string=>typeof v==="string"?v:"";
 
 /** Must be read from the actual Railway runtime database, never public client. */
-export const READ_API_FEE_STAGE_SQL=`
+export const READ_API_FEE_STAGE_SQL=runtimeAuthSql(`
  -- api-fee:two-person-source-stage. Technical ADMIN review + distinct owner consent.
  SELECT g.grant_id, g.owner_user_id, g.issuer_admin_id, g.rate_decision_digest,
    g.fee_model_version,g.policy_version,g.scope,g.issued_at,
@@ -88,7 +89,7 @@ export const READ_API_FEE_STAGE_SQL=`
    )
  FOR SHARE OF g,c,r1
  LIMIT 2
-`;
+`);
 export async function verifyReviewedApiFeeSourceStage(
   ownerUserId:string, stage:ApiFeeStage, expectedSourceUrl?:string,
   exactOrderMarket?:string,

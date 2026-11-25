@@ -7,6 +7,8 @@ import { rm, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { buildReleaseIdentity } from "../../lib/v13-strategy/build-release.mjs";
 
+import {captureBuildMetadata} from '../../scripts/build-metadata.mjs';
+
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
 
@@ -16,11 +18,17 @@ async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
 
+  const metadata=captureBuildMetadata(path.resolve(artifactDir,'../..'),[
+    'lib','artifacts/api-server/src','artifacts/api-server/build.mjs','artifacts/api-server/package.json',
+    'artifacts/api-server/tsconfig.json','scripts/build-metadata.mjs','package.json','pnpm-lock.yaml',
+    'pnpm-workspace.yaml','tsconfig.base.json','tsconfig.json',
+    'attached_assets/0_kalshi-fee-schedule_1790474920034.pdf',
+  ]);
   await esbuild({
     entryPoints: ["src/index.ts", "src/paperWorkerMain.ts"].map((entry) => path.resolve(artifactDir, entry)),
     platform: "node",
     bundle: true,
-    define: { __BTC_RELEASE__: JSON.stringify(buildReleaseIdentity(path.resolve(artifactDir, "../.."))) },
+    define: { __BTC_RELEASE__: JSON.stringify(buildReleaseIdentity(path.resolve(artifactDir, "../.."))), __STRATA_BUILD__:JSON.stringify(metadata) },
     format: "esm",
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
@@ -130,6 +138,7 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
      "c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601")
     throw Error("official_fee_distribution_artifact_mismatch");
   await writeFile(path.resolve(distDir,"official-fee-schedule.pdf"),bytes);
+  await writeFile(path.resolve(distDir,'build-manifest.json'),JSON.stringify(metadata,null,2)+'\n');
 }
 
 buildAll().catch((err) => {

@@ -129,7 +129,7 @@ test('bounded durable trace sweep on isolated PostgreSQL',async t=>{
   assert.match(JSON.stringify(decisionPlan),/Index Only Scan|Index Scan/);
   assert.doesNotMatch(JSON.stringify(decisionPlan),/"Node Type":"Seq Scan"/);
   plans.push(decisionPlan);
-  writeFileSync(resolve('../../../cursor-audit-explain.json'),JSON.stringify(plans,null,2));
+  writeFileSync(resolve('../../cursor-audit-explain.json'),JSON.stringify(plans,null,2));
   assert.equal(await auditUnseenExpiredSignals('acct',pool),0);assert.equal(Number((await state()).sources_examined),100);
  });
  }finally{await pool.end();}

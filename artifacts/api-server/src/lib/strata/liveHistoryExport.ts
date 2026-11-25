@@ -56,7 +56,7 @@ const DECISIONS=`SELECT 'decision:'||d.id::text AS row_id,d.observed_at::text AS
  */
 export async function readLiveHistoryExportBatch(actor:Actor,raw:Record<string,unknown>,db:Pick<Pool,"connect">=pool){
  const q=parseLiveHistoryQuery({...raw,cursor:undefined},actor,Date.now(),"export");
- const binding=createHash('sha256').update(JSON.stringify([actor.subject,q.scope,q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason])).digest('hex');
+ const binding=createHash('sha256').update(JSON.stringify([actor.subject,q.scope,q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,q.recordType])).digest('hex');
  const saved=decode(raw.cursor,binding);
  const c=await db.connect();let discard:Error|undefined;
  try{
@@ -72,11 +72,13 @@ export async function readLiveHistoryExportBatch(actor:Actor,raw:Record<string,u
   const params=[actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,saved?.at??null,saved?.id??null,q.limit+1,watermark];
   let rows:ExportRow[],nextCursor:string|null,scannedRows:number;
   if(phase==="decisions"){
-   const result=await c.query<ExportRow>(DECISIONS,params);
+   const result=q.recordType==='LEDGER_INTENT'?{rows:[]}:await c.query<ExportRow>(DECISIONS,params);
    rows=result.rows.slice(0,q.limit);scannedRows=rows.length;
    const last=rows.at(-1);
    nextCursor=result.rows.length>q.limit&&last?encode({phase,at:last.observed_at,id:last.row_id.slice(9),watermark,binding}):
     encode({phase:"intents",at:null,id:null,watermark,binding});
+  }else if(q.recordType==='LIVE_DECISION'){
+   rows=[];scannedRows=0;nextCursor=null;
   }else{
    // Page raw intent identities first. Financial projections and linked events
    // are evaluated only for this bounded batch, with the exact screen formulas.
@@ -91,7 +93,7 @@ export async function readLiveHistoryExportBatch(actor:Actor,raw:Record<string,u
    const candidates=result.rows.slice(0,q.limit);scannedRows=candidates.length;rows=[];
    if(candidates.length){
     const projection=await c.query(projectHistoryIntentBatchSql(),[
-     actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,null,null,q.limit,candidates.map(v=>v.id)]);
+     actor.subject,q.scope==="all",q.account,q.from,q.to,q.status,q.direction,q.market,q.strategy,q.reason,null,null,q.limit,candidates.map(v=>v.id),q.recordType]);
     if(!Array.isArray(projection.rows[0]?.rows))throw Error('live_history_export_projection_unavailable');
     rows=projection.rows[0].rows;
    }
@@ -99,7 +101,7 @@ export async function readLiveHistoryExportBatch(actor:Actor,raw:Record<string,u
    nextCursor=result.rows.length>q.limit&&last?encode({phase,at:last.at,id:last.id,watermark,binding}):null;
   }
   await c.query("COMMIT");
-  return {version:"LIVE_HISTORY_EXPORT_V1" as const,scope:q.scope,from:q.from,to:q.to,watermark,phase,
+  return {version:"LIVE_HISTORY_EXPORT_V1" as const,scope:q.scope,from:q.from,to:q.to,recordType:q.recordType,watermark,phase,
    rows,scannedRows,nextCursor,order:"decisions_then_ledger_desc",
    consistency:"Decision journal is bounded by recording cutoff; ledger values are read per batch, not an atomic whole-account snapshot. Missing historical decisions are not reconstructed."};
  }catch(error){try{await c.query('ROLLBACK');}catch{discard=Error('live_history_export_rollback_failed');}throw error;}

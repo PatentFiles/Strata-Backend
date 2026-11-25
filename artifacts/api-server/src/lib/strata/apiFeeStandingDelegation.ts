@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {beginFeeAuthorityTiming,withFinalFeePoolCheckout} from "./feeAuthorityTiming";
 import {randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
@@ -27,7 +28,7 @@ const deny=(reason:string)=>({ok:false as const,reason,
  policyApproved:false as const,tradingAuthorized:false as const,workerStarted:false as const});
 const text=(v:unknown)=>typeof v==="string"?v:"";
 async function admin(db:Client|Db,id:string) {
- const r=await db.query("SELECT 1 FROM auth.users u JOIN private.role_assignments role ON lower(btrim(u.email))=lower(btrim(role.email)) AND role.role='ADMIN' WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL LIMIT 1",[id]);
+ const r=await db.query(runtimeAuthSql("SELECT 1 FROM auth.users u JOIN private.role_assignments role ON lower(btrim(u.email))=lower(btrim(role.email)) AND role.role='ADMIN' WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL LIMIT 1"),[id]);
  return r.rows.length===1;
 }
 async function tx<T>(db:Db,run:(c:Client)=>Promise<T>):Promise<T>{
@@ -118,7 +119,7 @@ export async function consentStandingFeeDelegation(
     "AND p.state='APPROVED' AND p.fee_source_url='strata-api-reviewed://kxbtc15m/'||lower(g.grant_id::text)",
     "AND g.grant_id=$2::uuid AND g.revoked_at IS NULL",
     "AND p.fee_policy_version=$3",
-    "AND EXISTS(SELECT 1 FROM auth.users issuer",
+    runtimeAuthSql("AND EXISTS(SELECT 1 FROM auth.users issuer"),
     " JOIN private.role_assignments issuer_role",
     " ON lower(btrim(issuer_role.email))=lower(btrim(issuer.email))",
     " WHERE issuer.id=g.issuer_admin_id AND issuer.email_confirmed_at IS NOT NULL",
@@ -144,7 +145,7 @@ export async function consentStandingFeeDelegation(
   const model=await c.query([
     "SELECT m.model_id,m.reviewer_admin_id,m.valid_until",
     "FROM private.strata_api_fee_standing_models m",
-    "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
+    runtimeAuthSql("JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL"),
     "JOIN private.role_assignments role ON lower(btrim(role.email))=lower(btrim(u.email))",
     "AND role.role='ADMIN'",
     "WHERE m.model_id=$1::uuid AND m.reviewer_admin_id<>$2::uuid",
@@ -182,8 +183,8 @@ export const CONTINUE_SQL = [
  "private.strata_api_fee_source_grants g,",
  "private.strata_api_fee_owner_consents con,",
  "public.v13_production_account a,public.v13_live_money_policy p,",
- "auth.users reviewed_user, private.role_assignments reviewed_role,",
- "auth.users issuer_user,private.role_assignments issuer_role",
+ runtimeAuthSql("auth.users reviewed_user, private.role_assignments reviewed_role,"),
+ runtimeAuthSql("auth.users issuer_user,private.role_assignments issuer_role"),
  "WHERE d.model_id=m.model_id AND d.grant_id=g.grant_id",
  "AND d.owner_user_id=g.owner_user_id AND con.grant_id=g.grant_id",
  "AND con.owner_user_id=d.owner_user_id AND con.revoked_at IS NULL",
@@ -319,7 +320,7 @@ export async function inspectStandingFeeReadiness(
   const models=await db.query([
     "SELECT m.model_id::text,m.valid_until",
     "FROM private.strata_api_fee_standing_models m",
-    "JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL",
+    runtimeAuthSql("JOIN auth.users u ON u.id=m.reviewer_admin_id AND u.email_confirmed_at IS NOT NULL"),
     "JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))",
     "AND r.role='ADMIN'",
     "WHERE m.release_commit_sha=$1 AND m.rate_decision_digest=$2",

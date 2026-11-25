@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { standingAuthoritySql, OWNER_SELF_REVIEW_CONFIRM } from './ownerSelfReviewMode.js';
 import { createHash } from "node:crypto";
 import { deployedGitSha } from "./deployedGitSha";
@@ -93,7 +94,7 @@ const HISTORY_SQL=`SELECT (
  OR EXISTS(SELECT 1 FROM private.strata_standing_execution_reviews
  WHERE owner_user_id=$2::uuid AND execution_account_id=$1 AND release_commit_sha=$3)
  ) AS standing_history`;
-export const SUCCESSOR_SQL=`SELECT d.delegation_id::text,m.model_id::text,e.release_id::text,
+export const SUCCESSOR_SQL=runtimeAuthSql(`SELECT d.delegation_id::text,m.model_id::text,e.release_id::text,
  (extract(epoch FROM (LEAST(d.valid_until,m.valid_until)-clock_timestamp()))*1000)::float8 AS valid_for_ms
  FROM public.v13_production_account a
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id
@@ -129,7 +130,7 @@ export const SUCCESSOR_SQL=`SELECT d.delegation_id::text,m.model_id::text,e.rele
    AND (SELECT count(*) FROM private.strata_api_fee_standing_models competing
      WHERE competing.release_commit_sha=$7 AND competing.rate_decision_digest=$5
        AND competing.revoked_at IS NULL AND competing.valid_until>clock_timestamp())=1
- LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,g,issuer,issuer_role`;
+ LIMIT 2 FOR SHARE OF a,p,d,m,e,u,role,g,issuer,issuer_role`);
 export type ProtectiveFeeAuthority={ok:boolean;reason:string;proofKind?:"legacy"|"standing_successor";authorityFingerprint?:string;validForMs?:number};
 /** Read-only monetary authority. Inside a caller-owned transaction the SHARE
  * locks are retained until COMMIT, including model/delegation revocation rows.
