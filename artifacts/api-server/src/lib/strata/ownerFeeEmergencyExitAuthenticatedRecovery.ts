@@ -237,11 +237,17 @@ async function readOutcome(
     Math.max(completedAt-feed.observedAtMs,now-feed.observedAtMs+elapsed)>3000)
   return fail("exit_recovery_exchange_snapshot_stale");
  const matchingPositions=feed.positions.map(object).filter(x=>x.ticker===input.order.ticker);
- if(matchingPositions.length!==1)return fail("exit_recovery_position_not_unique");
- const observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);
+ if(!diagnosticSink&&matchingPositions.length!==1)return fail("exit_recovery_position_not_unique");
+ let observed:bigint|null=null;
+ if(matchingPositions.length===1){
+  if(!diagnosticSink)observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);
+  else try{observed=signed(matchingPositions[0]!.position_fp??matchingPositions[0]!.position);}catch{/* order presence is independent of the position echo */}
+ }
  const orders=feed.orders.map(object).filter(x=>x.client_order_id===input.order.client_order_id);
  if(orders.length!==1){
-  if(orders.length===0&&diagnosticSink)diagnosticSink(diagnostic("NOT_FOUND"));
+  if(orders.length===0&&diagnosticSink)diagnosticSink(diagnostic("NOT_FOUND",
+   feed.settlements.some(x=>object(x).ticker===input.order.ticker)?"PRESENT_UNVERIFIED":"NOT_FOUND",
+   observed===0n?"FLAT_ECHO":"UNVERIFIED"));
   return fail("exit_recovery_order_not_unique");
  }
  const order=orders[0]!;
@@ -344,7 +350,7 @@ async function readOutcome(
   // Diagnostic is structurally unable to mint a branded financial observation.
   return fail("exit_recovery_position_not_attributable");
  }
- if(expected!==observed)return fail("exit_recovery_position_not_attributable");
+ if(observed===null||expected!==observed)return fail("exit_recovery_position_not_attributable");
  const observation:IocRecoveryObservation={
   clientOrderId:text(input.order.client_order_id),
   requestedCountFp:text(input.order.count),

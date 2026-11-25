@@ -28,7 +28,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
  badProviderTotals?:boolean;duplicateOrder?:boolean;concurrentOrder?:boolean;badDigest?:boolean;
  missingOrderScope?:boolean;wrongOrderScope?:boolean;missingFillScope?:boolean;
  wrongFillScope?:boolean;oldOrder?:boolean;oldFill?:boolean;
- receiptWaitMs?:number;fullyClosed?:boolean;omitOrder?:boolean;omitPosition?:boolean;settled?:boolean;
+ receiptWaitMs?:number;fullyClosed?:boolean;omitOrder?:boolean;omitPosition?:boolean;settled?:boolean;omitSettlementSubaccount?:boolean;
  wallElapsedMs?:number;monotonicElapsedMs?:number;observationAgeMs?:number;
  startMonotonicMs?:number;baselineWallElapsedMs?:number;baselineMonotonicElapsedMs?:number;
  startWallMs?:number;throwWallAt?:number;throwMonotonicAt?:number;}={}){
@@ -81,7 +81,7 @@ function harness(options:{fill?:string;side?:"ask"|"bid";foreignFill?:boolean;
     ...(options.foreignFill?[{trade_id:"foreign",order_id:"other",ticker:MARKET,
        count_fp:"0.25",created_time:new Date(NOW).toISOString()}]:[])],
    positions:options.omitPosition?[]:[{ticker:MARKET,position_fp:options.differentPosition?"0.00":ending}],
-   settlements:options.settled?[{ticker:MARKET,subaccount_number:1,exchange_index:2,
+   settlements:options.settled?[{ticker:MARKET,...(options.omitSettlementSubaccount?{}:{subaccount_number:1}),exchange_index:2,
      yes_count_fp:position,no_count_fp:"0.00",market_result:"yes",revenue:300,settled_time:new Date(NOW).toISOString()}]:[]};
  }) as typeof readOwnedKalshiFeeds;
  return {calls,preview:(pin:()=>Promise<string|null>)=>inspectAuthenticatedProtectiveExitHistory(selected,pin,{db,readFeeds,now:()=>wall,monotonicNow:()=>monotonic}),run:()=>readAuthenticatedProtectiveExitOutcome(selected,options.restart?null:signedReceipt,
@@ -327,5 +327,20 @@ test("incident restricted preview reports categories only; refuses changed pin a
 test("authenticated complete no exact terminal order returns NOT_FOUND without treating settlement as authority",async()=>{
  const h=harness({restart:true,fill:"0.00",differentPosition:true,settled:true,omitOrder:true});
  const out=await withRestartTestPorts(()=>h.preview(async()=> "a".repeat(64)));
- assert.deepEqual(out,{order:"NOT_FOUND",settlement:"UNVERIFIED",exposure:"UNVERIFIED",readOnly:true,accountingPosted:false,tradingAuthorized:false});
+ assert.deepEqual(out,{order:"NOT_FOUND",settlement:"PRESENT_UNVERIFIED",exposure:"FLAT_ECHO",readOnly:true,accountingPosted:false,tradingAuthorized:false});
+});
+
+test("diagnostic order proof does not depend on a settled position echo or undocumented settlement row scope",async()=>{
+ const p=async()=> "a".repeat(64);
+ for(const omitOrder of [true,false]){
+  const h=harness({restart:true,fill:"0.00",omitPosition:true,settled:true,omitOrder,omitSettlementSubaccount:true});
+  const out=await withRestartTestPorts(()=>h.preview(p));
+  assert.deepEqual(out,{order:omitOrder?"NOT_FOUND":"EXACT_TERMINAL",settlement:"PRESENT_UNVERIFIED",
+   exposure:"UNVERIFIED",readOnly:true,accountingPosted:false,tradingAuthorized:false});
+  await assert.rejects(()=>h.run(),/exit_recovery_position_not_unique/);
+ }
+ const h=harness({restart:true,fill:"0.00",differentPosition:true,settled:true,omitSettlementSubaccount:true});
+ const out=await withRestartTestPorts(()=>h.preview(p));
+ assert.deepEqual(out,{order:"EXACT_TERMINAL",settlement:"PRESENT_UNVERIFIED",exposure:"FLAT_ECHO",
+  readOnly:true,accountingPosted:false,tradingAuthorized:false});
 });
