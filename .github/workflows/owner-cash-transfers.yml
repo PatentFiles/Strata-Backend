@@ -39,18 +39,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-${{ matrix.postgres }}
           sudo systemctl stop postgresql
-          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
-      - name: Verify selected PostgreSQL binary
-        run: |
-          test "$(command -v postgres)" = "/usr/lib/postgresql/${{ matrix.postgres }}/bin/postgres"
-          postgres --version
-          postgres --version | grep -E 'PostgreSQL\) ${{ matrix.postgres }}\.'
-      - name: Native transaction, RLS, UNKNOWN, duplication and cancellation races
+      - name: Native transactions, RLS, receipts, duplication and cancellation races
         working-directory: artifacts/api-server
         env:
-          STRATA_ECONOMIC_PG_VERSION: ${{ matrix.postgres }}
-        env:
-          DATABASE_URL: postgres://fixture:fixture@127.0.0.1:1/never_connect
+          PG_BIN: /usr/lib/postgresql/${{ matrix.postgres }}/bin
         run: pnpm run test:owner-cash-transfers-native
       - run: pnpm --filter @workspace/api-server run build
-
