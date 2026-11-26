@@ -1,5 +1,7 @@
-import {economicExitNotDischarged} from '../strata/economicExitDischargeScope';
-import {ownedGateReadSql} from "./ownedGateRead";
+import {captureEconomicProtectiveEvidence} from '../strata/economicExitProtectiveEvidence';
+import {economicExitFinalityEnabled} from '../strata/economicExitDischargeScope';
+import {readEconomicRuntimeEvidence} from '../strata/economicExitRuntimeEvidence';
+import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
 import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
 import {encodeProductionOrder} from "./transport";
 import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
@@ -240,7 +242,16 @@ export class ProductionExecutor {
     return { cents, revision };
   }
 
-  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false): Promise<void> {
+  #economicReconciledSnapshot:Snapshot|null=null;
+  captureEconomicProtectiveEvidence(clientId:string):object|undefined{
+    if(!economicExitFinalityEnabled()||!this.#economicReconciledSnapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return undefined;
+    return captureEconomicProtectiveEvidence({ownerId:this.accountOwnerUserId,accountId:this.ledger.accountId,clientId},this.#economicReconciledSnapshot);
+  }
+  private async economicUnknownProof(tx:PoolClient,a:Account,currentIntentId:string|null,snapshot=this.#economicReconciledSnapshot){
+    if(!economicExitFinalityEnabled()||!snapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return null;
+    return readEconomicRuntimeEvidence(tx,{account:a,ownerId:this.accountOwnerUserId,snapshot,nowMs:this.now(),currentIntentId});
+  }
+  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false, allowEconomicProof=true): Promise<void> {
     requireProof(a.commissioned && !a.kill_switch && a.execution_enabled &&
       /^[0-9a-f]{64}$/.test(a.commissioning_digest ?? "") &&
       Number(a.subaccount) === 1 && Number(a.exchange_index) === 2, "production_authority_disabled_or_uncommissioned");
@@ -251,8 +262,20 @@ export class ProductionExecutor {
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
     // Preserve each gate boundary and refusal order. Only its independent
     // non-locking reads are batched; locked policy decoding remains separate.
-    const ownedGate = this.accountOwnerUserId ? (await tx.query(ownedGateReadSql(),
+    let ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
       [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
+    if(ownedGate?.has_uncertain_order===true&&!lifecycle&&allowEconomicProof){
+      const proof=await this.economicUnknownProof(tx,a,ignoreIntentId);
+      if(proof){
+        const remaining=(await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)",[a.id,ignoreIntentId])).rows;
+        if(remaining.length>0&&remaining.every(r=>proof.exitIds.includes(r.id))){
+          // lifecycle=true is only the original SQL projection here. The caller
+          // remains a normal order gate and still enforces every authority below.
+          const facts=(await tx.query(OWNED_GATE_READ_SQL,[a.id,ignoreIntentId,true,this.accountOwnerUserId])).rows[0];
+          if(facts)ownedGate={...facts,has_uncertain_order:false};
+        }
+      }
+    }
     const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
     requireProof(lifecycle || (ownedGate ? ownedGate.has_uncertain_order === false : unknown!.rows.length === 0),
@@ -297,6 +320,7 @@ export class ProductionExecutor {
     const done=this.startTiming("reconciliation");
     let schedulingResult:ReconcileSchedulingResult=undefined;
     try {
+      this.#economicReconciledSnapshot=null;
       const { account: a, earliest: floor } = await this.ledger.readReconcileAccount();
       const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
@@ -306,6 +330,8 @@ export class ProductionExecutor {
       try {const reconciliationReceipt=this.heldReconcile
           ?await this.heldReconcile(snapshot,a.revision)
           :await this.ledger.reconcile(snapshot,a.revision,this.now());
+        if(!this.heldReconcile&&this.accountOwnerUserId&&this.exchange.mode==="LIVE"&&economicExitFinalityEnabled())
+          this.#economicReconciledSnapshot=structuredClone(snapshot);
         commit("completed",{reconciliationReceipt});}
       catch(error){commit("rejected",{error});throw error;}
       if(this.afterReconcile&&!this.heldReconcile){
@@ -315,7 +341,7 @@ export class ProductionExecutor {
       }
       done("completed");
       return schedulingResult;
-    }catch(error){done("rejected",{error});throw error;}
+    }catch(error){this.#economicReconciledSnapshot=null;done("rejected",{error});throw error;}
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
@@ -624,12 +650,11 @@ export class ProductionExecutor {
           };
           try {
           if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
-          // Apart from this exact dispatch, only #387's verified accounting
-          // receipt can distinguish the historical UNKNOWN from new uncertainty.
-          // The latest signed account proof below can still contradict it.
-          const discharge=this.accountOwnerUserId?economicExitNotDischarged('account_id','client_order_id'):'';
-          const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2"+discharge, [a.id, id]);
-          requireProof(others.rows.length === 0, "production_other_uncertain_order");
+          // This intent itself is the ONLY allowed dispatched identity.
+          const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
+          const economicProof=others.rows.length?await this.economicUnknownProof(tx,a,id):null;
+          requireProof(others.rows.length===0||economicProof!==null&&others.rows.every(r=>economicProof.exitIds.includes(r.id)),
+            "production_other_uncertain_order");
           await this.gate(tx, a, i.kind === "EXIT", id);
           const p = await this.ledger.policy(tx, a);
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
@@ -727,6 +752,10 @@ export class ProductionExecutor {
           if(pendingSnapshot){const outcome=await pendingSnapshot;if(!outcome.ok)throw outcome.error;snapshot=outcome.snapshot;}
           else snapshot=await readFinalSnapshot(oldest);
           await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
+          if(economicProof){
+            const fresh=await this.economicUnknownProof(tx,a,id,snapshot);
+            requireProof(fresh?.receiptDigest===economicProof.receiptDigest,"economic_discharge_final_receipt_changed");
+          }
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
           requireProof(this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
@@ -791,6 +820,8 @@ export class ProductionExecutor {
             // HTTP send, without repeating network proof or extending its age.
             this.ledger.setFinalWireClock(()=>{
               const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
+              if(economicProof)requireProof(now>=snapshot.observedAtMs&&now-snapshot.observedAtMs<=5000,
+                "economic_discharge_final_wire_evidence_expired");
               const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id});
               try {
               assertChampionSourceReference(source);
@@ -828,6 +859,8 @@ export class ProductionExecutor {
             const now=this.now();
             requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_held_original_source_expired");
           }
+          if(economicProof){const now=this.now();requireProof(now>=snapshot.observedAtMs&&now-snapshot.observedAtMs<=5000,
+            "economic_discharge_final_wire_evidence_expired");}
           invoked = true;
           finalTiming("completed",{finalMarketReads});
           }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
@@ -875,7 +908,7 @@ export class ProductionExecutor {
       if (i.cancel_attempted) return null;
       // Cancellation of a known uncertain order is allowed, but all OTHER
       // uncertainty, ownership, approval and kill-switch barriers still apply.
-      await this.gate(tx, a, i.kind === "EXIT", id);
+      await this.gate(tx, a, i.kind === "EXIT", id, false, false);
       await this.ledger.policy(tx, a);
       await tx.query("UPDATE v13_production_intent SET cancel_attempted=true,state='UNKNOWN' WHERE id=$1", [id]);
       await this.ledger.persist(tx, a);
@@ -885,7 +918,7 @@ export class ProductionExecutor {
     this.fault("after_cancel_commit");
     await this.ledger.transaction(async (tx, a) => {
       const final = async () => {
-        await this.gate(tx, a, order.kind === "EXIT", id);
+        await this.gate(tx, a, order.kind === "EXIT", id, false, false);
         requireProof(a.execution_enabled && !a.kill_switch && a.commissioned &&
           identity(a).keyFingerprint === (order.decision.identity as { keyFingerprint: string }).keyFingerprint,
         "production_cancel_gate_changed");

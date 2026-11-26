@@ -64,7 +64,10 @@ jobs:
         env:
           STRATA_ECONOMIC_PG_VERSION: ${{ matrix.postgres }}
         run: pnpm run test:economic-settlement-native && pnpm run test:economic-discharge-native
-      - name: Orders-off economic discharge entry, protective exit and restart
-        working-directory: artifacts/api-server
-        run: node scripts/run-v13-disposable-postgres.mjs src/lib/strata/dischargeReceiptFullCycle.postgres.test.ts
       - run: pnpm --filter @workspace/api-server run build
+
+      - name: Full real worker cycle after canonical economic discharge
+        working-directory: artifacts/api-server
+        env:
+          PG_BIN: /usr/lib/postgresql/${{ matrix.postgres }}/bin
+        run: pnpm run test:economic-discharge-cycle

@@ -635,6 +635,7 @@ export function createProductionPersonalSession(
           const outcome = await dispatchReviewedProtectiveExitOnce({
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
+            economicEvidence:session.executor.captureEconomicProtectiveEvidence(String(order.client_order_id)),
             ...(directSource?{directHeldSource:directSource}:{}),
           });
           if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);

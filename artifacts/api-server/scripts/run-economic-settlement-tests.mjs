@@ -32,7 +32,7 @@ try{
   const file=join(out,'native.cjs');bundle(discharge?'src/lib/strata/economicExitDischarge.native.ts':'src/lib/strata/ownerEconomicSettlement.native.ts',file);
   run(process.execPath,['--test',file],{DATABASE_URL:`postgresql:///strata_economic_fixture?host=${encodeURIComponent(socket)}&port=5544&user=postgres`,STRATA_ISOLATED_ECONOMIC_TEST:'1',STRATA_ECONOMIC_SOCKET:socket});
  }else{
-  const entries=discharge?['src/lib/strata/economicExitDischargeEvidence.test.ts','src/routes/economicExitDischargeRoute.test.ts']:['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
+  const entries=discharge?['src/lib/strata/economicExitDischargeEvidence.test.ts','src/lib/strata/economicExitRuntimeEvidence.test.ts','src/routes/economicExitDischargeRoute.test.ts']:['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
   const files=entries.map((p,i)=>{const f=join(out,`${i}.cjs`);bundle(p,f);return f;});
   run(process.execPath,['--test',...files],{DATABASE_URL:'postgres://fixture:fixture@127.0.0.1:1/never_connect'});
  }
