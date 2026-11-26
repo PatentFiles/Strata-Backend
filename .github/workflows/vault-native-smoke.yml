@@ -12,7 +12,7 @@ permissions: {}
 
 jobs:
   native-vault:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/vault-native-smoke-20261110'
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -41,7 +41,7 @@ jobs:
           test "$(docker inspect "$DB" --format '{{len .HostConfig.PortBindings}}')" = 0
           test "$(docker inspect "$DB" --format '{{.HostConfig.Privileged}}')" = false
           test "$(docker inspect "$DB" --format '{{len .HostConfig.Binds}}')" = 0
-          
+
           sql() {
             docker exec -i "$DB" psql -X --no-password -v ON_ERROR_STOP=1 -v VERBOSITY=verbose \
               -U supabase_admin -h /var/run/postgresql -d postgres "$@"
@@ -135,7 +135,7 @@ jobs:
           SELECT p.proname, l.lanname, p.prosecdef, p.provolatile, p.probin, p.prosrc, p.proacl
           FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
           WHERE p.oid = 'vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)'::regprocedure;
-          
+
           DO $$
           BEGIN
             PERFORM vault.create_secret('FAKE_NATIVE_VAULT_ONLY_ALPHA', 'native_smoke_alpha', 'Disposable synthetic fixture');
@@ -182,7 +182,7 @@ jobs:
           END $$;
           RESET ROLE;
           SQL
-          
+
           expect_error 'view SELECT without native-helper EXECUTE is denied' 42501 \
             "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
           expect_error 'direct base-table SELECT is denied' 42501 \
@@ -191,7 +191,7 @@ jobs:
             "SET ROLE anon; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
           expect_error 'authenticated cannot decrypt fixture' 42501 \
             "SET ROLE authenticated; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
-          
+
           sql <<'SQL'
           GRANT EXECUTE ON FUNCTION vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea)
           TO vault_smoke_reader;
@@ -211,14 +211,14 @@ jobs:
           sql -c "REVOKE EXECUTE ON FUNCTION vault._crypto_aead_det_decrypt(bytea,bytea,bigint,bytea,bytea) FROM vault_smoke_reader"
           expect_error 'revoking helper EXECUTE restores denial' 42501 \
             "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
-          
+
           expect_error 'ciphertext bit flip is rejected' 22000 \
             "SELECT vault._crypto_aead_det_decrypt(set_byte(decode(secret,'base64'),0,get_byte(decode(secret,'base64'),0) # 1),convert_to(id::text,'utf8'),0,'pgsodium'::bytea,nonce) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
           expect_error 'wrong authenticated row ID is rejected' 22000 \
             "SELECT vault._crypto_aead_det_decrypt(decode(secret,'base64'),convert_to('00000000-0000-0000-0000-000000000000','utf8'),0,'pgsodium'::bytea,nonce) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
           expect_error 'nonce bit flip is rejected' 22000 \
             "SELECT vault._crypto_aead_det_decrypt(decode(secret,'base64'),convert_to(id::text,'utf8'),0,'pgsodium'::bytea,set_byte(nonce,0,get_byte(nonce,0) # 1)) FROM vault.secrets WHERE name = 'native_smoke_alpha'"
-          
+
           before=$(sql -Atc 'SELECT pg_postmaster_start_time()')
           docker restart --time 30 "$DB" >/dev/null
           wait_ready
@@ -240,4 +240,3 @@ jobs:
             "SET ROLE vault_smoke_reader; SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'native_smoke_alpha'"
           printf 'PASS: all native Vault smoke checks completed\n'
           printf '%s\n' 'Native Vault smoke passed: pinned PG17.11/Vault0.3.1, fake roundtrips/update, helper ACL boundary, tamper rejection, and restart persistence.' >> "$GITHUB_STEP_SUMMARY"
-          
