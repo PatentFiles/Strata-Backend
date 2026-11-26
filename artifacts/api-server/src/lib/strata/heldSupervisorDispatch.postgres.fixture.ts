@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import {V13_ENTRY_POLICY_VERSION} from '@workspace/v13-strategy';
 import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
 import {proveEconomicSettlement,economicSettlementPlan} from './ownerEconomicSettlementProof';
 import {commitEconomicSettlement} from './ownerEconomicSettlementCommit';
@@ -9,7 +10,7 @@ import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
 import {pool,type Pool} from '@workspace/db';
 import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome,restrictedRuntimeDiagnostics,beginRestrictedRuntimeDiagnostics} from './restrictedProtectiveRuntime.fixture';
-import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH,V13_ENTRY_POLICY_VERSION} from '@workspace/v13-strategy';
+import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
 import {conservativeExitFeeMicros} from '../v13-production/fractionalExitFee';
 import {maximumExitFeePerContractMicros} from '../microLiveEntryFees';
@@ -399,10 +400,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
  }
 }
 
-/** One process and real worker, exact receipt, no seeded successor orders.
- * The canonical runner strips credentials and fences all outbound sockets.
- * The synthetic venue is the only code which accepts a signed order request. */
-export async function runDischargeReceiptFullCycle(){
+export async function runEconomicDischargeFullCycle(){
  const setup=new NativePool({connectionString:url!,max:2});
  const controls:PersonalSessionControl[]=[];let control:PersonalSessionControl|undefined;
  const at=Date.now();let btc=99990,cash=0,qty=0,reads=0;
@@ -478,7 +476,7 @@ export async function runDischargeReceiptFullCycle(){
   for(const migration of ['20261125205247_owner_arm_preparation','20261126004500_economic_settlement_receipt','20261126113609_economic_exit_obligation_discharge'])
    await setup.query(readFileSync('../../supabase/migrations/'+migration+'.sql','utf8'));
   Object.assign(process.env,{NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,
-   STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',STRATA_ECONOMIC_EXIT_FINALITY_ENABLED:'true',STRATA_ECONOMIC_EXIT_DISCHARGE_SHA:sha,
+   STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',STRATA_ECONOMIC_EXIT_FINALITY_ENABLED:'true',
    STRATA_INDEPENDENT_LIVE_SOURCE_V1:'true',
    STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:JSON.stringify([{ownerId:owner,accountId:account,releaseSha:sha}])});
   const probe=await probeCurrentKalshiFeeApi(globalThis.fetch,Date.now,successor);
@@ -489,7 +487,7 @@ export async function runDischargeReceiptFullCycle(){
   policyHash=computeV13LiveMoneyPolicyHash(decodePolicy((await setup.query("SELECT * FROM public.v13_live_money_policy WHERE id=$1",[policy])).rows[0]));
   await setup.query("UPDATE public.v13_live_money_policy SET policy_hash=$2 WHERE id=$1",[policy,policyHash]);
   await seedCombinedStanding(setup,{owner,reviewer,grant,account,policyHash,sha});
-  const retired=await recordRehearsalReceipt(setup,held);
+  const retired=await recordEconomicRehearsalReceipt(setup,held);
   cash=Number(held.snapshot.cashMicros);
   control=createProductionPersonalSession(db);controls.push(control);
   const started=await control.start({userId:owner,accountId:account,action:'START'});
@@ -511,6 +509,7 @@ export async function runDischargeReceiptFullCycle(){
   assert.equal(submitted.length,2);assert.equal(httpErrors.length,0,JSON.stringify(httpErrors));
   const final=(await setup.query("SELECT cash_micros,reserved_micros,blocked_reason FROM public.v13_production_account WHERE id=$1",[account])).rows[0];
   assert.deepEqual(final,{cash_micros:String(cash),reserved_micros:'0',blocked_reason:null});
+   assert.deepEqual((await setup.query("SELECT (SELECT count(*)::int FROM private.strata_economic_settlement_receipt) booked,(SELECT count(*)::int FROM private.strata_economic_exit_discharge) discharged,(SELECT count(*)::int FROM public.v13_production_event WHERE kind='SETTLEMENT') settlement_events")).rows[0],{booked:1,discharged:1,settlement_events:1});
   assert.deepEqual((await setup.query("SELECT i.state,m.state AS marker FROM public.v13_production_intent i JOIN private.strata_emergency_exit_reservations m USING(client_order_id) WHERE i.id=$1",[retired])).rows,[{state:'DISPATCHED',marker:'UNKNOWN'}]);
  }finally{
   try{for(const c of controls)await c.stop({userId:owner,accountId:account,action:'KILL'});}
@@ -518,7 +517,7 @@ export async function runDischargeReceiptFullCycle(){
  }
 }
 
-async function recordRehearsalReceipt(setup:Pool,held:ReturnType<typeof economicSettlementFixture>){
+async function recordEconomicRehearsalReceipt(setup:Pool,held:ReturnType<typeof economicSettlementFixture>){
  Object.assign(held.account,{id:account,owner_user_id:owner,key_fingerprint:fingerprint});
  held.snapshot.identity.keyFingerprint=fingerprint;
  for(const i of held.history.rows)i.account_id=account;
@@ -556,17 +555,18 @@ async function recordRehearsalReceipt(setup:Pool,held:ReturnType<typeof economic
  const events=(await setup.query("SELECT * FROM public.v13_production_event WHERE account_id=$1 ORDER BY event_id",[account])).rows;
  const positions=(await setup.query("SELECT * FROM public.v13_production_position WHERE account_id=$1",[account])).rows;
  const evidence={...held,account:{...posted,subaccount:Number(posted.subaccount),exchange_index:Number(posted.exchange_index)},history:{...held.history,events,positions}};
- const stored=(await setup.query("SELECT * FROM private.strata_economic_settlement_receipt WHERE request_id=$1",[scope.requestId])).rows[0];
- const proofAfterBooking=proveEconomicDischarge({...evidence,booking:stored,
-  market:{ticker:plan.settlement.market,exchange_index:2,market_type:'binary',status:'finalized',result:'no',
-   settlement_ts:held.rawSettlement.settled_time,close_time:new Date(plan.settlement.occurredAtMs-1000).toISOString(),
-   settlement_value_dollars:'0.0000'},transfers:{subaccount:[],crossExchange:[],complete:true}});
- const discharged=await commitEconomicDischarge(proofAfterBooking,{...scope,requestId:randomUUID()},deps);
- assert.equal(discharged.status,'RECORDED',JSON.stringify(discharged));
- const stopped=(await setup.query("SELECT execution_enabled,kill_switch,reserved_micros FROM public.v13_production_account WHERE id=$1",[account])).rows[0];
- assert.deepEqual(stopped,{execution_enabled:false,kill_switch:true,reserved_micros:'0'});
- // Exercise the worker after the separate owner's already-qualified consent;
- // this synthetic account transition never stands in for a production approval.
- await setup.query("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false WHERE id=$1",[account]);
+ const booking=(await setup.query("SELECT * FROM private.strata_economic_settlement_receipt WHERE request_id=$1",[scope.requestId])).rows[0];
+  const market={ticker:plan.settlement.market,exchange_index:2,market_type:'binary',status:'finalized',result:plan.settlement.result.toLowerCase(),
+    settlement_ts:held.rawSettlement.settled_time,close_time:new Date(plan.settlement.occurredAtMs-1000).toISOString(),settlement_value_dollars:plan.settlement.result==='YES'?'1.0000':'0.0000'};
+  const dischargeProof=proveEconomicDischarge({...evidence,booking,market,transfers:{subaccount:[],crossExchange:[],complete:true}});
+  const disposed=await commitEconomicDischarge(dischargeProof,{...scope,requestId:randomUUID()},deps);
+  assert.equal(disposed.status,'RECORDED',JSON.stringify(disposed));
+  assert.deepEqual((await setup.query("SELECT execution_enabled,kill_switch,reserved_micros FROM public.v13_production_account WHERE id=$1",[account])).rows[0],
+    {execution_enabled:false,kill_switch:true,reserved_micros:'0'});
+  // Fixture-only owner reauthorization. The production discharge never enables
+  // trading; actual owner ARM/consent is separately exercised in native browser CI.
+  // This disposable full-cycle tests the REAL recurring worker, entry, protective
+  // sender, STOP and restart after explicit synthetic owner authorization.
+  await setup.query("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false WHERE id=$1",[account]);
  return plan.exitId;
 }

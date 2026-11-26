@@ -1,3 +1,4 @@
+import {recheckEconomicProtectiveEvidence} from './economicExitProtectiveEvidence';
 import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {verifyDurableFeeStage,verifyDurableProtectiveAuthority} from './durableFeeConsumers';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
@@ -59,7 +60,7 @@ const fail=(reason:string,state:Result["state"]="BLOCKED",postAttempted=false):R
 type Receipt=IocRecoveryObservation["response"];
 type Material={keyId:string;privateKey:string};
 type Input={ownerId:string;accountId:string;reservationId:string;
-  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease;directHeldSource?:DirectEntrySource};
+  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease;directHeldSource?:DirectEntrySource;economicEvidence?:object};
 /** Narrow seams are for isolated tests; not injectable by public controllers. */
 type Ports={
  db?:DB;now?:()=>number;monotonicNow?:()=>number;
@@ -203,6 +204,7 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
 async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;noExactRowBeforeCommit?:true;diagnosticStage?:FinalFenceStage}>{
  let c:DBClient|null=null,committed=false,eligible=false,commitStarted=false;
+  let economicObservedAt:number|null=null,economicDeadline=Infinity;
  const denied=(diagnosticStage:FinalFenceStage)=>({attempted:false,receipt:null,diagnosticStage});
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
@@ -236,7 +238,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
  EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
- i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,
+ i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,i.id AS economic_target_intent_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-(i.decision#>>'{ownedEvaluation,source,evaluated_at}')::timestamptz))*1000::double precision AS source_age_ms,
  CASE WHEN $14::boolean THEN NULL ELSE
  EXTRACT(EPOCH FROM (code_release.expires_at-clock_timestamp()))*1000::double precision END AS release_remaining_ms
@@ -310,8 +312,18 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   if(rows.rows.length===0)return {...denied("locked_fence_no_exact_row"),noExactRowBeforeCommit:true};
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
    return denied("locked_fence_no_exact_row");
-  const row=rows.rows[0]!;
-  const reservationAge=row.reservation_age_ms,heartbeatAge=row.heartbeat_age_ms;
+   const row=rows.rows[0]!;
+   // Prepared/UNKNOWN marking does not grant permission to ignore an old
+   // transport UNKNOWN. Recheck the immutable discharge and fresh exact signed
+   // settlement proof on this real locked final sender, not just on ARM.
+   economicObservedAt=await recheckEconomicProtectiveEvidence(c,input.economicEvidence,
+     {ownerId:input.ownerId,accountId:input.accountId,clientId:String(input.order.client_order_id),intentId:String(row.economic_target_intent_id)},Date.now());
+   if(economicObservedAt!==null){
+     const left=5000-(Date.now()-economicObservedAt);
+     if(left<=0||left>5000)return denied("evidence_clock");
+     economicDeadline=monotonicNow()+left;
+   }
+   const reservationAge=row.reservation_age_ms,heartbeatAge=row.heartbeat_age_ms;
   if(typeof reservationAge!=="number"||!Number.isFinite(reservationAge)||reservationAge<0||reservationAge>=8000||
      typeof heartbeatAge!=="number"||!Number.isFinite(heartbeatAge)||heartbeatAge<0||heartbeatAge>=5000)
    return denied("reservation_or_heartbeat_age");
@@ -360,7 +372,9 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  try{
   const receipt=await send(()=>{
    const current=monotonicNow();
-   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs||current-evidenceStart>sourceRemainingMs||
+   if(!Number.isFinite(current)||current<evidenceStart||current>=economicDeadline||
+       (economicObservedAt!==null&&(Date.now()<economicObservedAt||Date.now()-economicObservedAt>5000))||
+       current-evidenceStart>=remainingMs||current-evidenceStart>sourceRemainingMs||
       (feeAuthority&&(current<feeAuthorityStart||current-feeAuthorityStart>=feeAuthorityRemainingMs||!feeAuthority.providerFresh()))){
     expired=true;throw Error("protective_exit_final_evidence_expired");
    }
