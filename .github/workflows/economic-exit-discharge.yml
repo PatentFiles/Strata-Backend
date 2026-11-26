@@ -63,7 +63,7 @@ jobs:
         working-directory: artifacts/api-server
         env:
           STRATA_ECONOMIC_PG_VERSION: ${{ matrix.postgres }}
-        run: pnpm run test:economic-settlement-native && pnpm run test:economic-discharge-native
+        run: pnpm run test:economic-settlement-native && pnpm run test:economic-discharge-native && pnpm run test:economic-recovery-batch-native
       - run: pnpm --filter @workspace/api-server run build
 
       - name: Full real worker cycle after canonical economic discharge

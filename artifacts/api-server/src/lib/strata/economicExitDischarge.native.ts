@@ -6,7 +6,7 @@ import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {economicDischargeFixture} from './economicExitDischargeFixture';
 import {proveEconomicDischarge,economicDischargePlan} from './economicExitDischargeEvidence';
 import {commitEconomicDischarge,economicDischargeOutcome,cancelEconomicDischarge,type DischargeScope} from './economicExitDischargeCommit';
-import {readEconomicExitDischarges,assertNoEconomicExitContradiction} from './economicExitDischargeScope';
+import {economicExitNotDischarged,readEconomicExitDischarges,assertNoEconomicExitContradiction} from './economicExitDischargeScope';
 import {readUnresolvedIntentMode} from './workerUncertainOrderGate';
 const url=new URL(process.env.DATABASE_URL??'');
 if(process.env.NODE_ENV!=='test'||process.env.STRATA_ISOLATED_ECONOMIC_TEST!=='1'||url.pathname!=='/strata_economic_fixture'||
@@ -60,6 +60,19 @@ test('native economic discharge atomicity, original UNKNOWN, cancellation, owner
   await pool.query(schema);
   await pool.query(readFileSync('../../supabase/migrations/20261126004500_economic_settlement_receipt.sql','utf8'));
   await pool.query(readFileSync('../../supabase/migrations/20261126113609_economic_exit_obligation_discharge.sql','utf8'));
+  await t.test('PIN absent-receipt fast path has exact canonical parity and cannot exempt missing or corrupted proof',async()=>{
+   const x=await seed();
+   const read=async(fast:boolean)=>(await pool.query('SELECT r.id FROM public.v13_production_intent r WHERE r.account_id=$1'+economicExitNotDischarged('r.account_id','r.client_order_id',fast)+' ORDER BY r.id',[x.f.account.id])).rows;
+   assert.deepEqual(await read(true),await read(false));assert.equal((await read(true)).length,2);
+   assert.equal((await run(x)).ok,true);
+   assert.deepEqual(await read(true),await read(false));assert.equal((await read(true)).length,1);
+   await pool.query("UPDATE public.v13_production_intent SET exchange_order_id='late-provider-evidence' WHERE kind='EXIT'");
+   assert.deepEqual(await read(true),await read(false));assert.equal((await read(true)).length,2);
+   assert.throws(()=>economicExitNotDischarged('account_id','client_order_id',true),/qualified_outer_alias_required/);
+   assert.throws(()=>economicExitNotDischarged('economic_candidate.account_id','r.client_order_id',true),/qualified_outer_alias_required/);
+   process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED='false';
+   try{assert.equal(economicExitNotDischarged('r.account_id','r.client_order_id',true),'');}finally{process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED='true';}
+  });
   await t.test('one immutable discharge; cash/events unchanged; reserve zero, stopped fence advances',async()=>{
    const x=await seed(),before=await current(),result=await run(x);assert.equal(result.ok,true,JSON.stringify(result));
    const after=await current();assert.equal(after.cash_micros,before.cash_micros);assert.equal(after.events,2);assert.equal(after.reserved_micros,'0');assert.equal(after.receipts,1);

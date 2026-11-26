@@ -1,7 +1,8 @@
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {readEconomicPendingMoneyBatch} from './economicRecoveryReadBatch';
 import {canonical,digest,requireProof,type Request} from '../v13-production/types';
 import {deployedGitSha} from './deployedGitSha';
-import {captureEconomicSettlementScope} from './ownerEconomicSettlementService';
+import {captureEconomicSettlementScope,type EconomicAlreadyLockedScope} from './ownerEconomicSettlementService';
 import {readVerifiedRoleAuthority} from './accountCredentialControls';
 import {inspectRestrictedKeyMetadata,inspectSubaccount1} from './accountCredentialProbe';
 import {getOwnedProductionKalshiJson,personalAccountSnapshot} from './personalExchangeRead';
@@ -39,16 +40,11 @@ const refusal=(e:unknown)=>dischargeNo(e instanceof Error&&/^economic_discharge_
 /** Other monetary operations are separate obligations. A quiet cash snapshot
  * does not cancel an unresolved transfer or auto-withdrawal maintenance claim. */
 async function readPendingMoney(tx:Pick<PoolClient,'query'>,account:string,lock:boolean){
- const histories:Row[][]=[];
- for(const [table,allowed] of [
-  ['private.kalshi_owner_topups',['completed','cancelled']],
-  ['private.kalshi_owner_shard_allocations',['completed']],
-  ['private.kalshi_owner_pilot_transfers',['completed']],
-  ['private.strata_manual_profit_withdrawals',['completed','expired']],
-  ['private.strata_auto_withdrawal_maintenance',['completed']],
- ] as const){
-  const rows=(await tx.query(`SELECT t.*,t.xmin::text AS row_revision FROM ${table} t WHERE execution_account_id=$1 LIMIT 1001${lock?' FOR SHARE':''}`,[account])).rows as Row[];
-  requireProof(rows.length<=1000&&rows.every(r=>(allowed as readonly string[]).includes(String(r.state))),'economic_discharge_pending_money_requires_review');histories.push(rows.sort((a,b)=>canonical(a).localeCompare(canonical(b))));
+ const histories=await readEconomicPendingMoneyBatch(tx,account,lock);
+ const allowedStates=[['completed','cancelled'],['completed'],['completed'],['completed','expired'],['completed']];
+ for(const [index,rows] of histories.entries()){
+  requireProof(rows.length<=1000&&rows.every(r=>allowedStates[index]!.includes(String(r.state))),'economic_discharge_pending_money_requires_review');
+  rows.sort((a,b)=>canonical(a).localeCompare(canonical(b)));
  }
  const legs=(await tx.query(`SELECT l.*,l.xmin::text AS row_revision FROM private.kalshi_owner_topup_legs l JOIN private.kalshi_owner_topups p ON p.id=l.topup_id
   WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') LIMIT 1${lock?' FOR SHARE OF l':''}`,[account])).rows;
@@ -57,10 +53,11 @@ async function readPendingMoney(tx:Pick<PoolClient,'query'>,account:string,lock:
 export function createEconomicDischargeService(deps:Deps){
  const db=deps.db??pool,now=deps.now??Date.now,sha=deps.sha??deployedGitSha,enabled=deps.enabled??economicDischargeEnabled;
  const check=()=>{const build=sha();requireProof(enabled()&&economicExitFinalityEnabled()&&SHA.test(build),'economic_discharge_release_not_qualified');return build;};
- const capture=async(tx:Pick<PoolClient,'query'>,owner:string,build:string,lock=false)=>{
-  const first=await captureEconomicSettlementScope(tx,owner,build,now(),deps.isScheduled,lock);
-  const a=(await tx.query('SELECT blocked_reason FROM public.v13_production_account WHERE id=$1',[first.account.id])).rows;
-  requireProof(a.length===1&&a[0]!.blocked_reason===null,'economic_discharge_unrelated_hold_requires_review');
+ const capture=async(tx:Pick<PoolClient,'query'>,owner:string,build:string,lock=false,alreadyLocked?:EconomicAlreadyLockedScope)=>{
+  const first=await captureEconomicSettlementScope(tx,owner,build,now(),deps.isScheduled,lock,alreadyLocked);
+  // This exact account was already read in the coherent capture (and is
+  // FOR UPDATE locked by the writer). Do not add a second network round trip.
+  requireProof(first.blockedReason===null,'economic_discharge_unrelated_hold_requires_review');
   const beat=first.worker.heartbeat_at instanceof Date?first.worker.heartbeat_at.getTime():Date.parse(String(first.worker.heartbeat_at));
   requireProof(first.worker.state==='released'||Number.isSafeInteger(beat)&&beat<now()-120000,'economic_discharge_worker_not_stale');
   const receipts=(await tx.query(`SELECT b.* FROM private.strata_economic_settlement_receipt b WHERE b.execution_account_id=$1 AND b.owner_user_id=$2::uuid
@@ -73,7 +70,7 @@ export function createEconomicDischargeService(deps:Deps){
   const tx=await db.connect();let first:Awaited<ReturnType<typeof capture>>;
   let verification:Awaited<ReturnType<typeof readVerifiedRoleAuthority>>,restricted:Awaited<ReturnType<typeof readVerifiedRoleAuthority>>;
   try{
-   await tx.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');await tx.query("SET LOCAL statement_timeout='4000ms'");
+   await tx.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout='4000ms'");
    first=await capture(tx,owner,build);
    requireProof(expected===undefined||expected===first.dischargeScopeDigest,'economic_discharge_preview_scope_changed');
    verification=await readVerifiedRoleAuthority(tx,owner,String(first.worker.provider_connection_id),'verification');
@@ -137,7 +134,7 @@ export function createEconomicDischargeService(deps:Deps){
     return await commitEconomicDischarge(proof,{ownerId:owner,requestId:String(input.requestId),scopeDigest:first.dischargeScopeDigest,releaseSha:build,
      controlEpoch:first.controlEpoch,workerFence:String(first.worker.fencing_token)},{db,now,verifyLocked:async(tx,a,p)=>{
       requireProof(check()===build&&a.id===p.accountId,'economic_discharge_release_changed');
-      const locked=await capture(tx,owner,build,true);
+      const locked=await capture(tx,owner,build,true,{account:a as unknown as Row,pin:first.pin});
       requireProof(locked.dischargeScopeDigest===first.dischargeScopeDigest&&digest(locked.history)===p.historyDigest,'economic_discharge_locked_scope_changed');
      }});
    }catch(e){return refusal(e);}
