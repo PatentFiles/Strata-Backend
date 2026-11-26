@@ -1,0 +1,60 @@
+# Paper process isolation
+The API start command no longer starts the server paper scheduler. The paper
+worker uses the original strategy, cadence, and exclusive database lease, but
+cannot send a process-local paper wake or call the legacy micro-live execution
+hook. User-owned live entry and protective-exit code, reconciliation, risk,
+fee, and quote-age checks are unchanged. No runtime migration is automatic.
+
+## Staging and cutover
+- Build the release, run `pnpm --filter @workspace/api-server run test:paper-process-boundary`,
+  and run the paper-worker and live worker safety/regression suites in
+  disposable environments. Exercise startup, exclusive leasing, rollover and
+  SIGTERM against a disposable database and no-order feeds before rollout.
+- Use a **dedicated, private** paper service with start command
+  `pnpm --filter @workspace/api-server run start:paper`. Do not configure an
+  HTTP health check. Set the ordinary exact paper entry-policy approval,
+  `NODE_ENV=production`, and `FORWARD_TEST_PRODUCTION_WORKER_ENABLED=true`
+  explicitly for that service. Set `STRATA_PAPER_DATABASE_URL` to a distinct
+  least-privilege paper login authorized through the scoped role in
+  docs/strata-paper-cutover/reviewed-role.sql. The worker refuses an unisolated
+  role at startup, before acquiring the lease. Do not inherit API database or credential
+  settings, live provider signing keys, or live flags. Verify paper and zero-authority shadow results in staging;
+  leave autonomous learning disabled until separately qualified; do not grant execution or credential
+  storage access. A separate runtime can still share database resources if both
+  services use the same database.
+- Before a controlled live release, inventory active users and any legacy
+  execution path that relies on paper. The former paper-triggered legacy
+  micro-live cycle stops when this API revision takes over. Do not cut over
+  while a legacy position, nonterminal order, unknown outcome, or an active
+  worker could depend on it. Coordinate a stopped, reconciled cutover and
+  exact-release authorization through the existing controls.
+- Start the API without the old scheduler; verify health and API boot logs.
+  Wait for the old paper lease to expire or release, then start exactly one
+  dedicated paper service and verify its separate deployment identity and
+  continuing paper evaluations. Check that it cannot access execution tables or
+  create orders. Verify independent entry/held-exit evidence separately; fresh
+  paper/PASS rows do not prove order latency.
+- Roll back only with the same stopped-account checks. Stop the dedicated
+  paper service first so the previous API revision does not compete for its lease.
+
+## Fresh live starts vs legacy exposure
+A flat owner with no authorized independent source cannot start an entry
+scheduler. A previous uncertain order can still enter reconciliation-only
+recovery, without a paper wake or paper trace sweep. An already open legacy
+position must not lose its existing owner-scoped protection: this exceptional
+path still uses legacy paper evidence, is not a qualified independent deployment,
+and must be resolved before cutover. Do not arm on a legacy protection-only
+status. A passing local split test does not prove hosted process identities or
+a genuine protective exit.
+
+## Live runtime contract
+
+The API entrypoint always chooses the independent-only LIVE worker before
+listening. An unbound session cannot start normal entry or exit, cannot read
+paper, and cannot use the old protection fallback even if paper is running.
+Read-only UNKNOWN recovery may still reconcile. The legacy compatibility
+fixtures do not boot the API entrypoint. Verify a qualified direct held path
+on the authorized release, then cut over only when venue reads show every
+affected account is flat with no unresolved position/order/intent. If an
+active position lacks verified direct protection, keep the old deployment;
+do not hand it to the new release. This never grants order authority.

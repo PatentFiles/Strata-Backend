@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { pool } from "@workspace/db";
 import { REVIEWED_FEE_DIGEST } from "./operatorAttestedFeeEligibility";
 import { FEE_SOURCE_DECISION_SHA256 } from "./operatorFeePolicyDecision";
@@ -112,7 +113,7 @@ export async function inspectOwnerFeeSourceReadiness(
       return blocked(candidate.reason || "operator_candidate_missing");
     // Multiple independently issued grants are ambiguous; never choose one.
     const grants = await db.query(
-      `SELECT g.grant_id,g.owner_user_id,g.release_id,g.reviewed_pdf_sha256,g.policy_version,
+      runtimeAuthSql(`SELECT g.grant_id,g.owner_user_id,g.release_id,g.reviewed_pdf_sha256,g.policy_version,
               g.approved_by_admin_id,g.policy_decision_sha256,g.approved_at,g.expires_at,
               g.revoked_at,g.authorized_stages,
               EXISTS (
@@ -160,7 +161,7 @@ export async function inspectOwnerFeeSourceReadiness(
               AND reviewers.revoked_at IS NULL AND reviewers.expires_at>now()
               AND signer.email_confirmed_at IS NOT NULL AND sr.role='ADMIN'
           ) >= 2
-        ORDER BY g.approved_at DESC LIMIT 2`,
+        ORDER BY g.approved_at DESC LIMIT 2`),
       [ownerUserId, candidate.releaseId, FEE_SOURCE_DECISION_SHA256],
     );
     if (grants.rows.length !== 1) {

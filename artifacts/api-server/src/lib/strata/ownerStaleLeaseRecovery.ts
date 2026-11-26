@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import { randomUUID, createHash } from "node:crypto";
 import { pool } from "@workspace/db";
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
@@ -150,6 +151,7 @@ export async function recoverOwnerStaleLease(
    await client.query("BEGIN");
    await client.query("SET LOCAL lock_timeout='1200ms'");
    await client.query("SET LOCAL statement_timeout='8000ms'");
+  await assertOwnerArmFence(client,ownerId);
    const a=await client.query(LOCK_ACCOUNT,[id,ownerId]);
    const l=await client.query(LOCK_LEASE,[id,ownerId]);
    if (a.rows.length!==1 || l.rows.length!==1 ||

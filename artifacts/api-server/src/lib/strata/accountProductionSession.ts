@@ -1,3 +1,4 @@
+import {getOwnedFeeFailureStage} from "./ownedFeeFailureDiagnostic";
 import {logger} from "../logger";
 import type {TimingObserver} from "../v13-production/stageTiming";
 import { recoverPreparedOwnedExitIntents } from "./preparedProtectiveExitRecovery";
@@ -222,6 +223,7 @@ export interface SchedulableWorker {
   start(): Promise<void>;
   startRecovery(): Promise<void>;
   stop(): void;
+  whenIdle?(): Promise<void>;
 }
 
 /**
@@ -313,7 +315,9 @@ export function openOwnedExecutionSession(input: {
     const candidate = attempt?.evaluationId;
     const evaluationId = typeof candidate === "string" &&
       /^[a-zA-Z0-9_-]{1,70}$/.test(candidate) ? candidate : null;
-    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId });
+    const feeEvidenceStage = getOwnedFeeFailureStage(sourceError);
+    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId,
+      ...(feeEvidenceStage ? { feeEvidenceStage } : {}) });
   };
   const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
     input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit, {

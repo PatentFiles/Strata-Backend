@@ -1,3 +1,7 @@
+import {reviewOwnerArm} from '../lib/strata/ownerArmScope';
+import {prepareOwnerArm,startPreparedOwner} from '../lib/strata/ownerArmPreparation';
+import {readOwnerArmOutcome,readCurrentOwnerArm} from '../lib/strata/ownerArmStore';
+import {protectiveHistoryPreviewHandler} from "./ownerProtectiveHistoryPreviewRoute";
 import {advanceOwnerFinancialCommissioning} from "../lib/strata/ownerCommissioningFinancialChecks";
 import {publicInitialRiskAction,REVIEW_INITIAL_RISK,APPROVE_INITIAL_RISK} from "../lib/strata/publicInitialRiskSetup";
 import {publicReleaseAction,REVIEW_PUBLIC_RELEASE,CONFIRM_PUBLIC_RELEASE} from "../lib/strata/publicCommissioningRelease";
@@ -127,6 +131,7 @@ export interface UserScopePort {
   verifyHistoricalFunding(userId:string):Promise<HistoricalFundingView>;
   prepareOwnerPilotTransfer(userId:string):Promise<PilotTransferView>;
   executeOwnerPilotTransfer(userId:string, body:unknown):Promise<PilotTransferView>;
+  recoverArmLease?(userId:string):Promise<{ok:boolean;reason:string}>;
   migrationReady(): Promise<boolean>;
   settings(userId: string): Promise<UserExecutionView>;
   wallet(userId: string): Promise<KalshiUserRead>;
@@ -339,6 +344,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  router.get("/release/protective-history-preview",protectiveHistoryPreviewHandler());
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
   router.get('/registered-opening-capital/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await registeredOpeningCapitalPreview(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
   router.post('/registered-opening-capital/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await applyRegisteredOpeningCapital(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});
@@ -377,6 +383,34 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     res.status(409).json({ error: "user_scope_not_migrated" });
     return false;
   };
+  // These routes inherit the same authenticated owner/MFA middleware as
+  // /control. No account ID, user ID, credential or external URL is accepted.
+  router.get('/arm/review',async(_req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');
+    const result=await reviewOwnerArm(owner);res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post('/arm',async(req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');
+    const result=await prepareOwnerArm(owner,req.body,port);res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.get('/arm/current',async(_req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');
+    const result=await readCurrentOwnerArm(owner);res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.get('/arm/outcome',async(req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');
+    const result=await readOwnerArmOutcome(owner,String(req.query.requestId??''));
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
+  router.post('/start-prepared',async(req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});
+    res.set('Cache-Control','private, no-store');
+    const result=await startPreparedOwner(owner,req.body,port);res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
   router.get("/bot-settings", async (_req, res) => {
     const userId = subject(res);
     if (!userId) return void res.status(401).json({ error: "Unauthorized" });

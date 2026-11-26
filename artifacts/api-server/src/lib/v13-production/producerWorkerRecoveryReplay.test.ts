@@ -16,7 +16,7 @@ import type {StageTiming} from './stageTiming';
 // proof. Fresh paths deliberately stop BEFORE planning/reserving any order.
 const epoch=Date.parse('2026-11-02T11:31:00.373Z');
 const afterFreshness='replay_stopped_after_freshness_before_planning';
-function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;providerAgeMs?:number;held?:boolean;snapshotFails?:boolean}){
+function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;providerAgeMs?:number;held?:boolean;snapshotFails?:boolean;legacySimulation?:boolean}){
  let now=epoch+options.producerMs;
  const source={...receiptFixture(epoch),id:'offline-source',evaluation_source:'paper',
   strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
@@ -55,7 +55,7 @@ function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;pr
   }},
   transaction:async(fn:(t:unknown,a:unknown)=>unknown)=>fn(tx,account),
   policy:async()=>({entryPolicyVersion:V13_LEGACY_ENTRY_POLICY,maxQuoteAgeMs:5000})};
- const exchange={mode:'LIVE',snapshot:async()=>{
+ const exchange={mode:options.legacySimulation?'SIMULATION':'LIVE',snapshot:async()=>{
    order.push('signed-snapshot');now+=options.reconcileMs??0;
    if(options.snapshotFails)throw Error('personal_exchange_history_unreconciled');
    return {observedAtMs:now};
@@ -71,7 +71,7 @@ function replay(options:{producerMs:number;reconcileMs?:number;bookMs?:number;pr
  if(options.held)executor.heldReconcile=async()=>{counts.heldReconciles++;order.push('held-reconcile');return undefined as never;};
  const worker=new ProductionWorker(executor,2500,error=>{reports.push(error);},()=>!options.held,
   async()=>{order.push('unknown-audit');},async()=>{counts.protected++;order.push('protect');},
-  {record:async d=>{decisions.push(d);return true;},sweep:async()=>0});
+  {record:async d=>{decisions.push(d);return true;},sweep:async()=>0},true);
  return {source,original,executor,worker,counts,order,events,reports,decisions,now:()=>now};
 }
 
@@ -85,8 +85,8 @@ for(const [age,expected] of [[4999,afterFreshness],[5000,afterFreshness],[5001,'
  });
 }
 
-test('producer transaction, reconcile and late book consume one immutable five-second source budget',async()=>{
- const f=replay({producerMs:2000,reconcileMs:2000,bookMs:1001});
+test('historical paper simulation: producer transaction, reconcile and late book consume one immutable five-second source budget',async()=>{
+ const f=replay({producerMs:2000,reconcileMs:2000,bookMs:1001,legacySimulation:true});
  try{await f.worker.tick('committed_signal');}finally{f.worker.stop();}
  assert.deepEqual(f.order,['unknown-audit','signed-snapshot','ledger-reconcile','discovery','book']);
  const admission=f.events.find(e=>e.stage==='evaluation_age_admission');
@@ -97,8 +97,8 @@ test('producer transaction, reconcile and late book consume one immutable five-s
  assert.deepEqual(f.decisions.map(d=>(d as {phase:string}).phase),['QUALIFYING_SEEN','PREPARE_REJECTED']);
 });
 
-test('reconciliation that exhausts the budget leaves no rediscovered or replayed historical entry',async()=>{
- const f=replay({producerMs:2000,reconcileMs:3001});
+test('historical paper simulation: reconciliation that exhausts the budget leaves no rediscovered or replayed historical entry',async()=>{
+ const f=replay({producerMs:2000,reconcileMs:3001,legacySimulation:true});
  try{await f.worker.tick('committed_signal');await f.worker.tick('committed_signal');}finally{f.worker.stop();}
  assert.equal(f.counts.discovered,2);assert.equal(f.counts.books,0);assert.equal(f.counts.submits,0);
  assert.deepEqual(f.decisions,[]);assert.equal(JSON.stringify(f.source),f.original);
@@ -153,7 +153,7 @@ for(const state of ['UNKNOWN','DISPATCHED','TERMINAL','BLOCKED']){
  });
 }
 
-test('UNKNOWN mode remains held and read-only reconciliation preserves protection without entry or renewal',async()=>{
+test('unbound live UNKNOWN reconciliation never adopts a synthetic unpinned holding or queries paper',async()=>{
  const mode=await readUnresolvedIntentMode(async(sql,args)=>{
   assert.match(sql,/state IN \('DISPATCHED','UNKNOWN'\)/);assert.match(sql,/strata_emergency_exit_reservations/);
   assert.deepEqual(args,['offline-account',null]);return {rows:[{n:'1'}]};
@@ -162,8 +162,15 @@ test('UNKNOWN mode remains held and read-only reconciliation preserves protectio
  const f=replay({producerMs:100,held:true});
  try{await f.worker.tick();await f.worker.tick();}finally{f.worker.stop();}
  assert.equal(f.counts.heldReconciles,2);assert.equal(f.counts.reconciles,0);assert.equal(f.counts.renewals,0);
- assert.equal(f.counts.protected,2);assert.equal(f.counts.discovered,0);assert.equal(f.counts.submits,0);
- assert.deepEqual(f.order.slice(0,4),['unknown-audit','signed-snapshot','held-reconcile','protect']);
+ assert.equal(f.counts.protected,0);assert.equal(f.counts.discovered,0);assert.equal(f.counts.submits,0);
+ assert.deepEqual(f.order,['unknown-audit','signed-snapshot','held-reconcile','unknown-audit','signed-snapshot','held-reconcile']);
+});
+
+test('the same fresh paper setup never reaches an unbound LIVE worker',async()=>{
+ const f=replay({producerMs:100});
+ try{await f.worker.tick('committed_signal');}finally{f.worker.stop();}
+ assert.equal(f.counts.reconciles,1);assert.equal(f.counts.discovered,0);
+ assert.equal(f.counts.books,0);assert.equal(f.counts.writes,0);assert.equal(f.counts.submits,0);
 });
 
 test('incomplete signed history prevents protective dispatch and entry even in held recovery',async()=>{

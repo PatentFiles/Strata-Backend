@@ -6,7 +6,7 @@ import {dispatchReviewedProtectiveExitOnce} from './ownerFeeEmergencyExitSignedD
 import {markOwnedEmergencyExitUnknownForReview} from './ownerFeeEmergencyExitUnknownCommit';
 import {dedicatedSignerFingerprint} from './commissioning';
 import assert from 'node:assert/strict';
-import {pool} from '@workspace/db';
+import {pool,type PoolClient} from '@workspace/db';
 import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority} from './reviewedProtectiveExitFee';
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from './apiFeeSourceStage';
 import {PDF_FREE_API_RATE_REVIEW_DECISION_SHA256,PDF_FREE_RATE_REVIEW_VECTOR_VERSION} from './apiFeeRateReference';
@@ -70,7 +70,7 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
  await insert('private.kalshi_account_worker_lease',{execution_account_id:account,owner_user_id:owner,holder_id:'worker',fencing_token:8,state:'owned',credential_fingerprint:fingerprint,account_kill:false,heartbeat_at:new Date()});
  await insert('public.v13_production_observation',{account_id:account,kind:'OWNER_ACTIVATION_REQUEST'});
  const results=[];
- for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay','stale-source-final','stale-source-final-no-send-rollback','future-source-final','stale-source-after-commit','malformed-source-final','no-send-audit-rollback','final-lock-probe','legacy-release-expiry'] as const){
+ for(const scenario of ['valid-unknown','revoke-after-provider','change-proof-after-provider','expire-during-query','expire-after-commit','stale-provider-delay','stale-provider-pool-wait','stale-provider-commit-delay','first-proof-only-stale','stale-provider-signing-delay','stale-source-final','stale-source-final-no-send-rollback','future-source-final','stale-source-after-commit','malformed-source-final','no-send-audit-rollback','final-lock-probe','legacy-release-expiry','legacy-revoke-after-marker','legacy-final-lock-timeout','legacy-cleanup-ack-loss'] as const){
   await db.query(`TRUNCATE public.v13_production_position,public.v13_production_intent,private.strata_emergency_exit_reservations,private.strata_protective_exit_local_no_send`);
   await db.query(`UPDATE private.strata_api_fee_standing_models SET valid_until=clock_timestamp()+interval '1 hour',revoked_at=NULL`);
   await db.query(`UPDATE private.strata_api_fee_standing_delegations SET valid_until=clock_timestamp()+interval '50 minutes',revoked_at=NULL`);
@@ -79,12 +79,13 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
    await db.query(`CREATE OR REPLACE FUNCTION public.synthetic_block_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic_block_failure'; END $$;
     CREATE TRIGGER synthetic_block_failure BEFORE UPDATE ON public.v13_production_intent FOR EACH ROW WHEN (NEW.state='BLOCKED') EXECUTE FUNCTION public.synthetic_block_failure()`);
   }
-  if(scenario==='legacy-release-expiry'){
+  if(scenario.startsWith('legacy-')){
+   await db.query('TRUNCATE private.strata_protective_exit_release');
    await db.query('TRUNCATE private.strata_standing_execution_reviews,private.strata_api_fee_standing_models,private.strata_api_fee_standing_delegations');
    await db.query("UPDATE private.strata_api_fee_rate_reviews SET expires_at=clock_timestamp()+interval '1 hour'");
    await insert('private.strata_protective_exit_release',{release_commit_sha:sha,state:'approved',created_at:before,expires_at:future,independent_reviewer_id:admin,operator_approver_id:owner});
   }
-  const noSend=scenario==='expire-after-commit'||scenario.startsWith('stale-provider-')||scenario==='stale-source-after-commit'||scenario==='stale-source-final'||scenario==='legacy-release-expiry';
+  const noSend=scenario==='expire-after-commit'||scenario.startsWith('stale-provider-')||scenario==='stale-source-after-commit'||scenario==='stale-source-final'||scenario==='legacy-release-expiry'||scenario==='legacy-revoke-after-marker';
   const reservationId=randomUUID(),clientId='v13p-'+randomUUID(),market='KXBTC15M-26NOV031945-45';
   const order={ticker:market,client_order_id:clientId,side:'ask',count:'2.00',price:'0.5500',time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,reduce_only:true,subaccount:1,exchange_index:2};
   const request={action:'SELL',reduceOnly:true,timeInForce:'IOC',market,side:'YES',clientOrderId:clientId,contracts:2,limitMicros:550000};
@@ -111,6 +112,7 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
   const txDb={connect:async()=>{
    connections++;if(connections===2&&scenario==='stale-provider-pool-wait')advance(3100);
    const c=await pool.connect();let finalAuthority=false;
+   let lockRival:PoolClient|undefined;
    return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
     if(sql==='BEGIN'&&connections===1&&!firstMarkerPrepared){
      const out=await c.query(sql,args);firstMarkerPrepared=true;
@@ -142,10 +144,21 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
       await db.query(`UPDATE public.v13_production_intent SET decision=jsonb_set(decision,'{ownedEvaluation,source,evaluated_at}',to_jsonb(clock_timestamp()-($1::double precision * interval '1 millisecond'))) WHERE kind='EXIT'`,[sourceAge]);
      }
      if(scenario==='legacy-release-expiry')await db.query("UPDATE private.strata_protective_exit_release SET expires_at=clock_timestamp()+interval '1 second'");
+     if(scenario==='legacy-revoke-after-marker'||scenario==='legacy-cleanup-ack-loss'){
+      assert.equal((await db.query("SELECT state FROM private.strata_emergency_exit_reservations")).rows[0].state,'UNKNOWN');
+      await db.query("UPDATE private.strata_protective_exit_release SET revoked_at=clock_timestamp()");
+     }
+     if(scenario==='legacy-final-lock-timeout'){
+      lockRival=await pool.connect();await lockRival.query("BEGIN");
+      await lockRival.query("SELECT id FROM public.v13_production_position WHERE id='parent' FOR UPDATE");
+     }
     }
     if(sql.startsWith('INSERT INTO private.strata_protective_exit_local_no_send'))auditInsertAttempts++;
     let out;
     try{out=await c.query(sql,args);}catch(error:any){failures.push({sql,code:error.code,message:error.message});throw error;}
+    finally{if(lockRival){await lockRival.query("ROLLBACK");lockRival.release();lockRival=undefined;}}
+    if(sql.includes('AS reservation_age_ms')&&(scenario==='legacy-revoke-after-marker'||scenario==='legacy-cleanup-ack-loss'))assert.equal(out.rows.length,0,"real fence rejected revoked technical release");
+    if(sql==='COMMIT'&&connections===3&&scenario==='legacy-cleanup-ack-loss')throw Error('cleanup commit acknowledgment lost');
     if(sql.includes('SELECT d.delegation_id')&&scenario==='expire-after-commit'){
      assert.equal(out.rows.length,1,'positive native authority must be observed before commit expiry');
      assert.ok(Number.isFinite(out.rows[0].valid_for_ms)&&out.rows[0].valid_for_ms>0&&out.rows[0].valid_for_ms+1<3000);
@@ -238,20 +251,23 @@ test('actual successor verifier and dispatcher: real UNKNOWN, final standing/res
    assert.equal(auditInsertAttempts,1,'audit insert precedes failing financial update');
    assert.ok(failures.some(f=>f.sql.startsWith("UPDATE public.v13_production_intent SET state='BLOCKED'")&&f.code==='P0001'&&f.message==='synthetic_block_failure'),'actual trigger must abort no-send transaction');
   }
-  assert.equal(authorityCalls,1);assert.equal(finalSuccessorQueries,scenario==='legacy-release-expiry'?0:1);
+  assert.equal(authorityCalls,1);assert.equal(finalSuccessorQueries,scenario.startsWith('legacy-')?0:1);
   assert.equal(finalFenceQueries,scenario==='revoke-after-provider'||scenario==='change-proof-after-provider'||scenario==='expire-during-query'?0:1);
   assert.equal(posts,(scenario==='valid-unknown'||scenario==='first-proof-only-stale'||scenario==='final-lock-probe')?1:0,scenario+JSON.stringify(result));
   assert.equal(result.postAttempted,scenario==='valid-unknown'||scenario==='first-proof-only-stale'||scenario==='final-lock-probe');assert.equal(result.mayRetry,false);
   const state=(await db.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state;
-  assert.equal(state,noSend?'VOID':'UNKNOWN');
+  assert.equal(state,noSend||scenario==='legacy-cleanup-ack-loss'?'VOID':'UNKNOWN');
+  if(scenario==='legacy-final-lock-timeout')assert.ok(failures.some(f=>f.sql.includes('AS reservation_age_ms')&&f.code==='55P03'));
   assert.equal(result.state,noSend?'BLOCKED':'UNKNOWN');
+  if(scenario==='legacy-revoke-after-marker'||scenario==='legacy-cleanup-ack-loss')
+   assert.equal((await db.query('SELECT reason FROM private.strata_protective_exit_local_no_send')).rows[0].reason,'final_fence_no_exact_row_before_commit');
   const priorPosts=posts;
   const repeated=await dispatchReviewedProtectiveExitOnce(input,ports);
   assert.notEqual(feeProofs.at(-1)?.reason,'protective_fee_clock_invalid','repeat must not pass merely because the test clock became fractional');
   assert.equal(posts,priorPosts);assert.equal(repeated.postAttempted,false);assert.equal(repeated.mayRetry,false);
   assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations')).rows[0].state,state,'repeat preserves original durable reservation distinction');
-  assert.equal((await db.query("SELECT state FROM public.v13_production_intent WHERE kind='EXIT'")).rows[0].state,noSend?'BLOCKED':'DISPATCHED');
-  assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_local_no_send')).rows[0].n,noSend?1:0,'repeat cannot manufacture or duplicate no-send audit');
+  assert.equal((await db.query("SELECT state FROM public.v13_production_intent WHERE kind='EXIT'")).rows[0].state,noSend||scenario==='legacy-cleanup-ack-loss'?'BLOCKED':'DISPATCHED');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM private.strata_protective_exit_local_no_send')).rows[0].n,noSend||scenario==='legacy-cleanup-ack-loss'?1:0,'repeat cannot manufacture or duplicate no-send audit');
   assert.equal((await db.query('SELECT quantity_hundredths FROM public.v13_production_position')).rows[0].quantity_hundredths,'300');
   results.push({scenario,providerAgeAtFinal,state:result.state,ledger:state,posts,signCalls,feeCalls,authorityCalls,finalSuccessorQueries,finalFenceQueries,repeatState:repeated.state,repeatFeeReason:feeProofs.at(-1)?.reason,elapsedMs,authorityBudgetMs,sourceBudgetMs,releaseBudgetMs,heartbeatBudgetMs,reservationBudgetMs});
   t.mock.restoreAll();

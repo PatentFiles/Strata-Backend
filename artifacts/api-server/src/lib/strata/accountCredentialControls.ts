@@ -1,3 +1,4 @@
+import {cancelOwnerArmInTransaction} from './ownerArmContext';
 import { VERIFY_AND_COMMISSION, parseMultiKeyInput, inventoryContainsKeys, type MultiKeyInput } from "./multiKeyCommissioning";
 import { advanceTechnicalSetup, createTechnicalSetupAdmission, SETUP_ROLE_ORDER, TECHNICAL_SETUP_CONFIRMATION,
   technicalSetupResult, buildTechnicalSetupPlan, publicTechnicalSetupReview, executeAuthorizedTechnicalSetup,
@@ -488,11 +489,19 @@ export function accountCredentialControls(
             view: emptyUserExecutionView(userId),
           };
         }
+        // Discover additive schema without requiring it on older deployments.
+        // An unavailable catalog query is not evidence that the schema is absent.
+        const armSchema=await db.query(`/* owner-arm:schema */ SELECT EXISTS(
+          SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid='public.v13_production_account'::regclass
+            AND attname='owner_control_epoch' AND NOT attisdropped) AS available`);
+        if(armSchema.rows.length!==1||typeof armSchema.rows[0].available!=='boolean')
+          return {...closed,reason:'owner_arm_cancellation_schema_unverified'};
         const result = await operateAccountWorker({
           commissioning: ports(),
           activity: { async readOwnedAccount() { return null; } },
           leases: database,
           safety: {
+            ...(armSchema.rows[0].available?{invalidatePreparation:(owner:string,tx:import('./accountCredentialStore').CredentialClient)=>cancelOwnerArmInTransaction(tx,owner)}:{}),
             async listAccounts(ownerUserId) {
               const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
               return accounts.rows.flatMap((row) => {

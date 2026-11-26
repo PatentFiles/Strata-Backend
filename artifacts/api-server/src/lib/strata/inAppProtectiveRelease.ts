@@ -1,4 +1,5 @@
 import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot} from './reconciledReleaseRenewalHistory';
@@ -679,10 +680,10 @@ export async function authorizeProtectiveRelease(
   const used=await client.query('SELECT release_id FROM private.strata_protective_exit_release WHERE release_commit_sha=$1 AND operator_approver_id=$2::uuid AND release_evidence_digest=$3 LIMIT 2',[sha,ownerId,review.rows[0]!.evidence_digest]);
   if(used.rows.length)return {...deny('release_review_already_used_lookup_only'),outcome:'LOOKUP_ONLY' as const};
   const reviewer=String(review.rows[0]?.reviewer_user_id);
-  const role=await client.query(`
+  const role=await client.query(runtimeAuthSql(`
  SELECT 1 FROM auth.users u JOIN public.profiles p ON p.id=u.id
  WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL
- AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1 FOR SHARE OF u,p`,[reviewer]);
+ AND p.role IN ('ADMIN','DEVELOPER') LIMIT 1 FOR SHARE OF u,p`),[reviewer]);
   if(role.rows.length!==1)return deny("reviewer_authority_expired");
   let repairEvidence:{observedAtMs:number;exchangeDigest:string}|null=null;
   if(repairing){

@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {terminalDisarmedLease} from './terminalWorkerLease';
 import {platformFeeUploadEnabled,isUploadedBaselineId} from './platformFeeUploadMode';
 import {activeUploadedBaselineMatches} from './platformUploadedFeeSchedule';
@@ -108,6 +109,7 @@ async function execute(owner:string,b:Row,d:Deps,attemptNumber=0):Promise<Reauth
  const excluded=new Set(history.neverPosted.map(x=>x.clientOrderId));if(snapshot.orders.some(o=>excluded.has(o.request.clientOrderId))||(excluded.size>0&&feeds.historicalCoverageComplete!==true)||!v3MigrationFlatHistoryCheck(snapshot,history.expectedRequests).ok)return no('durable_reauthorization_history_not_flat_or_complete');
  const marketMono=performance.now(),marketStarted=now(),market=await(d.probe??probeCurrentKalshiFeeApi)();const fee=preparePdfFreeApiFeePolicyReview(market,now());if(!fee.ok||now()<marketStarted||now()-marketStarted>5000)return no('durable_reauthorization_fresh_market_unverified');
  tx=await db.connect();await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,owner);
  const attempt=await tx.query("SELECT authorization_id FROM private.strata_durable_fee_release_authorization WHERE authorization_id=$1 AND owner_user_id=$2 AND state='PENDING' FOR UPDATE",[b.authorizationId,owner]);if(attempt.rows.length!==1)return no('durable_reauthorization_attempt_not_pending');
  const locked=await scopeRow(tx,owner,str(b.accountId),true);if(!locked||!matches(locked.m,b)||locked.m.policy_id!==m.policy_id||locked.m.key_fingerprint!==m.key_fingerprint||locked.m.kalshi_connection_id!==m.kalshi_connection_id)return no('durable_reauthorization_scope_changed');
  if(String(locked.m.account_revision)!==String(m.account_revision)){

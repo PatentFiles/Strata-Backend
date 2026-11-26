@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from './rolloverStrikeDiagnostics';
+import {emitDirectEntryRolloverGap,marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from './rolloverStrikeDiagnostics';
 import {createPublicForwardTestFeeds} from './forwardTestFeeds';
 import {forwardTestFeedError} from './forwardTestFeedValidation';
 import {BoundaryDiscoveryRecovery,producerDelayMs} from './forwardTestCadence';
@@ -86,4 +86,27 @@ test('alternating ticker identities cannot multiply per-window logs; malformed c
  assert.equal(events.length,4,'invalid huge clock must not poison subsequent valid windows');
  const throwing=new RolloverStrikeDiagnostics(()=>{throw Error('offline');});
  assert.doesNotThrow(()=>throwing.observe(T,TICKER,marketStrikeEvidence({floor_strike:null}),null));
+});
+
+test('direct-entry rollover diagnostics remain independent of paper and emit only affected windows',async()=>{
+ let now=T,opened=T,strike:unknown=80000,calls=0;
+ const lines:string[]=[];
+ const api=createPublicForwardTestFeeds(async(input)=>{
+  calls++;
+  const market={...row(strike),open_time:new Date(opened).toISOString(),close_time:new Date(opened+900000).toISOString(),
+   floor_strike:strike,private_test_field:'must not appear'};
+  return Response.json(String(input).includes('?')?{markets:[market]}:{market},
+   {headers:{Age:'1','Cache-Control':'max-age=5'}});
+ },()=>new Date(now),()=>0,e=>emitDirectEntryRolloverGap(e,line=>lines.push(line)));
+ assert.equal((await api.market()).target,80000);assert.deepEqual(lines,[]);
+ opened=T+900000;now=opened;strike=null;
+ assert.equal((await api.market()).target,null);
+ now+=2500;strike=81000;
+ assert.equal((await api.market()).target,81000);
+ await api.market(TICKER);
+ assert.equal(calls,6);
+ assert.equal(lines.length,2);
+ assert.ok(!lines.join('').includes('must not appear'));
+ assert.deepEqual(lines.map(line=>{const e=JSON.parse(line);return [e.source,e.phase,e.strike.fields[0].type,e.transport.ageSeconds];}),[
+  ['direct_entry','first_unavailable','null',1],['direct_entry','ready','number',1]]);
 });

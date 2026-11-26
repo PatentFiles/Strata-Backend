@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from './forwardTestCadence.ts';
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery,drainPaperLanes} from './forwardTestCadence.ts';
 test('start-to-start delay removes processing overhead and prevents overrun hot loops',()=>{
  for(const [elapsed,expected] of [[0,5000],[2300,2700],[4750,250],[6000,250]])
   assert.equal(producerDelayMs(5000,elapsed),expected);
@@ -93,14 +93,12 @@ test('held optional book capture never blocks another cycle and never builds a b
 test('worker wires optional evidence persistence only after commit and outside cycle return path',()=>{
  const source=readFileSync(new URL('./forwardTestWorker.ts',import.meta.url),'utf8');
  const cycle=source.slice(source.indexOf('export async function runForwardTestCycle'),source.indexOf('export function startServerForwardTestWorker'));
- assert.ok(cycle.includes('notifyCommittedForwardSignal(result.researchEvent?.phase==="ENTRY" ? {'));
- assert.ok(cycle.includes('evaluationId:result.evaluationId,marketTicker:result.marketTicker!'));
- assert.ok(cycle.includes('btcProviderAgeMs:Math.max(0,now.getTime()-btc.providerAt.getTime())'));
- assert.ok(cycle.indexOf('}, engineId, LEASE_SECONDS);')<cycle.indexOf('notifyCommittedForwardSignal('));
+ assert.doesNotMatch(cycle, /notifyCommittedForwardSignal/);
+ assert.ok(cycle.indexOf('transactionTiming.mark("committed")')<cycle.indexOf('emitCommittedSourceQuote('));
  assert.ok(!cycle.includes('savePostActionPaperBook('));
  const scheduler=source.slice(source.indexOf('export function startServerForwardTestWorker'));
  assert.ok(scheduler.indexOf('await runForwardTestCycle(')<scheduler.indexOf('bookCaptureLane.submit('));
- assert.ok(scheduler.indexOf('bookCaptureLane.submit(')<scheduler.indexOf('await processMicroLiveForwardTestCycle('));
+ assert.doesNotMatch(scheduler,/processMicroLiveForwardTestCycle|registerMicroLiveWorkerLeaseOwner/);
  assert.ok(scheduler.includes('Paper book evidence skipped: previous research operation still pending'));
  assert.ok(!scheduler.includes('await bookCaptureLane.drain()'));
 });
@@ -114,4 +112,16 @@ test('worker remains one awaited cycle with ordinary five-second successful cade
  assert.ok(scheduler.includes('await pause('));
  const retry=new BoundaryDiscoveryRecovery();
  for(let i=0;i<20;i++)assert.equal(retry.periodMs(null,900000+i*5000),5000);
+});
+
+test('paper shutdown waits for the last optional write before lease/pool release',async()=>{
+ let finishBook,finishAutonomous; let released=false;
+ const book=new Promise(r=>{finishBook=r;});const autonomous=new Promise(r=>{finishAutonomous=r;});
+ const stop=drainPaperLanes({drain:async()=>{throw Error('already reported');}},
+   {drain:()=>book},{drain:()=>autonomous}).then(()=>{released=true;});
+ await Promise.resolve();assert.equal(released,false);
+ finishBook();await Promise.resolve();assert.equal(released,false);
+ finishAutonomous();await stop;assert.equal(released,true);
+ const worker=readFileSync(new URL('./forwardTestWorker.ts',import.meta.url),'utf8');
+ assert.match(worker,/await drainPaperLanes\(researchLane,bookCaptureLane,autonomousResearch\);\s*if \(lease\) await releaseWorkerLease/);
 });

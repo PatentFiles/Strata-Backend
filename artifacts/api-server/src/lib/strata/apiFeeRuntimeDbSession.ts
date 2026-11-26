@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { pool } from "@workspace/db";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -12,12 +13,12 @@ const deny = (reason: string) => ({
   ok: false as const, reason, policyApproved: false as const,
   commissioningApproved: false as const, tradingAuthorized: false as const,
 });
-export const SESSION_ADMIN_SQL = `
+export const SESSION_ADMIN_SQL = runtimeAuthSql(`
  SELECT EXISTS (
   SELECT 1 FROM auth.users u
   JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))
   WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND r.role='ADMIN'
- ) AS is_admin`;
+ ) AS is_admin`);
 
 // Fixed catalog targets only. These functions inspect ACLs, never table contents.
 export const SESSION_RELATIONS = [

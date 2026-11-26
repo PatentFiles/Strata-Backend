@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {performance} from "node:perf_hooks";
 import {pool,type Pool,type PoolClient} from "@workspace/db";
 import {ProductionLedger,type Account} from "../v13-production/ledger";
@@ -48,6 +49,7 @@ export async function commitCommissioningCashEvidence(owner:string,evidence:Matc
  try{
   check();tx=await db.connect();await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,owner);
   const locked=await tx.query<Account>("SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid AND subaccount=1 AND exchange_index=2 FOR UPDATE",[id,owner]);
   ensure(locked.rows.length===1,"commissioning_cash_owner_scope_changed");
   const a=locked.rows[0]!;

@@ -14,27 +14,8 @@ if (!process.env.DATABASE_URL) {
   );
 }
 
-/** node-postgres pool for a long-lived process. SSL follows the URL; local URLs stay plain. */
-export function poolConfig(connectionString: string): pg.PoolConfig {
-  const url = new URL(connectionString);
-  const sslmode = url.searchParams.get("sslmode");
-  const config: pg.PoolConfig = {
-    connectionString,
-    max: 10,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-  };
-  if (sslmode === "require" || sslmode === "prefer") {
-    url.searchParams.delete("sslmode");
-    config.connectionString = url.toString();
-    config.ssl = { rejectUnauthorized: false };
-  } else if (sslmode === "verify-ca" || sslmode === "verify-full") {
-    url.searchParams.delete("sslmode");
-    config.connectionString = url.toString();
-    config.ssl = { rejectUnauthorized: true };
-  }
-  return config;
-}
+import {poolConfig} from './poolConfig';
+export {poolConfig} from './poolConfig';
 
 export const pool = new Pool(poolConfig(process.env.DATABASE_URL));
 installPoolCheckoutTiming(pool);

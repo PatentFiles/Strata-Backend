@@ -19,5 +19,12 @@ date-range history, stable cursor pagination, exact decimal money strings,
 separate observation and ledger rows and a filtered summary. No paper PASS
 backfill. Historical retained intents with missing fields remain incomplete.
 Net P&L in summaries is recorded realized event P&L, not inferred quote profit.
+
+For a source-linked `DISPATCH / QUALIFIED` row with reason
+`direct_entry_observed_dispatch_returned`, the dispatcher callback returned.
+This advisory row is not an order submission, acknowledgment, fill, or new
+market evaluation. Live history derives order and fill counts from ledger
+records, not from the stage or outcome of a live decision. The callback record
+uses the original observation's linked context without replacing it.
  
 Do not change production flags or deploy while any account is trading.

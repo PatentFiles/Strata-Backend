@@ -10,25 +10,28 @@ import path from 'node:path';
 // wiring evidence, NOT an authorization, native database, or live efficacy test.
 const root=process.cwd();mkdirSync(path.join(root,'dist'),{recursive:true});const dir=mkdtempSync(path.join(root,'dist/wiring-'));
 const G='globalThis.__snapshotWiringFixture';
-const plugin={name:'synthetic-authority-and-scheduler',setup(b){b.onLoad({filter:/\/(personalExecutionSupervisor|accountProductionSession|personalExchangeRead|protectiveExitStartupRelease|continuousExecutionAuthorization|durableFeeConsumers)\.ts$/},args=>{
+const intercepted=new Set();
+const plugin={name:'synthetic-authority-and-scheduler',setup(b){b.onLoad({filter:/[\\/](personalExecutionSupervisor|accountProductionSession|personalExchangeRead|protectiveExitStartupRelease|continuousExecutionAuthorization|durableFeeConsumers)\.ts$/},args=>{
+ const file=args.path.replaceAll('\\','/');intercepted.add(file.split('/').at(-1));
  let s=readFileSync(args.path,'utf8');
  function replace(name,body){const pattern=new RegExp('export (async )?function '+name+'\\(');assert.match(s,pattern);s=s.replace(pattern,(_m,a)=>`${a??''}function original_${name}(`);s+=`\nexport function ${name}(...args:any[]){${body}}\n`;}
- if(args.path.endsWith('/personalExecutionSupervisor.ts')){
+ if(file.endsWith('/personalExecutionSupervisor.ts')){
   const declaration='let heldRecoveryScope:RecoveryHoldScope|null=null;';assert.ok(s.includes(declaration));
   s=s.replace(declaration,declaration+`${G}.setHeld=(scope:any,signal:any)=>{heldRecoveryScope=scope;heldReadAbort=signal;};`);
  }
- if(args.path.endsWith('/accountProductionSession.ts')){
+ if(file.endsWith('/accountProductionSession.ts')){
   replace('openOwnedExecutionSession',`const session=original_openOwnedExecutionSession(...args);${G}.captured={session,input:args[0]};return session;`);
   replace('scheduleOwnedAccountWorker',`args[0].worker.isScheduled=()=>true;return Promise.resolve({ok:true,reason:'synthetic_no_timer',workerStarted:true,executionActive:false});`);
  }
- if(args.path.endsWith('/personalExchangeRead.ts'))replace('readOwnedKalshiFeeds',`${G}.reads.push(args[3]);return original_readOwnedKalshiFeeds(...args);`);
- if(args.path.endsWith('/protectiveExitStartupRelease.ts'))replace('verifyProtectiveExitStartupRelease',`return Promise.resolve(${G}.release?{ok:true}:{ok:false,reason:'fixture_release_missing'});`);
- if(args.path.endsWith('/continuousExecutionAuthorization.ts'))replace('hasContinuousGrantHistory','return Promise.resolve(false);');
- if(args.path.endsWith('/durableFeeConsumers.ts'))replace('verifyDurableFeeStage',`return Promise.resolve(${G}.fee?{ok:true,sourceDigest:'c'.repeat(64),verifiedAtMs:${G}.now}:{ok:false,reason:'fixture_consent_revoked'});`);
+ if(file.endsWith('/personalExchangeRead.ts'))replace('readOwnedKalshiFeeds',`${G}.reads.push(args[3]);return original_readOwnedKalshiFeeds(...args);`);
+ if(file.endsWith('/protectiveExitStartupRelease.ts'))replace('verifyProtectiveExitStartupRelease',`return Promise.resolve(${G}.release?{ok:true}:{ok:false,reason:'fixture_release_missing'});`);
+ if(file.endsWith('/continuousExecutionAuthorization.ts'))replace('hasContinuousGrantHistory','return Promise.resolve(false);');
+ if(file.endsWith('/durableFeeConsumers.ts'))replace('verifyDurableFeeStage',`return Promise.resolve(${G}.fee?{ok:true,sourceDigest:'c'.repeat(64),verifiedAtMs:${G}.now}:{ok:false,reason:'fixture_consent_revoked'});`);
  return {contents:s,loader:'ts',resolveDir:path.dirname(args.path)};
 });}};
 const out=path.join(dir,'fixture.cjs');
 await build({stdin:{contents:`export {createProductionPersonalSession} from './src/lib/strata/personalExecutionSupervisor';export {ProductionExecutor} from './src/lib/v13-production/executor';export {dedicatedSignerFingerprint} from './src/lib/strata/commissioning';export {readPublicMetadataPrefetchConfig} from './src/lib/strata/publicMetadataPrefetchConfig';`,resolveDir:root,loader:'ts'},outfile:out,bundle:true,platform:'node',format:'cjs',plugins:[plugin],external:['pg-native','pino','pino-pretty','pdfjs-dist'],logLevel:'silent'});
+assert.deepEqual([...intercepted].sort(),['personalExecutionSupervisor.ts','accountProductionSession.ts','personalExchangeRead.ts','protectiveExitStartupRelease.ts','continuousExecutionAuthorization.ts','durableFeeConsumers.ts'].sort(),'Every authority port must be intercepted on this platform');
 const mod=createRequire(import.meta.url)(out);
 const owner='11111111-1111-4111-8111-111111111111',now=Date.parse('2026-11-18T12:00:00Z');
 const material={keyId:'synthetic-only',privateKey:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'pem',type:'pkcs8'}).toString()};

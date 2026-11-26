@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 /**
  * #165: show personal account setup separately from live execution release.
  * Owner-scoped, read-only, no exchange traffic or credential material.
@@ -76,7 +77,7 @@ export const OWNER_ONBOARDING_READ_SQL=[
  " WHERE t.owner_user_id=u.id AND t.execution_account_id=a.id",
  " AND t.state='completed' AND t.completed_at IS NOT NULL AND t.bot_after_cents>=2500)",
  "AS funding_recorded",
- "FROM auth.users u",
+ runtimeAuthSql("FROM auth.users u"),
  "LEFT JOIN public.v13_production_account a ON a.owner_user_id=u.id",
  " AND a.subaccount=1 AND a.exchange_index=2",
  "LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id",

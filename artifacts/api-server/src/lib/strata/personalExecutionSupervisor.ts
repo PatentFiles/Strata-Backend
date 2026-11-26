@@ -1,3 +1,6 @@
+import {ownerArmFence,assertOwnerArmFence,withoutOwnerArmFence} from './ownerArmContext';
+import {armTransaction,type ArmDatabase} from './ownerArmStore';
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -47,7 +50,7 @@ import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSigne
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
 import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
 import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
-import {deployedGitSha} from "./deployedGitSha";
+import {deployedGitSha,requireIndependentPaperCutover} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -76,6 +79,8 @@ import type { Identity, Request } from "../v13-production/types";
 type LeaseAction = "STOP" | "KILL";
 
 export interface PersonalSessionControl {
+  /** Process drain only. No automatic START and no unguarded lease release. */
+  quiesce?():Promise<{stopped:boolean;managingExposure:boolean}>;
   isScheduled(userId: string, accountId: string): boolean;
   start(input: {
     userId: string;
@@ -179,6 +184,8 @@ export function createOwnedTradingSupervisor(
   >,
 ): PersonalSessionControl {
   const workers = new Map<string, RunningWorker>();
+  let closing=false;
+  let shutdown:Promise<{stopped:boolean;managingExposure:boolean}>|null=null;
   // An opening session already owns a lifecycle operation even before its
   // worker is registered. Do not duplicate that operation or certify STOP
   // while it can still install a scheduled worker after the caller returns.
@@ -212,11 +219,43 @@ export function createOwnedTradingSupervisor(
     }
   };
   return {
+    quiesce(){
+      if(shutdown)return shutdown;
+      closing=true;
+      // Close entry gates synchronously, before any asynchronous STOP proof.
+      for(const r of workers.values())if(r.state)r.state.entriesAuthorized=false;
+      shutdown=(async()=>{
+        const identities=new Map<string,string>();
+        for(const [id,r] of workers)identities.set(id,r.ownerUserId);
+        for(const [id,r] of starts)identities.set(id,r.ownerUserId);
+        const running=new Set(workers.values());
+        const results=await Promise.allSettled([...identities].map(async([id,owner])=>{
+          const opening=starts.get(id);
+          if(opening)await opening.result;
+          // A pending factory can install a worker after the initial snapshot.
+          // Keep its idle barrier even when fenced STOP unregisters it.
+          const opened=workers.get(id);if(opened)running.add(opened);
+          return stopAccount(owner,id,'STOP');
+        }));
+        let stopped=true,managingExposure=false;
+        for(const result of results){
+          if(result.status==='rejected'){stopped=false;continue;}
+          if(!result.value.workerStopped)stopped=false;
+          if(result.value.managingExposure){stopped=false;managingExposure=true;}
+        }
+        // Await pre-existing ticks before closing their database pool. An
+        // uncertain dispatch remains durable; shutdown never replays it.
+        if(stopped)await Promise.all([...running].map(r=>r.worker.whenIdle?.()));
+        return {stopped,managingExposure};
+      })();
+      return shutdown;
+    },
     isScheduled(userId, accountId) {
       const running = workers.get(accountId);
       return running?.ownerUserId === userId && running.worker.isScheduled();
     },
     async start(input) {
+      if(closing)return {ok:false,reason:'worker_process_shutting_down',workerStarted:false};
       input = { ...input };
       const stopping = stops.get(input.accountId);
       if (stopping || ownerStops.has(input.userId)) {
@@ -242,6 +281,7 @@ export function createOwnedTradingSupervisor(
       const result = Promise.resolve().then(async () => {
         const opened = await open(input);
         if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if(closing&&opened.state)opened.state.entriesAuthorized=false;
         if (!opened.worker.isScheduled()) {
           opened.worker.stop();
           return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
@@ -249,7 +289,8 @@ export function createOwnedTradingSupervisor(
         workers.set(input.accountId, {
           ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
         });
-        return { ok: true, reason: "worker_scheduled", workerStarted: true };
+        return closing?{ok:false,reason:'worker_process_shutting_down',workerStarted:false}:
+          { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
       starts.set(input.accountId, { ownerUserId: input.userId, result });
       try { return await result; }
@@ -458,6 +499,16 @@ export function createProductionPersonalSession(
       ?await qualifyPublicIndependentLiveScope(db,directRolloutScope):null;
     if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
       return {ok:false,reason:"public_live_account_scope_changed"};
+    const directAllowed=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission);
+    // A known holding requires qualified direct held protection. For an
+    // unbound API account, admit only authentic read-only UNKNOWN recovery.
+    if(requireIndependentPaperCutover()&&!directAllowed){
+      if(snapshot.positions.length>0)
+        return {ok:false,reason:"existing_position_requires_independent_protection"};
+      const unresolved=await readUnresolvedIntentMode((sql,values)=>db.query(sql,values),input.accountId);
+      if(!unresolved.ok)return unresolved;
+      if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
+    }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
     if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
@@ -476,10 +527,23 @@ export function createProductionPersonalSession(
     // maintenance and protective-exit failures. A fresh, independently reviewed
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
+    // Emit only on a closed fence, after the no-send/unknown decision. Bound
+    // duplicate stage reports per worker; logging must never change the gate.
+    const protectiveDiagnosticLastAt=new Map<string,number>();
+    const reportProtectiveDiagnostic=(phase:"final_fence"|"restart",stage:string)=>{
+      try{
+        const now=performance.now(),key=phase+":"+stage;
+        if(!Number.isFinite(now))return;
+        const last=protectiveDiagnosticLastAt.get(key);
+        if(last!==undefined&&now-last<60_000)return;
+        protectiveDiagnosticLastAt.set(key,now);
+        logger.warn({event:"protective_exit_diagnostic",phase,stage},"Protective exit remains unverified");
+      }catch{/* reporting cannot give or revoke authority */}
+    };
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
-    const directSource=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission)
+    const directSource=directAllowed
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
         {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
@@ -573,6 +637,7 @@ export function createProductionPersonalSession(
             reservationId: reservation.reservationId, material, order, lease,
             ...(directSource?{directHeldSource:directSource}:{}),
           });
+          if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);
           // Preserve a known local no-send as a temporary reconciliation hold,
           // never as entry authority. UNKNOWN and failed reads remain sticky.
           await reconcileOwnedProtectiveExitOutcome({
@@ -593,7 +658,16 @@ export function createProductionPersonalSession(
           ownerId:input.userId,accountId:input.accountId,material,
         },db);
         if(!recovery.ok){
+          if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
+              state.presentedToken===claimed.fencingToken,
+            recovery,
+          });
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
+          // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
       },
@@ -751,7 +825,7 @@ export function createProductionPersonalSession(
       fetchImpl: measuredFetch,
     });
     if(directSource)session.executor.bindIndependentLiveSource(directSource);
-    else session.executor.containLiveEntries();
+    else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
     if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
@@ -906,7 +980,9 @@ export function createProductionPersonalSession(
     }
     const recovery = unresolved.mode === "recovery";
     if (recovery) state.entriesAuthorized = false;
-    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
+    // Request cancellation applies to admission, not to the recurring worker's
+    // async context. Its existing lease/STOP/KILL fences own subsequent ticks.
+    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, unresolved.mode));
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
@@ -1035,7 +1111,30 @@ function leaseIdentity(row: Record<string, unknown>): {
   return { financialAccountId, providerConnectionId, vaultSecretId };
 }
 
+/** A prepared START must atomically validate its cancellation epoch and
+ * acquire the worker fence. STOP/KILL before this transaction wins; STOP/KILL
+ * after it still uses the existing supervisor/lease fencing path. */
 async function claimWorkerLease(
+  db: Parameters<typeof claimWorkerLeaseUnfenced>[0],
+  input: Parameters<typeof claimWorkerLeaseUnfenced>[1],
+): ReturnType<typeof claimWorkerLeaseUnfenced> {
+  const fence=ownerArmFence();
+  if(!fence)return claimWorkerLeaseUnfenced(db,input);
+  if(fence.phase!=='STARTING'||fence.ownerId!==input.ownerUserId||fence.accountId!==input.executionAccountId)
+    return {ok:false,reason:'owner_start_scope_changed'};
+  if(typeof (db as Partial<ArmDatabase>).connect!=='function')
+    return {ok:false,reason:'owner_start_transaction_unavailable'};
+  try {
+    return await armTransaction(db as ArmDatabase,async tx=>{
+      await assertOwnerArmFence(tx,input.ownerUserId);
+      const result=await claimWorkerLeaseUnfenced(tx,input);
+      if(!result.ok)throw Error(result.reason);
+      return result;
+    });
+  }catch{return {ok:false,reason:'owner_start_interrupted_or_lease_unavailable'};}
+}
+
+async function claimWorkerLeaseUnfenced(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
     ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;

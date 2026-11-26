@@ -42,6 +42,7 @@
   "sql/strata_protective_exit_release_renewable.sql",
   "sql/strata_protective_exit_local_no_send.sql",
   "sql/strata_protective_exit_fractional_quantity.sql",
+  "sql/strata_protective_exit_final_fence_no_send_reason.sql",
   "sql/strata_fee_source_authorization_private.sql",
   "sql/strata_fee_source_policy_independent_reviews.sql",
   "sql/strata_in_app_protective_release_approval.sql",

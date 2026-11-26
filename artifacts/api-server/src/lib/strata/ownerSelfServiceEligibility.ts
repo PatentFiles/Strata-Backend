@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 /**
  * Public self-service identity boundary. This is neither a fee grant nor
  * permission to activate a worker. Each caller must still execute its existing
@@ -20,7 +21,7 @@ export function publicSelfServiceReleaseQualified(sha:string,env:NodeJS.ProcessE
  return env.NODE_ENV==="production"&&env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true"&&
   SHA.test(sha)&&env.RAILWAY_GIT_COMMIT_SHA===sha&&env.STRATA_PUBLIC_SELF_SERVICE_QUALIFIED_SHA===sha;
 }
-export const OWNED_SELF_SERVICE_SCOPE_SQL=`
+export const OWNED_SELF_SERVICE_SCOPE_SQL=runtimeAuthSql(`
  SELECT a.id AS account_id,a.owner_user_id::text AS owner_id,
         a.key_fingerprint, a.policy_id, p.policy_hash,
         a.commissioned,a.execution_enabled,a.kill_switch,a.blocked_reason,
@@ -64,7 +65,7 @@ export const OWNED_SELF_SERVICE_SCOPE_SQL=`
    AND s.configured_stake_cents BETWEEN 500 AND 2500000
    AND s.configured_stake_cents<=p.max_entry_stake_cents AND s.configured_stake_cents<=p.max_entry_all_in_cents
  LIMIT 2
-`;
+`);
 export type OwnedSelfServiceScope=OwnerSelfEnrollmentScope&{
  keyFingerprint:string;policyHash:string;commissioned:boolean;executionEnabled:boolean;killSwitchOn:boolean;
  blocked:boolean;cashConserved:boolean;cashReconciled:boolean;cashMicros:string;reservedMicros:string;stakeCents:number;

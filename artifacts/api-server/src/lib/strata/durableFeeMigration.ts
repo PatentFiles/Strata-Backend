@@ -1,3 +1,4 @@
+import {assertOwnerArmFence} from './ownerArmContext';
 import {platformFeeUploadEnabled,isUploadedBaselineId,UPLOADED_FEE_MIGRATION_CONFIRM,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
 import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
@@ -125,6 +126,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,ownerId);
   const attempt=await tx.query(`SELECT model_id FROM private.strata_durable_fee_migration_attempt
    WHERE model_id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3 AND release_commit_sha=$4
    AND body_hash=$5 AND state='PENDING' FOR UPDATE`,[b.modelId,ownerId,b.accountId,b.expectedSha,migrationBodyHash(b)]);

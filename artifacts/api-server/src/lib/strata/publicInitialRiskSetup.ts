@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import {platformFeeUploadEnabled} from "./platformFeeUploadMode";
 import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
 import {pool,type PoolClient} from "@workspace/db";
@@ -52,7 +53,7 @@ type Selection=NonNullable<ReturnType<typeof parseInitialRiskConsent>>;
 async function local(db:Q,owner:string,lock=false){
  const tail=lock?" FOR SHARE":"";
  const rows=await db.query("SELECT a.*,a.owner_user_id::text AS owner_id,a.revision::text AS revision_text "+
-  "FROM public.v13_production_account a JOIN auth.users u ON u.id=a.owner_user_id "+
+  runtimeAuthSql("FROM public.v13_production_account a JOIN auth.users u ON u.id=a.owner_user_id ")+
   "WHERE a.owner_user_id=$1::uuid AND u.email_confirmed_at IS NOT NULL "+
   "AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp()) "+
   "AND a.subaccount=1 AND a.exchange_index=2 LIMIT 2"+(lock?" FOR UPDATE OF a":""),[owner]);

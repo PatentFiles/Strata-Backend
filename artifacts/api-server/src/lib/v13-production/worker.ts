@@ -3,7 +3,8 @@ import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
 import {enqueueLiveDecision,liveAnalyticsFailure} from "./liveDecisionAnalytics";
-import {deployedGitSha} from "../strata/deployedGitSha";
+import {deployedGitSha,requireIndependentPaperCutover} from "../strata/deployedGitSha";
+import {getOwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
 
@@ -38,6 +39,8 @@ export class ProductionWorker {
   heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private readonly idleWaiters=new Set<()=>void>();
+  whenIdle():Promise<void>{return this.running?new Promise(resolve=>this.idleWaiters.add(resolve)):Promise.resolve();}
   private lifecycle = 0;
   private starting: Promise<void> | null = null;
   private recoveryOnly = false;
@@ -63,7 +66,8 @@ export class ProductionWorker {
     readonly recoverProtectiveExits: () => Promise<void> = async () => {},
     /** Trusted owner-scoped IOC exit, never obtained from user requests. */
     readonly dispatchProtectiveExit?: ProtectiveExitDispatch,
-    readonly signalTrace: SignalTracePort|null=null) {}
+    readonly signalTrace: SignalTracePort|null=null,
+    readonly independentPaperCutover=requireIndependentPaperCutover()) {}
   private async recordDecision(input:Parameters<SignalTracePort["record"]>[0]):Promise<boolean>{
     return this.signalTrace?this.signalTrace.record(input):true;
   }
@@ -74,7 +78,7 @@ export class ProductionWorker {
    * it cannot submit orders, reopen entries, or schedule a trading tick.
    */
   private scheduleTraceSweep(observedAt: number): void {
-    if (this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
+    if ((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
         observedAt - this.lastTraceSweepAt < 30_000) return;
     this.lastTraceSweepAt = observedAt;
     const trace = this.signalTrace;
@@ -138,10 +142,12 @@ export class ProductionWorker {
           }
           return;
         }
-        const audit=(stage:"ENTRY_GATE"|"PREPARE"|"DISPATCH",reasonCode:string,sourceId?:string)=>{
+        const audit=(stage:"ENTRY_GATE"|"PREPARE"|"DISPATCH",reasonCode:string,sourceId?:string,error?:unknown)=>{
+          const feeStage=getOwnedFeeFailureStage(error);
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId});
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
+              ...(feeStage?{reasonDetail:feeStage}:{})});
         };
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){
           if(!this.entryHoldReported){this.entryHoldReported=true;audit("ENTRY_GATE","production_entries_not_authorized");}
@@ -153,14 +159,24 @@ export class ProductionWorker {
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_after_observation",id);return;}
         let intent:string;
         try{intent=await this.executor.prepareEntry(id);}
-        catch(error){audit("PREPARE",liveAnalyticsFailure(error),id);throw error;}
+        catch(error){audit("PREPARE",liveAnalyticsFailure(error),id,error);throw error;}
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_before_dispatch",id);return;}
         try{await this.executor.dispatch(intent);}
-        catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id);throw error;}
+        catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id,error);throw error;}
+        // A dispatcher callback returning is not proof of an order or fill.
+        // This is advisory DISPATCH context; a second OBSERVATION would replace
+        // the richer source record used by the analytics normalizer.
+        try{
+          if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
+            enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
+              reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
+        }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
         return;
       }
-      await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
-      if(this.executor.liveEntryContained){
+      if(!this.independentPaperCutover||this.executor.exchange?.mode!=="LIVE")
+        await consumeOwnedPosition(this.executor,this.dispatchProtectiveExit);
+      if((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.liveEntryContained){
         if(!this.entryHoldReported){
           this.entryHoldReported=true;
           this.report(new Error("production_independent_entry_source_unavailable"));
@@ -264,6 +280,7 @@ export class ProductionWorker {
         // an abort-ignoring adapter cannot start replacement speculative work.
         void metadata?.drained.catch(()=>{});
         this.running = false;
+        for(const resolve of this.idleWaiters)resolve();this.idleWaiters.clear();
       }
     }
   }
@@ -293,6 +310,10 @@ export class ProductionWorker {
         if (!current()) return;
         await this.executor.reconcile();
         if (!current()) return;
+        // The API must never read a paper position or enable a normal
+        // unbound LIVE worker. UNKNOWN recovery uses startRecovery instead.
+        if(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE"&&!this.executor.independentSourceBound)
+          throw Error("production_independent_entry_source_unavailable");
         await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
       }
       if (!current()) return;
@@ -332,7 +353,7 @@ export class ProductionWorker {
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
+    this.detachWake=(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE")||this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
       if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;
@@ -345,7 +366,7 @@ export class ProductionWorker {
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void {this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }
