@@ -39,7 +39,10 @@ export const PIN_SQL=`
 export async function pinOwnerProtectiveHistory(db:Db, owner:string, release:string){
  if(!UUID.test(owner)||!BUILD.test(release))return null;
  const {rows}=await db.query(PIN_SQL,[owner]);
- if(rows.length!==1)return null;
+ return validateOwnerProtectiveHistoryPinRows(rows,owner,release);
+}
+export function validateOwnerProtectiveHistoryPinRows(rows:Row[],owner:string,release:string){
+ if(!UUID.test(owner)||!BUILD.test(release)||rows.length!==1)return null;
  const row=rows[0]!,raw=row.order_request_json;
  if(row.owner_id!==owner||typeof row.account_id!=="string"||!UUID.test(String(row.reservation_id))||
    !DIGEST.test(String(row.key_fingerprint))||typeof raw!=="string"||raw.length>4096||

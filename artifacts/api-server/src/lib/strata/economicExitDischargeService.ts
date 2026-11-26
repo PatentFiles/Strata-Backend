@@ -3,6 +3,7 @@ import {readEconomicPendingMoneyBatch} from './economicRecoveryReadBatch';
 import {canonical,digest,requireProof,type Request} from '../v13-production/types';
 import {deployedGitSha} from './deployedGitSha';
 import {captureEconomicSettlementScope,type EconomicAlreadyLockedScope} from './ownerEconomicSettlementService';
+import {PIN_SQL,validateOwnerProtectiveHistoryPinRows} from './ownerProtectiveHistoryPreviewPin';
 import {readVerifiedRoleAuthority} from './accountCredentialControls';
 import {inspectRestrictedKeyMetadata,inspectSubaccount1} from './accountCredentialProbe';
 import {getOwnedProductionKalshiJson,personalAccountSnapshot} from './personalExchangeRead';
@@ -35,7 +36,7 @@ export async function readEconomicTransferPages(getPage:(cursor:string|undefined
  }
  throw Error('economic_discharge_transfer_history_incomplete');
 }
-const dischargeStages=['priorOutcome','localScope','providerIdentity','openingCut','signedHistory','closingCut','proof','lockedScope','transaction'] as const;
+const dischargeStages=['priorOutcome','localScope','providerIdentity','openingCut','signedHistory','closingCut','proof','lockedScope','lockedHistoryAndBinding','lockedPinAndBooking','transaction'] as const;
 type DischargeStage=typeof dischargeStages[number];
 export type EconomicDischargeTiming=(stage:DischargeStage,ms:number)=>void;
 const measured=(observe?:EconomicDischargeTiming)=>async<T>(stage:DischargeStage,work:()=>T|Promise<T>):Promise<T>=>{
@@ -68,25 +69,34 @@ function verifyPendingMoney(histories:Row[][]){
 export function createEconomicDischargeService(deps:Deps){
  const db=deps.db??pool,now=deps.now??Date.now,sha=deps.sha??deployedGitSha,enabled=deps.enabled??economicDischargeEnabled;
  const check=()=>{const build=sha();requireProof(enabled()&&economicExitFinalityEnabled()&&SHA.test(build),'economic_discharge_release_not_qualified');return build;};
- const capture=async(tx:Pick<PoolClient,'query'>,owner:string,build:string,lock=false,alreadyLocked?:EconomicAlreadyLockedScope)=>{
-  const first=await captureEconomicSettlementScope(tx,owner,build,now(),deps.isScheduled,lock,alreadyLocked);
+ const capture=async(tx:Pick<PoolClient,'query'>,owner:string,build:string,lock=false,alreadyLocked?:EconomicAlreadyLockedScope,observe?:EconomicDischargeTiming)=>{
+  const first=await (alreadyLocked?measured(observe)('lockedHistoryAndBinding',()=>captureEconomicSettlementScope(tx,owner,build,now(),deps.isScheduled,lock,alreadyLocked)):
+   captureEconomicSettlementScope(tx,owner,build,now(),deps.isScheduled,lock,alreadyLocked));
   // This exact account was already read in the coherent capture (and is
   // FOR UPDATE locked by the writer). Do not add a second network round trip.
   requireProof(first.blockedReason===null,'economic_discharge_unrelated_hold_requires_review');
   const beat=first.worker.heartbeat_at instanceof Date?first.worker.heartbeat_at.getTime():Date.parse(String(first.worker.heartbeat_at));
   requireProof(first.worker.state==='released'||Number.isSafeInteger(beat)&&beat<now()-120000,'economic_discharge_worker_not_stale');
   const maintenanceDigest=verifyPendingMoney(first.pendingMoney??await readEconomicPendingMoneyBatch(tx,first.account.id,lock));
-  const rows=(await tx.query(`WITH pending AS MATERIALIZED (
+  const combined=first.finalPinRequiredWithBooking;
+  const readBooking=()=>tx.query(`WITH ${combined?`current_pin AS MATERIALIZED (${PIN_SQL.replaceAll('$1','$2')}),`:''} pending AS MATERIALIZED (
     SELECT 1 FROM private.kalshi_owner_topup_legs l JOIN private.kalshi_owner_topups p ON p.id=l.topup_id
-    WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') LIMIT 1${lock?' FOR SHARE OF l':''}
+    WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') ${combined?'AND (SELECT count(*) FROM current_pin)>=0':''} LIMIT 1${lock?' FOR SHARE OF l':''}
    ), booking AS MATERIALIZED (
     SELECT b.* FROM private.strata_economic_settlement_receipt b WHERE b.execution_account_id=$1 AND b.owner_user_id=$2::uuid
      AND b.exit_intent_id=$3 AND b.reservation_id=$4::uuid LIMIT 2
    ) SELECT booking.*, EXISTS (SELECT 1 FROM pending) AS has_pending
+     ${combined?", coalesce((SELECT jsonb_agg(to_jsonb(p)) FROM current_pin p),'[]'::jsonb) AS checked_pin":""}
      FROM (SELECT 1) AS probe LEFT JOIN booking ON TRUE`,
-   [first.account.id,owner,first.exitId,first.pin.row.reservation_id])).rows as Row[];
+   [first.account.id,owner,first.exitId,first.pin.row.reservation_id]);
+  const rows=(await (combined?measured(observe)('lockedPinAndBooking',readBooking):readBooking())).rows as Row[];
+  if(combined){
+   const pins=rows[0]?.checked_pin;
+   requireProof(Array.isArray(pins)&&validateOwnerProtectiveHistoryPinRows(pins as Row[],owner,build)?.digest===first.pin.digest,
+    'economic_settlement_locked_identity_changed');
+  }
   requireProof(rows.length===1&&rows[0]!.request_id,'economic_discharge_booked_settlement_required');
-  const {has_pending,...booking}=rows[0]!;
+  const {has_pending,checked_pin:_checkedPin,...booking}=rows[0]!;
   requireProof(has_pending===false,'economic_discharge_pending_money_requires_review');
   return {...first,booking,maintenanceDigest,dischargeScopeDigest:digest({scope:first.scopeDigest,booking,maintenanceDigest})};
  };
@@ -170,7 +180,7 @@ export function createEconomicDischargeService(deps:Deps){
     return await measure('transaction',()=>commitEconomicDischarge(proof,{ownerId:owner,requestId:String(input.requestId),scopeDigest:first.dischargeScopeDigest,releaseSha:build,
      controlEpoch:first.controlEpoch,workerFence:String(first.worker.fencing_token)},{db,now,verifyLocked:async(tx,a,p)=>{
       requireProof(check()===build&&a.id===p.accountId,'economic_discharge_release_changed');
-      const locked=await measure('lockedScope',()=>capture(tx,owner,build,true,{account:a as unknown as Row,pin:first.pin}));
+      const locked=await measure('lockedScope',()=>capture(tx,owner,build,true,{account:a as unknown as Row,pin:first.pin},observe));
       requireProof(locked.dischargeScopeDigest===first.dischargeScopeDigest&&digest(locked.history)===p.historyDigest,'economic_discharge_locked_scope_changed');
      }}));
    }catch(e){return refusal(e);}

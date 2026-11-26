@@ -1,7 +1,7 @@
 /** Explicit owner-only economic recovery. This module NEVER submits an order,
  * changes a worker, clears a hold, or manufactures a terminal transport result. */
 import {pool,type Pool,type PoolClient} from '@workspace/db';
-import {readEconomicHistoryBatch,readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
+import {readEconomicHistoryBatch,readLockedDischargeHistoryAndMoney,readLockedDischargeFullHistory} from './economicRecoveryReadBatch';
 import {canonical,digest,requireProof,type Request} from '../v13-production/types';
 import {deployedGitSha} from './deployedGitSha';
 import {pinOwnerProtectiveHistory} from './ownerProtectiveHistoryPreviewPin';
@@ -27,8 +27,9 @@ const safe=(e:unknown)=>no(e instanceof Error&&/^economic_settlement_[a-z_]+$/.t
 export function economicSettlementEnabled(env=process.env){const sha=deployedGitSha(env);return SHA.test(sha)&&env.STRATA_ECONOMIC_SETTLEMENT_RECOVERY_SHA===sha;}
 
 async function retainedHistory(db:Query,account:string,owner:string,lock=false,dischargeBatch=false){
- const h=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
- const batch=dischargeBatch?await readLockedDischargeHistoryAndMoney(db,account):null;
+ const prepared=dischargeBatch?await readLockedDischargeFullHistory(db,account):undefined;
+ const h=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner},prepared);
+ const batch=prepared?.downstream??(dischargeBatch?await readLockedDischargeHistoryAndMoney(db,account):null);
  const {events,positions,markers,receipts}=batch??await readEconomicHistoryBatch(db,account,lock);
  requireProof(events.length<=3000&&positions.length<=1000&&markers.length<=1000&&receipts.length<=1000,'economic_settlement_history_bound_exceeded');
  const accountingOnlyExitClients:string[]=[];
@@ -110,11 +111,11 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
   revision:String(a.revision),cash_micros:String(a.cash_micros),initial_cash_micros:String(a.initial_cash_micros),net_funding_micros:String(a.net_funding_micros??'0'),reserved_micros:String(a.reserved_micros)};
  const scopeDigest=digest({pin:pin.digest,history:history.reconciliationDigest,credentials:credentialRows,
   controlEpoch:String(a.owner_control_epoch),workerFence:String(worker.fencing_token)});
- if(lock){
+ if(lock&&!combined){
   const finalPin=await pinOwnerProtectiveHistory(db,owner,sha);
   requireProof(finalPin?.digest===pin.digest,'economic_settlement_locked_identity_changed');
  }
- return {pin,account,history,worker,credentialRows,pendingMoney,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch),blockedReason:a.blocked_reason};
+ return {pin,account,history,worker,credentialRows,pendingMoney,finalPinRequiredWithBooking:combined,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch),blockedReason:a.blocked_reason};
 }
 
 export function createEconomicSettlementService(deps:Deps){
