@@ -1,4 +1,5 @@
-import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
+import {economicExitNotDischarged} from '../strata/economicExitDischargeScope';
+import {ownedGateReadSql} from "./ownedGateRead";
 import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
 import {encodeProductionOrder} from "./transport";
 import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
@@ -250,7 +251,7 @@ export class ProductionExecutor {
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
     // Preserve each gate boundary and refusal order. Only its independent
     // non-locking reads are batched; locked policy decoding remains separate.
-    const ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
+    const ownedGate = this.accountOwnerUserId ? (await tx.query(ownedGateReadSql(),
       [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
     const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
@@ -623,8 +624,11 @@ export class ProductionExecutor {
           };
           try {
           if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
-          // This intent itself is the ONLY allowed dispatched identity.
-          const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
+          // Apart from this exact dispatch, only #387's verified accounting
+          // receipt can distinguish the historical UNKNOWN from new uncertainty.
+          // The latest signed account proof below can still contradict it.
+          const discharge=this.accountOwnerUserId?economicExitNotDischarged('account_id','client_order_id'):'';
+          const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2"+discharge, [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");
           await this.gate(tx, a, i.kind === "EXIT", id);
           const p = await this.ledger.policy(tx, a);

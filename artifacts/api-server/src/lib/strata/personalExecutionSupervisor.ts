@@ -771,7 +771,7 @@ export function createProductionPersonalSession(
                 feeCheckedAt=clock;
               }else if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
-                  sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
+                  sourceUrl,market,{db:finalLedger?.currentTransaction()??undefined,probe:(fetchImpl,clock,ticker)=>
                     feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),

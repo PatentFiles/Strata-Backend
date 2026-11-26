@@ -270,6 +270,13 @@ export class ProductionLedger {
       snapshot.complete && snapshot.cashExact && !snapshot.unexplainedCashActivity &&
       snapshot.observedAtMs <= nowMs && nowMs - snapshot.observedAtMs <= 15_000 &&
       money(snapshot.cashMicros) === money(a.cash_micros), "production_final_account_changed_or_unproven");
+    const discharges=await readEconomicExitDischarges(tx,a.id,true);
+    assertNoEconomicExitContradiction(discharges,snapshot);
+    if(discharges.length){
+      requireProof(nowMs-snapshot.observedAtMs<=5000&&discharges.every(d=>
+        snapshot.settlements.filter(s=>`settlement:${s.id}`===d.settlement_event_id&&digest(s)===d.settlement_digest).length===1),
+        "economic_discharge_final_settlement_unverified");
+    }
     // One statement snapshot under the caller's existing account lock. Independent
     // aggregates avoid a history cross-product and project no decision payload.
     // Cast bigint values to text to preserve node-postgres int8 precision.

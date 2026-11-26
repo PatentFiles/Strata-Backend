@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from '../strata/economicExitDischargeScope';
 /** Read-only owned-account gate facts from one coherent statement snapshot.
  * Caller already holds its account FOR UPDATE. No lock is added or moved;
  * the separate approved-policy FOR SHARE still follows every gate invocation.
@@ -25,3 +26,12 @@ export const OWNED_GATE_READ_SQL = `
        ON a.policy_id=p.id AND a.id=p.execution_account_id
      WHERE a.id=$1 AND a.owner_user_id::text=$4::text AND p.state='APPROVED')
    ELSE '[]'::jsonb END AS policy_rows FROM master`;
+
+
+// Match #387's worker uncertainty gate at the actual mutation boundary too.
+// The switch is read at invocation: an off switch cannot retire any order.
+export function ownedGateReadSql():string {
+ const clause=economicExitNotDischarged('account_id','client_order_id');
+ return clause ? OWNED_GATE_READ_SQL.replace("AND state IN ('DISPATCHED','UNKNOWN')",
+  "AND state IN ('DISPATCHED','UNKNOWN')"+clause) : OWNED_GATE_READ_SQL;
+}
