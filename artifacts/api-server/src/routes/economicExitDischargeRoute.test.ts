@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import express from 'express';import type {AddressInfo} from 'node:net';
 import {economicDischargeRouter} from './economicExitDischargeRoute';
-import {createEconomicDischargeService,economicDischargeEnabled,ECONOMIC_DISCHARGE_CONFIRM,readEconomicTransferPages} from '../lib/strata/economicExitDischargeService';
+import {createEconomicDischargeService,economicDischargeEnabled,ECONOMIC_DISCHARGE_CONFIRM,readEconomicDischargeCut,readEconomicTransferPages} from '../lib/strata/economicExitDischargeService';
 const owner='11111111-1111-4111-8111-111111111111',requestId='22222222-2222-4222-8222-222222222222';
 
 test('economic recovery is default-off and exact release bound',()=>{
@@ -17,13 +17,13 @@ test('service refuses selector injection and implicit authorization before touch
  }
 });
 test('mounted routes bind authenticated owner, require explicit intent and retain readback after disable',async()=>{
- const calls:string[]=[];let enabled=true;
+ const calls:string[]=[];const traces:unknown[]=[];let enabled=true;
  const result={ok:true,status:'RECORDED',reason:'economic_discharge_posted_transport_remains_unknown',accountingPosted:true};
  const service={enabled:()=>enabled,preview:async(who:string)=>{calls.push('preview:'+who);return {...result,accountingPosted:false};},
-  apply:async(who:string)=>{calls.push('apply:'+who);return result;},
+  apply:async(who:string,_input:unknown,observe:(stage:'signedHistory',ms:number)=>void)=>{calls.push('apply:'+who);observe('signedHistory',432);return result;},
   outcome:async(who:string,id:string)=>{calls.push('outcome:'+who+':'+id);return result;},
   cancel:async(who:string,id:string)=>{calls.push('cancel:'+who+':'+id);return {ok:false,status:'CANCELED',accountingPosted:false};}} as unknown as ReturnType<typeof createEconomicDischargeService>;
- const app=express();app.use(express.json());app.use((req,res,next)=>{res.locals.strata={subject:req.get('X-Test-Owner')??''};next();});
+ const app=express();app.use(express.json());app.use((req,res,next)=>{res.locals.strata={subject:req.get('X-Test-Owner')??''};req.log={info:(v:unknown)=>traces.push(v)} as unknown as typeof req.log;next();});
  app.use('/economic',economicDischargeRouter(service));const server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/economic`;
  const post=(path:string,body:unknown={},auth=true,header:Record<string,string>={})=>fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',...(auth?{'X-Test-Owner':owner}:{}),...header},body:JSON.stringify(body)});
@@ -40,6 +40,7 @@ test('mounted routes bind authenticated owner, require explicit intent and retai
   assert.equal((await post('/apply',{},true,{'X-Strata-Action-Intent':'discharge-economic-obligation'})).status,404);
   const out=await fetch(`${base}/outcome?requestId=${requestId}`,{headers:{'X-Test-Owner':owner}});assert.equal(out.status,200);
   assert.equal((await post('/cancel',{requestId,confirmation:'CANCEL_ONLY_THIS_ECONOMIC_DISCHARGE_REQUEST'})).status,200);
+  assert.deepEqual(traces,[{event:'economic_discharge_timing',operation:'apply',stages:{signedHistory:432}}]);
   assert.deepEqual(calls,[`preview:${owner}`,`apply:${owner}`,`outcome:${owner}:${requestId}`,`cancel:${owner}:${requestId}`]);
  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
@@ -94,4 +95,23 @@ test('apply refusal preserves a valid attempt ID, pending semantics and bounded 
   assert.deepEqual(messages.slice(-1),[{event:'economic_discharge_apply_not_recorded',status:'UNKNOWN',reason:'economic_discharge_apply_outcome_unavailable'}]);
   assert.ok(!JSON.stringify(messages).includes(requestId));assert.ok(!JSON.stringify(messages).includes('private'));
  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
+
+test('two independent cut reads overlap and both must finish before history',async()=>{
+ const events:string[]=[];
+ let finish!:()=>void;
+ const gate=new Promise<void>(resolve=>{finish=resolve;});
+ const cut=readEconomicDischargeCut(async()=>{events.push('transfer-start');await gate;events.push('transfer-complete');return 'transfers';},
+  async()=>{events.push('market');finish();return 'market';});
+ const pair=await cut;events.push('next-stage');
+ assert.deepEqual(pair,['transfers','market']);
+ assert.deepEqual(events,['transfer-start','market','transfer-complete','next-stage']);
+});
+
+test('failed cut does not finish with in-flight reads or admit partial evidence',async()=>{
+ let done=false;
+ await assert.rejects(readEconomicDischargeCut(async()=>{await new Promise<void>(resolve=>setImmediate(resolve));done=true;throw Error('transfer refused');},
+  async()=>{throw Error('market refused');}),/transfer refused/);
+ assert.equal(done,true);
 });
