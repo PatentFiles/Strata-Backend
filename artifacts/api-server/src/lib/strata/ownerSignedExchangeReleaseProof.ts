@@ -1,3 +1,5 @@
+import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
+import {settledReserveReadinessEnabled,stoppedArmExposure} from './armSettledReserveScope';
 import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
 /**
  * #165: Explicit owner-initiated signed-exchange release diagnostic.
@@ -93,6 +95,23 @@ export const OWNER_SIGNED_PROOF_INTENTS_SQL=[
  * Bounded explicit action. A failing first signed Kalshi balance GET stops
  * further history reads in the existing reader. No provider PDF/cooldown.
  */
+export async function readOwnerSignedProofAccount(db:Db,owner:string,lock=false){
+ const original=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[owner]);
+ const row=original.rows[0];
+ if(original.rows.length!==1||!row||row.diagnostic_held===true||!settledReserveReadinessEnabled()||row.commissioned!==true)
+  return original;
+ const local=await stoppedArmExposure(db,String(row.id),owner,lock);
+ if(!local.clear||local.receipts.length!==1)return original;
+ const receipt=local.receipts[0]!;
+ const query=OWNER_SIGNED_PROOF_ACCOUNT_SQL
+  .replace("OR i.reserved_micros<>0))","OR i.reserved_micros<>0) AND i.id<>$2)")
+  .replace("r.state IN ('PREPARED','DISPATCHED','UNKNOWN')))","r.state IN ('PREPARED','DISPATCHED','UNKNOWN') AND r.reservation_id<>$3::uuid))");
+ const verified=await db.query(query,[owner,receipt.exitId,receipt.reservationId]);
+ if(verified.rows.length!==1||verified.rows[0]?.id!==row.id||
+    !sameRevision(row.hold_revision,verified.rows[0]?.hold_revision))return original;
+ return {rows:verified.rows.map(r=>({...r,settled_reserve_receipt_digest:receipt.receiptDigest})) as Row[]};
+}
+
 export async function inspectOwnerSignedExchangeReleaseProof(
  ownerId:string,deps:ProofDeps={},
 ):Promise<SignedReleaseProof>{
@@ -100,9 +119,10 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  const db=deps.db??pool as unknown as Db;
  const clock=deps.now??Date.now;
  let account:Row;const requests:Request[]=[];
+ let settled:ReconciledReleaseHistory|undefined;
  let history:Awaited<ReturnType<typeof readNeverPostedReleaseHistory>>;
  try{
-  const a=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
+  const a=await readOwnerSignedProofAccount(db,ownerId);
   if(a.rows.length!==1)return no("owned_execution_account_missing_or_ambiguous");
   account=a.rows[0]!;
   const eligible=account.commissioned===true||(deps.allowStoppedUncommissioned===true&&
@@ -119,7 +139,12 @@ export async function inspectOwnerSignedExchangeReleaseProof(
    return no("ledger_cash_or_reservation_unverified");
   if(String(account.reserved_micros)!=="0")
    return no("ledger_reservations_must_be_zero");
-  history=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
+  if(account.settled_reserve_receipt_digest){
+   settled=await readReconciledReleaseRenewalHistory(db,String(account.id),ownerId);
+   if(settled.settledDispositions?.[0]?.receiptDigest!==account.settled_reserve_receipt_digest)
+    return no("account_changed_during_signed_diagnostic");
+  }
+  history=settled??await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
   requests.push(...history.requests);
  }catch{return no("owner_read_only_database_unavailable");}
  let creds:Awaited<ReturnType<typeof loadedMaterial>>=null;
@@ -144,6 +169,13 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  if(!("identity" in mapped))return no(mapped.reason,true);
  const excluded=new Set(history!.neverPosted.map(x=>x.clientOrderId));
  const contradicted=mapped.orders.some(o=>excluded.has(o.request.clientOrderId));
+ if(settled){
+  try{
+   if(read.historicalCoverageComplete!==true||clock()<started||clock()-started>5000)
+    return no("signed_exchange_read_stale",true);
+   verifyReconciledReleaseRenewalSnapshot(settled,mapped);
+  }catch{return no("settled_reserve_signed_history_conflict",true);}
+ }
  const flat=contradicted?{ok:false as const,reason:"proven_never_posted_provider_record_conflict"}:
   history!.neverPosted.length>0&&read.historicalCoverageComplete!==true
    ?{ok:false as const,reason:"authenticated_exchange_history_incomplete"}
@@ -172,17 +204,21 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  }catch{/* remain false; never grant permission */}
  // Final read is after ALL exchange/fee/readiness awaits. No locks span network.
  try{
+  if(settled){
+   const finalSettled=await readReconciledReleaseRenewalHistory(db,String(account.id),ownerId);
+   if(finalSettled.reconciliationDigest!==settled.reconciliationDigest)return no("financial_history_changed_during_signed_diagnostic",true);
+  }
   if(history!.neverPosted.length>0||deps.captureCommissioningEvidence){
    const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
    if(finalHistory.historyDigest!==history!.historyDigest)return no("financial_history_changed_during_signed_diagnostic",true);
   }
-  const final=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
+  const final=await readOwnerSignedProofAccount(db,ownerId);
   if(final.rows.length!==1||final.rows[0]!.id!==account.id||
-    final.rows[0]!.diagnostic_held!==true||!sameRevision(account.hold_revision,final.rows[0]!.hold_revision))
+    final.rows[0]!.diagnostic_held!==true||final.rows[0]!.settled_reserve_receipt_digest!==account.settled_reserve_receipt_digest||!sameRevision(account.hold_revision,final.rows[0]!.hold_revision))
    return no("account_changed_during_signed_diagnostic",true);
  }catch{return no("signed_diagnostic_final_hold_unavailable",true);}
  const completed=clock();
- if(!Number.isSafeInteger(completed)||completed<started||completed-started>45_000)
+ if(!Number.isSafeInteger(completed)||completed<started||completed-started>(settled?5000:45_000))
   return no("signed_exchange_read_stale",true);
  if(deps.captureCommissioningEvidence&&exchangeFlat&&(cashMatch||initialFundingCandidate)&&
    account.execution_enabled===false&&account.kill_switch===true&&completed-started<=15000){

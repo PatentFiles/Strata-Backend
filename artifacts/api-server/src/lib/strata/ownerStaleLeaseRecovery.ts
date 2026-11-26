@@ -4,7 +4,8 @@ import { pool } from "@workspace/db";
 import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { loadedMaterial } from "./inAppProtectiveRelease";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
-import type { Identity, Request } from "../v13-production/types";
+import {settledReserveReadinessEnabled,stoppedArmExposure,verifyDisposedExitAgainstSnapshot,type StoppedSettledExitDisposition} from './armSettledReserveScope';
+import type { Identity, Request, Snapshot } from "../v13-production/types";
 
 /**
  * Issue #155: only the authenticated owner may request a fenced recovery.
@@ -22,6 +23,7 @@ type DB = Query & { connect(): Promise<Client> };
 type Deps = {
   db?: DB;
   readFeeds?: typeof readOwnedKalshiFeeds;
+  map?: typeof personalAccountSnapshot;
   now?: () => number;
   isScheduled?: (ownerId: string, accountId: string) => boolean;
   bootAtMs?: number;
@@ -84,6 +86,10 @@ const CAS_RELEASE = [
  "WHERE e.execution_account_id=$1 AND e.state IN ('PREPARED','DISPATCHED','UNKNOWN'))",
  "RETURNING fencing_token::text"
 ].join(" ");
+const CAS_RELEASE_SETTLED=CAS_RELEASE
+ .replace('AND account_kill=false','AND account_kill=false AND arm_requested=false')
+ .replace("i.state IN ('PREPARED','DISPATCHED','UNKNOWN'))","i.state IN ('PREPARED','DISPATCHED','UNKNOWN') AND i.id<>$6)")
+ .replace("e.state IN ('PREPARED','DISPATCHED','UNKNOWN'))","e.state IN ('PREPARED','DISPATCHED','UNKNOWN') AND e.reservation_id<>$7::uuid)");
 
 /** Signed GETs take place BEFORE and AFTER the short DB write transaction. */
 export async function recoverOwnerStaleLease(
@@ -96,6 +102,7 @@ export async function recoverOwnerStaleLease(
  let account: Row, beforeReadAt = 0, signedCash = "";
  let material:{keyId:string;privateKey:string}|null=null;
  const requests: Request[] = [];
+ let receipt:StoppedSettledExitDisposition|undefined,signedSnapshot:Snapshot|undefined;
  try {
    const records = await db.query(ACCOUNT,[ownerId]);
    if (records.rows.length!==1) return fail("owner_lease_not_unique_or_missing");
@@ -122,8 +129,16 @@ export async function recoverOwnerStaleLease(
    const feed=await signedGet(material,beforeReadAt);
    if (!feed.ok || feed.observedAtMs!==beforeReadAt) return fail("signed_kalshi_read_unavailable");
    const identity: Identity={subaccount:1,exchangeIndex:2,keyFingerprint:val(account.key_fingerprint)};
-   const snapshot=personalAccountSnapshot(identity,feed,requests);
+   const snapshot=(deps.map??personalAccountSnapshot)(identity,feed,requests);
    const unresolved=await readUnresolvedIntentMode((sql,args)=>db.query(sql,args),id);
+   if(unresolved.ok&&unresolved.mode==='recovery'&&settledReserveReadinessEnabled()&&account.arm_requested===false&&
+      feed.historicalCoverageComplete===true&&'identity' in snapshot){
+    const stopped=await stoppedArmExposure(db,id,ownerId);
+    if(stopped.clear&&stopped.receipts.length===1){
+     verifyDisposedExitAgainstSnapshot(stopped.receipts[0]!,snapshot);
+     receipt=stopped.receipts[0];signedSnapshot=snapshot;
+    }
+   }
    const positions=await db.query(
       "SELECT count(*)::int AS n FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0",[id]);
    signedCash=feed.cashMicros;
@@ -139,7 +154,7 @@ export async function recoverOwnerStaleLease(
        snapshot.complete && snapshot.positions.length===0 &&
        snapshot.orders.every(o=>o.terminal),
       localFlat:positions.rows.length===1&&Number(positions.rows[0]?.n)===0 &&
-       unresolved.ok && unresolved.mode==="entries",
+       unresolved.ok && (unresolved.mode==="entries"||!!receipt),
    });
    if (!eligible.ok) return fail(eligible.reason);
    if (now()-beforeReadAt>15000) return fail("signed_kalshi_read_expired");
@@ -179,12 +194,20 @@ export async function recoverOwnerStaleLease(
    });}catch{return fail("financial_intent_changed_during_recovery");}
    if(hash(comparable)!==hash(requests))
      return fail("financial_intent_changed_during_recovery");
-   const released=await client.query(CAS_RELEASE,
-     [id,ownerId,account.holder_id,account.fencing_token,account.heartbeat_at]);
+   if(receipt){
+    const final=await stoppedArmExposure(client,id,ownerId,true);
+    if(!signedSnapshot||!final.clear||final.receipts.length!==1||final.receipts[0]!.receiptDigest!==receipt.receiptDigest||
+       now()<beforeReadAt||now()-beforeReadAt>5000||deps.isScheduled?.(ownerId,id))
+      return fail("stale_lease_settled_disposition_scope_changed");
+    verifyDisposedExitAgainstSnapshot(receipt,signedSnapshot);
+   }
+   const released=await client.query(receipt?CAS_RELEASE_SETTLED:CAS_RELEASE,
+     [id,ownerId,account.holder_id,account.fencing_token,account.heartbeat_at,
+      ...(receipt?[receipt.exitId,receipt.reservationId]:[])]);
    if(released.rows.length!==1)return fail("stale_lease_atomic_fence_refused");
    const event={ownerId,accountId:id,priorToken:val(account.fencing_token),
       nextToken:val(released.rows[0]?.fencing_token),readAt:beforeReadAt,
-      accountRevision:account.revision,exchangeDigest:hash({cash:signedCash,requests})};
+      accountRevision:account.revision,...(receipt?{settledReserveReceiptDigest:receipt.receiptDigest}:{}),exchangeDigest:hash({cash:signedCash,requests})};
    await client.query(
     "INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES($1,$2,'OWNER_STALE_LEASE_FENCED_RECOVERY',$3::jsonb,$4)",
     [randomUUID(),id,JSON.stringify(event),hash(event)]);
@@ -203,10 +226,18 @@ export async function recoverOwnerStaleLease(
      return fail("post_recovery_signed_exchange_unverified");
    const identity:Identity={subaccount:1,exchangeIndex:2,
      keyFingerprint:val(account.key_fingerprint)};
-   const snapshot=personalAccountSnapshot(identity,post,requests);
+   const snapshot=(deps.map??personalAccountSnapshot)(identity,post,requests);
    if(!("identity" in snapshot)||snapshot.positions.length!==0||
       snapshot.orders.some(o=>!o.terminal))
      return fail("post_recovery_signed_exchange_exposure");
+   if(receipt){
+    if(post.historicalCoverageComplete!==true||now()<finishedAt||now()-finishedAt>5000)
+      return fail("post_recovery_signed_exchange_unverified");
+    verifyDisposedExitAgainstSnapshot(receipt,snapshot);
+    const current=await stoppedArmExposure(db,id,ownerId);
+    if(!current.clear||current.receipts.length!==1||current.receipts[0]!.receiptDigest!==receipt.receiptDigest)
+      return fail("post_recovery_settled_disposition_scope_changed");
+   }
    await db.query(
      "INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest) VALUES($1,$2,'OWNER_STALE_LEASE_POST_RECOVERY_PROOF',$3::jsonb,$4)",
      [randomUUID(),id,JSON.stringify({ownerId,id,finishedAt,cash:signedCash}),

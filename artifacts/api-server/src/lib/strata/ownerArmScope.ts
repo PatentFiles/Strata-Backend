@@ -113,19 +113,31 @@ export async function holdForOwnerArm(fence:OwnerArmFence,scope:OwnerArmScope,db
       const created=await tx.query(INSERT_PUBLIC_STOPPED_LEASE_SQL,[scope.ownerId,scope.accountId,scope.fingerprint]);
       requireArm(created.rows.length===1,'owner_arm_initial_worker_lease_unverified');
     }
+    if(scope.settledReserveReceiptDigest){
+      const locked=await tx.query('SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',
+        [scope.accountId,scope.ownerId]);
+      requireArm(locked.rows.length===1,'owner_arm_account_scope_changed');
+    }
     const worker=await tx.query(`SELECT state,arm_requested,account_kill FROM private.kalshi_account_worker_lease
       WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,[scope.accountId,scope.ownerId]);
     requireArm(worker.rows.length===1&&worker.rows[0].arm_requested===false&&
       ((worker.rows[0].state==='released'&&worker.rows[0].account_kill===false)||
        (worker.rows[0].state==='killed'&&worker.rows[0].account_kill===true)),'owner_arm_worker_not_safely_stopped');
-    const exposure=await tx.query(`SELECT
-      EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
-      EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1
-        AND (terminal IS DISTINCT FROM TRUE OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) AS intents,
-      EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
-        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[scope.accountId]);
-    requireArm(exposure.rows.length===1&&exposure.rows[0].positions===false&&exposure.rows[0].intents===false&&
-      exposure.rows[0].exits===false,'owner_arm_open_or_uncertain_exposure');
+    if(scope.settledReserveReceiptDigest){
+      const disposition=await stoppedArmExposure(tx,scope.accountId,scope.ownerId,true);
+      requireArm(disposition.clear&&disposition.receipts.length===1&&
+        disposition.receipts[0]!.receiptDigest===scope.settledReserveReceiptDigest,
+        'owner_arm_open_or_uncertain_exposure');
+    }else{
+      const exposure=await tx.query(`SELECT
+        EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
+        EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1
+          AND (terminal IS DISTINCT FROM TRUE OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) AS intents,
+        EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
+          AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[scope.accountId]);
+      requireArm(exposure.rows.length===1&&exposure.rows[0].positions===false&&exposure.rows[0].intents===false&&
+        exposure.rows[0].exits===false,'owner_arm_open_or_uncertain_exposure');
+    }
     const maintenance=await tx.query(`SELECT
       EXISTS(SELECT 1 FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1
         AND state IN ('prepared','attempted','pending','uncertain')) AS withdrawal,

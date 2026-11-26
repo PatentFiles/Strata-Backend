@@ -143,3 +143,42 @@ test("internal financial check can inspect an approved stopped uncommissioned ac
   assert.equal(refused.stats().reads,0);
  }
 });
+
+import {readOwnerSignedProofAccount} from './ownerSignedExchangeReleaseProof';
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {proveEconomicSettlement,economicSettlementPlan} from './ownerEconomicSettlementProof';
+import {digest} from '../v13-production/types';
+
+test('signed cash scope accepts only the exact receipt and rechecks stopped predicates',async()=>{
+ const f=economicSettlementFixture(),p=economicSettlementPlan(proveEconomicSettlement(f));
+ const a=f.account;let additional=false,changed=false,secondQueries=0;
+ const db={async query(sql:string,args?:unknown[]){
+  if(sql.includes('SELECT d.*, s.payload'))return {rows:[{payload:p,payload_digest:digest(p),
+   exit_intent_id:p.exitId,entry_intent_id:p.parentId,reservation_id:p.reservationId,market:p.settlement.market,
+   client_order_id:f.history.requests[1]!.clientOrderId,settlement_event_id:p.eventId,
+   settlement_digest:digest(p.settlement),occurred_at:new Date(p.settlement.occurredAtMs)}]};
+  if(sql.includes(' AS positions,')&&sql.includes(' AS exits'))
+   return {rows:[{positions:false,intents:additional,exits:false}]};
+  if(args?.length===3){
+   secondQueries++;
+   assert.deepEqual(args,[a.owner_user_id,p.exitId,p.reservationId]);
+   assert.match(sql,/i\.id<>\$2/);assert.match(sql,/r\.reservation_id<>\$3::uuid/);
+   assert.match(sql,/w\.arm_requested=false/);assert.match(sql,/a\.reserved_micros=0/);
+   return {rows:[{id:a.id,commissioned:true,diagnostic_held:true,hold_revision:{revision:changed?'b':'a'}}]};
+  }
+  return {rows:[{id:a.id,commissioned:true,diagnostic_held:false,hold_revision:{revision:'a'}}]};
+ }};
+ const lastSha=process.env.RAILWAY_GIT_COMMIT_SHA,lastFlag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+  assert.ok((await readOwnerSignedProofAccount(db,a.owner_user_id)).rows[0]?.settled_reserve_receipt_digest);
+  changed=true;
+  assert.equal((await readOwnerSignedProofAccount(db,a.owner_user_id)).rows[0]?.diagnostic_held,false);
+  additional=true;
+  assert.equal((await readOwnerSignedProofAccount(db,a.owner_user_id)).rows[0]?.diagnostic_held,false);
+  assert.equal(secondQueries,2);
+ }finally{
+  if(lastSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=lastSha;
+  if(lastFlag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=lastFlag;
+ }
+});

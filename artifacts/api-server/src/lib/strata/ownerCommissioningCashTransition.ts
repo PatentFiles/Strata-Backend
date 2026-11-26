@@ -4,8 +4,9 @@ import {pool,type Pool,type PoolClient} from "@workspace/db";
 import {ProductionLedger,type Account} from "../v13-production/ledger";
 import {digest} from "../v13-production/types";
 import {getScopedKalshiJson} from "../kalshiAccountClient";
-import {collectCommissioningCashEvidence,OWNER_SIGNED_PROOF_ACCOUNT_SQL,type MatchingCommissioningEvidence} from "./ownerSignedExchangeReleaseProof";
+import {collectCommissioningCashEvidence,readOwnerSignedProofAccount,type MatchingCommissioningEvidence} from "./ownerSignedExchangeReleaseProof";
 import {persistVerifiedOwnedCashMicros,RECORD_OWNED_CASH_CONFIRMATION} from "./personalCashReconciliation";
+import {readReconciledReleaseRenewalHistory,verifyReconciledReleaseRenewalSnapshot} from './reconciledReleaseRenewalHistory';
 import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
 import {registeredReceipt,proveRegisteredOpeningEvidence,type RegisteredReceipt} from "./registeredOpeningCapitalProof";
 import {readCapitalTransfers} from "./capitalCreditTransfers";
@@ -67,8 +68,9 @@ export async function commitCommissioningCashEvidence(owner:string,evidence:Matc
    AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified' FOR SHARE OF p,f,pc,c`,[id,owner]);
   ensure(pins.rows.length===1,"commissioning_cash_signer_or_policy_changed");
   await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[id]);
-  const final=(await tx.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[owner])).rows;
+  const final=(await readOwnerSignedProofAccount(tx,owner,true)).rows;
   ensure(final.length===1&&final[0]!.id===id&&final[0]!.diagnostic_held===true&&
+   final[0]!.settled_reserve_receipt_digest===evidence.account.settled_reserve_receipt_digest&&
    digest(final[0]!.hold_revision)===digest(evidence.account.hold_revision),"commissioning_cash_scope_changed");
   const history=await readNeverPostedReleaseHistory(tx,id,true,{expiredExitOwnerId:owner});
   ensure(history.historyDigest===evidence.historyDigest,"commissioning_cash_history_changed");
@@ -92,11 +94,26 @@ export async function commitCommissioningCashEvidence(owner:string,evidence:Matc
    ensure(initial===null&&String(a.cash_micros)===snapshot.cashMicros,"commissioning_cash_mismatch");
    await ledger.finalAccountProof(tx,a,snapshot,check());
   }
+  const settledDigest=final[0]!.settled_reserve_receipt_digest;
+  if(settledDigest){
+   ensure(!evidence.initialFundingCandidate&&a.commissioned===true&&String(a.cash_micros)===snapshot.cashMicros&&
+    check()-observed<=5000,'commissioning_cash_settled_scope_changed');
+   const retained=await readReconciledReleaseRenewalHistory(tx,id,owner,true);
+   ensure(retained.settledDispositions?.[0]?.receiptDigest===settledDigest,'commissioning_cash_settled_scope_changed');
+   verifyReconciledReleaseRenewalSnapshot(retained,snapshot);
+   const updated=await tx.query(`UPDATE public.v13_production_account SET cash_precision_verified=true,reconciled_at=$3::timestamptz
+    WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned AND NOT execution_enabled AND kill_switch
+     AND cash_micros=$4::bigint AND reserved_micros=0 AND blocked_reason IS NULL
+     AND (reconciled_at IS NULL OR reconciled_at<=$3::timestamptz)
+    RETURNING id`,[id,owner,new Date(observed).toISOString(),snapshot.cashMicros]);
+   ensure(updated.rows.length===1,'commissioning_cash_persistence_refused');
+  }else{
   const stored=await persistVerifiedOwnedCashMicros(tx,{
    ownerUserId:owner,executionAccountId:id,confirmation:RECORD_OWNED_CASH_CONFIRMATION,subaccount:1,exchangeIndex:2,
    observedAtMs:observed,nowMs:check(),maxAgeMs:15000,cashMicros:snapshot.cashMicros,
   });
   ensure(stored.ok,"commissioning_cash_persistence_refused");
+  }
   const updated=(await tx.query<Account>("SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid",[id,owner])).rows[0];
   ensure(updated&&updated.execution_enabled===false&&updated.kill_switch===true&&updated.blocked_reason===a.blocked_reason&&
    updated.policy_id===a.policy_id&&updated.key_fingerprint===a.key_fingerprint&&updated.commissioned===a.commissioned,
@@ -104,6 +121,7 @@ export async function commitCommissioningCashEvidence(owner:string,evidence:Matc
   if(!evidence.initialFundingCandidate)ensure(String(updated.cash_micros)===String(a.cash_micros)&&String(updated.initial_cash_micros)===String(a.initial_cash_micros),"commissioning_cash_unexpected_capital_change");
   await ledger.finalAccountProof(tx,updated,snapshot,check());
   await ledger.assertConservation(tx,updated);
+  ensure(!settledDigest||check()-observed<=5000,'commissioning_cash_evidence_expired');
   check();commitSent=true;await tx.query("COMMIT");committed=true;
   return {ok:true as const,reason:"commissioning_signed_cash_recorded",recordPersisted:true as const,transferAttempted:false as const,
    observedAt:new Date(observed).toISOString(),initialFundingEstablished:evidence.initialFundingCandidate};
