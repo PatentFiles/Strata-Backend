@@ -797,3 +797,37 @@ test('durable qualification requires exact proof, retains exchange gates, and ne
   process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='false';assert.equal((await qualifyProtectiveRelease(OWNER,deps)).ok,false);
  }finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
 });
+
+
+test("qualification fee diagnostics preserve safe transport cause without persistence",async()=>{
+ const {annotateFeeFailure}=await import("./feeFailureDiagnostics");
+ const {sanitizePublic}=await import("../v13-production/sanitize");
+ const h=fakeDb({apiSource:true});
+ const source=annotateFeeFailure({body:"synthetic-sensitive-body",headers:{authorization:"synthetic-secret"}},
+  {phase:"provider_transport",reason:"provider_http_rejected",path:"/series/KXBTC15M",httpStatus:429});
+ const failure=annotateFeeFailure({ok:false as const,reason:"live_api_fee_source_not_verified"},
+  {phase:"authorization",reason:"live_api_fee_source_not_verified"},source);
+ const result=await qualifyProtectiveRelease(OWNER,{
+  db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
+  readFeeds:(async()=>emptySignedFeed({observedAtMs:V4_CLOCK})) as never,
+  verifyApiFee:(async()=>failure) as never,
+ });
+ const publicResult=JSON.parse(JSON.stringify(sanitizePublic(result)));
+ assert.deepEqual(publicResult,{ok:false,reason:"release_api_fee_live_api_fee_source_not_verified",
+  ordersSubmitted:false,feeDiagnostics:{version:1,phase:"provider_transport",
+   reason:"provider_http_rejected",endpoint:"series_detail",httpStatus:429}});
+ assert.equal(JSON.stringify(publicResult).includes("synthetic-sensitive"),false);
+ assert.equal(JSON.stringify(publicResult).includes("synthetic-secret"),false);
+ assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
+});
+test("qualification fee diagnostics ignore spoofed details and retain original refusal",async()=>{
+ const h=fakeDb({apiSource:true});
+ const result=await qualifyProtectiveRelease(OWNER,{
+  db:h.db,sha:()=>SHA,now:()=>V4_CLOCK,
+  readFeeds:(async()=>emptySignedFeed({observedAtMs:V4_CLOCK})) as never,
+  verifyApiFee:(async()=>({ok:false,reason:"live_api_fee_source_not_verified",
+   feeDiagnostics:{reason:"synthetic-private-data"},body:"synthetic-private-data"})) as never,
+ });
+ assert.deepEqual(JSON.parse(JSON.stringify(result)),{ok:false,reason:"release_api_fee_live_api_fee_source_not_verified",ordersSubmitted:false});
+ assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
+});
