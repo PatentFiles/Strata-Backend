@@ -231,6 +231,18 @@ function flag(value: unknown): boolean {
 }
 
 
+/** Display metadata only; never disclose or reuse the opaque provider cursor.
+ * Omission is deliberately unknown for this endpoint, not proof of the last page. */
+function walletTransferPageState(payload:unknown):NonNullable<KalshiUserRead["subaccountTransferPageState"]>{
+  if(!payload||typeof payload!=="object"||Array.isArray(payload))return "unknown";
+  const row=payload as Record<string,unknown>;
+  if(!Array.isArray(row.transfers)||row.transfers.length>200||
+     !row.transfers.every((item:unknown)=>!!item&&typeof item==="object"&&!Array.isArray(item))||
+     !Object.hasOwn(row,"cursor")||typeof row.cursor!=="string"||row.cursor.length>1024)return "unknown";
+  if(row.cursor==="")return "last";
+  return row.cursor.trim()!==""&&!/[\u0000-\u001f\u007f]/.test(row.cursor)?"more":"unknown";
+}
+
 function rowsOf(payload: unknown, keys: string[]): unknown[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
   const record = payload as Record<string, unknown>;
@@ -618,7 +630,9 @@ export function createDatabaseUserScopePort(
         assembled.botEligibilityReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
         assembled.verificationReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
       }
-      const result={...assembled,displayObservedAtMs,displayReadDiagnostics};
+      const result={...assembled,displayObservedAtMs,displayReadDiagnostics,
+        subaccountTransferPageState:displayReadDiagnostics.reads.transfers.status==="response_received"
+          ?walletTransferPageState(transfers):"unknown" as const};
       if(assembled.credentialVerified&&assembled.botEligible&&assembled.verificationReason===null&&
         [limits,bot,positions,orders,fills,settlements,transfers].every(x=>x!==null))
         displayCacheable.add(result);
