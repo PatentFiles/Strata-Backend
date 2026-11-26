@@ -1,0 +1,9 @@
+*
+!package.json
+!package-lock.json
+!book.mjs
+!capture.mjs
+!ws-adapter.mjs
+!tls-dial.mjs
+!runtime.mjs
+!Dockerfile

@@ -1,0 +1,1 @@
+{"name":"strata-orders-off-book-runner","version":"1.0.0","private":true,"type":"module","engines":{"node":">=24"},"scripts":{"start":"node runtime.mjs","test":"node --test *.test.mjs"},"dependencies":{"ws":"8.23.0"}}
