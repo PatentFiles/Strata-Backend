@@ -69,3 +69,29 @@ test('transfer reads reject bad tokens, malformed pages, cursor cycles and a non
  await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers:[],cursor:String(++pages)})),/economic_discharge_transfer_history_incomplete/);
  assert.equal(pages,20);
 });
+
+
+test('apply refusal preserves a valid attempt ID, pending semantics and bounded diagnostics',async()=>{
+ const messages:unknown[]=[];
+ let mode:'refused'|'mismatch'|'unknown'='refused';
+ const service={enabled:()=>true,apply:async()=>{
+  if(mode==='unknown')throw Error('a private provider payload must not be returned or logged');
+  return {ok:false,status:'REFUSED',reason:'economic_discharge_evidence_expired',reserveReleased:false,leaseReleased:false,tradingAuthorized:false,
+   ...(mode==='mismatch'?{requestId:owner}:{})};
+ }} as unknown as ReturnType<typeof createEconomicDischargeService>;
+ const app=express();app.use(express.json());
+ app.use((req,res,next)=>{res.locals.strata={subject:owner};req.log={warn:(value:unknown)=>messages.push(value)} as unknown as typeof req.log;next();});
+ app.use('/economic',economicDischargeRouter(service));const server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
+ const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/economic/apply`;
+ const apply=(id:string)=>fetch(base,{method:'POST',headers:{'Content-Type':'application/json','X-Strata-Action-Intent':'discharge-economic-obligation'},body:JSON.stringify({requestId:id,private:'never log the body'})});
+ try{
+  const refused=await apply(requestId);assert.equal(refused.status,409);
+  assert.deepEqual(await refused.json(),{ok:false,status:'REFUSED',reason:'economic_discharge_evidence_expired',reserveReleased:false,leaseReleased:false,tradingAuthorized:false,requestId});
+  assert.equal(((await (await apply('not-a-uuid')).json()) as {requestId?:string}).requestId,undefined);
+  mode='mismatch';assert.equal(((await (await apply(requestId)).json()) as {requestId?:string}).requestId,owner);
+  mode='unknown';const uncertain=await apply(requestId);assert.equal(uncertain.status,503);
+  assert.deepEqual(await uncertain.json(),{ok:false,status:'UNKNOWN',reason:'economic_discharge_apply_outcome_unavailable',reserveReleased:null,leaseReleased:null,outcomeUnknown:true,tradingAuthorized:false,requestId});
+  assert.deepEqual(messages.slice(-1),[{event:'economic_discharge_apply_not_recorded',status:'UNKNOWN',reason:'economic_discharge_apply_outcome_unavailable'}]);
+  assert.ok(!JSON.stringify(messages).includes(requestId));assert.ok(!JSON.stringify(messages).includes('private'));
+ }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
