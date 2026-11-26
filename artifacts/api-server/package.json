@@ -115,7 +115,8 @@
     "test:economic-settlement": "node scripts/run-economic-settlement-tests.mjs",
     "test:economic-settlement-native": "node scripts/run-economic-settlement-tests.mjs --native",
     "test:economic-discharge": "node scripts/run-economic-settlement-tests.mjs --discharge",
-    "test:economic-discharge-native": "node scripts/run-economic-settlement-tests.mjs --discharge --native"
+    "test:economic-discharge-native": "node scripts/run-economic-settlement-tests.mjs --discharge --native",
+    "test:economic-discharge-cycle": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/economicDischargeFullCycle.postgres.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",

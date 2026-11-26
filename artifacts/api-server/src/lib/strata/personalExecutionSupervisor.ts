@@ -635,6 +635,7 @@ export function createProductionPersonalSession(
           const outcome = await dispatchReviewedProtectiveExitOnce({
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
+            economicEvidence:session.executor.captureEconomicProtectiveEvidence(String(order.client_order_id)),
             ...(directSource?{directHeldSource:directSource}:{}),
           });
           if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);
@@ -770,8 +771,11 @@ export function createProductionPersonalSession(
                   market,sourceUrl,policyVersion,formulaVersion,digest},{},finalLedger?.currentTransaction()??undefined);
                 feeCheckedAt=clock;
               }else if(apiSource){
+                // Final-market proof runs while the executor owns the account lock.
+                // Standing fee renewal also locks that account: reuse this exact
+                // transaction rather than self-deadlocking through a second pool slot.
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
-                  sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
+                  sourceUrl,market,{db:finalLedger?.currentTransaction()??undefined,probe:(fetchImpl,clock,ticker)=>
                     feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
