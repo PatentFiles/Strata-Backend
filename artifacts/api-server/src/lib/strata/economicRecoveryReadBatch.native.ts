@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {pool} from '@workspace/db';
 import {canonical,digest} from '../v13-production/types';
-import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch} from './economicRecoveryReadBatch';
+import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch,readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
 assert.equal(process.env.STRATA_ISOLATED_ECONOMIC_TEST,'1');
 assert.ok(process.env.STRATA_ECONOMIC_SOCKET?.startsWith('/tmp/strata-economic-'));
 const account='batch-owner',foreign='foreign-owner';
@@ -49,10 +49,21 @@ test('native lossless recovery batching preserves scope, financial hashes, bound
    assert.equal((await readEconomicHistoryBatch(pool,foreign,false)).events.length,1);
    assert.ok((await readEconomicPendingMoneyBatch(pool,foreign,false)).every(rows=>rows.length===1&&rows[0]!.state==='uncertain'));
   });
+  await t.test('combined discharge projection exactly matches both original reads',async()=>{
+   const c=await pool.connect();try{
+    await c.query('BEGIN');
+    const {pendingMoney,...history}=await readLockedDischargeHistoryAndMoney(c,account);
+    assert.deepEqual(history,await readEconomicHistoryBatch(c,account,true));
+    const expected=await readEconomicPendingMoneyBatch(c,account,true);
+    assert.deepEqual(pendingMoney.map(sorted),expected.map(sorted));
+    const empty=await readLockedDischargeHistoryAndMoney(c,"batch-owner' OR true --");
+    for(const rows of [...Object.values(empty).slice(0,4),...empty.pendingMoney])assert.equal(rows.length,0);
+   }finally{await c.query('ROLLBACK');c.release();}
+  });
   await t.test('every original row lock is held until transaction completion',async()=>{
    const a=await pool.connect(),b=await pool.connect();
    try{
-    await a.query('BEGIN');await readEconomicHistoryBatch(a,account,true);await readEconomicPendingMoneyBatch(a,account,true);
+    await a.query('BEGIN');await readLockedDischargeHistoryAndMoney(a,account);
     for(const [table,scope] of [...history.map(([table,scope])=>[table,scope]),...pending.map(table=>[table,'execution_account_id'])]){
      await b.query('BEGIN');await b.query("SET LOCAL lock_timeout='60ms'");
      await assert.rejects(b.query(`UPDATE ${table} SET ${scope}=${scope} WHERE ${scope}=$1`,[account]),{code:'55P03'});

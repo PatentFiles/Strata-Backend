@@ -57,8 +57,7 @@ type Deps={db?:Pool;now?:()=>number;sha?:()=>string;enabled?:()=>boolean;isSched
 const refusal=(e:unknown)=>dischargeNo(e instanceof Error&&/^economic_discharge_[a-z_]+$/.test(e.message)?e.message:'economic_discharge_verification_refused');
 /** Other monetary operations are separate obligations. A quiet cash snapshot
  * does not cancel an unresolved transfer or auto-withdrawal maintenance claim. */
-async function readPendingMoney(tx:Pick<PoolClient,'query'>,account:string,lock:boolean){
- const histories=await readEconomicPendingMoneyBatch(tx,account,lock);
+function verifyPendingMoney(histories:Row[][]){
  const allowedStates=[['completed','cancelled'],['completed'],['completed'],['completed','expired'],['completed']];
  for(const [index,rows] of histories.entries()){
   requireProof(rows.length<=1000&&rows.every(r=>allowedStates[index]!.includes(String(r.state))),'economic_discharge_pending_money_requires_review');
@@ -76,7 +75,7 @@ export function createEconomicDischargeService(deps:Deps){
   requireProof(first.blockedReason===null,'economic_discharge_unrelated_hold_requires_review');
   const beat=first.worker.heartbeat_at instanceof Date?first.worker.heartbeat_at.getTime():Date.parse(String(first.worker.heartbeat_at));
   requireProof(first.worker.state==='released'||Number.isSafeInteger(beat)&&beat<now()-120000,'economic_discharge_worker_not_stale');
-  const maintenanceDigest=await readPendingMoney(tx,first.account.id,lock);
+  const maintenanceDigest=verifyPendingMoney(first.pendingMoney??await readEconomicPendingMoneyBatch(tx,first.account.id,lock));
   const rows=(await tx.query(`WITH pending AS MATERIALIZED (
     SELECT 1 FROM private.kalshi_owner_topup_legs l JOIN private.kalshi_owner_topups p ON p.id=l.topup_id
     WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') LIMIT 1${lock?' FOR SHARE OF l':''}
