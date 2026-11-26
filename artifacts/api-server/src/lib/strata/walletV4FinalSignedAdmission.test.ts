@@ -146,6 +146,18 @@ test("executor calls gate inside final callback and retains fail-safe UNKNOWN re
  assert.match(code,/verifyWalletV4FinalSignedAdmission\(tx,/);
  assert.match(code,/withFeeAuthorityTimingPurpose\("FINAL_MARKET",\(\)=>this\.exchange\.submit\(i\.request,final\)\)/);
  assert.match(code,/withoutFeeAuthorityTiming\(\(\)=>this\.exchange\.submit\(i\.request, final\)\)/);
+ // Passive timing wrappers may surround the awaited call; the same final
+ // authorization fence must still be supplied at the real submit boundary.
+ assert.match(code,/this\.exchange\.submit\(i\.request,\s*final\)/);
+ const registered=code.indexOf("ProductionExecutor.#fences.add(final);");
+ const afterPost=code.indexOf('this.fault("after_post_before_commit")',registered);
+ assert.ok(registered>=0&&afterPost>registered,"locate the registered dispatch boundary");
+ const boundary=code.slice(registered,afterPost);
+ const awaited=boundary.match(/\bawait\s+[^;]*this\.exchange\.submit\(i\.request,\s*final\)[^;]*;/)?.[0];
+ assert.ok(awaited,"the submit expression must be awaited before post-dispatch bookkeeping");
+ assert.equal((awaited.match(/this\.exchange\.submit\(i\.request,\s*final\)/g)??[]).length,
+   (boundary.match(/this\.exchange\.submit\(/g)??[]).length,
+   "every timed and untimed submit branch must remain inside that awaited expression");
  assert.match(code,/UPDATE v13_production_intent SET state='DISPATCHED'/);
  assert.match(code,/POST_UNCERTAIN/);
  assert.match(code,/ProductionExecutor\.\#fences\.add\(final\)/);
