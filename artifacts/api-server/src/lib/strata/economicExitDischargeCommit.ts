@@ -90,10 +90,18 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
   requireProof(typeof update.fencing_token==='string','economic_discharge_worker_fence_changed');
   requireProof(typeof update.revision==='string'&&typeof update.owner_control_epoch==='string','economic_discharge_stop_epoch_changed');
   await ledger.assertConservation(tx,{...a,reserved_micros:'0'});
+  // Use the precision of the original row (already SHARE-locked by the
+  // scope verifier). The proof still must match its millisecond projection;
+  // a mismatch produces NULL and the NOT NULL/receipt guards refuse it.
+  // Neither the historical row nor the trigger comparison is rounded.
   await tx.query(`INSERT INTO private.strata_economic_exit_discharge(request_id,owner_user_id,execution_account_id,booking_request_id,booking_digest,
    entry_intent_id,exit_intent_id,reservation_id,client_order_id,settlement_event_id,settlement_digest,exit_request,exit_capability_digest,exit_dispatch_at,marker_order_digest,
    scope_digest,release_sha,released_reserve_micros,prior_revision,posted_revision,prior_control_epoch,control_epoch,prior_worker_fence,worker_fence,payload,payload_digest)
-   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+    (SELECT i.dispatch_at FROM public.v13_production_intent i
+      WHERE i.id=$7 AND i.account_id=$3 AND i.capability_digest=$13
+      AND date_trunc('milliseconds',i.dispatch_at)=$14::timestamptz),
+    $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
    [scope.requestId,scope.ownerId,a.id,plan.bookingRequestId,plan.bookingDigest,plan.parentId,plan.exitId,plan.reservationId,plan.exitRequest.clientOrderId,
     plan.settlementEventId,plan.settlementDigest,plan.exitRequest,plan.exitCapabilityDigest,new Date(plan.exitDispatchAt),plan.markerOrderDigest,
     scope.scopeDigest,scope.releaseSha,plan.releaseReserveMicros,plan.expectedRevision,update.revision,scope.controlEpoch,update.owner_control_epoch,

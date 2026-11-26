@@ -81,6 +81,21 @@ test('native economic discharge atomicity, original UNKNOWN, cancellation, owner
    assert.equal((await run(x)).ok,false);assert.deepEqual(await current(),after);
    assert.deepEqual(await readUnresolvedIntentMode(pool.query.bind(pool),x.f.account.id),{ok:true,mode:'entries'});
   });
+  await t.test('submillisecond original dispatch is copied exactly into the receipt, never rewritten',async()=>{
+   const x=await seed(),before=await current();
+   await pool.query("UPDATE public.v13_production_intent SET dispatch_at=dispatch_at+interval '500 microseconds' WHERE kind='EXIT'");
+   const result=await run(x);assert.equal(result.ok,true,JSON.stringify(result));
+   const {rows:[match]}=await pool.query(`SELECT i.dispatch_at=d.exit_dispatch_at AS exact,
+    i.dispatch_at<>date_trunc('milliseconds',i.dispatch_at) AS has_submillisecond,d.transport_outcome
+    FROM private.strata_economic_exit_discharge d JOIN public.v13_production_intent i ON i.id=d.exit_intent_id`);
+   assert.deepEqual(match,{exact:true,has_submillisecond:true,transport_outcome:'UNKNOWN'});
+   assert.equal((await current()).cash_micros,before.cash_micros);
+  });
+  await t.test('a dispatch changed beyond the proved millisecond cannot silently release',async()=>{
+   const x=await seed();await pool.query("UPDATE public.v13_production_intent SET dispatch_at=dispatch_at+interval '1 millisecond' WHERE kind='EXIT'");
+   const before=await current(),result=await run(x);assert.equal(result.ok,false);
+   assert.deepEqual(await current(),before);
+  });
   await t.test('simultaneous discharges cannot release reserve twice',async()=>{
    const x=await seed(),results=await Promise.all([run(x),run(x)]);assert.equal(results.filter(r=>r.ok).length,1);assert.equal((await current()).receipts,1);assert.equal((await current()).events,2);
   });
