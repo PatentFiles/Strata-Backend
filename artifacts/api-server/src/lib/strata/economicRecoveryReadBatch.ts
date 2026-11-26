@@ -2,7 +2,7 @@ import {requireProof} from '../v13-production/types';
 
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
-type ReadSpec=Readonly<{name:string;table:string;scope:string;order:readonly string[];limit:number}>;
+type ReadSpec=Readonly<{name:string;table:string;scope:string;order:readonly string[];limit:number;immutable?:boolean}>;
 const HISTORY:readonly ReadSpec[]=[
  {name:'events',table:'public.v13_production_event',scope:'account_id',order:['event_id'],limit:3000},
  {name:'positions',table:'public.v13_production_position',scope:'account_id',order:['id'],limit:1000},
@@ -23,12 +23,13 @@ const obj=(v:unknown):v is Row=>v!==null&&typeof v==='object'&&!Array.isArray(v)
  * dependencies retain the old table lock order. No lock is removed, no cached
  * value is accepted, and the caller keeps the original five-second deadline.
  * All table/column names below are module constants, never request inputs. */
-function statement(specs:readonly ReadSpec[],lock:boolean):string{
+function statement(specs:readonly ReadSpec[],lock:boolean,afterCleanIntents=false):string{
  const ctes=specs.map((s,i)=>`r${i} AS MATERIALIZED (
   SELECT t.*,t.xmin::text AS row_revision FROM ${s.table} t
   WHERE t.${s.scope}=$1${i?' AND (SELECT count(*) FROM r'+(i-1)+')>=0':''}
+  ${afterCleanIntents&&i>=2?"AND NOT EXISTS(SELECT 1 FROM r1 WHERE state='BLOCKED' AND kind IN ('ENTRY','EXIT'))":''}
   ${s.order.length?'ORDER BY '+s.order.map(k=>'t.'+k).join(','):''}
-  LIMIT ${s.limit+1} ${lock?'FOR SHARE OF t':''})`);
+  LIMIT ${s.limit+1} ${lock&&!s.immutable?'FOR SHARE OF t':''})`);
  return 'WITH '+ctes.join(',\n')+'\n'+specs.map((s,i)=>`SELECT '${s.name}'::text AS section,
   (SELECT jsonb_object_agg(a.attname,a.atttypid::integer) FROM pg_catalog.pg_attribute a
    WHERE a.attrelid='${s.table}'::regclass AND a.attnum>0 AND NOT a.attisdropped)
@@ -57,8 +58,8 @@ export function decodeEconomicBatchCell(oid:unknown,value:unknown):unknown{
   default: throw Error(FAIL);
  }
 }
-async function read(db:Query,account:string,specs:readonly ReadSpec[],lock:boolean){
- const result=await db.query(statement(specs,lock),[account]);
+async function read(db:Query,account:string,specs:readonly ReadSpec[],lock:boolean,afterCleanIntents=false){
+ const result=await db.query(statement(specs,lock,afterCleanIntents),[account]);
  requireProof(result.rows.length===specs.length,FAIL);
  const output:Record<string,Row[]>={};
  for(const spec of specs){
@@ -86,4 +87,26 @@ export async function readEconomicPendingMoneyBatch(db:Query,account:string,lock
 export async function readLockedDischargeHistoryAndMoney(db:Query,account:string){
  const r=await read(db,account,[...HISTORY,...MONEY],true);
  return {events:r.events!,positions:r.positions!,markers:r.markers!,receipts:r.receipts!,pendingMoney:MONEY.map(s=>r[s.name]!)};
+}
+
+
+/** Only the already-locked reserve writer uses this. Historical discharge
+ * rows are immutable, account-bound and separately validated; intent rows
+ * retain their SHARE locks. If existing BLOCKED intents need supplemental
+ * no-send proof, the SQL intentionally skips downstream row locks so the
+ * caller can keep the original supplemental→history→money lock order. */
+const DISCHARGE_HISTORY:readonly ReadSpec[]=[
+ {name:'abstractDischarges',table:'private.strata_economic_exit_discharge',scope:'execution_account_id',order:['request_id'],limit:1000,immutable:true},
+ {name:'intents',table:'public.v13_production_intent',scope:'account_id',order:['created_at','id'],limit:1000},
+ ...HISTORY,...MONEY,
+];
+export async function readLockedDischargeFullHistory(db:Query,account:string){
+ const r=await read(db,account,DISCHARGE_HISTORY,true,true);
+ const intents=r.intents!,discharges=r.abstractDischarges!;
+ requireProof(intents.length<=1000,'release_history_bound_exceeded');
+ requireProof(discharges.length<=1000,'economic_discharge_history_capacity');
+ const supplemental=intents.some(i=>i.state==='BLOCKED'&&(i.kind==='ENTRY'||i.kind==='EXIT'));
+ return {intents,discharges,downstream:supplemental?null:{
+  events:r.events!,positions:r.positions!,markers:r.markers!,receipts:r.receipts!,pendingMoney:MONEY.map(s=>r[s.name]!)},
+ };
 }

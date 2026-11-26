@@ -1,4 +1,4 @@
-import {readEconomicExitDischarges} from './economicExitDischargeScope';
+import {readEconomicExitDischarges,verifyEconomicExitDischargeRows} from './economicExitDischargeScope';
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
 import {validateLocalExitNoSend} from './localExitNoSendEvidence';
@@ -13,15 +13,16 @@ const MAX_HISTORY=1000;
  * account's digest-valid no-send receipt identifies that same intent. A reason
  * string or BLOCKED status on its own is never evidence of non-submission. */
 export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lock=false,
- diagnostic?:{expiredExitOwnerId:string}){
- const discharges=await readEconomicExitDischarges(db,accountId,lock);
+ diagnostic?:{expiredExitOwnerId:string},preloaded?:{intents:Row[];discharges:Row[]}){
+ if(preloaded&&!lock)throw Error('release_history_preloaded_rows_require_lock');
+ const discharges=preloaded?await verifyEconomicExitDischargeRows(db,accountId,preloaded.discharges):await readEconomicExitDischarges(db,accountId,lock);
  const finish=<T extends {expectedRequests:Request[];historyDigest:string}>(h:T):T&{economicDischarges?:Row[]}=>{
   if(!discharges.length)return h;
   const clients=new Set(discharges.map(d=>String(d.client_order_id)));
   return {...h,expectedRequests:h.expectedRequests.filter(r=>!clients.has(r.clientOrderId)),economicDischarges:discharges,
    historyDigest:digest({history:h.historyDigest,economicDischarges:discharges})};
  };
- const rows=(await db.query(`SELECT i.*,i.xmin::text AS row_revision FROM public.v13_production_intent i
+ const rows=preloaded?.intents??(await db.query(`SELECT i.*,i.xmin::text AS row_revision FROM public.v13_production_intent i
   WHERE account_id=$1 ORDER BY created_at,id LIMIT 1001 ${lock?'FOR SHARE':''}`,[accountId])).rows;
  if(rows.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
  const requests:Request[]=[];

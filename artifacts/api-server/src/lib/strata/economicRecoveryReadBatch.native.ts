@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {pool} from '@workspace/db';
 import {canonical,digest} from '../v13-production/types';
-import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch,readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
+import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch,readLockedDischargeHistoryAndMoney,readLockedDischargeFullHistory} from './economicRecoveryReadBatch';
 assert.equal(process.env.STRATA_ISOLATED_ECONOMIC_TEST,'1');
 assert.ok(process.env.STRATA_ECONOMIC_SOCKET?.startsWith('/tmp/strata-economic-'));
 const account='batch-owner',foreign='foreign-owner';
@@ -59,6 +59,30 @@ test('native lossless recovery batching preserves scope, financial hashes, bound
     const empty=await readLockedDischargeHistoryAndMoney(c,"batch-owner' OR true --");
     for(const rows of [...Object.values(empty).slice(0,4),...empty.pendingMoney])assert.equal(rows.length,0);
    }finally{await c.query('ROLLBACK');c.release();}
+  });
+  await t.test('full locked batch keeps exact rows and defers downstream locks for supplemental evidence',async()=>{
+   await pool.query(`CREATE TABLE public.v13_production_intent(id text,account_id text,state text,kind text,created_at timestamptz,reserved_micros bigint);
+    CREATE TABLE private.strata_economic_exit_discharge(request_id uuid,execution_account_id text,released_reserve_micros bigint);
+    INSERT INTO public.v13_production_intent VALUES('entry','batch-owner','TERMINAL','ENTRY','2026-11-25T00:00:00Z',9007199254740993);
+    INSERT INTO private.strata_economic_exit_discharge VALUES('33333333-3333-4333-8333-333333333333','batch-owner',9007199254740993)`);
+   const a=await pool.connect(),b=await pool.connect();
+   try{
+    await a.query('BEGIN');
+    const clean=await readLockedDischargeFullHistory(a,account);
+    assert.equal(clean.intents[0]?.reserved_micros,'9007199254740993');
+    assert.equal(clean.discharges[0]?.released_reserve_micros,'9007199254740993');
+    assert.deepEqual(clean.downstream,await readLockedDischargeHistoryAndMoney(a,account));
+    await a.query('ROLLBACK');
+    await a.query("UPDATE public.v13_production_intent SET state='BLOCKED'");
+    await a.query('BEGIN');
+    const blocked=await readLockedDischargeFullHistory(a,account);
+    assert.equal(blocked.downstream,null);
+    await b.query('BEGIN');await b.query("SET LOCAL lock_timeout='60ms'");
+    await b.query('UPDATE public.v13_production_position SET basis_micros=basis_micros WHERE account_id=$1',[account]);
+    await b.query('ROLLBACK');
+    await b.query('BEGIN');await b.query("SET LOCAL lock_timeout='60ms'");
+    await assert.rejects(b.query('UPDATE public.v13_production_intent SET state=state WHERE account_id=$1',[account]),{code:'55P03'});
+   }finally{await b.query('ROLLBACK');await a.query('ROLLBACK');a.release();b.release();}
   });
   await t.test('every original row lock is held until transaction completion',async()=>{
    const a=await pool.connect(),b=await pool.connect();

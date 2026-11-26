@@ -23,8 +23,11 @@ export async function readEconomicExitDischarges(db:Query,account:string,_lock=f
  // insertion. Never grant UPDATE merely to issue a redundant FOR SHARE.
  const result=await db.query(`SELECT d.*,d.xmin::text AS row_revision FROM private.strata_economic_exit_discharge d
   WHERE execution_account_id=$1 ORDER BY request_id LIMIT 1001`,[account]);
- requireProof(result.rows.length<=1000,'economic_discharge_history_capacity');
- for(const d of result.rows){
+ return verifyEconomicExitDischargeRows(db,account,result.rows);
+}
+export async function verifyEconomicExitDischargeRows(db:Query,account:string,rows:Row[]){
+ requireProof(rows.length<=1000,'economic_discharge_history_capacity');
+ for(const d of rows){
   const p=typeof d.payload==='string'?JSON.parse(d.payload):d.payload;
   requireProof(p&&typeof p==='object'&&!Array.isArray(p)&&digest(p)===d.payload_digest&&
    p.accountId===account&&p.ownerId===d.owner_user_id&&p.exitId===d.exit_intent_id&&p.parentId===d.entry_intent_id&&
@@ -35,7 +38,7 @@ export async function readEconomicExitDischarges(db:Query,account:string,_lock=f
   const valid=await db.query('SELECT private.strata_has_economic_exit_discharge($1,$2) AS verified',[account,d.client_order_id]);
   requireProof(valid.rows.length===1&&valid.rows[0].verified===true,'economic_discharge_financial_contradiction');
  }
- return result.rows;
+ return rows;
 }
 export function assertNoEconomicExitContradiction(discharges:Row[],snapshot:{orders:{request:{clientOrderId:string}}[];fills:{clientOrderId:string}[]}){
  const clients=new Set(discharges.map(d=>String(d.client_order_id)));
