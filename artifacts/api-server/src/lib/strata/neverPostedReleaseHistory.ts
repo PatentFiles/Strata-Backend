@@ -1,3 +1,4 @@
+import {readLockedBlockedDischargeEvidence} from './economicRecoveryReadBatch';
 import {readEconomicExitDischarges,verifyEconomicExitDischargeRows} from './economicExitDischargeScope';
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
@@ -35,26 +36,28 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  const candidates=rows.filter(r=>r.state==='BLOCKED'&&(r.kind==='ENTRY'||(diagnostic&&r.kind==='EXIT')));
  if(!candidates.length)return finish({rows,requests,expectedRequests:requests,neverPosted:[],historyDigest:digest(rows)});
  const ids=candidates.map(r=>String(r.id));
- const observations=(await db.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
+ const exits=candidates.filter(i=>i.kind==='EXIT');
+ const dispatched=exits.filter(i=>i.dispatch_at!==null);
+ const batch=preloaded&&diagnostic?await readLockedBlockedDischargeEvidence(db,accountId,ids,
+  exits.map(i=>String(i.client_order_id)),dispatched.map(i=>String(i.client_order_id))):null;
+ const observations=batch?.observations??(await db.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
   FROM public.v13_production_observation WHERE account_id=$1
   AND kind IN ('PROVEN_NOT_POSTED','POST_ATTEMPT','POST_UNCERTAIN'${diagnostic?",'CANCEL_ATTEMPT'":''}) AND payload->>'id'=ANY($2::text[])
   ORDER BY id LIMIT 3001 ${lock?'FOR SHARE':''}`,[accountId,ids])).rows;
  if(observations.length>3000)throw Error('release_history_bound_exceeded');
- const events=(await db.query(`SELECT 1 AS present FROM public.v13_production_event
+ const events=batch?.events??(await db.query(`SELECT 1 AS present FROM public.v13_production_event
   WHERE account_id=$1 AND intent_id=ANY($2::text[]) LIMIT 1 ${lock?'FOR SHARE':''}`,[accountId,ids])).rows;
  if(events.length)throw Error('release_never_posted_financial_event_conflict');
- const exits=candidates.filter(i=>i.kind==='EXIT');
- const markers=exits.length?(await db.query(`SELECT reservation_id,owner_user_id::text AS owner_user_id,
+ const markers=batch?.markers??(exits.length?(await db.query(`SELECT reservation_id,owner_user_id::text AS owner_user_id,
   execution_account_id,client_order_id,state,trading_authorized,market_ticker,reducing_side,
   quantity_hundredths,order_request_json,order_digest,worker_holder_id,worker_fencing_token::text AS worker_fencing_token,xmin::text AS row_revision
   FROM private.strata_emergency_exit_reservations WHERE client_order_id=ANY($1::text[])
-  ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[exits.map(i=>String(i.client_order_id))])).rows:[];
+  ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[exits.map(i=>String(i.client_order_id))])).rows:[]);
  if(markers.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
- const dispatched=exits.filter(i=>i.dispatch_at!==null);
- const localNoSends=dispatched.length?(await db.query(`SELECT n.*,n.worker_fencing_token::text AS worker_fencing_token,
+ const localNoSends=batch?.localNoSends??(dispatched.length?(await db.query(`SELECT n.*,n.worker_fencing_token::text AS worker_fencing_token,
   n.quantity_hundredths::text AS quantity_hundredths,n.limit_micros::text AS limit_micros,n.xmin::text AS row_revision
   FROM private.strata_protective_exit_local_no_send n WHERE client_order_id=ANY($1::text[])
-  ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[dispatched.map(i=>String(i.client_order_id))])).rows:[];
+  ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[dispatched.map(i=>String(i.client_order_id))])).rows:[]);
  if(localNoSends.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
  const neverPosted=[];
  for(const i of candidates){

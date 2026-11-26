@@ -2,7 +2,7 @@ import {requireProof} from '../v13-production/types';
 
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
-type ReadSpec=Readonly<{name:string;table:string;scope:string;order:readonly string[];limit:number;immutable?:boolean}>;
+type ReadSpec=Readonly<{name:string;table:string;scope:string;order:readonly string[];limit:number;immutable?:boolean;columns?:readonly string[];extra?:string;unscoped?:boolean}>;
 const HISTORY:readonly ReadSpec[]=[
  {name:'events',table:'public.v13_production_event',scope:'account_id',order:['event_id'],limit:3000},
  {name:'positions',table:'public.v13_production_position',scope:'account_id',order:['id'],limit:1000},
@@ -25,14 +25,14 @@ const obj=(v:unknown):v is Row=>v!==null&&typeof v==='object'&&!Array.isArray(v)
  * All table/column names below are module constants, never request inputs. */
 function statement(specs:readonly ReadSpec[],lock:boolean,afterCleanIntents=false):string{
  const ctes=specs.map((s,i)=>`r${i} AS MATERIALIZED (
-  SELECT t.*,t.xmin::text AS row_revision FROM ${s.table} t
-  WHERE t.${s.scope}=$1${i?' AND (SELECT count(*) FROM r'+(i-1)+')>=0':''}
+  SELECT ${s.columns?s.columns.map(c=>'t.'+c).join(','):'t.*'},t.xmin::text AS row_revision FROM ${s.table} t
+  WHERE ${s.unscoped?'true':'t.'+s.scope+'=$1'}${s.extra?' AND '+s.extra:''}${i?' AND (SELECT count(*) FROM r'+(i-1)+')>=0':''}
   ${afterCleanIntents&&i>=2?"AND NOT EXISTS(SELECT 1 FROM r1 WHERE state='BLOCKED' AND kind IN ('ENTRY','EXIT'))":''}
   ${s.order.length?'ORDER BY '+s.order.map(k=>'t.'+k).join(','):''}
   LIMIT ${s.limit+1} ${lock&&!s.immutable?'FOR SHARE OF t':''})`);
  return 'WITH '+ctes.join(',\n')+'\n'+specs.map((s,i)=>`SELECT '${s.name}'::text AS section,
   (SELECT jsonb_object_agg(a.attname,a.atttypid::integer) FROM pg_catalog.pg_attribute a
-   WHERE a.attrelid='${s.table}'::regclass AND a.attnum>0 AND NOT a.attisdropped)
+   WHERE a.attrelid='${s.table}'::regclass AND a.attnum>0 AND NOT a.attisdropped${s.columns?" AND a.attname IN ("+s.columns.map(c=>"'"+c+"'").join(',')+")":''})
    || jsonb_build_object('row_revision',25) AS types,
   COALESCE((SELECT jsonb_agg((SELECT jsonb_object_agg(e.key,e.value)
     FROM jsonb_each_text(to_jsonb(r)) e)${s.order.length?' ORDER BY '+s.order.map(k=>'r.'+k).join(','):''})
@@ -58,8 +58,8 @@ export function decodeEconomicBatchCell(oid:unknown,value:unknown):unknown{
   default: throw Error(FAIL);
  }
 }
-async function read(db:Query,account:string,specs:readonly ReadSpec[],lock:boolean,afterCleanIntents=false){
- const result=await db.query(statement(specs,lock,afterCleanIntents),[account]);
+async function read(db:Query,account:string,specs:readonly ReadSpec[],lock:boolean,afterCleanIntents=false,extra:unknown[]=[]){
+ const result=await db.query(statement(specs,lock,afterCleanIntents),[account,...extra]);
  requireProof(result.rows.length===specs.length,FAIL);
  const output:Record<string,Row[]>={};
  for(const spec of specs){
@@ -109,4 +109,28 @@ export async function readLockedDischargeFullHistory(db:Query,account:string){
  return {intents,discharges,downstream:supplemental?null:{
   events:r.events!,positions:r.positions!,markers:r.markers!,receipts:r.receipts!,pendingMoney:MONEY.map(s=>r[s.name]!)},
  };
+}
+
+// Same bounded supplemental evidence and same lock order as the sequential
+// path. IDs are parameters from the already-locked intent rows, never SQL.
+const BLOCKED_DISCHARGE:readonly ReadSpec[]=[
+ {name:'observations',table:'public.v13_production_observation',scope:'account_id',order:['id'],limit:3000,
+  columns:['id','account_id','kind','payload','digest','observed_at'],
+  extra:"t.kind IN ('PROVEN_NOT_POSTED','POST_ATTEMPT','POST_UNCERTAIN','CANCEL_ATTEMPT') AND t.payload->>'id'=ANY($2::text[])"},
+ {name:'events',table:'public.v13_production_event',scope:'account_id',order:[],limit:0,columns:['event_id'],
+  extra:"t.intent_id=ANY($2::text[])"},
+ {name:'markers',table:'private.strata_emergency_exit_reservations',scope:'execution_account_id',unscoped:true,
+  order:['reservation_id'],limit:1000,extra:"NOT EXISTS(SELECT 1 FROM r1) AND t.client_order_id=ANY($3::text[])",
+  columns:['reservation_id','owner_user_id','execution_account_id','client_order_id','state','trading_authorized','market_ticker','reducing_side',
+   'quantity_hundredths','order_request_json','order_digest','worker_holder_id','worker_fencing_token']},
+ {name:'localNoSends',table:'private.strata_protective_exit_local_no_send',scope:'execution_account_id',unscoped:true,
+  order:['reservation_id'],limit:1000,extra:"NOT EXISTS(SELECT 1 FROM r1) AND t.client_order_id=ANY($4::text[])"},
+];
+export async function readLockedBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[]){
+ const r=await read(db,account,BLOCKED_DISCHARGE,true,false,[ids,exitClients,dispatchedClients]);
+ const textColumn=(x:unknown)=>x===null?null:String(x);
+ return {observations:r.observations!,events:r.events!,
+  markers:r.markers!.map(x=>({...x,worker_fencing_token:textColumn(x.worker_fencing_token)})),
+  localNoSends:r.localNoSends!.map(x=>({...x,worker_fencing_token:textColumn(x.worker_fencing_token),
+   quantity_hundredths:textColumn(x.quantity_hundredths),limit_micros:textColumn(x.limit_micros)}))};
 }
