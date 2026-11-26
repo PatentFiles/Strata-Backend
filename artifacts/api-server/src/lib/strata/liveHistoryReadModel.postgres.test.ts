@@ -217,8 +217,12 @@ test('booked settlement and UNKNOWN exit remain separate in the screen and expor
   assert.equal(page.summary.submittedOrders,1);assert.equal(page.summary.fills,1);
   assert.equal(page.summary.wins,1);assert.equal(page.summary.netPnlMicros,'1477500');
   assert.equal(page.summary.feeMicros,'52500');
-  const exported=await readLiveHistoryExportBatch(owner,{market:'KXBTC15M-TEST'});
-  assert.equal(exported.rows.find(r=>r.row_id==='intent:blocked-exit')?.status,'SUBMISSION_UNCERTAIN');
-  assert.equal(exported.rows.find(r=>r.row_id==='intent:entry-1')?.net_pnl_micros,'1477500');
+  // Export intentionally scans bounded decision and ledger pages separately.
+  // An empty intermediate batch is not EOF; follow the exact frozen scope.
+  const query={market:'KXBTC15M-TEST',from:new Date(now-60000).toISOString(),to:new Date().toISOString(),limit:'2'};
+  const rows:Record<string,unknown>[]=[];let cursor:string|undefined,pages=0;
+  do{const batch=await readLiveHistoryExportBatch(owner,{...query,cursor});rows.push(...batch.rows);cursor=batch.nextCursor??undefined;assert.ok(++pages<20);}while(cursor);
+  assert.equal(rows.find(r=>r.row_id==='intent:blocked-exit')?.status,'SUBMISSION_UNCERTAIN');
+  assert.equal(rows.find(r=>r.row_id==='intent:entry-1')?.net_pnl_micros,'1477500');
  }finally{await pool.query("UPDATE public.v13_production_intent SET state='BLOCKED',terminal=true WHERE id='blocked-exit'");}
 });
