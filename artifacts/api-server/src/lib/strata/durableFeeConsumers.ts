@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled,isUploadedBaselineId} from "./platformFeeUploadMode";
 import type {DurablePhaseMetadata} from './durablePhaseMetadata';
 import type {PrefetchedPublicMetadata} from "./committedPublicMetadata";
 import {durableReleaseMatch} from './durableFeeReleaseBinding';
@@ -21,8 +22,14 @@ export async function verifyDurableProtectiveAuthority(owner:string,account:stri
  AND p.fee_source_url='strata-durable-owner-fee://'||m.model_id::text
  AND p.fee_policy_version=m.policy_version AND p.fee_formula_version=m.formula_version
  AND a.fee_artifact_digest=m.official_source_digest AND a.commissioned=true AND a.subaccount=1 AND a.exchange_index=2
- FOR SHARE OF m,s,a,p`,[owner,account,sha,DURABLE_FEE_VERSION,HISTORICAL_FEE_VERSION,historicalBaselineEnabled()]);
+ FOR SHARE OF m,s,a,p`,[owner,account,sha,DURABLE_FEE_VERSION,HISTORICAL_FEE_VERSION,historicalBaselineEnabled()||platformFeeUploadEnabled()]);
  if(r.rows.length!==1)return {ok:false as const};
+ const row=r.rows[0]!;
+ if(row.source_kind===HISTORICAL_SOURCE_KIND){
+  if(isUploadedBaselineId(row.historical_baseline_id)){
+   if(!await (await import("./platformUploadedFeeSchedule")).activeUploadedBaselineMatches(db,row.historical_baseline_id,row.official_source_digest))return {ok:false as const};
+  }else if(!historicalBaselineEnabled())return {ok:false as const};
+ }
  return {ok:true as const,authorityFingerprint:createHash('sha256').update(JSON.stringify(r.rows[0])).digest('hex'),validForMs:5000};
  }catch{return {ok:false as const};}
 }

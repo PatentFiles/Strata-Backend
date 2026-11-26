@@ -1,5 +1,6 @@
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
+import {validateLocalExitNoSend} from './localExitNoSendEvidence';
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
 const object=(v:unknown):v is Row=>!!v&&typeof v==='object'&&!Array.isArray(v);
@@ -36,15 +37,27 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  const exits=candidates.filter(i=>i.kind==='EXIT');
  const markers=exits.length?(await db.query(`SELECT reservation_id,owner_user_id::text AS owner_user_id,
   execution_account_id,client_order_id,state,trading_authorized,market_ticker,reducing_side,
-  quantity_hundredths,order_request_json,order_digest,xmin::text AS row_revision
+  quantity_hundredths,order_request_json,order_digest,worker_holder_id,worker_fencing_token::text AS worker_fencing_token,xmin::text AS row_revision
   FROM private.strata_emergency_exit_reservations WHERE client_order_id=ANY($1::text[])
   ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[exits.map(i=>String(i.client_order_id))])).rows:[];
  if(markers.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
+ const dispatched=exits.filter(i=>i.dispatch_at!==null);
+ const localNoSends=dispatched.length?(await db.query(`SELECT n.*,n.worker_fencing_token::text AS worker_fencing_token,
+  n.quantity_hundredths::text AS quantity_hundredths,n.limit_micros::text AS limit_micros,n.xmin::text AS row_revision
+  FROM private.strata_protective_exit_local_no_send n WHERE client_order_id=ANY($1::text[])
+  ORDER BY reservation_id LIMIT 1001 ${lock?'FOR SHARE':''}`,[dispatched.map(i=>String(i.client_order_id))])).rows:[];
+ if(localNoSends.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
  const neverPosted=[];
  for(const i of candidates){
   const r=json(i.request) as Row,d=json(i.decision);
   const matches=observations.filter(o=>{const p=json(o.payload);return object(p)&&p.id===i.id;});
   const receipt=matches[0],payload=receipt?json(receipt.payload):null;
+  if(i.kind==='EXIT'&&i.dispatch_at!==null){
+   const n=validateLocalExitNoSend(i,rows,matches,markers,localNoSends,accountId,diagnostic!.expiredExitOwnerId);
+   neverPosted.push({intentId:String(i.id),clientOrderId:String(i.client_order_id),requestDigest:digest(r),
+    capabilityDigest:String(i.capability_digest),observationId:`local-no-send:${n.reservation_id}`,observationDigest:String(n.evidence_sha256)});
+   continue;
+  }
   if(i.kind==='EXIT')validateExpiredExitNoSend(i,rows,matches,markers,accountId,diagnostic!.expiredExitOwnerId);
   else if(i.account_id!==accountId||i.terminal!==true||i.exchange_order_id!==null||!zero(i.filled_hundredths)||!zero(i.reserved_micros)||
     i.parent_id!==null||i.cancel_attempted!==false||r.clientOrderId!==i.client_order_id||r.clientOrderId!==`v13p-${i.id}`||
@@ -60,5 +73,5 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  }
  const excluded=new Set(neverPosted.map(x=>x.clientOrderId));
  return {rows,requests,expectedRequests:requests.filter(r=>!excluded.has(r.clientOrderId)),neverPosted,
-  historyDigest:exits.length?digest({rows,observations,markers}):digest({rows,observations})};
+  historyDigest:exits.length?digest({rows,observations,markers,...(localNoSends.length?{localNoSends}:{})}):digest({rows,observations})};
 }

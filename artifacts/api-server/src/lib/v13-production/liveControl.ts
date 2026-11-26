@@ -123,7 +123,9 @@ export async function createLiveProductionWorker(): Promise<WorkerHandle> {
     if (!anchor) throw new Error("production_funding_anchor_missing");
     const ledger = new ProductionLedger(pool, account.id);
     const exchange = await createProductionExchange(ledger, openMarketTicker, anchor);
-    const worker = new ProductionWorker(new ProductionExecutor(ledger, exchange));
+    const executor=new ProductionExecutor(ledger,exchange);
+    executor.containLiveEntries();
+    const worker = new ProductionWorker(executor);
     let released = false;
     return {
       start: () => worker.start(),

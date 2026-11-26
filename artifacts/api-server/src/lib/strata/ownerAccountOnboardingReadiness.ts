@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 /**
  * #165: show personal account setup separately from live execution release.
  * Owner-scoped, read-only, no exchange traffic or credential material.
@@ -20,19 +21,22 @@ export type OwnerOnboardingReadiness={
  phase:Phase;
  emailVerified:boolean;ownedAccountUnique:boolean;
  credentials:{verifiedRoles:string[];allFourRecorded:boolean};
+ keyInventory:{connection:"missing"|"saved"|"ambiguous"|"unknown";primaryMaskedId:string|null;storedRoles:string[]};
  funding:{historicalOrCompletedTransferRecorded:boolean;freshExchangeCashRequired:true};
  policy:{approvedRecord:boolean;configuredStakeCents:number|null};
  account:{commissioned:boolean;killSwitchOn:boolean;provisionalHold:boolean;otherFreeze:boolean};
+ openingBasis:{cashMicros:string;initialCashMicros:string;cashMovementMicros:string;differenceMicros:string;repairCandidate:boolean}|null;
  nextActions:string[];
 };
 const empty=(reason:string):OwnerOnboardingReadiness=>({
  ok:false,reason,readOnly:true,tradingAuthorized:false,ordersSubmitted:false,
  signedKalshiEvidenceRefreshed:false,phase:"account_missing",emailVerified:false,
  ownedAccountUnique:false,credentials:{verifiedRoles:[],allFourRecorded:false},
+ keyInventory:{connection:"unknown",primaryMaskedId:null,storedRoles:[]},
  funding:{historicalOrCompletedTransferRecorded:false,freshExchangeCashRequired:true},
  policy:{approvedRecord:false,configuredStakeCents:null},
  account:{commissioned:false,killSwitchOn:true,provisionalHold:false,otherFreeze:false},
- nextActions:[reason],
+ openingBasis:null,nextActions:[reason],
 });
 const isTrue=(value:unknown)=>value===true;
 const asInt=(value:unknown):number|null=>{
@@ -45,8 +49,23 @@ export const OWNER_ONBOARDING_READ_SQL=[
  "SELECT u.email_confirmed_at IS NOT NULL AS email_verified,",
  "a.id IS NOT NULL AS account_exists,a.commissioned,a.kill_switch,a.blocked_reason,",
  "p.state AS policy_state, s.configured_stake_cents,",
+ "(SELECT count(*) FROM public.financial_accounts f WHERE f.user_id=u.id AND f.provider='kalshi') AS connection_count,",
+ "(SELECT count(*) FROM public.financial_accounts f JOIN private.provider_connections pc ON pc.financial_account_id=f.id WHERE f.user_id=u.id AND f.provider='kalshi') AS linked_connection_count,",
+ "(SELECT min(f.masked_key_id) FROM public.financial_accounts f WHERE f.user_id=u.id AND f.provider='kalshi') AS primary_masked_id,",
  "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
- " WHERE c.owner_user_id=u.id AND c.financial_account_id=a.kalshi_connection_id",
+ " JOIN public.financial_accounts f ON f.id=c.financial_account_id AND f.user_id=u.id AND f.provider='kalshi'",
+ " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=f.id",
+ " WHERE c.owner_user_id=u.id AND c.revoked_at IS NULL AND c.vault_secret_id IS NOT NULL",
+ " AND (a.id IS NULL OR c.financial_account_id=a.kalshi_connection_id)) AS stored_roles,",
+ "a.cash_micros::text AS cash_micros,a.initial_cash_micros::text AS initial_cash_micros,",
+ "(SELECT COALESCE(SUM(e.cash_delta_micros),0)::text FROM public.v13_production_event e WHERE e.account_id=a.id) AS cash_movement_micros,",
+ "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
+ " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=c.financial_account_id",
+ " JOIN public.financial_accounts fa ON fa.id=pc.financial_account_id AND fa.user_id=u.id AND fa.provider='kalshi'",
+ " WHERE c.owner_user_id=u.id AND (a.id IS NULL OR c.financial_account_id=a.kalshi_connection_id)",
+ " AND (SELECT count(*) FROM public.financial_accounts owned",
+ " JOIN private.provider_connections linked ON linked.financial_account_id=owned.id",
+ " WHERE owned.user_id=u.id AND owned.provider='kalshi')=1",
  " AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL",
  " AND c.verification_reason='credential_verified'",
  " AND c.vault_secret_id IS NOT NULL",
@@ -58,7 +77,7 @@ export const OWNER_ONBOARDING_READ_SQL=[
  " WHERE t.owner_user_id=u.id AND t.execution_account_id=a.id",
  " AND t.state='completed' AND t.completed_at IS NOT NULL AND t.bot_after_cents>=2500)",
  "AS funding_recorded",
- "FROM auth.users u",
+ runtimeAuthSql("FROM auth.users u"),
  "LEFT JOIN public.v13_production_account a ON a.owner_user_id=u.id",
  " AND a.subaccount=1 AND a.exchange_index=2",
  "LEFT JOIN public.v13_live_money_policy p ON p.id=a.policy_id",
@@ -78,6 +97,19 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.ok=true;r.nextActions=[];
   r.emailVerified=isTrue(a.email_verified);
   r.ownedAccountUnique=isTrue(a.account_exists);
+  const connectionCount=asInt(a.connection_count),linkedCount=asInt(a.linked_connection_count);
+  r.keyInventory.connection=connectionCount===0&&linkedCount===0?"missing":
+    connectionCount===1&&linkedCount===1?"saved":
+    connectionCount!==null&&linkedCount!==null?"ambiguous":"unknown";
+  // Expose only the existing masked ID, never provider secret or raw key ID.
+  if(r.keyInventory.connection==="saved"&&typeof a.primary_masked_id==="string"&&/^••••[A-Za-z0-9-]{4}$/.test(a.primary_masked_id))
+    r.keyInventory.primaryMaskedId=a.primary_masked_id;
+  if(r.keyInventory.connection==="saved"&&Array.isArray(a.stored_roles)){
+    const saved=a.stored_roles as unknown[];
+    if(saved.some(role=>!ROLES.includes(role as typeof ROLES[number]))||new Set(saved).size!==saved.length)
+      r.keyInventory.connection="ambiguous";
+    else r.keyInventory.storedRoles=ROLES.filter(role=>saved.includes(role));
+  }
   const roles:string[]=Array.isArray(a.active_roles)?a.active_roles.filter((v:unknown):v is string=>typeof v==="string"):[];
   r.credentials.verifiedRoles=ROLES.filter(role=>roles.filter((x:string)=>x===role).length===1);
   r.credentials.allFourRecorded=r.credentials.verifiedRoles.length===ROLES.length&&
@@ -90,6 +122,15 @@ export async function inspectOwnerAccountOnboardingReadiness(
   r.account.provisionalHold=a.blocked_reason==="awaiting_account_commissioning";
   r.account.otherFreeze=a.blocked_reason!==null&&a.blocked_reason!==undefined&&
     !r.account.provisionalHold;
+  if(r.ownedAccountUnique &&
+    [a.cash_micros,a.initial_cash_micros,a.cash_movement_micros].every(v=>typeof v==="string"&&/^-?\d+$/.test(v))){
+   const cash=BigInt(String(a.cash_micros)),initial=BigInt(String(a.initial_cash_micros)),movement=BigInt(String(a.cash_movement_micros));
+   const difference=cash-initial-movement;
+   r.openingBasis={cashMicros:String(cash),initialCashMicros:String(initial),cashMovementMicros:String(movement),
+    differenceMicros:String(difference),repairCandidate:r.account.commissioned&&r.account.killSwitchOn&&
+    r.funding.historicalOrCompletedTransferRecorded&&initial===0n&&movement===0n&&cash>0n};
+   if(difference!==0n)r.nextActions.push("verify_registered_opening_capital_before_release");
+  }
   if(!r.emailVerified)r.nextActions.push("confirm_own_email_before_account_setup");
   if(!r.ownedAccountUnique){
    r.phase="account_missing";

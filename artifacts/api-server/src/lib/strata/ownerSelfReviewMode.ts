@@ -17,9 +17,31 @@ export function sameStandingAuthoritySql(review='r',grant='g'){
 }
 
 export type OwnerSelfEnrollmentScope={ownerId:string;accountId:string};
-export function configuredOwnerSelfScope():OwnerSelfEnrollmentScope|undefined{
- const ownerId=process.env.STRATA_OWNER_SELF_RELEASE_OWNER_ID,accountId=process.env.STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID;
- return ownerId&&accountId?{ownerId,accountId}:undefined;
+/** A server-controlled allow-list is bound to the actual release. Never derive
+ * enrollment from the request account or fall back to a broader configuration
+ * when the list is malformed. An empty configured list disables enrollment. */
+export function configuredOwnerSelfScope(owner?:string,sha?:string,env:NodeJS.ProcessEnv=process.env):OwnerSelfEnrollmentScope|undefined{
+ const configured=env.STRATA_OWNER_SELF_RELEASE_SCOPES_V1;
+ if(configured===undefined){
+  const ownerId=env.STRATA_OWNER_SELF_RELEASE_OWNER_ID,accountId=env.STRATA_OWNER_SELF_RELEASE_ACCOUNT_ID;
+  return ownerId&&accountId?{ownerId,accountId}:undefined;
+ }
+ if(!owner||!uuid.test(owner)||!sha||!/^[a-f0-9]{40}$/.test(sha)||sha!==env.RAILWAY_GIT_COMMIT_SHA||configured.length>65536)return undefined;
+ try{
+  const rows:unknown=JSON.parse(configured);
+  if(!Array.isArray(rows)||rows.length>256)return undefined;
+  const owners=new Set<string>(),accounts=new Set<string>();
+  let selected:OwnerSelfEnrollmentScope|undefined;
+  for(const item of rows){
+   if(!item||typeof item!=='object'||Array.isArray(item)||Object.keys(item).sort().join(',')!=='accountId,ownerId,releaseSha'||
+      typeof item.ownerId!=='string'||!uuid.test(item.ownerId)||typeof item.accountId!=='string'||
+      !/^[A-Za-z0-9_.:-]{1,128}$/.test(item.accountId)||item.releaseSha!==sha||
+      owners.has(item.ownerId.toLowerCase())||accounts.has(item.accountId))return undefined;
+   owners.add(item.ownerId.toLowerCase());accounts.add(item.accountId);
+   if(item.ownerId===owner)selected={ownerId:item.ownerId,accountId:item.accountId};
+  }
+  return selected;
+ }catch{return undefined;}
 }
 export function ownerSelfEnrollmentAllowed(owner:string,account:unknown,scope:OwnerSelfEnrollmentScope|undefined){
  return !!scope&&uuid.test(scope.ownerId)&&!!scope.accountId&&scope.ownerId===owner&&scope.accountId===account;

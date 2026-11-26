@@ -1,3 +1,8 @@
+import {assertOwnerArmFence} from './ownerArmContext';
+import {terminalDisarmedLease} from './terminalWorkerLease';
+import {platformFeeUploadEnabled,isUploadedBaselineId} from './platformFeeUploadMode';
+import {activeUploadedBaselineMatches} from './platformUploadedFeeSchedule';
+import {resolveOwnerSelfScope,publicSelfServiceRequested,publicSelfServiceReleaseQualified} from './ownerSelfServiceEligibility';
 import {performance} from 'node:perf_hooks';
 import {createHash} from 'node:crypto';
 import {pool} from '@workspace/db';
@@ -20,7 +25,18 @@ type Deps={db?:Db;sha?:()=>string;scope?:typeof configuredOwnerSelfScope;now?:()
 const noAuthority={tradingAuthorized:false as const,workerStarted:false as const,ordersSubmitted:false as const,retryAuthorized:false as const};
 const no=(reason:string)=>({ok:false as const,reason,...noAuthority});
 const str=(v:unknown)=>typeof v==='string'?v:'';
-const enabled=()=>process.env.STRATA_DURABLE_OWNER_FEE_ENABLED==='true'&&historicalBaselineEnabled();
+const enabled=()=>process.env.STRATA_DURABLE_OWNER_FEE_ENABLED==='true'&&(historicalBaselineEnabled()||platformFeeUploadEnabled());
+/** Diagnose deployment admission without exposing environment values or weakening it.
+ * Recovery must not attempt owner operations when the platform build is unqualified.
+ */
+export function durableReauthorizationAdmissionReason(owner:string,sha:string,feeEnabled:boolean,env:NodeJS.ProcessEnv=process.env,hasTestScope=false):string|null{
+ if(!UUID.test(owner))return 'durable_reauthorization_owner_unverified';
+ if(!SHA.test(sha))return 'durable_reauthorization_deployed_build_unavailable';
+ if(!feeEnabled)return 'durable_reauthorization_fee_path_disabled';
+ if(!hasTestScope&&publicSelfServiceRequested(env)&&!publicSelfServiceReleaseQualified(sha,env))
+  return 'durable_reauthorization_platform_release_unqualified';
+ return null;
+}
 export function validDurableReauthorizationBody(raw:unknown):raw is Row{
  if(!raw||typeof raw!=='object'||Array.isArray(raw))return false;const b=raw as Row;
  return Object.keys(b).sort().join(',')==='accountId,authorizationId,confirmation,expectedSha,modelId,originalSha,policyHash,riskAcceptance,sourceDigest'&&
@@ -28,6 +44,9 @@ export function validDurableReauthorizationBody(raw:unknown):raw is Row{
  HASH.test(str(b.policyHash))&&HASH.test(str(b.sourceDigest))&&typeof b.accountId==='string'&&b.accountId.length>0&&b.accountId.length<=200&&b.confirmation===DURABLE_REAUTH_CONFIRM&&b.riskAcceptance===HISTORICAL_RISK_ACCEPTANCE;
 }
 async function scopeRow(db:Q,owner:string,account:string,lock=false){
+ // Serialize exact-build consent against administrator replacement; the
+ // immutable model, original bytes and owner policy are still checked below.
+ if(lock&&platformFeeUploadEnabled())await db.query('SELECT pg_advisory_xact_lock_shared(1958371201,1)');
  const r=await db.query(`SELECT m.*,m.effective_date::text AS effective_date_text,s.entry_revoked,s.known_publication_change,
  b.original_bytes,b.content_sha256 AS baseline_digest,a.revision AS account_revision,a.key_fingerprint,a.kalshi_connection_id,
  a.reconciled_at,a.cash_micros,a.reserved_micros,a.initial_cash_micros,a.policy_id,a.execution_enabled,a.kill_switch,a.blocked_reason,a.commissioned,a.cash_precision_verified,
@@ -42,35 +61,43 @@ async function scopeRow(db:Q,owner:string,account:string,lock=false){
  ${lock?'FOR UPDATE OF a FOR SHARE OF m,s,p':''}`,[owner,account]);
  if(r.rows.length!==1)return null;const m=r.rows[0],p=approvedFromRow(m.policy as Row);
  if(!p||p.policyHash!==computeV13LiveMoneyPolicyHash(p)||m.source_kind!==HISTORICAL_SOURCE_KIND||m.policy_version!==HISTORICAL_FEE_VERSION||m.genuine_source_verified!==false||m.source_capture_id!==null||
- m.historical_baseline_id!==HISTORICAL_BASELINE_ID||m.baseline_digest!==HISTORICAL_BASELINE_SHA256||m.official_source_digest!==HISTORICAL_BASELINE_SHA256||
- !Buffer.isBuffer(m.original_bytes)||createHash('sha256').update(m.original_bytes).digest('hex')!==HISTORICAL_BASELINE_SHA256||m.formula_version!=='standard-quadratic-0.07-v1'||m.effective_date_text!=='2026-07-07'||
+ !Buffer.isBuffer(m.original_bytes)||!HASH.test(str(m.official_source_digest))||m.baseline_digest!==m.official_source_digest||createHash('sha256').update(m.original_bytes).digest('hex')!==m.official_source_digest||m.formula_version!=='standard-quadratic-0.07-v1'||m.effective_date_text!=='2026-07-07'||
  m.entry_revoked!==false||m.known_publication_change!==false||m.execution_enabled!==false||m.kill_switch!==true||m.blocked_reason!==null||m.commissioned!==true||m.cash_precision_verified!==true||String(m.reserved_micros)!=='0'||m.fee_artifact_digest!==m.official_source_digest)return null;
+ const uploaded=isUploadedBaselineId(m.historical_baseline_id);
+ if(uploaded?(!platformFeeUploadEnabled()||!await activeUploadedBaselineMatches(db,m.historical_baseline_id,m.official_source_digest)):
+ (!historicalBaselineEnabled()||m.historical_baseline_id!==HISTORICAL_BASELINE_ID||m.official_source_digest!==HISTORICAL_BASELINE_SHA256))return null;
  const lease=await db.query(`SELECT state,account_kill,arm_requested FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND owner_user_id=$2::uuid ${lock?'FOR UPDATE':''}`,[account,owner]);
- if(lease.rows.length!==1||lease.rows[0].state!=='killed'||lease.rows[0].account_kill!==true||lease.rows[0].arm_requested!==false)return null;
+ // Recovery intentionally leaves a released lease under a killed account.
+ if(lease.rows.length!==1||!terminalDisarmedLease(lease.rows[0]))return null;
  const conflict=await db.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[account,m.official_source_digest]);if(conflict.rows.length)return null;
  return {m,p};
 }
 function matches(m:Row,b:Row){return m.model_id===b.modelId&&m.release_commit_sha===b.originalSha&&m.approved_policy_hash===b.policyHash&&m.official_source_digest===b.sourceDigest;}
-function tuple(r:Row){return {authorizationId:r.authorization_id,ownerId:r.owner_user_id,accountId:r.execution_account_id,modelId:r.model_id,originalSha:r.original_release_sha,sha:r.release_commit_sha,policyHash:r.policy_hash,sourceDigest:r.source_digest,confirmation:r.confirmation,riskAcceptance:r.risk_acceptance,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:HISTORICAL_BASELINE_ID,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,...noAuthority};}
+function tuple(r:Row){return {authorizationId:r.authorization_id,ownerId:r.owner_user_id,accountId:r.execution_account_id,modelId:r.model_id,originalSha:r.original_release_sha,sha:r.release_commit_sha,policyHash:r.policy_hash,sourceDigest:r.source_digest,confirmation:r.confirmation,riskAcceptance:r.risk_acceptance,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:r.historical_baseline_id,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,...noAuthority};}
 export async function durableFeeReauthorizationPreview(owner:string,d:Pick<Deps,'db'|'sha'|'scope'>={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)return no('production_override_forbidden');
- const configured=(d.scope??configuredOwnerSelfScope)(),sha=(d.sha??deployedGitSha)();if(!enabled()||!UUID.test(owner)||!configured||!SHA.test(sha)||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
+ const sha=(d.sha??deployedGitSha)();
+ const admission=durableReauthorizationAdmissionReason(owner,sha,enabled(),process.env,!!d.scope);
+ if(admission)return no(admission);
+ const configured=d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,sha);
+ if(!configured||!ownerSelfEnrollmentAllowed(owner,configured.accountId,configured))return no('durable_reauthorization_scope_unavailable');
  try{const db=d.db??pool,found=await scopeRow(db,owner,configured.accountId);if(!found)return no('durable_reauthorization_historical_stopped_scope_unverified');const {m,p}=found;
  const reconciled=new Date(String(m.reconciled_at)).getTime();if(!Number.isFinite(reconciled)||reconciled>Date.now()+10000||Date.now()-reconciled>900000)return no('durable_reauthorization_fresh_reconciliation_required');
  if(m.release_commit_sha===sha)return no('durable_reauthorization_different_release_required');
  const attempts=await db.query("SELECT authorization_id FROM private.strata_durable_fee_release_authorization WHERE model_id=$1 AND release_commit_sha=$2 AND state IN('PENDING','RECORDED') LIMIT 1",[m.model_id,sha]);if(attempts.rows.length)return no('durable_reauthorization_existing_attempt_requires_readback');
- return {ok:true as const,ownerId:owner,accountId:configured.accountId,sha,modelId:m.model_id,originalSha:m.release_commit_sha,policyHash:p.policyHash,sourceDigest:m.official_source_digest,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:HISTORICAL_BASELINE_ID,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false,publicationKnownCurrent:false,confirmation:DURABLE_REAUTH_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE,
+ return {ok:true as const,ownerId:owner,accountId:configured.accountId,sha,modelId:m.model_id,originalSha:m.release_commit_sha,policyHash:p.policyHash,sourceDigest:m.official_source_digest,sourceKind:HISTORICAL_SOURCE_KIND,baselineId:m.historical_baseline_id,effectiveDate:'2026-07-07',sourceAuthenticityVerified:false,publicationKnownCurrent:false,confirmation:DURABLE_REAUTH_CONFIRM,riskAcceptance:HISTORICAL_RISK_ACCEPTANCE,
  limits:{capitalLimitCents:p.capitalLimitCents,maxEntryStakeCents:p.maxEntryStakeCents,maxEntryAllInCents:p.maxEntryAllInCents,maxDailyLossCents:p.maxDailyLossCents,maxTotalLossCents:p.maxTotalLossCents,maxOpenPositions:p.maxOpenPositions},...noAuthority};
  }catch{return no('durable_reauthorization_preview_unavailable');}
 }
 export async function durableFeeReauthorizationOutcome(owner:string,id:string,sha:string,db:Q=pool){
  const unknown=()=>({outcome:'UNKNOWN' as const,...noAuthority});if(!UUID.test(owner)||!UUID.test(id)||!SHA.test(sha))return unknown();
- try{const r=await db.query('SELECT * FROM private.strata_durable_fee_release_authorization WHERE authorization_id=$1::uuid AND owner_user_id=$2::uuid AND release_commit_sha=$3',[id,owner,sha]);if(r.rows.length!==1)return unknown();const v=r.rows[0];
+ try{const r=await db.query('SELECT ra.*,m.historical_baseline_id FROM private.strata_durable_fee_release_authorization ra JOIN private.strata_durable_owner_fee_model m ON m.model_id=ra.model_id AND m.owner_user_id=ra.owner_user_id AND m.execution_account_id=ra.execution_account_id WHERE ra.authorization_id=$1::uuid AND ra.owner_user_id=$2::uuid AND ra.release_commit_sha=$3',[id,owner,sha]);if(r.rows.length!==1)return unknown();const v=r.rows[0];
  if(v.state==='RECORDED')return {outcome:'RECORDED' as const,...tuple(v)};
  if(v.state==='REJECTED')return {outcome:'REJECTED' as const,...tuple(v),reason:v.reason,noCommit:true};return unknown();
  }catch{return unknown();}
 }
-async function execute(owner:string,b:Row,d:Deps){
+type ReauthorizationResult=ReturnType<typeof no>|{ok:true;reason:string;authorizationId:unknown;tradingAuthorized:false;workerStarted:false;ordersSubmitted:false;retryAuthorized:false};
+async function execute(owner:string,b:Row,d:Deps,attemptNumber=0):Promise<ReauthorizationResult>{
  const db=d.db??pool,now=d.now??Date.now;let tx:Client|undefined,done=false,commitAttempted=false,discard:Error|undefined;
  try{
  const found=await scopeRow(db,owner,str(b.accountId));if(!found||!matches(found.m,b))return no('durable_reauthorization_prior_model_changed_or_revoked');
@@ -82,8 +109,18 @@ async function execute(owner:string,b:Row,d:Deps){
  const excluded=new Set(history.neverPosted.map(x=>x.clientOrderId));if(snapshot.orders.some(o=>excluded.has(o.request.clientOrderId))||(excluded.size>0&&feeds.historicalCoverageComplete!==true)||!v3MigrationFlatHistoryCheck(snapshot,history.expectedRequests).ok)return no('durable_reauthorization_history_not_flat_or_complete');
  const marketMono=performance.now(),marketStarted=now(),market=await(d.probe??probeCurrentKalshiFeeApi)();const fee=preparePdfFreeApiFeePolicyReview(market,now());if(!fee.ok||now()<marketStarted||now()-marketStarted>5000)return no('durable_reauthorization_fresh_market_unverified');
  tx=await db.connect();await tx.query('BEGIN ISOLATION LEVEL SERIALIZABLE');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,owner);
  const attempt=await tx.query("SELECT authorization_id FROM private.strata_durable_fee_release_authorization WHERE authorization_id=$1 AND owner_user_id=$2 AND state='PENDING' FOR UPDATE",[b.authorizationId,owner]);if(attempt.rows.length!==1)return no('durable_reauthorization_attempt_not_pending');
- const locked=await scopeRow(tx,owner,str(b.accountId),true);if(!locked||!matches(locked.m,b)||String(locked.m.account_revision)!==String(m.account_revision)||locked.m.policy_id!==m.policy_id||locked.m.key_fingerprint!==m.key_fingerprint||locked.m.kalshi_connection_id!==m.kalshi_connection_id)return no('durable_reauthorization_scope_changed');
+ const locked=await scopeRow(tx,owner,str(b.accountId),true);if(!locked||!matches(locked.m,b)||locked.m.policy_id!==m.policy_id||locked.m.key_fingerprint!==m.key_fingerprint||locked.m.kalshi_connection_id!==m.kalshi_connection_id)return no('durable_reauthorization_scope_changed');
+ if(String(locked.m.account_revision)!==String(m.account_revision)){
+  // STOP closes execution immediately; an already-running signed cash
+  // reconciliation may still finish. No authorization has been written here.
+  // Reacquire all signed evidence for the same immutable owner/model/policy
+  // consent after a confirmed rollback; do not relax the revision comparison.
+  if(attemptNumber>=2)return no('durable_reauthorization_account_revision_changed');
+  await tx.query('ROLLBACK');tx.release();tx=undefined;
+  return execute(owner,b,d,attemptNumber+1);
+ }
  const credential=await tx.query("SELECT 1 FROM private.kalshi_connection_credentials WHERE owner_user_id=$1 AND financial_account_id=$2 AND key_fingerprint=$3 AND role='restricted_execution' AND revoked_at IS NULL AND verified_at IS NOT NULL AND verification_reason='credential_verified' FOR SHARE",[owner,m.kalshi_connection_id,m.key_fingerprint]);if(credential.rows.length!==1)return no('durable_reauthorization_signer_changed');
  const lockedHistory=await readNeverPostedReleaseHistory(tx,str(b.accountId),true,{expiredExitOwnerId:owner});if(lockedHistory.historyDigest!==history.historyDigest)return no('durable_reauthorization_history_changed');
  if(String(feeds.cashMicros)!==String(locked.m.cash_micros))return no('durable_reauthorization_signed_cash_mismatch');
@@ -103,7 +140,7 @@ async function execute(owner:string,b:Row,d:Deps){
 export async function reauthorizeDurableFeeRelease(owner:string,raw:unknown,d:Deps={}){
  if(process.env.NODE_ENV!=='test'&&Object.keys(d).length)return no('production_override_forbidden');
  if(!enabled()||!UUID.test(owner)||!validDurableReauthorizationBody(raw))return no('explicit_durable_reauthorization_required');const b=raw;
- if(b.expectedSha!==(d.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(owner,str(b.accountId),(d.scope??configuredOwnerSelfScope)()))return no('durable_reauthorization_scope_invalid');
+ if(b.expectedSha!==(d.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(owner,str(b.accountId),(d.scope?d.scope():await resolveOwnerSelfScope(pool,owner,b.expectedSha))))return no('durable_reauthorization_scope_invalid');
  const db=d.db??pool;
  try{const claim=await db.query(`INSERT INTO private.strata_durable_fee_release_authorization(authorization_id,model_id,owner_user_id,execution_account_id,original_release_sha,release_commit_sha,policy_hash,source_digest,confirmation,risk_acceptance)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING RETURNING authorization_id`,[b.authorizationId,b.modelId,owner,b.accountId,b.originalSha,b.expectedSha,b.policyHash,b.sourceDigest,b.confirmation,b.riskAcceptance]);if(claim.rows.length!==1)return no('durable_reauthorization_existing_attempt_requires_readback');}catch{return no('durable_reauthorization_claim_unknown');}

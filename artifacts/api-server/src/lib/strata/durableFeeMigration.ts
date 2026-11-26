@@ -1,3 +1,7 @@
+import {assertOwnerArmFence} from './ownerArmContext';
+import {platformFeeUploadEnabled,isUploadedBaselineId,UPLOADED_FEE_MIGRATION_CONFIRM,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
+import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {HISTORICAL_FEE_VERSION,HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,HISTORICAL_MIGRATION_CONFIRM,HISTORICAL_RISK_ACCEPTANCE,HISTORICAL_MODEL_CONFIRM,readHistoricalBaselineBytes,historicalBaselineEnabled} from './historicalOwnerFeeBaseline';
 /** Isolated, default-off atomic durable migration. No ARM, START or orders.
  * Preserves approved limits. Original V2/V3 consent is never relabeled. */
@@ -36,13 +40,17 @@ async function readDurableMigrationCapture(db:Q,owner:string,account:string,capt
 const CAPTURE_KEYS='accountId,captureId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance';
 const HISTORICAL_KEYS='accountId,baselineId,confirmation,expectedPolicyHash,expectedPolicyId,expectedPolicyVersion,expectedSha,modelId,riskAcceptance,sourceKind';
 const historicalBody=(b:Row)=>b.sourceKind===HISTORICAL_SOURCE_KIND;
+const uploadedBody=(b:Row)=>historicalBody(b)&&isUploadedBaselineId(b.baselineId);
 function validSourceBody(b:Row){return historicalBody(b)
- ? historicalBaselineEnabled()&&Object.keys(b).sort().join(',')===HISTORICAL_KEYS&&b.baselineId===HISTORICAL_BASELINE_ID&&b.confirmation===HISTORICAL_MIGRATION_CONFIRM&&b.riskAcceptance===HISTORICAL_RISK_ACCEPTANCE
- : Object.keys(b).sort().join(',')===CAPTURE_KEYS&&/^\d{1,18}$/.test(String(b.captureId))&&b.confirmation===DURABLE_MIGRATION_CONFIRM&&b.riskAcceptance===DURABLE_PUBLICATION_RISK_ACCEPTANCE;}
+ ? Object.keys(b).sort().join(',')===HISTORICAL_KEYS&&b.riskAcceptance===HISTORICAL_RISK_ACCEPTANCE&&
+ (uploadedBody(b)?platformFeeUploadEnabled()&&b.confirmation===UPLOADED_FEE_MIGRATION_CONFIRM:
+ historicalBaselineEnabled()&&b.baselineId===HISTORICAL_BASELINE_ID&&b.confirmation===HISTORICAL_MIGRATION_CONFIRM)
+ : !platformFeeUploadEnabled()&&Object.keys(b).sort().join(',')===CAPTURE_KEYS&&/^\d{1,18}$/.test(String(b.captureId))&&b.confirmation===DURABLE_MIGRATION_CONFIRM&&b.riskAcceptance===DURABLE_PUBLICATION_RISK_ACCEPTANCE;}
 async function readMigrationSource(db:Q,owner:string,account:string,b:Row){
  if(!historicalBody(b))return readDurableMigrationCapture(db,owner,account,String(b.captureId));
  if(!validSourceBody(b))return null;
- const source=await readHistoricalBaselineBytes();if(!source)return null;
+ const source=uploadedBody(b)?await readActiveUploadedFeeSchedule(db):await readHistoricalBaselineBytes();if(!source)return null;
+ if(uploadedBody(b)&&b.baselineId!=="platform-upload-"+source.digest)return null;
  // Any known different publication, even expired or followed by a revert,
  // contradicts this historical assumption. Never select only the newest row.
  const conflict=await db.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[account,source.digest]);
@@ -55,7 +63,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
  if(!validSourceBody(b)||!UUID.test(ownerId)||!POLICY_ID.test(txt(b.expectedPolicyId))||!SHA.test(txt(b.expectedPolicyHash))||
  !Number.isSafeInteger(b.expectedPolicyVersion)||Number(b.expectedPolicyVersion)<1||!UUID.test(txt(b.modelId))||
  !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||
- b.expectedSha!==(deps.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(ownerId,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))
+ b.expectedSha!==(deps.sha??deployedGitSha)()||!ownerSelfEnrollmentAllowed(ownerId,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,ownerId,txt(b.expectedSha)))))
  return fail('explicit_durable_migration_scope_consent_required');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true')return fail('durable_fee_feature_disabled');
  const db=deps.db??pool;
@@ -118,6 +126,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   await tx.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   await tx.query("SET LOCAL lock_timeout='1500ms'");
   await tx.query("SET LOCAL statement_timeout='12000ms'");
+  await assertOwnerArmFence(tx,ownerId);
   const attempt=await tx.query(`SELECT model_id FROM private.strata_durable_fee_migration_attempt
    WHERE model_id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3 AND release_commit_sha=$4
    AND body_hash=$5 AND state='PENDING' FOR UPDATE`,[b.modelId,ownerId,b.accountId,b.expectedSha,migrationBodyHash(b)]);
@@ -251,8 +260,8 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   await tx.query(`UPDATE private.strata_owner_sha_approvals
     SET revoked_at=now() WHERE owner_user_id=$1::uuid
       AND execution_account_id=$2 AND revoked_at IS NULL`,[ownerId,id]);
-  if(historicalBody(b)){
-   const historical=await readHistoricalBaselineBytes();
+  if(historicalBody(b)&&!uploadedBody(b)){
+    const historical=await readHistoricalBaselineBytes();
    if(!historical||historical.digest!==source.digest)return fail('historical_baseline_bytes_changed');
    await tx.query(`INSERT INTO private.strata_durable_historical_baseline(baseline_id,source_kind,content_sha256,original_bytes,effective_date,formula_version)
     VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(baseline_id) DO NOTHING`,[HISTORICAL_BASELINE_ID,HISTORICAL_SOURCE_KIND,source.digest,historical.bytes,source.effectiveDate,source.formulaVersion]);
@@ -261,7 +270,7 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
    approved_policy_hash,source_capture_id,official_source_digest,policy_version,formula_version,effective_date,confirmation,genuine_source_verified,source_kind,historical_baseline_id)
    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
    [b.modelId,ownerId,id,b.expectedSha,next.policyHash,historicalBody(b)?null:b.captureId,source.digest,next.feePolicyVersion,source.formulaVersion,source.effectiveDate,
-    historicalBody(b)?HISTORICAL_MODEL_CONFIRM:'I_APPROVE_VERSIONED_DURABLE_OFFICIAL_FEE_TERMS_V1',!historicalBody(b),historicalBody(b)?HISTORICAL_SOURCE_KIND:'FRESH_CANONICAL_CAPTURE',historicalBody(b)?HISTORICAL_BASELINE_ID:null]);
+    historicalBody(b)?HISTORICAL_MODEL_CONFIRM:'I_APPROVE_VERSIONED_DURABLE_OFFICIAL_FEE_TERMS_V1',!historicalBody(b),historicalBody(b)?HISTORICAL_SOURCE_KIND:'FRESH_CANONICAL_CAPTURE',historicalBody(b)?b.baselineId:null]);
   await tx.query('INSERT INTO private.strata_durable_owner_fee_state(model_id) VALUES($1)',[b.modelId]);
   const event={accountId:id,ownerId,oldPolicyId:old.id,newPolicyId:policyId,
    oldPolicyHash:old.policyHash,newPolicyHash:next.policyHash,feeDigest:source.digest,
@@ -308,7 +317,7 @@ export async function durableMigrationOutcome(owner:string,modelId:string,sha:st
 }
 /** Non-mutating preview. Confirmation still performs signed history + locked CAS. */
 export async function previewDurableFeeMigration(owner:string,sourceKind:string='FRESH_CANONICAL_CAPTURE'){
- const scope=configuredOwnerSelfScope(),sha=deployedGitSha();
+ const sha=deployedGitSha(),scope=await resolveOwnerSelfScope(pool,owner,sha);
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!scope||
  !ownerSelfEnrollmentAllowed(owner,scope.accountId,scope)||!/^[a-f0-9]{40}$/.test(sha))return fail('durable_migration_scope_or_feature_unavailable');
  try{const r=await pool.query(`SELECT p.*,a.id AS account_id,a.execution_enabled,a.kill_switch,a.blocked_reason,a.commissioned
@@ -324,18 +333,19 @@ export async function previewDurableFeeMigration(owner:string,sourceKind:string=
  WHERE execution_account_id=$1 AND captured_at<=clock_timestamp() AND expires_at>clock_timestamp()+interval '45 seconds'
  ORDER BY captured_at DESC,capture_id DESC LIMIT 1`,[scope.accountId]);
  const capture=c.rows[0];
- const historical=sourceKind===HISTORICAL_SOURCE_KIND;
- if(!historical&&sourceKind!=='FRESH_CANONICAL_CAPTURE')return fail('durable_source_kind_invalid');
- const baseline=historical?await readHistoricalBaselineBytes():null;
+ const uploaded=sourceKind===UPLOADED_FEE_PROVENANCE;
+ const historical=uploaded||sourceKind===HISTORICAL_SOURCE_KIND;
+ if((uploaded&&!platformFeeUploadEnabled())||(!historical&&(platformFeeUploadEnabled()||sourceKind!=='FRESH_CANONICAL_CAPTURE')))return fail('durable_source_kind_invalid');
+ const baseline=uploaded?await readActiveUploadedFeeSchedule():historical?await readHistoricalBaselineBytes():null;
  if(historical&&!baseline)return fail('historical_baseline_disabled_or_unverified_bytes');
  if(historical){const conflict=await pool.query('SELECT 1 FROM private.strata_railway_official_fee_capture_v5 WHERE execution_account_id=$1 AND content_sha256<>$2 LIMIT 1',[scope.accountId,baseline!.digest]);if(conflict.rows.length)return fail('historical_baseline_conflicts_with_known_capture');}
  if(!historical&&!capture)return fail('genuine_current_capture_missing');
  return {ok:true as const,ownerId:owner,accountId:scope.accountId,sha,expectedPolicyId:old.id,expectedPolicyHash:old.policyHash,expectedPolicyVersion:old.version,
- sourceKind,baselineId:historical?HISTORICAL_BASELINE_ID:null,sourceAuthenticityVerified:!historical,
- candidateBaseline:historical?{baselineId:HISTORICAL_BASELINE_ID,digest:baseline!.digest,effectiveDate:baseline!.effectiveDate,sourceKind:HISTORICAL_SOURCE_KIND,sourceAuthenticityVerified:false,publicationKnownCurrent:false}:null,
+ sourceKind:historical?HISTORICAL_SOURCE_KIND:sourceKind,baselineId:historical?(uploaded?"platform-upload-"+baseline!.digest:HISTORICAL_BASELINE_ID):null,sourceAuthenticityVerified:!historical,
+ candidateBaseline:historical?{baselineId:uploaded?"platform-upload-"+baseline!.digest:HISTORICAL_BASELINE_ID,digest:baseline!.digest,effectiveDate:baseline!.effectiveDate,sourceKind:HISTORICAL_SOURCE_KIND,sourceAuthenticityVerified:false,publicationKnownCurrent:false}:null,
  candidateCapture:historical?null:{captureId:capture.capture_id,digest:capture.content_sha256,capturedAt:capture.captured_at,expiresAt:capture.expires_at,effectiveDate:capture.effective_date},
  limits:{capitalLimitCents:old.capitalLimitCents,maxEntryStakeCents:old.maxEntryStakeCents,maxEntryAllInCents:old.maxEntryAllInCents,maxDailyLossCents:old.maxDailyLossCents,maxTotalLossCents:old.maxTotalLossCents,maxOpenPositions:old.maxOpenPositions},
- confirmation:historical?HISTORICAL_MIGRATION_CONFIRM:DURABLE_MIGRATION_CONFIRM,riskAcceptance:historical?HISTORICAL_RISK_ACCEPTANCE:DURABLE_PUBLICATION_RISK_ACCEPTANCE,publicationKnownCurrent:false,tradingAuthorized:false,policyMigrated:false};
+ confirmation:uploaded?UPLOADED_FEE_MIGRATION_CONFIRM:historical?HISTORICAL_MIGRATION_CONFIRM:DURABLE_MIGRATION_CONFIRM,riskAcceptance:historical?HISTORICAL_RISK_ACCEPTANCE:DURABLE_PUBLICATION_RISK_ACCEPTANCE,publicationKnownCurrent:false,tradingAuthorized:false,policyMigrated:false};
  }catch{return fail('durable_migration_preview_unavailable');}
 }
 
@@ -348,7 +358,7 @@ export async function migrateOwnedDurableFeePolicy(owner:string,raw:unknown,deps
  if(!validSourceBody(b))return fail('durable_migration_attempt_body_invalid');
  if(process.env.STRATA_DURABLE_OWNER_FEE_ENABLED!=='true'||!UUID.test(owner)||!UUID.test(txt(b.modelId))||
  !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||b.expectedSha!==(deps.sha??deployedGitSha)()||
- !ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))return fail('durable_migration_attempt_scope_unavailable');
+ !ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,deployedGitSha()))))return fail('durable_migration_attempt_scope_unavailable');
  const db=deps.db??pool;let claim:Awaited<ReturnType<Db['connect']>>|null=null;
  try{claim=await db.connect();const c=await claim.query(`INSERT INTO private.strata_durable_fee_migration_attempt
  (model_id,owner_user_id,execution_account_id,release_commit_sha,body_hash,request)
@@ -385,7 +395,7 @@ export async function cancelPendingDurableMigration(owner:string,raw:unknown,dep
  const b=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw as Row:{};
  if(Object.keys(b).sort().join(',')!=='accountId,confirmation,expectedSha,modelId'||
  b.confirmation!==DURABLE_PENDING_CANCEL_CONFIRM||!UUID.test(owner)||!UUID.test(txt(b.modelId))||
- !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||!ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope??configuredOwnerSelfScope)()))
+ !/^[a-f0-9]{40}$/.test(txt(b.expectedSha))||!ownerSelfEnrollmentAllowed(owner,txt(b.accountId),(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,deployedGitSha()))))
  return unknown('explicit_pending_migration_cancellation_required');
  let c:Awaited<ReturnType<Db['connect']>>|null=null,done=false,commitAttempted=false,discard:Error|undefined;
  try{c=await(deps.db??pool).connect();await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='1500ms'");await c.query("SET LOCAL statement_timeout='4000ms'");

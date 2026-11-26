@@ -1,7 +1,9 @@
+import {assertOwnerArmFence} from './ownerArmContext';
+import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {createHash} from 'node:crypto';
 import {pool} from '@workspace/db';
 import {deployedGitSha} from './deployedGitSha';
-import {OWNER_SELF_REVIEW_CONFIRM,configuredOwnerSelfScope,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
+import {OWNER_SELF_REVIEW_CONFIRM,ownerSelfEnrollmentAllowed} from './ownerSelfReviewMode';
 type Scope={ownerId:string;accountId:string};
 type Deps={db?:{connect:()=>Promise<Client>};sha?:()=>string;scope?:()=>Scope|undefined};
 export const OWNER_SELF_REVOKE_CONFIRM='I_REVOKE_MY_OWNER_ONLY_STANDING_EXECUTION_REVIEW_V1';
@@ -14,11 +16,12 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
  const no=(reason:string)=>({ok:false,reason,ordersSubmitted:false,workerStarted:false,tradingAuthorized:false,independentHumanReview:false});
  const b=raw as Record<string,unknown>,sha=(deps.sha??deployedGitSha)(),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
  if(!uuid.test(owner)||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==5||Object.keys(b).some(k=>!['expectedSha','accountId','policyHash','qualificationId','confirmation'].includes(k))||b.confirmation!==OWNER_SELF_REVIEW_CONFIRM||b.expectedSha!==sha||!/^[a-f0-9]{40}$/.test(sha)||!uuid.test(String(b.qualificationId)))return no('explicit_owner_self_review_required');
- const scope=(deps.scope??configuredOwnerSelfScope)();
+ const scope=(deps.scope?deps.scope():await resolveOwnerSelfScope(pool,owner,sha));
  if(!ownerSelfEnrollmentAllowed(owner,b.accountId,scope))return no('owner_self_account_not_enabled');
  let tx:Client|undefined,commitAttempted=false,done=false,discard:Error|undefined;
  try{
   tx=await(deps.db??pool).connect();await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='1500ms'");await tx.query("SET LOCAL statement_timeout='3000ms'");
+  await assertOwnerArmFence(tx,owner);
   const r=await tx.query(`SELECT a.id,p.policy_hash,q.evidence_digest FROM public.v13_production_account a
    JOIN public.v13_live_money_policy p ON p.id=a.policy_id AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
    JOIN private.strata_protective_release_qualification q ON q.execution_account_id=a.id AND q.owner_user_id=a.owner_user_id
@@ -27,7 +30,9 @@ export async function recordOwnerSelfStandingReview(owner:string,raw:unknown,dep
    AND a.commissioned=true AND a.blocked_reason IS NULL AND p.state='APPROVED'
    AND w.arm_requested=false
    AND (
-    (w.state='released' AND w.account_kill=false AND a.kill_switch=false)
+    (w.state='released' AND w.account_kill=false AND
+      ((a.kill_switch=false AND a.execution_enabled=true) OR
+       (a.kill_switch=true AND a.execution_enabled=false)))
     OR
     (w.state='killed' AND w.account_kill=true AND a.kill_switch=true AND a.execution_enabled=false)
    )

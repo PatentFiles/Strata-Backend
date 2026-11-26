@@ -8,6 +8,8 @@ export type ProtectiveExitDispatch = (selection: Readonly<{
   side: "YES" | "NO";
   quantityHundredths: string;
   minimumExitMicros: number;
+  /** Exact held receipt from the bound independent producer. */
+  directHeldId?:string;
 }>) => Promise<void>;
 import { digest, money, requireProof } from "./types";
 

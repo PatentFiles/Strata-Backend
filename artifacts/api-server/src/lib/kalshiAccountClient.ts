@@ -482,7 +482,7 @@ export async function getScopedKalshiJson(
   let memberTicket:MemberReadTicket|null=null;
   if(memberReadBudgetEnabled()){
     if(host!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
-    memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey),undefined,externalSignal,{host,query});
+    memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey),undefined,externalSignal,{host,query,ownerId:rateLimitOwnerId});
   }
   const timestamp = Date.now().toString();
   const signature = signRequest(creds, "GET", path, timestamp, true);

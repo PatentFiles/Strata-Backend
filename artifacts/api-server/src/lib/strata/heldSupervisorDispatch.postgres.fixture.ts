@@ -1,3 +1,4 @@
+import {pinOwnerProtectiveHistory} from "./ownerProtectiveHistoryPreviewPin";
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
 import {pool,type Pool} from '@workspace/db';
@@ -336,6 +337,21 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
     assert.equal((await db.query('SELECT state FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1',[account])).rows[0].state,'UNKNOWN');
     const before=external.summary().requests;await pause(2700);
     assert.equal(external.summary().posts,1);assert.equal(external.summary().requests,before,'stopped scheduler must not poll or resend');
+    const proofConn=await setup.connect();
+    try{
+     await proofConn.query('BEGIN');
+     await proofConn.query("UPDATE private.kalshi_account_worker_lease SET state='owned',account_kill=false,arm_requested=false WHERE execution_account_id=$1",[account]);
+     const i=(await proofConn.query("SELECT state,terminal,dispatch_at,exchange_order_id FROM public.v13_production_intent WHERE account_id=$1 AND kind='EXIT'",[account])).rows[0];
+     assert.equal(i.state,'DISPATCHED');assert.equal(i.terminal,false);assert.ok(i.dispatch_at);assert.equal(i.exchange_order_id,null);
+     assert.ok(await pinOwnerProtectiveHistory(proofConn,owner,sha),"matched owned, disarmed retained fence should pin");
+     assert.equal(await pinOwnerProtectiveHistory(proofConn,reviewer,sha),null,"foreign owner must not pin");
+     await proofConn.query("UPDATE private.kalshi_account_worker_lease SET arm_requested=true WHERE execution_account_id=$1",[account]);
+     assert.equal(await pinOwnerProtectiveHistory(proofConn,owner,sha),null,"armed owner must not pin");
+     await proofConn.query("UPDATE private.kalshi_account_worker_lease SET arm_requested=false,fencing_token=fencing_token+1 WHERE execution_account_id=$1",[account]);
+     assert.equal(await pinOwnerProtectiveHistory(proofConn,owner,sha),null,"different lease token must not pin");
+     console.log("PIN_INCIDENT_POSITIVE_ARMED_FOREIGN_STALE_FENCE_PASS");
+    }finally{await proofConn.query('ROLLBACK');proofConn.release();}
+
    }
    assert.equal(sourceFailure,undefined);
    if(combined){

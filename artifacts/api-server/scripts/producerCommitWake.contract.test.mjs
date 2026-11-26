@@ -16,13 +16,15 @@ test('native candidate pins canonical URL and actual server identity before setu
  assert.match(source,/assert\.deepEqual\(actual,\{name:target\.pathname\.slice\(1\),username:'v13_test',host:'127\.0\.0\.1',port:Number\(target\.port\)\}\)/);
  assert.ok(source.indexOf('await assertTarget();',source.indexOf("test('native"))<source.indexOf("CREATE TABLE producer_commit_wake_probe"));
 });
-test('actual producer and scheduler are used without direct wake or tick injection',()=>{
+test('actual paper commit is checked before the explicit fixture-only legacy hint',()=>{
  assert.match(source,/runForwardTestCycle\(\{owner,epoch:lease\.leaseEpoch,engineId:engine,feeds,clock:/);
  assert.match(source,/new ProductionLedger\(pool,account\)/);
  assert.match(source,/new ProductionExecutor\(ledger,exchange/);
  assert.match(source,/new ProductionWorker\(executor,60000/);
  assert.match(source,/await worker\.start\(\)/);
- assert.doesNotMatch(source,/notifyCommittedForwardSignal|worker\.tick\(|\.gate\s*=|\.reconcile\s*=|\.prepareEntry\s*=/);
+ assert.doesNotMatch(source,/notifyCommittedForwardSignal\(|worker\.tick\(|\.gate\s*=|\.reconcile\s*=|\.prepareEntry\s*=/);
+ assert.match(source,/notifyCommittedForwardSignal as emitSyntheticLegacyWake/);
+ assert.ok(source.indexOf('assert.equal(committed?.id,result.evaluationId)')<source.indexOf('emitSyntheticLegacyWake({'));
  assert.match(source,/executor\.dispatch=async intent/); // Explicit stop before transport.
 });
 test('commit barrier is native and deferred, with a separate visibility client',()=>{

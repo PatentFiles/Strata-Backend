@@ -139,6 +139,8 @@ export async function registerAccountCredential(
     role: string;
     apiKeyId: string;
     privateKey: string;
+    /** New onboarding never rotates an existing role. */
+    createOnly?: boolean;
   },
 ): Promise<AccountCredentialRegistration> {
   if (!knownCredentialRole(input.role)) {
@@ -170,6 +172,7 @@ export async function registerAccountCredential(
         role: input.role,
         vaultSecretId,
         keyFingerprint: fingerprint,
+        createOnly: input.createOnly === true,
         frozenRestrictedRecovery: input.role === "restricted_execution" &&
           resolved.context.executionAccountId !== null,
       });
@@ -188,6 +191,7 @@ export async function registerAccountCredential(
     const reason = error instanceof Error ? error.message : "credential_binding_rejected";
     if (reason === "vault_secret_reused_from_provider_connection" || reason === "vault_secret_reused" ||
         reason === "credential_not_owned" || reason === "ambiguous_credential_role" ||
+        reason === "credential_already_registered" ||
         reason === "restricted_execution_rebinding_required") {
       return registration(false, reason, input.role);
     }
@@ -283,6 +287,8 @@ export async function verifyAccountCredential(
     authenticatedUserId: string;
     role: string;
     confirmation: unknown;
+    /** Internal save-and-verify binding; never accepted from an HTTP caller. */
+    expectedStored?: Readonly<{ fingerprint: string; vaultSecretId: string }>;
     readSecret: (vaultSecretId: string) => Promise<{ keyId: string; privateKey: string } | null>;
     probe: (
       material: { keyId: string; privateKey: string },
@@ -314,6 +320,13 @@ export async function verifyAccountCredential(
   const fingerprint = text(locked.rows[0]?.key_fingerprint);
   if (!credentialId || !vaultSecretId || !fingerprint) {
     return registration(false, "credential_fingerprint_invalid", input.role);
+  }
+  // Another tab may replace the role between saving and verification. Never
+  // verify that replacement as if it were the just-saved credential.
+  if (input.expectedStored &&
+      (input.expectedStored.fingerprint !== fingerprint ||
+       input.expectedStored.vaultSecretId !== vaultSecretId)) {
+    return registration(false, "credential_rotated", input.role);
   }
   const material = await input.readSecret(vaultSecretId);
   if (!material) return registration(false, "vault_secret_missing", input.role);

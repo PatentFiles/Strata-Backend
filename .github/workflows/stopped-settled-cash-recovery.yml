@@ -1,0 +1,61 @@
+name: Stopped settled cash recovery
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/strata/**'
+      - 'artifacts/api-server/src/routes/ownerSettledCashRecoveryHandler*'
+      - 'artifacts/api-server/src/routes/protectiveReleaseRouter.ts'
+      - 'docs/settled-cash-recovery/**'
+      - '.github/workflows/stopped-settled-cash-recovery.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recovery-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install selected isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}
+          sudo systemctl stop postgresql
+          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+      - name: Verify selected PostgreSQL binary
+        run: |
+          test "$(command -v postgres)" = "/usr/lib/postgresql/${{ matrix.postgres }}/bin/postgres"
+          postgres --version
+          postgres --version | grep -E 'PostgreSQL\) ${{ matrix.postgres }}\.'
+      - name: Exact retained history, owner recovery and deferred commit fences
+        working-directory: artifacts/api-server
+        run: |
+          node scripts/run-v13-disposable-postgres.mjs --settled-cash-recovery
+          node scripts/run-v13-disposable-postgres.mjs src/routes/ownerSettledCashRecoveryHandler.test.ts
+          node scripts/run-v13-disposable-postgres.mjs src/lib/strata/expiredExitNoSendEvidence.postgres.test.ts
+      - name: Signed brackets and no-send regressions
+        working-directory: artifacts/api-server
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://unit@127.0.0.1:1/never_connect
+        run: |
+          pnpm exec esbuild src/lib/strata/settledCashBracket.test.ts src/lib/strata/localExitNoSendEvidence.test.ts src/lib/strata/expiredExitNoSendEvidence.test.ts src/lib/strata/reconciledReleaseRenewalHistory.test.ts src/lib/strata/ownerSettledCashFreezeRecovery.test.ts --bundle --platform=node --format=cjs --outdir=dist/stopped-cash --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/stopped-cash/*.cjs

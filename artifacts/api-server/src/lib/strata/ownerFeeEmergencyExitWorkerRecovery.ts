@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
-import {reconcileUnknownProtectiveExitAfterRestart} from "./ownerFeeEmergencyExitRestartRecovery";
+import {reconcileUnknownProtectiveExitAfterRestart,type RestartDiagnosticStage} from "./ownerFeeEmergencyExitRestartRecovery";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 
 /** Trusted, account-scoped UNKNOWN recovery poll. NEVER posts an IOC.
@@ -10,7 +10,7 @@ import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
  */
 type Db={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 type Recover=typeof reconcileUnknownProtectiveExitAfterRestart;
-export type ExitRecoveryPoll={ok:boolean;reason:string;attempted:number;mayRetry:false;postAttempted:false};
+export type ExitRecoveryPoll={ok:boolean;reason:string;attempted:number;mayRetry:false;postAttempted:false;diagnosticStage?:RestartDiagnosticStage};
 const blocked=(reason:string):ExitRecoveryPoll=>({ok:false,reason,attempted:0,mayRetry:false,postAttempted:false});
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACCOUNT=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -60,7 +60,8 @@ export async function reconcileOwnedProtectiveExits(input:{
    material:input.material,order:order as unknown as Readonly<EmergencyExitOrder>,
   });
   return {ok:outcome.state==="RECONCILED",
-   reason:outcome.reason,attempted:1,mayRetry:false,postAttempted:false};
+   reason:outcome.reason,attempted:1,mayRetry:false,postAttempted:false,
+   ...(outcome.diagnosticStage?{diagnosticStage:outcome.diagnosticStage}:{})};
  }catch{
   return blocked("protective_exit_recovery_read_or_provider_unavailable");
  }

@@ -1,3 +1,5 @@
+import {platformFeeUploadEnabled,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
+import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
 /** Authenticated monetary fee SOURCE verifier shared by the three boundaries.
  * Verifies the official, strictly parsed Kalshi fee schedule plus the live
  * exchange's exact market, event, series and future fee changes. An official
@@ -15,6 +17,10 @@ export type MonetaryFeeEvidenceContract = {
   policyApproved:false;tradingAuthorized:false;
   rateLimitOrigin?:"provider"|"shared_cooldown"|"backend_local"|"bridge_unclassified";
   retryAt?:string;
+  sourceKind?:typeof UPLOADED_FEE_PROVENANCE;
+  sourceAuthenticityVerified?:false;
+  publicationKnownCurrent?:false;
+  sourceEffectiveDate?:string;
 };
 const deny=(stage:ApiFeeStage,reason:string):MonetaryFeeEvidenceContract=>({
   ok:false,reason,stage,monetaryFeeAuthorized:false,
@@ -32,6 +38,14 @@ export async function verifyMonetaryFeeContract(
  if(!Number.isSafeInteger(start)||start<=0)return deny(stage,"invalid_fee_clock");
  // An official monetary source MUST be present before relying on the API's
  // series multiplier. No browser claims, uploads or self-attestations.
+ let sourceDigest:string;
+ let uploaded:Awaited<ReturnType<typeof readActiveUploadedFeeSchedule>>=null;
+ if(platformFeeUploadEnabled()&&establish===establishOfficialFeeDigest){
+  if(stage==="ORDER_ENTRY")return deny(stage,"uploaded_schedule_requires_durable_owner_consent");
+  uploaded=await readActiveUploadedFeeSchedule();
+  if(!uploaded)return deny(stage,"platform_uploaded_fee_schedule_missing_or_unverified");
+  sourceDigest=uploaded.digest;
+ }else{
  let proof:PdfProof;
  try{proof=await establish();}catch{return deny(stage,"official_monetary_fee_source_unavailable");}
  if(!proof.ok){
@@ -46,7 +60,9 @@ export async function verifyMonetaryFeeContract(
      ...(suffix?{rateLimitOrigin:origin!}:{}),
      ...(proof.diagnostic.retryAt?{retryAt:proof.diagnostic.retryAt}:{})};
  }
- if(!/^[a-f0-9]{64}$/.test(proof.digest))
+ sourceDigest=proof.digest;
+ }
+ if(!/^[a-f0-9]{64}$/.test(sourceDigest))
    return deny(stage,"official_monetary_fee_digest_invalid");
  const observation=await probeCurrentKalshiFeeApi(fetchImpl,now,exactMarketTicker);
  if(!observation.ok)return deny(stage,observation.reason);
@@ -57,8 +73,9 @@ export async function verifyMonetaryFeeContract(
  if(now()-start>15_000)return deny(stage,"monetary_fee_source_stale");
  // This digest is the official PDF bytes, NOT a reviewer grant. It must be
  // pinned to the authenticated owner's persisted policy before approval.
- return {ok:true,reason:"provider_monetary_fee_schedule_and_market_verified",
+ return {ok:true,reason:uploaded?"admin_uploaded_fee_schedule_and_market_verified":"provider_monetary_fee_schedule_and_market_verified",
   stage,marketTicker:candidate.marketTicker,eventTicker:candidate.eventTicker,
-  sourceDigest:proof.digest,verifiedAt:candidate.verifiedAt,
+  sourceDigest,verifiedAt:candidate.verifiedAt,
+  ...(uploaded?{sourceKind:UPLOADED_FEE_PROVENANCE,sourceAuthenticityVerified:false as const,publicationKnownCurrent:false as const,sourceEffectiveDate:uploaded.effectiveDate}:{}),
   monetaryFeeAuthorized:true,policyApproved:false,tradingAuthorized:false};
 }

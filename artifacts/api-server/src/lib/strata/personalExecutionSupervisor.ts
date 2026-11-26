@@ -1,3 +1,6 @@
+import {ownerArmFence,assertOwnerArmFence,withoutOwnerArmFence} from './ownerArmContext';
+import {armTransaction,type ArmDatabase} from './ownerArmStore';
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
 import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
 import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
@@ -45,8 +48,9 @@ import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIn
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
-import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
-import {deployedGitSha} from "./deployedGitSha";
+import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
+import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
+import {deployedGitSha,requireIndependentPaperCutover} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -75,6 +79,8 @@ import type { Identity, Request } from "../v13-production/types";
 type LeaseAction = "STOP" | "KILL";
 
 export interface PersonalSessionControl {
+  /** Process drain only. No automatic START and no unguarded lease release. */
+  quiesce?():Promise<{stopped:boolean;managingExposure:boolean}>;
   isScheduled(userId: string, accountId: string): boolean;
   start(input: {
     userId: string;
@@ -138,7 +144,7 @@ const SIGNER_SQL = `
          c.vault_secret_id::text AS vault_secret_id,
          s.decrypted_secret,
          p.policy_hash, p.fee_policy_version, p.fee_source_url, p.fee_formula_version, p.state AS policy_state,
-         stake.configured_stake_cents
+         stake.configured_stake_cents, stake.risk_preset_id, p.version AS risk_policy_revision
   FROM v13_production_account a
   JOIN private.kalshi_connection_credentials c
     ON c.owner_user_id = a.owner_user_id
@@ -159,12 +165,16 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-/** Distinct from global fetch, so a deployment cannot submit through the unbound global client. */
+import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
+import {DirectEntrySource} from "../v13-production/directEntrySource";
+import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
+
+/** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
 export async function personalProductionFetch(
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
 ): Promise<Response> {
-  return fetch(input, init);
+  return containedProductionFetch(input,init);
 }
 
 export function createOwnedTradingSupervisor(
@@ -174,6 +184,8 @@ export function createOwnedTradingSupervisor(
   >,
 ): PersonalSessionControl {
   const workers = new Map<string, RunningWorker>();
+  let closing=false;
+  let shutdown:Promise<{stopped:boolean;managingExposure:boolean}>|null=null;
   // An opening session already owns a lifecycle operation even before its
   // worker is registered. Do not duplicate that operation or certify STOP
   // while it can still install a scheduled worker after the caller returns.
@@ -207,11 +219,43 @@ export function createOwnedTradingSupervisor(
     }
   };
   return {
+    quiesce(){
+      if(shutdown)return shutdown;
+      closing=true;
+      // Close entry gates synchronously, before any asynchronous STOP proof.
+      for(const r of workers.values())if(r.state)r.state.entriesAuthorized=false;
+      shutdown=(async()=>{
+        const identities=new Map<string,string>();
+        for(const [id,r] of workers)identities.set(id,r.ownerUserId);
+        for(const [id,r] of starts)identities.set(id,r.ownerUserId);
+        const running=new Set(workers.values());
+        const results=await Promise.allSettled([...identities].map(async([id,owner])=>{
+          const opening=starts.get(id);
+          if(opening)await opening.result;
+          // A pending factory can install a worker after the initial snapshot.
+          // Keep its idle barrier even when fenced STOP unregisters it.
+          const opened=workers.get(id);if(opened)running.add(opened);
+          return stopAccount(owner,id,'STOP');
+        }));
+        let stopped=true,managingExposure=false;
+        for(const result of results){
+          if(result.status==='rejected'){stopped=false;continue;}
+          if(!result.value.workerStopped)stopped=false;
+          if(result.value.managingExposure){stopped=false;managingExposure=true;}
+        }
+        // Await pre-existing ticks before closing their database pool. An
+        // uncertain dispatch remains durable; shutdown never replays it.
+        if(stopped)await Promise.all([...running].map(r=>r.worker.whenIdle?.()));
+        return {stopped,managingExposure};
+      })();
+      return shutdown;
+    },
     isScheduled(userId, accountId) {
       const running = workers.get(accountId);
       return running?.ownerUserId === userId && running.worker.isScheduled();
     },
     async start(input) {
+      if(closing)return {ok:false,reason:'worker_process_shutting_down',workerStarted:false};
       input = { ...input };
       const stopping = stops.get(input.accountId);
       if (stopping || ownerStops.has(input.userId)) {
@@ -237,6 +281,7 @@ export function createOwnedTradingSupervisor(
       const result = Promise.resolve().then(async () => {
         const opened = await open(input);
         if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if(closing&&opened.state)opened.state.entriesAuthorized=false;
         if (!opened.worker.isScheduled()) {
           opened.worker.stop();
           return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
@@ -244,7 +289,8 @@ export function createOwnedTradingSupervisor(
         workers.set(input.accountId, {
           ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
         });
-        return { ok: true, reason: "worker_scheduled", workerStarted: true };
+        return closing?{ok:false,reason:'worker_process_shutting_down',workerStarted:false}:
+          { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
       starts.set(input.accountId, { ownerUserId: input.userId, result });
       try { return await result; }
@@ -355,23 +401,11 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "live_execution_not_enabled" };
     }
     if (!flag(loaded.row.cash_precision_verified)) return { ok: false, reason: "cash_not_reconciled" };
-    // New exposure is forbidden until the exact Railway build has a genuine,
-    // unexpired independently reviewed protective EXIT release. The earlier
-    // implementation only checked this when the EXIT itself was attempted,
-    // which was too late for an already-opened position.
-    const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
-    // A standing grant can bootstrap START, but cannot admit ANY entry
-    // until a new signed exchange snapshot renews its short technical lease.
-    const startupSha=deployedGitSha();
-    let standingMode=false;
-    if(/^[a-f0-9]{40}$/.test(startupSha)){
-      try {standingMode=await hasContinuousGrantHistory(db,input.userId,startupSha);}
-      catch {return {ok:false,reason:"standing_authority_unavailable"};}
-    }
-    if(standingMode ? !(await checkContinuousBootstrap(db,input.userId,startupSha)) : !exitRelease.ok)
-      return {ok:false,reason:standingMode?"standing_grant_not_current":exitRelease.reason};
-    if(standingMode && process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true")
-      return {ok:false,reason:"protective_exit_release_disabled"};
+    // Match ARM's read-only authorization preflight, then independently
+    // reconcile signed exchange state and all remaining START requirements.
+    const authority = await verifyPersonalStartupAuthority(db, input.userId);
+    if (!authority.ok) return authority;
+    const { startupSha, standingMode } = authority;
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);
@@ -457,6 +491,24 @@ export function createProductionPersonalSession(
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
     }
+    const directRolloutScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,releaseSha:startupSha});
+    // Existing startup already checked signed cash, current fees and the
+    // standing bootstrap grant. Public admission adds verified account
+    // linkage without a manually configured customer. No grant is minted.
+    const publicAdmission=publicSelfServiceRequested()&&standingMode
+      ?await qualifyPublicIndependentLiveScope(db,directRolloutScope):null;
+    if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
+      return {ok:false,reason:"public_live_account_scope_changed"};
+    const directAllowed=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission);
+    // A known holding requires qualified direct held protection. For an
+    // unbound API account, admit only authentic read-only UNKNOWN recovery.
+    if(requireIndependentPaperCutover()&&!directAllowed){
+      if(snapshot.positions.length>0)
+        return {ok:false,reason:"existing_position_requires_independent_protection"};
+      const unresolved=await readUnresolvedIntentMode((sql,values)=>db.query(sql,values),input.accountId);
+      if(!unresolved.ok)return unresolved;
+      if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
+    }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
     if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
@@ -475,7 +527,27 @@ export function createProductionPersonalSession(
     // maintenance and protective-exit failures. A fresh, independently reviewed
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
+    // Emit only on a closed fence, after the no-send/unknown decision. Bound
+    // duplicate stage reports per worker; logging must never change the gate.
+    const protectiveDiagnosticLastAt=new Map<string,number>();
+    const reportProtectiveDiagnostic=(phase:"final_fence"|"restart",stage:string)=>{
+      try{
+        const now=performance.now(),key=phase+":"+stage;
+        if(!Number.isFinite(now))return;
+        const last=protectiveDiagnosticLastAt.get(key);
+        if(last!==undefined&&now-last<60_000)return;
+        protectiveDiagnosticLastAt.set(key,now);
+        logger.warn({event:"protective_exit_diagnostic",phase,stage},"Protective exit remains unverified");
+      }catch{/* reporting cannot give or revoke authority */}
+    };
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    // Rollout OFF until the replacement has completed signed qualification.
+    // The flag is not consent, fee authority or a release approval.
+    const directSource=directAllowed
+      ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
+        holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
+        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
+    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
         const tx=finalLedger?.currentTransaction();
@@ -497,7 +569,7 @@ export function createProductionPersonalSession(
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
-    },personalProductionFetch,timingObserver,timingContext);
+    },rawOwnedTransport,timingObserver,timingContext);
     let activeMetadata:MetadataPrefetchAttempt|null=null;
     let heldReadAbort:AbortSignal|null=null;
     let recoveryAbort:AbortController|null=null;
@@ -536,7 +608,7 @@ export function createProductionPersonalSession(
           // DOES NOT send an order. It independently rechecks position,
           // strategy, approved policy/fees, book, stake and exit floor.
           const financialId = await session.executor.prepareExit(
-            selection.positionId,selection.minimumExitMicros/1_000_000,
+            selection.positionId,selection.minimumExitMicros/1_000_000,selection.directHeldId,
           );
           const financialRows = await db.query(
             "SELECT request FROM public.v13_production_intent "+
@@ -563,7 +635,9 @@ export function createProductionPersonalSession(
           const outcome = await dispatchReviewedProtectiveExitOnce({
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
+            ...(directSource?{directHeldSource:directSource}:{}),
           });
+          if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);
           // Preserve a known local no-send as a temporary reconciliation hold,
           // never as entry authority. UNKNOWN and failed reads remain sticky.
           await reconcileOwnedProtectiveExitOutcome({
@@ -584,7 +658,16 @@ export function createProductionPersonalSession(
           ownerId:input.userId,accountId:input.accountId,material,
         },db);
         if(!recovery.ok){
+          if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
+              state.presentedToken===claimed.fencingToken,
+            recovery,
+          });
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
+          // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
       },
@@ -741,15 +824,17 @@ export function createProductionPersonalSession(
       }),
       fetchImpl: measuredFetch,
     });
+    if(directSource)session.executor.bindIndependentLiveSource(directSource);
+    else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
-    if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
+    if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if((apiSource||durableSource)&&options.publicMetadataPrefetch===true){
+    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){
       session.executor.prefetchCommittedPublicMetadata=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
@@ -895,7 +980,9 @@ export function createProductionPersonalSession(
     }
     const recovery = unresolved.mode === "recovery";
     if (recovery) state.entriesAuthorized = false;
-    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
+    // Request cancellation applies to admission, not to the recurring worker's
+    // async context. Its existing lease/STOP/KILL fences own subsequent ticks.
+    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, unresolved.mode));
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
@@ -1024,7 +1111,30 @@ function leaseIdentity(row: Record<string, unknown>): {
   return { financialAccountId, providerConnectionId, vaultSecretId };
 }
 
+/** A prepared START must atomically validate its cancellation epoch and
+ * acquire the worker fence. STOP/KILL before this transaction wins; STOP/KILL
+ * after it still uses the existing supervisor/lease fencing path. */
 async function claimWorkerLease(
+  db: Parameters<typeof claimWorkerLeaseUnfenced>[0],
+  input: Parameters<typeof claimWorkerLeaseUnfenced>[1],
+): ReturnType<typeof claimWorkerLeaseUnfenced> {
+  const fence=ownerArmFence();
+  if(!fence)return claimWorkerLeaseUnfenced(db,input);
+  if(fence.phase!=='STARTING'||fence.ownerId!==input.ownerUserId||fence.accountId!==input.executionAccountId)
+    return {ok:false,reason:'owner_start_scope_changed'};
+  if(typeof (db as Partial<ArmDatabase>).connect!=='function')
+    return {ok:false,reason:'owner_start_transaction_unavailable'};
+  try {
+    return await armTransaction(db as ArmDatabase,async tx=>{
+      await assertOwnerArmFence(tx,input.ownerUserId);
+      const result=await claimWorkerLeaseUnfenced(tx,input);
+      if(!result.ok)throw Error(result.reason);
+      return result;
+    });
+  }catch{return {ok:false,reason:'owner_start_interrupted_or_lease_unavailable'};}
+}
+
+async function claimWorkerLeaseUnfenced(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
     ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;

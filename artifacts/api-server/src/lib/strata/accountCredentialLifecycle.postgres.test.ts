@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import {openCredentialFixture} from "./credentialFixtureDb.testHelper";
 import test from "node:test";
 import {
   credentialDatabaseFromPool,
@@ -24,19 +24,9 @@ const WALLET_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const WALLET_B = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 
 test("vault registration commits per user and rolls back a rejected binding", async (t) => {
-  let PGlite: new () => {
-    exec(query: string): Promise<unknown>;
-    query(query: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
-    close(): Promise<void>;
-  };
-  try {
-    const loaded = createRequire(process.cwd() + "/package.json")("@electric-sql/pglite") as { PGlite: typeof PGlite };
-    PGlite = loaded.PGlite;
-  } catch {
-    t.skip("disposable PostgreSQL is not installed");
-    return;
-  }
-  const db = new PGlite();
+  const db=await openCredentialFixture();
+  if(!db){t.skip("disposable PostgreSQL is not installed");return;}
+
   try {
     await db.exec(`
       CREATE SCHEMA IF NOT EXISTS private;

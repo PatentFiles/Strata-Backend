@@ -1,9 +1,11 @@
+import {platformFeeUploadEnabled} from "./strata/platformFeeUploadMode";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
-import { readIndependentOfficialFeeV5 } from "./strata/independentOfficialFeeV5";
+import { readIndependentOfficialFeeV5,readPlatformOfficialFeeV5,capturePlatformOfficialFeeV5 } from "./strata/independentOfficialFeeV5";
+import {publicSelfServiceRequested} from "./strata/ownerSelfServiceEligibility";
 export { INDEPENDENT_OFFICIAL_FEE_SNAPSHOT, officialFeeSnapshotLeaseValid } from "./strata/verifiedOfficialFeeSnapshotLease";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 // Capture the real transport before any tests can monkeypatch global fetch.
@@ -237,6 +239,7 @@ export type OfficialFeePdfByteVerification =
     digest: string;
     effectiveDate: string;
     formulaVersion: typeof STANDARD_QUADRATIC_FEE_FORMULA_VERSION;
+    feeRule: string;
   }
   | { ok: false; reason: OfficialFeePdfByteFailure };
 
@@ -281,6 +284,7 @@ export async function verifyOfficialFeePdfBytes(bytes: Buffer): Promise<Official
     digest: createHash("sha256").update(bytes).digest("hex"),
     effectiveDate: parsed.effectiveDate,
     formulaVersion: parsed.formulaVersion,
+    feeRule: parsed.feeRule,
   };
 }
 
@@ -315,6 +319,7 @@ export async function readUnapprovedOfficialFeePublication(
   nowMs:()=>number=Date.now,
 ):Promise<{ok:true;digest:string;normalizedText:string;observedAt:string}|
  {ok:false;reason:string}> {
+ if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return {ok:false,reason:"manual_fee_schedule_mode_no_issuer_download"};
  const start=nowMs();
  // Shared producer lease also gates V4; never issue a separate production
  // canonical PDF GET ahead of its atomic Supabase claim.
@@ -333,7 +338,7 @@ export async function readUnapprovedOfficialFeePublication(
    // Missing independent evidence may use the ordinary existing Edge path.
    // A present but corrupted or unverifiable independent artifact is a
    // security failure, never an excuse to fall back to another origin.
-   if(proof.reason!=="v5_genuine_issuer_capture_missing")
+   if(publicSelfServiceRequested()||proof.reason!=="v5_genuine_issuer_capture_missing")
      return {ok:false,reason:proof.reason};
  }
 
@@ -440,6 +445,7 @@ export async function verifyCurrentFeeArtifact(
   approval: FeeArtifactApprovalIdentity,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<FeeArtifactVerification> {
+  if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return failure("unavailable","manual_fee_schedule_requires_durable_owner_consent");
   if (approval.sourceUrl !== CANONICAL_FEE_SCHEDULE_URL ||
       approval.policyVersion !== STANDING_FEE_POLICY_VERSION ||
       approval.formulaVersion !== STANDARD_QUADRATIC_FEE_FORMULA_VERSION ||
@@ -871,8 +877,23 @@ export async function establishOfficialFeeDigest(
   fetchImpl: typeof fetch = globalThis.fetch,
   nowMs: () => number = Date.now,
 ): Promise<EstablishedOfficialFeeDigest> {
+  if(platformFeeUploadEnabled()&&fetchImpl===PRODUCTION_FEE_FETCH)return {ok:false,reason:"manual_fee_schedule_mode_no_issuer_download",diagnostic:{...EMPTY_FEE_FETCH}};
   const running = officialFeeInFlight.get(fetchImpl);
   if (running) return running;
+  // Public V5 shares genuine publisher bytes, not owner monetary authority.
+  // The strict reviewed parser and current market API proof remain required.
+  if(publicSelfServiceRequested()&&fetchImpl===PRODUCTION_FEE_FETCH&&globalThis.fetch===PRODUCTION_FEE_FETCH){
+    const task:Promise<EstablishedOfficialFeeDigest>=(async():Promise<EstablishedOfficialFeeDigest>=>{
+      let proof=await readPlatformOfficialFeeV5();
+      if(!proof.ok){const captured=await capturePlatformOfficialFeeV5();if(captured.ok)proof=await readPlatformOfficialFeeV5();}
+      if(!proof.ok)return {ok:false,reason:proof.reason,diagnostic:{...EMPTY_FEE_FETCH,retryAt:proof.retryAt}};
+      const verified=await verifyOfficialFeePdfBytes(proof.bytes);
+      const fresh=await readPlatformOfficialFeeV5();
+      if(!verified.ok||verified.digest!==proof.digest||!fresh.ok||fresh.captureId!==proof.captureId)return {ok:false,reason:"v5_platform_monetary_terms_unverified",diagnostic:{...EMPTY_FEE_FETCH}};
+      return {ok:true,digest:verified.digest,diagnostic:{...EMPTY_FEE_FETCH,httpStatus:200,contentType:"application/pdf",finalOrigin:"https://kalshi.com",finalPathname:"/docs/kalshi-fee-schedule.pdf"}};
+    })().finally(()=>{officialFeeInFlight.delete(fetchImpl);});
+    officialFeeInFlight.set(fetchImpl,task);return task;
+  }
 
   const retryAt = officialFee429CooldownUntil.get(fetchImpl) ?? 0;
   const now = nowMs();

@@ -13,7 +13,7 @@ test('owner signed diagnostic uses concurrent committed row revisions without lo
  const db={query:async(s:string,p?:unknown[])=>{assert.doesNotMatch(s,/\b(UPDATE|INSERT|DELETE|FOR UPDATE|FOR SHARE)\b/i);return reader.query(rewrite(s),p)}};
  try{
  await q(`CREATE SCHEMA proof_public;CREATE SCHEMA proof_private;
- CREATE TABLE public.v13_production_account(id text,owner_user_id uuid,kalshi_connection_id uuid,key_fingerprint text,commissioned boolean,kill_switch boolean,blocked_reason text,cash_precision_verified boolean,cash_micros bigint,reserved_micros bigint,policy_id text,subaccount int,exchange_index int,execution_enabled boolean);
+ CREATE TABLE public.v13_production_account(id text,owner_user_id uuid,kalshi_connection_id uuid,key_fingerprint text,commissioned boolean,kill_switch boolean,blocked_reason text,cash_precision_verified boolean,cash_micros bigint,initial_cash_micros bigint NOT NULL DEFAULT 25000000,reserved_micros bigint,policy_id text,subaccount int,exchange_index int,execution_enabled boolean);
  CREATE TABLE public.v13_live_money_policy(id text,execution_account_id text,created_by text,state text,fee_policy_version text);
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text,owner_user_id uuid,fencing_token bigint,holder_id text,state text,arm_requested boolean,account_kill boolean);
  CREATE TABLE public.financial_accounts(id uuid,user_id uuid,provider text);
@@ -22,7 +22,7 @@ test('owner signed diagnostic uses concurrent committed row revisions without lo
  CREATE TABLE public.v13_production_position(account_id text,quantity_hundredths bigint);
  CREATE TABLE public.v13_production_intent(account_id text,terminal boolean,state text,reserved_micros bigint,request jsonb,created_at timestamptz,id text,evaluation_id text);
  CREATE TABLE private.strata_emergency_exit_reservations(execution_account_id text,state text,market_ticker text);`);
- await q("INSERT INTO public.v13_production_account VALUES($1,$2,$3,'key',true,false,NULL,true,25000000,0,'policy',1,2,true)",[account,owner,fa]);
+ await q("INSERT INTO public.v13_production_account VALUES($1,$2,$3,'key',true,false,NULL,true,25000000,25000000,0,'policy',1,2,true)",[account,owner,fa]);
  await q("INSERT INTO public.v13_live_money_policy VALUES('policy',$1,$2,'APPROVED','fee')",[account,owner]);
  await q("INSERT INTO public.financial_accounts VALUES($1,$2,'kalshi')",[fa,owner]);await q('INSERT INTO private.provider_connections VALUES($1,$2)',[pc,fa]);
  await q("INSERT INTO private.kalshi_connection_credentials VALUES($1,$2,$3,'restricted_execution',NULL,now(),'credential_verified','key',$4)",[owner,fa,pc,'44444444-4444-4444-8444-444444444444']);

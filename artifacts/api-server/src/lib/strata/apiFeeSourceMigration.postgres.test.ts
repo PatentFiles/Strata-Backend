@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {pool} from "@workspace/db";
 import {CONTINUE_SQL} from "./apiFeeStandingDelegation";
+import {READ_API_FEE_STAGE_SQL} from "./apiFeeSourceStage";
 test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and revocation fails closed",async()=>{
  const urlText=process.env.DATABASE_URL;
  assert.equal(process.env.CI,"true");
@@ -35,11 +36,11 @@ test("the exact fee stage SQL runs on transactional isolated CI PostgreSQL and r
     const initial=await db.query("SELECT count(*)::int AS n FROM "+privateSchema+"."+name);
     assert.equal(initial.rows[0]?.n,0);
   }
-  const tick=String.fromCharCode(96);
-  const source=readFileSync("src/lib/strata/apiFeeSourceStage.ts","utf8");
-  const exact=source.split("export const READ_API_FEE_STAGE_SQL="+tick)[1]?.split(tick+";")[0];
-  assert.ok(exact);
-  const sql=replaceSchemas(exact);
+  // Execute the actual exported SQL, not a formatting-sensitive extraction
+  // from its TypeScript declaration. All original native authorization and
+  // revocation assertions below still execute against the real statement.
+  assert.ok(READ_API_FEE_STAGE_SQL);
+  const sql=replaceSchemas(READ_API_FEE_STAGE_SQL);
   await db.query("INSERT INTO "+authSchema+".users VALUES ($1,'owner@example.invalid',now()),($2,'technical@example.invalid',now())",[owner,admin]);
   await db.query("INSERT INTO "+privateSchema+".role_assignments VALUES ('technical@example.invalid','ADMIN')");
   await db.query("INSERT INTO "+privateSchema+".strata_api_fee_rate_reviews (owner_user_id,reviewer_user_id,rate_decision_digest,fee_model_version,confirmation,review_note,verified_rate_source,signed_at,expires_at) VALUES ($1,$2,$3,$4,'I_INDEPENDENTLY_APPROVE_STRATA_API_FEE_RATE_MODEL_V1',$5,'kalshi_official_fee_publication',now()-interval '1 minute',now()+interval '30 minutes')",[owner,admin,digest,model,"The technical administrator independently verified Kalshi's current fee formula, coefficient, rounding, effective publication date and KXBTC15M market exceptions."]);

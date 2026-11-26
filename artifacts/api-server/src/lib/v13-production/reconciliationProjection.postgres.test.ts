@@ -14,7 +14,7 @@ assert.match(disposableUrl ?? "", /^postgresql:\/\/v13_test@127\.0\.0\.1:\d+\/v1
 assert.equal(process.env.DATABASE_URL, disposableUrl);
 
 const originalSql = "SELECT * FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE";
-const intentColumns = ["id", "account_id", "evaluation_id", "crossing_key", "parent_id", "kind", "market", "side",
+const intentColumns = ["id", "account_id", "evaluation_id", "direct_source_id", "crossing_key", "parent_id", "kind", "market", "side",
   "state", "request", "decision", "policy_hash", "fee_fingerprint", "capability_digest", "client_order_id",
   "exchange_order_id", "reserved_micros", "exit_fee_micros", "filled_hundredths", "terminal", "cancel_attempted",
   "dispatch_at", "created_at"];
@@ -146,7 +146,7 @@ test("reconciliation projection preserves PostgreSQL rows, locks and concurrent 
       });
     }
 
-    await check("same 23 columns, JSONB type, account scope and complete state/kind/terminal truth table", async () => {
+    await check("same 24 columns, JSONB type, account scope and complete state/kind/terminal truth table", async () => {
       let count = 0;
       for (const state of ["PREPARED", "DISPATCHED", "UNKNOWN", "TERMINAL", "BLOCKED"])
         for (const terminal of [false, true]) for (const kind of ["ENTRY", "EXIT"])

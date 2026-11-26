@@ -5,6 +5,7 @@ import { planV13IocEntry } from "../v13ExecutionPlanner";
 import { ProductionLedger, identity, decodePolicy } from "./ledger";
 import { computeV13LiveMoneyPolicyHash } from "../v13LiveMoneyRisk";
 import { KalshiProductionExchange } from "./transport";
+import {containedProductionFetch} from "./liveEntryContainment";
 import { digest, requireProof, type MarketEvidence, type Request } from "./types";
 
 const PUBLIC = "https://api.elections.kalshi.com/trade-api/v2";
@@ -78,6 +79,7 @@ export async function createProductionExchange(ledger: ProductionLedger, ticker:
   const keyId = process.env.KALSHI_INDEX2_API_KEY_ID, privateKey = process.env.KALSHI_INDEX2_PRIVATE_KEY;
   requireProof(keyId && privateKey, "production_dedicated_signer_missing");
   return new KalshiProductionExchange({ keyId, privateKey, identity: identity(a), fundingAnchor, ticker, market,
+    fetchImpl:containedProductionFetch,
     requests: async () => (await ledger.query<{ request: Request }>(
       "SELECT request FROM v13_production_intent WHERE account_id=$1 AND state<>'PREPARED'", [a.id])).rows.map(r => r.request),
     orderMarket: async orderId => (await ledger.query(

@@ -1,3 +1,4 @@
+import {platformFeeUploadEnabled} from "./platformFeeUploadMode";
 /**
  * #165 V5 alternate issuer collector; genuine Railway TLS fetch only, no uploads.
  * It is not an Edge capture, fee grant, owner release or order authorizer.
@@ -5,6 +6,8 @@
  */
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
+import {publicSelfServiceRequested,resolveOwnerSelfScope} from "./ownerSelfServiceEligibility";
+import {deployedGitSha} from "./deployedGitSha";
 export const V5_URL="https://kalshi.com/docs/kalshi-fee-schedule.pdf";
 export const V5_VERSION="issuer_pdf_55m_signed_api_recheck_v2";
 const MAX_BYTES=2_000_000, LEASE_MS=55*60_000;
@@ -28,6 +31,10 @@ const selectLatest=String.raw`SELECT content_sha256,original_bytes,byte_length,e
 export async function readIndependentOfficialFeeV5(d:Deps={}):Promise<
  |{ok:true;digest:string;normalizedText:string;originalCapturedAt:string;effectiveDate:string;tradingAuthorized:false}
  |ReturnType<typeof no>>{
+ if(publicSelfServiceRequested()){
+  const proof=await readPlatformOfficialFeeV5(d);
+  return proof.ok?{ok:true,digest:proof.digest,normalizedText:proof.normalizedText,originalCapturedAt:proof.originalCapturedAt,effectiveDate:proof.effectiveDate,tradingAuthorized:false}:proof;
+ }
  if(!ports(d)||!can(d)||!accountPattern.test(target(d)))return no("v5_source_disabled_or_wrong_account");
  let rows:Record<string,unknown>[];
  try{rows=(await (d.db??pool).query(selectLatest,[target(d)])).rows;}
@@ -80,6 +87,10 @@ function retryAfter(raw:string|null,now:number):string|null{
  * No caller-supplied bytes, URL, policy, account ID, or fee rate are accepted.
  */
 export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
+ if(publicSelfServiceRequested()){
+  if(!ports(d)||!can(d)||!UUID.test(ownerId))return no("v5_owner_or_feature_unavailable");
+  return capturePlatformAndBindOwnerFeeV5(ownerId,d);
+ }
  if(!ports(d)||!can(d)||!accountPattern.test(target(d))||!UUID.test(ownerId))
    return no("v5_owner_or_feature_unavailable");
  const db=d.db??pool as Db,now=d.clock??Date.now;
@@ -166,4 +177,143 @@ export async function captureIndependentOfficialFeeV5(ownerId:string,d:Deps={}){
     digest,originalCapturedAt:captured,effectiveDate:parsed.effectiveDate,
     tradingAuthorized:false as const,ordersSubmitted:false as const};
  }catch{return no("v5_issuer_capture_or_database_unavailable");}
+}
+
+type PlatformProof={ok:true;captureId:string;digest:string;bytes:Buffer;normalizedText:string;
+ originalCapturedAt:string;effectiveDate:string;tradingAuthorized:false};
+const platformLatest=String.raw`SELECT capture_id::text,content_sha256,original_bytes,byte_length,effective_date::text AS effective_date,
+ captured_at,expires_at,canonical_url,source_kind,policy_version
+ FROM private.strata_platform_official_fee_capture_v1
+ ORDER BY captured_at DESC,capture_id DESC LIMIT 1`;
+const publicEnabled=()=>process.env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true";
+// Collection is a public-document observation, not owner execution approval.
+// A separate opt-in permits genuine evidence collection while live release is off.
+export function platformFeeObservationRequested(env:NodeJS.ProcessEnv=process.env):boolean{
+ if(platformFeeUploadEnabled(env))return false;
+ return env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true"||
+  (env.STRATA_V5_RAILWAY_CAPTURE_ENABLED==="true"&&env.STRATA_PUBLIC_SELF_SERVICE_ENABLED==="true");
+}
+const platformSourceEnabled=(d:Deps)=>!platformFeeUploadEnabled()&&(d.enabled
+ ?d.enabled()&&(publicEnabled()||process.env.STRATA_PLATFORM_FEE_CAPTURE_ENABLED==="true")
+ :platformFeeObservationRequested());
+export async function readPlatformOfficialFeeV5(d:Deps={}):Promise<PlatformProof|ReturnType<typeof no>>{
+ if(!ports(d)||!platformSourceEnabled(d))return no("v5_platform_source_disabled");
+ const db=d.db??pool,now=(d.clock??Date.now)();
+ try{
+  const rows=(await db.query(platformLatest)).rows;
+  if(rows.length!==1)return no("v5_genuine_issuer_capture_missing");
+  const r=rows[0]!,b=r.original_bytes,at=Date.parse(timestamp(r.captured_at)),ex=Date.parse(timestamp(r.expires_at));
+  if(!Buffer.isBuffer(b)||b.length<100||b.length>MAX_BYTES||r.byte_length!==b.length||
+   r.canonical_url!==V5_URL||r.source_kind!=="railway_canonical_https_direct"||r.policy_version!==V5_VERSION||
+   !HASH.test(String(r.content_sha256))||sha(b)!==r.content_sha256||!/^[1-9]\d{0,18}$/.test(String(r.capture_id))||
+   !Number.isFinite(at)||at>now||ex!==at+LEASE_MS||ex<=now)
+   return no("v5_issuer_capture_corrupted_or_expired");
+  if(r.effective_date===null)return no("v5_platform_publication_terms_unverified");
+  const [{extractFeeScheduleDocumentText},{parseDynamicKalshiPublication}]=await Promise.all([
+   import("../microLiveFeeArtifact"),import("./dynamicOfficialFeeSchedule")]);
+  const raw=await extractFeeScheduleDocumentText(b);
+  if(!raw)return no("v5_issuer_pdf_unparseable");
+  const normalizedText=raw.replace(/\s+/g," ").trim(),parsed=parseDynamicKalshiPublication(normalizedText,now);
+  if(!parsed.ok||parsed.effectiveDate!==timestamp(r.effective_date).slice(0,10))return no("v5_platform_publication_terms_unverified");
+  // Recheck the newest immutable identity after parsing; never pick a stale
+  // valid row behind an unsupported or contradictory later publication.
+  const current=await db.query("SELECT capture_id::text FROM private.strata_platform_official_fee_capture_v1 ORDER BY captured_at DESC,capture_id DESC LIMIT 1");
+  if(current.rows.length!==1||String(current.rows[0]!.capture_id)!==String(r.capture_id)||
+   (d.clock??Date.now)()>=ex)return no("v5_platform_publication_changed");
+  return {ok:true,captureId:String(r.capture_id),digest:String(r.content_sha256),bytes:b,normalizedText,
+   originalCapturedAt:new Date(at).toISOString(),effectiveDate:parsed.effectiveDate,tradingAuthorized:false};
+ }catch{return no("v5_platform_issuer_store_unavailable");}
+}
+/** Same canonical TLS origin and cross-replica throttle as V5. No account
+ * lookup, customer credentials or owner grant is required for this public
+ * publisher observation. Unsupported genuine bytes are kept as evidence but
+ * never represented as an approved monetary model. */
+export async function capturePlatformOfficialFeeV5(d:Deps={}){
+ if(!ports(d)||!platformSourceEnabled(d))return no("v5_platform_source_disabled");
+ const db=d.db??pool,now=d.clock??Date.now;
+ try{
+  const cached=await readPlatformOfficialFeeV5(d);
+  if(cached.ok&&Date.parse(cached.originalCapturedAt)+50*60_000>now())return {ok:true as const,
+    reason:"v5_platform_previous_real_capture_reused",digest:cached.digest,originalCapturedAt:cached.originalCapturedAt,
+    effectiveDate:cached.effectiveDate,tradingAuthorized:false as const,ordersSubmitted:false as const};
+  const claim=await db.query("UPDATE public.strata_official_fee_capture_throttle SET next_allowed_at=clock_timestamp()+interval '30 minutes' WHERE id=true AND next_allowed_at<=clock_timestamp() RETURNING next_allowed_at");
+  if(claim.rows.length!==1){
+   const lease=await db.query("SELECT next_allowed_at FROM public.strata_official_fee_capture_throttle WHERE id=true");
+   return no("v5_issuer_shared_cooldown",timestamp(lease.rows[0]?.next_allowed_at));
+  }
+  let res:Response;
+  try{res=await(d.fetcher??globalThis.fetch)(V5_URL,{method:"GET",cache:"no-store",redirect:"error",
+    headers:{Accept:"application/pdf","Cache-Control":"no-cache"},signal:AbortSignal.timeout(12000)});}
+  catch{return no("v5_independent_issuer_network_unavailable");}
+  const retry=res.status===429?retryAfter(res.headers.get("retry-after"),now()):null;
+  const status=await db.query(String.raw`UPDATE public.strata_official_fee_capture_throttle
+   SET last_provider_http_status=$1,last_provider_at=clock_timestamp(),
+   last_provider_retry_at=CASE WHEN $1=429 THEN GREATEST(next_allowed_at,COALESCE($2::timestamptz,next_allowed_at)) ELSE NULL END,
+   next_allowed_at=CASE WHEN $1=429 THEN GREATEST(next_allowed_at,COALESCE($2::timestamptz,next_allowed_at)) ELSE next_allowed_at END
+   WHERE id=true RETURNING next_allowed_at`,[res.status,retry]);
+  if(status.rows.length!==1)return no("v5_upstream_status_provenance_unavailable");
+  if(res.status!==200)return no("v5_issuer_http_"+res.status,res.status===429?timestamp(status.rows[0]?.next_allowed_at):null);
+  if(res.redirected||res.url!==V5_URL||res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase()!=="application/pdf")
+   return no("v5_issuer_identity_or_type_invalid");
+  const bytes=await boundedPdf(res);
+  if(!bytes)return no("v5_issuer_pdf_truncated");
+  const capturedAt=now();
+  const [{extractFeeScheduleDocumentText},{parseDynamicKalshiPublication}]=await Promise.all([
+   import("../microLiveFeeArtifact"),import("./dynamicOfficialFeeSchedule")]);
+  let effectiveDate:string|null=null;
+  try{const raw=await extractFeeScheduleDocumentText(bytes);const parsed=raw?parseDynamicKalshiPublication(raw,capturedAt):null;
+   if(parsed?.ok)effectiveDate=parsed.effectiveDate;}catch{/* genuine bytes, unsupported terms */}
+  const digest=sha(bytes),captured=new Date(capturedAt).toISOString();
+  const wrote=await db.query(String.raw`INSERT INTO private.strata_platform_official_fee_capture_v1
+    (canonical_url,source_kind,policy_version,content_sha256,original_bytes,byte_length,effective_date,captured_at,expires_at)
+    VALUES($1,'railway_canonical_https_direct',$2,$3,$4,$5,$6::date,$7::timestamptz,$8::timestamptz)
+    RETURNING capture_id`,[V5_URL,V5_VERSION,digest,bytes,bytes.length,effectiveDate,captured,new Date(capturedAt+LEASE_MS).toISOString()]);
+  if(wrote.rows.length!==1)return no("v5_evidence_immutable_write_failed");
+  if(!effectiveDate)return no("v5_platform_publication_terms_unverified");
+  return {ok:true as const,reason:"v5_genuine_railway_issuer_capture_recorded",digest,originalCapturedAt:captured,effectiveDate,
+   tradingAuthorized:false as const,ordersSubmitted:false as const};
+ }catch{return no("v5_platform_issuer_capture_or_database_unavailable");}
+}
+/** Authenticated owner's own receipt references the shared bytes and original
+ * lease. The model/fee grant is still a separate informed owner decision.
+ * Do not bind to a client account selector or mint an approval. */
+export async function bindPlatformFeeV5ToOwner(owner:string,d:Deps={}){
+ if(!ports(d)||!publicEnabled()||!platformSourceEnabled(d)||!UUID.test(owner))return no("v5_owner_or_feature_unavailable");
+ const db=d.db??pool;
+ try{
+  const scope=await resolveOwnerSelfScope(db,owner,deployedGitSha());
+  if(!scope)return no("v5_verified_owner_scope_unavailable");
+  const source=await readPlatformOfficialFeeV5(d);
+  if(!source.ok)return source;
+  const guards=await db.query("SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=to_regclass('private.strata_durable_owner_fee_model') AND tgname='strata_platform_fee_model_guard' AND tgenabled='O'");
+  if(guards.rows.length!==1)return no("v5_platform_model_guard_unavailable");
+  const saved=await db.query(String.raw`INSERT INTO private.strata_railway_official_fee_capture_v5
+   (execution_account_id,platform_capture_id,source_kind,policy_version,canonical_url,content_sha256,original_bytes,byte_length,effective_date,captured_at,expires_at)
+   SELECT a.id,c.capture_id,c.source_kind,c.policy_version,c.canonical_url,c.content_sha256,c.original_bytes,c.byte_length,c.effective_date,c.captured_at,c.expires_at
+   FROM private.strata_platform_official_fee_capture_v1 c
+   JOIN public.v13_production_account a ON a.owner_user_id=$1::uuid AND a.id=$2 AND a.subaccount=1 AND a.exchange_index=2
+   WHERE c.capture_id=$3::bigint AND c.effective_date IS NOT NULL AND c.expires_at>clock_timestamp()+interval '45 seconds'
+   ON CONFLICT(execution_account_id,platform_capture_id) WHERE platform_capture_id IS NOT NULL DO NOTHING RETURNING capture_id::text`,[owner,scope.accountId,source.captureId]);
+  const current=await db.query(String.raw`SELECT r.capture_id::text FROM private.strata_railway_official_fee_capture_v5 r
+   JOIN public.v13_production_account a ON a.id=r.execution_account_id AND a.owner_user_id=$1::uuid
+   WHERE r.execution_account_id=$2 AND r.platform_capture_id=$3::bigint
+   AND r.expires_at>clock_timestamp()+interval '45 seconds' AND r.content_sha256=$4
+   AND NOT EXISTS(SELECT 1 FROM private.strata_platform_official_fee_capture_v1 later
+    WHERE (later.captured_at,later.capture_id)>(r.captured_at,r.platform_capture_id)) LIMIT 2`,[owner,scope.accountId,source.captureId,source.digest]);
+  if(current.rows.length!==1||saved.rows.length>1)return no("v5_platform_owner_binding_unconfirmed");
+  return {ok:true as const,reason:"v5_platform_owner_receipt_verified",captureId:String(current.rows[0]!.capture_id),
+   digest:source.digest,originalCapturedAt:source.originalCapturedAt,effectiveDate:source.effectiveDate,
+   tradingAuthorized:false as const,ordersSubmitted:false as const};
+ }catch{return no("v5_platform_owner_binding_unavailable");}
+}
+async function capturePlatformAndBindOwnerFeeV5(owner:string,d:Deps){
+ // Scope before any network/financial receipt operation.
+ const scope=await resolveOwnerSelfScope(d.db??pool,owner,deployedGitSha());
+ if(!scope)return no("v5_verified_owner_scope_unavailable");
+ const captured=await capturePlatformOfficialFeeV5(d);
+ if(!captured.ok){
+  const cached=await readPlatformOfficialFeeV5(d);
+  if(!cached.ok)return captured;
+ }
+ return bindPlatformFeeV5ToOwner(owner,d);
 }

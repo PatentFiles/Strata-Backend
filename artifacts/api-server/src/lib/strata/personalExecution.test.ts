@@ -79,7 +79,7 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
     id: "owner-1", subaccount: 1, exchange_index: 2,
     key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
     policy_id: "policy-1", policy_state: "APPROVED", configured_stake_cents: 100,
-    cash_precision_verified: true, cash_micros: "0",
+    cash_precision_verified: true, cash_micros: "0", initial_cash_micros: "0",
     reconciled_at: "2026-10-15T16:26:22.935Z",
     verified_funding_at: "2026-10-15T17:52:26.418Z",
     minimum_exit_micros: 10000, fee_artifact_digest: "a".repeat(64),
@@ -96,6 +96,10 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
   const stillStale = await reportOwnedActivation(db, USER);
   assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
   owner.reconciled_at = "2026-10-15T17:53:00.000Z";
+  const missingBasis = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
+  assert.equal(missingBasis.readyForCommissioning, false);
+  assert.ok(missingBasis.blockers.includes("cash_not_reconciled"));
+  owner.initial_cash_micros = "25000000";
   const fresh = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
   assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
   const tooOld = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T18:10:00.000Z"));
@@ -303,8 +307,11 @@ test("cash reconciliation records the subaccount read and does not transfer or e
   assert.equal(recorded.ok, true);
   assert.equal(recorded.cashCents, 100_000);
   assert.equal(recorded.transferAttempted, false);
-  assert.equal(sql.includes("execution_enabled"), false);
-  assert.equal(sql.includes("kill_switch"), false);
+  // Safety predicates may read the switches; the UPDATE must never set them.
+  const assignments = sql.slice(sql.indexOf("SET "), sql.indexOf("WHERE "));
+  assert.doesNotMatch(assignments, /execution_enabled|kill_switch|blocked_reason/);
+  assert.match(sql, /a.cash_micros = \$3::bigint/);
+  assert.match(sql, /a.execution_enabled IS FALSE AND a.kill_switch IS TRUE/);
   const skipped = await persistOwnedCashReconciliation({
     query: async () => { throw new Error("write_not_allowed"); },
   }, {
@@ -720,7 +727,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
   const material = keyMaterial();
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
-  let feeChecks = 0;
+  let feeChecks = 0, leaseWrites = 0;
+  let observedBalance="50.0000";
   const session = createProductionPersonalSession({
     async query(text: string) {
       if (text.includes("personal-session:signer")) {
@@ -735,6 +743,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
         }] };
       }
       if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      if (text.includes("WITH unresolved_intents AS")) return {rows:[{n:"0"}]};
+      if (/INSERT INTO private.kalshi_account_worker_lease|UPDATE private.kalshi_account_worker_lease/i.test(text)) leaseWrites++;
       return { rows: [] };
     },
   }, {
@@ -747,7 +757,7 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
       };
     },
     kalshiGet: async (_creds, path) => {
-      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("balance")) return { balance_dollars: observedBalance };
       if (path.includes("orders")) return { orders: [] };
       if (path.includes("positions")) return { market_positions: [] };
       if (path.includes("fills")) return { fills: [] };
@@ -759,6 +769,21 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(refused.reason, "cash_evidence_mismatch");
   assert.equal(feeChecks, 0);
   assert.equal(session.isScheduled(USER, "acct-a"), false);
+  // Matching cash and a clean signed read are still not an independent
+  // source. Refuse the real owned START before it can claim a lease.
+  observedBalance="1.0000";
+  const originalCutover={...process.env};
+  try{
+    process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+    process.env.STRATA_PAPER_ISOLATION_QUALIFIED_SHA=process.env.RAILWAY_GIT_COMMIT_SHA;
+    const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
+    assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  }finally{
+    for(const k of ["RAILWAY_GIT_COMMIT_SHA","STRATA_PAPER_ISOLATION_QUALIFIED_SHA"]){
+      if(originalCutover[k]===undefined)delete process.env[k];else process.env[k]=originalCutover[k];
+    }
+  }
+  assert.equal(feeChecks,1);assert.equal(leaseWrites,0);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
     { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
@@ -1217,3 +1242,90 @@ for (const failing of [false, true]) {
     } finally { release(); await stopping; for (const worker of opened.values()) worker.stop(); }
   });
 }
+
+
+test("owner cash refresh preserves original signed-read clock and refuses elapsed evidence", async (t) => {
+  const cases = [
+    { wall: 100, mono: 100, reason: "cash_reconciled", writes: 1 },
+    { wall: 15_000, mono: 15_000, reason: "cash_reconciled", writes: 1 },
+    { wall: 15_001, mono: 15_001, reason: "cash_read_expired", writes: 0 },
+    { wall: 100, mono: 15_001, reason: "cash_read_expired", writes: 0 },
+    { wall: -1, mono: 100, reason: "cash_read_clock_unverified", writes: 0 },
+    { wall: 100, mono: -1, reason: "cash_read_clock_unverified", writes: 0 },
+  ];
+  let wall = NOW, mono = 100;
+  t.mock.method(Date, "now", () => wall);
+  t.mock.method(performance, "now", () => mono);
+  for (const fixture of cases) {
+    wall = NOW;
+    mono = 100;
+    let writes = 0, reads = 0;
+    const result = await reconcileOwnedSubaccountCash({
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes("personal-activation:cash-signer")) {
+          assert.deepEqual(params, [USER]);
+          return { rows: [{ account_id: "acct-a",
+            decrypted_secret: JSON.stringify({ api_key_id: "fixture-key", private_key: "fixture-not-a-key" }) }] };
+        }
+        assert.match(sql, /owned-cash:reconcile/);
+        assert.equal(params?.[0], "acct-a");
+        assert.equal(params?.[1], USER);
+        assert.equal(params?.[3], new Date(NOW).toISOString());
+        assert.doesNotMatch(sql.slice(sql.indexOf("SET "),sql.indexOf("WHERE ")), /blocked_reason|execution_enabled|kill_switch/);
+        assert.match(sql, /a.reconciled_at <= \$4::timestamptz/);
+        writes++;
+        return { rows: [{ id: "acct-a" }], rowCount: 1 };
+      },
+    }, {
+      ownerUserId: USER,
+      confirmation: RECORD_OWNED_CASH_CONFIRMATION,
+      nowMs: NOW,
+      get: async (_creds, path, query) => {
+        assert.equal(path, "/trade-api/v2/portfolio/balance");
+        reads++;
+        wall = NOW + fixture.wall;
+        mono = 100 + fixture.mono;
+        return query
+          ? { subaccount: 1, exchange_index: 2, balance_dollars: "1000.00" }
+          : { balance_dollars: "25000.00" };
+      },
+    });
+    assert.equal(reads, 2);
+    assert.equal(result.reason, fixture.reason);
+    assert.equal(result.ok, fixture.writes === 1);
+    assert.equal(result.transferAttempted, false);
+    assert.equal(writes, fixture.writes);
+  }
+});
+
+
+test('process quiesce fences a pending START, waits its tick and never silently restarts',async()=>{
+ let open!:()=>void,idle!:()=>void;
+ const opening=new Promise<void>(resolve=>{open=resolve;}),draining=new Promise<void>(resolve=>{idle=resolve;});
+ const worker={...fakeWorker(),whenIdle:()=>draining};
+ const dispatch=state(true);const calls:string[]=[];
+ const supervisor=createOwnedTradingSupervisor(async()=>{
+  await opening;await worker.start();return {ok:true,worker,state:dispatch,disarm:async action=>{
+   calls.push(action);return {entriesBlocked:true,managingExposure:false};
+  }};
+ });
+ const started=supervisor.start({userId:USER,accountId:'shutdown-pending',action:'START'});
+ const stopped=supervisor.quiesce!();let complete=false;void stopped.then(()=>{complete=true;});
+ assert.equal(supervisor.quiesce!(),stopped);
+ assert.equal((await supervisor.start({userId:USER,accountId:'shutdown-other',action:'START'})).reason,'worker_process_shutting_down');
+ open();assert.equal((await started).workerStarted,false);
+ for(let i=0;i<10;i++)await Promise.resolve();
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(complete,false);
+ idle();assert.deepEqual(await stopped,{stopped:true,managingExposure:false});assert.deepEqual(calls,['STOP']);
+ assert.equal(worker.isScheduled(),false);assert.equal(dispatch.accountKill,false);
+});
+
+test('process quiesce retains an exposed protective worker and never reports flat',async()=>{
+ const worker=fakeWorker();await worker.start();const dispatch=state(true);
+ const supervisor=createOwnedTradingSupervisor(async()=>({ok:true,worker,state:dispatch,
+  disarm:async action=>{assert.equal(action,'STOP');return {entriesBlocked:true,managingExposure:true};}}));
+ await supervisor.start({userId:USER,accountId:'shutdown-exposure',action:'START'});
+ assert.deepEqual(await supervisor.quiesce!(),{stopped:false,managingExposure:true});
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(dispatch.accountKill,false);assert.equal(worker.isScheduled(),true);
+ worker.stop();
+});

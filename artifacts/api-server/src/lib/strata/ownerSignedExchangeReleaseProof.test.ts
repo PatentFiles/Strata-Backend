@@ -128,3 +128,18 @@ for(const coverage of [false,"missing"] as const){
   assert.equal(m.seen.some(sql=>/\b(INSERT|UPDATE|DELETE|CALL|TRUNCATE)\b/i.test(sql)),false);
  });
 }
+
+test("internal financial check can inspect an approved stopped uncommissioned account; default diagnostic cannot",async()=>{
+ const row={...account,commissioned:false,execution_enabled:false,kill_switch:true};
+ const f=mock(row);
+ assert.equal((await inspectOwnerSignedExchangeReleaseProof(owner,f.deps)).ok,false);
+ assert.equal(f.stats().reads,0);
+ const result=await inspectOwnerSignedExchangeReleaseProof(owner,{...(f.deps as object),allowStoppedUncommissioned:true} as never);
+ assert.equal(result.ok,true);
+ assert.equal(result.tradingAuthorized,false);
+ for(const bad of [{...row,kill_switch:false},{...row,execution_enabled:true},{...row,policy_state:"DRAFT"}]){
+  const refused=mock(bad);
+  assert.equal((await inspectOwnerSignedExchangeReleaseProof(owner,{...(refused.deps as object),allowStoppedUncommissioned:true} as never)).ok,false);
+  assert.equal(refused.stats().reads,0);
+ }
+});

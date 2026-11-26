@@ -126,8 +126,10 @@ export function simulateBookCapacity(
    interpretation:"BOOK_CAPACITY_ONLY_NOT_EXECUTION"};
 }
 export type OrderbookRead=(ticker:string,signal?:AbortSignal)=>Promise<ReadonlyResearchBook>;
-const researchBookReadLimit = createReadOnlyRateLimit();
-export async function fetchKalshiPublicBook(ticker:string,signal?:AbortSignal):Promise<ReadonlyResearchBook>{
+// Each reader instance owns its cooldown state. The default paper reader remains unchanged.
+export function createPublicBookReader():OrderbookRead {
+ const researchBookReadLimit = createReadOnlyRateLimit();
+ return async function(ticker:string,signal?:AbortSignal):Promise<ReadonlyResearchBook>{
  if(!/^KXBTC15M-[A-Z0-9-]{5,90}$/.test(ticker))throw Error("invalid_research_ticker");
  const origin="https://external-api.kalshi.com";
  const uri=origin+"/trade-api/v2/markets/"+encodeURIComponent(ticker)+"/orderbook";
@@ -160,4 +162,6 @@ export async function fetchKalshiPublicBook(ticker:string,signal?:AbortSignal):P
  const parsed=parseKalshiResearchOrderbook(raw,ticker,started,received);
  attempt.success!();
  return {...parsed,bodyCompletedAtMs:Date.now(),rawResponseDigest:createHash("sha256").update(text).digest("hex")};
+ };
 }
+export const fetchKalshiPublicBook:OrderbookRead=createPublicBookReader();

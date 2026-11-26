@@ -23,3 +23,16 @@ test('throwing and mutable getters cannot leak unchecked error values',()=>{
 test('diagnostic logger failures do not replace refusal or return secrets',()=>{const original=console.warn;console.warn=()=>{throw Error('private logger');};try{assert.deepEqual(logCapitalFailure(new KalshiApiError('NETWORK_ERROR'),'transfer_history'),{stage:'transfer_history',failureCode:'capital_provider_read_failed',providerType:'NETWORK_ERROR'});}finally{console.warn=original;}});
 
 test('safe diagnostic fields survive public sanitizer',()=>{const d={stage:'transfer_history',failureCode:'capital_provider_read_failed',providerType:'HTTP_ERROR',providerStatus:403};assert.deepEqual(sanitizePublic({diagnostic:d}),{diagnostic:d});});
+
+test('registered opening and member budget failures retain only fixed identifiers',async()=>{
+ for(const code of ['registered_opening_signed_receipt_mismatch','kalshi_member_budget_unavailable']){
+  await assert.rejects(capitalStage('transfer_history',async()=>{throw Error(code);}),e=>{
+   const d=capitalFailureDiagnostic(e,'preview');
+   assert.deepEqual(d,{stage:'transfer_history',failureCode:code});
+   assert.deepEqual(sanitizePublic({diagnostic:d}),{diagnostic:d});
+   assert.equal(capitalPublicReason(e),'capital_credit_refused');return true;
+  });
+ }
+ for(const code of ['registered_opening_private_account_details','kalshi_member_budget_private_signature'])
+  assert.equal(capitalFailureDiagnostic(Error(code),'preview').failureCode,'capital_internal_failure');
+});

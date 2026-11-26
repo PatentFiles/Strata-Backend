@@ -1,3 +1,4 @@
+import {technicalSetupMasterSafe} from "./technicalSetupMasterSafety";
 import { createHash } from "node:crypto";
 import type { CredentialDatabase } from "./accountCredentialStore";
 
@@ -289,9 +290,7 @@ async function claimAttempt(
         return { ok: false as const, reason: retryBlockedReason(state), state };
       }
       const master = await client.query(MASTER_SAFETY_SQL);
-      if (master.rows.length !== 1 ||
-          master.rows[0]?.live_execution_enabled !== false ||
-          master.rows[0]?.manual_kill_switch !== true) {
+      if (!await technicalSetupMasterSafe(client,master,input,"create_subaccount")) {
         return { ok: false as const, reason: "production_safety_controls_not_fail_closed", state };
       }
       const marked = await client.query(MARK_ATTEMPTED_SQL, [

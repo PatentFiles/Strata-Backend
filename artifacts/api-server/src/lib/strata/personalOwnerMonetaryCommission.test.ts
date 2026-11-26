@@ -7,7 +7,7 @@ const OWNER="11111111-1111-4111-8111-111111111111";
 const FEE="d".repeat(64);
 const fresh=()=>new Date(Date.now()-30_000).toISOString();
 const funded=()=>new Date(Date.now()-90_000).toISOString();
-function sampleDb(){
+function sampleDb(initialCashMicros="25000000"){
  const statements:{sql:string;args?:unknown[]}[]=[];
  const ready={
   id:"account-1",subaccount:1,exchange_index:2,
@@ -17,7 +17,7 @@ function sampleDb(){
   fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
   fee_formula_version:"standard-quadratic-0.07-v1",
   configured_stake_cents:150,cash_precision_verified:true,
-  cash_micros:"25000000",reconciled_at:fresh(),verified_funding_at:funded(),
+  cash_micros:"25000000",initial_cash_micros:initialCashMicros,reconciled_at:fresh(),verified_funding_at:funded(),
   minimum_exit_micros:null,fee_artifact_digest:null,
   commissioned:false,execution_enabled:false,kill_switch:true,
   activation_requests:0,
@@ -72,4 +72,14 @@ test("Step 11 rejects a different fee digest before commissioning write",async()
  assert.equal(result.ok,false);
  assert.equal(result.reason,"fee_artifact_unverified");
  assert.ok(!statements.some(s=>s.sql.includes("personal-activation:commission")));
+});
+
+
+test("Step 11 refuses a nonconserving initial basis before fee or commissioning writes",async()=>{
+ const {db,statements}=sampleDb("0");let feeReads=0;
+ const result=await commissionOwnedAccount(db,{
+  ownerUserId:OWNER,confirmation:COMMISSION_OWNED_ACCOUNT_CONFIRMATION,feeArtifactDigest:FEE,
+  minimumExitMicros:10000,verifyMonetary:async()=>{feeReads++;throw Error("must not read fees");}});
+ assert.equal(result.ok,false);assert.equal(result.reason,"cash_not_reconciled");assert.equal(feeReads,0);
+ assert.ok(!statements.some(x=>x.sql.includes("personal-activation:commission")));
 });

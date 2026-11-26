@@ -1,0 +1,23 @@
+name: Owner ARM lifecycle and cancellation
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-owner-arm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-16
+      - name: Real disposable PostgreSQL owner isolation and STOP cancellation races
+        working-directory: artifacts/api-server
+        run: pnpm run test:owner-arm-lifecycle

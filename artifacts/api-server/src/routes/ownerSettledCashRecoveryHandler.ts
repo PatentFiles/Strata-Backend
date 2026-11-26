@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express';
 import {pool} from '@workspace/db';
 import {deployedGitSha} from '../lib/strata/deployedGitSha';
-import {OWNER_SETTLED_CASH_RECOVERY_CONFIRM,recoverOwnerSettledCashFreeze} from '../lib/strata/ownerSettledCashFreezeRecovery';
+import {OWNER_SETTLED_CASH_RECOVERY_CONFIRM,recoverOwnerSettledCashFreeze,previewOwnerSettledCashFreeze,ownerSettledCashRecoveryOutcome,validSettledCashRecoveryScope,type SettledCashRecoveryScope} from '../lib/strata/ownerSettledCashFreezeRecovery';
 import {personalTradingSession} from '../lib/strata/sharedPersonalTradingControls';
 import {sanitizePublic} from '../lib/v13-production/sanitize';
 
@@ -94,5 +94,34 @@ export function createOwnerSettledCashRecoveryHandler(deps:RouteDeps=defaults):R
    // A handler/dependency failure is not proof that no commit occurred.
    res.status(503).json({...no('owner_settled_cash_recovery_outcome_unverified'),riskFreezeCleared:null,outcomeUnknown:true});
   }
+ };
+}
+
+type ReadDeps={approved:()=>boolean;migrationReady:()=>Promise<boolean>;sha:()=>string;
+ preview:(owner:string)=>Promise<Awaited<ReturnType<typeof previewOwnerSettledCashFreeze>>>;
+ outcome:(owner:string,scope:SettledCashRecoveryScope)=>Promise<Awaited<ReturnType<typeof ownerSettledCashRecoveryOutcome>>>};
+const readDefaults:ReadDeps={...defaults,sha:deployedGitSha,
+ preview:owner=>previewOwnerSettledCashFreeze(owner,{isScheduled:(o,a)=>personalTradingSession.isScheduled(o,a)}),
+ outcome:ownerSettledCashRecoveryOutcome};
+/** Owner identity always comes from the same AAL2 middleware as the mutation.
+ * Receipt reads stay available if a release gate is later disabled. */
+export function createOwnerSettledCashRecoveryReadHandler(mode:'preview'|'outcome',deps:ReadDeps=readDefaults):RequestHandler{
+ return async(req,res)=>{
+  res.setHeader('Cache-Control','private, no-store');const owner=res.locals.strata?.subject;
+  if(typeof owner!=='string'||!UUID.test(owner)){res.status(401).json(no('authenticated_execution_owner_required'));return;}
+  if(mode==='outcome'){
+   if(Object.keys(req.query).sort().join('|')!=='accountId|expectedRevision|settlementEventId'||!validSettledCashRecoveryScope(req.query)){
+    res.status(400).json(no('recovery_exact_scope_required'));return;
+   }
+   try{res.status(200).json(sanitizePublic(await deps.outcome(owner,{accountId:req.query.accountId,expectedRevision:req.query.expectedRevision,settlementEventId:req.query.settlementEventId})));}
+   catch{res.status(503).json({...no('recovery_outcome_unverified'),status:'UNKNOWN',outcomeUnknown:true,riskFreezeCleared:null});}
+   return;
+  }
+  if(Object.keys(req.query).length!==0){res.status(400).json(no('recovery_owner_scope_only'));return;}
+  if(!deps.approved()){res.status(409).json(no('owner_settled_cash_recovery_release_disabled'));return;}
+  try{
+   if(!await deps.migrationReady()){res.status(409).json(no('owner_settled_cash_recovery_migration_not_ready'));return;}
+   const out=await deps.preview(owner);res.status(out.ok?200:409).json(sanitizePublic({...out,sha:deps.sha()}));
+  }catch{res.status(503).json(no('recovery_preview_unavailable'));}
  };
 }
