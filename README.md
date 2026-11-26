@@ -1,4 +1,16 @@
-# BTC Kalshi V1.3 — technical handoff
+# Strata backend
+
+Start with the [current source and verification guide](./docs/CURRENT_SOURCE_GUIDE.md).
+
+**Historical handoff below:** the original paper-dashboard and development-only
+micro-live description is retained for reference. It is not a current production
+deployment or authorization statement. In particular, it does not describe the
+separate owner-scoped production executor, Supabase authentication, or continuous
+owner grants now present in this repository. Use the current guide and linked
+implementation for those paths; do not infer runtime flags, approvals, exposure,
+or exchange outcomes from any repository document.
+
+## Historical BTC Kalshi V1.3 technical handoff
 
 > **Current product direction:** [AGENTS.md](./AGENTS.md) supersedes historical fixed-customer pilot and manual enrollment requirements. This historical handoff does not establish current release readiness.
 

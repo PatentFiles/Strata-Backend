@@ -13,6 +13,12 @@ import { proveSettlementMarketOwnership } from "./microLiveSettlementOwnership";
 const ticker = "KXBTC15M-PRIMARY-SETTLEMENT";
 const observedAt = new Date().toISOString();
 
+// All evidence in a case shares one observation clock. Otherwise a later
+// helper can finish a millisecond after the case's already-captured nowMs,
+// creating spurious future evidence and an intermittent false refusal.
+test.beforeEach(() => test.mock.timers.enable({ apis: ["Date"], now: Date.parse(observedAt) }));
+test.afterEach(() => test.mock.timers.reset());
+
 const order: KalshiSubmissionEvidence["orders"][number] = {
   id: "bot-order",
   clientOrderId: "bot-client-order",
