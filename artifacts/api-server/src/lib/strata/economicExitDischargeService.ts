@@ -64,9 +64,7 @@ async function readPendingMoney(tx:Pick<PoolClient,'query'>,account:string,lock:
   requireProof(rows.length<=1000&&rows.every(r=>allowedStates[index]!.includes(String(r.state))),'economic_discharge_pending_money_requires_review');
   rows.sort((a,b)=>canonical(a).localeCompare(canonical(b)));
  }
- const legs=(await tx.query(`SELECT l.*,l.xmin::text AS row_revision FROM private.kalshi_owner_topup_legs l JOIN private.kalshi_owner_topups p ON p.id=l.topup_id
-  WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') LIMIT 1${lock?' FOR SHARE OF l':''}`,[account])).rows;
- requireProof(!legs.length,'economic_discharge_pending_money_requires_review');return digest(histories);
+ return digest(histories);
 }
 export function createEconomicDischargeService(deps:Deps){
  const db=deps.db??pool,now=deps.now??Date.now,sha=deps.sha??deployedGitSha,enabled=deps.enabled??economicDischargeEnabled;
@@ -78,10 +76,19 @@ export function createEconomicDischargeService(deps:Deps){
   requireProof(first.blockedReason===null,'economic_discharge_unrelated_hold_requires_review');
   const beat=first.worker.heartbeat_at instanceof Date?first.worker.heartbeat_at.getTime():Date.parse(String(first.worker.heartbeat_at));
   requireProof(first.worker.state==='released'||Number.isSafeInteger(beat)&&beat<now()-120000,'economic_discharge_worker_not_stale');
-  const receipts=(await tx.query(`SELECT b.* FROM private.strata_economic_settlement_receipt b WHERE b.execution_account_id=$1 AND b.owner_user_id=$2::uuid
-    AND b.exit_intent_id=$3 AND b.reservation_id=$4::uuid LIMIT 2`,[first.account.id,owner,first.exitId,first.pin.row.reservation_id])).rows as Row[];
-  requireProof(receipts.length===1,'economic_discharge_booked_settlement_required');
-  const maintenanceDigest=await readPendingMoney(tx,first.account.id,lock),booking=receipts[0]!;
+  const maintenanceDigest=await readPendingMoney(tx,first.account.id,lock);
+  const rows=(await tx.query(`WITH pending AS MATERIALIZED (
+    SELECT 1 FROM private.kalshi_owner_topup_legs l JOIN private.kalshi_owner_topups p ON p.id=l.topup_id
+    WHERE p.execution_account_id=$1 AND l.state IN ('claimed','uncertain') LIMIT 1${lock?' FOR SHARE OF l':''}
+   ), booking AS MATERIALIZED (
+    SELECT b.* FROM private.strata_economic_settlement_receipt b WHERE b.execution_account_id=$1 AND b.owner_user_id=$2::uuid
+     AND b.exit_intent_id=$3 AND b.reservation_id=$4::uuid LIMIT 2
+   ) SELECT booking.*, EXISTS (SELECT 1 FROM pending) AS has_pending
+     FROM (SELECT 1) AS probe LEFT JOIN booking ON TRUE`,
+   [first.account.id,owner,first.exitId,first.pin.row.reservation_id])).rows as Row[];
+  requireProof(rows.length===1&&rows[0]!.request_id,'economic_discharge_booked_settlement_required');
+  const {has_pending,...booking}=rows[0]!;
+  requireProof(has_pending===false,'economic_discharge_pending_money_requires_review');
   return {...first,booking,maintenanceDigest,dischargeScopeDigest:digest({scope:first.scopeDigest,booking,maintenanceDigest})};
  };
  const collect=async(owner:string,build:string,expected?:string,observe?:EconomicDischargeTiming)=>{

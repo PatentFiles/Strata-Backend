@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {ProductionLedger,type Account} from '../v13-production/ledger';
 import {canonical,digest,requireProof} from '../v13-production/types';
@@ -97,11 +98,15 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
     plan.settlementEventId,plan.settlementDigest,plan.exitRequest,plan.exitCapabilityDigest,new Date(plan.exitDispatchAt),plan.markerOrderDigest,
     scope.scopeDigest,scope.releaseSha,plan.releaseReserveMicros,plan.expectedRevision,update.revision,scope.controlEpoch,update.owner_control_epoch,
     scope.workerFence,update.fencing_token,plan,digest(plan)]);
-  const recognized=await tx.query('SELECT private.strata_has_economic_exit_discharge($1,$2) AS verified',[a.id,plan.exitRequest.clientOrderId]);
-  requireProof(recognized.rows.length===1&&recognized.rows[0].verified===true,'economic_discharge_receipt_not_recognized');
-  await ledger.observe(tx,'OWNER_ECONOMIC_OBLIGATION_DISCHARGED',{requestId:scope.requestId,bookingRequestId:plan.bookingRequestId,accountId:a.id,
+  const observation={requestId:scope.requestId,bookingRequestId:plan.bookingRequestId,accountId:a.id,
    releasedReserveMicros:plan.releaseReserveMicros,priorWorkerFence:scope.workerFence,workerFence:update.fencing_token,
-   receiptDigest:digest(plan),cashChanged:false,transportOutcome:'UNKNOWN',tradingAuthorized:false});
+   receiptDigest:digest(plan),cashChanged:false,transportOutcome:'UNKNOWN',tradingAuthorized:false};
+  // The receipt already exists in this transaction. An audit row can be
+  // inserted only if the same canonical recognition function returns true.
+  const recognized=await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+   SELECT $1,$2,'OWNER_ECONOMIC_OBLIGATION_DISCHARGED',$3,$4 WHERE private.strata_has_economic_exit_discharge($2,$5) IS TRUE
+   RETURNING id`,[randomUUID(),a.id,JSON.stringify(observation),digest(observation),plan.exitRequest.clientOrderId]);
+  requireProof(recognized.rows.length===1,'economic_discharge_receipt_not_recognized');
   clock();committing=true;await tx.query('COMMIT');committed=true;
  }catch(error){
   if(committing){discard=true;return {...dischargeNo('economic_discharge_commit_outcome_unverified','UNKNOWN'),requestId:scope.requestId,outcomeUnknown:true,reserveReleased:null,leaseReleased:null};}
