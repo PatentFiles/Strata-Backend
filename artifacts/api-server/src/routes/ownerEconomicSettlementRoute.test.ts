@@ -18,9 +18,11 @@ test('service refuses selector injection and implicit authorization before touch
  }
 });
 test('mounted routes bind authenticated owner, require explicit intent and retain readback after disable',async()=>{
- const calls:string[]=[];let enabled=true;
+ const calls:string[]=[];let enabled=true;let reserveWriteEnabled=false;
  const result={ok:true,status:'RECORDED',reason:'economic_settlement_posted_transport_remains_unknown',accountingPosted:true};
- const service={enabled:()=>enabled,preview:async(who:string)=>{calls.push('preview:'+who);return {...result,accountingPosted:false};},
+ const service={enabled:()=>enabled,reserveWriteEnabled:()=>reserveWriteEnabled,
+  applyRetainedReserve:async(who:string)=>{calls.push('dispose:'+who);return {status:'RECORDED',reserveReleased:true,tradingAuthorized:false};},preview:async(who:string)=>{calls.push('preview:'+who);return {...result,accountingPosted:false};},
+  inspectRetainedReserve:async(who:string)=>{calls.push('reserve:'+who);return {ok:true,readOnly:true,reserveReleased:false,tradingAuthorized:false};},
   apply:async(who:string)=>{calls.push('apply:'+who);return result;},
   outcome:async(who:string,id:string)=>{calls.push('outcome:'+who+':'+id);return result;},
   cancel:async(who:string,id:string)=>{calls.push('cancel:'+who+':'+id);return {ok:false,status:'CANCELED',accountingPosted:false};}} as unknown as ReturnType<typeof createEconomicSettlementService>;
@@ -33,15 +35,32 @@ test('mounted routes bind authenticated owner, require explicit intent and retai
   assert.equal((await post('/preview')).status,400);
   assert.equal((await post('/preview?owner=other',{},true,{'X-Strata-Read-Intent':'inspect-economic-settlement'})).status,400);
   assert.equal((await post('/preview',{accountId:'foreign'},true,{'X-Strata-Read-Intent':'inspect-economic-settlement'})).status,400);
+  const read={'X-Strata-Read-Intent':'inspect-settled-exit-reserve'};
+  assert.equal((await post('/reserve-evidence',{},false,read)).status,401);
+  assert.equal((await post('/reserve-evidence')).status,400);
+  assert.equal((await post('/reserve-evidence?account=other',{},true,read)).status,400);
+  assert.equal((await post('/reserve-evidence',{accountId:'other'},true,read)).status,400);
   assert.equal(calls.length,0);
+  const reserve=await post('/reserve-evidence',{},true,read);
+  assert.equal(reserve.status,200);assert.equal(reserve.headers.get('cache-control'),'private, no-store');
+  assert.deepEqual(await reserve.json(),{ok:true,readOnly:true,reserveReleased:false,tradingAuthorized:false});
   const p=await post('/preview',{},true,{'X-Strata-Read-Intent':'inspect-economic-settlement'});assert.equal(p.status,200);assert.equal(p.headers.get('cache-control'),'private, no-store');
+  const dispose={'X-Strata-Action-Intent':'dispose-settled-exit-reserve'};
+  assert.equal((await post('/dispose-reserve',{},true,dispose)).status,404);
+  reserveWriteEnabled=true;
+  assert.equal((await post('/dispose-reserve',{},false,dispose)).status,401);
+  assert.equal((await post('/dispose-reserve')).status,400);
+  assert.equal((await post('/dispose-reserve?owner=other',{},true,dispose)).status,400);
+  assert.equal((await post('/dispose-reserve',{},true,dispose)).status,200);
+  reserveWriteEnabled=false;
   assert.equal((await post('/apply')).status,400);
   assert.equal((await post('/apply',{},true,{'X-Strata-Action-Intent':'post-economic-settlement'})).status,200);
   enabled=false;assert.equal((await post('/preview',{},true,{'X-Strata-Read-Intent':'inspect-economic-settlement'})).status,404);
   assert.equal((await post('/apply',{},true,{'X-Strata-Action-Intent':'post-economic-settlement'})).status,404);
+  assert.equal((await post('/reserve-evidence',{},true,read)).status,404);
   const out=await fetch(`${base}/outcome?requestId=${requestId}`,{headers:{'X-Test-Owner':owner}});assert.equal(out.status,200);
   assert.equal((await post('/cancel',{requestId,confirmation:'CANCEL_ONLY_THIS_ECONOMIC_SETTLEMENT_REQUEST'})).status,200);
-  assert.deepEqual(calls,[`preview:${owner}`,`apply:${owner}`,`outcome:${owner}:${requestId}`,`cancel:${owner}:${requestId}`]);
+  assert.deepEqual(calls,[`reserve:${owner}`,`preview:${owner}`,`dispose:${owner}`,`apply:${owner}`,`outcome:${owner}:${requestId}`,`cancel:${owner}:${requestId}`]);
  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 test('ordinary reconciliation retains reserve when a settled parent still has uncertain exit transport',()=>{

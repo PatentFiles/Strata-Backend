@@ -436,6 +436,32 @@ export class ProductionLedger {
         const priorIntentStates = new Map(intents.map(i => [i.id, reconciledIntentState(i)]));
         const earliest = Math.min(...intents.map(i => i.created_at.getTime()), nowMs);
         requireProof(snapshot.historyFromMs <= earliest, "production_history_coverage_gap");
+        // A settled reserve disposition is accounting only. Keep the old EXIT
+        // unknown, and reject any later signed order/fill that contradicts it
+        // instead of silently attaching that evidence to the historical row.
+        const zeroReserveParents=new Set(intents.filter(i=>i.kind==="ENTRY"&&i.terminal&&i.reserved_micros==="0").map(i=>i.id));
+        const candidates=intents.filter(i=>i.kind==="EXIT"&&!i.terminal&&i.parent_id&&zeroReserveParents.has(i.parent_id));
+        if(candidates.length){
+          const relation=(await tx.query("SELECT to_regclass('private.strata_settled_exit_reserve_disposition')::text AS name")).rows[0];
+          if(relation?.name){
+            const dispositions=(await tx.query(`SELECT d.exit_intent_id,d.entry_intent_id,e.event_id,e.digest
+              FROM private.strata_settled_exit_reserve_disposition d
+              LEFT JOIN private.strata_economic_settlement_receipt r ON r.request_id=d.settlement_request_id AND r.execution_account_id=d.execution_account_id
+              LEFT JOIN public.v13_production_event e ON e.account_id=r.execution_account_id AND e.event_id=r.settlement_event_id
+                AND e.intent_id=d.entry_intent_id AND e.kind='SETTLEMENT' AND e.digest=r.settlement_digest
+              WHERE d.execution_account_id=$1 AND d.owner_user_id=$2::uuid AND d.exit_intent_id=ANY($3::text[])`,
+              [a.id,a.owner_user_id,candidates.map(i=>i.id)])).rows;
+            for(const d of dispositions){
+              const exit=candidates.find(i=>i.id===d.exit_intent_id);
+              requireProof(exit&&exit.parent_id===d.entry_intent_id&&
+                !snapshot.orders.some(o=>o.request.clientOrderId===exit.client_order_id)&&
+                !snapshot.fills.some(f=>f.clientOrderId===exit.client_order_id)&&
+                !snapshot.positions.some(p=>p.market===exit.market&&money(p.quantityHundredths)!==0n)&&
+                snapshot.settlements.some(x=>`settlement:${x.id}`===d.event_id&&digest(x)===d.digest),
+                "production_unattributed_order");
+            }
+          }
+        }
         const byClient = new Map(intents.map(i => [i.client_order_id, i]));
         const byOrder = new Map(snapshot.orders.map(o => [o.orderId, o]));
         requireProof(byOrder.size === snapshot.orders.length, "production_duplicate_order_evidence");

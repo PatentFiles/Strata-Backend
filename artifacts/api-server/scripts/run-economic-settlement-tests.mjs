@@ -22,7 +22,8 @@ try{
  if(native){
   const version=process.env.STRATA_ECONOMIC_PG_VERSION;
   if(version&&!/^(16|17)$/.test(version))throw Error('test_pg_version_invalid');
-  if(version)pg=`/usr/lib/postgresql/${version}/bin`;else {const roots=readdirSync('/usr/lib/postgresql').filter(v=>/^(16|17)$/.test(v)).sort().reverse();pg=`/usr/lib/postgresql/${roots[0]}/bin`;}
+  if(process.env.STRATA_ECONOMIC_PG_BIN)pg=resolve(process.env.STRATA_ECONOMIC_PG_BIN);
+  else if(version)pg=`/usr/lib/postgresql/${version}/bin`;else {const roots=readdirSync('/usr/lib/postgresql').filter(v=>/^(16|17)$/.test(v)).sort().reverse();pg=`/usr/lib/postgresql/${roots[0]}/bin`;}
   if(!existsSync(join(pg,'initdb')))throw Error('isolated_postgres_binary_missing');
   mkdirSync(socket);run(join(pg,'initdb'),['-D',data,'-U','postgres','-A','trust','--no-locale']);
   writeFileSync(join(data,'postgresql.auto.conf'),`listen_addresses = ''\nunix_socket_directories = '${socket}'\nport = 5544\n`);
@@ -31,7 +32,7 @@ try{
   const file=join(out,'native.cjs');bundle('src/lib/strata/ownerEconomicSettlement.native.ts',file);
   run(process.execPath,['--test',file],{DATABASE_URL:`postgresql:///strata_economic_fixture?host=${encodeURIComponent(socket)}&port=5544&user=postgres`,STRATA_ISOLATED_ECONOMIC_TEST:'1',STRATA_ECONOMIC_SOCKET:socket});
  }else{
-  const entries=['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
+  const entries=['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/lib/strata/settledExitReserveEvidence.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
   const files=entries.map((p,i)=>{const f=join(out,`${i}.cjs`);bundle(p,f);return f;});
   run(process.execPath,['--test',...files],{DATABASE_URL:'postgres://fixture:fixture@127.0.0.1:1/never_connect'});
  }

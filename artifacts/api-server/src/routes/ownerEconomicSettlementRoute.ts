@@ -16,6 +16,30 @@ export function economicSettlementRouter(service:Service){
   try{const result=await service.preview(res.locals.strata.subject);res.status(result.ok?200:409).json(result);}
   catch{res.status(503).json({ok:false,reason:'economic_settlement_preview_unavailable',accountingPosted:false,tradingAuthorized:false});}
  });
+ router.post('/reserve-evidence',async(req,res)=>{
+  if(!service.enabled())return void res.status(404).end();
+  if(req.get('X-Strata-Read-Intent')!=='inspect-settled-exit-reserve'||Object.keys(req.query).length||
+   req.body&&Object.keys(req.body).length)return void res.status(400).json({reason:'economic_settlement_empty_preview_required'});
+  try{const result=await service.inspectRetainedReserve(res.locals.strata.subject);res.status(result.ok?200:409).json(result);}
+  catch{res.status(503).json({ok:false,reason:'economic_settlement_preview_unavailable',accountingPosted:false,tradingAuthorized:false});}
+ });
+ router.get('/reserve-outcome',async(req,res)=>{
+  if(Object.keys(req.query).sort().join(',')!=='requestId'||!UUID.test(String(req.query.requestId)))return void res.status(400).end();
+  try{
+   const result=await service.reserveOutcome(res.locals.strata.subject,String(req.query.requestId));
+   res.status(result.status==='RECORDED'?200:result.status==='UNKNOWN'?503:409).json(result);
+  }catch{res.status(503).json({status:'UNKNOWN',reserveReleased:null,tradingAuthorized:false});}
+ });
+ router.post('/dispose-reserve',async(req,res)=>{
+  if(!service.reserveWriteEnabled())return void res.status(404).end();
+  if(Object.keys(req.query).length||req.get('X-Strata-Action-Intent')!=='dispose-settled-exit-reserve')
+   return void res.status(400).json({reason:'economic_settlement_action_intent_required'});
+  try{
+   const result=await service.applyRetainedReserve(res.locals.strata.subject,req.body);
+   const status='status' in result?result.status:'REFUSED';
+   res.status(status==='RECORDED'?200:status==='UNKNOWN'?503:409).json(result);
+  }catch{res.status(503).json({status:'UNKNOWN',reserveReleased:null,tradingAuthorized:false});}
+ });
  router.post('/apply',async(req,res)=>{
   if(!service.enabled())return void res.status(404).end();
   if(Object.keys(req.query).length||req.get('X-Strata-Action-Intent')!=='post-economic-settlement')return void res.status(400).json({reason:'economic_settlement_action_intent_required'});

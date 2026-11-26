@@ -3,6 +3,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';import {randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {disposeSettledExitReserve,readSettledExitReserveOutcome} from './settledExitReserveDisposition';
+import {inspectSettledExitReserve} from './settledExitReserveEvidence';
 import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
 import {proveEconomicSettlement,economicSettlementPlan} from './ownerEconomicSettlementProof';
 import {commitEconomicSettlement,economicSettlementOutcome,cancelEconomicSettlement,type EconomicCommitScope} from './ownerEconomicSettlementCommit';
@@ -56,6 +58,41 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
   const identity=(await pool.query('SELECT current_database() db,inet_server_addr() host')).rows[0];assert.equal(identity.db,'strata_economic_fixture');assert.equal(identity.host,null);
   await pool.query(schema);
   await pool.query(readFileSync('../../supabase/migrations/20261126004500_economic_settlement_receipt.sql','utf8'));
+  await pool.query(readFileSync('../../supabase/migrations/20261126124100_settled_exit_reserve_disposition.sql','utf8'));
+  await t.test('atomic reserve disposition preserves booked cash, exit, marker, position and worker',async()=>{
+   const {f,proof,scope}=await seed();
+   assert.equal((await commitEconomicSettlement(proof,scope,{db:pool,verifyLocked:locked})).ok,true);
+   const a=(await pool.query('SELECT * FROM public.v13_production_account')).rows[0];
+   const events=(await pool.query('SELECT * FROM public.v13_production_event WHERE account_id=$1 ORDER BY event_id',[a.id])).rows;
+   const positions=(await pool.query('SELECT * FROM public.v13_production_position WHERE account_id=$1',[a.id])).rows;
+   const evidence={...f,account:a,history:{...f.history,events,positions}};
+   const release={...scope,requestId:randomUUID()};
+   const opts={db:pool,now:()=>f.nowMs,verifyLocked:locked};
+   assert.equal((await disposeSettledExitReserve(evidence,{...release,ownerId:randomUUID()},opts)).status,'REFUSED');
+   assert.equal((await disposeSettledExitReserve(evidence,release,{...opts,now:()=>f.nowMs+5001})).status,'REFUSED');
+   assert.equal((await disposeSettledExitReserve(evidence,{...release,workerFence:'62'},opts)).status,'REFUSED');
+   assert.equal((await pool.query('SELECT reserved_micros FROM public.v13_production_account')).rows[0].reserved_micros,'3000000');
+   assert.equal((await pool.query("SELECT reserved_micros FROM public.v13_production_intent WHERE kind='ENTRY'")).rows[0].reserved_micros,'3000000');
+   // Two identical callers serialize on the exact account; both see one result.
+   assert.equal((await readSettledExitReserveOutcome(pool,scope.ownerId,release.requestId)).status,'NOT_RECORDED');
+   const [x,y]=await Promise.all([disposeSettledExitReserve(evidence,release,opts),disposeSettledExitReserve(evidence,release,opts)]);
+   assert.equal(x.status,'RECORDED');assert.equal(y.status,'RECORDED');
+   assert.equal((await readSettledExitReserveOutcome(pool,scope.ownerId,release.requestId)).status,'RECORDED');
+   assert.notEqual((await readSettledExitReserveOutcome(pool,randomUUID(),release.requestId)).status,'RECORDED');
+   assert.equal((await disposeSettledExitReserve(evidence,{...release,requestId:randomUUID()},opts)).status,'REFUSED');
+   const after=(await pool.query('SELECT * FROM public.v13_production_account')).rows[0];
+   assert.equal(after.cash_micros,a.cash_micros);assert.equal(after.reserved_micros,'0');assert.equal(after.revision,'19');
+   assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_event WHERE account_id=$1 ORDER BY event_id',[a.id])).rows,events);
+   assert.deepEqual((await pool.query('SELECT * FROM public.v13_production_position WHERE account_id=$1',[a.id])).rows,positions);
+   assert.deepEqual((await pool.query("SELECT state,terminal,exchange_order_id FROM public.v13_production_intent WHERE kind='EXIT'")).rows,[{state:'DISPATCHED',terminal:false,exchange_order_id:null}]);
+   assert.deepEqual((await pool.query('SELECT state,trading_authorized FROM private.strata_emergency_exit_reservations')).rows,[{state:'UNKNOWN',trading_authorized:false}]);
+   assert.equal((await pool.query('SELECT arm_requested FROM private.kalshi_account_worker_lease')).rows[0].arm_requested,false);
+   assert.deepEqual((await pool.query('SELECT released_micros,transport_outcome,trading_authorized FROM private.strata_settled_exit_reserve_disposition')).rows,
+    [{released_micros:'3000000',transport_outcome:'UNKNOWN',trading_authorized:false}]);
+   await assert.rejects(pool.query('DELETE FROM private.strata_settled_exit_reserve_disposition'),/immutable/);
+   for(const role of ['anon','authenticated','strata_paper_runtime'])
+    assert.equal((await pool.query("SELECT has_table_privilege($1,'private.strata_settled_exit_reserve_disposition','INSERT') ok",[role])).rows[0].ok,false);
+  });
   await t.test('one canonical event + immutable receipt + conserved cash/P&L; no control/reserve/lease changes',async()=>{
    const {f,proof,scope}=await seed();const r=await commitEconomicSettlement(proof,scope,{db:pool,verifyLocked:locked});assert.equal(r.ok,true,JSON.stringify(r));
    assert.equal(r.accountingPosted,true);const p=economicSettlementPlan(proof);
@@ -64,6 +101,14 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
    const i=(await pool.query('SELECT * FROM public.v13_production_intent WHERE id=$1',[f.exitId])).rows[0];assert.equal(i.state,'DISPATCHED');assert.equal(i.terminal,false);assert.equal(i.exchange_order_id,null);
    const m=(await pool.query('SELECT * FROM private.strata_emergency_exit_reservations')).rows[0];assert.equal(m.state,'UNKNOWN');assert.equal(m.trading_authorized,false);
    const w=(await pool.query('SELECT * FROM private.kalshi_account_worker_lease')).rows[0];assert.equal(w.state,'owned');assert.equal(w.arm_requested,false);assert.equal(w.fencing_token,'61');
+   const stored=(await pool.query('SELECT * FROM private.strata_economic_settlement_receipt WHERE request_id=$1',[scope.requestId])).rows[0];
+   const events=(await pool.query('SELECT * FROM public.v13_production_event WHERE account_id=$1 ORDER BY event_id',[a.id])).rows;
+   const positions=(await pool.query('SELECT * FROM public.v13_production_position WHERE account_id=$1',[a.id])).rows;
+   const evidence={...f,account:a,history:{...f.history,events,positions}};
+   const inspected=inspectSettledExitReserve(evidence,stored);
+   assert.equal(inspected.status,'SETTLED_WITH_UNKNOWN_TRANSPORT_EVIDENCE_MATCHED');
+   assert.equal(inspected.reserveReleased,false);assert.equal(inspected.transportOutcome,'UNKNOWN');
+   assert.throws(()=>inspectSettledExitReserve({...evidence,snapshot:{...f.snapshot,cashMicros:'1'}},stored));
    const repeated=await commitEconomicSettlement(proof,scope,{db:pool,verifyLocked:locked});assert.equal(repeated.ok,false);
    assert.equal((await economicSettlementOutcome(scope.ownerId,scope.requestId,pool)).ok,true);
    assert.equal((await pool.query("SELECT count(*)::int n FROM public.v13_production_event WHERE kind='SETTLEMENT'")).rows[0].n,1);

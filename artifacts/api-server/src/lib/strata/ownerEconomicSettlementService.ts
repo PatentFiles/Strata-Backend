@@ -13,6 +13,11 @@ import type {ReconciledReleaseHistory} from './reconciledReleaseRenewalHistory';
 import {proveEconomicSettlement,economicSettlementPlan,type EconomicSettlementAccount,type EconomicSettlementPlan} from './ownerEconomicSettlementProof';
 import {commitEconomicSettlement,economicSettlementOutcome,cancelEconomicSettlement} from './ownerEconomicSettlementCommit';
 
+import {inspectSettledExitReserve} from './settledExitReserveEvidence';
+
+import {disposeSettledExitReserve,readSettledExitReserveOutcome} from './settledExitReserveDisposition';
+
+export const SETTLED_EXIT_RESERVE_CONFIRM='RELEASE_ONLY_THE_VERIFIED_RESERVE_KEEP_EXIT_TRANSPORT_UNKNOWN';
 export const ECONOMIC_SETTLEMENT_CONFIRM='I_AUTHORIZE_EXACT_SIGNED_SETTLEMENT_ACCOUNTING_ONLY_KEEP_UNKNOWN_EXIT_RESERVE_AND_WORKER_HOLD';
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA=/^[a-f0-9]{40}$/;const HASH=/^[a-f0-9]{64}$/;
@@ -87,6 +92,7 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
 
 export function createEconomicSettlementService(deps:Deps){
  const db=deps.db??pool,now=deps.now??Date.now,sha=deps.sha??deployedGitSha,enabled=deps.enabled??economicSettlementEnabled;
+ const reserveWriteEnabled=()=>{const build=sha();return enabled()&&SHA.test(build)&&process.env.STRATA_SETTLED_EXIT_RESERVE_DISPOSITION_SHA===build;};
  const check=()=>{const build=sha();requireProof(enabled()&&SHA.test(build),'economic_settlement_release_not_qualified');return build;};
  const readCapture=async(owner:string,build:string)=>{
   const tx=await db.connect();try{
@@ -99,7 +105,7 @@ export function createEconomicSettlementService(deps:Deps){
    return {...result,verification,restricted};
   }finally{try{await tx.query('ROLLBACK');}finally{tx.release();}}
  };
- const collect=async(owner:string,build:string,expectedScope?:string)=>{
+ const collectInput=async(owner:string,build:string,expectedScope?:string)=>{
   const first=await readCapture(owner,build);
   requireProof(expectedScope===undefined||expectedScope===first.scopeDigest,'economic_settlement_preview_scope_changed');
   const observed=now(),signal=AbortSignal.timeout(5000);
@@ -117,13 +123,60 @@ export function createEconomicSettlementService(deps:Deps){
   requireProof('identity' in snapshot,'economic_settlement_snapshot_unverified');
   const market=String(first.pin.row.market_ticker),settlements=feed.settlements.filter(record).filter(x=>x.ticker===market),positions=feed.positions.filter(record).filter(x=>x.ticker===market);
   requireProof(settlements.length===1&&positions.length===1,'economic_settlement_exact_market_evidence_missing');
-  const proof=proveEconomicSettlement({account:first.account,history:first.history,snapshot,exitId:first.exitId,
-   reservationId:String(first.pin.row.reservation_id),rawSettlement:settlements[0]!,rawPosition:positions[0]!,nowMs:now()});
+  const input={account:first.account,history:first.history,snapshot,exitId:first.exitId,
+   reservationId:String(first.pin.row.reservation_id),rawSettlement:settlements[0]!,rawPosition:positions[0]!,nowMs:now()};
   requireProof(check()===build&&!deps.isScheduled(owner,first.account.id),'economic_settlement_release_or_worker_changed');
-  return {first,proof,build};
+  return {first,input,build};
+ };
+ const collect=async(owner:string,build:string,scope?:string)=>{
+  const {first,input}=await collectInput(owner,build,scope);
+  return {first,proof:proveEconomicSettlement(input),build};
  };
  return {
-  enabled,
+  enabled,reserveWriteEnabled,
+  async reserveOutcome(owner:string,requestId:string){return readSettledExitReserveOutcome(db,owner,requestId);},
+  async applyRetainedReserve(owner:string,input:unknown){
+   if(!reserveWriteEnabled()||!UUID.test(owner)||!record(input)||
+    Object.keys(input).sort().join(',')!=='confirmation,releaseSha,requestId,scopeDigest'||
+    input.confirmation!==SETTLED_EXIT_RESERVE_CONFIRM||!UUID.test(String(input.requestId))||
+    !SHA.test(String(input.releaseSha))||!HASH.test(String(input.scopeDigest)))
+    return no('economic_settlement_explicit_owner_scope_required');
+   try{
+    const build=check();requireProof(build===input.releaseSha,'economic_settlement_release_changed');
+    const scopeDigest=String(input.scopeDigest),requestId=String(input.requestId);
+    const x=await collectInput(owner,build,scopeDigest);
+    return await disposeSettledExitReserve(x.input,{requestId,ownerId:owner,scopeDigest,releaseSha:build,
+     controlEpoch:x.first.controlEpoch,workerFence:String(x.first.worker.fencing_token)},
+    {db,now,verifyLocked:async(tx,a,d)=>{
+     requireProof(reserveWriteEnabled()&&check()===build&&a.id===x.input.account.id,'economic_settlement_release_changed');
+     const current=await capture(tx,owner,build,now(),deps.isScheduled,true);
+     requireProof(current.scopeDigest===d&&canonical(current.account)===canonical(x.first.account)&&
+      !deps.isScheduled(owner,a.id),'economic_settlement_locked_scope_changed');
+    }});
+   }catch(e){return safe(e);}
+  },
+  async inspectRetainedReserve(owner:string){
+   if(!UUID.test(owner))return no('economic_settlement_authenticated_owner_required');
+   try{
+    const build=check(),{first,input}=await collectInput(owner,build);
+    const tx=await db.connect();
+    try{
+     await tx.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+     await tx.query("SET LOCAL statement_timeout='3000ms'");
+     const current=await capture(tx,owner,build,now(),deps.isScheduled);
+     requireProof(current.scopeDigest===first.scopeDigest&&check()===build,'economic_settlement_preview_scope_changed');
+     const receipts=(await tx.query(`SELECT r.* FROM private.strata_economic_settlement_receipt r
+      WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND exit_intent_id=$3
+       AND reservation_id=$4::uuid LIMIT 2`,[owner,input.account.id,input.exitId,input.reservationId])).rows;
+     requireProof(receipts.length===1,'economic_settlement_posted_receipt_required');
+     requireProof(check()===build&&!deps.isScheduled(owner,input.account.id),'economic_settlement_release_or_worker_changed');
+     const proof=inspectSettledExitReserve({...input,nowMs:now()},receipts[0]!);
+     return {ok:true as const,status:proof.status,releaseSha:build,scopeDigest:first.scopeDigest,reservedMicros:proof.reservedMicros,
+      transportOutcome:proof.transportOutcome,readOnly:true,accountingPosted:false,reserveReleased:false,
+      ordersSubmitted:false,workerStarted:false,tradingAuthorized:false,leaseReleased:false};
+    }finally{try{await tx.query('ROLLBACK');}finally{tx.release();}}
+   }catch(e){return safe(e);}
+  },
   async preview(owner:string){
    if(!UUID.test(owner))return no('economic_settlement_authenticated_owner_required');
    try{
