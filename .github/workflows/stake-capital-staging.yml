@@ -1,0 +1,44 @@
+name: Isolated stake and capital review
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/entryBudget*'
+      - 'artifacts/api-server/src/lib/persistedEntryBudget*'
+      - 'artifacts/api-server/src/lib/readLockedSimulationBudgetSelection.ts'
+      - 'artifacts/api-server/src/lib/v13-production/budgetSelectorExecutor.postgres.test.ts'
+      - 'artifacts/api-server/src/routes/walletEntryBudgetPreviewRouter*'
+      - 'staging/stake-capital/**'
+      - '.github/workflows/stake-capital-staging.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-preview-and-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://fixture:fixture@127.0.0.1:1/never_connect
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - run: pnpm install --frozen-lockfile
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-17
+      - run: pnpm run typecheck
+      - working-directory: artifacts/api-server
+        run: pnpm run test:stake-capital-preview
+      - working-directory: artifacts/api-server
+        env:
+          PG_BIN: /usr/lib/postgresql/17/bin
+        run: pnpm run test:stake-capital-native
+      - working-directory: staging/stake-capital/market-data-runner
+        run: npm ci --ignore-scripts && npm test
+      - working-directory: artifacts/api-server
+        run: pnpm run build

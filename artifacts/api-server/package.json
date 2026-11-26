@@ -115,7 +115,9 @@
     "test:economic-settlement": "node scripts/run-economic-settlement-tests.mjs",
     "test:economic-settlement-native": "node scripts/run-economic-settlement-tests.mjs --native",
     "test:economic-discharge": "node scripts/run-economic-settlement-tests.mjs --discharge",
-    "test:economic-discharge-native": "node scripts/run-economic-settlement-tests.mjs --discharge --native"
+    "test:economic-discharge-native": "node scripts/run-economic-settlement-tests.mjs --discharge --native",
+    "test:stake-capital-preview": "node scripts/run-stake-preview-tests.mjs",
+    "test:stake-capital-native": "node scripts/run-v13-disposable-postgres.mjs --entry-budget-selector && node scripts/run-stake-executor-canary-local.mjs"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",
