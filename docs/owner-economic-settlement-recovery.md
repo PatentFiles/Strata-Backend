@@ -70,7 +70,7 @@ concurrent duplicate posting, lost COMMIT acknowledgement, immutable receipts,
 role restrictions and delayed-request cancellation races. Its reduced schema
 is transaction evidence, not a substitute for deployed-schema acceptance.
 
-The incident preview observed a 3,000,000 micro-dollar settlement credit and
-1,477,500 micro-dollar net realized P&L, retaining 3,000,000 reserved micro-dollars.
-That was a read-only candidate preview, **not a posted production recovery**.
-Fresh owner-authenticated production evidence is required at application time.
+The incident candidate was evaluated using a read-only signed preview. That
+was not a posted production recovery. Customer balances and account identifiers
+are intentionally omitted from this public repository. Fresh owner-authenticated
+production evidence is required at application time.
