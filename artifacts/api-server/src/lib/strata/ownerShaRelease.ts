@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {authorizeHeldHistoryConsent} from './ownerNeverPostedReleaseRenewal';
 import {HELD_CONSENT_CONFIRM} from './heldConsentPolicy';
@@ -323,10 +324,10 @@ export async function authorizeOwnerShaRelease(
     }
     const flat=await tx.query(`SELECT
       (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1 AND
-       (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) intents,
+       (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)${economicExitNotDischarged("account_id","client_order_id")}) intents,
       (SELECT count(*)::text FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
       (SELECT count(*)::text FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
-        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[accountId]);
+        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) exits`,[accountId]);
     if(flat.rows.length!==1||!["intents","positions","exits"].every(k=>flat.rows[0]?.[k]==="0"))
       return reject("owner_restore_local_exposure_or_uncertainty");
     // Standing history is sticky: revoked or missing standing scope cannot
@@ -403,9 +404,9 @@ export async function authorizeOwnerShaRelease(
               AND a.execution_enabled=true AND a.kill_switch=false AND a.blocked_reason IS NULL AND a.reserved_micros=0)
           AND NOT EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0)
           AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1
-            AND (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0))
+            AND (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)${economicExitNotDischarged("account_id","client_order_id")})
           AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
-            AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+            AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")})
         RETURNING fencing_token::text AS fencing_token`,[accountId,ownerId,killedLeaseToken,current.key_fingerprint,preflight!.observedAtMs]);
       if(released.rows.length!==1){
         // This failure occurs after account admission was updated. Explicitly
@@ -456,7 +457,7 @@ export async function revokeOwnerShaRelease(ownerId:string,raw:unknown,deps:Depe
   const accountId=String(a.rows[0]?.id);
   const counts=await tx.query(`SELECT
      (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) positions,
-     (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) unresolved,
+     (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged("account_id","client_order_id")}) unresolved,
      (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND state='owned' AND heartbeat_at > now()-interval '30 seconds') running`,[accountId]);
   const c=counts.rows[0]!;
   if(counts.rows.length!==1||Number(c.positions)!==0||Number(c.unresolved)!==0||Number(c.running)!==0)

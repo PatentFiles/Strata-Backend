@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {platformFeeUploadEnabled} from './platformFeeUploadMode';
 import {isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {parseV3FeeSource} from './ownerFeeV3Authority';
@@ -117,9 +118,9 @@ export async function holdForOwnerArm(fence:OwnerArmFence,scope:OwnerArmScope,db
     const exposure=await tx.query(`SELECT
       EXISTS(SELECT 1 FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
       EXISTS(SELECT 1 FROM public.v13_production_intent WHERE account_id=$1
-        AND (terminal IS DISTINCT FROM TRUE OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) AS intents,
+        AND (terminal IS DISTINCT FROM TRUE OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)${economicExitNotDischarged("account_id","client_order_id")}) AS intents,
       EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1
-        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[scope.accountId]);
+        AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) AS exits`,[scope.accountId]);
     requireArm(exposure.rows.length===1&&exposure.rows[0].positions===false&&exposure.rows[0].intents===false&&
       exposure.rows[0].exits===false,'owner_arm_open_or_uncertain_exposure');
     const maintenance=await tx.query(`SELECT

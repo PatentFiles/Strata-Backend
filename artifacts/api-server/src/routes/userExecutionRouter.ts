@@ -1,3 +1,5 @@
+import {economicDischargeRouter} from './economicExitDischargeRoute';
+import {createEconomicDischargeService} from '../lib/strata/economicExitDischargeService';
 import {economicSettlementRouter} from './ownerEconomicSettlementRoute';
 import {createEconomicSettlementService} from '../lib/strata/ownerEconomicSettlementService';
 import {personalTradingSession} from '../lib/strata/sharedPersonalTradingControls';
@@ -349,6 +351,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   router.use(requireUser);
   router.get("/release/protective-history-preview",protectiveHistoryPreviewHandler());
   router.use('/release/economic-settlement',economicSettlementRouter(createEconomicSettlementService({isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)})));
+  router.use('/release/economic-discharge',economicDischargeRouter(createEconomicDischargeService({isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)})));
   // Candidate-only feature gate; all actor identity comes from existing AAL2 middleware.
   router.get('/registered-opening-capital/preview',async(_req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await registeredOpeningCapitalPreview(owner);res.status(result.ok?200:409).json(sanitizePublic(result));});
   router.post('/registered-opening-capital/apply',async(req,res)=>{const owner=subject(res);if(!owner)return void res.status(401).json({reason:'unauthorized'});res.set('Cache-Control','private, no-store');const result=await applyRegisteredOpeningCapital(owner,req.body);res.status(result.ok?200:409).json(sanitizePublic(result));});

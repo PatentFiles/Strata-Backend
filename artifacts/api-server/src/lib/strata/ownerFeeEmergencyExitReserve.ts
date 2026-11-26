@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {createHash,randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -122,7 +123,7 @@ export async function reserveOwnedEmergencyExitProof(
       "AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i " +
       "WHERE i.account_id=a.id AND " +
       "(i.state IN ('DISPATCHED','UNKNOWN') OR " +
-      "(i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
+      "(i.terminal=false AND i.exchange_order_id IS NOT NULL))"+economicExitNotDischarged("i.account_id","i.client_order_id")+") " +
       "FOR UPDATE OF a,w,pos,fi",
       [accountId,ownerId,order.ticker,side,fingerprint,quantity.toString(),
        lease.holderId,lease.fencingToken,order.client_order_id,

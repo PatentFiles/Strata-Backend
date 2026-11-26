@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {verifyDurableFeeStage,verifyDurableProtectiveAuthority} from './durableFeeConsumers';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
@@ -294,7 +295,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    AND i.request->>'limitMicros'=$11::text
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
-   AND i.client_order_id<>r.client_order_id)
+   AND i.client_order_id<>r.client_order_id${economicExitNotDischarged("i.account_id","i.client_order_id")})
  FOR SHARE OF r,a,g,w,pos,i,p`;
   // Anchor local elapsed BEFORE the DB read. DB-computed ages avoid comparing
   // host/DB wall clocks; subtracting the full round trip is conservative.

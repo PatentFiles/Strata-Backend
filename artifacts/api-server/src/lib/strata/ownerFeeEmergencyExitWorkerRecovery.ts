@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {reconcileUnknownProtectiveExitAfterRestart,type RestartDiagnosticStage} from "./ownerFeeEmergencyExitRestartRecovery";
@@ -29,7 +30,7 @@ export async function reconcileOwnedProtectiveExits(input:{
    "SELECT reservation_id::text AS reservation_id,market_ticker,client_order_id,"+
    "order_digest,order_request_json FROM private.strata_emergency_exit_reservations "+
    "WHERE owner_user_id=$1::uuid AND execution_account_id=$2::text "+
-   "AND state='UNKNOWN' ORDER BY created_at,reservation_id LIMIT 2",
+   "AND state='UNKNOWN'"+economicExitNotDischarged("execution_account_id","client_order_id")+" ORDER BY created_at,reservation_id LIMIT 2",
    [input.ownerId,input.accountId],
   );
   if(rs.rows.length===0)return {ok:true,reason:"no_unresolved_protective_exits",attempted:0,mayRetry:false,postAttempted:false};

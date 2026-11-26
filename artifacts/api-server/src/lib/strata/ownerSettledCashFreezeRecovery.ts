@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 /** Reason-specific accounting recovery. Owner approval never authorizes trading. */
 import {pool,type Pool,type PoolClient} from '@workspace/db';
 import {ProductionLedger,decodePolicy,identity,type Account} from '../v13-production/ledger';
@@ -19,9 +20,9 @@ const no=(reason:string)=>({ok:false as const,reason,ordersSubmitted:false,worke
 const ACCOUNT=`SELECT a.* FROM public.v13_production_account a WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 LIMIT 2`;
 const COUNTS=`SELECT
  (SELECT count(*)::text FROM public.v13_production_intent WHERE account_id=$1 AND
-  (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) intents,
+  (NOT terminal OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)${economicExitNotDischarged("account_id","client_order_id")}) intents,
  (SELECT count(*)::text FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
- (SELECT count(*)::text FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`;
+ (SELECT count(*)::text FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) exits`;
 const json=(v:unknown):unknown=>typeof v==='string'?JSON.parse(v):v;
 export function validSettledCashRecoveryScope(v:unknown):v is SettledCashRecoveryScope{
  if(!v||typeof v!=='object'||Array.isArray(v))return false;const s=v as Row;

@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -150,7 +151,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND w.heartbeat_at > now()-interval '5 seconds' " +
       "AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i " +
       "WHERE i.account_id=a.id AND (i.state IN ('DISPATCHED','UNKNOWN') " +
-      "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
+      "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL))"+economicExitNotDischarged("i.account_id","i.client_order_id")+") " +
       "FOR UPDATE OF r,a,w,pos,fi",
       [reservationId,ownerId,accountId,digest,order.client_order_id,
        order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint,baseline,

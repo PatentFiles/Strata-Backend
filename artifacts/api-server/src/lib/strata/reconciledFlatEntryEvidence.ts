@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import type {Snapshot} from "../v13-production/types";
 
 /** Read-only continuation evidence, called only AFTER committed reconciliation.
@@ -18,9 +19,9 @@ export async function reconciledFlatEntryEvidence(
     SELECT a.reserved_micros::text AS reserved_micros,a.cash_micros::text AS cash_micros,
       a.blocked_reason,a.kill_switch,a.execution_enabled,
       (SELECT count(*)::text FROM v13_production_intent i WHERE i.account_id=a.id
-        AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal)) AS unresolved,
+        AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal)${economicExitNotDischarged("i.account_id","i.client_order_id")}) AS unresolved,
       (SELECT count(*)::text FROM private.strata_emergency_exit_reservations r
-        WHERE r.execution_account_id=a.id AND r.state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits,
+        WHERE r.execution_account_id=a.id AND r.state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("r.execution_account_id","r.client_order_id")}) AS exits,
       (SELECT count(*)::text FROM v13_production_position p WHERE p.account_id=a.id
         AND (p.quantity_hundredths<>0 OR p.basis_micros<>0)) AS positions
     FROM v13_production_account a WHERE a.id=$1 AND a.owner_user_id=$2::uuid`,

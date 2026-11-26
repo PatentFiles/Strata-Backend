@@ -1,3 +1,4 @@
+import {readEconomicExitDischarges,assertNoEconomicExitContradiction} from '../strata/economicExitDischargeScope';
 import {ReconciliationEventDigests} from "./reconciliationEventDigests";
 import {transactionConnectionFence} from "./transactionConnectionFence";
 import {reconciledIntentState,reconciliationIntentChanged} from "./reconciliationIntentPersistence";
@@ -406,6 +407,9 @@ export class ProductionLedger {
           this.heldReconciliationTransaction(body, held, digest(snapshot))
         : (body: (tx: PoolClient, a: Account) => Promise<{accountId:string;observationId:string}>) => this.transaction(body);
       return await transact(async (tx, a) => {
+        const economicDischarges=await readEconomicExitDischarges(tx,a.id,true);
+        assertNoEconomicExitContradiction(economicDischarges,snapshot);
+        const financiallyDischarged=new Set(economicDischarges.map(d=>String(d.exit_intent_id)));
         const originalFreeze = a.blocked_reason;
         const block = (reason: string, overwrite = true) => {
           // Held recovery cannot certify a successful financial receipt after
@@ -587,7 +591,7 @@ export class ProductionLedger {
           // remains UNKNOWN. Financial posting is not authority to release that
           // exit's retained risk reserve. Only a separate resolved-history path
           // may discharge it; ordinary reconciliation must keep the hold.
-          const uncertainExit = intents.some(child => child.parent_id === i.id && !child.terminal && child.state !== "BLOCKED");
+          const uncertainExit = intents.some(child => child.parent_id === i.id && !child.terminal && child.state !== "BLOCKED" && !financiallyDischarged.has(child.id));
           const retain = money(pos.quantity_hundredths) > 0n ? money(i.exit_fee_micros)
             : uncertainExit ? money(i.reserved_micros) : 0n;
           if (money(i.reserved_micros) < retain) {

@@ -46,7 +46,9 @@ test('mounted routes bind authenticated owner, require explicit intent and retai
 });
 test('ordinary reconciliation retains reserve when a settled parent still has uncertain exit transport',()=>{
  const ledger=readFileSync('src/lib/v13-production/ledger.ts','utf8');
- assert.match(ledger,/uncertainExit = intents\.some\(child => child\.parent_id === i\.id && !child\.terminal && child\.state !== "BLOCKED"\)/);
+ assert.match(ledger,/const economicDischarges=await readEconomicExitDischarges\(tx,a\.id,true\)/);
+ assert.match(ledger,/assertNoEconomicExitContradiction\(economicDischarges,snapshot\)/);
+ assert.match(ledger,/uncertainExit = intents\.some\(child => child\.parent_id === i\.id && !child\.terminal && child\.state !== "BLOCKED" && !financiallyDischarged\.has\(child\.id\)\)/);
  assert.match(ledger,/uncertainExit \? money\(i\.reserved_micros\) : 0n/);
  const routes=readFileSync('src/routes/userExecutionRouter.ts','utf8');
  assert.ok(routes.indexOf('economicSettlementRouter(createEconomicSettlementService')>routes.indexOf('requireUser'));
