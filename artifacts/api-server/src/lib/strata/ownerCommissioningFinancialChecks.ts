@@ -137,7 +137,7 @@ export async function prepareActivationRequest(owner:string){
    AND a.commissioned=true AND a.execution_enabled=false AND a.kill_switch=true
    AND a.blocked_reason IS NULL AND a.reserved_micros=0 AND a.minimum_exit_micros=10000
    AND a.cash_precision_verified=true AND a.reconciled_at BETWEEN now()-interval '15 minutes' AND now()
-   AND a.cash_micros=a.initial_cash_micros+COALESCE((SELECT SUM(e.cash_delta_micros) FROM public.v13_production_event e WHERE e.account_id=a.id),0)
+   AND a.cash_micros=a.initial_cash_micros+COALESCE((to_jsonb(a)->>'net_funding_micros')::bigint,0)+COALESCE((SELECT SUM(e.cash_delta_micros) FROM public.v13_production_event e WHERE e.account_id=a.id),0)
    FOR UPDATE OF a`,[owner]);
   if(locked.rows.length!==1)return refuse("stopped_commissioned_release_scope_required");
   const lease=await tx.query("SELECT execution_account_id FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 FOR UPDATE",[locked.rows[0].id]);

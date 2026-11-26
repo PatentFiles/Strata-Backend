@@ -1,3 +1,4 @@
+import {fundedCapitalBasis} from '../strata/cashTransferPolicy';
 import {readEconomicExitDischarges,assertNoEconomicExitContradiction} from '../strata/economicExitDischargeScope';
 import {ReconciliationEventDigests} from "./reconciliationEventDigests";
 import {transactionConnectionFence} from "./transactionConnectionFence";
@@ -27,7 +28,7 @@ export type Account = {
   kill_switch: boolean; execution_enabled: boolean; commissioned: boolean;
   minimum_exit_micros: number | null;
   fee_artifact_digest: string | null; cash_precision_verified: boolean;
-  cash_micros: string; reserved_micros: string; initial_cash_micros: string;
+  cash_micros: string; reserved_micros: string; initial_cash_micros: string; net_funding_micros?:string;
   blocked_reason: string | null; reconciled_at: Date | null; revision: string;
 };
 export type Intent = {
@@ -252,15 +253,19 @@ export class ProductionLedger {
     // Three independent, one-row aggregates in one statement. Do not join raw
     // history rows: that would multiply amounts. Account lock and every
     // conservation equation remain unchanged; no history is omitted/cached.
-    const {rows:[totals]} = await tx.query(`SELECT e.cash,e.pnl,p.basis,p.position_pnl,r.amount
+    const hasFunding=a.net_funding_micros!==undefined;
+    const fundingJoin=hasFunding?` CROSS JOIN (SELECT coalesce(sum(delta_micros),0)::text net,
+      bool_and(owner_user_id=$2::uuid) AS owned FROM private.strata_owner_cash_flow_receipt WHERE execution_account_id=$1) f`:'';
+    const {rows:[totals]} = await tx.query(`SELECT e.cash,e.pnl,p.basis,p.position_pnl,r.amount${hasFunding?',f.net,f.owned':''}
       FROM (SELECT coalesce(sum(cash_delta_micros),0)::text cash,
         coalesce(sum(pnl_micros),0)::text pnl FROM v13_production_event WHERE account_id=$1) e
       CROSS JOIN (SELECT coalesce(sum(basis_micros),0)::text basis,
         coalesce(sum(realized_pnl_micros),0)::text position_pnl FROM v13_production_position WHERE account_id=$1) p
       CROSS JOIN (SELECT coalesce(sum(reserved_micros),0)::text amount
-        FROM v13_production_intent WHERE account_id=$1) r`, [a.id]);
-    requireProof(money(a.cash_micros) === money(a.initial_cash_micros) + money(totals.cash) &&
-      money(a.cash_micros) + money(totals.basis) === money(a.initial_cash_micros) + money(totals.pnl) &&
+        FROM v13_production_intent WHERE account_id=$1) r${fundingJoin}`,hasFunding?[a.id,a.owner_user_id]:[a.id]);
+    if(hasFunding)requireProof(money(totals.net)===money(a.net_funding_micros!)&&totals.owned!==false,"production_funding_receipts_inconsistent");
+    requireProof(money(a.cash_micros) === fundedCapitalBasis(a) + money(totals.cash) &&
+      money(a.cash_micros) + money(totals.basis) === fundedCapitalBasis(a) + money(totals.pnl) &&
       money(totals.position_pnl) === money(totals.pnl) &&
       money(a.reserved_micros) === money(totals.amount), "production_money_conservation_failed");
   }
