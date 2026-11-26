@@ -45,8 +45,10 @@ test("production wiring does not convert ordinary reconciliation or successful e
  assert.match(source,/technicalRelease.completeReconciliation\(eligible&&flat\)/);
  assert.match(source,/if\(currentEntry&&!settledReserveReadinessEnabled\(\)\)throw new Error\("production_other_uncertain_order"\)/);
  assert.match(source,/if\(currentEntry&&unresolvedNow.mode==="recovery"\)[\s\S]*runtimeSettledExitReceipt[\s\S]*if\(!receipt\)throw new Error\("production_other_uncertain_order"\)/);
- assert.ok(source.indexOf('if(receipt)return {ok:false,reason:"production_settled_disposition_exit_not_qualified"}')<source.indexOf('const claimed = await claimWorkerLease'));
+ const containment=source.indexOf('if(receipt&&(!settledReserveContinuationEnabled()||!directAllowed||!standingMode))');
+ assert.ok(containment>=0&&containment<source.indexOf('const claimed = await claimWorkerLease'));
+ assert.match(source,/eligibleHistoricPair=unresolved.mode==="recovery"&&directAllowed&&standingMode&&settledReserveContinuationEnabled\(\)[\s\S]*reconciledSettledExitReceipt/);
  const executor=readFileSync("src/lib/v13-production/executor.ts","utf8");
- assert.match(executor,/current\?\.receiptDigest===retired.receiptDigest[\s\S]*if\(i.kind==="ENTRY"\)throw new Error\("production_settled_disposition_exit_not_qualified"\)/);
+ assert.match(executor,/current\?\.receiptDigest===retired.receiptDigest[\s\S]*if\(i.kind==="ENTRY"&&!settledReserveContinuationEnabled\(\)\)throw new Error\("production_settled_disposition_exit_not_qualified"\)/);
  assert.doesNotMatch(source,/state.entriesAuthorized\s*=\s*true/);
 });

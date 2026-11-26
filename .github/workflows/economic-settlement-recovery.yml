@@ -7,11 +7,20 @@ on:
       - 'artifacts/api-server/src/lib/strata/accountCredentialControls.ts'
       - 'artifacts/api-server/src/lib/strata/reconciledReleaseRenewalHistory.ts'
       - 'artifacts/api-server/src/lib/strata/settledCashBracket.ts'
+      - 'artifacts/api-server/src/lib/strata/*Settled*'
+      - 'artifacts/api-server/src/lib/strata/settledExit*'
+      - 'artifacts/api-server/src/lib/strata/settledReceiptFullCycle.postgres.test.ts'
+      - 'artifacts/api-server/src/lib/strata/heldSupervisorDispatch.postgres.fixture.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerFeeEmergencyExitWorkerRecovery.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/strata/reconciledFlatEntryEvidence.ts'
+      - 'artifacts/api-server/src/lib/v13-production/executor.ts'
       - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
       - 'artifacts/api-server/src/routes/ownerEconomicSettlement*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - 'artifacts/api-server/scripts/run-economic-settlement-tests.mjs'
       - 'supabase/migrations/*economic_settlement*'
+      - 'supabase/migrations/*settled_exit_reserve_disposition*'
       - '.github/workflows/economic-settlement-recovery.yml'
   workflow_dispatch:
 permissions:
@@ -58,4 +67,7 @@ jobs:
         env:
           STRATA_ECONOMIC_PG_VERSION: ${{ matrix.postgres }}
         run: pnpm run test:economic-settlement-native
+      - name: Orders-off receipt, worker entry, protective exit and restart
+        working-directory: artifacts/api-server
+        run: node scripts/run-v13-disposable-postgres.mjs src/lib/strata/settledReceiptFullCycle.postgres.test.ts
       - run: pnpm --filter @workspace/api-server run build

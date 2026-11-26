@@ -92,9 +92,31 @@ export async function reconcileOwnedProtectiveExits(input:{
      pending=next;
     }else{
      const current=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,snapshot,nowMs:Date.now()});
-     if(current?.receiptDigest!==retired.receiptDigest||Date.now()-started>5000||Date.now()<started)
+     if(current?.receiptDigest===retired.receiptDigest&&Date.now()-started<=5000&&Date.now()>=started)
+      return {ok:true,reason:"historical_protective_exit_economic_receipt_matches",attempted:0,mayRetry:false,postAttempted:false};
+     // A newly acknowledged BUY can change exchange cash before ordinary
+     // ledger reconciliation. Permit only that read-only reconciliation, not
+     // another entry. The ledger independently verifies fills/positions/cash.
+     if(!snapshot.orders.every(o=>o.terminal))return blocked("protective_exit_historical_history_unverified");
+     verifyDisposedExitAgainstSnapshot(retired,snapshot);
+     const entries=(await db.query(`SELECT i.client_order_id,i.market,i.exchange_order_id
+      FROM public.v13_production_intent i JOIN public.v13_production_account a ON a.id=i.account_id
+      WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2 AND a.key_fingerprint=$3
+       AND i.id<>$4 AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal)
+       AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations m WHERE m.execution_account_id=a.id
+        AND m.reservation_id<>$5::uuid AND m.state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+       AND i.kind='ENTRY' AND i.state IN ('DISPATCHED','UNKNOWN') AND NOT i.terminal
+       AND i.market<>$6 AND i.created_at>to_timestamp($7::double precision/1000)
+       AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent other WHERE other.account_id=a.id
+        AND other.id NOT IN ($4,i.id) AND (other.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT other.terminal))
+      LIMIT 2`,[input.accountId,input.ownerId,fp,retired.exitId,retired.reservationId,retired.market,retired.settledAtMs])).rows;
+     const entry=entries[0],age=Date.now()-started;
+     if(entries.length!==1||!entry||!Number.isSafeInteger(age)||age<0||age>5000||
+        snapshot.orders.filter(o=>o.request.clientOrderId===entry.client_order_id&&o.request.market===entry.market&&
+         o.terminal&&o.request.action==='BUY'&&!o.request.reduceOnly&&
+         (entry.exchange_order_id===null||entry.exchange_order_id===o.orderId)).length!==1)
       return blocked("protective_exit_historical_history_unverified");
-     return {ok:true,reason:"historical_protective_exit_economic_receipt_matches",attempted:0,mayRetry:false,postAttempted:false};
+     return {ok:true,reason:"historical_receipt_pending_owned_entry_reconcile_only",attempted:0,mayRetry:false,postAttempted:false};
     }
    }
   }

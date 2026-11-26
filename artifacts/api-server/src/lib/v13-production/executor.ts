@@ -1,3 +1,4 @@
+import {settledReserveContinuationEnabled} from "../strata/armSettledReserveScope";
 import {runtimeSettledExitReceipt} from '../strata/runtimeSettledExitGuard';
 import {settledReserveReadinessEnabled} from '../strata/armSettledReserveScope';
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
@@ -242,6 +243,11 @@ export class ProductionExecutor {
   }
 
   #committedSettlementSnapshot:Snapshot|null=null;
+  /** Internal STOP proof input; never a substitute for a locked flat check. */
+  committedSettledSnapshotForStop():Snapshot|null{
+    return settledReserveContinuationEnabled()&&this.#committedSettlementSnapshot
+      ?structuredClone(this.#committedSettlementSnapshot):null;
+  }
   private async settledExitGuard(tx:PoolClient,a:Account,currentIntentId:string|null,snapshot=this.#committedSettlementSnapshot){
     if(!snapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return null;
     const receipt=await runtimeSettledExitReceipt(tx,{accountId:a.id,ownerId:this.accountOwnerUserId,snapshot,
@@ -756,7 +762,7 @@ export class ProductionExecutor {
             // wire guards. Never create new exposure until that lane is proven
             // on this same exact receipt. Orders-off diagnostics may test the
             // proof above, but it isn't permission to invoke the transport.
-            if(i.kind==="ENTRY")throw new Error("production_settled_disposition_exit_not_qualified");
+            if(i.kind==="ENTRY"&&!settledReserveContinuationEnabled())throw new Error("production_settled_disposition_exit_not_qualified");
           }
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.

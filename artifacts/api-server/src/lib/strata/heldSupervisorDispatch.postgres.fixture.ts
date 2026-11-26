@@ -1,9 +1,14 @@
+import {readFileSync} from 'node:fs';
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {proveEconomicSettlement,economicSettlementPlan} from './ownerEconomicSettlementProof';
+import {commitEconomicSettlement} from './ownerEconomicSettlementCommit';
+import {disposeSettledExitReserve} from './settledExitReserveDisposition';
 import {pinOwnerProtectiveHistory} from "./ownerProtectiveHistoryPreviewPin";
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createPublicKey,verify,constants,randomUUID} from 'node:crypto';
 import {pool,type Pool} from '@workspace/db';
 import {installRestrictedProtectiveRuntime,assertRestrictedAuthority,assertRestrictedOutcome,restrictedRuntimeDiagnostics,beginRestrictedRuntimeDiagnostics} from './restrictedProtectiveRuntime.fixture';
-import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
+import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH,V13_ENTRY_POLICY_VERSION} from '@workspace/v13-strategy';
 import {digest,type Request} from '../v13-production/types';
 import {conservativeExitFeeMicros} from '../v13-production/fractionalExitFee';
 import {maximumExitFeePerContractMicros} from '../microLiveEntryFees';
@@ -391,4 +396,166 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
    try{await pool.end();}finally{if(restricted)await setup.end();}
   }
  }
+}
+
+/** One process and real worker, exact receipt, no seeded successor orders.
+ * The canonical runner strips credentials and fences all outbound sockets.
+ * The synthetic venue is the only code which accepts a signed order request. */
+export async function runSettledReceiptFullCycle(){
+ const setup=new NativePool({connectionString:url!,max:2});
+ const controls:PersonalSessionControl[]=[];let control:PersonalSessionControl|undefined;
+ const at=Date.now();let btc=99990,cash=0,qty=0,reads=0;
+ const ticker=request.market, orders:Record<string,unknown>[]=[],fills:Record<string,unknown>[]=[];
+ const submitted:Array<{id:string;reduce:boolean;count:number}>=[],httpErrors:string[]=[];
+ const open=new Date(at-90000).toISOString(),close=new Date(at+810000).toISOString();
+ const market={ticker,event_ticker:ticker+'-EVENT',series_ticker:'KXBTC15M',exchange_index:2,
+  status:'active',floor_strike:100000,price_level_structure:'deci_cent',open_time:open,close_time:close,
+  expiration_time:close,expected_expiration_time:close,latest_expiration_time:close,
+  yes_bid_dollars:'0.5000',yes_ask_dollars:'0.5000',no_bid_dollars:'0.5000',no_ask_dollars:'0.5000'};
+ const held=economicSettlementFixture(at);
+ // Keep the new live market distinct from the historical already-settled market.
+ const successor='KXBTC15M-REHEARSAL-SUCCESSOR';market.ticker=successor;market.event_ticker=successor+'-EVENT';
+ const respond=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
+ globalThis.fetch=async(input,init)=>{
+  const u=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);
+  const path=u.pathname,method=init?.method??'GET';
+  if(u.origin==='https://api.exchange.coinbase.com'&&method==='GET'){
+   reads++;return respond({price:String(btc),time:new Date().toISOString()});
+  }
+  try{
+   assert.equal(u.origin,'https://external-api.kalshi.com');
+   if(method==='POST'){
+    assert.equal(path,'/trade-api/v2/portfolio/events/orders');
+    const h=new Headers(init?.headers),ts=h.get('KALSHI-ACCESS-TIMESTAMP')!;
+    assert.equal(h.get('KALSHI-ACCESS-KEY'),material.keyId);
+    assert(verify('sha256',Buffer.from(ts+'POST'+path),{key:createPublicKey(material.privateKey),padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},Buffer.from(h.get('KALSHI-ACCESS-SIGNATURE')!,'base64')));
+    const b=JSON.parse(String(init?.body)),count=Math.round(Number(b.count)*100),id='venue-'+(submitted.length+1);
+    assert.equal(b.ticker,successor);assert.equal(b.subaccount,1);assert.equal(b.exchange_index,2);
+    assert.equal(b.time_in_force,'immediate_or_cancel');assert(!submitted.some(x=>x.id===b.client_order_id));
+    assert(Number.isSafeInteger(count)&&count>0);assert.equal(b.reduce_only,submitted.length===1);
+    const reducing=b.reduce_only===true,orderTime=new Date().toISOString();
+    assert.equal(b.side,reducing?'ask':'bid');if(reducing)assert.equal(count,qty);
+    const cents=Math.round(Number(b.price)*100),gross=count*cents*100,fee=10000;
+    qty+=reducing?-count:count;cash+=reducing?gross-fee:-gross-fee;
+    submitted.push({id:b.client_order_id,reduce:reducing,count});
+    orders.push({order_id:id,client_order_id:b.client_order_id,ticker:successor,book_side:b.side,
+     subaccount_number:1,exchange_index:2,created_time:orderTime,status:'executed',yes_price_dollars:b.price,
+     initial_count_fp:b.count,fill_count_fp:b.count,remaining_count_fp:'0.00',reduce_only:reducing});
+    fills.push({trade_id:'fill-'+id,order_id:id,ticker:successor,count_fp:b.count,
+     yes_price_dollars:b.price,no_price_dollars:(1-Number(b.price)).toFixed(4),fee_cost:'0.0100',
+     subaccount_number:1,exchange_index:2,created_time:orderTime});
+    return respond({order_id:id,client_order_id:b.client_order_id,fill_count:b.count,remaining_count:'0.00',ts_ms:Date.now()},201);
+   }
+   assert.equal(method,'GET');
+   const o=held.snapshot.orders[0]!,f=held.snapshot.fills[0]!;
+   if(path==='/trade-api/v2/portfolio/balance')return respond({balance_dollars:(cash/1000000).toFixed(6),subaccount:1,exchange_index:2});
+   if(path.includes('/historical/'))return respond({orders:[],fills:[],cursor:''});
+   if(path==='/trade-api/v2/portfolio/orders')return respond({orders:[{
+    client_order_id:o.request.clientOrderId,ticker:o.request.market,order_id:o.orderId,status:'executed',
+    book_side:'ask',yes_price_dollars:'0.49',initial_count_fp:'3.00',fill_count_fp:'3.00',
+    created_time:new Date(f.occurredAtMs-5000).toISOString(),subaccount_number:1,exchange_index:2},...orders],cursor:''});
+   if(path==='/trade-api/v2/portfolio/fills')return respond({fills:[{
+    trade_id:f.id,order_id:f.orderId,ticker:f.market,count_fp:'3.00',yes_price_dollars:'0.51',no_price_dollars:'0.49',
+    fee_cost:'0.052500',created_time:new Date(f.occurredAtMs).toISOString(),subaccount_number:1,exchange_index:2},...fills],cursor:''});
+   if(path==='/trade-api/v2/portfolio/positions')return respond({market_positions:submitted.length?[{ticker:successor,
+    position_fp:(qty/100).toFixed(2),subaccount_number:1,exchange_index:2}]:[],cursor:''});
+   if(path==='/trade-api/v2/portfolio/settlements')return respond({settlements:[held.rawSettlement],cursor:''});
+   if(path.endsWith('/orderbook')){const resp=respond({orderbook_fp:{yes_dollars:[['0.5000','100.00']],no_dollars:[['0.5000','100.00']]}});Object.defineProperty(resp,'url',{value:u.href});return resp;}
+   if(path==='/trade-api/v2/markets')return respond({markets:[market],cursor:''});
+   if(path==='/trade-api/v2/markets/'+successor)return respond({market});
+   if(path==='/trade-api/v2/series/KXBTC15M')return respond({series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:'1'}});
+   if(path==='/trade-api/v2/events/'+market.event_ticker)return respond({event:{event_ticker:market.event_ticker,series_ticker:'KXBTC15M',exchange_index:2,fee_type_override:null,fee_multiplier_override:null}});
+   if(path==='/trade-api/v2/series/fee_changes')return respond({series_fee_change_arr:[],cursor:''});
+   if(path==='/trade-api/v2/events/fee_changes')return respond({event_fee_changes:[],cursor:''});
+   throw Error('unrecognized synthetic request '+path);
+  }catch(e){httpErrors.push(String(e));throw e;}
+ };
+ try{
+  const admin=await setup.connect();try{await installFullRecoverySchema(admin);}finally{admin.release();}
+  await setup.query("CREATE TABLE vault.decrypted_secrets(id uuid PRIMARY KEY REFERENCES vault.secrets(id),decrypted_secret text NOT NULL)");
+  await installCombinedPlatformShape(setup);
+  for(const migration of ['20261125205247_owner_arm_preparation','20261126004500_economic_settlement_receipt','20261126124100_settled_exit_reserve_disposition'])
+   await setup.query(readFileSync('../../supabase/migrations/'+migration+'.sql','utf8'));
+  Object.assign(process.env,{NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,
+   STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA:sha,STRATA_SETTLED_EXIT_CONTINUATION_SHA:sha,
+   STRATA_INDEPENDENT_LIVE_SOURCE_V1:'true',
+   STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:JSON.stringify([{ownerId:owner,accountId:account,releaseSha:sha}])});
+  const probe=await probeCurrentKalshiFeeApi(globalThis.fetch,Date.now,successor);
+  const fee=preparePdfFreeApiFeePolicyReview(probe);assert(fee.ok,JSON.stringify(fee));
+  await reset(fee.reviewCandidateDigest,setup);
+  await setup.query("UPDATE public.strata_configured_stake SET configured_stake_cents=500,risk_capital_cents=2500 WHERE execution_account_id=$1",[account]);
+  await setup.query("UPDATE public.v13_live_money_policy SET entry_policy_version=$2 WHERE id=$1",[policy,V13_ENTRY_POLICY_VERSION]);
+  policyHash=computeV13LiveMoneyPolicyHash(decodePolicy((await setup.query("SELECT * FROM public.v13_live_money_policy WHERE id=$1",[policy])).rows[0]));
+  await setup.query("UPDATE public.v13_live_money_policy SET policy_hash=$2 WHERE id=$1",[policy,policyHash]);
+  await seedCombinedStanding(setup,{owner,reviewer,grant,account,policyHash,sha});
+  const retired=await recordRehearsalReceipt(setup,held);
+  cash=Number(held.snapshot.cashMicros);
+  control=createProductionPersonalSession(db);controls.push(control);
+  const started=await control.start({userId:owner,accountId:account,action:'START'});
+  assert.equal(started.workerStarted,true,JSON.stringify({started,httpErrors}));
+  const describe=async()=>({submitted,httpErrors,cash,qty,reads,
+   account:(await setup.query("SELECT blocked_reason,cash_micros,reserved_micros FROM public.v13_production_account WHERE id=$1",[account])).rows,
+   decisions:(await setup.query("SELECT stage,outcome,reason_code FROM private.strata_live_decision_log_v1 WHERE execution_account_id=$1 ORDER BY observed_at DESC LIMIT 8",[account])).rows,
+   intents:(await setup.query('SELECT state,kind FROM public.v13_production_intent WHERE account_id=$1',[account])).rows});
+  await until(async()=>reads>=1,describe);await pause(250);btc=100020;
+  await until(async()=>submitted.length===1&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)>0,describe);
+  btc=99980;
+  await until(async()=>submitted.length===2&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)===0,describe);
+  assert.deepEqual(submitted.map(x=>x.reduce),[false,true]);assert.equal(submitted[0]!.count,submitted[1]!.count);
+  const stopped=await control.stop({userId:owner,accountId:account,action:'STOP'});assert.deepEqual(stopped,{workerStopped:true,managingExposure:false});
+  control=createProductionPersonalSession(db);controls.push(control);
+  const restarted=await control.start({userId:owner,accountId:account,action:'START'});
+  assert.equal(restarted.workerStarted,true,JSON.stringify({restarted,httpErrors}));
+  const observed=reads;await until(async()=>reads>observed,describe);
+  assert.equal(submitted.length,2);assert.equal(httpErrors.length,0,JSON.stringify(httpErrors));
+  const final=(await setup.query("SELECT cash_micros,reserved_micros,blocked_reason FROM public.v13_production_account WHERE id=$1",[account])).rows[0];
+  assert.deepEqual(final,{cash_micros:String(cash),reserved_micros:'0',blocked_reason:null});
+  assert.deepEqual((await setup.query("SELECT i.state,m.state AS marker FROM public.v13_production_intent i JOIN private.strata_emergency_exit_reservations m USING(client_order_id) WHERE i.id=$1",[retired])).rows,[{state:'DISPATCHED',marker:'UNKNOWN'}]);
+ }finally{
+  try{for(const c of controls)await c.stop({userId:owner,accountId:account,action:'KILL'});}
+  finally{try{await pool.end();}finally{await setup.end();}}
+ }
+}
+
+async function recordRehearsalReceipt(setup:Pool,held:ReturnType<typeof economicSettlementFixture>){
+ Object.assign(held.account,{id:account,owner_user_id:owner,key_fingerprint:fingerprint});
+ held.snapshot.identity.keyFingerprint=fingerprint;
+ for(const i of held.history.rows)i.account_id=account;
+ for(const e of held.history.events)e.account_id=account;
+ for(const p of held.history.positions)p.account_id=account;
+ for(const m of held.history.markers){m.execution_account_id=account;m.owner_user_id=owner;}
+ const proof=proveEconomicSettlement(held),plan=economicSettlementPlan(proof);
+ await setup.query(`INSERT INTO private.kalshi_account_worker_lease(execution_account_id,owner_user_id,financial_account_id,
+  provider_connection_id,vault_secret_id,holder_id,fencing_token,state,credential_fingerprint,arm_requested,account_kill,heartbeat_at,released_at)
+  VALUES($1,$2,$3,$4,$5,'offline-worker',7,'released',$6,false,false,clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')`,
+  [account,owner,financial,provider,secret,fingerprint]);
+ await setup.query("UPDATE public.v13_production_account SET cash_micros=$2,reserved_micros=$3,initial_cash_micros=$4,revision=$5 WHERE id=$1",
+  [account,held.account.cash_micros,held.account.reserved_micros,held.account.initial_cash_micros,held.account.revision]);
+ for(const i of held.history.rows)await setup.query(`INSERT INTO public.v13_production_intent(id,account_id,evaluation_id,crossing_key,parent_id,kind,market,side,state,
+  request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id,reserved_micros,exit_fee_micros,
+  filled_hundredths,terminal,dispatch_at,created_at)
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+  [i.id,account,i.kind==='ENTRY'?'supervisor-source':null,i.kind==='ENTRY'?'historic-crossing':null,i.parent_id,i.kind,i.market,i.side,i.state,
+   JSON.stringify(i.request),JSON.stringify(i.decision),i.policy_hash,i.fee_fingerprint,i.capability_digest,i.client_order_id,i.exchange_order_id,
+   i.reserved_micros,i.exit_fee_micros,i.filled_hundredths,i.terminal,i.dispatch_at,i.created_at]);
+ const p=held.history.positions[0]!;
+ await setup.query("INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros,realized_pnl_micros) VALUES($1,$2,$3,$4,$5,$6,0)",[p.id,account,p.market,p.side,p.quantity_hundredths,p.basis_micros]);
+ for(const e of held.history.events)await setup.query(`INSERT INTO public.v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at)
+  VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)`,[account,e.event_id,e.intent_id,e.kind,e.digest,JSON.stringify(e.payload),e.cash_delta_micros,e.pnl_micros,e.occurred_at]);
+ const m=held.history.markers[0]!;
+ await setup.query(`INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,
+  reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,order_request_json,initial_position_fp,position_observed_at_ms)
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,7,'offline-worker',$9,'-3.00',$10)`,
+  [m.reservation_id,owner,account,m.market_ticker,m.client_order_id,m.reducing_side,m.quantity_hundredths,m.order_digest,m.order_request_json,held.nowMs-14000]);
+ await setup.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[m.reservation_id]);
+ const scope={requestId:randomUUID(),ownerId:owner,scopeDigest:'b'.repeat(64),releaseSha:sha,controlEpoch:'0',workerFence:'7'};
+ const deps={db:setup,now:()=>held.nowMs,verifyLocked:async()=>{}};
+ const settle=await commitEconomicSettlement(proof,scope,deps);assert.equal(settle.ok,true,JSON.stringify(settle));
+ const posted=(await setup.query("SELECT * FROM public.v13_production_account WHERE id=$1",[account])).rows[0];
+ const events=(await setup.query("SELECT * FROM public.v13_production_event WHERE account_id=$1 ORDER BY event_id",[account])).rows;
+ const positions=(await setup.query("SELECT * FROM public.v13_production_position WHERE account_id=$1",[account])).rows;
+ const evidence={...held,account:{...posted,subaccount:Number(posted.subaccount),exchange_index:Number(posted.exchange_index)},history:{...held.history,events,positions}};
+ const disposed=await disposeSettledExitReserve(evidence,{...scope,requestId:randomUUID()},deps);
+ assert.equal(disposed.status,'RECORDED',JSON.stringify(disposed));
+ return plan.exitId;
 }

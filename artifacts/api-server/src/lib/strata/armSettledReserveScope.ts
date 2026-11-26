@@ -7,6 +7,10 @@ export function settledReserveReadinessEnabled(env=process.env){
  const sha=deployedGitSha(env);
  return /^[a-f0-9]{40}$/.test(sha)&&env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA===sha;
 }
+/** Exact release opt-in; default is deliberate no-entry containment. */
+export function settledReserveContinuationEnabled(env=process.env){
+ return settledReserveReadinessEnabled(env)&&env.STRATA_SETTLED_EXIT_CONTINUATION_SHA===deployedGitSha(env);
+}
 export type StoppedSettledExitDisposition={exitId:string;entryId:string;reservationId:string;clientOrderId:string;market:string;
  eventId:string;eventDigest:string;receiptDigest:string;settledAtMs:number};
 /** Structural receipt reader only. Its results cannot prove that the venue has

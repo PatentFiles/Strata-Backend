@@ -7,7 +7,7 @@ import type {Snapshot} from "../v13-production/types";
  */
 export async function reconciledFlatEntryEvidence(
  db:{query(sql:string,params:unknown[]):Promise<{rows:Record<string,unknown>[]}>},
- input:{accountId:string;ownerId:string;snapshot:Snapshot;nowMs:number;receiptClock?:()=>number},
+ input:{accountId:string;ownerId:string;snapshot:Snapshot;nowMs:number;receiptClock?:()=>number;lockReceipt?:boolean},
 ):Promise<boolean>{
  try {
   const s=input.snapshot,age=input.nowMs-s.observedAtMs;
@@ -19,7 +19,7 @@ export async function reconciledFlatEntryEvidence(
     SELECT a.reserved_micros::text AS reserved_micros,a.cash_micros::text AS cash_micros,
       a.blocked_reason,a.kill_switch,a.execution_enabled,
       (SELECT count(*)::text FROM v13_production_intent i WHERE i.account_id=a.id
-        AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal)) AS unresolved,
+        AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal OR i.reserved_micros<>0)) AS unresolved,
       (SELECT count(*)::text FROM private.strata_emergency_exit_reservations r
         WHERE r.execution_account_id=a.id AND r.state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits,
       (SELECT count(*)::text FROM v13_production_position p WHERE p.account_id=a.id
@@ -33,6 +33,6 @@ export async function reconciledFlatEntryEvidence(
   if(r.unresolved==="0"&&r.exits==="0")return true;
   if(r.unresolved!=="1"||r.exits!=="1"||!input.receiptClock)return false;
   return (await reconciledSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,
-   snapshot:s,now:input.receiptClock}))!==null;
+   snapshot:s,now:input.receiptClock,lock:input.lockReceipt}))!==null;
  }catch{return false;}
 }

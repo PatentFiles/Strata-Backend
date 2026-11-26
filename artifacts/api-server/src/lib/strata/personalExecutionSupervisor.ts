@@ -28,7 +28,7 @@ import {createEntryWireClockFetch} from "./entryWireClock";
 import {TechnicalReleaseEntryGate} from "./technicalReleaseEntryGate";
 import {reconciledFlatEntryEvidence} from "./reconciledFlatEntryEvidence";
 import { randomUUID } from "node:crypto";
-import type { Pool } from "@workspace/db";
+import type { Pool, PoolClient } from "@workspace/db";
 import { getScopedKalshiJson } from "../kalshiAccountClient";
 import { verifyCurrentFeeArtifact } from "../microLiveFeeArtifact";
 import { STANDARD_QUADRATIC_FEE_FORMULA_VERSION } from "../microLiveFeeArtifact";
@@ -42,8 +42,8 @@ import {createGuardedOwnerV3FeeFetch} from "./guardedOwnerV3FeeWire";
 import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
-import {runtimeSettledExitReceipt} from "./runtimeSettledExitGuard";
-import {settledReserveReadinessEnabled} from "./armSettledReserveScope";
+import {reconciledSettledExitReceipt,runtimeSettledExitReceipt} from "./runtimeSettledExitGuard";
+import {settledReserveContinuationEnabled,settledReserveReadinessEnabled} from "./armSettledReserveScope";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
 import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
@@ -513,7 +513,7 @@ export function createProductionPersonalSession(
     }
     if(settledReserveReadinessEnabled()){
       const receipt=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now()});
-      if(receipt)return {ok:false,reason:"production_settled_disposition_exit_not_qualified"};
+      if(receipt&&(!settledReserveContinuationEnabled()||!directAllowed||!standingMode))return {ok:false,reason:"production_settled_disposition_exit_not_qualified"};
     }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
@@ -782,7 +782,10 @@ export function createProductionPersonalSession(
                 feeCheckedAt=clock;
               }else if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
-                  sourceUrl,market,{probe:(fetchImpl,clock,ticker)=>
+                  // In the locked final order transaction, the standing-fee
+                  // renewal must use the same connection as its account locks.
+                  // A second connection waits on this transaction's own lock.
+                  sourceUrl,market,{db:finalLedger?.currentTransaction()??undefined,probe:(fetchImpl,clock,ticker)=>
                     feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
                 if(!checked.ok||checked.identity.marketTicker!==market)
                   throw annotateFeeFailure(new Error("api_fee_exact_market_source_unavailable"),
@@ -989,11 +992,17 @@ export function createProductionPersonalSession(
       }
       return {ok:false,reason:unresolved.reason};
     }
-    const recovery = unresolved.mode === "recovery";
-    if (recovery) state.entriesAuthorized = false;
+    // Only the exact account-bound direct lane with current standing authority
+    // can reclassify an old economic pair. The worker still reconciles signed
+    // history and renews its own technical lease before opening entries.
+    const eligibleHistoricPair=unresolved.mode==="recovery"&&directAllowed&&standingMode&&settledReserveContinuationEnabled()
+      ?await reconciledSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.userId,snapshot,now})
+      :null;
+    const mode=eligibleHistoricPair?"entries":unresolved.mode;
+    if (mode==="recovery") state.entriesAuthorized = false;
     // Request cancellation applies to admission, not to the recurring worker's
     // async context. Its existing lease/STOP/KILL fences own subsequent ticks.
-    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, unresolved.mode));
+    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, mode));
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
@@ -1006,7 +1015,16 @@ export function createProductionPersonalSession(
       ok: true,
       worker: session.worker,
       state,
-      disarm: (action) => {if(action==="KILL")recoveryAbort?.abort();finalPublicMetadata?.discardAll();return disarmWorkerLease(db, input.userId, input.accountId, action, new Date(now()).toISOString());},
+      disarm: (action) => {
+        if(action==="KILL")recoveryAbort?.abort();
+        finalPublicMetadata?.discardAll();
+        return disarmWorkerLease(db,input.userId,input.accountId,action,new Date(now()).toISOString(),async tx=>{
+          const snapshot=session.executor.committedSettledSnapshotForStop();
+          return snapshot!==null&&await reconciledFlatEntryEvidence(tx,{
+            accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),receiptClock:now,lockReceipt:true,
+          });
+        });
+      },
     };
   });
 }
@@ -1230,6 +1248,7 @@ export async function disarmWorkerLease(
   executionAccountId: string,
   action: LeaseAction,
   now: string,
+  proveSettledFlat?:(client:PoolClient)=>Promise<boolean>,
 ): Promise<{ entriesBlocked: boolean; managingExposure: boolean }> {
   try {
     if (action === "KILL") {
@@ -1248,7 +1267,8 @@ export async function disarmWorkerLease(
       await client.query("SET LOCAL lock_timeout='750ms'");
       await client.query("SET LOCAL statement_timeout='5000ms'");
       await lockStopAccount(client,ownerUserId,executionAccountId);
-      const managingExposure=await readStopExposure(client,executionAccountId);
+      const rawExposure=await readStopExposure(client,executionAccountId);
+      const managingExposure=rawExposure&&!(proveSettledFlat&&await proveSettledFlat(client));
       const updated=managingExposure
         ? await client.query(HOLD_LEASE_SQL,[executionAccountId,ownerUserId])
         : await releaseWorkerLease(client,ownerUserId,executionAccountId,false,now);
