@@ -286,7 +286,7 @@ test('exact five-second final source boundary remains accepted and later recross
   if(/^insert into "forward_test_positions"/i.test(text??''))inserted=true;
   return original.apply(this,args);};
  let r;try{r=await f.observe(10,{clock:at=>at+(inserted?5000:0)});}finally{proto.query=original;unsubscribe();}
- assert.equal(r.error,null);assert.equal(wakes,1);assert.equal((await f.state()).positions.length,1);
+ assert.equal(r.error,null);assert.equal(wakes,0);assert.equal((await f.state()).positions.length,1);
  await f.observe(-10);await f.observe(10);assert.equal((await f.state()).positions.length,1);
  assert.equal((await f.state()).evaluations.filter(e=>e.qualifyingTrigger).length,1);
 });

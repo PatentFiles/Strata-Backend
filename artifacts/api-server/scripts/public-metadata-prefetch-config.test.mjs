@@ -9,6 +9,8 @@ const entry=fileURLToPath(new URL("../src/lib/strata/sharedPersonalTradingContro
 const supervisor=fileURLToPath(new URL("../src/lib/strata/personalExecutionSupervisor.ts",import.meta.url));
 const flag="STRATA_PUBLIC_METADATA_PREFETCH_ENABLED";
 const finalFlag="STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED";
+const overlapFlag="STRATA_FINAL_ACCOUNT_SNAPSHOT_OVERLAP_ENABLED";
+const boundedFlag="STRATA_BOUNDED_HISTORY_READS_ENABLED";
 // Compile the ACTUAL process-wide construction module. Only its DB, supervisor
 // factory and HTTP-control-port dependencies are offline stubs. Config parsing
 // and option forwarding are real; no worker, DB, provider or socket is started.
@@ -44,15 +46,17 @@ function construct(value,{extra={},throwDiagnostic=false}={}){
     fetch(){throw Error("network_forbidden_in_configuration_test");}};
   return {run:()=>runInNewContext(source,context,{timeout:1000}),calls,values,module,diagnostics,envReads};
 }
-function verifySharedConstruction(c,enabled,finalEnabled=false){
+function verifySharedConstruction(c,enabled,finalEnabled=false,overlapEnabled=false,boundedEnabled=false){
   assert.equal(c.calls.length,2);const [session,controls]=c.calls;
   assert.equal(session.kind,"supervisor");assert.equal(session.options.publicMetadataPrefetch,enabled);
-  assert.deepEqual(Object.keys(session.options),["publicMetadataPrefetch","finalPublicMetadataPrefetch"]);
+  assert.deepEqual(Object.keys(session.options),["overlapFinalAccountSnapshot","boundedHistoryReads","publicMetadataPrefetch","finalPublicMetadataPrefetch"]);
   assert.equal(session.options.finalPublicMetadataPrefetch,finalEnabled);
+  assert.equal(session.options.overlapFinalAccountSnapshot,overlapEnabled);
+  assert.equal(session.options.boundedHistoryReads,boundedEnabled);
   assert.equal(controls.kind,"controls");assert.equal(controls.pool,session.pool);
   assert.equal(controls.options.session,c.module.exports.personalTradingSession);
   assert.equal(c.module.exports.personalTradingControls.session,c.module.exports.personalTradingSession);
-  assert.deepEqual(c.envReads,[flag,finalFlag],"only the two explicit independent rollout flags are read, exactly once each");
+  assert.deepEqual(c.envReads,[flag,finalFlag,overlapFlag,boundedFlag],"only the four explicit independent rollout flags are read, exactly once each");
 }
 
 test("unset and exact false retain OFF at the actual shared supervisor construction",()=>{
@@ -64,10 +68,10 @@ test("unset and exact false retain OFF at the actual shared supervisor construct
 
 test("exact true opts the same supervisor into its existing reviewed public-only coordinator",async()=>{
   const c=construct("true");c.run();verifySharedConstruction(c,true);assert.equal(c.diagnostics.length,0);
-  // Static integration assertion: this is the unchanged reviewed hook, not a
-  // new coordinator, book cache, alternate worker construction or bypass.
+  // The reviewed coordinator is available only on the non-direct source path.
+  // Independent direct-source sessions must not install this legacy hook.
   const text=await readFile(supervisor,"utf8");
-  assert.match(text,/if\(apiSource&&options\.publicMetadataPrefetch===true\)\{/);
+  assert.match(text,/if\(!directSource&&\(apiSource\|\|durableSource\)&&options\.publicMetadataPrefetch===true\)\{/);
   assert.match(text,/const attempt=processCommittedPublicMetadata\.start\(metadataScope\(\),hint\)/);
 });
 
@@ -108,6 +112,28 @@ test("final phases require their own exact true and do not enable PREPARE",()=>{
       assert.equal(c.diagnostics.length,[undefined,"false","true"].includes(final)?0:1);
       if(c.diagnostics.length)assert.deepEqual(JSON.parse(JSON.stringify(c.diagnostics)),[["strata_final_public_metadata_prefetch_config_invalid",{enabled:false}]]);
       assert.equal(c.values[finalFlag],final);
+    }
+  }
+});
+
+// All four flags remain independent. Enabling an optimization is not authority.
+test("all four exact-true rollout flags are independently forwarded",()=>{
+  for(const prepare of [false,true])for(const final of [false,true])
+  for(const overlap of [false,true])for(const bounded of [false,true]){
+    const c=construct(String(prepare),{extra:{[finalFlag]:String(final),[overlapFlag]:String(overlap),[boundedFlag]:String(bounded)}});
+    c.run();verifySharedConstruction(c,prepare,final,overlap,bounded);
+    assert.equal(c.diagnostics.length,0);
+  }
+});
+test("new flags default off and invalid values cannot enable either optimization",()=>{
+  const labels={ [overlapFlag]:"strata_final_account_snapshot_overlap_config_invalid",[boundedFlag]:"strata_bounded_history_reads_config_invalid" };
+  for(const tested of [overlapFlag,boundedFlag]){
+    for(const value of [undefined,"false","","TRUE"," true","true ","1",true,false,1,null,{toString(){throw Error("never_coerce");}}]){
+      const other=tested===overlapFlag?boundedFlag:overlapFlag;
+      const c=construct("true",{extra:{[finalFlag]:"true",[other]:"true",...(value===undefined?{}:{[tested]:value})},throwDiagnostic:true});
+      c.run();verifySharedConstruction(c,true,true,other===overlapFlag,other===boundedFlag);
+      const valid=value===undefined||value==="false";
+      assert.deepEqual(JSON.parse(JSON.stringify(c.diagnostics)),valid?[]:[[labels[tested],{enabled:false}]]);
     }
   }
 });

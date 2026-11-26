@@ -1,3 +1,4 @@
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { pool } from "@workspace/db";
 
 /** Admin-only, read-only proof of the *running backend's* PostgreSQL connection.
@@ -26,12 +27,12 @@ export const RUNTIME_DB_IDENTITY_SQL=`
 export async function inspectRuntimeDbIdentity(actorId:string,db:Db=pool){
  if(!UUID.test(actorId))return deny("authentication_subject_invalid");
  try{
-  const allowed=await db.query(`
+  const allowed=await db.query(runtimeAuthSql(`
    SELECT EXISTS(
     SELECT 1 FROM auth.users u
     JOIN private.role_assignments r ON lower(btrim(r.email))=lower(btrim(u.email))
     WHERE u.id=$1::uuid AND u.email_confirmed_at IS NOT NULL AND r.role='ADMIN'
-   ) AS is_admin`,[actorId]);
+   ) AS is_admin`),[actorId]);
   if(allowed.rows.length!==1||allowed.rows[0]?.is_admin!==true)
    return deny("confirmed_administrator_required");
   const state=await db.query(RUNTIME_DB_IDENTITY_SQL);

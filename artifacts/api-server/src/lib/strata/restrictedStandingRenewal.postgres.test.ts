@@ -4,7 +4,7 @@ import {renewContinuousTechnicalLease,checkContinuousEligibility,revokeContinuou
 import {renewStandingFeeObservationLease,revokeStandingFeeDelegation} from './apiFeeStandingDelegation';
 import {openRestrictedStandingRenewal,assertStandingIdentity,seedStandingRenewal,standingProof,
  standingHumanSnapshot,standingTechnicalSnapshot,observeStandingQueries,rollbackStanding,standingDenied,
- standingRuntimeRole,renewalLockOnly,humanAuthority,technicalLease,technicalAudit,feeDelegation,
+ standingRuntimeRole,renewalLockOnly,feeLockOnly,humanAuthority,technicalLease,technicalAudit,feeDelegation,
  technicalLeaseInsertColumns,technicalLeaseUpdateColumns,technicalAuditInsertColumns,type StandingScope} from './restrictedStandingRenewal.fixture';
 
 // Run ONLY through scripts/run-v13-disposable-postgres.mjs, with no flags or
@@ -129,11 +129,13 @@ test('restricted LOGIN renews technical standing leases, never human authority',
    // Row locks need a column UPDATE grant. A permissive policy cannot override
    // the restrictive barrier. Existing BEFORE-row immutable guards may reject
    // first (P0001); never disable them just to force an RLS-specific SQLSTATE.
-   for(const [table,column] of Object.entries(renewalLockOnly)){
+   for(const [table,column] of Object.entries({...renewalLockOnly,...feeLockOnly})){
     await setup.query(`CREATE POLICY standing_renewal_accidental_widening ON ${table} FOR UPDATE TO ${standingRuntimeRole} USING(true) WITH CHECK(true)`);
     try{await standingDenied(runtime,`UPDATE ${table} SET ${column}=${column}`,[],['42501','P0001']);}
     finally{await setup.query(`DROP POLICY standing_renewal_accidental_widening ON ${table}`);}
    }
+   await standingDenied(runtime,'UPDATE auth.users SET email_confirmed_at=NULL WHERE id=$1',[s.reviewer]);
+   await standingDenied(runtime,"UPDATE private.role_assignments SET role='USER' WHERE email=$1::text||'@example.invalid'",[s.reviewer]);
    for(const column of ['owner_user_id','model_id','grant_id','policy_hash','release_commit_sha','confirmation','granted_at','valid_until']){
     await standingDenied(runtime,`UPDATE ${feeDelegation} SET ${column}=${column} WHERE delegation_id=$1`,[s.delegation]);
    }
@@ -238,7 +240,7 @@ test('restricted LOGIN renews technical standing leases, never human authority',
    try{
     const observed=observeStandingQueries(runtime);
     assert.equal((await renewStandingFeeObservationLease(s.owner,s.feeGrant,'ORDER_ENTRY',{db:observed.db,sha:()=>s.sha})).ok,false);
-    assert.deepEqual(observed.errors,[{code:'42501',operation:'UPDATE'}]);assert.deepEqual(await snapshot(),before);
+    assert.deepEqual(observed.errors,[{code:'42501',operation:'WITH'}]);assert.deepEqual(await snapshot(),before);
    }finally{await setup.query(`GRANT UPDATE(lease_expires_at) ON ${feeDelegation} TO ${standingRuntimeRole}`);}
    for(const table of ['auth.users','private.role_assignments']){
     await setup.query(`DROP POLICY standing_renewal_read ON ${table}`);
@@ -246,6 +248,20 @@ test('restricted LOGIN renews technical standing leases, never human authority',
      assert.equal((await runtime.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n,0,'SELECT ACL alone gives no rows under RLS');
      assert.equal((await renewFee(s)).ok,false);assert.deepEqual(await snapshot(),before);
     }finally{await setup.query(`CREATE POLICY standing_renewal_read ON ${table} FOR SELECT TO ${standingRuntimeRole} USING(true)`);}
+   }
+   assert.equal((await renewFee(s)).ok,true);
+  });
+
+  await t.test('each fee authority row lock requires its narrow column privilege',async()=>{
+   const s=await seedStandingRenewal(setup),before=await standingHumanSnapshot(setup,s);
+   for(const [table,column] of Object.entries(feeLockOnly)){
+    await setup.query(`REVOKE UPDATE(${column}) ON ${table} FROM ${standingRuntimeRole}`);
+    try{
+     const observed=observeStandingQueries(runtime);
+     assert.equal((await renewStandingFeeObservationLease(s.owner,s.feeGrant,'ORDER_ENTRY',{db:observed.db,sha:()=>s.sha})).ok,false,table);
+     assert.deepEqual(observed.errors,[{code:'42501',operation:'WITH'}],table);
+     assert.deepEqual(await standingHumanSnapshot(setup,s),before);
+    }finally{await setup.query(`GRANT UPDATE(${column}) ON ${table} TO ${standingRuntimeRole}`);}
    }
    assert.equal((await renewFee(s)).ok,true);
   });

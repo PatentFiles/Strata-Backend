@@ -6,20 +6,20 @@ import {runInNewContext} from "node:vm";
 
 const path=fileURLToPath(new URL("../src/lib/strata/personalExecutionSupervisor.ts",import.meta.url));
 const text=await readFile(path,"utf8");
-const start=text.indexOf("    if(apiSource&&options.publicMetadataPrefetch===true){");
+const start=text.indexOf("    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){");
 const end=text.indexOf("    // Opt-in, same owning session only.",start);
 assert.ok(start>=0&&end>start,"exact reviewed hook must be present");
 // Run the actual complete hook-installation block, not a parallel test-only
 // guard. Its coordinator and scope readers are offline spies; no worker,
 // provider, authority SQL, eligibility clock or transport is invoked.
 const hook=text.slice(start,end);
-function session({entriesAuthorized=true,apiSource=true,enabled=true,patch={}}={}){
+function session({entriesAuthorized=true,apiSource=true,durableSource=false,directSource=null,enabled=true,patch={}}={}){
   const state={armRequested:true,entriesAuthorized,accountKill:false,globalKill:false,
     presentedToken:7,fencingToken:7,...patch};
   const starts=[],scopes=[];
   const attempt={source:{evaluationId:"committed-exact-source"},drained:Promise.resolve(),
     pause(){},discard(){}};
-  const context={state,apiSource,options:{publicMetadataPrefetch:enabled},activeMetadata:null,
+  const context={state,apiSource,durableSource,directSource,options:{publicMetadataPrefetch:enabled},activeMetadata:null,
     session:{executor:{}},
     metadataScope(){scopes.push("read");return {accountId:"account-a",fence:7};},
     processCommittedPublicMetadata:{start(scope,hint){starts.push({scope,hint});return attempt;}},
@@ -58,8 +58,26 @@ test("existing arm, kill and fence exclusions still suppress advisory work",()=>
   }
 });
 
-test("public-coordinator hook still requires both exact API source and explicit opt-in",()=>{
+test("public-coordinator hook still requires supported API or durable source and explicit opt-in",()=>{
   for(const args of [{apiSource:false},{enabled:false},{enabled:"true"}])assert.equal(session(args).run,undefined);
   assert.ok(session({patch:{entriesAuthorized:undefined}}).run({evaluationId:"source"}),
     "only explicit sticky false adds an exclusion; absent legacy field is not a new authority gate");
+});
+
+for(const patch of [{},{entriesAuthorized:false},{accountKill:true},{globalKill:true},{armRequested:false},{presentedToken:6}])test("durable hook preserves all entry controls "+JSON.stringify(patch),()=>{
+ const s=session({apiSource:false,durableSource:true,patch});const attempt=s.run({evaluationId:"source"});
+ assert.equal(!!attempt,Object.keys(patch).length===0);
+});
+
+// Exercise the actual hook with a direct-source object, not a flag string.
+// Even otherwise eligible API/durable sessions must not install this hook.
+test("independent direct-source sessions never install committed metadata prefetch",()=>{
+  for(const apiSource of [false,true])for(const durableSource of [false,true]){
+    for(const enabled of [false,true]){
+      const s=session({apiSource,durableSource,enabled,directSource:Object.freeze({kind:"independent"})});
+      assert.equal(s.run,undefined);
+      assert.equal(s.starts.length,0);
+      assert.equal(s.scopes.length,0);
+    }
+  }
 });

@@ -4,8 +4,7 @@ import {readEntryBookQuote,assertEntrySourceFresh,quoteFromEntryBook,type EntryB
 import {emitCommittedSourceQuote} from "./sourceQuoteProvenance";
 import {readForwardCycleFeeds} from "./forwardFeedReadScope";
 import {forwardTestFeedError} from "./forwardTestFeedValidation";
-import {notifyCommittedForwardSignal} from "./forwardTestSignalWake";
-import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery} from "./forwardTestCadence";
+import {producerDelayMs,OptionalResearchLane,BoundaryDiscoveryRecovery,drainPaperLanes} from "./forwardTestCadence";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
@@ -32,7 +31,6 @@ import { logger } from "./logger";
 import { savePostActionPaperBook, savePrequalificationPaperBook, type PaperBookCaptureEvent } from "./forwardTestBookCapture";
 import { forwardTestStartupDecision } from "./forwardTestStartupGate";
 export { isForwardTestWorkerEnabled } from "./forwardTestStartupGate";
-import { processMicroLiveForwardTestCycle, registerMicroLiveWorkerLeaseOwner } from "./microLive";
 import { ensureV13BuiltInResearchChallengers, recordV13ShadowOpportunities } from "./v13StrategyResearch";
 import { AutonomousShadowSchedule } from "./autonomousShadowSchedule";
 import { autonomousShadowLearningConfigured, runAutonomousShadowResearch } from "./v13AutonomousShadowLearning";
@@ -169,10 +167,9 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   const now = options.now ?? new Date(clock());
   let btc: BtcObservation;
   let market: MarketObservation;
-  let currentMarket: MarketObservation;
   const priorPosition = await getOpenPaperPosition(engineId);
   try {
-    ({btc,currentMarket,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
+    ({btc,market}=await readForwardCycleFeeds(feeds,priorPosition?.marketTicker,signal));
     timing.feedsDecodedObservedAtMs=diagnosticWallNow();
     cycleDiagnostics.observe(engineId,btc.providerAt.getTime(),btc.receivedAt.getTime());
     if (priorPosition && market.ticker !== priorPosition.marketTicker) {
@@ -482,13 +479,6 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
     btcProviderAtMs:btc.providerAt.getTime(),btcReceivedAtMs:btc.receivedAt.getTime(),
     marketDecodedAtMs:detailMarket.fetchedAt.getTime()});
   if(result.evaluationId&&(result.signal==="SCOUT"||result.signal==="CONFIRM")){
-    notifyCommittedForwardSignal(result.researchEvent?.phase==="ENTRY" ? {
-      evaluationId:result.evaluationId,marketTicker:result.marketTicker!,evaluatedAtMs:now.getTime(),
-      committedAtMs:Date.now(),qualifyingTrigger:true,
-      btcProviderAgeMs:Math.max(0,now.getTime()-btc.providerAt.getTime()),
-      btcReceiveAgeMs:Math.max(0,now.getTime()-btc.receivedAt.getTime()),
-      marketAgeMs:Math.max(0,now.getTime()-market.fetchedAt.getTime()),
-    }:undefined);
     try{emitCommittedSourceQuote(detailMarket,{evaluationId:result.evaluationId,engineId,signal:result.signal,
       marketTicker:market.ticker,evaluatedAtMs:now.getTime(),commitReturnObservedAtMs:Date.now(),
       qualifyingTrigger:result.researchEvent?.phase==="ENTRY"},
@@ -496,7 +486,7 @@ export async function runForwardTestCycle(options: CycleOptions): Promise<CycleR
   }
   // Return the committed action immediately. The scheduler owns optional
   // post-action capture; a slow public book or receipt INSERT cannot hold the
-  // next strategy cycle or the separately gated micro-live consumer.
+  // next strategy cycle.
   return result;
   } catch (error) {
     if (error instanceof WorkerLeaseLostError) throw error;
@@ -517,7 +507,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   if (!startup.ready) {
     logger.info({ reason: startup.reason, mode: startup.mode },
       "Strategy evaluation producer not scheduled; no new forward-test entries");
-    return { running: false, stop: async () => {} };
+    return { running: false, stop: async () => {}, done: Promise.resolve() };
   }
   logger.info({ mode: startup.mode, reason: startup.reason },
     "Strategy evaluation producer scheduler enabled; awaiting market evaluations");
@@ -554,7 +544,6 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
           else await ensureWorkerEngine();
           lease = await acquireWorkerLease(owner);
           if (lease) {
-            registerMicroLiveWorkerLeaseOwner(owner);
             try {
               await ensureV13BuiltInResearchChallengers();
             } catch (error) {
@@ -583,11 +572,6 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
               "Paper book evidence skipped: previous research operation still pending");
           }
           if (!stopped && cycle.evaluationId) {
-            try {
-              await processMicroLiveForwardTestCycle(cycle.evaluationId);
-            } catch (error) {
-              logger.error({ err: error }, "Gated micro-live cycle failed");
-            }
             const evaluationId=cycle.evaluationId;
             // Optional research recording must never be required for the
             // champion paper signal or the separately gated live executor.
@@ -615,15 +599,16 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
       } catch (error) {
         if (error instanceof WorkerLeaseLostError) {
           lease = null;
-          registerMicroLiveWorkerLeaseOwner(null);
         } else if (!stopped) {
           logger.error({ err: error }, "Server paper forward-test cycle failed");
         }
       }
       if (!stopped) await pause(producerDelayMs(periodMs,performance.now()-cycleStarted));
     }
-    await researchLane.drain();
-    registerMicroLiveWorkerLeaseOwner(null);
+    // Closing the pool or handing off the lease while POST_ACTION evidence
+    // or an autonomous research write is still running can lose its receipt.
+    // These lanes are single-flight; they never delay a trading or paper tick.
+    await drainPaperLanes(researchLane,bookCaptureLane,autonomousResearch);
     if (lease) await releaseWorkerLease(owner, lease.leaseEpoch);
   })();
   task.catch((error: unknown) => {
@@ -631,6 +616,7 @@ export function startServerForwardTestWorker(feeds: ForwardTestFeeds = publicFor
   });
   return {
     running: true,
+    done: task,
     stop: async () => {
       stopped = true;
       autonomousResearch.stop();

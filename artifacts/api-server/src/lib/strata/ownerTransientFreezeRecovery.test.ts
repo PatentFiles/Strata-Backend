@@ -1,3 +1,4 @@
+import {FINAL_ACCOUNT_PROJECTION_SQL} from '../v13-production/ledger';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync} from 'node:crypto';
@@ -17,8 +18,9 @@ function fixture(overrides:Record<string,unknown>={},fault=''){
   initial_cash_micros:'25000000',revision:'1',execution_enabled:true,kill_switch:false,...overrides};
  const policy={id:'p',state:'APPROVED',created_by:owner};
  const policy_hash=computeV13LiveMoneyPolicyHash({id:'p',state:'APPROVED',createdBy:owner} as never);
- const query=async(sql:string)=>{
+ const query=async(sql:string,args:unknown[]=[])=>{
   calls.push(sql);
+  if(sql===FINAL_ACCOUNT_PROJECTION_SQL){assert.deepEqual(args,['a',[]]);return {rows:[{known:[],events:[],positions:[]}]};}
   if(sql==='COMMIT'&&fault==='commit_ack_lost')throw Error('commit acknowledgement lost');
   if(['BEGIN','COMMIT','ROLLBACK'].includes(sql)||sql.startsWith('SET LOCAL')||sql.includes("set_config('lock_timeout'"))return {rows:[]};
   if(sql.includes('SELECT a.*'))return {rows:[account]};
@@ -53,7 +55,7 @@ function fixture(overrides:Record<string,unknown>={},fault=''){
 }
 test('signed flat complete recovery only clears transient hold with gates closed',async()=>{
  const f=fixture();assert.equal((await f.run()).ok,true);assert.equal(f.reads,1);
- assert.equal(f.calls.filter(sql=>sql===finalAccountIntentSql).length,1);
+ assert.equal(f.calls.filter(sql=>sql===FINAL_ACCOUNT_PROJECTION_SQL).length,1);
  assert.ok(f.calls.includes('COMMIT'));assert.ok(!f.calls.includes('ROLLBACK'));
  assert.equal(f.calls.filter(s=>s.startsWith('UPDATE')).length,1);
  assert.equal(f.calls.filter(s=>s.includes('sum(cash_delta_micros)')).length,1);

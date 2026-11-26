@@ -1,0 +1,63 @@
+
+  artifacts/api-server/dist/durableFeeMigration.cjs    1.1mb ⚠️
+  artifacts/api-server/dist/guardedDurableFeeWire.cjs  1.1mb ⚠️
+  artifacts/api-server/dist/durableOwnerFeePolicy.cjs  1.1mb ⚠️
+  artifacts/api-server/dist/durableFeeLifecycle.cjs    1.1mb ⚠️
+
+⚡ Done in 386ms
+
+  artifacts/api-server/dist/migration-fixture.cjs  11.5kb
+
+⚡ Done in 8ms
+
+  artifacts/api-server/dist/durableUserExecutionRouter.cjs  1.5mb ⚠️
+
+⚡ Done in 115ms
+PASS atomic DDL rollback and duplicate migration fail-closed without partial effects
+PASS cross-owner capture denied
+PASS immutable source model
+PASS actual native verifier SELECT/DATE mapping + real market validator (mock HTTP)
+PASS actual native verifier refuses source/version/formula mismatch
+PASS concurrent change waits on final-share fence
+PASS sticky change/revocation
+PASS monitor rollback
+PASS private RLS and client ACL
+PASS 9 native groups including actual verifier (synthetic prerequisite schema, not full V3 integration)
+PASS real strict PDF enrollment transaction
+PASS real monitor same/change/unavailable sticky audit
+PASS unseen change followed by revert is retained
+PASS unseen expired change followed by revert is retained
+PASS concurrent enrollment exactly one
+PASS rollback after model/state insert
+PASS lost COMMIT acknowledgement no retry + actual durable readback
+PASS deferred enrollment deadline rolls back at COMMIT
+PASS corrupted source never enrolls
+PASS corrupted stored provenance latches entries closed
+PASS live account enrollment refused
+PASS actual final-account+durable SQL holds revocation until transport and COMMIT
+PASS revoke-before-send blocks actual entry adapter
+PASS entry consent revoked does not block independently reviewed exit fee adapter
+PASS one transport on unknown outcome, no internal retry
+PASS actual capture change serializes with wire and blocks subsequent dispatch without monitor
+PASS 11 lifecycle +5 native wire groups; synthetic provider/technical authorization, real PDF/parser/SQL, no exchange orders
+PASS actual native nonmutating migration-preview SQL exact preserved limits
+PASS atomic migration preserves exact lower legacy limits/strategy, keeps stopped, revokes stale SHA, scoped receipt
+PASS native concurrent migration exactly one
+PASS native rollback after five separate write boundaries restores old policy/account/no model
+PASS lost COMMIT acknowledgement requires exact immutable receipt, no retry
+PASS exact prior-policy/hash/version/SHA/explicit-risk/actor body fail closed
+PASS account revision race refuses migration
+PASS execution-enabled account never migrates
+PASS credential revoked during signed preflight fails locked recheck
+PASS same-SHA prior approval refuses before mutation or revocation
+PASS durable rejection permits fresh explicitly scoped attempt, never same-ID replay
+PASS rejection lock waits for active migration and cannot mislabel committed model
+PASS orphan claim explicitly cancelled with authoritative no-commit receipt; only fresh ID may execute
+PASS cancelled delayed original writer cannot execute after signed read completes
+PASS active transaction blocks cancellation; committed work never becomes rejected
+PASS cancellation exact owner/account/SHA/explicit-action fences
+PASS simultaneous cancellations produce one immutable rejection audit
+PASS cancellation COMMIT uncertainty resolves by exact readback, never replay
+PASS actual cancellation HTTP handler + scoped database readback with synthetic MFA middleware
+PASS separately explicit cancellation after real writer rollback is idempotent, never migration replay
+PASS 20 native migration groups, strict real PDF/SQL, synthetic provider/credential fixture, no exchange signing or orders

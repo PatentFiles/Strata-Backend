@@ -1,36 +1,12 @@
 name: ChatGPT V13 diagnostics
 
 # Preserve full security/typecheck/Postgres suite for code and dependency changes.
-# Do not spend runner minutes for docs, research notes or screenshots.
+# Always emit the required gate; skip expensive jobs for narrative-only docs.
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'artifacts/**'
-      - 'lib/**'
-      - 'scripts/**'
-      - 'sql/**'
-      - 'supabase/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'tsconfig*.json'
-      - '.github/workflows/chatgpt-v13-diagnostics.yml'
+    branches: [main]
   pull_request:
-    branches:
-      - main
-    paths:
-      - 'artifacts/**'
-      - 'lib/**'
-      - 'scripts/**'
-      - 'sql/**'
-      - 'supabase/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'tsconfig*.json'
-      - '.github/workflows/chatgpt-v13-diagnostics.yml'
+    branches: [main]
   workflow_dispatch:
 
 # Cancel superseded PR checks; never cancel an in-progress mainline safety run.
@@ -42,7 +18,27 @@ permissions:
   contents: read
 
 jobs:
+  change-scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: scope
+        env:
+          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/release-change-scope.mjs
+
   static-and-unit:
+    needs: change-scope
+    if: needs.change-scope.outputs.runtime_changed == 'true'
     # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
     runs-on: ubuntu-24.04
     services:
@@ -83,6 +79,8 @@ jobs:
           /usr/lib/postgresql/16/bin/initdb --version
           /usr/lib/postgresql/16/bin/pg_ctl --version
           echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: Audit remediation regression checks (offline)
+        run: pnpm --filter @workspace/api-server run test:audit-remediation
       - name: Typecheck workspace
         run: pnpm run typecheck
       - name: Verify legacy global account never selects an owned account
@@ -561,6 +559,8 @@ jobs:
           node --test dist/microLiveFeeOfficialSnapshot.test.cjs
 
   both-prefetch-safety:
+    needs: change-scope
+    if: needs.change-scope.outputs.runtime_changed == 'true'
     name: BOTH-prefetch safety (PG${{ matrix.postgres }})
     # Pin native PostgreSQL tooling compatibility; ubuntu-latest moved to 26.04.
     runs-on: ubuntu-24.04
@@ -617,3 +617,27 @@ jobs:
       - name: Test BOTH-prefetch production and micro-live safety suites
         working-directory: artifacts/api-server
         run: pnpm run test:v13-safety-all
+
+  release-gate:
+    name: Backend release gate
+    if: always()
+    needs: [change-scope, static-and-unit, both-prefetch-safety]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the exact candidate's applicable checks
+        env:
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          RUNTIME_CHANGED: ${{ needs.change-scope.outputs.runtime_changed }}
+          STATIC_RESULT: ${{ needs.static-and-unit.result }}
+          NATIVE_RESULT: ${{ needs.both-prefetch-safety.result }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          if [ "$RUNTIME_CHANGED" = true ]; then
+            test "$STATIC_RESULT" = success
+            test "$NATIVE_RESULT" = success
+          elif [ "$RUNTIME_CHANGED" = false ]; then
+            test "$STATIC_RESULT" = skipped
+            test "$NATIVE_RESULT" = skipped
+          else
+            exit 1
+          fi

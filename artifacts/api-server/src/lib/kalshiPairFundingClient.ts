@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported} from "./strata/kalshiMemberReadBudget";
 import {
   constants as cryptoConstants,
   createPrivateKey,
@@ -92,6 +93,7 @@ function baseUrl(): string {
 async function signedGet(
   path: string, query: string, creds: Credentials = credentials("VERIFIER"),
 ): Promise<unknown> {
+  assertMemberBudgetUnsupported();
   const timestamp = Date.now().toString();
   let response: Response;
   try {
@@ -353,6 +355,7 @@ export async function postOneShotPairFunding(
   attemptId: string,
   authorization: "development" | "strata-production" = "development",
 ): Promise<void> {
+  assertMemberBudgetUnsupported();
   if (authorization === "strata-production") {
     if (process.env.NODE_ENV !== "production" ||
         process.env.KALSHI_API_ENVIRONMENT !== "production" ||

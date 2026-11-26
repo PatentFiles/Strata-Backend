@@ -54,3 +54,61 @@ test('existing signed stage emits one event with branded sidechannel, forged and
 });
 
 test('inherited object keys remain unknown paths without diagnostic groups',async()=>{const seen:unknown[]=[];let summary:OwnedFeedReadTiming|undefined;const w=createOwnedFeedReadTiming(async(...args:any[])=>{seen.push(args[1]);return 42;},e=>{summary=e;});for(const path of ['constructor','toString','__proto__'])assert.equal(await w.get(null,path),42);w.finish();assert.deepEqual(seen,['constructor','toString','__proto__']);assert.deepEqual(summary!.groups,[]);});
+
+import {createOwnedSnapshotTiming,isOwnedSnapshotTiming,recordOwnedSnapshotTiming,type OwnedSnapshotTiming} from './ownedFeedReadTiming';
+import {readFileSync} from 'node:fs';
+
+test('snapshot phase timings are bounded monotonic diagnostic primitives; finish emits once',()=>{
+ let t=10;const events:OwnedSnapshotTiming[]=[];const timing=createOwnedSnapshotTiming(e=>events.push(e),()=>t);
+ for(const phase of ['unresolved_intents','heartbeat','maintenance','signed_feeds','load_requests','snapshot_mapping'] as const){timing.mark(phase);t+=7;}
+ timing.finish(true);timing.finish(false);assert.equal(events.length,1);assert.equal(events[0].totalElapsedMs,42);
+ assert.equal(events[0].phases.length,6);assert.ok(events[0].phases.every(p=>p.elapsedMs===7&&p.completed));
+ assert.ok(isOwnedSnapshotTiming(events[0]));assert.ok(Object.isFrozen(events[0])&&Object.isFrozen(events[0].phases));
+ assert.ok(events[0].phases.every(Object.isFrozen));assert.ok(JSON.stringify(events[0]).length<1024);
+});
+test('snapshot diagnostics survive bad clocks, observer failures and malformed labels without changing failure',async()=>{
+ for(const clock of [()=>NaN,()=>{throw Error('clock');},(()=>{let n=3;return()=>--n;})()]){
+  let captured:OwnedSnapshotTiming|undefined;const timing=createOwnedSnapshotTiming(e=>{captured=e;throw Error('logger');},clock);
+  timing.mark('heartbeat');timing.mark('secret-arbitrary-label' as never);timing.finish(false);
+  assert.equal(captured?.completed,false);assert.equal(captured?.phases[0].completed,false);assert.equal(captured?.phases[0].elapsedMs,null);
+  assert.ok(!JSON.stringify(captured).includes('secret'));
+ }
+ const timing=createOwnedSnapshotTiming(()=>Promise.reject(Error('logger')));for(let i=0;i<100;i++)timing.mark('heartbeat');timing.finish(false);
+ await new Promise(r=>setTimeout(r,0));
+});
+test('snapshot sidechannel isolates concurrent calls, failure before feeds and forged stage objects',async()=>{
+ const a=new OwnedFeedTimingCapture(),b=new OwnedFeedTimingCapture();
+ await Promise.all([a.run(async()=>{const t=createOwnedSnapshotTiming();t.mark('heartbeat');await new Promise(r=>setTimeout(r,5));t.finish(false);}),b.run(async()=>{const t=createOwnedSnapshotTiming();t.mark('load_requests');t.finish(true);})]);
+ assert.equal(a.snapshot(),undefined);assert.equal(a.snapshotPhases()?.phases[0].phase,'heartbeat');assert.equal(a.snapshotPhases()?.completed,false);
+ assert.equal(b.snapshotPhases()?.phases[0].phase,'load_requests');assert.equal(new OwnedFeedTimingCapture().snapshotPhases(),undefined);
+ const events:StageTiming[]=[];const record=(e:StageTiming)=>{events.push(e);};const summary=a.snapshotPhases()!;
+ beginExecutionStage(record,'signed_snapshot',{accountId:'fixture',mode:'LIVE'})('rejected',{signedSnapshotPhases:summary});
+ beginExecutionStage(record,'final_signed_snapshot',{accountId:'fixture',mode:'LIVE'})('completed',{signedSnapshotPhases:b.snapshotPhases()});
+ beginExecutionStage(record,'signed_snapshot',{accountId:'fixture',mode:'LIVE'})('rejected',{signedSnapshotPhases:{...summary}});
+ beginExecutionStage(record,'prepare_entry',{accountId:'fixture',mode:'LIVE'})('completed',{signedSnapshotPhases:summary});
+ await Promise.resolve();assert.equal(events[0].signedSnapshotPhases,summary);assert.equal(events[1].signedSnapshotPhases,b.snapshotPhases());assert.equal(events[2].signedSnapshotPhases,undefined);assert.equal(events[3].signedSnapshotPhases,undefined);
+ const outside=new OwnedFeedTimingCapture();outside.run(()=>recordOwnedSnapshotTiming({...summary}));assert.equal(outside.snapshotPhases(),undefined);
+});
+
+test('actual supervisor snapshot body retains signed GET order, DB sequence, authority clocks and error identity',async()=>{
+ const source=readFileSync('src/lib/strata/personalExecutionSupervisor.ts','utf8');
+ const body=source.split('      readSnapshot: async () => {')[1].split('      readMarket:')[0].replace(/\n      },\s*$/,'')
+  .replace('const snapshotDb: { query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}> } =','const snapshotDb =')
+  .replace('const scopedGet:typeof getScopedKalshiJson=','const scopedGet=')
+  .replace('let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;','let latest;');
+ const names=['createOwnedSnapshotTiming','heldReadAbort','state','technicalRelease','finalLedger','db','readUnresolvedIntentMode','input','heartbeatLease','holderId','fingerprint','now','get','getScopedKalshiJson','createOwnedFeedReadTiming','recordOwnedFeedReadTiming','readOwnedKalshiFeeds','material','emptySnapshot','identity','loadRequests','directRounding','heartbeatLeaseInTransaction','options','apiSource','durableSource','heldRecoveryScope'];
+ const factory=new Function(...names,`return async function(){${body}}`);
+ for(const transactional of [false,true])for(const failure of ['none','unresolved','heartbeat','provider','requests'] as const){
+  const calls:string[]=[];let clocks=0;const sentinel=new Error('private-provider-error');const identity={subaccount:1 as const,exchangeIndex:2 as const,keyFingerprint:'fixture'};
+  const get=async(...args:any[])=>{calls.push('get:'+args[1]);if(failure==='provider')throw sentinel;return response(args[1]);};
+  const read=async(...args:Parameters<typeof readOwnedKalshiFeeds>)=>{if(failure==='provider'){await args[2]!(creds,'/trade-api/v2/portfolio/balance');throw Error('unreachable');}return readOwnedKalshiFeeds(...args);};
+  const capture=new OwnedFeedTimingCapture();
+  const snapshot=factory(createOwnedSnapshotTiming,null,{}, {beginReconciliation(){calls.push('begin');}},transactional?{currentFinalSnapshotEntry:()=>null,currentTransaction:()=>({query:async()=>({rows:[]})})}:null,{},async()=>{calls.push('unresolved');return failure==='unresolved'?{ok:false}:{ok:true,mode:'entries'};},{accountId:'fixture',userId:'owner'},async()=>{calls.push('heartbeat');return failure==='heartbeat'?{ok:false,reason:'stale_worker_fence'}:{ok:true,armRequested:true};},'holder','fingerprint',()=>{clocks++;return 1234;},get,get,createOwnedFeedReadTiming,recordOwnedFeedReadTiming,read,creds,personalAccountSnapshot,identity,async()=>{calls.push('requests');if(failure==='requests')throw sentinel;return [];},null,async()=>{calls.push('transactionalHeartbeat');return failure==='heartbeat'?{ok:false,reason:'stale_worker_fence'}:{ok:true,armRequested:true};},{},false,false,null);
+  let result:unknown,error:unknown;await capture.run(async()=>{try{result=await snapshot();}catch(e){error=e;}});
+  const expected=['begin','unresolved'];if(failure!=='unresolved')expected.push(transactional?'transactionalHeartbeat':'heartbeat');
+  if(!['unresolved','heartbeat'].includes(failure)){expected.push(...['balance',...(failure==='provider'?[]:['orders','historical/orders','fills','historical/fills','positions','settlements'])].map(p=>'get:/trade-api/v2/'+(p.startsWith('historical/')?p:'portfolio/'+p)));if(failure!=='provider')expected.push('requests');}
+  assert.deepEqual(calls,expected);assert.equal(clocks,failure==='unresolved'?0:failure==='heartbeat'?1:2);
+  if(failure==='none'){assert.equal(error,undefined);assert.ok(result);assert.equal(capture.snapshotPhases()?.completed,true);}
+  else {assert.ok(error);assert.equal(capture.snapshotPhases()?.completed,false);if(failure==='provider'||failure==='requests')assert.equal(error,sentinel);}
+ }
+});

@@ -1,7 +1,9 @@
+import "./transactionalWorkerHeartbeat.test";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
 import { readFileSync } from "node:fs";
+import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
 import { heartbeatLease } from "./personalExecutionSupervisor";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 
@@ -63,14 +65,36 @@ test("final snapshot heartbeat reuses the held worker-lease transaction instead 
     // Exercise the real helper above; also pin the supervisor routing so a
     // future refactor cannot silently put the final heartbeat back on db.
     const source=readFileSync("src/lib/strata/personalExecutionSupervisor.ts","utf8");
-    const start=source.indexOf("readSnapshot: async () => {"),end=source.indexOf("readMarket: (market,side,context)=>readOwnedEntryMarket({");
+    const start=source.indexOf("readSnapshot: async () => {"),end=source.indexOf("readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({");
     assert.ok(start>=0&&end>start,"pin only the actual signed-snapshot callback, not the rest of the supervisor");
     const body=source.slice(start,end);
-    assert.match(body,/heartbeatLease\(snapshotDb,/);
+    assert.match(body,/proofTx \? heartbeatLeaseInTransaction : heartbeatLease/);
     assert.match(body,/loadRequests\(snapshotDb, input.accountId\)/);
     assert.doesNotMatch(body,/heartbeatLease\(db,/);
   } finally {
     await holder.query("ROLLBACK");await other.query("ROLLBACK");
     holder.release();other.release();
   }
+});
+
+
+test("transactional heartbeat retains STOP lock and rollback ownership; exact owner holder fence fingerprint only",async()=>{
+ const holder=await pool.connect(),other=await pool.connect();
+ const input={executionAccountId:"account",ownerUserId:"11111111-1111-4111-8111-111111111111",holderId:"worker",fencingToken:1,fingerprint:"fingerprint",now:"2026-11-18T00:00:00Z"};
+ try {
+  for(const wrong of [{executionAccountId:"foreign"},{ownerUserId:"22222222-2222-4222-8222-222222222222"},{holderId:"other"},{fencingToken:2},{fingerprint:"revoked"}])assert.deepEqual(await heartbeatLeaseInTransaction(holder,{...input,...wrong}),{ok:false,reason:"stale_worker_fence"});
+  const before=await holder.query("SELECT heartbeat_at FROM private.kalshi_account_worker_lease WHERE execution_account_id='account'");
+  await holder.query("BEGIN");
+  assert.deepEqual(await heartbeatLeaseInTransaction(holder,input),{ok:true,armRequested:true});
+  await other.query("BEGIN");await other.query("SET LOCAL lock_timeout='100ms'");
+  await assert.rejects(other.query("UPDATE private.kalshi_account_worker_lease SET arm_requested=false WHERE execution_account_id='account'"),(e:unknown)=>(e as {code:string}).code==='55P03');
+  await other.query("ROLLBACK");await holder.query("ROLLBACK");
+  assert.deepEqual((await holder.query("SELECT heartbeat_at FROM private.kalshi_account_worker_lease WHERE execution_account_id='account'")).rows,before.rows);
+  await other.query("UPDATE private.kalshi_account_worker_lease SET arm_requested=false WHERE execution_account_id='account'");
+  await holder.query("BEGIN");
+  assert.deepEqual(await heartbeatLeaseInTransaction(holder,input),{ok:true,armRequested:false});
+  await holder.query("COMMIT");
+  await other.query("UPDATE private.kalshi_account_worker_lease SET account_kill=true WHERE execution_account_id='account'");
+  assert.deepEqual(await heartbeatLeaseInTransaction(holder,input),{ok:false,reason:"stale_worker_fence"});
+ }finally{await holder.query("ROLLBACK");await other.query("ROLLBACK");holder.release();other.release();}
 });

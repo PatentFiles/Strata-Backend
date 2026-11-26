@@ -62,7 +62,7 @@ export type Snapshot = {
 // evidence, including pagination and history coverage, before any release.
 export interface Exchange {
   readonly mode: "LIVE" | "SIMULATION";
-  market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext): Promise<MarketEvidence>;
+  market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT"): Promise<MarketEvidence>;
   snapshot(identity: Identity, historyFromMs: number): Promise<Snapshot>;
   submit(request: Request, finalCheck: () => Promise<void>): Promise<{ orderId?: string }>;
   cancel(orderId: string, finalCheck: () => Promise<void>): Promise<void>;

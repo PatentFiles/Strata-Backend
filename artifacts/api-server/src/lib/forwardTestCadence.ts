@@ -13,6 +13,14 @@ export class OptionalResearchLane {
  async drain():Promise<void>{await this.pending;}
 }
 
+/** STOP only: the database lease and pool outlive all three optional writes,
+ * even when one lane's reporting fails. No steady-state clock or tick waits. */
+export async function drainPaperLanes(
+ research:{drain():Promise<void>},book:{drain():Promise<void>},autonomous:{drain():Promise<void>},
+):Promise<void>{
+ await Promise.allSettled([research.drain(),book.drain(),autonomous.drain()]);
+}
+
 /** Error-only recovery while a new quarter-hour market is being published.
  * At most fifteen one-second retry schedules share one budget per 15m window.
  * The first success or any unrelated failure (including HTTP429) permanently

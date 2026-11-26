@@ -1,3 +1,5 @@
+import {recoverOwnerStaleLease,OWNER_STALE_LEASE_CONFIRMATION} from './ownerStaleLeaseRecovery';
+import {runtimeAuthSql} from './runtimeAuthRelation';
 import { normalizePrimaryDisplayMoney, normalizeWalletDisplayMoney } from "./primaryDisplayMoney";
 import { ownedCashProjection } from "./ownedCashPrecision";
 import {createWalletDisplayReads} from "./walletDisplayReads";
@@ -34,6 +36,7 @@ import { readOwnerFundingMaintenanceReadiness } from "./ownerFundingMaintenanceR
 import {ownerTopupStatus,prepareOwnerTopup,executeOwnerTopup,reconcileOwnerTopup,cancelPreparedOwnerTopup} from "./ownerVariableTopup";
 import { accountCredentialControls } from "./accountCredentialControls";
 import type { PersonalSessionControl } from "./personalExecutionSupervisor";
+import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
 import {
   approveOwnedPolicyForUser,
   readOwnedApprovedFeeEvidence,
@@ -60,12 +63,12 @@ export interface UserScopeQuery {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 }
 
-const CAN_MANAGE_SHARED_PRESETS_SQL = `
+const CAN_MANAGE_SHARED_PRESETS_SQL = runtimeAuthSql(`
   SELECT 1 FROM public.profiles p
   JOIN auth.users u ON u.id = p.id
   JOIN private.role_assignments ra ON lower(ra.email) = lower(u.email)
   WHERE p.id = $1::uuid AND p.role = 'ADMIN' AND ra.role = 'ADMIN'
-`;
+`);
 
 const MIGRATION_SQL = `
   SELECT (
@@ -84,13 +87,14 @@ const MIGRATION_SQL = `
 
 const ACCOUNT_SQL = `
   SELECT a.id, a.owner_user_id, a.kalshi_connection_id, a.subaccount, a.exchange_index,
-         a.commissioned, a.execution_enabled, a.kill_switch,
+         a.commissioned, a.execution_enabled, a.kill_switch, a.blocked_reason,
          a.cash_micros::text AS cash_micros, a.reserved_micros::text AS reserved_micros,
          a.minimum_exit_micros, a.reconciled_at,
          p.state AS policy_state, p.version AS policy_version, p.max_entry_stake_cents,
          s.configured_stake_cents, s.revision AS stake_revision,
          s.risk_preset_id, s.risk_preset_revision, s.risk_capital_cents,
-         wl.state AS worker_lease_state, wl.arm_requested AS worker_arm_requested
+         wl.state AS worker_lease_state, wl.arm_requested AS worker_arm_requested,
+         wl.account_kill AS worker_account_kill
   FROM v13_production_account a
   LEFT JOIN v13_live_money_policy p ON p.id = a.policy_id
   LEFT JOIN strata_configured_stake s ON s.execution_account_id = a.id
@@ -227,6 +231,18 @@ function flag(value: unknown): boolean {
 }
 
 
+/** Display metadata only; never disclose or reuse the opaque provider cursor.
+ * Omission is deliberately unknown for this endpoint, not proof of the last page. */
+function walletTransferPageState(payload:unknown):NonNullable<KalshiUserRead["subaccountTransferPageState"]>{
+  if(!payload||typeof payload!=="object"||Array.isArray(payload))return "unknown";
+  const row=payload as Record<string,unknown>;
+  if(!Array.isArray(row.transfers)||row.transfers.length>200||
+     !row.transfers.every((item:unknown)=>!!item&&typeof item==="object"&&!Array.isArray(item))||
+     !Object.hasOwn(row,"cursor")||typeof row.cursor!=="string"||row.cursor.length>1024)return "unknown";
+  if(row.cursor==="")return "last";
+  return row.cursor.trim()!==""&&!/[\u0000-\u001f\u007f]/.test(row.cursor)?"more":"unknown";
+}
+
 function rowsOf(payload: unknown, keys: string[]): unknown[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
   const record = payload as Record<string, unknown>;
@@ -272,6 +288,9 @@ function accountFrom(userId: string, row: Record<string, unknown>): ScopedAccoun
     exchangeIndex: integer(row.exchange_index) ?? BOT_EXCHANGE_INDEX,
     commissioned: flag(row.commissioned),
     executionEnabled: flag(row.execution_enabled),
+    financialHoldReason:row.blocked_reason===null?null:
+      typeof row.blocked_reason==="string"&&/^[a-z][a-z0-9_]{0,127}$/.test(row.blocked_reason)?row.blocked_reason:"account_hold_status_unavailable",
+    workerAccountKill:row.worker_account_kill===null||row.worker_account_kill===undefined?null:flag(row.worker_account_kill),
     workerArmRequested: row.worker_arm_requested===null||row.worker_arm_requested===undefined
       ?null:flag(row.worker_arm_requested),
     workerLeaseState: text(row.worker_lease_state),
@@ -330,6 +349,9 @@ function viewFrom(userId: string, account: ScopedAccount | null): UserExecutionV
       account.killSwitch===false,
     workerArmRequested:account.workerArmRequested??null,
     workerLeaseState:account.workerLeaseState??null,
+    executionEnabled:account.executionEnabled,
+    financialHoldReason:account.financialHoldReason,
+    workerAccountKill:account.workerAccountKill??null,
     killSwitch: account.killSwitch,
     commissioningState: account.commissioningState,
     reconciledAt: account.reconciledAt,
@@ -472,11 +494,28 @@ export function createDatabaseUserScopePort(
 
   return {
     migrationReady,
+    async recoverArmLease(userId) {
+      if (!options.session) return {ok:false,reason:'worker_registry_unavailable'};
+      const transactional=db as UserScopeQuery & {connect?:()=>Promise<{query:UserScopeQuery['query'];release():void}>};
+      if (!transactional.connect) return {ok:false,reason:'worker_recovery_transaction_unavailable'};
+      return recoverOwnerStaleLease(userId,OWNER_STALE_LEASE_CONFIRMATION,{
+        db:{query:(sql,args)=>db.query(sql,args),connect:()=>transactional.connect!.call(db)},
+        isScheduled:(owner,account)=>options.session!.isScheduled(owner,account),
+      });
+    },
     async settings(userId) {
       if (!await migrationReady()) return emptyUserExecutionView(userId);
       const account = await ownedAccount(userId);
       if (account && options.session?.isScheduled(userId, account.id) === true) account.workerRunning = true;
-      return viewFrom(userId, account);
+      const view = viewFrom(userId, account);
+      // The dashboard must not infer release eligibility from the cash or
+      // worker-arm flags. Avoid extra authorization reads on running accounts.
+      if (account && account.commissioned && account.executionEnabled &&
+          !account.killSwitch && !account.workerRunning) {
+        const release = await verifyPersonalStartupAuthority(db, userId);
+        view.startupReleaseBlockReason = release.ok ? null : release.reason;
+      }
+      return view;
     },
     async ownerTopupStatus(userId){return ownerTopupStatus(db as never,userId);},
     async prepareOwnerTopup(userId,amountCents){return prepareOwnerTopup(db as never,userId,amountCents);},
@@ -591,7 +630,9 @@ export function createDatabaseUserScopePort(
         assembled.botEligibilityReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
         assembled.verificationReason??="WALLET_DISPLAY_READS_UNAVAILABLE";
       }
-      const result={...assembled,displayObservedAtMs,displayReadDiagnostics};
+      const result={...assembled,displayObservedAtMs,displayReadDiagnostics,
+        subaccountTransferPageState:displayReadDiagnostics.reads.transfers.status==="response_received"
+          ?walletTransferPageState(transfers):"unknown" as const};
       if(assembled.credentialVerified&&assembled.botEligible&&assembled.verificationReason===null&&
         [limits,bot,positions,orders,fills,settlements,transfers].every(x=>x!==null))
         displayCacheable.add(result);
@@ -715,6 +756,9 @@ export function createDatabaseUserScopePort(
       }
       if (!options.session) return refused(userId, "worker_not_scheduled", account);
       if (action === "ARM") {
+        // Do not report ARM readiness on a build that START would refuse.
+        const release = await verifyPersonalStartupAuthority(db, userId);
+        if (!release.ok) return refused(userId, release.reason, account);
         // ARM is an authorization/readiness state, never a worker lifecycle
         // action. The previously shared START path could place orders on ARM.
         // Do not persist a forged approval or clear a kill switch here.

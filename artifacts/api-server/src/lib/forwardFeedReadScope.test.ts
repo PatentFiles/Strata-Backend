@@ -65,6 +65,34 @@ test("owned-market read shares the same deadline; late resolved data cannot esca
  const expired=new AbortController();
  await assert.rejects(readForwardCycleFeeds(make(()=>{expired.abort(new DOMException("timeout","TimeoutError"));return btc;},()=>market),undefined,undefined,expired.signal));
 });
+test("held market remains readable when next-window discovery is unavailable",async()=>{
+ const calls:Array<string|undefined>=[];
+ const held={...market,ticker:"KXBTC15M-HELD",result:"yes",status:"settled"};
+ const feeds=make(()=>Promise.resolve(btc),(ticker:string|undefined)=>{
+  calls.push(ticker);
+  if(!ticker)throw Error("Kalshi returned no current market");
+  assert.equal(ticker,held.ticker);return Promise.resolve(held);
+ });
+ const result=await readForwardCycleFeeds(feeds,held.ticker);
+ assert.equal(result.market,held);assert.deepEqual(calls,[held.ticker]);
+});
+test("held exact-read failure never falls back to a new current market",async()=>{
+ const calls:Array<string|undefined>=[];
+ const feeds=make(()=>Promise.resolve(btc),(ticker:string|undefined)=>{
+  calls.push(ticker);if(ticker)throw Error("held market unavailable");return Promise.resolve(market);
+ });
+ await assert.rejects(readForwardCycleFeeds(feeds,"KXBTC15M-HELD"),/held market unavailable/);
+ assert.deepEqual(calls,["KXBTC15M-HELD"]);
+});
+test("after the held position clears the next cycle resumes current-market discovery",async()=>{
+ const calls:Array<string|undefined>=[];
+ const feeds=make(()=>Promise.resolve(btc),(ticker:string|undefined)=>{
+  calls.push(ticker);return Promise.resolve({...market,ticker:ticker??"KXBTC15M-NEW"});
+ });
+ assert.equal((await readForwardCycleFeeds(feeds,"KXBTC15M-HELD")).market.ticker,"KXBTC15M-HELD");
+ assert.equal((await readForwardCycleFeeds(feeds,undefined)).market.ticker,"KXBTC15M-NEW");
+ assert.deepEqual(calls,["KXBTC15M-HELD",undefined]);
+});
 test("BTC failure diagnostics include elapsed timeout cause; valid recovery emits once and failures are bounded",async()=>{
  let clock=0,calls=0;const events:BtcFeedDiagnostic[]=[];
  const fetcher=(async(_url:unknown,init:RequestInit)=>{calls++;

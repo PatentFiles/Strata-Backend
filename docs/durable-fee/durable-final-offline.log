@@ -1,0 +1,165 @@
+
+  dist/durable-regression/inAppProtectiveRelease.test.cjs              1.4mb ⚠️
+  .../durable-regression/ownerFeeEmergencyExitSignedDispatch.test.cjs  1.3mb ⚠️
+  dist/durable-regression/ownerSelfAccountActivation.test.cjs          1.3mb ⚠️
+  dist/durable-regression/ownerFeeV3Migration.test.cjs                 1.2mb ⚠️
+  dist/durable-regression/heldProtectiveMarketFee.test.cjs             1.2mb ⚠️
+  dist/durable-regression/ownerStandingFeeAuthorization.test.cjs       1.1mb ⚠️
+  dist/durable-regression/durableFeeConsumers.test.cjs                 1.1mb ⚠️
+  dist/durable-regression/durableOwnerFeePolicy.test.cjs               1.1mb ⚠️
+
+⚡ Done in 361ms
+✔ durable source requires exact versioned identity, not issuer URL or legacy scheme (1.251595ms)
+✔ feature off never contacts DB or provider at startup, market or protective stages (0.490758ms)
+✔ durable protective mode selected only from exact approved policy identity (1.823836ms)
+✔ durable approved evidence has no recurring PDF lease, but does not claim current publication (1.548331ms)
+✔ ENTRY publication transport outage alone does not discard approved terms (0.208364ms)
+✔ ENTRY rejects approved (0.153831ms)
+✔ ENTRY rejects integrityValid (0.213581ms)
+✔ ENTRY rejects knownPublicationChange (0.09317ms)
+✔ ENTRY rejects formula (0.176325ms)
+✔ ENTRY rejects digest (0.103055ms)
+✔ ENTRY rejects owner (0.063045ms)
+✔ ENTRY rejects sha (0.143696ms)
+✔ ENTRY fresh metadata missing/stale/future refuses without guessed fee bound (0.504009ms)
+✔ PROTECTIVE_EXIT publication transport outage alone does not discard approved terms (0.181904ms)
+✔ PROTECTIVE_EXIT rejects approved (0.096806ms)
+✔ PROTECTIVE_EXIT rejects integrityValid (0.096806ms)
+✔ PROTECTIVE_EXIT rejects knownPublicationChange (0.044387ms)
+✔ PROTECTIVE_EXIT rejects formula (0.03983ms)
+✔ PROTECTIVE_EXIT rejects digest (0.053801ms)
+✔ PROTECTIVE_EXIT rejects owner (0.027411ms)
+✔ PROTECTIVE_EXIT rejects sha (0.158819ms)
+✔ PROTECTIVE_EXIT fresh metadata missing/stale/future refuses without guessed fee bound (0.077667ms)
+✔ entry revocation does not disable independent reduce-only fee proof (0.121392ms)
+✔ known change latch cannot be cleared by stale matching response or429 (0.453683ms)
+✔ malformed change evidence rejects (0.296867ms)
+✔ locked durable row plus existing actual market verifier makes ZERO PDF calls (8.345866ms)
+✔ real market multiplier change is refused without publication polling (1.841883ms)
+✔ missing/ambiguous durable state refuses (0.212319ms)
+✔ held market uses protective evidence without requiring or renewing an entry grant (2.160513ms)
+✔ held market rejects refused (0.707656ms)
+✔ held market rejects unauthorized (0.111949ms)
+✔ held market rejects wrongMarket (0.087111ms)
+✔ held market rejects wrongDigest (0.18605ms)
+✔ held market rejects invalidDate (0.096446ms)
+✔ held market rejects stale proof and unsupported fee model before provider read (0.473513ms)
+✔ supervisor held fee branch precedes ordinary entry verifier without fallback (1.189581ms)
+✔ actual protective verifier accepts fresh protective model without reading or renewing expired entry observation (2.601357ms)
+✔ owner V3 held risk-reducing exit accepts only fresh actual issuer-backed evidence (0.813665ms)
+✔ PRODUCTION qualifier performs only owned GET and stores a digest, not a trading permission (8.754711ms)
+✔ protective qualification refuses false history coverage before fee authority or persistence (1.942715ms)
+✔ commissioning repair refuses false history coverage without release or freeze writes (2.607927ms)
+✔ protective qualification refuses missing history coverage before fee authority or persistence (0.753365ms)
+✔ commissioning repair refuses missing history coverage without release or freeze writes (0.889579ms)
+✔ Step 12 reports sanitized provider source reasons and still refuses missing or changed PDF digest (1.751517ms)
+✔ Step 12 accepts a genuine reviewed API-source eligibility without a PDF capture (0.759072ms)
+✔ V4 protective qualification uses exact owner-approved dynamic issuer model, never legacy PDF preflight (1.142651ms)
+✔ V4 qualification fails closed on absent, duplicate, malformed, changed, future or stale owner fee evidence (2.520395ms)
+✔ Step 12 denies a revoked, wrong or stale API fee-source review (1.386577ms)
+✔ owner-only qualification rejects stale exchange readings and expired provider journeys (0.978503ms)
+✔ reviewer cannot impersonate account owner or use ordinary user role (0.404379ms)
+✔ authenticated distinct reviewer persists immutable evidence in transaction (0.360563ms)
+✔ owner acceptance is rejected if missing distinct reviewer or authenticated confirmation (0.351059ms)
+✔ independently approved owner release fences killed terminal lease without ARM or START (25.215394ms)
+▶ terminal lease transition refuses missing review, armed lease, exposure and owned worker
+  ✔ {"leaseState":"killed","review":false} (0.374454ms)
+  ✔ {"leaseState":"killed","leaseArmed":true} (0.363587ms)
+  ✔ {"leaseState":"killed","leaseExposure":true} (0.402646ms)
+  ✔ {"leaseState":"owned"} (0.702378ms)
+✔ terminal lease transition refuses missing review, armed lease, exposure and owned worker (2.667086ms)
+✔ owner consent inserts exact signed release then atomically enables account and global live flag (13.096197ms)
+✔ eligible but killed owner remains stopped until genuine reviewed release (8.689263ms)
+✔ eligible but killed owner cannot bypass independent technical review (0.233953ms)
+✔ owner's independently qualified stopped account can release when shared master is already enabled (8.331815ms)
+✔ already enabled account cannot outrun a globally stopped or inconsistent master (0.424038ms)
+✔ globally enabled master still cannot bypass absent independent reviewer (0.240362ms)
+✔ provisional freeze cannot be cleared without distinct explicit owner consent (0.156686ms)
+✔ any genuine freeze is immutable through commissioning recovery (0.221244ms)
+✔ owner-authorized recovery denies stale signed source, mismatched cash and any exchange exposure (1.32858ms)
+✔ explicit owner reviewed repair refreshes real Kalshi evidence inside transaction even with old worker reconciliation (0.475205ms)
+✔ release account lookup binds the policy to both execution account and owner (0.883721ms)
+✔ owner SHA consent alone never reports a live technical protective-exit release (0.513704ms)
+✔ OWNER_SHA_V1 releaseActive is true only with BOTH exact-SHA owner consent and technical exit approval (0.520203ms)
+✔ Step12 status returns legacy fee evidence diagnostics without claiming qualification (0.269756ms)
+✔ Step12 status identifies approved V4 policy by version, never falsely as legacy PDF (0.735878ms)
+✔ consequential held release refuses missing or revoked durable SHA consent before control writes (8.346286ms)
+✔ fresh independently reviewed release accepts durable prior-qualification SHA consent without relabeling it (8.039264ms)
+✔ final release lookup returns the complete historical receipt without granting current readiness (0.394023ms)
+✔ final release lookup keeps absent or ambiguous receipts unknown and performs no writes (0.185139ms)
+✔ durable qualification requires exact proof, retains exchange gates, and never calls PDF/V3 (72.480187ms)
+✔ one committed UNKNOWN marker produces at most one signed IOC, even across repeated calls (4.744013ms)
+✔ exact 0/partial/full IOC observations reconcile only after independent read (1.107738ms)
+✔ fail-closed before POST for missing fee evidence, durable marker, or final account/lease lock (1.031794ms)
+✔ uncertain network responses and unproven history remain UNKNOWN, never retryable (1.314449ms)
+✔ unverified monetary fees deny before consuming an emergency reservation (0.18593ms)
+✔ owner, scope and order identity are checked before all external side effects (0.194462ms)
+✔ signed V2 POST uses exact canonical path, RSA-PSS and strict reduce-only IOC body (6.177351ms)
+✔ a valid exchange fill without durable audited terminal commit remains UNKNOWN (0.573444ms)
+✔ failed or ambiguous final fence COMMIT never posts and is never retryable (0.605802ms)
+✔ kill/lease/review database row locks are released before network transport (0.49847ms)
+✔ final outbound fence demands a matching DISPATCHED V13 financial EXIT intent (0.389787ms)
+✔ hosted signed dispatcher rejects absent, malformed and false release switch before DB or POST (0.248775ms)
+✔ owned exit rechecks DB-relative reservation/heartbeat lifetimes after delayed COMMIT (2.706876ms)
+✔ owned exit fails closed for missing, future and invalid DB age evidence (1.325165ms)
+✔ owned exit rejects invalid or regressed monotonic time and preserves UNKNOWN without retry (1.132616ms)
+✔ real signing path refuses aged evidence before raw fetch (1.1952ms)
+✔ proven no-send is durably VOID/BLOCKED, never RECONCILED or replayed (1.366828ms)
+✔ takeover or partial/ambiguous local finalization retains UNKNOWN without retry (1.864237ms)
+✔ actual transport ambiguity never mints a local no-send audit (0.339371ms)
+✔ second fee reader exception cannot be mistaken for an ambiguous order transport (0.401865ms)
+✔ durable local result is exact-object/scope branded; forged or ambiguous results cannot bypass sticky hold (0.967096ms)
+✔ composed main-owned flow retains reconciliation hold, exits with fresh ID and resumes only from signed flat valid gates (1.532327ms)
+✔ production outcome helper rejects forged/uncertain results and never enables an entry (1.238314ms)
+✔ hosted process cannot inject the monetary authority port even with release opt-in (0.183997ms)
+✔ pinned EXIT source expiry is checked before and after COMMIT, with inclusive 5000ms boundary (1.675102ms)
+✔ already-expired intact source gets scoped audited no-send only after cleanup commits (1.89281ms)
+✔ expired-source cleanup failure or invalid evidence retains UNKNOWN without false no-send proof (4.19119ms)
+✔ finite technical release expires at the final send boundary without borrowing owner authority (1.94648ms)
+✔ standing technical review remains without TTL, but revoked standing history cannot fall back (0.604891ms)
+✔ real fee freshness and authority proof cannot hide EXIT source or finite release expiry during signing (6.090951ms)
+✔ fresh genuine fractional YES and NO reductions preserve zero, partial and full reconciliation (2.155215ms)
+✔ missing persistence freshness/commit provenance remains UNKNOWN after witnessed POST (0.848037ms)
+✔ V3 migration is feature disabled even with a seemingly valid owner proof (1.995114ms)
+✔ V3 migration rejects missing exact CAS or consent and invented reviewer grant (0.566714ms)
+✔ live 429/expired official PDF prevents V3 migration before any DB write (0.358069ms)
+✔ V3 preview is non-mutating and distinguishes historical freeze and immutable policy (1.283843ms)
+✔ V3 policy version is distinct from historical V2 reviewed route (0.256176ms)
+✔ V3 legacy-marker repair cannot bypass signed history and flatness (0.958593ms)
+✔ V3 policy switch SQL must lock authority AND consent, and require exact stake/preset (1.164112ms)
+✔ V3 migration from legacy preserves approved scope without creating reviewer evidence (5.161352ms)
+✔ V3 migration from reviewed-api-v2 preserves approved scope without creating reviewer evidence (1.501741ms)
+✔ V3 $5 preset proof is exact-versioned and bounded by authenticated cash (0.344178ms)
+✔ invalid owner, forged ownerUserId and malformed consent fail before database access (3.210213ms)
+✔ enrollment belongs to signed exact owner and account, not to global ADMIN role (0.33203ms)
+✔ missing explicit activation flag and protective capability both fail closed (0.484259ms)
+✔ activation outcome is scoped to actual owner, source account and recorded SHA (1.311214ms)
+✔ missing or multiple ambiguous activation receipts never authorize a retry (0.309937ms)
+✔ genuine source SHA, owner policy, immutable consent digest and current issuer evidence all match (2.836801ms)
+✔ expired, wrong owner or wrong policy consent cannot authorize new exposure (1.586759ms)
+✔ real issuer failure never becomes a standalone fee authorization (0.308375ms)
+✔ wrong source identity refuses before database and provider (0.187633ms)
+✔ only an authenticated historical V3 source plus fresh provider fee can serve reduce-only exits (0.609658ms)
+✔ protective fee mode is selected from approved owner policy, never client input (1.705849ms)
+✔ final reduce-only authority binds immutable original owner, release, approved policy and PDF bytes (0.700275ms)
+ℹ tests 132
+ℹ suites 0
+ℹ pass 132
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1234.754413
+
+  dist/durableFeeRoutes.test.cjs  1.5mb ⚠️
+
+⚡ Done in 105ms
+✔ durable routes authenticate before feature/body handling, never trust supplied actor (73.391469ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 731.088119

@@ -1,0 +1,20 @@
+waiting for server to start.... done
+server started
+
+  artifacts/api-server/dist/durable-fullchain-native.cjs  1.4mb ⚠️
+
+⚡ Done in 170ms
+▶ full-chain actual migration → fresh activation request → qualification → review → activation
+  ✔ no prior same-SHA approval completes all actual stages, preserved limits, remains disarmed (1301.226273ms)
+  ✔ existing same-SHA approval refuses migration before any write or revocation (688.960473ms)
+  ✔ prior OLD-SHA approval revoked by migration does not poison new-SHA activation (903.811528ms)
+✔ full-chain actual migration → fresh activation request → qualification → review → activation (2990.981918ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3608.858622
+Disposable evidence retained at /tmp/owner-final-native.e3fHI2; cluster stopped on exit.

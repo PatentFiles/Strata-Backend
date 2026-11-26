@@ -1,0 +1,47 @@
+name: Live decision history PostgreSQL
+on:
+  pull_request:
+    paths:
+      - 'artifacts/api-server/src/lib/v13-production/**'
+      - 'artifacts/api-server/src/lib/strata/liveHistory*'
+      - 'artifacts/api-server/src/routes/liveHistoryRouter.ts'
+      - 'artifacts/api-server/src/routes/strataRouter.ts'
+      - 'artifacts/api-server/scripts/run-v13-disposable-postgres.mjs'
+      - 'lib/db/drizzle/0050_strata_live_decision_history.sql'
+      - '.github/workflows/live-decision-history.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  analytics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Install selected PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}
+          sudo systemctl stop postgresql
+          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+      - name: Native projection, migration, immutable recording and tenant isolation
+        working-directory: artifacts/api-server
+        run: node scripts/run-v13-disposable-postgres.mjs --live-decision-history

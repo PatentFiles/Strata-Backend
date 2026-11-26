@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, delimiter } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,9 +8,12 @@ import { fileURLToPath } from "node:url";
 // Never read ambient DATABASE_URL, Kalshi secrets, or runtime account settings.
 // A new cluster/database and credential-stripped child exist only for this run.
 const api = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const rounding = process.argv[2] === "--rounding-authority";
 const auditCursor = process.argv[2] === "--audit-cursor";
 const renewal = process.argv[2] === "--renewal";
-const recovery = process.argv[2] === "--recovery";
+const recovery = ["--recovery","--settled-cash-recovery"].includes(process.argv[2]);
+const stoppedCashDiagnostic = process.argv[2] === "--stopped-cash-diagnostic";
+const liveHistory = process.argv[2] === "--live-decision-history";
 const restore = process.argv[2] === "--restore";
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
@@ -55,6 +58,8 @@ globalThis.fetch = (...args) => {
 };
 `);
 const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
+  ...Object.fromEntries(['SystemRoot','SYSTEMROOT','WINDIR','TEMP','TMP','USERPROFILE','LOCALAPPDATA','APPDATA','COMSPEC']
+    .filter(key=>process.env[key]).map(key=>[key,process.env[key]])),
   // Avoid host timezone autodetection during initdb in restricted containers.
   TZ: "UTC", PGTZ: "UTC",
   STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED: process.env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,
@@ -71,36 +76,48 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
 // exclusively owns a NEW local postgres/v13_ci cluster on 5432, or fails.
 if (fullSuite) { env.GITHUB_ACTIONS = "true"; env.CI = "true"; }
 function run(command, args, options = {}) {
+  const timeout = options.timeout ?? (fullSuite ? 600_000 : 180_000);
   const shell = process.platform === "win32" && /\.cmd$/i.test(command);
+  const startedAt = performance.now();
   const r = spawnSync(command, args, {
     cwd: api,
     env,
     stdio: "inherit",
-    timeout: fullSuite ? 600_000 : 180_000,
+    timeout,
     shell,
+    windowsHide: true,
     ...options,
   });
-  if (r.status !== 0) throw new Error(`Disposable test command failed (${r.status}): ${command}`);
+  if (r.status !== 0) {
+    if(command===executable(bin,'pg_ctl')&&existsSync(join(root,'postgres.log')))console.error(readFileSync(join(root,'postgres.log'),'utf8'));
+    throw new Error(`Disposable test command failed (status=${r.status}, signal=${r.signal ?? "none"}, timedOut=${r.error?.code === "ETIMEDOUT"}, timeoutMs=${timeout}, elapsedMs=${Math.round(performance.now() - startedAt)}): ${command}`);
+  }
 }
 console.info("ISOLATED_FINAL_OVERLAP_ENV",JSON.stringify({port,fullSuite,final:env.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED,older:env.STRATA_PUBLIC_METADATA_PREFETCH_ENABLED}));
 let started = false;
 try {
   run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
     "--set=shared_buffers=16MB"]);
+  // Configuration avoids nested shell quoting differences in Windows pg_ctl.
+  appendFileSync(join(root,'data','postgresql.conf'), "\nunix_socket_directories = ''\n");
   run(executable(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
     // Every test client is pinned to loopback TCP. Do not also require a Unix
     // socket, which restricted test containers may not permit creating.
-    `-h 127.0.0.1 -p ${port} -c unix_socket_directories=''`, "-w", "start"]);
+    `-h 127.0.0.1 -p ${port}`, "-w", "start"]);
   started = true;
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  if (!recovery && !restore && !renewal && !auditCursor) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  if (!rounding && !recovery && !restore && !renewal && !auditCursor && !stoppedCashDiagnostic && !liveHistory) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
     ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
-  if (process.argv[2] === "--full-suite") {
-    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"]);
+  if (rounding) {
+    run(process.execPath, ["scripts/direct-rounding-postgres.cjs"]);
+  } else if (process.argv[2] === "--full-suite") {
+    // This aggregates all safety groups; individual child/SQL/wire budgets remain unchanged.
+    // Both workflow callers reserve additional setup and cleanup headroom.
+    run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"], { timeout: 1_200_000 });
   } else {
-    const testFile = auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts" : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
+    const testFile = liveHistory ? "src/lib/strata/liveHistoryReadModel.postgres.test.ts" : stoppedCashDiagnostic ? "src/lib/strata/stoppedCashDiagnosticLoader.postgres.test.ts" : auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? (process.argv[2] === "--settled-cash-recovery" ? "src/lib/strata/ownerSettledCashFreezeRecovery.postgres.test.ts" : "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts") : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",

@@ -340,6 +340,7 @@ export async function replaceOwnedCredentialInTransaction(
     vaultSecretId: string;
     keyFingerprint: string | null;
     frozenRestrictedRecovery?: boolean;
+    createOnly?: boolean;
   },
 ): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
   if (!(KNOWN_CREDENTIAL_ROLES as readonly string[]).includes(input.role)) {
@@ -361,6 +362,7 @@ async function replaceCredentialInTransaction(
     vaultSecretId: string;
     keyFingerprint: string | null;
     frozenRestrictedRecovery?: boolean;
+    createOnly?: boolean;
   },
 ): Promise<{ ok: true; credentialId: string } | { ok: false; reason: string }> {
   const locked = await client.query(LOCK_OWNED_CONNECTION_SQL, [
@@ -407,6 +409,10 @@ async function replaceCredentialInTransaction(
   ]);
   if (active.rows.length > 1) return { ok: false, reason: "ambiguous_credential_role" };
   const previousId = text(active.rows[0]?.id);
+  // Onboarding is create-only. A repeated or concurrent save may not revoke
+  // an already bound role. The caller's surrounding transaction rolls back
+  // the newly created Vault secret when this refusal is returned.
+  if (input.createOnly && previousId) return { ok: false, reason: "credential_already_registered" };
   // Recovery is explicitly two-stage: revoke the stale role first. No silent
   // automatic rotation while an execution account is bound to the old key.
   if (frozenRecovery && previousId) {

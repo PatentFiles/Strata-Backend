@@ -1,9 +1,14 @@
+import {ownerSelfReviewOutcome} from '../lib/strata/ownerSelfReviewOutcome';
+import {recordOwnerSelfStandingReview,revokeOwnerSelfStandingReview} from '../lib/strata/ownerSelfStandingReview';
+import {activateOwnerSelfAccount,ownerSelfActivationOutcome} from '../lib/strata/ownerSelfAccountActivation';
+import {heldHistoryConsentOutcome} from '../lib/strata/ownerNeverPostedReleaseRenewal';
 import {recoverOwnerTransientFreeze} from '../lib/strata/ownerTransientFreezeRecovery';
+import {createOwnerSettledCashRecoveryHandler,createOwnerSettledCashRecoveryReadHandler} from './ownerSettledCashRecoveryHandler';
 import {recordStandingExecutionReview,revokeStandingExecutionReview,standingExecutionStatus} from '../lib/strata/standingExecutionReview';
 import { Router, type IRouter, type RequestHandler } from "express";
 import {
   authorizeProtectiveRelease,attestProtectiveReleaseReview,
-  pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,
+  pendingReleaseOwners,protectiveReleaseStatus,qualifyProtectiveRelease,lookupProtectiveReleaseAuthorization,
 } from "../lib/strata/inAppProtectiveRelease";
 import {authorizeOwnerShaRelease,revokeOwnerShaRelease,ownerRestoreStatus} from "../lib/strata/ownerShaRelease";
 import {recoverOwnerStaleLease} from "../lib/strata/ownerStaleLeaseRecovery";
@@ -86,6 +91,10 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
+ // Separate exact-settlement recovery. Default disabled; never invokes transient fallback.
+ router.post('/owner-settled-cash-freeze-recover',createOwnerSettledCashRecoveryHandler());
+ router.get('/owner-settled-cash-freeze-preview',createOwnerSettledCashRecoveryReadHandler('preview'));
+ router.get('/owner-settled-cash-freeze-outcome',createOwnerSettledCashRecoveryReadHandler('outcome'));
  // Explicit owner opt-in for continuous technical renewal. No orders or
  // releases are created from this endpoint; it requires an existing reviewed
  // exact-SHA release and durable owner approval.
@@ -103,6 +112,47 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
   const actor=identify(res.locals);
   if(!actor||!isOperator(actor.role))return void res.status(403).json({reason:'independent_operator_role_required'});
   const result=await recordStandingExecutionReview(actor.subject,actor.role!,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // New owner-only authority is separate from immutable historical independent reviews.
+ // Require signed AAL2 owner session and server-configured exact owner/account scope.
+ router.get('/owner-standing-review-outcome',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await ownerSelfReviewOutcome(actor.subject,req.query);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(200).json(sanitizePublic(result));
+ });
+ router.post('/owner-standing-review',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await recordOwnerSelfStandingReview(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ // Explicit AAL2 owner-only activation. Uses signed Kalshi history,
+ // issuer monetary evidence, exact-SHA technical review, ledger conservation,
+ // worker CAS and deferred five-second freshness. No ARM or START.
+ router.get('/owner-self-activation-outcome',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const sha=typeof req.query.sha==='string'?req.query.sha:'';
+  const result=await ownerSelfActivationOutcome(actor.subject,sha);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(200).json(sanitizePublic(result));
+ });
+ router.post('/owner-self-activate',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await activateOwnerSelfAccount(actor.subject,req.body);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
+ router.post('/owner-standing-review-revoke',async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const result=await revokeOwnerSelfStandingReview(actor.subject,req.body);
   res.setHeader('Cache-Control','private, no-store');
   res.status(result.ok?200:409).json(sanitizePublic(result));
  });
@@ -129,6 +179,24 @@ export function createProtectiveReleaseRouter(requireUser:RequestHandler):IRoute
  });
  // Owner-only AAL2 routes: owner identity comes from the signed JWT, never
  // from a submitted account selector, and cannot clear shared safety gates.
+ router.get("/authorization-outcome",async(req,res)=>{
+  const actor=identify(res.locals);if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const reviewId=typeof req.query.reviewId==='string'?req.query.reviewId:'';
+  const result=await lookupProtectiveReleaseAuthorization(actor.subject,reviewId);
+  res.setHeader('Cache-Control','private, no-store');res.status(200).json(sanitizePublic(result));
+ });
+ router.get("/owner-consent-outcome",async(req,res)=>{
+  const actor=identify(res.locals);
+  if(!actor)return void res.status(401).json({reason:'unauthorized'});
+  const qualification=typeof req.query.qualificationId==='string'?req.query.qualificationId:'';
+  const sha=typeof req.query.sha==='string'?req.query.sha:'';
+  const account=typeof req.query.accountId==='string'?req.query.accountId:undefined;
+  if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(qualification)||!/^[a-f0-9]{40}$/.test(sha)||(account!==undefined&&(!account||account.length>200)))
+   return void res.status(400).json({reason:'held_consent_readback_scope_invalid'});
+  const result=await heldHistoryConsentOutcome(actor.subject,qualification,sha,pool,account);
+  res.setHeader('Cache-Control','private, no-store');
+  res.status(result.ok?200:409).json(sanitizePublic(result));
+ });
  router.post("/owner-authorize",async(req,res)=>{
   const actor=identify(res.locals);
   if(!actor)return void res.status(401).json({reason:"unauthorized"});

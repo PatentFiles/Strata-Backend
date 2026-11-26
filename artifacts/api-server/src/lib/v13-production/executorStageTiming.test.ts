@@ -1,3 +1,4 @@
+import {PREPARE_ENTRY_CAPACITY_SQL} from './prepareEntryCapacity';
 import test from "node:test";
 import assert from "node:assert/strict";
 import {ProductionExecutor} from "./executor";
@@ -72,7 +73,7 @@ test("real prepare path preserves price refusal and records normalized book for 
   const tx={query:async(sql:string)=>{
    if(sql.startsWith("INSERT")||sql.startsWith("UPDATE")){writes++;throw Error("unexpected_write");}
    if(sql.includes("FROM forward_test_evaluations"))return {rows:[source]};
-   if(sql.includes("AS total_loss"))return {rows:[{basis:"0",total_loss:"0",daily_loss:"0",open:0}]};
+   if(sql===PREPARE_ENTRY_CAPACITY_SQL)return {rows:[{has_prepared:false,basis:"0",total_loss:"0",daily_loss:"0",open:"0"}]};
    if(sql.includes("FROM strata_configured_stake"))return {rows:[{configured_stake_cents:500,revision:1}]};
    return {rows:[]};
   }};

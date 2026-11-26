@@ -1,10 +1,20 @@
+import {ownerArmFence,assertOwnerArmFence,withoutOwnerArmFence} from './ownerArmContext';
+import {armTransaction,type ArmDatabase} from './ownerArmStore';
+import {protectiveRecoveryLivenessStage} from "./protectiveRecoveryLiveness";
+import { heartbeatLeaseInTransaction } from "./transactionalWorkerHeartbeat";
+import {parseDurableFeeSource,verifyDurableFeeStage} from './durableFeeConsumers';
+import {DURABLE_FEE_VERSION,isDurableFeeVersion} from './durableOwnerFeePolicy';
+import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
+import {createDirectRoundingRuntime} from './directRoundingRuntime';
+import {createDirectRoundingOwnedAdapters} from './directRoundingOwnedAdapters';
+import {releaseFailedStartLease} from "./failedStartLeaseCleanup";
 import {readHeldProtectiveMarketFee} from "./heldProtectiveMarketFee";
 import {holdUnknownEntryRecovery,type RecoveryHoldScope} from "./unknownEntryRecoveryHold";
 import {createUnknownEntryHeldFence} from "./unknownEntryHeldFence";
 import {createBoundedUnknownEntryReadRunner} from "./boundedUnknownEntryReadRunner";
 import {FinalPublicMetadataPhases} from "./finalPublicMetadataPhases";
 import {createFeeVerificationTiming} from "./feeVerificationTiming";
-import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming} from "./ownedFeedReadTiming";
+import {createOwnedFeedReadTiming,recordOwnedFeedReadTiming,createOwnedSnapshotTiming} from "./ownedFeedReadTiming";
 import {readOwnedEntryMarket} from "./ownedEntryMarketRead";
 import {processCommittedPublicMetadata,type MetadataPrefetchAttempt} from "./committedPublicMetadata";
 import {lockStopAccount,readStopExposure} from "./stopExposure";
@@ -27,6 +37,9 @@ import { parseOwnerFeeSource, verifyOwnerFeeSourceStage } from "./ownerFeeSource
 import { createGuardedOwnerFeeFetch } from "./guardedOwnerFeeWire";
 import {parseReviewedApiSource,verifyReviewedApiFeeSourceStage,API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "./apiFeeSourceStage";
 import {createGuardedReviewedApiFeeFetch} from "./guardedReviewedApiFeeWire";
+import {parseV3FeeSource,verifyOwnerV3FeeAuthority,V3_FEE_POLICY_VERSION,V3_FEE_FORMULA_VERSION} from "./ownerFeeV3Authority";
+import {createGuardedOwnerV3FeeFetch} from "./guardedOwnerV3FeeWire";
+import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
@@ -35,8 +48,9 @@ import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIn
 import { reserveOwnedEmergencyExitProof } from "./ownerFeeEmergencyExitReserve";
 import { dispatchReviewedProtectiveExitOnce } from "./ownerFeeEmergencyExitSignedDispatch";
 import { verifyProtectiveExitStartupRelease } from "./protectiveExitStartupRelease";
-import {checkContinuousBootstrap,checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
-import {deployedGitSha} from "./deployedGitSha";
+import { verifyPersonalStartupAuthority } from "./personalStartupAuthority";
+import {checkContinuousEligibility,renewContinuousTechnicalLease,hasContinuousGrantHistory} from "./continuousExecutionAuthorization";
+import {deployedGitSha,requireIndependentPaperCutover} from "./deployedGitSha";
 import {
   openOwnedExecutionSession,
   scheduleOwnedAccountWorker,
@@ -65,6 +79,8 @@ import type { Identity, Request } from "../v13-production/types";
 type LeaseAction = "STOP" | "KILL";
 
 export interface PersonalSessionControl {
+  /** Process drain only. No automatic START and no unguarded lease release. */
+  quiesce?():Promise<{stopped:boolean;managingExposure:boolean}>;
   isScheduled(userId: string, accountId: string): boolean;
   start(input: {
     userId: string;
@@ -128,7 +144,7 @@ const SIGNER_SQL = `
          c.vault_secret_id::text AS vault_secret_id,
          s.decrypted_secret,
          p.policy_hash, p.fee_policy_version, p.fee_source_url, p.fee_formula_version, p.state AS policy_state,
-         stake.configured_stake_cents
+         stake.configured_stake_cents, stake.risk_preset_id, p.version AS risk_policy_revision
   FROM v13_production_account a
   JOIN private.kalshi_connection_credentials c
     ON c.owner_user_id = a.owner_user_id
@@ -149,12 +165,16 @@ const SIGNER_SQL = `
     AND a.exchange_index = 2
 `;
 
-/** Distinct from global fetch, so a deployment cannot submit through the unbound global client. */
+import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
+import {DirectEntrySource} from "../v13-production/directEntrySource";
+import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
+
+/** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
 export async function personalProductionFetch(
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
 ): Promise<Response> {
-  return fetch(input, init);
+  return containedProductionFetch(input,init);
 }
 
 export function createOwnedTradingSupervisor(
@@ -164,12 +184,90 @@ export function createOwnedTradingSupervisor(
   >,
 ): PersonalSessionControl {
   const workers = new Map<string, RunningWorker>();
+  let closing=false;
+  let shutdown:Promise<{stopped:boolean;managingExposure:boolean}>|null=null;
+  // An opening session already owns a lifecycle operation even before its
+  // worker is registered. Do not duplicate that operation or certify STOP
+  // while it can still install a scheduled worker after the caller returns.
+  const starts = new Map<string, {
+    ownerUserId: string;
+    result: Promise<{ ok: boolean; reason: string; workerStarted: boolean }>;
+  }>();
+  // A new START is refused while any earlier control can still disarm its
+  // account. Do not queue an automatic restart behind STOP/KILL. Counts allow
+  // KILL to close local gates immediately even when another STOP is waiting.
+  const stops = new Map<string, { ownerUserId: string; pending: number }>();
+  const ownerStops = new Map<string, number>();
+  const stopAccount = async (userId: string, accountId: string, action: LeaseAction) => {
+    const pending = starts.get(accountId), running = workers.get(accountId), stopping = stops.get(accountId);
+    if ([pending, running, stopping].some(operation => operation && operation.ownerUserId !== userId))
+      return { workerStopped: false, managingExposure: false };
+    const control = stopping ?? { ownerUserId: userId, pending: 0 };
+    control.pending++;
+    stops.set(accountId, control);
+    try {
+      if (pending) {
+        try { await pending.result; }
+        catch { return { workerStopped: false, managingExposure: false }; }
+      }
+      // Keep the existing authoritative exposure check: STOP may retain an
+      // entry-held protective worker, whereas KILL must stop it completely.
+      return await stopOne(workers, userId, accountId, action);
+    } finally {
+      control.pending--;
+      if (control.pending === 0 && stops.get(accountId) === control) stops.delete(accountId);
+    }
+  };
   return {
+    quiesce(){
+      if(shutdown)return shutdown;
+      closing=true;
+      // Close entry gates synchronously, before any asynchronous STOP proof.
+      for(const r of workers.values())if(r.state)r.state.entriesAuthorized=false;
+      shutdown=(async()=>{
+        const identities=new Map<string,string>();
+        for(const [id,r] of workers)identities.set(id,r.ownerUserId);
+        for(const [id,r] of starts)identities.set(id,r.ownerUserId);
+        const running=new Set(workers.values());
+        const results=await Promise.allSettled([...identities].map(async([id,owner])=>{
+          const opening=starts.get(id);
+          if(opening)await opening.result;
+          // A pending factory can install a worker after the initial snapshot.
+          // Keep its idle barrier even when fenced STOP unregisters it.
+          const opened=workers.get(id);if(opened)running.add(opened);
+          return stopAccount(owner,id,'STOP');
+        }));
+        let stopped=true,managingExposure=false;
+        for(const result of results){
+          if(result.status==='rejected'){stopped=false;continue;}
+          if(!result.value.workerStopped)stopped=false;
+          if(result.value.managingExposure){stopped=false;managingExposure=true;}
+        }
+        // Await pre-existing ticks before closing their database pool. An
+        // uncertain dispatch remains durable; shutdown never replays it.
+        if(stopped)await Promise.all([...running].map(r=>r.worker.whenIdle?.()));
+        return {stopped,managingExposure};
+      })();
+      return shutdown;
+    },
     isScheduled(userId, accountId) {
       const running = workers.get(accountId);
       return running?.ownerUserId === userId && running.worker.isScheduled();
     },
     async start(input) {
+      if(closing)return {ok:false,reason:'worker_process_shutting_down',workerStarted:false};
+      input = { ...input };
+      const stopping = stops.get(input.accountId);
+      if (stopping || ownerStops.has(input.userId)) {
+        return { ok: false, reason: stopping && stopping.ownerUserId !== input.userId
+          ? "foreign_execution_account" : "worker_control_in_progress", workerStarted: false };
+      }
+      const pending = starts.get(input.accountId);
+      if (pending) {
+        if (pending.ownerUserId !== input.userId)
+          return { ok: false, reason: "foreign_execution_account", workerStarted: false };
+        return pending.result;
+      }
       const existing = workers.get(input.accountId);
       if (existing && existing.ownerUserId !== input.userId) {
         return { ok: false, reason: "foreign_execution_account", workerStarted: false };
@@ -177,30 +275,55 @@ export function createOwnedTradingSupervisor(
       if (existing?.worker.isScheduled()) {
         return { ok: true, reason: "worker_already_running", workerStarted: true };
       }
-      const opened = await open(input);
-      if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
-      if (!opened.worker.isScheduled()) {
-        opened.worker.stop();
-        return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
-      }
-      workers.set(input.accountId, {
-        ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+      // Register before invoking open, including a synchronously completing
+      // adapter. Promise continuations then apply pending STOP before the
+      // worker's first scheduled timer can run.
+      const result = Promise.resolve().then(async () => {
+        const opened = await open(input);
+        if (!opened.ok) return { ok: false, reason: opened.reason, workerStarted: false };
+        if(closing&&opened.state)opened.state.entriesAuthorized=false;
+        if (!opened.worker.isScheduled()) {
+          opened.worker.stop();
+          return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
+        }
+        workers.set(input.accountId, {
+          ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
+        });
+        return closing?{ok:false,reason:'worker_process_shutting_down',workerStarted:false}:
+          { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
-      return { ok: true, reason: "worker_scheduled", workerStarted: true };
+      starts.set(input.accountId, { ownerUserId: input.userId, result });
+      try { return await result; }
+      finally { if (starts.get(input.accountId)?.result === result) starts.delete(input.accountId); }
     },
     async stop(input) {
-      return stopOne(workers, input.userId, input.accountId, input.action ?? "STOP");
+      return stopAccount(input.userId, input.accountId, input.action ?? "STOP");
     },
     async stopOwner(userId, action = "STOP") {
-      let workerStopped = true;
-      let managingExposure = false;
-      for (const [accountId, running] of workers) {
-        if (running.ownerUserId !== userId) continue;
-        const stopped = await stopOne(workers, userId, accountId, action);
-        if (!stopped.workerStopped) workerStopped = false;
-        if (stopped.managingExposure) managingExposure = true;
+      ownerStops.set(userId, (ownerStops.get(userId) ?? 0) + 1);
+      try {
+        let workerStopped = true;
+        let managingExposure = false;
+        const accountIds = new Set([
+          ...[...workers].filter(([, running]) => running.ownerUserId === userId).map(([id]) => id),
+          ...[...starts].filter(([, pending]) => pending.ownerUserId === userId).map(([id]) => id),
+          ...[...stops].filter(([, stopping]) => stopping.ownerUserId === userId).map(([id]) => id),
+        ]);
+        // Close all available local gates immediately, then retain the owner
+        // barrier until EVERY disarm settles, including after one fails.
+        const results = await Promise.allSettled([...accountIds].map(accountId =>
+          stopAccount(userId, accountId, action)));
+        for (const result of results) {
+          if (result.status === "rejected") throw result.reason;
+          if (!result.value.workerStopped) workerStopped = false;
+          if (result.value.managingExposure) managingExposure = true;
+        }
+        return { workerStopped, managingExposure };
+      } finally {
+        const remaining = ownerStops.get(userId)! - 1;
+        if (remaining === 0) ownerStops.delete(userId);
+        else ownerStops.set(userId, remaining);
       }
-      return { workerStopped, managingExposure };
     },
   };
 }
@@ -214,6 +337,11 @@ export function createProductionPersonalSession(
     /** LOCAL prototype opt-in. Production construction leaves this disabled. */
     publicMetadataPrefetch?: boolean;
     finalPublicMetadataPrefetch?: boolean;
+    /** Process-only experimental scheduling switches, never execution authority. */
+    overlapFinalAccountSnapshot?: boolean;
+    boundedHistoryReads?: boolean;
+    /** Inactive candidate; no production caller supplies this option. Requires reviewed registry. */
+    directPrecisionSizing?: boolean;
   } = {},
 ): PersonalSessionControl {
   const get:typeof getScopedKalshiJson = options.kalshiGet ?? ((creds, path, query = "", fetchImpl = fetch,_host,_owner,signal) =>
@@ -273,23 +401,11 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "live_execution_not_enabled" };
     }
     if (!flag(loaded.row.cash_precision_verified)) return { ok: false, reason: "cash_not_reconciled" };
-    // New exposure is forbidden until the exact Railway build has a genuine,
-    // unexpired independently reviewed protective EXIT release. The earlier
-    // implementation only checked this when the EXIT itself was attempted,
-    // which was too late for an already-opened position.
-    const exitRelease=await verifyProtectiveExitStartupRelease(db,input.userId);
-    // A standing grant can bootstrap START, but cannot admit ANY entry
-    // until a new signed exchange snapshot renews its short technical lease.
-    const startupSha=deployedGitSha();
-    let standingMode=false;
-    if(/^[a-f0-9]{40}$/.test(startupSha)){
-      try {standingMode=await hasContinuousGrantHistory(db,input.userId,startupSha);}
-      catch {return {ok:false,reason:"standing_authority_unavailable"};}
-    }
-    if(standingMode ? !(await checkContinuousBootstrap(db,input.userId,startupSha)) : !exitRelease.ok)
-      return {ok:false,reason:standingMode?"standing_grant_not_current":exitRelease.reason};
-    if(standingMode && process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true")
-      return {ok:false,reason:"protective_exit_release_disabled"};
+    // Match ARM's read-only authorization preflight, then independently
+    // reconcile signed exchange state and all remaining START requirements.
+    const authority = await verifyPersonalStartupAuthority(db, input.userId);
+    if (!authority.ok) return authority;
+    const { startupSha, standingMode } = authority;
     const configuredStake = number(loaded.row.configured_stake_cents);
     if (configuredStake === null) return { ok: false, reason: "configured_stake_missing" };
     const digest = text(loaded.row.fee_artifact_digest);
@@ -301,7 +417,7 @@ export function createProductionPersonalSession(
       return { ok: false, reason: "fee_evidence_missing" };
     }
     const observedAt = now();
-    const feeds = await readOwnedKalshiFeeds(material, observedAt, get);
+    const feeds = await readOwnedKalshiFeeds(material, observedAt, get, options.boundedHistoryReads===true&&(parseReviewedApiSource(sourceUrl)||parseDurableFeeSource(sourceUrl))?{mode:"bounded_history_reads_v1"}:undefined);
     if (!feeds.ok) return feeds;
     const identity: Identity = { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint };
     const requests = await loadRequests(db, input.accountId);
@@ -319,12 +435,20 @@ export function createProductionPersonalSession(
     if(!cashProof.ok)return cashProof;
     const alternate=parseOwnerFeeSource(sourceUrl);
     const apiSource=parseReviewedApiSource(sourceUrl);
+    const ownerV3Source=parseV3FeeSource(sourceUrl);
+    const durableSource=parseDurableFeeSource(sourceUrl);
+    if(durableSource&&(!isDurableFeeVersion(policyVersion)||formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))return {ok:false,reason:'durable_fee_policy_identity_invalid'};
+    const durableAtStart=durableSource?await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY'):null;
+    if(durableSource&&(!durableAtStart?.ok||durableAtStart.sourceDigest!==digest))return {ok:false,reason:'durable_fee_startup_proof_unavailable'};
     if(alternate && (policyVersion!==OPERATOR_FEE_SOURCE_POLICY ||
        formulaVersion!==STANDARD_QUADRATIC_FEE_FORMULA_VERSION))
       return {ok:false,reason:"source_policy_identity_invalid"};
     if(apiSource && (policyVersion!==API_SOURCE_POLICY_VERSION ||
        formulaVersion!==API_SOURCE_FORMULA_VERSION))
       return {ok:false,reason:"api_source_policy_identity_invalid"};
+    if(ownerV3Source && (policyVersion!==V3_FEE_POLICY_VERSION ||
+       formulaVersion!==V3_FEE_FORMULA_VERSION))
+      return {ok:false,reason:"owner_v3_fee_policy_identity_invalid"};
     const operatorAtStart=alternate?
       await verifyOwnerFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
     if(alternate && (!operatorAtStart?.ok || operatorAtStart.identity.digest!==digest))
@@ -333,17 +457,29 @@ export function createProductionPersonalSession(
       await verifyReviewedApiFeeSourceStage(input.userId,"STEP_11",sourceUrl):null;
     if(apiSource && (!apiAtStart?.ok || apiAtStart.identity.grantId!==apiSource.grantId))
       return {ok:false,reason:"reviewed_api_source_release_unavailable"};
+    // Signed issuer-origin monetary authority is owner-only, not a reused
+    // REVIEWED_API_V2 human reviewer identity. Fail closed if expired,
+    // mismatched to the actual deployment, or no current official proof.
+    const ownerV3AtStart=ownerV3Source?
+      await verifyOwnerStandingFee(input.userId,"STEP_11",sourceUrl):null;
+    if(ownerV3Source && (!ownerV3AtStart?.ok ||
+       ownerV3AtStart.identity.sourceAuthorityId!==ownerV3Source ||
+       ownerV3AtStart.identity.sourceDigest!==digest ||
+       ownerV3AtStart.identity.sha!==startupSha))
+      return {ok:false,reason:"owner_standing_fee_source_release_unavailable"};
     // The commissioning digest is a historical observation. Refresh the API
     // source for the exact target market at every readMarket and final POST.
     // The direct owner's standing policy has no human reviewer requirement,
     // but must prove authoritative monetary schedule + current Kalshi market.
     // Isolated test-injected fee verifiers never invoke the production source.
-    const monetaryAtStart=!apiSource&&!alternate&&!options.verifyFee?
+    const monetaryAtStart=!apiSource&&!alternate&&!ownerV3Source&&!durableSource&&!options.verifyFee?
       await verifyMonetaryFeeContract("STEP_11"):null;
     if(monetaryAtStart && (!monetaryAtStart.ok||
        !monetaryAtStart.monetaryFeeAuthorized||monetaryAtStart.sourceDigest!==digest))
       return {ok:false,reason:monetaryAtStart.ok?"fee_artifact_unverified":monetaryAtStart.reason};
-    const artifact=apiSource && apiAtStart?.ok?
+    const artifact=durableSource&&durableAtStart?.ok?{valid:true,digest,verifiedAt:durableAtStart.verifiedAtMs}:ownerV3Source&&ownerV3AtStart?.ok?
+      {valid:true,digest,verifiedAt:ownerV3AtStart.identity.verifiedAtMs}:
+      apiSource && apiAtStart?.ok?
       {valid:true,digest,verifiedAt:apiAtStart.identity.verifiedAtMs}:
       alternate && operatorAtStart?.ok?
       {valid:true,digest:operatorAtStart.identity.digest,
@@ -354,6 +490,24 @@ export function createProductionPersonalSession(
       await verifyFee({ digest, policyVersion, sourceUrl, formulaVersion });
     if (!artifact.valid || artifact.digest !== digest || !artifact.verifiedAt) {
       return { ok: false, reason: "fee_evidence_missing" };
+    }
+    const directRolloutScope=Object.freeze({ownerId:input.userId,accountId:input.accountId,releaseSha:startupSha});
+    // Existing startup already checked signed cash, current fees and the
+    // standing bootstrap grant. Public admission adds verified account
+    // linkage without a manually configured customer. No grant is minted.
+    const publicAdmission=publicSelfServiceRequested()&&standingMode
+      ?await qualifyPublicIndependentLiveScope(db,directRolloutScope):null;
+    if(publicAdmission&&(publicAdmission.keyFingerprint!==fingerprint||publicAdmission.policyHash!==policyHash))
+      return {ok:false,reason:"public_live_account_scope_changed"};
+    const directAllowed=independentLiveRolloutAllowed(directRolloutScope,process.env,publicAdmission);
+    // A known holding requires qualified direct held protection. For an
+    // unbound API account, admit only authentic read-only UNKNOWN recovery.
+    if(requireIndependentPaperCutover()&&!directAllowed){
+      if(snapshot.positions.length>0)
+        return {ok:false,reason:"existing_position_requires_independent_protection"};
+      const unresolved=await readUnresolvedIntentMode((sql,values)=>db.query(sql,values),input.accountId);
+      if(!unresolved.ok)return unresolved;
+      if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
     }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
@@ -373,7 +527,32 @@ export function createProductionPersonalSession(
     // maintenance and protective-exit failures. A fresh, independently reviewed
     // signed release can reopen this ONE transient gate, never a terminal hold.
     const technicalRelease = new TechnicalReleaseEntryGate();
+    // Emit only on a closed fence, after the no-send/unknown decision. Bound
+    // duplicate stage reports per worker; logging must never change the gate.
+    const protectiveDiagnosticLastAt=new Map<string,number>();
+    const reportProtectiveDiagnostic=(phase:"final_fence"|"restart",stage:string)=>{
+      try{
+        const now=performance.now(),key=phase+":"+stage;
+        if(!Number.isFinite(now))return;
+        const last=protectiveDiagnosticLastAt.get(key);
+        if(last!==undefined&&now-last<60_000)return;
+        protectiveDiagnosticLastAt.set(key,now);
+        logger.warn({event:"protective_exit_diagnostic",phase,stage},"Protective exit remains unverified");
+      }catch{/* reporting cannot give or revoke authority */}
+    };
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
+    // Rollout OFF until the replacement has completed signed qualification.
+    // The flag is not consent, fee authority or a release approval.
+    const directSource=directAllowed
+      ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
+        holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
+        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
+    const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
+    const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
+      createDirectRoundingOwnedAdapters({query:(sql,values)=>{
+        const tx=finalLedger?.currentTransaction();
+        return tx?tx.query(sql,values):db.query(sql,values);
+      }},input.userId)):null;
     const timingObserver:TimingObserver=event=>logger.info({event:"strata_execution_stage",...event});
     const timingContext={accountId:input.accountId,mode:"LIVE" as const};
     let finalPublicMetadata:FinalPublicMetadataPhases|null=null;
@@ -381,12 +560,16 @@ export function createProductionPersonalSession(
     const clockCheckedTransport=createEntryWireClockFetch(()=>{
       if(!finalLedger)throw new Error("production_final_wire_clock_missing");
       finalLedger.assertFinalWireClock();
+      directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+      ownerV3Source ? createGuardedOwnerV3FeeFetch(input.userId,input.accountId,sourceUrl,
+        clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,
+        {borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
       alternate ? createGuardedOwnerFeeFetch(input.userId,sourceUrl,clockCheckedTransport) :
       !options.verifyFee ? createGuardedMonetaryFeeFetch(input.userId,input.accountId,clockCheckedTransport,policyHash,
         fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null}) : clockCheckedTransport;
-    },personalProductionFetch,timingObserver,timingContext);
+    },rawOwnedTransport,timingObserver,timingContext);
     let activeMetadata:MetadataPrefetchAttempt|null=null;
     let heldReadAbort:AbortSignal|null=null;
     let recoveryAbort:AbortController|null=null;
@@ -425,7 +608,7 @@ export function createProductionPersonalSession(
           // DOES NOT send an order. It independently rechecks position,
           // strategy, approved policy/fees, book, stake and exit floor.
           const financialId = await session.executor.prepareExit(
-            selection.positionId,selection.minimumExitMicros/1_000_000,
+            selection.positionId,selection.minimumExitMicros/1_000_000,selection.directHeldId,
           );
           const financialRows = await db.query(
             "SELECT request FROM public.v13_production_intent "+
@@ -452,7 +635,9 @@ export function createProductionPersonalSession(
           const outcome = await dispatchReviewedProtectiveExitOnce({
             ownerId: input.userId, accountId: input.accountId,
             reservationId: reservation.reservationId, material, order, lease,
+            ...(directSource?{directHeldSource:directSource}:{}),
           });
+          if(outcome.diagnosticStage)reportProtectiveDiagnostic("final_fence",outcome.diagnosticStage);
           // Preserve a known local no-send as a temporary reconciliation hold,
           // never as entry authority. UNKNOWN and failed reads remain sticky.
           await reconcileOwnedProtectiveExitOutcome({
@@ -473,11 +658,22 @@ export function createProductionPersonalSession(
           ownerId:input.userId,accountId:input.accountId,material,
         },db);
         if(!recovery.ok){
+          if(recovery.diagnosticStage)reportProtectiveDiagnostic("restart",recovery.diagnosticStage);
           state.entriesAuthorized=false;
+          const recoveryLiveness=protectiveRecoveryLivenessStage({
+            enabled:process.env.STRATA_PROTECTIVE_EXIT_RECOVERY_DIAGNOSTIC_ENABLED==="true",
+            sameFencedSession:!state.accountKill&&!state.globalKill&&
+              state.presentedToken===claimed.fencingToken,
+            recovery,
+          });
+          if(recoveryLiveness)reportProtectiveDiagnostic("restart",recoveryLiveness);
+          // Leave the tick blocked before ordinary reconciliation or any order.
           throw new Error(recovery.reason);
         }
       },
       readSnapshot: async () => {
+        const snapshotTiming=createOwnedSnapshotTiming();let snapshotCompleted=false;
+        try {
         const abort=heldReadAbort;
         const checkRead=()=>{abort?.throwIfAborted();if(abort&&(state.accountKill||state.globalKill))throw Error("held_recovery_read_killed");};
         checkRead();
@@ -496,6 +692,7 @@ export function createProductionPersonalSession(
         const snapshotDb: { query(sql:string,params?:unknown[]):Promise<{rows:Record<string,unknown>[]}> } = {
           query:(sql,params)=>proofTx?proofTx.query(sql,params):db.query(sql,params),
         };
+        snapshotTiming.mark("unresolved_intents");
         const unresolvedNow=await readUnresolvedIntentMode(
           (sql,params)=>snapshotDb.query(sql,params),input.accountId,currentEntry,
         );
@@ -513,7 +710,8 @@ export function createProductionPersonalSession(
           if(currentEntry)throw new Error("production_other_uncertain_order");
         }
         checkRead();
-        const beat = await heartbeatLease(snapshotDb, {
+        snapshotTiming.mark("heartbeat");
+        const beat = await (proofTx ? heartbeatLeaseInTransaction : heartbeatLease)(snapshotDb, {
           executionAccountId: input.accountId, ownerUserId: input.userId, holderId,
           fencingToken: state.fencingToken, fingerprint, now: new Date(now()).toISOString(),
         });
@@ -527,6 +725,7 @@ export function createProductionPersonalSession(
         // If a process died between persisting a cash maintenance hold and
         // requesting STOP, the next heartbeat still disables new entries.
         // Protective reduce-only exit management is left to the worker.
+        snapshotTiming.mark("maintenance");
         if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
           try {
             const maintenance=await snapshotDb.query(
@@ -538,28 +737,37 @@ export function createProductionPersonalSession(
         }
         // Separate bounded diagnostics only; original signed-read clock/proof remain untouched.
         const scopedGet:typeof getScopedKalshiJson=async(creds,path,query,fetchImpl,host,owner,signal)=>{
-          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort??signal);checkRead();return result;
+          checkRead();const result=await get(creds,path,query,fetchImpl,host,owner,abort&&signal?AbortSignal.any([abort,signal]):abort??signal);checkRead();return result;
         };
+        snapshotTiming.mark("signed_feeds");
         const feedTiming=createOwnedFeedReadTiming(scopedGet,recordOwnedFeedReadTiming);
         let latest: Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
-        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get); }
+        try { latest = await readOwnedKalshiFeeds(material, now(), feedTiming.get, options.boundedHistoryReads===true&&(apiSource||durableSource)&&!heldRecoveryScope&&!abort&&(!proofTx||currentEntry!==null)?{mode:"bounded_history_reads_v1"}:undefined); }
         finally { feedTiming.finish(); }
         if (!latest.ok) throw new Error(latest.reason);
-        const proven = emptySnapshot(identity, latest, await loadRequests(snapshotDb, input.accountId));
+        snapshotTiming.mark("load_requests");
+        const requests=await loadRequests(snapshotDb, input.accountId);
+        snapshotTiming.mark("snapshot_mapping");
+        const proven = emptySnapshot(identity, latest, requests);
         if (!("identity" in proven)) throw new Error(proven.reason);
         // Authority remains closed here. Only committed ledger reconciliation
         // or the final transactional account proof can reopen it.
+        // Refresh out of band after exposure proof, never delay protective reconciliation.
+        if(directRounding&&!proofTx)void directRounding.refresh();
+        snapshotCompleted=true;
         return proven;
+        } finally {snapshotTiming.finish(snapshotCompleted);}
       },
-      readMarket: (market,side,context)=>readOwnedEntryMarket({
-        market,side,context,now,apiSource:!!apiSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),
-        verifyFee:async(clock,readMetadata,captureMetadata)=>{
+      readMarket: (market,side,context,purpose)=>readOwnedEntryMarket({
+        ...(directRounding&&purpose!=="EXIT"&&!heldRecoveryScope?{readDirectRounding:()=>directRounding.read(finalLedger?.currentWireScopeToken()??undefined)}:{}),
+        market,side,context,now,apiSource:!!apiSource,durableSource:!!durableSource,activeMetadata,metadataScope,finalPublicMetadata:()=>finalPublicMetadata?.consumeFinalMarket(market),finalDurableMetadata:()=>finalPublicMetadata?.consumeDurableFinalMarket(market),
+        verifyFee:async(clock,readMetadata,captureMetadata,prepareMetadata,finalMetadata)=>{
               const feeTiming=beginExecutionStage(timingObserver,"fee_verification",timingContext);
               const feeReads=createFeeVerificationTiming();
               try {
               if(heldRecoveryScope){
                 feeVerifiedAt=await readHeldProtectiveMarketFee({ownerId:input.userId,accountId:input.accountId,
-                  market,sourceUrl,policyVersion,formulaVersion,digest});
+                  market,sourceUrl,policyVersion,formulaVersion,digest},{},finalLedger?.currentTransaction()??undefined);
                 feeCheckedAt=clock;
               }else if(apiSource){
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
@@ -575,6 +783,20 @@ export function createProductionPersonalSession(
                   sourceUrl,market);
                 if(!checked.ok || checked.identity.digest!==digest)
                   throw new Error("owner_operator_fee_source_unavailable");
+                feeVerifiedAt=checked.identity.verifiedAtMs;
+                feeCheckedAt=clock;
+              }else if(durableSource){
+                const checked=await verifyDurableFeeStage(input.userId,input.accountId,sourceUrl,'ENTRY',market,prepareMetadata,finalLedger?.currentTransaction()??undefined,finalMetadata);
+                if(!checked.ok||checked.sourceDigest!==digest||checked.marketTicker!==market)throw Error('durable_fee_market_unavailable');
+                feeVerifiedAt=checked.verifiedAtMs;feeCheckedAt=clock;
+              }else if(ownerV3Source){
+                const checked=await verifyOwnerStandingFee(input.userId,"ORDER_ENTRY",
+                  sourceUrl,market);
+                if(!checked.ok||checked.identity.sourceAuthorityId!==ownerV3Source||
+                   checked.identity.marketTicker!==market||
+                   checked.identity.sourceDigest!==digest||
+                   checked.identity.sha!==startupSha)
+                  throw new Error("owner_standing_current_market_fee_authority_unavailable");
                 feeVerifiedAt=checked.identity.verifiedAtMs;
                 feeCheckedAt=clock;
               }else if(!options.verifyFee){
@@ -602,14 +824,17 @@ export function createProductionPersonalSession(
       }),
       fetchImpl: measuredFetch,
     });
+    if(directSource)session.executor.bindIndependentLiveSource(directSource);
+    else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
-    if(apiSource&&options.finalPublicMetadataPrefetch===true){
+    session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
+    if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if(apiSource&&options.publicMetadataPrefetch===true){
+    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){
       session.executor.prefetchCommittedPublicMetadata=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
@@ -746,7 +971,8 @@ export function createProductionPersonalSession(
       state.entriesAuthorized = false;
       state.presentedToken = -1;
       try {
-        await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
+        await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
       } finally {
         session.worker.stop();
       }
@@ -754,11 +980,14 @@ export function createProductionPersonalSession(
     }
     const recovery = unresolved.mode === "recovery";
     if (recovery) state.entriesAuthorized = false;
-    const scheduled = await scheduleOwnedAccountWorker(session, unresolved.mode);
+    // Request cancellation applies to admission, not to the recurring worker's
+    // async context. Its existing lease/STOP/KILL fences own subsequent ticks.
+    const scheduled = await withoutOwnerArmFence(()=>scheduleOwnedAccountWorker(session, unresolved.mode));
     if (!scheduled.workerStarted) {
       state.entriesAuthorized = false;
       state.presentedToken = -1;
-      await releaseWorkerLease(db, input.userId, input.accountId, false, new Date(now()).toISOString());
+      await releaseFailedStartLease(db, {executionAccountId:input.accountId,ownerUserId:input.userId,
+          holderId,fencingToken:claimed.fencingToken,now:new Date(now()).toISOString()});
       session.worker.stop();
       return { ok: false, reason: scheduled.reason };
     }
@@ -843,10 +1072,18 @@ async function stopOne(
     ? await running.disarm(action)
     : { entriesBlocked: !running.state, managingExposure: false };
   if (!authority.entriesBlocked) return { workerStopped: false, managingExposure: false };
-  const keepManaging = action === "STOP" && authority.managingExposure;
+  // A delayed STOP receipt cannot claim protective management after a newer
+  // KILL already halted or unregistered this worker.
+  const keepManaging = action === "STOP" && authority.managingExposure &&
+    running.state?.accountKill !== true && running.worker.isScheduled() && workers.get(accountId) === running;
   if (!keepManaging) running.worker.stop();
   if (running.worker.isScheduled() && !keepManaging) return { workerStopped: false, managingExposure: false };
-  if (!keepManaging) workers.delete(accountId);
+  const registered = workers.get(accountId);
+  // Defense in depth: stale cleanup can never erase a different generation,
+  // even if a future lifecycle path accidentally bypasses the start barrier.
+  if (registered && registered !== running)
+    return { workerStopped: false, managingExposure: false };
+  if (!keepManaging && registered === running) workers.delete(accountId);
   return { workerStopped: true, managingExposure: keepManaging };
 }
 
@@ -874,7 +1111,30 @@ function leaseIdentity(row: Record<string, unknown>): {
   return { financialAccountId, providerConnectionId, vaultSecretId };
 }
 
+/** A prepared START must atomically validate its cancellation epoch and
+ * acquire the worker fence. STOP/KILL before this transaction wins; STOP/KILL
+ * after it still uses the existing supervisor/lease fencing path. */
 async function claimWorkerLease(
+  db: Parameters<typeof claimWorkerLeaseUnfenced>[0],
+  input: Parameters<typeof claimWorkerLeaseUnfenced>[1],
+): ReturnType<typeof claimWorkerLeaseUnfenced> {
+  const fence=ownerArmFence();
+  if(!fence)return claimWorkerLeaseUnfenced(db,input);
+  if(fence.phase!=='STARTING'||fence.ownerId!==input.ownerUserId||fence.accountId!==input.executionAccountId)
+    return {ok:false,reason:'owner_start_scope_changed'};
+  if(typeof (db as Partial<ArmDatabase>).connect!=='function')
+    return {ok:false,reason:'owner_start_transaction_unavailable'};
+  try {
+    return await armTransaction(db as ArmDatabase,async tx=>{
+      await assertOwnerArmFence(tx,input.ownerUserId);
+      const result=await claimWorkerLeaseUnfenced(tx,input);
+      if(!result.ok)throw Error(result.reason);
+      return result;
+    });
+  }catch{return {ok:false,reason:'owner_start_interrupted_or_lease_unavailable'};}
+}
+
+async function claimWorkerLeaseUnfenced(
   db: { query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
     ownerUserId: string; executionAccountId: string; holderId: string; fingerprint: string;

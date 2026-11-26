@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PoolClient } from "@workspace/db";
-import { ProductionLedger, identity, type Account } from "./ledger";
+import { ProductionLedger, identity, FINAL_ACCOUNT_PROJECTION_SQL, type Account } from "./ledger";
 import { digest } from "./types";
 
 // Method-level cases use the real final-account proof with a deterministic
 // transaction. Malformed fixtures deliberately exercise the runtime guards.
 // They run as part of the existing disposable production acceptance suite.
 type MalformedFixture = Record<string, any>;
-const projectionSql =
-  "SELECT created_at,client_order_id,request,exchange_order_id,terminal,filled_hundredths FROM v13_production_intent WHERE account_id=$1";
+const projectionSql = FINAL_ACCOUNT_PROJECTION_SQL;
 const columns = [
   "created_at",
   "client_order_id",
@@ -122,24 +121,11 @@ async function run(f: MalformedFixture) {
       if (f.rejectSql && sql.includes(f.rejectSql))
         throw Error("fixture-query-failed");
       assert.equal(args[0], "account");
-      if (sql.includes("FROM v13_production_intent WHERE account_id=$1")) {
-        assert.equal(sql, projectionSql);
-        assert.equal(/LIMIT|ORDER BY|state\s*=|terminal\s*=/.test(sql), false);
-        return {
-          rows: f.intents.map((row: Record<string, unknown>) =>
-            Object.fromEntries(columns.map((key) => [key, row[key]])),
-          ),
-        };
-      }
-      if (sql.startsWith("SELECT digest"))
-        return {
-          rows:
-            f.events[String(args[1])] == null
-              ? []
-              : [{ digest: f.events[String(args[1])] }],
-        };
-      if (sql.startsWith("SELECT market,side,quantity_hundredths"))
-        return { rows: f.positions };
+      if(sql===projectionSql)return {rows:[{
+        known:f.intents.map((row:Record<string,unknown>)=>Object.fromEntries(columns.map(key=>[key,row[key] instanceof Date && Number.isFinite((row[key] as Date).getTime())?(row[key] as Date).toISOString():row[key]]))),
+        events:f.eventRows??[...new Set(args[1] as string[])].flatMap(id=>f.events[id]==null?[]:[{event_id:id,digest:f.events[id]}]),
+        positions:f.positions,
+      }]};
       throw Error("unexpected query");
     },
   };
@@ -161,9 +147,9 @@ async function run(f: MalformedFixture) {
 }
 
 // Recorded from the original method differential oracle. Besides expected
-// outcomes, preserve the original query count and exact projected SQL.
+// outcomes, preserve original outcomes with one batched event read and exact projected SQL.
 const expectedCalls: Record<string, number> = {
-  "complete signed account with historical order/fill/settlement/position": 4,
+  "complete signed account with historical order/fill/settlement/position": 3,
   "empty known history remains valid when snapshot empty": 2,
   "reject authenticated=false": 0,
   "reject complete=false": 0,
@@ -173,7 +159,7 @@ const expectedCalls: Record<string, number> = {
   "reject observedAtMs=1793836784999": 0,
   "reject cashMicros=99": 0,
   "reject identity mismatch": 0,
-  "history floor exact boundary": 4,
+  "history floor exact boundary": 3,
   "history floor1ms gap": 1,
   "oldest intent after2500rows not dropped": 1,
   "reject historical request": 1,
@@ -186,22 +172,22 @@ const expectedCalls: Record<string, number> = {
   "nonintegral filled remains fail closed": 1,
   "fill missing digest": 2,
   "fill changed digest": 2,
-  "settlement missing digest": 3,
-  "settlement changed digest": 3,
-  "position mismatch": 4,
-  "zero snapshot positions ignored": 4,
+  "settlement missing digest": 2,
+  "settlement changed digest": 2,
+  "position mismatch": 3,
+  "zero snapshot positions ignored": 3,
   "query rejection propagates": 1,
-  "duplicate hypothetical client preserves first-match behavior": 4,
-  "unused decision malformed and absent values irrelevant": 4,
+  "duplicate hypothetical client preserves first-match behavior": 3,
+  "unused decision malformed and absent values irrelevant": 3,
   "unmatched old BLOCKED retained in floor": 1,
   "unmatched old TERMINAL retained in floor": 1,
   "unmatched old PREPARED retained in floor": 1,
   "unmatched old UNKNOWN retained in floor": 1,
   "unmatched old DISPATCHED retained in floor": 1,
-  "reordered unique intents preserve result": 4,
+  "reordered unique intents preserve result": 3,
   "invalid consumed Date fails existing history check": 1,
   "null consumed Date retains existing throw": 1,
-  "multiple unsorted snapshot positions normalize identically": 4,
+  "multiple unsorted snapshot positions normalize identically": 3,
 };
 function check(
   name: string,
@@ -213,22 +199,10 @@ function check(
     mutate(fixture);
     const result = await run(fixture);
     assert.equal(result.result, expected);
-    assert.equal(result.calls.length, expectedCalls[name]);
-    const eventSql = "SELECT digest FROM v13_production_event WHERE account_id=$1 AND event_id=$2";
-    const expectedSequence = [
-      { sql: projectionSql, args: ["account"] },
-      ...fixture.snapshot.fills.map((entry: { id: string }) => ({
-        sql: eventSql, args: ["account", `fill:${entry.id}`],
-      })),
-      ...fixture.snapshot.settlements.map((entry: { id: string }) => ({
-        sql: eventSql, args: ["account", `settlement:${entry.id}`],
-      })),
-      {
-        sql: "SELECT market,side,quantity_hundredths FROM v13_production_position\n      WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY market,side",
-        args: ["account"],
-      },
-    ];
-    assert.deepEqual(result.calls, expectedSequence.slice(0, expectedCalls[name]));
+    assert.equal(result.calls.length, Math.min(1,expectedCalls[name]));
+    const eventIds = [...fixture.snapshot.fills.map((entry:{id:string})=>`fill:${entry.id}`),
+      ...fixture.snapshot.settlements.map((entry:{id:string})=>`settlement:${entry.id}`)];
+    assert.deepEqual(result.calls, expectedCalls[name]===0?[]:[{sql:projectionSql,args:["account",eventIds]}]);
   });
 }
 check("complete signed account with historical order/fill/settlement/position");
@@ -397,3 +371,10 @@ check("multiple unsorted snapshot positions normalize identically", (f) => {
     quantityHundredths: "01",
   });
 });
+
+for (const [name,mutate,expected] of [
+  ["duplicate identical snapshot event is still checked",(f:MalformedFixture)=>f.snapshot.fills.push({...fill}),"ok"],
+  ["duplicate changed snapshot event refuses",(f:MalformedFixture)=>f.snapshot.fills.push({...fill,feeMicros:"1"}),"production_final_unreconciled_fill"],
+  ["ambiguous returned event rows refuse",(f:MalformedFixture)=>f.eventRows=[{event_id:"fill:fill",digest:digest(fill)},{event_id:"fill:fill",digest:digest(fill)}],"production_final_event_history_ambiguous"],
+  ["batch query failure propagates",(f:MalformedFixture)=>f.rejectSql="SELECT event_id,digest","fixture-query-failed"],
+] as const) test(`final event digest batch: ${name}`,async()=>{const f=defaultFixture();mutate(f);const out=await run(f);assert.equal(out.result,expected);assert.equal(out.calls.filter(c=>c.sql===projectionSql).length,1);});

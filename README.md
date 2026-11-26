@@ -1,5 +1,7 @@
 # BTC Kalshi V1.3 — technical handoff
 
+> **Current product direction:** [AGENTS.md](./AGENTS.md) supersedes historical fixed-customer pilot and manual enrollment requirements. This historical handoff does not establish current release readiness.
+
 > **Production live-money handoff:** Brit should start with [V13_LIVE_MONEY_HANDOFF.md](./V13_LIVE_MONEY_HANDOFF.md). That document is the authoritative production-executor contract. The existing micro-live commissioning harness remains intentionally bounded and must not be scaled to the production ceiling by changing its small-dollar constants.
 
 > **Strategy tuning/research:** [V13_STRATEGY_RESEARCH.md](./V13_STRATEGY_RESEARCH.md) defines the locked champion, zero-authority challengers, prospective shadow evaluation, and the reviewed promotion process for changing opportunity thresholds without weakening execution/risk controls.
@@ -281,10 +283,7 @@ Sequence:
 4. `startFeeArtifactMonitor()` starts a process-local check of the approved fee-schedule artifact. The micro-live route module also calls this at import time unless `MICRO_LIVE_TEST_ISOLATED_SCHEMA` is set.
 5. If `NODE_ENV=production`, `SHADOW_LIVE_PRODUCTION_PREFLIGHT_ENABLED=true`, and `SHADOW_LIVE_PRODUCTION_ENABLED` is not `true`, the process runs `verifyProductionShadowReads()`. That is a GET-only Kalshi check. Failure is logged. It does not start the observer.
 6. `startShadowObserver()` starts a 5-second interval only when the environment is `development`, or when it is `production` and `SHADOW_LIVE_PRODUCTION_ENABLED=true`. Otherwise it returns immediately.
-7. `startServerForwardTestWorker()` starts the paper loop only when:
-   - development and `FORWARD_TEST_WORKER_ENABLED=true`, or
-   - production and `FORWARD_TEST_PRODUCTION_WORKER_ENABLED=true`.
-   The loop acquires a database lease, runs a cycle about every 5 seconds, and, after a successful paper evaluation, calls `processMicroLiveForwardTestCycle`. That call returns without exchange writes unless the micro-live flags, kill switch, account binding, and bounded-run phase all allow it.
+7. API startup does not launch the paper producer. Run the isolated `start:paper` command with its own restricted database connection and exact paper enablement; see [paper process cutover](docs/paper-process-isolation.md).
 8. `reconcileMicroLiveAtStartup()` runs once. If the reason is that environment flags, database flags, or the kill switch are blocking execution, it then runs `auditMicroLiveReadOnly()`. A thrown reconciliation is logged and execution stays blocked.
 
 There is no separate migration step on startup. Schema changes are applied with Drizzle Kit push in development (`pnpm --filter @workspace/db run push`).
@@ -293,7 +292,7 @@ There is no separate migration step on startup. Schema changes are applied with 
 
 - No WebSocket server.
 - No message consumer.
-- The paper worker does not start just because the process starts. The flag above is required.
+- The paper worker never starts in the API process, even if a paper flag is present.
 - Micro-live does not place an order at startup. Startup only reconciles and audits.
 - Key-provisioning routers are mounted only when their development flags say they are enabled. Pair commissioning is mounted unconditionally, but its handlers still require the Phase 4 admin and their own guards.
 
@@ -437,7 +436,7 @@ Every enabled worker cycle:
 8. Opens at most one paper position per engine, only on that first cross, only for SCOUT or CONFIRM, stake $5, contracts = 5 / entry offer.
 9. Closes it through `paperClose`: Kalshi result, then a fresh expiry inference, then a V1.3 exit at the mark.
 10. Updates the engine row: signal, buffer, offers, mark, unrealized paper P&L.
-11. Calls `processMicroLiveForwardTestCycle(evaluationId)`.
+11. Records paper provenance without notifying or invoking a live executor.
 
 Unrealized paper P&L is `contracts * mark - stake`, rounded to cents. It is stored on the engine row while the position is open. It is not a Kalshi portfolio value.
 
@@ -590,7 +589,7 @@ See `KalshiAccountSnapshot`, `KalshiOrderbook`, `KalshiOrder`, `KalshiFill`, and
 There are three engines, and they must not be collapsed into one.
 
 1. **Browser paper engine** — `usePaperTrading` + `evaluateStrategy`. Starts when the cockpit mounts. In memory, except completed trades posted to history.
-2. **Server paper engine** — `startServerForwardTestWorker`. Starts at API boot when flagged. Persists evaluations and $5 paper positions. Engine id is `v1.3-paper`.
+2. **Server paper engine** — `startServerForwardTestWorker`. Starts only in the separate paper process when flagged. Persists evaluations and $5 paper positions. Engine id is `v1.3-paper`.
 3. **Micro-live engine** — functions in `microLive.ts`, invoked at the end of each server paper cycle and by admin routes. Real orders.
 
 Shadow mode is a recorder on top of engine 2. It is not an execution engine.
@@ -715,10 +714,10 @@ Paper positions are separate rows with status `OPEN`, `CLOSED`, or `SETTLED`. On
 - File: `forwardTestWorker.ts`
 - Purpose: own the loop and the lease.
 - Inputs: optional feeds. Production uses the public feeds.
-- Outputs: `{ running, stop }`.
-- Side effects: lease rows, cycles, and `processMicroLiveForwardTestCycle`.
-- Called by: `index.ts` on listen.
-- Calls: `runForwardTestCycle`, `processMicroLiveForwardTestCycle`.
+- Outputs: `{ running, stop, done }`.
+- Side effects: paper lease rows, evaluation cycles and optional paper research.
+- Called by: `paperWorkerMain.ts`, never by the API listener.
+- Calls: `runForwardTestCycle`.
 
 ### `scanShadowOnce` and `startShadowObserver`
 

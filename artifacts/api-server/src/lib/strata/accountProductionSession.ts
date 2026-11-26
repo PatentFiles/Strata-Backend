@@ -1,3 +1,4 @@
+import {getOwnedFeeFailureStage} from "./ownedFeeFailureDiagnostic";
 import {logger} from "../logger";
 import type {TimingObserver} from "../v13-production/stageTiming";
 import { recoverPreparedOwnedExitIntents } from "./preparedProtectiveExitRecovery";
@@ -111,15 +112,15 @@ export class AccountScopedExchange implements Exchange {
     readonly readSnapshot: ((identity: Identity, historyFromMs: number) => Promise<Snapshot>) | null = null,
     readonly fetchImpl: typeof fetch | null = null,
     readonly orderMarket: ((orderId: string) => Promise<string | null>) | null = null,
-    readonly readMarket: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext) => Promise<MarketEvidence>) | null = null,
+    readonly readMarket: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT") => Promise<MarketEvidence>) | null = null,
     readonly entriesOpen: (() => boolean) | null = null,
   ) {}
   readonly #spent = new WeakSet<() => Promise<void>>();
-  async market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext): Promise<MarketEvidence> {
+  async market(market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT"): Promise<MarketEvidence> {
     if (!this.readMarket) throw new Error("operation_not_enabled");
     requireProof(/^KXBTC15M[A-Za-z0-9._-]+$/.test(market), "production_market_invalid");
     requireProof(side === "YES" || side === "NO", "production_market_side_invalid");
-    const evidence = await this.readMarket(market, side, context);
+    const evidence = await this.readMarket(market, side, context, purpose);
     validateMarketEvidence(evidence);
     return evidence;
   }
@@ -222,6 +223,7 @@ export interface SchedulableWorker {
   start(): Promise<void>;
   startRecovery(): Promise<void>;
   stop(): void;
+  whenIdle?(): Promise<void>;
 }
 
 /**
@@ -269,7 +271,7 @@ export function openOwnedExecutionSession(input: {
   state: AccountDispatchState;
   material?: { keyId: string; privateKey: string } | null;
   readSnapshot?: ((identity: Identity, historyFromMs: number) => Promise<Snapshot>) | null;
-  readMarket?: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext) => Promise<MarketEvidence>) | null;
+  readMarket?: ((market: string, side: "YES" | "NO", context?:EntryPrepareMarketContext, purpose?:"ENTRY"|"EXIT") => Promise<MarketEvidence>) | null;
   fetchImpl?: typeof fetch | null;
   now?: () => number;
   intervalMs?: number;
@@ -313,7 +315,9 @@ export function openOwnedExecutionSession(input: {
     const candidate = attempt?.evaluationId;
     const evaluationId = typeof candidate === "string" &&
       /^[a-zA-Z0-9_-]{1,70}$/.test(candidate) ? candidate : null;
-    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId });
+    const feeEvidenceStage = getOwnedFeeFailureStage(sourceError);
+    console.warn("strata_personal_worker_tick_rejected", { reason, evaluationId,
+      ...(feeEvidenceStage ? { feeEvidenceStage } : {}) });
   };
   const worker = new ProductionWorker(executor, input.intervalMs ?? 2_500, reportWorkerError,
     input.entriesOpen, input.recoverProtectiveExits, input.dispatchProtectiveExit, {

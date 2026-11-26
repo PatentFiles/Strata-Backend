@@ -22,7 +22,14 @@ const finalPublicMetadataPrefetch=readPublicMetadataPrefetchConfig(process.env.S
 if(finalPublicMetadataPrefetch.source==="invalid"){
   try{console.warn("strata_final_public_metadata_prefetch_config_invalid",{enabled:false});}catch{}
 }
+const finalAccountSnapshotOverlap=readPublicMetadataPrefetchConfig(process.env.STRATA_FINAL_ACCOUNT_SNAPSHOT_OVERLAP_ENABLED);
+const boundedHistoryReads=readPublicMetadataPrefetchConfig(process.env.STRATA_BOUNDED_HISTORY_READS_ENABLED);
+for(const [label,config] of [["strata_final_account_snapshot_overlap_config_invalid",finalAccountSnapshotOverlap],["strata_bounded_history_reads_config_invalid",boundedHistoryReads]] as const){
+  if(config.source==="invalid"){try{console.warn(label,{enabled:false});}catch{}}
+}
 export const personalTradingSession = createProductionPersonalSession(pool, {
+  overlapFinalAccountSnapshot:finalAccountSnapshotOverlap.enabled,
+  boundedHistoryReads:boundedHistoryReads.enabled,
   publicMetadataPrefetch: publicMetadataPrefetch.enabled,
   finalPublicMetadataPrefetch:finalPublicMetadataPrefetch.enabled,
 });

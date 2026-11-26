@@ -1,3 +1,7 @@
+import {FINAL_ACCOUNT_PROJECTION_SQL} from "../v13-production/ledger";
+import {DURABLE_FEE_VERSION} from './durableOwnerFeePolicy';
+import {createJoinedSigner} from './signedTransport.local.fixture';
+import {dedicatedSignerFingerprint} from './commissioning';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { digest as v13Digest } from "../v13-production/types";
@@ -7,7 +11,7 @@ import { computeDynamicFeeModelDigest, type DynamicFeeModel } from "./dynamicOff
 import { CANONICAL_FEE_SCHEDULE_URL } from "../microLiveFeeArtifact";
 import {
   qualifyProtectiveRelease,attestProtectiveReleaseReview,
-  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,
+  authorizeProtectiveRelease,readReleaseOwner,protectiveReleaseStatus,lookupProtectiveReleaseAuthorization,
   REVIEW_CONFIRM,OWNER_CONFIRM,PROVISIONAL_REPAIR_CONFIRM,
 } from "./inAppProtectiveRelease";
 const OWNER="11111111-1111-4111-8111-111111111111";
@@ -39,26 +43,58 @@ const emptySignedFeed=(override:Record<string,unknown>={})=>({
 });
 const repairRequest={reviewId:RID,confirmation:OWNER_CONFIRM,
  provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM};
+const fixtureSigner=createJoinedSigner('25.0000');
+const fixtureFingerprint=dedicatedSignerFingerprint(fixtureSigner.material.keyId,fixtureSigner.material.privateKey)!;
 const account={id:"owner-execution-2",owner_id:OWNER,commissioned:true,policy_state:"APPROVED",
  cash_precision_verified:true,minimum_exit_micros:10000,fee_artifact_digest:DIGEST,
  fee_source_url:"https://kalshi.com/docs/kalshi-fee-schedule.pdf",
- cash_micros:"25000000",key_fingerprint:"c".repeat(64),
+ cash_micros:"25000000",key_fingerprint:fixtureFingerprint,
  policy_id:"policy-v13",commissioning_digest:"c".repeat(64),kalshi_connection_id:QID,configured_stake_cents:100,
  max_entry_stake_cents:2500,max_entry_all_in_cents:3000};
 type Row=Record<string,unknown>;
-function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
- const executed:string[]=[];
+function fakeDb(input:{v3Source?:boolean;durableSource?:boolean;consent?:boolean;review?:boolean;duplicate?:boolean;permit?:boolean;badCash?:boolean;freeze?:string;unresolved?:boolean;fresh?:boolean;apiSource?:boolean;v4Source?:boolean;v4Grant?:"valid"|"missing"|"duplicate"|"malformed";globalLive?:boolean;accountLive?:boolean;globalInconsistent?:boolean;eligibleKilled?:boolean;leaseState?:"killed"|"owned"|"released";leaseKill?:boolean;leaseArmed?:boolean;leaseExposure?:boolean}={}){
+ const executed:string[]=[];let signedReads=0;
+ const readFeeds=async(material:typeof fixtureSigner.material,at:number)=>{signedReads++;return fixtureSigner.read(material,at,[],true);};
  const query=async(sql:string,_args?:unknown[]):Promise<{rows:Row[]}>=>{
   executed.push(sql);
   if(sql==="BEGIN"||sql==="COMMIT"||sql==="ROLLBACK"||sql.startsWith("SET LOCAL"))return {rows:[]};
-  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,blocked_reason:input.freeze??null,...(input.apiSource?{
+  if(sql.includes('SELECT oa.approval_id FROM private.strata_owner_sha_approvals')){
+    assert.ok(sql.includes('oa.qualification_digest=oq.evidence_digest'));
+    assert.ok(sql.includes('oa.confirmed_at<oq.expires_at'));
+    assert.equal(_args?.length,3,'durable consent does not require the new reviewer qualification id');
+    return {rows:input.consent===false?[]:[{approval_id:'synthetic-consent'}]};
+  }
+  if(sql.includes("SELECT l.release_id::text"))return {rows:[]};
+  if(sql.includes("a.xmin::text AS account_revision"))return {rows:[{
+    account_revision:'1',policy_revision:'1',stake_revision:'1',worker_revision:'1',credential_revision:'1',financial_revision:'1',provider_revision:'1',global_revision:'1',vault_revision:'1',
+    financial_id:QID,provider_id:RID,vault_secret_id:QID,fencing_token:'3',state:input.leaseState,arm_requested:input.leaseArmed??false,account_kill:input.leaseKill??(input.leaseState==='killed'),
+    key_fingerprint:fixtureFingerprint,cash_micros:'25000000',reserved_micros:'0'
+  }]};
+  if(sql.includes('SELECT w.*,w.xmin'))return {rows:input.leaseState?[{owner_user_id:OWNER,financial_account_id:QID,provider_connection_id:RID,credential_fingerprint:fixtureFingerprint,vault_secret_id:QID,state:input.leaseState,account_kill:input.leaseKill??(input.leaseState==='killed'),arm_requested:input.leaseArmed??false,fencing_token:'3',row_revision:'1'}]:[]};
+  if(sql.includes('pg_catalog.pg_constraint')||sql.includes('pg_catalog.pg_trigger'))return {rows:[{oid:1}]};
+  if(sql.includes('SELECT event_id FROM public.v13_production_event')||sql.includes('SELECT reservation_id FROM private.strata_emergency_exit_reservations'))return {rows:[]};
+  if(sql.includes('SELECT id FROM public.v13_production_position'))return {rows:input.leaseExposure?[{id:'synthetic-position'}]:[]};
+  if(sql.startsWith('SELECT * FROM public.v13_production_account'))return {rows:[{...account,subaccount:1,exchange_index:2,initial_cash_micros:'25000000',reserved_micros:'0'}]};
+  if(sql.includes('SELECT e.cash,e.pnl'))return {rows:[{cash:'0',pnl:'0',basis:'0',position_pnl:'0',amount:'0'}]};
+  // Exact batched FINAL proof shape for this original empty-history fixture.
+  // Match before inner SELECT fragments; no synthetic retained history.
+  if(sql===FINAL_ACCOUNT_PROJECTION_SQL){
+    assert.deepEqual(_args,[account.id,[]]);
+    return {rows:[{known:[],events:[],positions:[]}]};
+  }
+  if(sql.includes('SELECT created_at,client_order_id')||sql.includes('SELECT market,side,quantity_hundredths'))return {rows:[]};
+  if(sql.includes('clock_timestamp()')&&sql.includes('AS fresh'))return {rows:[{fresh:true}]};
+  // Preserve the original empty-history scenario. Never invent a no-send
+  // receipt merely to satisfy a retained-history-only production reader.
+  if(sql.includes("SELECT i.*,i.xmin::text AS row_revision"))return {rows:[]};
+  if(sql.includes("FROM public.v13_production_account a")&&sql.includes("stake.configured_stake_cents"))return {rows:[{...account,execution_enabled:input.accountLive??false,kill_switch:input.eligibleKilled===true?true:!(input.accountLive??false),blocked_reason:input.freeze??null,...(input.apiSource?{
     fee_source_url:"strata-api-reviewed://kxbtc15m/55555555-5555-4555-8555-555555555555",
     fee_policy_version:API_SOURCE_POLICY_VERSION,fee_formula_version:API_SOURCE_FORMULA_VERSION,
   }:{}),...(input.v4Source?{
     fee_policy_version:DYNAMIC_FEE_POLICY_VERSION_V4,
     fee_formula_version:DYNAMIC_FEE_POLICY_VERSION_V4,
     policy_hash:"f".repeat(64),
-  }:{})}]};
+  }:{}),...(input.v3Source?{fee_source_url:`strata-owner-fee-v3://kxbtc15m/${QID}`,fee_policy_version:"strata_owner_official_monetary_fee_v3",fee_formula_version:"standard-quadratic-0.07-v1"}:{}),...(input.durableSource?{fee_source_url:`strata-durable-owner-fee://${QID}`,fee_policy_version:"owner_approved_canonical_terms_v1",fee_formula_version:"standard-quadratic-0.07-v1",policy_hash:"f".repeat(64)}:{})}]};
   if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
     digest:v13Digest({accountId:String(account.id),policyId:String(account.policy_id),
       feeDigest:String(account.fee_artifact_digest),stakeCents:Number(account.configured_stake_cents),
@@ -75,7 +111,7 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
     return {rows:[row]};
   }
   if(sql.includes("FROM private.kalshi_connection_credentials c"))return {rows:[{
-    decrypted_secret:JSON.stringify({api_key_id:"not-real",private_key:"offline-only"}),
+    decrypted_secret:JSON.stringify({api_key_id:fixtureSigner.material.keyId,private_key:fixtureSigner.material.privateKey}),
   }]};
   if(sql.includes("AS positions,")&&sql.includes("AS exits"))
     return {rows:[{positions:input.leaseExposure?1:0,intents:0,exits:0}]};
@@ -122,7 +158,7 @@ function fakeDb(input:{review?:boolean;duplicate?:boolean;permit?:boolean;badCas
   throw Error("unexpected_query");
  };
  const db={query,connect:async()=>({query,release(){executed.push("RELEASE")}})};
- return {db:db as never,executed};
+ return {db:db as never,executed,readFeeds,get signedReads(){return signedReads;}};
 }
 test("PRODUCTION qualifier performs only owned GET and stores a digest, not a trading permission",async()=>{
  const h=fakeDb();
@@ -355,8 +391,8 @@ test("reviewer cannot impersonate account owner or use ordinary user role",async
   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/107",
   note:"Reviewed the exact SHA, price floors, unknown orders, crash recovery, fees, owner isolation and signed production GET evidence.",
   confirmation:REVIEW_CONFIRM};
- assert.equal((await attestProtectiveReleaseReview(OWNER,"ADMIN",data,{db:h.db,sha:()=>SHA})).ok,false);
- assert.equal((await attestProtectiveReleaseReview(REVIEWER,"STANDARD",data,{db:h.db,sha:()=>SHA})).ok,false);
+ assert.equal((await attestProtectiveReleaseReview(OWNER,"ADMIN",data,{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds})).ok,false);
+ assert.equal((await attestProtectiveReleaseReview(REVIEWER,"STANDARD",data,{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds})).ok,false);
  assert.equal(h.executed.length,0);
 });
 test("authenticated distinct reviewer persists immutable evidence in transaction",async()=>{
@@ -364,7 +400,7 @@ test("authenticated distinct reviewer persists immutable evidence in transaction
   reviewUrl:"https://github.com/PatentFiles/Strata-Backend/pull/107",
   note:"Reviewed the exact release SHA, official fee inputs, full provider history, cash and position reconciliation, signed exits, and no-retry crashes.",
   confirmation:REVIEW_CONFIRM};
- const r=await attestProtectiveReleaseReview(REVIEWER,"DEVELOPER",data,{db:h.db,sha:()=>SHA});
+ const r=await attestProtectiveReleaseReview(REVIEWER,"DEVELOPER",data,{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.ok(h.executed.indexOf("BEGIN")<h.executed.indexOf("COMMIT"));
  assert.equal(h.executed.some(s=>s.includes("UPDATE public.live_execution_config")),false);
@@ -372,14 +408,17 @@ test("authenticated distinct reviewer persists immutable evidence in transaction
 test("owner acceptance is rejected if missing distinct reviewer or authenticated confirmation",async()=>{
  const h=fakeDb({review:false});
  const body={reviewId:RID,confirmation:OWNER_CONFIRM};
- assert.equal((await authorizeProtectiveRelease(OWNER,{...body,confirmation:"wrong"},{db:h.db,sha:()=>SHA})).ok,false);
- assert.equal((await authorizeProtectiveRelease(OWNER,body,{db:h.db,sha:()=>SHA})).ok,false);
+ assert.equal((await authorizeProtectiveRelease(OWNER,{...body,confirmation:"wrong"},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds})).ok,false);
+ const missing=await authorizeProtectiveRelease(OWNER,body,{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
+ assert.equal(missing.ok,false);assert.equal(missing.reason,"independent_review_or_qualification_expired");
+ assert.ok(h.executed.some(q=>q.includes("release:preflight-review")),"independent review checkpoint required");
  assert.equal(h.executed.some(s=>s.includes("UPDATE public.live_execution_config")),false);
- assert.ok(h.executed.includes("ROLLBACK"));
+ assert.equal(h.signedReads,0);
 });
 test("independently approved owner release fences killed terminal lease without ARM or START",async()=>{
  const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,leaseState:"killed"});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
+ assert.ok(h.executed.some(q=>q.includes("SELECT i.*,i.xmin::text AS row_revision")),"empty-history collector checkpoint reached");
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.ok(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease") &&
    x.includes("fencing_token=fencing_token+1") &&
@@ -390,23 +429,26 @@ test("independently approved owner release fences killed terminal lease without 
  assert.equal(h.executed.some(x=>/productionStart|productionArm|kalshiPost|submitOrder/.test(x)),false);
  assert.ok(h.executed.includes("COMMIT"));
 });
-test("terminal lease transition refuses missing review, armed lease, exposure and owned worker",async()=>{
+test("terminal lease transition refuses missing review, armed lease, exposure and owned worker",async t=>{
  for(const input of [
    {leaseState:"killed" as const,review:false},
    {leaseState:"killed" as const,leaseArmed:true},
    {leaseState:"killed" as const,leaseExposure:true},
    {leaseState:"owned" as const},
- ]){
+ ]){await t.test(JSON.stringify(input),async()=>{
    const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,...input});
-   const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+   const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
    assert.equal(r.ok,false,JSON.stringify(input));
+   if('review' in input){assert.equal(r.reason,'independent_review_or_qualification_expired');assert.ok(h.executed.some(q=>q.includes('release:preflight-review')));}
+   else if('leaseExposure' in input){assert.equal(r.reason,'owner_release_transaction_refused');assert.ok(h.executed.some(q=>q.includes('SELECT id FROM public.v13_production_position')));assert.equal(h.signedReads,0);}
+   else {assert.equal(r.reason,'owner_release_transaction_refused');assert.ok(h.executed.some(q=>q.includes('a.xmin::text AS account_revision')));assert.equal(h.executed.some(q=>q.includes('SELECT i.*,i.xmin::text AS row_revision')),false,'armed/owned worker refused before history');}
    assert.equal(h.executed.includes("COMMIT"),false,JSON.stringify(input));
    assert.equal(h.executed.some(x=>x.includes("UPDATE private.kalshi_account_worker_lease")),false,JSON.stringify(input));
- }
+ });}
 });
 test("owner consent inserts exact signed release then atomically enables account and global live flag",async()=>{
  const h=fakeDb();
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.equal(r.ordersSubmitted,false);
  assert.equal("workerStarted" in r && r.workerStarted,false);
@@ -420,7 +462,7 @@ test("owner consent inserts exact signed release then atomically enables account
 
 test("eligible but killed owner remains stopped until genuine reviewed release",async()=>{
  const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.equal(r.ordersSubmitted,false);
  assert.ok(h.executed.some(q=>q.includes("UPDATE public.v13_production_account SET execution_enabled=true,kill_switch=false")));
@@ -428,18 +470,20 @@ test("eligible but killed owner remains stopped until genuine reviewed release",
 });
 test("eligible but killed owner cannot bypass independent technical review",async()=>{
  const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,review:false});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.ok,false);
+ assert.equal(r.reason,"independent_review_or_qualification_expired");
+ assert.ok(h.executed.some(q=>q.includes("release:preflight-review")),"independent review checkpoint required");
  assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
 });
 test("owner's independently qualified stopped account can release when shared master is already enabled",async()=>{
  const h=fakeDb({globalLive:true});
  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
-  db:h.db,sha:()=>SHA,
+  db:h.db,sha:()=>SHA,readFeeds:h.readFeeds,
  });
  assert.equal(r.ok,true,JSON.stringify(r));
  assert.equal(r.ordersSubmitted,false);
- const technical=h.executed.findIndex(q=>q.includes("FROM private.strata_protective_release_reviews r"));
+ const technical=h.executed.findIndex(q=>q.includes("FOR SHARE OF r,q"));
  const owned=h.executed.findIndex(q=>q.includes("UPDATE public.v13_production_account"));
  const release=h.executed.findIndex(q=>q.includes("INSERT INTO private.strata_protective_exit_release"));
  assert.ok(technical>0&&release>technical&&owned>release);
@@ -464,24 +508,26 @@ test("already enabled account cannot outrun a globally stopped or inconsistent m
   assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false,name);
   assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false,name);
   assert.equal(h.executed.some(q=>q.includes("UPDATE public.live_execution_config")),false,name);
-  assert.ok(h.executed.includes("ROLLBACK"),name);
+  assert.equal(h.signedReads,0,name);assert.equal(h.executed.includes("BEGIN"),false,name);
  }
 });
 
 test("globally enabled master still cannot bypass absent independent reviewer",async()=>{
  const h=fakeDb({globalLive:true,review:false});
  const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{
-  db:h.db,sha:()=>SHA,
+  db:h.db,sha:()=>SHA,readFeeds:h.readFeeds,
  });
  assert.equal(r.ok,false);
+ assert.equal(r.reason,"independent_review_or_qualification_expired");
+ assert.ok(h.executed.some(q=>q.includes("release:preflight-review")),"independent review checkpoint required");
  assert.equal(h.executed.some(q=>q.includes("INSERT INTO private.strata_protective_exit_release")),false);
  assert.equal(h.executed.some(q=>q.includes("UPDATE public.v13_production_account")),false);
- assert.ok(h.executed.includes("ROLLBACK"));
+ assert.equal(h.signedReads,0);assert.equal(h.executed.includes("BEGIN"),false);
 });
 
 test("provisional freeze cannot be cleared without distinct explicit owner consent",async()=>{
  const h=fakeDb({freeze:"awaiting_account_commissioning"});
- const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA});
+ const r=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.ok,false);
  assert.equal(r.reason,"explicit_commissioning_repair_confirmation_required");
  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
@@ -491,7 +537,7 @@ test("any genuine freeze is immutable through commissioning recovery",async()=>{
  const h=fakeDb({freeze:"unknown_exchange_order"});
  const r=await authorizeProtectiveRelease(OWNER,{
   reviewId:RID,confirmation:OWNER_CONFIRM,provisionalRepairConfirmation:PROVISIONAL_REPAIR_CONFIRM,
- },{db:h.db,sha:()=>SHA});
+ },{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
  assert.equal(r.reason,"account_risk_freeze_requires_independent_remediation");
  assert.equal(h.executed.some(s=>s.includes("SET blocked_reason=NULL")),false);
 });
@@ -659,6 +705,8 @@ test("Step12 status returns legacy fee evidence diagnostics without claiming qua
 
 test("Step12 status identifies approved V4 policy by version, never falsely as legacy PDF",async()=>{
  for(const scenario of [
+  {name:"durable",opts:{durableSource:true},expected:"DURABLE_OWNER_TERMS_V1",legacyExpired:false},
+  {name:"owner_v3",opts:{v3Source:true},expected:"OWNER_OFFICIAL_V3",legacyExpired:false},
   {name:"approved_v4",opts:{v4Source:true},expected:"DYNAMIC_PROVIDER_V4",legacyExpired:false},
   {name:"legacy_pdf",opts:{},expected:"LEGACY_PDF_V1",legacyExpired:true},
   {name:"reviewed_api",opts:{apiSource:true},expected:"REVIEWED_API_V2",legacyExpired:false},
@@ -683,4 +731,69 @@ test("Step12 status identifies approved V4 policy by version, never falsely as l
   assert.equal(res.releaseActive,false);
   assert.equal(res.ordersSubmitted,false);
  }
+});
+
+test('consequential held release refuses missing or revoked durable SHA consent before control writes',async()=>{
+ const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,leaseState:'killed',consent:false});
+ const result=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
+ assert.equal(result.ok,false);assert.equal(result.reason,'owner_exact_sha_consent_required');
+ assert.ok(h.executed.some(s=>s.includes('oa.qualification_digest=oq.evidence_digest')));
+ assert.equal(h.executed.some(s=>/UPDATE public.live_execution_config|UPDATE public.v13_production_account|UPDATE private.kalshi_account_worker_lease/.test(s)),false);
+});
+test('fresh independently reviewed release accepts durable prior-qualification SHA consent without relabeling it',async()=>{
+ const h=fakeDb({globalLive:true,accountLive:true,eligibleKilled:true,leaseState:'killed'});
+ const result=await authorizeProtectiveRelease(OWNER,{reviewId:RID,confirmation:OWNER_CONFIRM},{db:h.db,sha:()=>SHA,readFeeds:h.readFeeds});
+ assert.equal(result.ok,true,JSON.stringify(result));const q=h.executed.find(s=>s.includes('SELECT oa.approval_id'))!;
+ assert.ok(q.includes('oa.confirmed_at<oq.expires_at'));assert.equal(q.includes('qualification_id=$4'),false);
+ assert.equal(h.executed.some(s=>/UPDATE private.strata_owner_sha_approvals/.test(s)),false);
+ assert.ok(h.executed.some(s=>s.includes('FOR SHARE OF u,p')));
+ assert.ok(h.executed.some(s=>s.includes('OWNER_RELEASE_SIGNED_RECHECK')));
+});
+
+test('final release lookup returns the complete historical receipt without granting current readiness',async()=>{
+ const expires=new Date('2026-10-20T06:00:00Z');
+ for(const revoked_at of [null,new Date('2026-10-20T05:00:00Z')]){
+  const queries:string[]=[];
+  const db={query:async(sql:string,params?:unknown[])=>{
+   queries.push(sql);assert.deepEqual(params,[RID,OWNER]);
+   return {rows:[{release_id:QID,execution_account_id:account.id,release_commit_sha:SHA,revoked_at,expires_at:expires}]};
+  },connect:async()=>{throw Error('receipt lookup must not open a transaction');}};
+  const result=await lookupProtectiveReleaseAuthorization(OWNER,RID,{db});
+  assert.deepEqual(JSON.parse(JSON.stringify(result)),{
+   outcome:'RECORDED',releaseId:QID,accountId:account.id,reviewId:RID,sha:SHA,
+   revoked:revoked_at!==null,expiresAt:expires.toISOString(),currentReadinessVerified:false,
+   ordersSubmitted:false,workerStarted:false,
+  });
+  assert.equal(queries.length,1);assert.match(queries[0]!,/^SELECT /);
+ }
+});
+test('final release lookup keeps absent or ambiguous receipts unknown and performs no writes',async()=>{
+ for(const rows of [[],[{},{}]]){
+  const db={query:async(sql:string)=>{assert.match(sql,/^SELECT /);return {rows};},
+   connect:async()=>{throw Error('no transaction');}};
+  assert.deepEqual(await lookupProtectiveReleaseAuthorization(OWNER,RID,{db}),{outcome:'UNKNOWN'});
+ }
+});
+
+// Durable source consent is a separate branch; it cannot reuse V3 grants.
+test('durable qualification requires exact proof, retains exchange gates, and never calls PDF/V3',async()=>{
+ const old=process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';
+ try{
+  const now=Date.now();const d=fakeDb({durableSource:true});let calls=0;
+  const proof={ok:true as const,reason:'approved_durable_terms_and_fresh_market_metadata',sourceDigest:DIGEST,
+   policyVersion:DURABLE_FEE_VERSION,sourceKind:'FRESH_CANONICAL_CAPTURE',sourceAuthenticityVerified:true,sourceFresh:()=>true,verifiedAtMs:now,marketTicker:'KXBTC15M-TEST',intent:'ENTRY' as const,publicationKnownCurrent:false as const,
+   publicationMonitorState:'never_checked' as const,entryConsentRequired:true,feeProofOnly:true as const,tradingAuthorized:false as const};
+  const deps={...d,sha:()=>SHA,now:()=>now,verifyDurableFee:async(...args:unknown[])=>{calls++;assert.deepEqual(args,[OWNER,account.id,`strata-durable-owner-fee://${QID}`,'ENTRY']);return proof;},verifyFee:async()=>{throw Error('no PDF');},verifyV3StandingFee:async()=>{throw Error('no V3');}};
+  const r=await qualifyProtectiveRelease(OWNER,deps);assert.equal(r.ok,true,JSON.stringify(r));assert.equal(calls,1);
+  for(const patch of [{sourceDigest:'e'.repeat(64)},{verifiedAtMs:now-5001},{verifiedAtMs:now+1},{marketTicker:'FOREIGN'},{feeProofOnly:false},{tradingAuthorized:true}]){
+   const f=fakeDb({durableSource:true});const result=await qualifyProtectiveRelease(OWNER,{...deps,...f,verifyDurableFee:async()=>({...proof,...patch}) as typeof proof});
+   assert.equal(result.ok,false);assert.equal(f.executed.some(q=>q.includes('INSERT INTO private.strata_protective_release_qualification')),false);
+  }
+  for(const input of [{freeze:'risk_hold'}]){
+   const blocked=fakeDb({durableSource:true,...input});let feeCalls=0;
+   const denied=await qualifyProtectiveRelease(OWNER,{...deps,...blocked,verifyDurableFee:async()=>{feeCalls++;return proof;}});
+   assert.equal(denied.ok,false);assert.equal(feeCalls,0,'exchange/account fences precede durable fee proof');
+  }
+  process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='false';assert.equal((await qualifyProtectiveRelease(OWNER,deps)).ok,false);
+ }finally{if(old===undefined)delete process.env.STRATA_DURABLE_OWNER_FEE_ENABLED;else process.env.STRATA_DURABLE_OWNER_FEE_ENABLED=old;}
 });

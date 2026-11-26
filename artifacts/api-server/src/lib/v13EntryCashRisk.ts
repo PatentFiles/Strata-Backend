@@ -1,18 +1,21 @@
-import {prepareVerifiedEntryFeeRepricing} from "./entryCashFeeRepricing";
+import {prepareVerifiedEntryFeeRepricing,validEntryFeePriceGrid} from "./entryCashFeeRepricing";
 import {digest} from "./v13-production/types";
 import {planV13IocEntry,type V13IocEntryPlan,type V13DepthLevel,type V13ExecutionSignal,type V13ExecutionDirection} from './v13ExecutionPlanner';
 import type {V13VerifiedFeeEvidence} from './v13LiveMoneyEntryPreflight';
+import {directAccountRoundingIdentity,validDirectAccountRoundingEvidence,type DirectAccountRoundingEvidence} from './strata/directAccountRoundingEvidence';
+export const DIRECT_ENTRY_CASH_RISK_VERSION='DIRECT_CENTICENT_FRAGMENTS_V1' as const;
 export const ENTRY_CASH_RISK_VERSION='NON_DIRECT_CENT_FRAGMENTS_V1' as const;
-export type V13EntryCashRisk={version:typeof ENTRY_CASH_RISK_VERSION;marketTicker:string;side:'YES'|'NO';
+export type V13EntryCashRisk={version:typeof ENTRY_CASH_RISK_VERSION|typeof DIRECT_ENTRY_CASH_RISK_VERSION;roundingEvidence?:DirectAccountRoundingEvidence;marketTicker:string;side:'YES'|'NO';
  gridEvidence?:{structure:'deci_cent'|'tapered_deci_cent';ranges:Array<{start:string;end:string;step:string}>};
  modelFingerprint:string;gridDigest:string;policyHash:string;artifactDigest:string;feeMetadataDigest:string;seriesDigest:string;entryCashDebitPerContractMicros:number;
  entryTradeFeePerContractMicros:number;exitLossPerContractMicros:number};
-export type V13EntryCashProof={version:typeof ENTRY_CASH_RISK_VERSION;contracts:number;limitMicros:number;
+export type V13EntryCashProof={version:typeof ENTRY_CASH_RISK_VERSION|typeof DIRECT_ENTRY_CASH_RISK_VERSION;contracts:number;limitMicros:number;
  modelFingerprint:string;feeFingerprint:string;budgetCents:number;entryCashDebitMicros:string;
  entryTradeFeeMicros:string;exitLossMicros:string;reservedEntryCashCents:number;reservedExitFeeCents:number;plannedAllInCents:number};
 export function cashRiskModelFingerprint(r:Omit<V13EntryCashRisk,'modelFingerprint'|'entryCashDebitPerContractMicros'|'entryTradeFeePerContractMicros'|'exitLossPerContractMicros'>):string {
  return digest({version:r.version,marketTicker:r.marketTicker,side:r.side,policyHash:r.policyHash,artifactDigest:r.artifactDigest,
-  feeMetadataDigest:r.feeMetadataDigest,seriesDigest:r.seriesDigest,gridDigest:r.gridDigest});
+  feeMetadataDigest:r.feeMetadataDigest,seriesDigest:r.seriesDigest,gridDigest:r.gridDigest,
+  ...(r.version===DIRECT_ENTRY_CASH_RISK_VERSION?{roundingEvidence:directAccountRoundingIdentity(r.roundingEvidence)}:{})});
 }
 export function cashRiskFeeFingerprint(fee:Pick<V13VerifiedFeeEvidence,'contracts'|'limitPrice'|'cashRisk'>):string {
  const r=fee.cashRisk!;return digest({modelFingerprint:r.modelFingerprint,contracts:fee.contracts,limitPrice:fee.limitPrice,
@@ -25,11 +28,15 @@ const ceil=(n:bigint,d:bigint)=>(n+d-1n)/d;
  * envelope only after the exact-market source/grid checks and existing helpers. */
 export function validEntryCashRisk(fee:V13VerifiedFeeEvidence):fee is V13VerifiedFeeEvidence&{cashRisk:V13EntryCashRisk}{
  const r=fee.cashRisk;
- if(!r||r.version!==ENTRY_CASH_RISK_VERSION||!/^KXBTC15M-[A-Za-z0-9-]+$/.test(r.marketTicker)||
+ if(!r||![ENTRY_CASH_RISK_VERSION,DIRECT_ENTRY_CASH_RISK_VERSION].includes(r.version)||!/^KXBTC15M-[A-Za-z0-9-]+$/.test(r.marketTicker)||
   !['YES','NO'].includes(r.side)||![r.modelFingerprint,r.gridDigest,r.policyHash,r.artifactDigest,r.feeMetadataDigest,r.seriesDigest].every(hash)||
   r.modelFingerprint!==cashRiskModelFingerprint(r)||fee.fingerprint!==cashRiskFeeFingerprint(fee)||
   !Number.isSafeInteger(fee.reservedEntryFeeCents)||fee.reservedEntryFeeCents<0||!Number.isSafeInteger(fee.reservedExitFeeCents)||fee.reservedExitFeeCents<0||
-  r.entryCashDebitPerContractMicros!==1_000_000||
+  (r.version===ENTRY_CASH_RISK_VERSION
+   ?r.entryCashDebitPerContractMicros!==1_000_000||r.roundingEvidence!==undefined
+   :!validDirectAccountRoundingEvidence(r.roundingEvidence)||!r.gridEvidence||
+    !Number.isSafeInteger(r.entryCashDebitPerContractMicros)||r.entryCashDebitPerContractMicros<10_000||
+    r.entryCashDebitPerContractMicros>1_000_000||r.entryCashDebitPerContractMicros%10_000!==0)||
   !Number.isSafeInteger(fee.contracts)||fee.contracts<1||fee.contracts>999_999_999||
   !Number.isFinite(fee.limitPrice)||fee.limitPrice<=0||fee.limitPrice>=1||
   Math.abs(fee.limitPrice*10000-Math.round(fee.limitPrice*10000))>1e-8||
@@ -47,7 +54,7 @@ export function entryCashProof(fee:V13VerifiedFeeEvidence,contracts:number,budge
   trade=BigInt(r.entryTradeFeePerContractMicros)*n,exit=BigInt(r.exitLossPerContractMicros)*n;
  const cashCents=Number(ceil(cash,10000n)),exitCents=Number(ceil(exit,10000n));
  if(!Number.isSafeInteger(cashCents+exitCents))return null;
- return {version:ENTRY_CASH_RISK_VERSION,contracts,limitMicros:Math.round(fee.limitPrice*1_000_000),
+ return {version:r.version,contracts,limitMicros:Math.round(fee.limitPrice*1_000_000),
   modelFingerprint:r.modelFingerprint,feeFingerprint:fee.fingerprint,budgetCents,
   entryCashDebitMicros:String(cash),entryTradeFeeMicros:String(trade),exitLossMicros:String(exit),
   reservedEntryCashCents:cashCents,reservedExitFeeCents:exitCents,plannedAllInCents:cashCents+exitCents};
@@ -68,8 +75,15 @@ export function planCashBoundEntry(input:{signal:V13ExecutionSignal;direction:V1
  let max=Math.min(999999999,Number(BigInt(budgetCents)*10000n/per));
  if(!selectedTerms)max=Math.min(max,fee.contracts);
  while(max>0&&ceil(cash*BigInt(max),10000n)+ceil(exit*BigInt(max),10000n)>BigInt(budgetCents))max--;
- if(max<1)return {ok:false,reason:'no_whole_contract_affordable'};
- const plan=planV13IocEntry({...input,maxContracts:max});
+ if(max<1&&fee.cashRisk!.version!==DIRECT_ENTRY_CASH_RISK_VERSION)return {ok:false,reason:'no_whole_contract_affordable'};
+ const direct=fee.cashRisk!.version===DIRECT_ENTRY_CASH_RISK_VERSION;
+ const plan=planV13IocEntry({...input,...(direct?{maxContractsAtLimit:(price:string)=>{
+  const selected=reprice?.(1,Number(price));if(!selected?.cashRisk)return null;
+  const c=BigInt(selected.cashRisk.entryCashDebitPerContractMicros),e=BigInt(selected.cashRisk.exitLossPerContractMicros);
+  let n=BigInt(budgetCents)*10000n/(c+e);if(n>999999999n)n=999999999n;
+  while(n>0n&&ceil(c*n,10000n)+ceil(e*n,10000n)>BigInt(budgetCents))n--;
+  return Number(n);
+ }}:{maxContracts:max})});
  if(!plan.ok)return plan;
  // Only the same freshly verified exact grid can mint different PREPARE
  // terms. Never borrow a lower-price fee proof or alter an existing intent.
@@ -85,9 +99,15 @@ export function planCashBoundEntry(input:{signal:V13ExecutionSignal;direction:V1
 export function samePinnedCashModel(pinned:V13VerifiedFeeEvidence,fresh:V13VerifiedFeeEvidence):boolean{
  if(!validEntryCashRisk(pinned)||!validEntryCashRisk(fresh))return false;
  const a=pinned.cashRisk,b=fresh.cashRisk;
+ if(a.version===DIRECT_ENTRY_CASH_RISK_VERSION&&
+  (!validEntryFeePriceGrid(pinned,a.gridEvidence)||!validEntryFeePriceGrid(fresh,b.gridEvidence)))return false;
  return pinned.policyVersion===fresh.policyVersion&&pinned.sourceUrl===fresh.sourceUrl&&pinned.formulaVersion===fresh.formulaVersion&&
   a.modelFingerprint===b.modelFingerprint&&a.marketTicker===b.marketTicker&&a.side===b.side&&a.gridDigest===b.gridDigest&&
-  a.entryCashDebitPerContractMicros===b.entryCashDebitPerContractMicros&&a.exitLossPerContractMicros===b.exitLossPerContractMicros&&
+  a.version===b.version&&
+  (a.version===DIRECT_ENTRY_CASH_RISK_VERSION?
+   (fresh.limitPrice===pinned.limitPrice?b.entryCashDebitPerContractMicros===a.entryCashDebitPerContractMicros:
+    b.entryCashDebitPerContractMicros<=a.entryCashDebitPerContractMicros):
+   a.entryCashDebitPerContractMicros===b.entryCashDebitPerContractMicros)&&a.exitLossPerContractMicros===b.exitLossPerContractMicros&&
   fresh.limitPrice<=pinned.limitPrice+1e-12&&b.entryTradeFeePerContractMicros<=a.entryTradeFeePerContractMicros&&
   (fresh.limitPrice!==pinned.limitPrice||b.entryTradeFeePerContractMicros===a.entryTradeFeePerContractMicros);
 }
@@ -119,5 +139,6 @@ export function entryFillFeeUpperMicros(fee:V13VerifiedFeeEvidence,quantityHundr
  const gross=grossNumerator/100n;
  // A cent lattice contains the centicent lattice; this never assumes member
  // class or credits a rebate. Aligned amounts get no invented extra cent.
- return ceil(gross+exactTrade,10000n)*10000n-gross;
+ const quantum=fee.cashRisk.version===DIRECT_ENTRY_CASH_RISK_VERSION?100n:10000n;
+ return ceil(gross+exactTrade,quantum)*quantum-gross;
 }

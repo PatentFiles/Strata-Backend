@@ -1,8 +1,14 @@
+import {withMemberHistoryCredits,memberReadBudgetEnabled} from './kalshiMemberReadBudget';
+import {dedicatedSignerFingerprint} from './commissioning';
+import {historyLaneCredentialKey,inBoundedHistoryReadLane} from "./boundedHistoryReadLane";
+import {prepareDirectPrecisionBounds} from "../directPrecisionCashBounds";
+import {currentDirectAccountRoundingEvidence,type DirectAccountRoundingIdentity} from "./directAccountRoundingEvidence";
 import type {MetadataCaptureManifest} from "./metadataCapture";
 import {reportOwnedHistoryCapacity} from "./ownedHistoryCapacityDiagnostics";
-import {ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
+import {ENTRY_CASH_RISK_VERSION,DIRECT_ENTRY_CASH_RISK_VERSION,cashRiskModelFingerprint,cashRiskFeeFingerprint} from "../v13EntryCashRisk";
 import {requestQuantityHundredths} from "../v13-production/requestQuantity";
 import { getScopedKalshiJson, KalshiApiError } from "../kalshiAccountClient";
+import {ownedFeeFailure} from "./ownedFeeFailureDiagnostic";
 import { verifyOwnedFeeMetadata } from "./ownedMarketFeeMetadata";
 import { maximumEntryFeePerContractMicros, maximumExitFeePerContractMicros, maximumEntryCashDebitPerContractMicros } from "../microLiveEntryFees";
 import { planV13IocEntry } from "../v13ExecutionPlanner";
@@ -23,6 +29,16 @@ export const getOwnedProductionKalshiJson:typeof getScopedKalshiJson=(
 
 
 const BALANCE_PATH = "/trade-api/v2/portfolio/balance";
+
+/** Separate native-only fixed-scope balance transport; legacy readers unchanged. */
+export function getStoppedBalanceObservationJson(
+ creds:Parameters<typeof getScopedKalshiJson>[0],owner:string,signal:AbortSignal,
+ observeBalanceFetchInvoked:()=>void,
+):Promise<unknown>{
+ return getScopedKalshiJson(creds,BALANCE_PATH,'?subaccount=1&exchange_index=2',
+  undefined,PERSONAL_KALSHI_HOST,owner,signal,observeBalanceFetchInvoked);
+}
+
 const ORDER_PATH = "/trade-api/v2/portfolio/orders";
 const FILL_PATH = "/trade-api/v2/portfolio/fills";
 const POSITION_PATH = "/trade-api/v2/portfolio/positions";
@@ -74,16 +90,36 @@ export interface OwnedKalshiRead {
 }
 
 /** Authenticated Exchange Index 2 reads. A truncated page is a blocker, not an empty account. */
+export type BoundedHistoryReadOptions = {mode:"bounded_history_reads_v1";signal?:AbortSignal};
 export async function readOwnedKalshiFeeds(
   creds: { keyId: string; privateKey: string },
   nowMs: number,
   get: typeof getScopedKalshiJson = getOwnedProductionKalshiJson,
+  bounded?:BoundedHistoryReadOptions,
 ): Promise<OwnedKalshiRead | { ok: false; reason: string }> {
+  if(bounded&&bounded.mode!=="bounded_history_reads_v1")return {ok:false,reason:"bounded_history_mode_invalid"};
+  const controller=bounded?new AbortController():null;
+  const signal=controller?(bounded?.signal?AbortSignal.any([controller.signal,bounded.signal]):controller.signal):undefined;
+  const laneKey=controller?historyLaneCredentialKey(creds.keyId):null;
+  let failure:string|null=null;
+  const fail=(reason:string)=>{if(!failure){failure=reason;controller?.abort(Error(reason));}};
+  const onExternalAbort=()=>fail("kalshi_read_canceled");
+  bounded?.signal?.addEventListener('abort',onExternalAbort,{once:true});
+  if(bounded?.signal?.aborted)onExternalAbort();
+  const timer=controller?setTimeout(()=>fail("kalshi_read_deadline_exceeded"),15000):null;
+  const originalGet=get;
+  if(signal)get=((...args:Parameters<typeof getScopedKalshiJson>)=>{
+    signal.throwIfAborted();const supplied=args[6];args[6]=supplied?AbortSignal.any([signal,supplied]):signal;
+    return originalGet(...args);
+  }) as typeof getScopedKalshiJson;
+  try {
   let balance: unknown;
   try {
-    balance = await get(creds, BALANCE_PATH, "?subaccount=1&exchange_index=2");
+    balance = signal?await inBoundedHistoryReadLane(laneKey!,signal,()=>get(creds,BALANCE_PATH,"?subaccount=1&exchange_index=2"))
+      :await get(creds, BALANCE_PATH, "?subaccount=1&exchange_index=2");
+    if(failure)return {ok:false,reason:failure};
   } catch(error) {
-    return { ok: false, reason: classifyOwnedKalshiReadFailure(error) };
+    return { ok: false, reason: failure??classifyOwnedKalshiReadFailure(error) };
   }
   if (!scopeEcho(balance)) return { ok: false, reason: "account_target_pair_mismatch" };
   const cash = readSubaccountSpendableCash({
@@ -96,21 +132,26 @@ export async function readOwnedKalshiFeeds(
     primaryBalance: {},
   });
   if (!cash.ok) return cash;
-  // Failure must stop the entire signed scan before any additional Kalshi
-  // GET is sent. In particular, a provider 429 must not fan out into five
-  // unnecessary signed history requests.
-  const orders = await pages(get, creds, ORDER_PATH, ["orders"]);
-  if ("failed" in orders) return {ok:false,reason:orders.failed};
-  const archivedOrders = await pages(get, creds, HISTORICAL_ORDER_PATH, ["orders"]);
-  if ("failed" in archivedOrders) return {ok:false,reason:archivedOrders.failed};
-  const fills = await pages(get, creds, FILL_PATH, ["fills"]);
-  if ("failed" in fills) return {ok:false,reason:fills.failed};
-  const archivedFills = await pages(get, creds, HISTORICAL_FILL_PATH, ["fills"]);
-  if ("failed" in archivedFills) return {ok:false,reason:archivedFills.failed};
-  const positions = await pages(get, creds, POSITION_PATH, ["market_positions", "positions"]);
-  if ("failed" in positions) return {ok:false,reason:positions.failed};
-  const settlements = await pages(get, creds, SETTLEMENT_PATH, ["settlements"]);
-  if ("failed" in settlements) return {ok:false,reason:settlements.failed};
+  // Legacy default remains strictly serial. Enabled lane owns whole paginated
+  // groups: failure is latched BEFORE its slot is released to queued work.
+  let results: Array<Page|{failed:string}>;
+  const groups:[string,string[]][]=[[ORDER_PATH,["orders"]],[HISTORICAL_ORDER_PATH,["orders"]],
+    [FILL_PATH,["fills"]],[HISTORICAL_FILL_PATH,["fills"]],[POSITION_PATH,["market_positions","positions"]],[SETTLEMENT_PATH,["settlements"]]];
+  if(signal){
+    const gather=()=>Promise.allSettled(groups.map(([path,keys])=>inBoundedHistoryReadLane(laneKey!,signal,async()=>{
+      try{const result=await pages(get,creds,path,keys);if("failed" in result)fail(result.failed);signal.throwIfAborted();return result;}
+      catch(error){fail(classifyOwnedKalshiReadFailure(error));throw error;}
+    }).catch(error=>{fail(classifyOwnedKalshiReadFailure(error));throw error;})));
+    let settled:Awaited<ReturnType<typeof gather>>;
+    try{settled=memberReadBudgetEnabled()?await withMemberHistoryCredits(dedicatedSignerFingerprint(creds.keyId,creds.privateKey),signal,gather):await gather();}
+    catch(error){fail(classifyOwnedKalshiReadFailure(error));return {ok:false,reason:failure!};}
+    if(failure)return {ok:false,reason:failure};
+    if(settled.some(r=>r.status!=="fulfilled"))return {ok:false,reason:"kalshi_read_failed"};
+    results=settled.map(r=>(r as PromiseFulfilledResult<Page|{failed:string}>).value);
+  }else{
+    results=[];for(const [path,keys] of groups){const result=await pages(get,creds,path,keys);if("failed" in result)return {ok:false,reason:result.failed};results.push(result);}
+  }
+  const [orders,archivedOrders,fills,archivedFills,positions,settlements]=results as Page[];
   const currentEmpty = orders.rows.length === 0 && fills.rows.length === 0 &&
     settlements.rows.length === 0 && !openPositions(positions.rows);
   if ((archivedOrders.unavailable || archivedFills.unavailable) && !currentEmpty) {
@@ -132,6 +173,8 @@ export async function readOwnedKalshiFeeds(
     positions: positions.rows,
     settlements: settlements.rows,
   };
+  }finally{if(timer)clearTimeout(timer);bounded?.signal?.removeEventListener('abort',onExternalAbort);}
+
 }
 
 /**
@@ -347,6 +390,11 @@ export function ownedMarketEvidence(input: {
   policyHash: string;
   verifiedAtMs: number;
   metadataCapture?: MetadataCaptureManifest;
+  /** Internal-only optional reviewed authority. The runtime caller must bind
+   * currentScope independently to this account, credential, generation and
+   * active documentation review; client JSON or a shape check is not authority.
+   * No production caller supplies this until that collector is qualified. */
+  directRounding?: {evidence:unknown;currentScope:DirectAccountRoundingIdentity};
 }): MarketEvidence {
   // All fee metadata is bound to the SAME market used for the book and the
   // final POST re-read. Never rely on series multiplier alone.
@@ -358,14 +406,15 @@ export function ownedMarketEvidence(input: {
     observedAtMs: input.observedAtMs, nowMs: input.nowMs,
     ...(input.metadataCapture !== undefined?{metadataCapture:input.metadataCapture}:{}),
   });
-  if (!feeProof.ok) throw new Error(feeProof.reason);
+  if (!feeProof.ok) throw ownedFeeFailure(feeProof.diagnosticStage);
   const seriesBody = object(input.seriesPayload);
   const marketBody = object(input.marketPayload);
   const series = object(seriesBody.series);
   const metadata = object(marketBody.market);
   const structure = metadata.price_level_structure;
-  requireProof(series.ticker === "KXBTC15M" && series.fee_type === "quadratic" &&
-    String(series.fee_multiplier) === "1" && metadata.ticker === input.market &&
+  // feeProof above already enforces the exact series, exchange and approved
+  // unit-multiplier encodings; do not re-parse or coerce its fee terms here.
+  requireProof(metadata.ticker === input.market &&
     metadata.exchange_index === 2 && metadata.status === "active" &&
     (structure === "deci_cent" || structure === "tapered_deci_cent"), "production_fee_or_market_grid_unproven");
   const ticks = structure === "deci_cent" && metadata.price_ranges === undefined
@@ -386,13 +435,21 @@ export function ownedMarketEvidence(input: {
   const count = plan.ok ? plan.plan.contracts : 1;
   const limit = plan.ok ? plan.plan.limitPrice : Number(bestAsk);
   const side = input.side.toLowerCase() as "yes" | "no";
-  const entry = maximumEntryFeePerContractMicros(1, limit.toFixed(4), ticks ?? undefined, side);
-  const exit = maximumExitFeePerContractMicros(1, ticks ?? undefined, side);
+  const rounding=input.directRounding;
+  if(Object.hasOwn(input,"directRounding")&&(!rounding||typeof rounding!=="object"))
+    throw new Error("direct_account_rounding_authority_unproven");
+  if(rounding&&!currentDirectAccountRoundingEvidence(rounding.evidence,rounding.currentScope,input.nowMs))
+    throw new Error("direct_account_rounding_authority_unproven");
+  const direct=rounding?prepareDirectPrecisionBounds(ticks??[],input.side)?.(limit):null;
+  if(rounding&&!direct)throw new Error("direct_account_rounding_grid_unproven");
+  const entry = direct?.trade??maximumEntryFeePerContractMicros(1, limit.toFixed(4), ticks ?? undefined, side);
+  const exit = direct?.exit??maximumExitFeePerContractMicros(1, ticks ?? undefined, side);
   requireProof(entry !== null && exit !== null && Number.isSafeInteger(input.verifiedAtMs), "fee_evidence_missing");
   const ranges=metadata.price_ranges??[{start:"0.0000",end:"1.0000",step:"0.0001"}];
-  const cash=maximumEntryCashDebitPerContractMicros(1,limit.toFixed(4),ranges,side);
+  const cash=direct?.cash??maximumEntryCashDebitPerContractMicros(1,limit.toFixed(4),ranges,side);
   requireProof(cash!==null,"fee_cash_bound_unproven");
-  const identity={version:ENTRY_CASH_RISK_VERSION,marketTicker:input.market,side:input.side,
+  const identity={version:rounding?DIRECT_ENTRY_CASH_RISK_VERSION:ENTRY_CASH_RISK_VERSION,
+    ...(rounding&&currentDirectAccountRoundingEvidence(rounding.evidence,rounding.currentScope,input.nowMs)?{roundingEvidence:structuredClone(rounding.evidence)}:{}),marketTicker:input.market,side:input.side,
     policyHash:input.policyHash,artifactDigest:input.artifactDigest,feeMetadataDigest:feeProof.fingerprint,
     seriesDigest:digest(series),gridDigest:digest({structure,ranges})};
   const cashRisk={...identity,gridEvidence:{structure:structure as 'deci_cent'|'tapered_deci_cent',ranges:structuredClone(ranges) as Array<{start:string;end:string;step:string}>},modelFingerprint:cashRiskModelFingerprint(identity),

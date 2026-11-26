@@ -2,10 +2,30 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync,existsSync} from "node:fs";
 import {join} from "node:path";
+import ts from "typescript";
 function read(relative:string):string {
  const a=join(process.cwd(),"src/lib/strata",relative);
  const b=join(process.cwd(),"artifacts/api-server/src/lib/strata",relative);
  return readFileSync(existsSync(a)?a:b,"utf8");
+}
+// Parse the declaration instead of assuming one particular whitespace/call
+// layout. Only a literal or the reviewed one-argument relation selector is
+// accepted; every original monetary/ownership predicate assertion remains.
+function declaredSql(text:string,name:string):string {
+ const tree=ts.createSourceFile('reviewed.ts',text,ts.ScriptTarget.Latest,true);
+ const found:ts.Expression[]=[];
+ function visit(node:ts.Node):void {
+  if(ts.isVariableDeclaration(node)&&ts.isIdentifier(node.name)&&node.name.text===name&&node.initializer)found.push(node.initializer);
+  ts.forEachChild(node,visit);
+ }
+ visit(tree);assert.equal(found.length,1,'exactly one '+name+' declaration');
+ let value=found[0];
+ if(ts.isCallExpression(value)){
+  assert.ok(ts.isIdentifier(value.expression)&&value.expression.text==='runtimeAuthSql');
+  assert.equal(value.arguments.length,1);value=value.arguments[0];
+ }
+ assert.ok(ts.isNoSubstitutionTemplateLiteral(value),'reviewed SQL must remain a fixed literal');
+ return value.text;
 }
 test("Step 9 owner approval and SQL bind the signed API grant, never a supplied PDF hash",()=>{
  const policy=read("personalPolicyApproval.ts");
@@ -15,7 +35,7 @@ test("Step 9 owner approval and SQL bind the signed API grant, never a supplied 
  assert.match(policy,/parseReviewedApiSource\(input\.policy\.feeSourceUrl/);
  assert.match(policy,/AND \(\$25::uuid IS NULL OR EXISTS \(/);
  assert.match(policy,/g\.authorized_stages @> ARRAY\['STEP_9'\]/);
- const sql=policy.split("const APPROVE_API_SQL = `")[1]?.split("`;")[0];
+ const sql=declaredSql(policy,"APPROVE_API_SQL");
  assert.ok(sql,"atomic API policy SQL must exist");
  assert.match(sql,/g\.policy_version=\$16 AND \$16='strata_api_fee_source_signed_review_v2'/);
  assert.match(sql,/r1\.reviewer_user_id=g\.issuer_admin_id/);
@@ -34,7 +54,7 @@ test("Step 11 checks fresh API source and owner consent inside commissioning SQL
  assert.match(owner,/private\.strata_api_fee_owner_consents/);
  assert.match(owner,/g\.authorized_stages @> ARRAY\['STEP_11'\]/);
  assert.match(owner,/AND \(\$7::uuid IS NULL OR EXISTS \(/);
- const sql=owner.split("const COMMISSION_API_SQL = `")[1]?.split("`;")[0];
+ const sql=declaredSql(owner,"COMMISSION_API_SQL");
  assert.ok(sql);
  assert.match(sql,/p\.fee_policy_version='strata_api_fee_source_signed_review_v2'/);
  assert.match(sql,/r1\.reviewer_user_id=g\.issuer_admin_id/);

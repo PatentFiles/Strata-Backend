@@ -1,0 +1,40 @@
+✔ parses the formula only in General Trading Fees with explicit universal applicability (124.796846ms)
+Warning: Indexing all PDF objects
+✔ parses the actual July 7, 2026 Kalshi PDF, not its later general-fees table as the formula section (722.265698ms)
+✔ rejects ambiguous special-market exceptions instead of inferring applicability (23.547547ms)
+✔ does not use an unrelated 0.07 formula outside General Trading Fees (1.687551ms)
+✔ verifies only exact canonical bytes, version, and formula (5.434251ms)
+✔ fails closed for source errors, altered bytes, and unexpected content types (1.204544ms)
+✔ fails closed when fetched PDF is oversized or malformed (23.261692ms)
+✔ rejects arbitrary source URLs and unversioned formula identities before fetching (0.288274ms)
+✔ 200 application/pdf is not approval until the reviewed parser accepts the formula (9.236245ms)
+✔ official fee fetch reports HTTP 403 and 404 without the response body (1.818838ms)
+✔ official fee fetch rejects non-PDF content types (0.808156ms)
+✔ official fee fetch rejects an oversized body and an invalid PDF (25.027931ms)
+✔ one successful verification parses and hashes the same PDF bytes from one GET (440.861091ms)
+✔ 429 without Retry-After performs one GET and stores nothing (1.961713ms)
+✔ 429 with a short Retry-After retries once and stores a digest only when the PDF validates (339.06995ms)
+✔ redirect mismatch and a changed PDF block without another GET (3.756305ms)
+✔ uploaded official fee bytes pass only the reviewed July 2026 PDF (309.827976ms)
+✔ trusted Supabase bridge requires exact project, official origin, fresh hash-bound PDF (361.859306ms)
+✔ versioned V4 original issuer PDF remains hash-verified within 55m, not re-stamped (3.39386ms)
+✔ strict V4 official bridge cooldown never reuses stale PDF or approves fees (1.437875ms)
+✔ trusted bridge cooldown reports retry without accepting any fee artifact (0.959214ms)
+✔ Edge 429 identifies shared lease versus provider and preserves exact UTC retry deadline (1.434991ms)
+✔ 429 cooldown respects Retry-After and never treats previous bytes as current evidence (557.386375ms)
+✔ repeated Kalshi 429s back off 60s, 120s, 240s without approving or caching bytes (0.870291ms)
+✔ injected fee transports cannot access the privileged production bridge after 429 (0.417609ms)
+✔ simultaneous official fee validations use one network request, without caching success (515.752765ms)
+Warning: Invalid PDF header version: fabrica
+Warning: Invalid PDF header version: fabrica
+Warning: Indexing all PDF objects
+✔ renewable, fresh official Edge PDF proof must pass canonical origin, captured hash, age and full reviewed parser (241.515408ms)
+✔ production monetary PDF authority uses one shared provider lease and never a pinned fixture (0.636969ms)
+ℹ tests 28
+ℹ suites 0
+ℹ pass 28
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4406.804975

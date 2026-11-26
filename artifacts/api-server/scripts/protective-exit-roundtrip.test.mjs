@@ -37,6 +37,7 @@ export {computeV13LiveMoneyPolicyHash} from ${JSON.stringify(lib+'/v13LiveMoneyR
 export * from ${JSON.stringify(strata+'/sharedPersonalTradingControls.ts')};
 export {FinalPublicMetadataPhases} from ${JSON.stringify(strata+'/finalPublicMetadataPhases.ts')};
 export {processCommittedPublicMetadata} from ${JSON.stringify(strata+'/committedPublicMetadata.ts')};
+export {OWNED_GATE_READ_SQL} from ${JSON.stringify(lib+'/v13-production/ownedGateRead.ts')};
 export {ProductionExecutor} from ${JSON.stringify(lib+'/v13-production/executor.ts')};
 export {ProductionLedger} from ${JSON.stringify(lib+'/v13-production/ledger.ts')};
 export {ProductionWorker} from ${JSON.stringify(lib+'/v13-production/worker.ts')};
@@ -74,7 +75,7 @@ const owner='11111111-1111-4111-8111-111111111111',account='offline-account',gra
 const market='KXBTC15M-26NOV031700-00',event='KXBTC15M-26NOV031700';
 const at=Date.parse('2026-11-03T16:55:00Z'),release='a'.repeat(40);
 const finalFlag='STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED',oldFlag='STRATA_PUBLIC_METADATA_PREFETCH_ENABLED';
-const reconciliationIntentSql="SELECT id,account_id,evaluation_id,crossing_key,parent_id, kind,market,side,state,request, CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision, policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id, reserved_micros,exit_fee_micros,filled_hundredths,terminal,cancel_attempted,dispatch_at,created_at FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE";
+const reconciliationIntentSql="SELECT id,account_id,evaluation_id,direct_source_id,crossing_key,parent_id, kind,market,side,state,request, CASE WHEN state='BLOCKED' AND terminal IS TRUE THEN NULL ELSE decision END AS decision, policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id, reserved_micros,exit_fee_micros,filled_hundredths,terminal,cancel_attempted,dispatch_at,created_at FROM v13_production_intent WHERE account_id=$1 ORDER BY created_at,id FOR UPDATE";
 const isReconciliationIntentQuery=sql=>typeof sql==='string'&&sql.replace(/\s+/g,' ').trim()===reconciliationIntentSql;
 const privateKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
 const keyId='offline-fixture-not-a-provider-key';
@@ -88,8 +89,8 @@ function pages(){return {
  '/series/fee_changes?series_ticker=KXBTC15M&show_historical=false':{series_fee_change_arr:[],cursor:''},
  ['/events/fee_changes?event_ticker='+event+'&limit=100']:{event_fee_changes:[],cursor:''},
 };}
-function fixture(value,{api=true,old='false'}={}){
- const f={now:at,digest:'d'.repeat(64),policy:'b'.repeat(64),logs:[],warnings:[],calls:[],sql:[],scheduleCalls:[],startupReleaseCalls:0,standingHistoryCalls:0,startupFeedReads:0,monetaryCalls:0,workerStops:0,books:0,orderTransportCalls:0,abortSignalDeadlines:[],timers:new Map(),publicPages:pages(),stopExposure:false,reviewMutator:r=>r};
+function fixture(value,{api=true,old='false',direct=false}={}){
+ const f={direct,now:at,digest:'d'.repeat(64),policy:'b'.repeat(64),logs:[],warnings:[],calls:[],sql:[],scheduleCalls:[],startupReleaseCalls:0,standingHistoryCalls:0,startupFeedReads:0,monetaryCalls:0,workerStops:0,books:0,orderTransportCalls:0,abortSignalDeadlines:[],timers:new Map(),publicPages:pages(),stopExposure:false,reviewMutator:r=>r};
  f.oldFlag=old;f.boundByAccount=new Map();f.accountRows=new Map();f.transportInFlight=0;f.maxTransportInFlight=0;
  f.source=api?'strata-api-reviewed://kxbtc15m/'+grant:'https://kalshi.com/docs/kalshi-fee-schedule.pdf';
  f.row={key_fingerprint:fingerprint,credential_fingerprint:fingerprint,cash_micros:'60000000000',reserved_micros:'0',reconciled_at:iso(at-1000),commissioned:true,execution_enabled:true,kill_switch:false,blocked_reason:null,fee_artifact_digest:f.digest,cash_precision_verified:true,subaccount:1,exchange_index:2,financial_account_id:'financial-offline',provider_connection_id:'provider-offline',vault_secret_id:'vault-offline',decrypted_secret:JSON.stringify({api_key_id:keyId,private_key:privateKey}),policy_hash:f.policy,fee_policy_version:'strata_api_fee_source_signed_review_v2',fee_source_url:f.source,fee_formula_version:'standard-quadratic-0.07-v1',policy_state:'APPROVED',configured_stake_cents:500};
@@ -100,6 +101,16 @@ function fixture(value,{api=true,old='false'}={}){
  const query=async(sql,args=[])=>{
   f.sql.push({sql,args});
   if(f.queryHook){const answer=await f.queryHook(sql,args);if(answer!==undefined)return answer;}
+  // The real dispatcher now chooses monetary mode from the owner's
+  // persisted approved policy, not a client-supplied V2/V3 switch. Preserve
+  // this legitimate V2 fixture's exact issuer mode under the same account.
+  if(sql.includes('SELECT p.fee_policy_version,p.fee_formula_version,')&&
+    sql.includes("p.state='APPROVED'")){
+   const record=ownedRow(args[1],args[0]);
+   return {rows:[{fee_policy_version:record.fee_policy_version,
+      fee_formula_version:record.fee_formula_version,
+      fee_source_url:record.fee_source_url,policy_hash:record.policy_hash}]};
+  }
   if(sql.includes('-- personal-session:signer'))return {rows:[ownedRow(args[1],args[0])]};
   if(sql.includes("FROM live_execution_config WHERE id = 'singleton'"))return {rows:[{live_execution_enabled:true,manual_kill_switch:false}]};
   if(sql==='SELECT request FROM v13_production_intent WHERE account_id = $1')return {rows:[]};
@@ -121,7 +132,7 @@ function fixture(value,{api=true,old='false'}={}){
  f.signedGet=async(_material,p)=>{assert.equal(p,`/trade-api/v2/markets/${market}/orderbook`);f.books++;return {orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};};
  f.fetch=async(input,init)=>{if(f.fetchHook){const answer=await f.fetchHook(input,init);if(answer!==undefined)return answer;}const url=String(input);if((init?.method??'GET')!=='GET'){f.orderTransportCalls++;throw Error('offline_order_transport_forbidden');}assert.ok(url.startsWith('https://external-api.kalshi.com/trade-api/v2/'));assert.equal(init?.redirect,'error');const p=url.replace('https://external-api.kalshi.com/trade-api/v2','');assert.ok(p in f.publicPages,'unexpected fixture public path '+p);const call={path:p,at:f.now,signal:init?.signal,index:f.calls.length};f.calls.push(call);f.transportInFlight++;f.maxTransportInFlight=Math.max(f.maxTransportInFlight,f.transportInFlight);try{if(f.pausePublic)await f.pausePublic;return f.respond?await f.respond(call):Response.json(f.publicPages[p]);}finally{f.transportInFlight--;}};
  class ClockDate extends Date{constructor(...a){super(...(a.length?a:[f.now]));}static now(){return f.now;}}
- const env=Object.freeze({[oldFlag]:old,...(value===undefined?{}:{[finalFlag]:value}),NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:release,STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true'});
+ const env=Object.freeze({[oldFlag]:old,...(value===undefined?{}:{[finalFlag]:value}),NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:release,STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',...(direct?{STRATA_INDEPENDENT_LIVE_SOURCE_V1:'true',STRATA_INDEPENDENT_LIVE_SOURCE_V1_OWNER:owner,STRATA_INDEPENDENT_LIVE_SOURCE_V1_ACCOUNT:account,STRATA_INDEPENDENT_LIVE_SOURCE_V1_SHA:release}:{})});
  const OfflineAbortSignal={timeout(ms){const controller=new AbortController();f.abortSignalDeadlines.push({ms,controller});return controller.signal;},abort:AbortSignal.abort.bind(AbortSignal),any:AbortSignal.any.bind(AbortSignal)};
  const allowedModules=new Set(['node:crypto','node:async_hooks','node:buffer','node:path','node:util','node:events']);
  const context={fixture:f,module:{exports:{}},process:{env},console:{warn:(...x)=>f.warnings.push(x),info:(...x)=>f.logs.push(x),log:(...x)=>f.logs.push(x)},Date:ClockDate,performance:{now:()=>f.mono??0},fetch:f.fetch,Response,Request,Headers,URL,URLSearchParams,AbortController,AbortSignal:OfflineAbortSignal,ReadableStream,TextDecoder,TextEncoder,Buffer,queueMicrotask,structuredClone,
@@ -139,6 +150,8 @@ const parentId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 function installExitFixture(f,spec){
  f.publicPages['/series/fee_changes?series_ticker=KXBTC15M&show_historical=false&limit=100']={series_fee_change_arr:[],cursor:''};
  f.publicPages['/events/fee_changes?event_ticker='+event+'&show_historical=false&limit=100']={event_fee_changes:[],cursor:''};
+ if(f.direct){Object.assign(f.publicPages['/markets/'+market].market,{open_time:iso(at-600000),close_time:iso(at+300000),expiration_time:iso(at+300000),expected_expiration_time:iso(at+300000),latest_expiration_time:iso(at+300000),floor_strike:100000});}
+ f.directObservations=new Map();
  f.mono=0;f.intents=[];f.reservations=[];f.audits=[];f.observations=[];f.posts=[];f.reconciliations=0;
  const p={id:'synthetic-policy',version:1,supersedesPolicyId:null,state:'APPROVED',strategyVersion:'V1.3',
  strategyParameterSetId:f.exports.V13_CHAMPION_PARAMETER_SET.id,strategyParameterHash:f.exports.V13_CHAMPION_PARAMETER_HASH,
@@ -162,14 +175,34 @@ function installExitFixture(f,spec){
   if(sql.startsWith('SELECT release_id FROM private.strata_standing_execution_reviews'))return spec.standing?rows({release_id:'standing'}):rows();
   if(sql.startsWith('SELECT r.release_id'))return spec.standing?rows({release_id:'standing'}):rows();
   if(sql.startsWith('SELECT * FROM v13_production_intent WHERE id='))return rows(parent);
-  if(sql.includes('WITH uncertain AS MATERIALIZED'))return rows({has_uncertain_order:f.intents.some(i=>['DISPATCHED','UNKNOWN'].includes(i.state)),owner_user_id:owner});
+  if(sql===f.exports.OWNED_GATE_READ_SQL){
+   assert.equal(args[0],account);assert.equal(args[3],owner);
+   return rows({has_uncertain_order:f.intents.some(i=>['DISPATCHED','UNKNOWN'].includes(i.state)),owner_user_id:owner,master_rows:[{manual_kill_switch:false,live_execution_enabled:true}],policy_rows:[{policy_hash:p.policyHash}]});
+  }
   if(sql==='SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config')return rows({manual_kill_switch:false,live_execution_enabled:true});
   if(sql.includes('SELECT p.policy_hash'))return rows({policy_hash:p.policyHash});
   if(sql.startsWith('SELECT p.* FROM v13_live_money_policy')||sql.startsWith('SELECT * FROM v13_live_money_policy'))return rows(policyRow);
   if(sql==="SELECT id FROM v13_live_money_policy WHERE state='APPROVED'")return rows({id:p.id});
   if(sql.startsWith('SELECT id FROM v13_production_intent WHERE parent_id'))return {rows:f.intents.filter(i=>i.parent_id===parentId&&!['TERMINAL','BLOCKED'].includes(i.state))};
   if(sql.startsWith('SELECT * FROM v13_production_position WHERE id='))return rows({...f.position});
-  if(sql.includes('FROM forward_test_evaluations'))return rows({...f.source});
+  if(sql.includes('FROM forward_test_evaluations')){assert.equal(f.direct,false,'independent exit cannot consult paper evaluations');return rows({...f.source});}
+  if(sql.startsWith('SELECT l.execution_account_id FROM private.kalshi_account_worker_lease l')){
+   assert.equal(args[0],account);assert.equal(args[1],owner);assert.ok(args[2]);assert.equal(String(args[3]),'3');assert.equal(args[4],fingerprint);
+   return rows({execution_account_id:account});
+  }
+  if(sql.startsWith('SELECT p.id,p.account_id,p.market,p.side,p.quantity_hundredths::text AS quantity_hundredths')){
+   assert.equal(args[0],parentId);assert.equal(args[1],account);assert.equal(args[2],owner);return rows({...f.position});
+  }
+  if(sql.startsWith('INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)')){
+   const [id,accountId,kind,payload,digest]=args;assert.equal(accountId,account);assert.equal(kind,'DIRECT_HELD_LIVE_V1');
+   f.directObservations.set(id,{payload:typeof payload==='string'?JSON.parse(payload):payload,digest});return rows();
+  }
+  if(sql.startsWith('SELECT payload,digest FROM public.v13_production_observation')){
+   assert.equal(args[1],account);assert.equal(args[2],'DIRECT_HELD_LIVE_V1');
+   const record=f.directObservations.get(args[0]);if(!record)return rows();
+   if(spec.tamperFinal&&f.finalPending)return rows({...record,digest:'0'.repeat(64)});
+   return rows(record);
+  }
   if(sql.startsWith('INSERT INTO v13_production_intent')){
    const [id,account_id,parent_id,market,side,request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id]=args;
    f.intents.push({id,account_id,parent_id,kind:'EXIT',market,side,request:JSON.parse(request),decision:JSON.parse(decision),policy_hash,fee_fingerprint,capability_digest,client_order_id,state:'PREPARED',terminal:false,exchange_order_id:null,filled_hundredths:'0',reserved_micros:'0',created_at:new Date(f.now),dispatch_at:null});return rows();
@@ -186,7 +219,7 @@ function installExitFixture(f,spec){
   if(sql.startsWith('SELECT r.reservation_id')&&sql.includes('AS intent_id'))return r?.state==='UNKNOWN'&&intent.state==='DISPATCHED'?rows({reservation_id:r.reservation_id,intent_id:intent.id}):rows();
   if(sql.startsWith('SELECT r.reservation_id')&&sql.includes('AS reservation_age_ms')){
    assert.equal(intent.state,'DISPATCHED');assert.equal(r.state,'UNKNOWN');assert.equal(intent.request.clientOrderId,r.client_order_id);f.finalPending=true;
-   return rows({reservation_id:r.reservation_id,reservation_age_ms:0,heartbeat_age_ms:0,owned_evaluation:intent.decision.ownedEvaluation,max_quote_age_ms:policyRow.max_quote_age_ms,source_age_ms:f.now-Date.parse(intent.decision.ownedEvaluation.source.evaluated_at),release_remaining_ms:spec.standing?null:(spec.releaseMs??60000)});
+   return rows({reservation_id:r.reservation_id,reservation_age_ms:0,heartbeat_age_ms:0,parent_id:parentId,owned_evaluation:intent.decision.ownedEvaluation,max_quote_age_ms:policyRow.max_quote_age_ms,source_age_ms:f.now-Date.parse(intent.decision.ownedEvaluation.source.evaluated_at),release_remaining_ms:spec.standing?null:(spec.releaseMs??60000)});
   }
   if(sql.startsWith('SELECT r.reservation_id'))return r?.state==='PREPARED'?rows({reservation_id:r.reservation_id}):rows();
   if(sql.startsWith("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN'")){if(r.state!=='PREPARED')return rows();r.state='UNKNOWN';return rows({reservation_id:r.reservation_id,client_order_id:r.client_order_id});}
@@ -199,7 +232,7 @@ function installExitFixture(f,spec){
   if(sql.startsWith('SELECT a.*,')&&sql.includes('reconciliation_history_floor')){f.reconciliations++;return rows({...f.row,reconciliation_history_floor:new Date(at-10000)});}
   if(isReconciliationIntentQuery(sql)){
    assert.equal(args.length,1);assert.equal(args[0],account);
-   return {rows:f.intents.map(i=>({...i,decision:i.state==='BLOCKED'&&i.terminal===true?null:i.decision}))};
+   return {rows:f.intents.map(i=>({...i,direct_source_id:i.direct_source_id??null,decision:i.state==='BLOCKED'&&i.terminal===true?null:i.decision}))};
   }
   if(sql.startsWith('SELECT position.id,position.quantity_hundredths'))return rows({id:parentId,quantity_hundredths:'25'});
   if(sql.startsWith('SELECT market,side,quantity_hundredths FROM v13_production_position'))return rows({market,side:'YES',quantity_hundredths:'25'});
@@ -208,7 +241,14 @@ function installExitFixture(f,spec){
   return undefined;
  };
  f.afterSign=()=>{f.mono+=spec.signDelay??0;f.now+=spec.signDelay??0;};
- f.fetchHook=async(input,init)=>{if(init?.method==='POST'){assert.match(String(input),/\/portfolio\/events\/orders$/);const body=JSON.parse(init.body);assert.equal(body.reduce_only,true);f.posts.push(body);throw Error('synthetic_uncertain_transport');}};
+ f.fetchHook=async(input,init)=>{
+  if(f.direct&&(init?.method??'GET')==='GET'){
+   const url=String(input);let data;
+   if(url==='https://api.exchange.coinbase.com/products/BTC-USD/ticker')data={price:'99990',time:iso(f.now)};
+   else if(url==='https://external-api.kalshi.com/trade-api/v2/markets/'+market+'/orderbook')data={orderbook_fp:{yes_dollars:[['0.5000','100000']],no_dollars:[['0.5000','100000']]}};
+   if(data){const response=Response.json(data);Object.defineProperty(response,'url',{value:url});return response;}
+  }
+  if(init?.method==='POST'){assert.match(String(input),/\/portfolio\/events\/orders$/);const body=JSON.parse(init.body);assert.equal(body.reduce_only,true);f.posts.push(body);throw Error('synthetic_uncertain_transport');}};
  return f;
 }
 for(const spec of [
@@ -251,6 +291,21 @@ for(const spec of [
  else {assert.ok(error);assert.equal(f.bound.exchange.state.entriesAuthorized,false);}
  if(!spec.blocked){await assert.rejects(f.openInput.dispatchProtectiveExit(selection));assert.equal(f.posts.length,spec.posts);assert.equal(f.reservations.length,1);}
  // Isolation comes from the VM import allowlist and fake fetch/timers above, not counters.
+});
+for(const spec of [{name:'fresh',posts:1},{name:'expires-during-signing',sourceAge:4500,signDelay:501,posts:0,blocked:true},{name:'tampered-final-read',tamperFinal:true,posts:0}])await test('independent held producer → actual signed dispatcher: '+spec.name,async()=>{
+ const f=installExitFixture(await start(fixture('false',{direct:true})),spec);
+ const directHeldId=await f.bound.executor.captureIndependentExit(parentId);assert.ok(directHeldId,'actual sealed held source');
+ const selection={positionId:parentId,market,side:'YES',quantityHundredths:'25',minimumExitMicros:400000,directHeldId};
+ let error;try{await f.openInput.dispatchProtectiveExit(selection);}catch(e){error=e;}
+ assert.equal(f.intents.length,2,String(error));assert.equal(f.reservations.length,1,String(error));
+ assert.equal(f.intents[1].decision.ownedEvaluation.sourceDirectHeldId,directHeldId);
+ assert.equal(f.posts.length,spec.posts,String(error));
+ assert.ok(f.sql.some(q=>q.sql?.includes('AS reservation_age_ms')),'locked signed final fence ran');
+ assert.ok(!f.sql.some(q=>q.sql?.includes('FROM forward_test_evaluations')),'no paper source read');
+ assert.equal(f.position.quantity_hundredths,'25');
+ if(spec.blocked){assert.equal(f.intents[1].state,'BLOCKED');assert.equal(f.reservations[0].state,'VOID');assert.equal(f.audits.length,1);}
+ else {assert.equal(f.intents[1].state,'DISPATCHED');assert.equal(f.reservations[0].state,'UNKNOWN');assert.ok(error);}
+ if(spec.posts){assert.equal(f.posts[0].reduce_only,true);assert.equal(f.posts[0].ticker,market);assert.equal(f.posts[0].count,'0.25');}
 });
 await writeFile(out+'/stub-boundaries.json',JSON.stringify({namedStubs:Object.keys(stubs),stubUses,scope:'Actual supervisor callback, executor, ledger, reserve, UNKNOWN commit, fee verification, signing, no-send and reconciliation. Startup approvals and advisory inspection eligibility are stubbed; SQL and provider responses are synthetic. VM imports, fetch and timers exclude real networking/scheduling. No PostgreSQL execution or rollback proof.'},null,2)+'\n');
 

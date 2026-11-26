@@ -67,3 +67,8 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+docs/platform-fee-native/local-evidence/
+local-*.log
+
+# Local Supabase CLI metadata, never release material.
+/supabase/.temp/

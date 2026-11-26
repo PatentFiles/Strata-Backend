@@ -227,6 +227,13 @@ export async function amendOwnedStakePolicy(
     // than downgrade fees or mutate the owner's standing authorization.
     if (old.feePolicyVersion===API_POLICY_SIGNED_REVIEW_V1)
       return reject("reviewed_api_v2_stake_change_requires_versioned_review");
+    // A durable fee review is bound to its exact approved policy. The legacy
+    // amendment path would replace the fee version and revoke release evidence.
+    // Do not write a policy or stake unless a dedicated durable renewal exists.
+    if (old.feePolicyVersion==="owner_attested_historical_terms_v1" ||
+        old.feePolicyVersion==="owner_approved_canonical_terms_v1" ||
+        old.feeSourceUrl?.startsWith("strata-durable-owner-fee://"))
+      return reject("durable_fee_stake_change_requires_versioned_owner_reauthorization");
     // Existing clients may lower a stake inside an already approved policy.
     // Raising the policy limit must NEVER use the legacy preset-less path.
     // Otherwise a bare amount + confirmation could silently bypass a 6% cap.

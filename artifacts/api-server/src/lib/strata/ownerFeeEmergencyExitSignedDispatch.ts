@@ -1,3 +1,4 @@
+import {verifyDurableFeeStage,verifyDurableProtectiveAuthority} from './durableFeeConsumers';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
 import {constants,createPrivateKey,createSign,createHash} from "node:crypto";
@@ -5,12 +6,16 @@ import {dedicatedSignerFingerprint} from "./commissioning";
 import {pool} from "@workspace/db";
 import {verifyMonetaryFeeContract} from "./monetaryFeeContract";
 import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority,isReviewedProtectiveExitFeeFresh} from "./reviewedProtectiveExitFee";
+import {readOwnerV3ProtectiveSource,verifyOwnerV3ProtectiveFee,
+  verifyOwnerV3ProtectiveFeeAuthority} from "./ownerStandingFeeAuthorization";
 import {markOwnedEmergencyExitUnknownForReview} from "./ownerFeeEmergencyExitUnknownCommit";
 import {reconcileIocEmergencyExit,type IocRecoveryObservation} from "./ownerFeeEmergencyExitReconcile";
 import {readAuthenticatedProtectiveExitOutcome} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
 import {persistAuthenticatedExitReconciliation} from "./ownerFeeEmergencyExitReconciliationCommit";
 import type {EmergencyExitOrder} from "./ownerFeeEmergencyExit";
 import type {ExitWorkerLease} from "./ownerFeeEmergencyExitReserve";
+import type {DirectEntrySource} from "../v13-production/directEntrySource";
+import type {PoolClient} from "@workspace/db";
 
 /**
  * P0 protective-exit signed transport candidate. Never wired to a public route;
@@ -32,12 +37,18 @@ const QUANTITY=/^\d{1,9}\.\d{2}$/;
 const PRICE=/^0\.(?!0000)\d{4}$/;
 type DBClient={query(sql:string,args?:unknown[]):Promise<{rows:Record<string,unknown>[]}>;release():void};
 type DB={connect():Promise<DBClient>};
+type FinalFenceStage=
+ |"fee_authority_clock"|"fee_authority_denied"|"signer_identity"|"standing_release_denied"
+ |"evidence_clock"|"locked_fence_no_exact_row"|"reservation_or_heartbeat_age"
+ |"held_source_scope"|"held_source_custody"|"release_or_source_invalid"
+ |"db_or_reader_exception"|"commit_unacknowledged"|"send_not_entered";
 type Result={
  state:"BLOCKED"|"UNKNOWN"|"RECONCILED";
  reason:string;clientOrderId?:string;filledHundredths?:string;
  mayRetry:false;tradingAuthorized:false;
  /** Means exactly one signed POST was attempted; NOT proof of a fill. */
  postAttempted:boolean;
+ diagnosticStage?:FinalFenceStage;
  /** UNKNOWN is a verification result, not proof that COMMIT rolled back. */
  reconciliationCommitState?:"NOT_ATTEMPTED"|"UNKNOWN"|"COMMITTED";
  reconciliationFreshnessVerified?:boolean;
@@ -47,7 +58,7 @@ const fail=(reason:string,state:Result["state"]="BLOCKED",postAttempted=false):R
 type Receipt=IocRecoveryObservation["response"];
 type Material={keyId:string;privateKey:string};
 type Input={ownerId:string;accountId:string;reservationId:string;
-  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease};
+  material:Material;order:Readonly<EmergencyExitOrder>;lease:ExitWorkerLease;directHeldSource?:DirectEntrySource};
 /** Narrow seams are for isolated tests; not injectable by public controllers. */
 type Ports={
  db?:DB;now?:()=>number;monotonicNow?:()=>number;
@@ -111,7 +122,7 @@ export function isDurableProtectiveExitNoSend(value:unknown,scope:{ownerId:strin
  const proof=value!==null&&typeof value==="object"?durableLocalNoSend.get(value):undefined;
  return !!proof&&proof.ownerId===scope.ownerId&&proof.accountId===scope.accountId&&proof.reservationId===scope.reservationId;
 }
-type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"}>;
+type NeverSentProof=Readonly<{input:Input;reason:"final_evidence_expired"|"final_fee_rejected"|"final_fee_unavailable"|"final_fence_no_exact_row_before_commit"}>;
 const neverSentProofs=new WeakMap<object,NeverSentProof>();
 /** Only explicit control-flow branches before raw POST mint this one-use proof.
  * Nothing from a caller/provider response, error string or database row can mint it. */
@@ -174,9 +185,12 @@ async function finalizeNeverSent(token:object,db:DB):Promise<boolean>{
  }catch{return false;}
  finally{if(c){if(!committed){try{await c.query("ROLLBACK");}catch{}}c.release();}}
 }
-async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB):Promise<Result>{
+async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB,diagnosticStage?:FinalFenceStage):Promise<Result>{
  const terminal=await finalizeNeverSent(mintNeverSent(input,reason),db);
- const result=Object.freeze(fail(terminal?"protective_exit_proven_not_posted_refresh_required":"protective_exit_local_abort_persistence_unverified",terminal?"BLOCKED":"UNKNOWN"));
+ const result=Object.freeze({
+  ...fail(terminal?"protective_exit_proven_not_posted_refresh_required":"protective_exit_local_abort_persistence_unverified",terminal?"BLOCKED":"UNKNOWN"),
+  ...(diagnosticStage?{diagnosticStage}:{})
+ });
  if(terminal)durableLocalNoSend.set(result,Object.freeze({ownerId:input.ownerId,accountId:input.accountId,reservationId:input.reservationId}));
  return result;
 }
@@ -185,9 +199,10 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * The one-use UNKNOWN marker remains durable; DB-relative evidence lifetimes
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
-async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:typeof verifyReviewedProtectiveExitFeeAuthority;providerFresh:()=>boolean}):
- Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true}>{
- let c:DBClient|null=null,committed=false,eligible=false;
+async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
+ Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;noExactRowBeforeCommit?:true;diagnosticStage?:FinalFenceStage}>{
+ let c:DBClient|null=null,committed=false,eligible=false,commitStarted=false;
+ const denied=(diagnosticStage:FinalFenceStage)=>({attempted:false,receipt:null,diagnosticStage});
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
   c=await db.connect();
@@ -196,14 +211,14 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   await c.query("SET LOCAL statement_timeout='12000ms'");
   if(feeAuthority){
    feeAuthorityStart=monotonicNow();
-   if(!Number.isFinite(feeAuthorityStart)||feeAuthorityStart<0)return {attempted:false,receipt:null};
+   if(!Number.isFinite(feeAuthorityStart)||feeAuthorityStart<0)return denied("fee_authority_clock");
    // Recheck and SHARE-lock the SAME monetary approval after provider GETs.
    // COMMIT releases these locks before signing/network; original DB expiry
    // remains bounded at the existing synchronous beforeSend boundary.
    const approved=await feeAuthority.verify(input.ownerId,input.accountId,sha,c);
    if(!approved.ok||approved.authorityFingerprint!==feeAuthority.fingerprint||
       typeof approved.validForMs!=="number"||!Number.isFinite(approved.validForMs)||approved.validForMs<=0)
-    return {attempted:false,receipt:null};
+    return denied("fee_authority_denied");
    feeAuthorityRemainingMs=approved.validForMs;
   }
   const yesMicros=Number((input.order.price as string).slice(2))*100;
@@ -213,14 +228,14 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const side=input.order.side==="ask"?"YES":"NO";
   const fingerprint=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
   const digest=createHash("sha256").update(JSON.stringify(input.order)).digest("hex");
-  if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))return {attempted:false,receipt:null};
+  if(!fingerprint||!/^[a-f0-9]{64}$/.test(fingerprint))return denied("signer_identity");
   const standingMode=await hasStandingReviewHistory(c,input.ownerId,input.accountId,sha);
   const standingAllowed=standingMode&&await checkStandingExitReview(c,input.ownerId,input.accountId,sha);
-  if(standingMode&&!standingAllowed)return {attempted:false,receipt:null};
+  if(standingMode&&!standingAllowed)return denied("standing_release_denied");
   const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
  EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
- i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,
+ i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-(i.decision#>>'{ownedEvaluation,source,evaluated_at}')::timestamptz))*1000::double precision AS source_age_ms,
  CASE WHEN $14::boolean THEN NULL ELSE
  EXTRACT(EPOCH FROM (code_release.expires_at-clock_timestamp()))*1000::double precision END AS release_remaining_ms
@@ -231,7 +246,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    AND p.policy_hash=i.policy_hash AND p.state='APPROVED'
  JOIN public.live_execution_config g ON g.id='singleton'
  JOIN private.kalshi_account_worker_lease w ON w.execution_account_id=a.id AND w.owner_user_id=a.owner_user_id
- JOIN public.v13_production_position pos ON pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
+ JOIN public.v13_production_position pos ON pos.id=i.parent_id AND pos.account_id=a.id AND pos.market=r.market_ticker AND pos.side=r.reducing_side
  -- Account owner AAL2 approval is required at account activation, but NEVER
  -- constitutes independent review of the executable emergency exit.
  -- Every signed protective IOC must have a genuinely independent exact-SHA
@@ -264,7 +279,12 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  AND pos.quantity_hundredths >= $8::bigint
 
  AND EXISTS (SELECT 1 FROM public.v13_production_observation o
-   WHERE o.account_id=a.id AND o.kind='OWNER_ACTIVATION_REQUEST')
+   WHERE o.account_id=a.id
+     AND (o.kind='OWNER_ACTIVATION_REQUEST'
+       OR (o.kind='OWNER_SELF_ACCOUNT_ACTIVATED'
+         AND o.payload->>'sha'=$1::text
+         AND o.payload->>'ownerId'=$3::text
+         AND o.payload->>'accountId'=$4::text)))
  AND i.market=r.market_ticker AND i.kind='EXIT'
    AND i.state='DISPATCHED' AND i.terminal=false
    AND i.exchange_order_id IS NULL AND i.filled_hundredths=0
@@ -279,23 +299,40 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   // Anchor local elapsed BEFORE the DB read. DB-computed ages avoid comparing
   // host/DB wall clocks; subtracting the full round trip is conservative.
   evidenceStart=monotonicNow();
-  if(!Number.isFinite(evidenceStart)||evidenceStart<0)return {attempted:false,receipt:null};
+  if(!Number.isFinite(evidenceStart)||evidenceStart<0)return denied("evidence_clock");
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
     input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed]);
+  // Only a successful query with zero rows proves this invocation did not
+  // reach FINAL COMMIT or POST. The diagnostic alone also describes ambiguous
+  // rows and is never the authorization for clearing the one-use marker.
+  if(rows.rows.length===0)return {...denied("locked_fence_no_exact_row"),noExactRowBeforeCommit:true};
   if(rows.rows.length!==1||rows.rows[0]?.reservation_id!==input.reservationId)
-   return {attempted:false,receipt:null};
+   return denied("locked_fence_no_exact_row");
   const row=rows.rows[0]!;
   const reservationAge=row.reservation_age_ms,heartbeatAge=row.heartbeat_age_ms;
   if(typeof reservationAge!=="number"||!Number.isFinite(reservationAge)||reservationAge<0||reservationAge>=8000||
      typeof heartbeatAge!=="number"||!Number.isFinite(heartbeatAge)||heartbeatAge<0||heartbeatAge>=5000)
-   return {attempted:false,receipt:null};
+   return denied("reservation_or_heartbeat_age");
   // The prepared strategy source is pinned to this exact financial EXIT.
   // A newly fetched book or fee response cannot refresh that source.
   const sourceLifetime=protectiveExitSourceRemainingMs(row.owned_evaluation,row.max_quote_age_ms,row.source_age_ms,String(input.order.ticker));
+  const owned=row.owned_evaluation as {sourceDirectHeldId?:unknown;source?:Record<string,unknown>}|null;
+  if(input.directHeldSource||owned?.sourceDirectHeldId!==undefined){
+   if(!input.directHeldSource||typeof owned?.sourceDirectHeldId!=="string"||typeof row.parent_id!=="string"||
+      !owned.source||owned.source.account_id!==input.accountId||owned.source.owner_user_id!==input.ownerId||
+      typeof owned.source.evaluated_at!=="string"||typeof row.source_age_ms!=="number"||sourceLifetime===null)
+     return denied("held_source_scope");
+   input.directHeldSource.assertExecutorBinding("LIVE",{accountId:input.accountId,ownerId:input.ownerId});
+   // Read the sealed original receipt inside the actual locked final fence.
+   // Valid expiry remains distinguishable from tampering or lost custody.
+   if(!await input.directHeldSource.verifyHeldForFinalFence(c as unknown as Pick<PoolClient,"query">,
+       owned.sourceDirectHeldId,row.parent_id,Math.ceil(Date.parse(owned.source.evaluated_at)+row.source_age_ms),owned.source))
+     return denied("held_source_custody");
+  }
   const releaseRemaining=standingAllowed?Infinity:row.release_remaining_ms;
   if(sourceLifetime===null||(!standingAllowed&&(typeof releaseRemaining!=="number"||
-     !Number.isFinite(releaseRemaining)||releaseRemaining<=0)))return {attempted:false,receipt:null};
+     !Number.isFinite(releaseRemaining)||releaseRemaining<=0)))return denied("release_or_source_invalid");
   // This exact locked EXIT has intact but expired source evidence. The send
   // callback has not been entered and no COMMIT was attempted in this fence.
   // Release read locks via ROLLBACK, then use the existing one-use, audited
@@ -306,15 +343,16 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   // The PREPARED -> UNKNOWN marker is already committed. This final
   // authorization fence must COMMIT before any network request is attempted.
   // No row lock may be held across the external transport.
+  commitStarted=true;
   await c.query("COMMIT");committed=true;eligible=true;
  }catch{
   // Ambiguous COMMIT: keep durable UNKNOWN, never transmit and never retry.
-  return {attempted:false,receipt:null};
+  return denied(commitStarted?"commit_unacknowledged":"db_or_reader_exception");
  }finally{
   if(c){if(!committed){try{await c.query("ROLLBACK");}catch{}}
    c.release();}
  }
- if(!eligible)return {attempted:false,receipt:null};
+ if(!eligible)return denied("send_not_entered");
  // At this point a kill can update immediately. An in-flight POST cannot be
  // unsent; the one-use marker ensures recovery-only behavior after a crash.
  let attempted=false,expired=false;
@@ -327,9 +365,10 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    }
    attempted=true;
   });
-  return {attempted,receipt};
+  return attempted?{attempted,receipt}:denied("send_not_entered");
  }catch{
-  return {attempted,receipt:null,...(!attempted&&expired?{expiredBeforeSend:true as const}:{})};
+  return !attempted&&!expired?denied("send_not_entered"):
+    {attempted,receipt:null,...(!attempted&&expired?{expiredBeforeSend:true as const}:{})};
  }
 }
 export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports={}):Promise<Result>{
@@ -338,6 +377,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  const hosted=Boolean(process.env.RAILWAY_ENVIRONMENT_ID||
    process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID);
  const testMode=process.env.NODE_ENV==="test"&&!hosted;
+ if(input.directHeldSource&&(!testMode&&input.directHeldSource.environment!=="LIVE_OBSERVATION"))return fail("direct_held_simulation_forbidden");
  if(!testMode&&(process.env.NODE_ENV!=="production"||
     process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE!=="true"))
   return fail("protective_exit_release_disabled");
@@ -356,12 +396,27 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
     !Number.isSafeInteger(lease.fencingToken)||lease.fencingToken<1)
   return fail("protective_exit_identity_invalid");
  // Production recovery is a trusted server-only implementation; tests may inject a reader.
- // The reviewed owner-pinned API fee model remains usable for narrowly
- // scoped protective exits when an entry/fee-source grant expires. It still
- // requires a fresh official exact-market fee/override read, and the exact
- // independently approved code SHA at the signed POST fence.
- const checkFee=ports.verifyFee??((_stage:"ORDER_ENTRY",market:string)=>
-   verifyReviewedProtectiveExitFee(ownerId,accountId,market));
+ // Determine the approved monetary authority from the REAL owner/account
+ // database record, never from request/strategy input. Historical V2 and
+ // owner-consented V3 retain distinct issuer evidence and final locks.
+ const policy=await (testMode&&ports.verifyFee?Promise.resolve({mode:'OTHER' as const}):
+   readOwnerV3ProtectiveSource(ownerId,accountId));
+ if(policy.mode==='UNAVAILABLE')return fail('protective_exit_owner_policy_not_verified');
+ const ownerDurable=policy.mode==='OWNER_DURABLE';
+ const ownerV3=policy.mode==='OWNER_V3'||ownerDurable;
+ const ownerV3Source=ownerV3?policy.sourceUrl:null;
+ const checkFee=ports.verifyFee??(ownerV3
+   ?async(_stage:"ORDER_ENTRY",market:string)=>{
+     const evidence=await (ownerDurable?verifyDurableFeeStage(ownerId,accountId,ownerV3Source!,'PROTECTIVE_EXIT',market):verifyOwnerV3ProtectiveFee(ownerId,accountId,ownerV3Source!,market));
+     if(!evidence.ok)return {ok:false,monetaryFeeAuthorized:false,
+       marketTicker:market,verifiedAt:undefined,authorityFingerprint:undefined};
+     const auth=await (ownerDurable?verifyDurableProtectiveAuthority:verifyOwnerV3ProtectiveFeeAuthority)(ownerId,accountId,releaseSha);
+     return {ok:auth.ok,monetaryFeeAuthorized:auth.ok,
+       marketTicker:market,verifiedAt:new Date(evidence.verifiedAtMs).toISOString(),
+       sourceFresh:ownerDurable&&'sourceFresh' in evidence?evidence.sourceFresh:undefined,
+       authorityFingerprint:auth.ok?auth.authorityFingerprint:undefined};
+    }
+   :(_stage:"ORDER_ENTRY",market:string)=>verifyReviewedProtectiveExitFee(ownerId,accountId,market));
  // Only explicit local test fee doubles may omit the new private proof.
  // Hosted processes reject all injected ports above, even under NODE_ENV=test.
  const enforceFeeAuthority=!(testMode&&ports.verifyFee&&!ports.verifyFeeAuthority);
@@ -390,14 +445,29 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
  if(!current.ok||!current.monetaryFeeAuthorized||current.marketTicker!==order.ticker||
     (enforceFeeAuthority&&currentAuthority!==initialAuthority))
   return refuseNeverSent(input,"final_fee_rejected",ports.db??(pool as unknown as DB));
+ const isCurrentProviderFee=()=>{
+   if(ownerV3){
+     if(ownerDurable&&(!('sourceFresh' in current)||typeof current.sourceFresh!=='function'||!current.sourceFresh()))return false;
+     const observedAt=Date.parse(String(current.verifiedAt??''));
+     const now=Date.now();
+     return Number.isFinite(observedAt)&&observedAt<=now&&
+       now-observedAt<5000;
+   }
+   return isReviewedProtectiveExitFeeFresh(current as Awaited<ReturnType<typeof verifyReviewedProtectiveExitFee>>);
+ };
  const outcome=await withFinalReleaseFence(input,releaseSha,
   beforeSend=>{
    if(ports.post){beforeSend();return ports.post(material,order);}
    return signedPost(material,order,beforeSend);
   },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),
-    enforceFeeAuthority?{fingerprint:initialAuthority as string,verify:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority,providerFresh:()=>isReviewedProtectiveExitFeeFresh(current)}:undefined);
+    enforceFeeAuthority?{fingerprint:initialAuthority as string,
+      verify:(ownerDurable?verifyDurableProtectiveAuthority:ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
+      providerFresh:isCurrentProviderFee}:undefined);
  if(outcome.expiredBeforeSend)return refuseNeverSent(input,"final_evidence_expired",ports.db??(pool as unknown as DB));
- if(!outcome.attempted)return fail("protective_exit_final_fence_closed","UNKNOWN");
+ if(outcome.noExactRowBeforeCommit)return refuseNeverSent(input,"final_fence_no_exact_row_before_commit",
+  ports.db??(pool as unknown as DB),outcome.diagnosticStage);
+ if(!outcome.attempted)return {...fail("protective_exit_final_fence_closed","UNKNOWN"),
+   ...(outcome.diagnosticStage?{diagnosticStage:outcome.diagnosticStage}:{})};
  if(!outcome.receipt)return fail("protective_exit_exchange_response_uncertain","UNKNOWN",true);
 
  let observed:IocRecoveryObservation;

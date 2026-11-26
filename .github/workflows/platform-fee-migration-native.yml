@@ -1,0 +1,41 @@
+name: Platform fee migration 0049 native qualification
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/platform-fee-native/**'
+      - 'lib/db/owner-self-release/007_platform_uploaded_fee_schedule.sql'
+      - 'lib/db/drizzle/0049_strata_platform_official_fee_capture.sql'
+      - '.github/workflows/platform-fee-migration-native.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+        scenario: [fresh, upgrade]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable_ci_only
+          POSTGRES_DB: strata_platform_fee_disposable
+        options: >-
+          --health-cmd "pg_isready -U postgres -d strata_platform_fee_disposable"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay real application and durable fee SQL, then exercise 0049
+        env:
+          TEST_CONTAINER: ${{ job.services.postgres.id }}
+          TEST_SCENARIO: ${{ matrix.scenario }}
+          TEST_PG_MAJOR: ${{ matrix.postgres }}
+        run: bash docs/platform-fee-native/run.sh

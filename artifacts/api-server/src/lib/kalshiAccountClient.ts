@@ -1,3 +1,4 @@
+import {assertMemberBudgetUnsupported, memberReadBudgetEnabled, reserveMemberRead, reserveMemberReadMutation, dispatchMemberRead, type MemberReadTicket} from "./strata/kalshiMemberReadBudget";
 import { createReadOnlyRateLimit, emitReadRateLimitDiagnostic, type ReadRateLimitDetails } from "./readOnlyRateLimit";
 import {
   constants as cryptoConstants,
@@ -379,7 +380,15 @@ function normalizeKalshiPem(privateKey: string): string {
     .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
 }
 
-function signRequest(creds: Credentials, method: "GET" | "POST" | "DELETE", path: string, timestamp: string): string {
+async function admitKnownReadMutation(creds:Credentials,path:string,host=baseUrl()):Promise<MemberReadTicket|null>{
+ if(!memberReadBudgetEnabled())return null;
+ if(host!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
+ return reserveMemberReadMutation('POST',path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+}
+
+function signRequest(creds: Credentials, method: "GET" | "POST" | "DELETE", path: string, timestamp: string, memberAdmitted = false): string {
+  const orderWrite = (method === "POST" && (path === "/trade-api/v2/portfolio/events/orders" || path === "/trade-api/v2/account/api_usage_level/upgrade")) || (method === "DELETE" && /^\/trade-api\/v2\/portfolio\/events\/orders\/[A-Za-z0-9_-]{1,128}$/.test(path));
+  if (!memberAdmitted && !orderWrite) assertMemberBudgetUnsupported();
   try {
     const key = createPrivateKey(normalizeKalshiPem(creds.privateKey));
     const message = Buffer.from(`${timestamp}${method}${path}`);
@@ -437,6 +446,7 @@ export async function getScopedKalshiJson(
   host = baseUrl(),
   rateLimitOwnerId?: string,
   externalSignal?: AbortSignal,
+  observeBalanceFetchInvoked?: () => void,
 ): Promise<unknown> {
   externalSignal?.throwIfAborted();
   if (!isAllowedGetPath(path) && !SCOPED_GET_ORDER_PATH.test(path)) throw new KalshiApiError("INVALID_RESPONSE");
@@ -469,11 +479,17 @@ export async function getScopedKalshiJson(
     emitReadRateLimitDiagnostic(attempt.blocked);
     throw new KalshiApiError("HTTP_ERROR", 429, attempt.blocked);
   }
+  let memberTicket:MemberReadTicket|null=null;
+  if(memberReadBudgetEnabled()){
+    if(host!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
+    memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey),undefined,externalSignal,{host,query,ownerId:rateLimitOwnerId});
+  }
   const timestamp = Date.now().toString();
-  const signature = signRequest(creds, "GET", path, timestamp);
+  const signature = signRequest(creds, "GET", path, timestamp, true);
   let response:Response;
   try {
-    response = await fetchImpl(`${host}${path}${query}`, {
+    response = await dispatchMemberRead(memberTicket,()=>{
+      const request=fetchImpl(`${host}${path}${query}`, {
       method: "GET",
       ...(externalSignal?{signal:externalSignal}:{}),
       cache: "no-store",
@@ -485,6 +501,13 @@ export async function getScopedKalshiJson(
         "KALSHI-ACCESS-SIGNATURE": signature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
       },
+      });
+      if(path===`${API_PREFIX}/portfolio/balance`&&query==='?subaccount=1&exchange_index=2'&&
+        host==='https://external-api.kalshi.com'){
+        // The fetch API was invoked; this is not evidence of provider receipt.
+        try{observeBalanceFetchInvoked?.();}catch{/* observation cannot affect transport */}
+      }
+      return request;
     });
   } catch {
     // Transport exceptions may include sensitive request URLs or headers.
@@ -565,21 +588,23 @@ export async function postScopedKalshiPilotTransfer(
     throw new KalshiApiError("INVALID_RESPONSE");
   }
   if (process.env.KALSHI_API_ENVIRONMENT !== "production") throw new KalshiApiError("INVALID_CREDENTIALS");
+  const memberTicket=await admitKnownReadMutation(creds,OWNER_PILOT_TRANSFER_PATH,"https://external-api.kalshi.com");
   const timestamp = Date.now().toString();
-  const response = await fetchImpl(`https://external-api.kalshi.com${OWNER_PILOT_TRANSFER_PATH}`, {
+  const memberSignature=signRequest(creds, "POST", OWNER_PILOT_TRANSFER_PATH, timestamp, true);
+  const response = await dispatchMemberRead(memberTicket,()=>fetchImpl(`https://external-api.kalshi.com${OWNER_PILOT_TRANSFER_PATH}`, {
     method: "POST", cache: "no-store", redirect: "manual",
     signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
     headers: {
       Accept: "application/json", "Content-Type": "application/json",
       "KALSHI-ACCESS-KEY": creds.keyId,
-      "KALSHI-ACCESS-SIGNATURE": signRequest(creds, "POST", OWNER_PILOT_TRANSFER_PATH, timestamp),
+      "KALSHI-ACCESS-SIGNATURE": memberSignature,
       "KALSHI-ACCESS-TIMESTAMP": timestamp,
     },
     body: JSON.stringify({
       client_transfer_id: clientTransferId, from_subaccount: 0,
       to_subaccount: 1, amount_cents: 2500, exchange_index: 2,
     }),
-  });
+  }));
   if (response.status !== 200) return { status: response.status, body: null, unreadable: true };
   const raw = await response.text();
   if (raw.trim()==="") return { status: 200, body: null, unreadable: false };
@@ -603,14 +628,16 @@ export async function postScopedKalshiShardAllocation(
   if (process.env.KALSHI_API_ENVIRONMENT !== "production")
     throw new KalshiApiError("INVALID_CREDENTIALS");
   const path = `${API_PREFIX}/portfolio/intra_exchange_instance_transfer`;
+  const memberTicket=await admitKnownReadMutation(creds,path,"https://external-api.kalshi.com");
   const timestamp=Date.now().toString();
-  const response=await fetchImpl(`https://external-api.kalshi.com${path}`,{
+  const memberSignature=signRequest(creds,"POST",path,timestamp,true);
+  const response=await dispatchMemberRead(memberTicket,()=>fetchImpl(`https://external-api.kalshi.com${path}`,{
     method:"POST",cache:"no-store",redirect:"manual",
     signal:AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
     headers:{
       Accept:"application/json","Content-Type":"application/json",
       "KALSHI-ACCESS-KEY":creds.keyId,
-      "KALSHI-ACCESS-SIGNATURE":signRequest(creds,"POST",path,timestamp),
+      "KALSHI-ACCESS-SIGNATURE":memberSignature,
       "KALSHI-ACCESS-TIMESTAMP":timestamp,
     },
     body:JSON.stringify({
@@ -619,7 +646,7 @@ export async function postScopedKalshiShardAllocation(
       source_exchange_shard:0,destination_exchange_shard:2,
       source_subaccount:0,destination_subaccount:0,
     }),
-  });
+  }));
   if(response.status!==200)return {status:response.status,body:null,unreadable:true};
   const raw=await response.text();
   try{return {status:200,body:JSON.parse(raw) as unknown,unreadable:false};}
@@ -660,18 +687,20 @@ export async function postScopedOwnerVariableTopup(
     amount:amountCents*100,source_exchange_shard:0,destination_exchange_shard:2,
     source_subaccount:0,destination_subaccount:0,
   };
+  const memberTicket=await admitKnownReadMutation(creds,path,"https://external-api.kalshi.com");
   const timestamp=Date.now().toString();
-  const response=await fetchImpl(`https://external-api.kalshi.com${path}`,{
+  const memberSignature=signRequest(creds,"POST",path,timestamp,true);
+  const response=await dispatchMemberRead(memberTicket,()=>fetchImpl(`https://external-api.kalshi.com${path}`,{
     method:"POST",cache:"no-store",redirect:"manual",
     signal:AbortSignal.timeout(ACCOUNT_TIMEOUT_MS),
     headers:{
       Accept:"application/json","Content-Type":"application/json",
       "KALSHI-ACCESS-KEY":creds.keyId,
-      "KALSHI-ACCESS-SIGNATURE":signRequest(creds,"POST",path,timestamp),
+      "KALSHI-ACCESS-SIGNATURE":memberSignature,
       "KALSHI-ACCESS-TIMESTAMP":timestamp,
     },
     body:JSON.stringify(body),
-  });
+  }));
   if(response.status!==200)return {status:response.status,body:null,unreadable:true};
   const raw=await response.text();
   if(raw.trim()==="")return {status:200,body:null,unreadable:false};
@@ -688,9 +717,10 @@ export async function createScopedKalshiSubaccountOne(
   creds: { keyId: string; privateKey: string },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  const memberTicket=await admitKnownReadMutation(creds,SUBACCOUNT_CREATION_PATH);
   const timestamp = Date.now().toString();
-  const signature = signRequest(creds, "POST", SUBACCOUNT_CREATION_PATH, timestamp);
-  const response = await fetchImpl(`${baseUrl()}${SUBACCOUNT_CREATION_PATH}`, {
+  const signature = signRequest(creds, "POST", SUBACCOUNT_CREATION_PATH, timestamp, true);
+  const response = await dispatchMemberRead(memberTicket,()=>fetchImpl(`${baseUrl()}${SUBACCOUNT_CREATION_PATH}`, {
     method: "POST",
     cache: "no-store",
     redirect: "manual",
@@ -703,7 +733,7 @@ export async function createScopedKalshiSubaccountOne(
       "KALSHI-ACCESS-TIMESTAMP": timestamp,
     },
     body: JSON.stringify({ exchange_index: 2 }),
-  });
+  }));
   if (response.status >= 300 && response.status < 400) {
     return { status: response.status, body: null, unreadable: true };
   }
@@ -725,14 +755,16 @@ export async function generateScopedKalshiSubaccountOneKey(
   creds: { keyId: string; privateKey: string },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ status: number; body: unknown; unreadable: boolean }> {
+  const memberTicket=await admitKnownReadMutation(creds,RESTRICTED_KEY_GENERATION_PATH);
   const timestamp = Date.now().toString();
   const signature = signRequest(
     creds,
     "POST",
     RESTRICTED_KEY_GENERATION_PATH,
     timestamp,
+    true,
   );
-  const response = await fetchImpl(`${baseUrl()}${RESTRICTED_KEY_GENERATION_PATH}`, {
+  const response = await dispatchMemberRead(memberTicket,()=>fetchImpl(`${baseUrl()}${RESTRICTED_KEY_GENERATION_PATH}`, {
     method: "POST",
     cache: "no-store",
     redirect: "manual",
@@ -750,7 +782,7 @@ export async function generateScopedKalshiSubaccountOneKey(
       scopes: ["read", "write::trade"],
       subaccount: 1,
     }),
-  });
+  }));
   if (response.status >= 300 && response.status < 400) {
     return { status: response.status, body: null, unreadable: true };
   }
@@ -897,18 +929,24 @@ export async function verifyKalshiRestrictedTradingKeyForSubaccount(
       .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
     const creds = { keyId: verifierKeyId, privateKey: pem };
     const path = `${API_PREFIX}/api_keys`;
+    let memberTicket:MemberReadTicket|null=null;
+    if(memberReadBudgetEnabled()){
+      if(baseUrl()!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
+      memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+    }
     const timestamp = Date.now().toString();
-    const response = await fetch(`${baseUrl()}${path}`, {
+    const memberSignature=signRequest(creds, "GET", path, timestamp, true);
+    const response = await dispatchMemberRead(memberTicket,()=>fetch(`${baseUrl()}${path}`, {
       method: "GET",
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
       headers: {
         Accept: "application/json",
         "KALSHI-ACCESS-KEY": creds.keyId,
-        "KALSHI-ACCESS-SIGNATURE": signRequest(creds, "GET", path, timestamp),
+        "KALSHI-ACCESS-SIGNATURE": memberSignature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
       },
-    });
+    }));
     if (!response.ok) return false;
     const payload = object(await response.json() as unknown);
     if (!Array.isArray(payload.api_keys)) return false;
@@ -983,9 +1021,14 @@ async function verifyKalshiTradingKeyTradePermissionForSubaccount(
       .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
     const creds = { keyId: verifierKeyId, privateKey: pem };
     const path = `${API_PREFIX}/api_keys`;
+    let memberTicket:MemberReadTicket|null=null;
+    if(memberReadBudgetEnabled()){
+      if(baseUrl()!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
+      memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+    }
     const timestamp = Date.now().toString();
-    const signature = signRequest(creds, "GET", path, timestamp);
-    const response = await fetch(`${baseUrl()}${path}`, {
+    const signature = signRequest(creds, "GET", path, timestamp, true);
+    const response = await dispatchMemberRead(memberTicket,()=>fetch(`${baseUrl()}${path}`, {
       method: "GET",
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
@@ -995,7 +1038,7 @@ async function verifyKalshiTradingKeyTradePermissionForSubaccount(
         "KALSHI-ACCESS-SIGNATURE": signature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
       },
-    });
+    }));
     if (!response.ok) return false;
     const payload = object(await response.json() as unknown);
     if (!Array.isArray(payload.api_keys)) return false;
@@ -1039,9 +1082,14 @@ async function verifyKalshiTradingKeyRestrictionForSubaccount(
       .replace(/\s*(-----END [A-Z ]+-----)/, "\n$1");
     const creds = { keyId: verifierKeyId, privateKey: pem };
     const path = `${API_PREFIX}/api_keys`;
+    let memberTicket:MemberReadTicket|null=null;
+    if(memberReadBudgetEnabled()){
+      if(baseUrl()!=="https://external-api.kalshi.com")throw Error("kalshi_member_budget_host_unverified");
+      memberTicket=await reserveMemberRead(path,dedicatedSignerFingerprint(creds.keyId,creds.privateKey));
+    }
     const timestamp = Date.now().toString();
-    const signature = signRequest(creds, "GET", path, timestamp);
-    const response = await fetch(`${baseUrl()}${path}`, {
+    const signature = signRequest(creds, "GET", path, timestamp, true);
+    const response = await dispatchMemberRead(memberTicket,()=>fetch(`${baseUrl()}${path}`, {
       method: "GET",
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
@@ -1051,7 +1099,7 @@ async function verifyKalshiTradingKeyRestrictionForSubaccount(
         "KALSHI-ACCESS-SIGNATURE": signature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
       },
-    });
+    }));
     if (!response.ok) return false;
     const payload = object(await response.json() as unknown);
     if (!Array.isArray(payload.api_keys)) return false;
@@ -3675,14 +3723,16 @@ export async function postScopedKalshiCashierSweep(
     throw new KalshiApiError("INVALID_RESPONSE");
   }
   const path = "/trade-api/v2/portfolio/intra_exchange_instance_transfer";
+  const memberTicket=await admitKnownReadMutation(creds,path,"https://external-api.kalshi.com");
   const timestamp = Date.now().toString();
-  const response = await fetchImpl(`https://external-api.kalshi.com${path}`, {
+  const memberSignature=signRequest(creds, "POST", path, timestamp, true);
+  const response = await dispatchMemberRead(memberTicket,()=>fetchImpl(`https://external-api.kalshi.com${path}`, {
     method: "POST", cache: "no-store", redirect: "manual",
     signal: AbortSignal.timeout(15_000),
     headers: {
       Accept: "application/json", "Content-Type": "application/json",
       "KALSHI-ACCESS-KEY": creds.keyId,
-      "KALSHI-ACCESS-SIGNATURE": signRequest(creds, "POST", path, timestamp),
+      "KALSHI-ACCESS-SIGNATURE": memberSignature,
       "KALSHI-ACCESS-TIMESTAMP": timestamp,
     },
     // amount is centicents (100 per cent), NOT amount_cents.
@@ -3693,7 +3743,7 @@ export async function postScopedKalshiCashierSweep(
       source_exchange_shard: 2, destination_exchange_shard: 0,
       source_subaccount: 1, destination_subaccount: 0,
     }),
-  });
+  }));
   if (response.status !== 200) {
     return { status: response.status, transferId: null, unreadable: true };
   }

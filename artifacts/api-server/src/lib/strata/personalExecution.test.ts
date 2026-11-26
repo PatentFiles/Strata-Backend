@@ -79,7 +79,7 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
     id: "owner-1", subaccount: 1, exchange_index: 2,
     key_fingerprint: "a".repeat(64), credential_fingerprint: "a".repeat(64),
     policy_id: "policy-1", policy_state: "APPROVED", configured_stake_cents: 100,
-    cash_precision_verified: true, cash_micros: "0",
+    cash_precision_verified: true, cash_micros: "0", initial_cash_micros: "0",
     reconciled_at: "2026-10-15T16:26:22.935Z",
     verified_funding_at: "2026-10-15T17:52:26.418Z",
     minimum_exit_micros: 10000, fee_artifact_digest: "a".repeat(64),
@@ -96,6 +96,10 @@ test("commissioning readiness rejects stale pre-transfer zero-cash verification"
   const stillStale = await reportOwnedActivation(db, USER);
   assert.ok(stillStale.blockers.includes("cash_not_reconciled"));
   owner.reconciled_at = "2026-10-15T17:53:00.000Z";
+  const missingBasis = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
+  assert.equal(missingBasis.readyForCommissioning, false);
+  assert.ok(missingBasis.blockers.includes("cash_not_reconciled"));
+  owner.initial_cash_micros = "25000000";
   const fresh = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T17:54:00.000Z"));
   assert.equal(fresh.blockers.includes("cash_not_reconciled"), false);
   const tooOld = await reportOwnedActivation(db, USER, Date.parse("2026-10-15T18:10:00.000Z"));
@@ -303,8 +307,11 @@ test("cash reconciliation records the subaccount read and does not transfer or e
   assert.equal(recorded.ok, true);
   assert.equal(recorded.cashCents, 100_000);
   assert.equal(recorded.transferAttempted, false);
-  assert.equal(sql.includes("execution_enabled"), false);
-  assert.equal(sql.includes("kill_switch"), false);
+  // Safety predicates may read the switches; the UPDATE must never set them.
+  const assignments = sql.slice(sql.indexOf("SET "), sql.indexOf("WHERE "));
+  assert.doesNotMatch(assignments, /execution_enabled|kill_switch|blocked_reason/);
+  assert.match(sql, /a.cash_micros = \$3::bigint/);
+  assert.match(sql, /a.execution_enabled IS FALSE AND a.kill_switch IS TRUE/);
   const skipped = await persistOwnedCashReconciliation({
     query: async () => { throw new Error("write_not_allowed"); },
   }, {
@@ -351,6 +358,168 @@ test("the market adapter stays disabled until a reader is bound, and global fetc
   const halted = await supervisor.stopOwner(USER);
   assert.equal(halted.workerStopped, true);
   assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+});
+
+for (const ownerWide of [false, true]) {
+  for (const action of ["STOP", "KILL"] as const) {
+    test(`${ownerWide ? "owner-wide" : "account"} ${action} waits for an in-flight START before reporting completion`, async () => {
+      let release!: () => void;
+      const waiting = new Promise<void>(resolve => { release = resolve; });
+      const worker = fakeWorker();
+      const dispatch = state(true);
+      const disarmed: string[] = [];
+      const supervisor = createOwnedTradingSupervisor(async () => {
+        await waiting;
+        await worker.start();
+        return { ok: true, worker, state: dispatch, disarm: async (command) => {
+          disarmed.push(command);
+          return { entriesBlocked: true, managingExposure: false };
+        } };
+      });
+      const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+      let completed = false;
+      const stopping = (ownerWide ? supervisor.stopOwner(USER, action)
+        : supervisor.stop({ userId: USER, accountId: "acct-a", action }))
+        .then(result => { completed = true; return result; });
+      try {
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(completed, false, "a pending START is not evidence that the worker is stopped");
+        release();
+        await starting;
+        assert.equal((await stopping).workerStopped, true);
+        assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+        assert.equal(worker.isScheduled(), false);
+        assert.equal(dispatch.entriesAuthorized, false);
+        assert.deepEqual(disarmed, [action]);
+        if (action === "KILL") {
+          assert.equal(dispatch.accountKill, true);
+          assert.equal(dispatch.presentedToken, -1);
+        }
+      } finally {
+        release();
+        await Promise.allSettled([starting, stopping]);
+        worker.stop();
+      }
+    });
+  }
+}
+
+test("concurrent owner START requests share one opening worker", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  let opens = 0;
+  const worker = fakeWorker();
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    opens++;
+    await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  const first = supervisor.start(input), second = supervisor.start(input);
+  try {
+    release();
+    const results = await Promise.all([first, second]);
+    assert.equal(opens, 1);
+    assert.equal(worker.starts, 1);
+    assert.ok(results.every(result => result.workerStarted));
+  } finally { worker.stop(); }
+});
+
+test("pending START retains its owner and cannot be stopped or joined by another owner", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  let opens = 0;
+  const worker = fakeWorker();
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    opens++;
+    if (opens === 1) await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const first = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  try {
+    const foreign = await supervisor.start({ userId: OTHER, accountId: "acct-a", action: "START" });
+    assert.deepEqual(foreign, { ok: false, reason: "foreign_execution_account", workerStarted: false });
+    const stopped = await supervisor.stop({ userId: OTHER, accountId: "acct-a" });
+    assert.equal(stopped.workerStopped, false);
+    assert.equal(opens, 1);
+    release();
+    assert.equal((await first).workerStarted, true);
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  } finally { release(); await first; worker.stop(); }
+});
+
+test("STOP during pending START preserves protective management when exposure exists", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const worker = fakeWorker(), dispatch = state(true);
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await waiting;
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async () =>
+      ({ entriesBlocked: true, managingExposure: true }) };
+  });
+  const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  const stopping = supervisor.stop({ userId: USER, accountId: "acct-a", action: "STOP" });
+  try {
+    release();
+    await starting;
+    assert.deepEqual(await stopping, { workerStopped: true, managingExposure: true });
+    assert.equal(dispatch.entriesAuthorized, false);
+    assert.equal(dispatch.accountKill, false);
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+  } finally { worker.stop(); }
+});
+
+test("pending START failure does not report a verified STOP or poison a later START", async () => {
+  let reject!: (error: Error) => void;
+  const waiting = new Promise<void>((_resolve, fail) => { reject = fail; });
+  const worker = fakeWorker();
+  let opens = 0;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    if (++opens === 1) await waiting;
+    await worker.start();
+    return { ok: true, worker };
+  });
+  const starting = supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  const stopping = supervisor.stop({ userId: USER, accountId: "acct-a" });
+  reject(new Error("opening_failed"));
+  await assert.rejects(starting, /opening_failed/);
+  assert.equal((await stopping).workerStopped, false);
+  try {
+    const retried = await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+    assert.equal(retried.workerStarted, true);
+    assert.equal(opens, 2);
+  } finally { worker.stop(); }
+});
+
+test("owner-wide KILL closes every local entry gate before awaiting the first disarm", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const first = fakeWorker(), second = fakeWorker();
+  const states = [state(true), state(true)];
+  const supervisor = createOwnedTradingSupervisor(async input => {
+    const index = input.accountId === "acct-a" ? 0 : 1;
+    const worker = index === 0 ? first : second;
+    await worker.start();
+    return { ok: true, worker, state: states[index], disarm: async () => {
+      if (index === 0) await waiting;
+      return { entriesBlocked: true, managingExposure: false };
+    } };
+  });
+  await supervisor.start({ userId: USER, accountId: "acct-a", action: "START" });
+  await supervisor.start({ userId: USER, accountId: "acct-b", action: "START" });
+  const stopping = supervisor.stopOwner(USER, "KILL");
+  try {
+    assert.ok(states.every(dispatch => dispatch.entriesAuthorized === false));
+    assert.ok(states.every(dispatch => dispatch.accountKill === true));
+    release();
+    assert.equal((await stopping).workerStopped, true);
+    assert.equal(first.isScheduled(), false);
+    assert.equal(second.isScheduled(), false);
+  } finally { release(); await stopping; first.stop(); second.stop(); }
 });
 
 test("entry scheduling starts one worker and a second start does not", async () => {
@@ -526,7 +695,14 @@ test("owner exchange qualification distinguishes signed GET rejection and 429 wi
   assert.equal(calls,2,"failure must abort first history page without retries");
  }
 });
-test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async () => {
+test("authenticated reads fail closed on incomplete history and a cash mismatch does not schedule", async (t) => {
+  // This unit fixture has mocked SQL/transport, not genuine release approvals.
+  // Explicitly select the existing isolated-test startup path so this test
+  // exercises cash mismatch rather than an unrelated missing release gate.
+  const keys=["NODE_ENV","RAILWAY_PROJECT_ID","RAILWAY_SERVICE_ID","RAILWAY_ENVIRONMENT_ID","RAILWAY_GIT_COMMIT_SHA"];
+  const saved=new Map(keys.map(key=>[key,process.env[key]]));
+  t.after(()=>{for(const [key,value] of saved){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  process.env.NODE_ENV="test";for(const key of keys.slice(1))delete process.env[key];
   const queries: string[] = [];
   const paged = await readOwnedKalshiFeeds(keyMaterial(), NOW, async (_creds, path, query = "") => {
     queries.push(`${path}${query}`);
@@ -551,7 +727,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   if (!followed.ok) assert.equal(followed.reason, "account_target_pair_mismatch");
   const material = keyMaterial();
   const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
-  let feeChecks = 0;
+  let feeChecks = 0, leaseWrites = 0;
+  let observedBalance="50.0000";
   const session = createProductionPersonalSession({
     async query(text: string) {
       if (text.includes("personal-session:signer")) {
@@ -566,6 +743,8 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
         }] };
       }
       if (text.includes("live_execution_config")) return { rows: [{ live_execution_enabled: true, manual_kill_switch: false }] };
+      if (text.includes("WITH unresolved_intents AS")) return {rows:[{n:"0"}]};
+      if (/INSERT INTO private.kalshi_account_worker_lease|UPDATE private.kalshi_account_worker_lease/i.test(text)) leaseWrites++;
       return { rows: [] };
     },
   }, {
@@ -578,7 +757,7 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
       };
     },
     kalshiGet: async (_creds, path) => {
-      if (path.includes("balance")) return { balance_dollars: "50.0000" };
+      if (path.includes("balance")) return { balance_dollars: observedBalance };
       if (path.includes("orders")) return { orders: [] };
       if (path.includes("positions")) return { market_positions: [] };
       if (path.includes("fills")) return { fills: [] };
@@ -590,6 +769,21 @@ test("authenticated reads fail closed on incomplete history and a cash mismatch 
   assert.equal(refused.reason, "cash_evidence_mismatch");
   assert.equal(feeChecks, 0);
   assert.equal(session.isScheduled(USER, "acct-a"), false);
+  // Matching cash and a clean signed read are still not an independent
+  // source. Refuse the real owned START before it can claim a lease.
+  observedBalance="1.0000";
+  const originalCutover={...process.env};
+  try{
+    process.env.RAILWAY_GIT_COMMIT_SHA="a".repeat(40);
+    process.env.STRATA_PAPER_ISOLATION_QUALIFIED_SHA=process.env.RAILWAY_GIT_COMMIT_SHA;
+    const unbound=await session.start({userId:USER,accountId:"acct-a",action:"START"});
+    assert.deepEqual(unbound,{ok:false,reason:"production_independent_entry_source_unavailable",workerStarted:false});
+  }finally{
+    for(const k of ["RAILWAY_GIT_COMMIT_SHA","STRATA_PAPER_ISOLATION_QUALIFIED_SHA"]){
+      if(originalCutover[k]===undefined)delete process.env[k];else process.env[k]=originalCutover[k];
+    }
+  }
+  assert.equal(feeChecks,1);assert.equal(leaseWrites,0);
   const open = emptySnapshot(
     { subaccount: 1, exchangeIndex: 2, keyFingerprint: fingerprint ?? "" },
     { ok: true, historicalCoverageComplete: true, observedAtMs: NOW, cashMicros: "1", orders: [{ id: "x" }], fills: [], positions: [], settlements: [] },
@@ -897,4 +1091,241 @@ test("START compares fractional-cent cash exactly and retains freshness and rese
  assert.deepEqual(verifiedStartCash({...proof,exchangeMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
  assert.deepEqual(verifiedStartCash({...proof,reservedMicros:"24482501"}),{ok:false,reason:"cash_evidence_mismatch"});
  assert.deepEqual(verifiedStartCash({...proof,observedAtMs:NOW+900001}),{ok:false,reason:"fresh_cash_reconciliation_required"});
+});
+
+
+test("failed-start cleanup pins holder and token and refuses an unverified acquisition", async () => {
+  const { releaseFailedStartLease } = await import("./failedStartLeaseCleanup");
+  const calls: Array<{ sql: string; args: unknown[] | undefined }> = [];
+  const db = { query: async (sql: string, args?: unknown[]) => {
+    calls.push({ sql, args }); return { rows: [] };
+  } };
+  const input = { executionAccountId: "acct-a", ownerUserId: USER,
+    holderId: "opening-worker", fencingToken: 7, now: new Date(NOW).toISOString() };
+  await releaseFailedStartLease(db, input);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /holder_id = \$4 AND fencing_token = \$5::bigint/);
+  assert.match(calls[0]!.sql, /state = 'owned' AND account_kill = false/);
+  assert.deepEqual(calls[0]!.args, ["acct-a", USER, input.now, "opening-worker", 7]);
+  for (const invalid of [{ holderId: "" }, { fencingToken: NaN }, { fencingToken: 0 },
+    { fencingToken: Number.MAX_SAFE_INTEGER + 1 }]) {
+    assert.throws(() => releaseFailedStartLease(db, { ...input, ...invalid }),
+      /failed_start_lease_identity_unverified/);
+  }
+  assert.equal(calls.length, 1);
+});
+
+
+for (const ownerWide of [false, true]) {
+  test(`${ownerWide ? "owner-wide" : "account"} overlapping STOP cannot orphan a replacement after an older disarm completes`, async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const first = fakeWorker(), replacement = fakeWorker();
+    let opens = 0, disarms = 0;
+    const supervisor = createOwnedTradingSupervisor(async () => {
+      const worker = ++opens === 1 ? first : replacement;
+      await worker.start();
+      return { ok: true, worker, state: state(true), disarm: async () => {
+        if (++disarms === 1) await waiting;
+        return { entriesBlocked: true, managingExposure: false };
+      } };
+    });
+    const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+    await supervisor.start(input);
+    const slowStop = ownerWide ? supervisor.stopOwner(USER) : supervisor.stop({ ...input, action: "STOP" });
+    try {
+      assert.equal((await supervisor.stop({ ...input, action: "STOP" })).workerStopped, true);
+      assert.equal(first.isScheduled(), false);
+      assert.deepEqual(await supervisor.start(input),
+        { ok: false, reason: "worker_control_in_progress", workerStarted: false });
+      assert.equal(opens, 1, "old disarm must finish before any successor acquisition");
+      assert.deepEqual(await supervisor.start({ ...input, userId: OTHER }),
+        { ok: false, reason: "foreign_execution_account", workerStarted: false });
+      release();
+      assert.equal((await slowStop).workerStopped, true);
+      assert.equal((await supervisor.start(input)).workerStarted, true);
+      assert.equal(supervisor.isScheduled(USER, "acct-a"), true);
+      assert.equal(replacement.isScheduled(), true);
+      assert.equal((await supervisor.stop({ ...input, action: "KILL" })).workerStopped, true);
+      assert.equal(replacement.isScheduled(), false, "successor remains tracked and killable");
+    } finally { release(); await slowStop; first.stop(); replacement.stop(); }
+  });
+}
+
+test("overlapping STOP preserves exposure management and KILL is never queued behind a slow STOP", async () => {
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const worker = fakeWorker(), dispatch = state(true);
+  let disarms = 0;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async action => {
+      if (++disarms === 1) await waiting;
+      return { entriesBlocked: true, managingExposure: action === "STOP" };
+    } };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  await supervisor.start(input);
+  const slowStop = supervisor.stop({ ...input, action: "STOP" });
+  try {
+    assert.deepEqual(await supervisor.stop({ ...input, action: "STOP" }), { workerStopped: true, managingExposure: true });
+    assert.equal(worker.isScheduled(), true);
+    assert.equal(dispatch.entriesAuthorized, false);
+    assert.equal((await supervisor.start(input)).reason, "worker_control_in_progress");
+    const killed = supervisor.stop({ ...input, action: "KILL" });
+    assert.equal(dispatch.accountKill, true, "KILL local fence closes synchronously");
+    assert.equal((await killed).workerStopped, true);
+    assert.equal(worker.isScheduled(), false);
+    release();
+    assert.deepEqual(await slowStop, { workerStopped: true, managingExposure: false },
+      "late STOP must not claim protective management after KILL");
+    assert.equal(supervisor.isScheduled(USER, "acct-a"), false);
+    assert.equal(worker.isScheduled(), false, "old STOP cannot revive a killed worker");
+  } finally { release(); await slowStop; worker.stop(); }
+});
+
+test("failed asynchronous disarm releases the lifecycle barrier without authorizing entries", async () => {
+  const worker = fakeWorker(), dispatch = state(true);
+  let fail = true;
+  const supervisor = createOwnedTradingSupervisor(async () => {
+    await worker.start();
+    return { ok: true, worker, state: dispatch, disarm: async () => {
+      if (fail) throw new Error("disarm_failed");
+      return { entriesBlocked: true, managingExposure: false };
+    } };
+  });
+  const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+  await supervisor.start(input);
+  try {
+    await assert.rejects(supervisor.stop({ ...input, action: "STOP" }), /disarm_failed/);
+    assert.equal(dispatch.entriesAuthorized, false);
+    fail = false;
+    assert.equal((await supervisor.stop({ ...input, action: "KILL" })).workerStopped, true);
+    assert.equal((await supervisor.start(input)).reason, "worker_scheduled");
+    assert.equal(dispatch.entriesAuthorized, false, "lifecycle cleanup is not an entry grant");
+  } finally { worker.stop(); }
+});
+
+for (const failing of [false, true]) {
+  test(`owner-wide STOP blocks new same-owner accounts until every disarm settles, failure=${failing}`, async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const opened = new Map<string, ReturnType<typeof fakeWorker>>();
+    const supervisor = createOwnedTradingSupervisor(async input => {
+      const worker = fakeWorker(); opened.set(input.accountId, worker); await worker.start();
+      return { ok: true, worker, state: state(true), disarm: async () => {
+        if (input.accountId === "acct-a" && failing) throw new Error("first_disarm_failed");
+        if (input.accountId === "acct-b") await waiting;
+        return { entriesBlocked: true, managingExposure: false };
+      } };
+    });
+    const input = { userId: USER, accountId: "acct-a", action: "START" as const };
+    await supervisor.start(input);
+    await supervisor.start({ ...input, accountId: "acct-b" });
+    let settled = false;
+    const stopping = supervisor.stopOwner(USER).then(
+      result => { settled = true; return { result }; },
+      error => { settled = true; return { error }; },
+    );
+    try {
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      assert.equal(settled, false);
+      assert.equal((await supervisor.start({ ...input, accountId: "acct-new" })).reason, "worker_control_in_progress");
+      assert.equal(opened.has("acct-new"), false);
+      assert.equal((await supervisor.start({ ...input, userId: OTHER, accountId: "foreign-account" })).workerStarted, true);
+      release();
+      const result = await stopping;
+      if (failing) assert.match(String("error" in result ? result.error : ""), /first_disarm_failed/);
+      else assert.equal("result" in result && result.result.workerStopped, true);
+      assert.equal((await supervisor.start({ ...input, accountId: "acct-new" })).workerStarted, true);
+      assert.equal(supervisor.isScheduled(OTHER, "foreign-account"), true, "owner STOP never changes another owner's worker");
+    } finally { release(); await stopping; for (const worker of opened.values()) worker.stop(); }
+  });
+}
+
+
+test("owner cash refresh preserves original signed-read clock and refuses elapsed evidence", async (t) => {
+  const cases = [
+    { wall: 100, mono: 100, reason: "cash_reconciled", writes: 1 },
+    { wall: 15_000, mono: 15_000, reason: "cash_reconciled", writes: 1 },
+    { wall: 15_001, mono: 15_001, reason: "cash_read_expired", writes: 0 },
+    { wall: 100, mono: 15_001, reason: "cash_read_expired", writes: 0 },
+    { wall: -1, mono: 100, reason: "cash_read_clock_unverified", writes: 0 },
+    { wall: 100, mono: -1, reason: "cash_read_clock_unverified", writes: 0 },
+  ];
+  let wall = NOW, mono = 100;
+  t.mock.method(Date, "now", () => wall);
+  t.mock.method(performance, "now", () => mono);
+  for (const fixture of cases) {
+    wall = NOW;
+    mono = 100;
+    let writes = 0, reads = 0;
+    const result = await reconcileOwnedSubaccountCash({
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes("personal-activation:cash-signer")) {
+          assert.deepEqual(params, [USER]);
+          return { rows: [{ account_id: "acct-a",
+            decrypted_secret: JSON.stringify({ api_key_id: "fixture-key", private_key: "fixture-not-a-key" }) }] };
+        }
+        assert.match(sql, /owned-cash:reconcile/);
+        assert.equal(params?.[0], "acct-a");
+        assert.equal(params?.[1], USER);
+        assert.equal(params?.[3], new Date(NOW).toISOString());
+        assert.doesNotMatch(sql.slice(sql.indexOf("SET "),sql.indexOf("WHERE ")), /blocked_reason|execution_enabled|kill_switch/);
+        assert.match(sql, /a.reconciled_at <= \$4::timestamptz/);
+        writes++;
+        return { rows: [{ id: "acct-a" }], rowCount: 1 };
+      },
+    }, {
+      ownerUserId: USER,
+      confirmation: RECORD_OWNED_CASH_CONFIRMATION,
+      nowMs: NOW,
+      get: async (_creds, path, query) => {
+        assert.equal(path, "/trade-api/v2/portfolio/balance");
+        reads++;
+        wall = NOW + fixture.wall;
+        mono = 100 + fixture.mono;
+        return query
+          ? { subaccount: 1, exchange_index: 2, balance_dollars: "1000.00" }
+          : { balance_dollars: "25000.00" };
+      },
+    });
+    assert.equal(reads, 2);
+    assert.equal(result.reason, fixture.reason);
+    assert.equal(result.ok, fixture.writes === 1);
+    assert.equal(result.transferAttempted, false);
+    assert.equal(writes, fixture.writes);
+  }
+});
+
+
+test('process quiesce fences a pending START, waits its tick and never silently restarts',async()=>{
+ let open!:()=>void,idle!:()=>void;
+ const opening=new Promise<void>(resolve=>{open=resolve;}),draining=new Promise<void>(resolve=>{idle=resolve;});
+ const worker={...fakeWorker(),whenIdle:()=>draining};
+ const dispatch=state(true);const calls:string[]=[];
+ const supervisor=createOwnedTradingSupervisor(async()=>{
+  await opening;await worker.start();return {ok:true,worker,state:dispatch,disarm:async action=>{
+   calls.push(action);return {entriesBlocked:true,managingExposure:false};
+  }};
+ });
+ const started=supervisor.start({userId:USER,accountId:'shutdown-pending',action:'START'});
+ const stopped=supervisor.quiesce!();let complete=false;void stopped.then(()=>{complete=true;});
+ assert.equal(supervisor.quiesce!(),stopped);
+ assert.equal((await supervisor.start({userId:USER,accountId:'shutdown-other',action:'START'})).reason,'worker_process_shutting_down');
+ open();assert.equal((await started).workerStarted,false);
+ for(let i=0;i<10;i++)await Promise.resolve();
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(complete,false);
+ idle();assert.deepEqual(await stopped,{stopped:true,managingExposure:false});assert.deepEqual(calls,['STOP']);
+ assert.equal(worker.isScheduled(),false);assert.equal(dispatch.accountKill,false);
+});
+
+test('process quiesce retains an exposed protective worker and never reports flat',async()=>{
+ const worker=fakeWorker();await worker.start();const dispatch=state(true);
+ const supervisor=createOwnedTradingSupervisor(async()=>({ok:true,worker,state:dispatch,
+  disarm:async action=>{assert.equal(action,'STOP');return {entriesBlocked:true,managingExposure:true};}}));
+ await supervisor.start({userId:USER,accountId:'shutdown-exposure',action:'START'});
+ assert.deepEqual(await supervisor.quiesce!(),{stopped:false,managingExposure:true});
+ assert.equal(dispatch.entriesAuthorized,false);assert.equal(dispatch.accountKill,false);assert.equal(worker.isScheduled(),true);
+ worker.stop();
 });

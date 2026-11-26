@@ -121,11 +121,15 @@ test('milliseconds are not guessed: converted future fill is rejected by actual 
   market:request.market,side:request.side,kind:'ENTRY',state:'UNKNOWN',exchange_order_id:null,
   terminal:false,reserved_micros:'6000000',filled_hundredths:'0',created_at:new Date(NOW-1000)};
  const queries:string[]=[];let frozen=false;
- const tx={async query(sql:string){
+ const tx={async query(sql:string,args?:unknown[]){
   queries.push(sql);
   if(sql.startsWith('BEGIN; SELECT'))return [{command:'BEGIN',rows:[]},{command:'SELECT',rows:[account]}];
   if(sql.includes('FROM v13_production_intent'))return {rows:[intent]};
-  if(sql.startsWith('SELECT digest FROM v13_production_event')||sql==='ROLLBACK')return {rows:[]};
+  if(sql==='SELECT event_id,digest FROM v13_production_event WHERE account_id=$1 AND event_id=ANY($2::text[])'){
+   assert.deepEqual(args,[account.id,snapshot.fills.map(f=>`fill:${f.id}`)]);
+   return {rows:[]};
+  }
+  if(sql==='ROLLBACK')return {rows:[]};
   throw Error('unexpected SQL before time validation');
  },release(){}};
  class Ledger extends ProductionLedger{override async freeze(){frozen=true;}}

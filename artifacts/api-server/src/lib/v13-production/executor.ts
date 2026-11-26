@@ -1,6 +1,12 @@
+import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
+import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
+import {encodeProductionOrder} from "./transport";
+import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
+import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {FeeAuthorityTimingCapture,withFeeAuthorityTimingPurpose,withoutFeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import type {FinalPublicMetadataHooks,FinalPublicMetadataContext} from "../strata/finalPublicMetadataPhases";
 import {getMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
+import {getOwnedFeeFailureStage,type OwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import {OwnedFeedTimingCapture} from "../strata/ownedFeedReadTiming";
 import type {CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import {ExecutionSubtimings} from "./executionSubtimings";
@@ -45,8 +51,131 @@ export type ReconcileSchedulingContext = Readonly<{
 }>;
 export type ReconcileSchedulingResult = {technicalRenewal: "deferred" | "settled"} | void;
 
+/** Diagnostic, process-local proof of the exact first market read boundary.
+ * Not a durable receipt, a replacement permission, or an order capability.
+ */
+export type FirstOwnedMarketFeeRefusal = Readonly<{
+  accountId:string;
+  sourceId:string;
+  crossingKey:string;
+  sourceSha256:string;
+  failureStage:OwnedFeeFailureStage;
+}>;
+export type FirstReadReceiptWorkerPin = Readonly<{
+ ownerId:string; releaseSha:string; holderId:string; fencingToken:string; credentialFingerprint:string;
+}>;
+/** Explicit trusted bootstrap only, never a route, flag or the ordinary ledger pool. */
+export type FirstReadReceiptWriter = Readonly<{
+ pin:FirstReadReceiptWorkerPin;
+ database:Pick<ProductionLedger["pool"],"query">;
+}>;
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
+  static readonly #seenFirstReadErrors = new WeakSet<object>();
+  static readonly #ambiguousFirstReadErrors = new WeakSet<object>();
+  static readonly #simulationFirstRead = new WeakMap<object,FirstOwnedMarketFeeRefusal>();
+  readonly #liveFirstRead = new WeakMap<object,FirstOwnedMarketFeeRefusal>();
+  #firstReadWriter:FirstReadReceiptWriter|null=null;
+  static readFirstMarketFeeRefusal(error:unknown):FirstOwnedMarketFeeRefusal|undefined{
+    if(error===null||typeof error!=="object")return undefined;
+    const receipt=this.#simulationFirstRead.get(error);
+    this.#simulationFirstRead.delete(error);
+    return this.#ambiguousFirstReadErrors.has(error)?undefined:receipt;
+  }
+  /** Set by actual production factories until independent source qualification. */
+  private independentEntryHold = false;
+  #directSource:DirectEntrySource|null=null;
+  /** Test-only binding. Real factories remain contained; a source label or
+   * environment flag alone cannot turn on independent live orders. */
+  bindIndependentSimulationSource(source:DirectEntrySource):void {
+    requireProof(this.exchange.mode==="SIMULATION"&&!this.#directSource&&source instanceof DirectEntrySource,
+      "direct_entry_simulation_binding_invalid");
+    source.assertSimulationBinding({accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    this.#directSource=source;
+  }
+  /** The actual owner factory supplies the source after existing release and
+   * startup checks. The general unbound network transport stays contained. */
+  bindIndependentLiveSource(source:DirectEntrySource):void{
+    requireProof(this.exchange.mode==="LIVE"&&this.accountOwnerUserId&&!this.#directSource&&source instanceof DirectEntrySource,
+      "direct_live_source_binding_invalid");
+    source.assertExecutorBinding("LIVE",{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+    this.#directSource=source;
+  }
+  /** Disabled unless a trusted server bootstrap explicitly supplies a scoped writer.
+   * No known production entry point calls this method. The SQL wrapper checks the
+   * actual session ACL, current owner/lease/fence and exact release independently.
+   */
+  bindFirstReadReceiptWriter(binding:FirstReadReceiptWriter):void{
+    const source=this.#directSource;
+    requireProof(source&&this.exchange.mode==="LIVE"&&
+      !this.#firstReadWriter&&binding.database!==this.ledger.pool,
+      "direct_fee_refusal_writer_binding_invalid");
+    this.assertDirectBinding(source);
+    source.assertFirstReadReceiptWorkerPin(binding.pin);
+    this.#firstReadWriter=Object.freeze({database:binding.database,pin:Object.freeze({...binding.pin})});
+  }
+  async recordPinnedFirstReadReceipt(error:unknown):Promise<boolean>{
+    if(error===null||typeof error!=="object")return false;
+    const receipt=this.#liveFirstRead.get(error);
+    // Consume before any await. Lost result, rejection or expired lease can
+    // never turn into a source-replacement retry on an ambiguous outcome.
+    this.#liveFirstRead.delete(error);
+    const source=this.#directSource,writer=this.#firstReadWriter;
+    if(ProductionExecutor.#ambiguousFirstReadErrors.has(error)||!receipt||!source||!writer||this.exchange.mode!=="LIVE"||
+      receipt.accountId!==this.ledger.accountId)return false;
+    this.assertDirectBinding(source);
+    const pin=writer.pin;
+    source.assertFirstReadReceiptWorkerPin(pin);
+    const result=await writer.database.query(
+      "SELECT CASE WHEN current_user='strata_direct_retry_receipt_writer' AND session_user='strata_direct_retry_receipt_writer' "+
+      "THEN private.strata_record_worker_first_market_fee_refusal($1,$2::uuid,$3,$4,$5::bigint,$6,$7,$8,$9) ELSE false END AS recorded",
+      [receipt.accountId,pin.ownerId,pin.releaseSha,pin.holderId,pin.fencingToken,pin.credentialFingerprint,
+       receipt.crossingKey,receipt.sourceId,receipt.sourceSha256]);
+    return result.rows.length===1&&result.rows[0]?.recorded===true;
+  }
+  get independentSourceBound():boolean{return this.#directSource!==null;}
+  get independentSimulationBound():boolean{return this.independentSourceBound&&this.exchange.mode==="SIMULATION";}
+  private assertDirectBinding(source:DirectEntrySource):void{
+    source.assertExecutorBinding(this.exchange.mode,{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
+  }
+  private assertLiveSourceQuote(source:unknown):void{
+    if(this.exchange.mode!=="LIVE")return;
+    if(this.#directSource)assertDirectEntryQuoteEvidence(source,this.now());
+    else assertCanonicalEntryQuoteEvidence(source,this.now());
+  }
+  async captureIndependentEntry():Promise<string|null>{
+    const source=this.#directSource;
+    requireProof(source,"direct_entry_source_binding_invalid");
+    this.assertDirectBinding(source);
+    return source.capture(this.ledger.pool);
+  }
+  async captureIndependentExit(parentId:string):Promise<string|null>{
+    const source=this.#directSource;
+    requireProof(source,"direct_held_source_binding_invalid");
+    this.assertDirectBinding(source);
+    return source.captureHeld(this.ledger.pool,parentId);
+  }
+  private assertIntentSourceKind(i:Intent):void {
+    if(i.kind==="EXIT"){
+      const owned=i.decision?.ownedEvaluation as {sourceDirectHeldId?:unknown}|undefined;
+      if(this.#directSource||owned?.sourceDirectHeldId!=null){
+        requireProof(this.#directSource&&typeof owned?.sourceDirectHeldId==="string","direct_held_intent_source_mismatch");
+        this.assertDirectBinding(this.#directSource);
+      }
+      return;
+    }
+    if(i.kind!=="ENTRY")return;
+    if(this.#directSource||i.direct_source_id!=null){
+      requireProof(this.#directSource&&i.direct_source_id&&i.evaluation_id===null,
+        "direct_entry_intent_source_mismatch");
+      this.assertDirectBinding(this.#directSource);
+    }
+  }
+  containLiveEntries():void { this.independentEntryHold=true; }
+  get liveEntryContained():boolean { return this.independentEntryHold; }
+  private assertEntrySourceAvailable():void {
+    requireProof(!this.independentEntryHold, "production_independent_entry_source_unavailable");
+  }
   static isFinalFence(check: () => Promise<void>): boolean { return this.#fences.has(check); }
   constructor(readonly ledger: ProductionLedger, readonly exchange: Exchange,
     readonly now: () => number = Date.now, readonly fault: (stage: string) => void = () => {}) {}
@@ -68,11 +197,13 @@ export class ProductionExecutor {
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
   }|null)|null=null;
   finalPublicMetadata:FinalPublicMetadataHooks|null=null;
+  /** Internal opt-in scheduling only; no client or authority input. */
+  overlapFinalAccountSnapshot = false;
   private phaseContext(i:Intent,invocation:symbol|undefined):FinalPublicMetadataContext|null {
     if(!invocation)return null;
     const source=i.decision?.source as Record<string,any>|undefined;
     if(!source||typeof source!=="object")return null;
-    try{return {intentId:i.id,invocation,source:{evaluationId:i.evaluation_id!,marketTicker:i.market,
+    try{return {intentId:i.id,invocation,source:{evaluationId:(i.direct_source_id??i.evaluation_id)!,marketTicker:i.market,
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),btcProviderAgeMs:source.btc_provider_age_ms,
       btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms}};}catch{return null;}
   }
@@ -117,16 +248,10 @@ export class ProductionExecutor {
     requireProof(!a.blocked_reason || allowBlockedExit || lifecycle, "production_account_frozen");
     requireProof(a.reconciled_at && a.reconciled_at.getTime() <= this.now() &&
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
-    // The owned account row is already locked by ledger.transaction. Batch only
-    // these adjacent independent reads; mutable master/policy checks stay later.
-    // CASE preserves UNKNOWN-first denial: do not read owner identity on that path.
-    const ownedGate = this.accountOwnerUserId ? (await tx.query(`
-      WITH uncertain AS MATERIALIZED (
-        SELECT EXISTS(SELECT 1 FROM v13_production_intent WHERE account_id=$1
-          AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)) AS has_uncertain_order
-      ) SELECT has_uncertain_order, CASE WHEN $3::boolean OR NOT has_uncertain_order
-        THEN (SELECT owner_user_id::text FROM v13_production_account WHERE id=$1)
-        ELSE NULL END AS owner_user_id FROM uncertain`, [a.id, ignoreIntentId, lifecycle])).rows[0] : null;
+    // Preserve each gate boundary and refusal order. Only its independent
+    // non-locking reads are batched; locked policy decoding remains separate.
+    const ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
+      [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
     const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
     requireProof(lifecycle || (ownedGate ? ownedGate.has_uncertain_order === false : unknown!.rows.length === 0),
@@ -134,15 +259,11 @@ export class ProductionExecutor {
     if (this.accountOwnerUserId) {
       requireProof(ownedGate && ownedGate.owner_user_id === this.accountOwnerUserId,
         "foreign_execution_account");
-      const master = await tx.query("SELECT manual_kill_switch, live_execution_enabled FROM live_execution_config");
-      requireProof(master.rows.length === 1 && master.rows[0].manual_kill_switch === false &&
-        master.rows[0].live_execution_enabled === true, "production_master_kill_switch_or_flag");
-      const policy = await tx.query(`SELECT p.policy_hash
-        FROM v13_live_money_policy p
-        JOIN v13_production_account a ON a.policy_id = p.id AND a.id = p.execution_account_id
-        WHERE a.id = $1 AND a.owner_user_id = $2::uuid AND p.state = 'APPROVED'`,
-      [a.id, this.accountOwnerUserId]);
-      requireProof(policy.rows.length === 1 && /^[0-9a-f]{64}$/.test(String(policy.rows[0].policy_hash ?? "")),
+      const master = {rows:Array.isArray(ownedGate.master_rows)?ownedGate.master_rows:[]};
+      requireProof(master.rows.length === 1 && master.rows[0]?.manual_kill_switch === false &&
+        master.rows[0]?.live_execution_enabled === true, "production_master_kill_switch_or_flag");
+      const policy = {rows:Array.isArray(ownedGate.policy_rows)?ownedGate.policy_rows:[]};
+      requireProof(policy.rows.length === 1 && /^[0-9a-f]{64}$/.test(String(policy.rows[0]?.policy_hash ?? "")),
         "production_policy_missing");
       return;
     }
@@ -178,8 +299,8 @@ export class ProductionExecutor {
       const { account: a, earliest: floor } = await this.ledger.readReconcileAccount();
       const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
-      try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot()});}
-      catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
+      try {snapshot=await feedTiming.run(()=>this.exchange.snapshot(identity(a), floor ? new Date(floor).getTime() : this.now()));signed("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});}
+      catch(error){signed("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
       const commit=this.startTiming("ledger_reconcile_commit");
       try {const reconciliationReceipt=this.heldReconcile
           ?await this.heldReconcile(snapshot,a.revision)
@@ -197,15 +318,19 @@ export class ProductionExecutor {
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
+    this.assertEntrySourceAvailable();
     const done=this.startTiming("prepare_entry",{evaluationId});
-    const diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
-    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
-    catch(error){done("rejected",{error,entryPrice:diagnostics.price,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
+    const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
+    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
+    catch(error){done("rejected",{error,entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
   }
-  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
+  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
     const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
-    const source = (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
-    requireProof(source && source.evaluation_source === "paper" &&
+    const direct=this.#directSource;
+    if(direct)this.assertDirectBinding(direct);
+    const source = direct?await direct.readExact(this.ledger.pool,evaluationId,this.now()):
+      (await this.ledger.pool.query("SELECT * FROM forward_test_evaluations WHERE id=$1", [evaluationId])).rows[0];
+    requireProof(source && source.evaluation_source === (direct?(direct.environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1"):"paper") &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
       source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
@@ -219,7 +344,7 @@ export class ProductionExecutor {
     let initialSourceElapsed: number | null = null;
     if(this.exchange.mode==="LIVE") {
       const sampledNow = this.now();
-      assertCanonicalEntryQuoteEvidence(source,sampledNow);
+      if(direct)assertDirectEntryQuoteEvidence(source,sampledNow);else assertCanonicalEntryQuoteEvidence(source,sampledNow);
       const elapsed = sampledNow - new Date(source.evaluated_at).getTime();
       initialSourceElapsed = elapsed;
       const ages = [source.btc_provider_age_ms,source.btc_receive_age_ms,source.market_age_ms];
@@ -233,14 +358,37 @@ export class ProductionExecutor {
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),
       btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
     });
-    let book = feedAlreadyExpired ? null : await readBook();
+    let book:MarketEvidence|null;
+    try{book=feedAlreadyExpired?null:await readBook();}
+    catch(error){
+      // Only this await is before transaction acquisition. The later
+      // compatibility read and FINAL/dispatch must never mark this proof.
+      const failureStage=getOwnedFeeFailureStage(error);
+      const sourceSha256=direct&&failureStage?DirectEntrySource.validatedSourceDigest(source):undefined;
+      if(error!==null&&typeof error==="object"&&failureStage&&sourceSha256){
+        const seen=ProductionExecutor.#seenFirstReadErrors;
+        if(seen.has(error)){
+          ProductionExecutor.#ambiguousFirstReadErrors.add(error);
+          ProductionExecutor.#simulationFirstRead.delete(error);
+          this.#liveFirstRead.delete(error);
+        }else{
+          seen.add(error);
+          const receipt=Object.freeze({accountId:this.ledger.accountId,sourceId:evaluationId,
+            crossingKey:source.crossing_key,sourceSha256,failureStage});
+          // A LIVE diagnostic never escapes through the simulation accessor.
+          if(this.exchange.mode==="SIMULATION")ProductionExecutor.#simulationFirstRead.set(error,receipt);
+          else if(this.#firstReadWriter)this.#liveFirstRead.set(error,receipt);
+        }
+      }
+      throw error;
+    }
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     if(book) diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");
     const prepare = () => this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
-      const prior = await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
-      if (prior.rows.length) return prior.rows[0]!.id; // duplicate event: no new reservation/capability
+      const prior = await tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
+      if (prior.rows.length) {this.assertIntentSourceKind(prior.rows[0]!);return prior.rows[0]!.id;} // duplicate event: no new reservation/capability
       await this.gate(tx, a);
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
@@ -254,7 +402,7 @@ export class ProductionExecutor {
         requireProof(source.crossing_consumed &&
           source.crossing_key === `${source.market_ticker}:first`,
           "production_entry_policy_claim_not_proven");
-        await this.assertEntryPolicyWindow(tx, source);
+        if(!direct)await this.assertEntryPolicyWindow(tx, source);
       }
       subtimings.mark("source_pin_and_classification");
       const sourceAge = this.now() - new Date(source.evaluated_at).getTime();
@@ -263,7 +411,7 @@ export class ProductionExecutor {
       admission(sourceCurrent?"eligible":"rejected",{sourceAgeMs:sourceAge,
         ...(sourceCurrent?{}:{error:"production_evaluation_stale"})});
       requireProof(sourceCurrent, "production_evaluation_stale");
-      const pinnedSource = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
+      const pinnedSource = direct?await direct.readExact(tx,evaluationId,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [evaluationId])).rows[0];
       // Preserve prior-intent replay and all authority/policy/window checks above.
       // An expired observation cannot become eligible after a wall-clock rollback.
       // Provider-error precedence is intentionally omitted on this stale-only path.
@@ -286,22 +434,15 @@ export class ProductionExecutor {
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);
-      if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+      this.assertLiveSourceQuote(source);
       subtimings.mark("exposure_and_stake");
-      const pending = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state='PREPARED'", [a.id]);
-      requireProof(pending.rows.length === 0, "production_prepared_order_blocks_entry");
-      const balances = await tx.query(`SELECT
-        (SELECT count(*) FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) AS open,
-        (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
-        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
-        (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1
-          AND occurred_at >= $2) AS daily_loss`, [a.id, new Date(new Date(this.now()).toISOString().slice(0, 10))]);
-      const b = balances.rows[0];
+      const b = await readPrepareEntryCapacity((sql,params)=>tx.query(sql,params),a.id,
+        new Date(new Date(this.now()).toISOString().slice(0,10)));
       const capital = BigInt(p.capitalLimitCents) * 10_000n - money(b.basis) - money(a.reserved_micros) - money(b.total_loss);
       requireProof(capital >= 0n, "production_capital_exhausted");
       const stake = await this.readConfiguredStake(tx);
       requireProof(stake.cents <= p.maxEntryStakeCents, "configured_stake_above_approved_maximum");
-      const pf = preflightV13LiveMoneyEntry({
+      const preflightInput = {
         policy: p, strategyParameterSetId: source.strategy_parameter_set_id, strategyParameterHash: source.strategy_parameter_hash,
         signal: source.signal, direction: source.direction, referenceOffer: source.entry_offer,
         bestAskDollars: book.bestAskDollars, askLevels: book.asks,
@@ -311,7 +452,9 @@ export class ProductionExecutor {
         realizedDailyLossCents: Math.ceil(Number(money(b.daily_loss)) / 10_000),
         realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
         configuredStakeCents: stake.cents, requireCashRisk:this.exchange.mode==="LIVE",
-      });
+      };
+      const pf=preflightV13LiveMoneyEntry(preflightInput);
+      diagnostics.sizing=captureEntrySizingDiagnostics(preflightInput,pf);
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
       if(pf.cashRisk)requireProof(book.fee.cashRisk&&book.fee.cashRisk.marketTicker===source.market_ticker&&book.fee.cashRisk.side===side&&
         book.fee.cashRisk.policyHash===p.policyHash,"production_cash_risk_identity_invalid");
@@ -327,7 +470,8 @@ export class ProductionExecutor {
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
       a.reserved_micros = String(money(a.reserved_micros) + reservation);
       subtimings.mark("reservation_and_conservation");
-      await tx.query(`INSERT INTO v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,
+      // Fixed server-side column choice. Existing paper-linked records remain intact.
+      await tx.query(`INSERT INTO v13_production_intent(id,account_id,${direct?"direct_source_id":"evaluation_id"},crossing_key,kind,market,side,
         request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,$4,'ENTRY',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [id, a.id, evaluationId, source.crossing_key, request.market, side, JSON.stringify(request), JSON.stringify(decision),
@@ -349,10 +493,13 @@ export class ProductionExecutor {
     return retried;
   }
 
-  async prepareExit(parentId: string, minimumExitPrice: number): Promise<string> {
+  async prepareExit(parentId: string, minimumExitPrice: number, directHeldId?:string): Promise<string> {
+    const direct=this.#directSource;
+    requireProof((direct!==null)=== (directHeldId!==undefined),"direct_held_intent_source_mismatch");
+    if(direct)this.assertDirectBinding(direct);
     const parent = (await this.ledger.pool.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2", [parentId, this.ledger.accountId])).rows[0];
     requireProof(parent?.kind === "ENTRY", "production_exit_parent_missing");
-    const book = await this.exchange.market(parent.market, parent.side);
+    const book = await this.exchange.market(parent.market, parent.side, undefined, "EXIT");
     return this.ledger.transaction(async (tx, a) => {
       await this.gate(tx, a, true);
       const p = await this.ledger.policy(tx, a);
@@ -362,7 +509,7 @@ export class ProductionExecutor {
       requireProof(active.rows.length === 0, "production_exit_already_pending");
       const pos = (await tx.query("SELECT * FROM v13_production_position WHERE id=$1 FOR UPDATE", [parentId])).rows[0];
       requireProof(pos && money(pos.quantity_hundredths) > 0n, "production_exit_not_owned");
-      const source = (await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
+      const source = direct?await direct.readHeldExact(tx,directHeldId!,parentId,this.now()):(await tx.query(`SELECT * FROM forward_test_evaluations WHERE evaluation_source='paper'
         AND market_ticker=$1 ORDER BY evaluated_at DESC,id DESC LIMIT 1 FOR SHARE`, [parent.market])).rows[0];
       const age = source ? this.now() - new Date(source.evaluated_at).getTime() : Infinity;
       requireProof(source && source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
@@ -394,7 +541,7 @@ export class ProductionExecutor {
         quantityVersion:EXIT_QUANTITY_VERSION,quantityHundredths:plan.plan.plannedHundredths,limitMicros:plan.plan.limitMicros,
         timeInForce: "IOC", reduceOnly: true, clientOrderId: `v13p-${id}` };
       const decision = { book, plan: plan.plan, minimumExitPrice, policy: p, identity: identity(a), parentId,
-        ownedEvaluation: { position: pos, source, sourcePaperEvaluationId: source.id, decision: ownedDecision } };
+        ownedEvaluation: { position: pos, source, ...(direct?{sourceDirectHeldId:source.id}:{sourcePaperEvaluationId:source.id}), decision: ownedDecision } };
       await tx.query(`INSERT INTO v13_production_intent(id,account_id,parent_id,kind,market,side,request,decision,
         policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros)
         VALUES($1,$2,$3,'EXIT',$4,$5,$6,$7,$8,$9,$10,$11,0,0)`,
@@ -411,7 +558,8 @@ export class ProductionExecutor {
     return withoutFeeAuthorityTiming(()=>{
     if(!this.finalPublicMetadata)return this.dispatchWithPhases(id);
     const invocation=Symbol("dispatch-metadata");
-    return this.dispatchWithPhases(id,invocation).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
+    const operation=()=>this.dispatchWithPhases(id,invocation);
+    return (this.finalPublicMetadata.dispatch?this.finalPublicMetadata.dispatch(id,invocation,operation):operation()).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
     });
   }
   private async dispatchWithPhases(id:string,invocation?:symbol):Promise<void> {
@@ -421,6 +569,9 @@ export class ProductionExecutor {
       const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 AND account_id=$2 FOR UPDATE", [id, a.id])).rows[0];
       requireProof(i, "production_intent_missing");
       if (i.state !== "PREPARED") return false;
+      requireProof(!(this.#directSource&&this.exchange.mode==="LIVE"&&i.kind==="EXIT"),"direct_live_exit_requires_signed_protective_dispatch");
+      this.assertIntentSourceKind(i);
+      if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
       if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
       await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
@@ -453,15 +604,25 @@ export class ProductionExecutor {
           if(this.exchange.mode==="LIVE")requireProof((i.decision.preflight as {cashRisk?:unknown}|undefined)?.cashRisk&&
             (i.decision.book as MarketEvidence).fee.cashRisk,"production_cash_risk_unproven");
           assertChampionSourceReference(i.decision.source);
-          if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(i.decision.source,this.now());
+          this.assertLiveSourceQuote(i.decision.source);
         }
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
         const final = async () => {
-          const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.evaluation_id});
+          const finalTiming=this.startTiming("final_preparation",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id});
           let finalComparison:FinalComparisonDiagnostics|undefined;
           let finalMarketReads:MarketEvidenceReadTiming|undefined;
+          let pendingSnapshot:Promise<{ok:true;snapshot:Snapshot}|{ok:false;error:unknown}>|undefined;
+          let snapshotHistoryFloor:Date|null|undefined;
+          const readFinalSnapshot=async(oldest:Date|null)=>{
+            const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
+            try{const snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
+              () => this.exchange.snapshot(identity(a), new Date(oldest as Date).getTime())));
+              snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});return snapshot;}
+            catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
+          };
           try {
+          if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");
@@ -470,10 +631,17 @@ export class ProductionExecutor {
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
             i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
+          if(i.kind==="ENTRY"&&this.overlapFinalAccountSnapshot){
+            snapshotHistoryFloor=(await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1",[a.id])).rows[0].earliest;
+            // Only fresh read-only proof is overlapped. The child snapshot ALS
+            // exemption never reaches the market sibling. Attach both handlers
+            // immediately; every exit below drains before this transaction ends.
+            pendingSnapshot=readFinalSnapshot(snapshotHistoryFloor!).then(snapshot=>({ok:true as const,snapshot}),error=>({ok:false as const,error}));
+          }
           const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
           const book = phaseContext&&this.finalPublicMetadata
-            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side))
-            :await this.exchange.market(i.market, i.side);
+            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side,undefined,i.kind))
+            :await this.exchange.market(i.market, i.side,undefined,i.kind);
           finalMarketReads=getMarketEvidenceReadTiming(book);
           const stored = i.decision.book as MarketEvidence;
           const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
@@ -539,21 +707,21 @@ export class ProductionExecutor {
             const pos = (await tx.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1 FOR UPDATE", [i.parent_id])).rows[0];
             requireProof(pos && money(pos.quantity_hundredths) >= requestQuantityHundredths(i.request) && i.request.reduceOnly,
               "production_exit_ownership_changed");
-            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown> };
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
+            const owned = i.decision.ownedEvaluation as { source: Record<string, unknown>; position: Record<string, unknown>; sourceDirectHeldId?:string };
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSource;
+            const source = direct?await direct.readHeldExact(tx,owned.sourceDirectHeldId!,i.parent_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [owned.source.id])).rows[0];
             const age = this.now() - new Date(source?.evaluated_at ?? 0).getTime();
             requireProof(source && canonical(source) === canonical(owned.source) &&
               age >= 0 && age <= p.maxQuoteAgeMs &&
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k => source[k] + age <= p.maxQuoteAgeMs),
             "production_final_owned_feed_changed_or_stale");
           }
-          const oldest = (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
+          const oldest = pendingSnapshot ? snapshotHistoryFloor! : (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
           if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("WIRE_FEE",context);}
-          const snapshotTiming=this.startTiming("final_signed_snapshot",{intentId:id,evaluationId:i.evaluation_id}),feedTiming=new OwnedFeedTimingCapture();
           let snapshot:Snapshot;
-          try{snapshot=await feedTiming.run(()=>this.ledger.withFinalAccountSnapshot(i.kind === "ENTRY" ? i.id : null,
-            () => this.exchange.snapshot(identity(a), new Date(oldest).getTime())));snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot()});}
-          catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot()});throw error;}
+          if(pendingSnapshot){const outcome=await pendingSnapshot;if(!outcome.ok)throw outcome.error;snapshot=outcome.snapshot;}
+          else snapshot=await readFinalSnapshot(oldest);
           await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
@@ -561,16 +729,18 @@ export class ProductionExecutor {
             this.now() - book.fee.verifiedAtMs <= p.maxFeeEvidenceAgeMs &&
             this.now() - a.reconciled_at!.getTime() <= 15_000, "production_final_evidence_expired");
           if (i.kind === "ENTRY") {
-            const source = (await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
+            this.assertIntentSourceKind(i);
+            const direct=this.#directSource;
+            const source = direct?await direct.readExact(tx,i.direct_source_id!,this.now()):(await tx.query("SELECT * FROM forward_test_evaluations WHERE id=$1 FOR SHARE", [i.evaluation_id])).rows[0];
             requireProof(canonical(source) === canonical(i.decision.source) &&
               this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs &&
               ["btc_provider_age_ms", "btc_receive_age_ms", "market_age_ms"].every(k =>
                 source[k] + this.now() - new Date(source.evaluated_at).getTime() <= p.maxQuoteAgeMs),
             "production_final_source_changed_or_expired");
             assertChampionSourceReference(source);
-            if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+            this.assertLiveSourceQuote(source);
             if (source.entry_policy_version === V13_ENTRY_POLICY_VERSION) {
-              await this.assertEntryPolicyWindow(tx, source);
+              if(!direct)await this.assertEntryPolicyWindow(tx, source);
             }
             const losses = (await tx.query(`SELECT
               (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
@@ -617,10 +787,11 @@ export class ProductionExecutor {
             // HTTP send, without repeating network proof or extending its age.
             this.ledger.setFinalWireClock(()=>{
               const now=this.now(),age=now-new Date(source.evaluated_at).getTime();
-              const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.evaluation_id});
+              const wireAdmission=this.startTiming("wire_source_admission",{intentId:id,evaluationId:i.direct_source_id??i.evaluation_id});
               try {
               assertChampionSourceReference(source);
-              if(this.exchange.mode==="LIVE") assertCanonicalEntryQuoteEvidence(source,this.now());
+              if(direct)requireProof(Number.isSafeInteger(source.original_oldest_ms)&&now>=source.original_oldest_ms&&now-source.original_oldest_ms<=5000&&now<source.market_close_ms,"direct_entry_original_source_expired");
+              this.assertLiveSourceQuote(source);
               requireProof(age>=0&&age<=p.maxQuoteAgeMs&&
                 ["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].every(k=>
                   typeof source[k]==="number"&&source[k]>=0&&source[k]+age<=p.maxQuoteAgeMs),
@@ -634,14 +805,29 @@ export class ProductionExecutor {
               }catch(error){wireAdmission("rejected",{error,sourceAgeMs:age,sourceToDecisionAgeMs:
                 Math.max(...["btc_provider_age_ms","btc_receive_age_ms","market_age_ms"].map(k=>source[k]+age))});throw error;}
             });
+            if(direct&&this.exchange.mode==="LIVE"){
+              requireProof(this.authorizeFinalEntry&&this.accountOwnerUserId,"direct_live_final_release_authority_missing");
+              this.ledger.pinIndependentEntryWire(a,i,source as DirectEvaluation,encodeProductionOrder(i.request));
+            }
           }
           // Trusted transports cannot send before this callback succeeds.
           // Earlier local failures therefore prove that no POST was attempted;
           // failures after success remain UNKNOWN unless an exact, private
           // downstream refusal proves its transport was never invoked.
+          if(i.kind==="ENTRY"&&this.#directSource){
+            const s=i.decision.source as {original_oldest_ms:number;market_close_ms:number};
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_entry_original_source_expired");
+          }
+          if(i.kind==="EXIT"&&this.#directSource){
+            const s=(i.decision.ownedEvaluation as {source:{original_oldest_ms:number;market_close_ms:number}}).source;
+            const now=this.now();
+            requireProof(Number.isSafeInteger(s.original_oldest_ms)&&now>=s.original_oldest_ms&&now-s.original_oldest_ms<=Math.min(5000,p.maxQuoteAgeMs)&&now<s.market_close_ms,"direct_held_original_source_expired");
+          }
           invoked = true;
           finalTiming("completed",{finalMarketReads});
-          }catch(error){finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
+          }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
+          finally{if(pendingSnapshot)await pendingSnapshot;}
         };
         ProductionExecutor.#fences.add(final);
         // One full fresh proof at the transport's last asynchronous boundary.

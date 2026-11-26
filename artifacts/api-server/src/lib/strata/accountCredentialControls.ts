@@ -1,4 +1,10 @@
+import {cancelOwnerArmInTransaction} from './ownerArmContext';
+import { VERIFY_AND_COMMISSION, parseMultiKeyInput, inventoryContainsKeys, type MultiKeyInput } from "./multiKeyCommissioning";
+import { advanceTechnicalSetup, createTechnicalSetupAdmission, SETUP_ROLE_ORDER, TECHNICAL_SETUP_CONFIRMATION,
+  technicalSetupResult, buildTechnicalSetupPlan, publicTechnicalSetupReview, executeAuthorizedTechnicalSetup,
+  EXECUTE_TECHNICAL_SETUP_CONFIRMATION, type ReviewedSetupAttempt, type TechnicalSetupPlan, type TechnicalSetupSnapshot, type SetupRole } from "./technicalSetupAdvance";
 import { emptyUserExecutionView } from "./userExecutionScope";
+import {withTechnicalSetupDatabaseAdmission} from "./technicalSetupAdmissionDb";
 import { prepareOwnerShardAllocation, ownerShardAllocationStatus,
   executeOwnerShardAllocation, reconcileOwnerShardAllocation,
   type ShardAllocationView } from "./ownerShardAllocation";
@@ -16,6 +22,7 @@ import {
   createDatabaseAccountCommissioningPorts,
   credentialDatabaseFromPool,
   type CredentialDatabase,
+  type CredentialClient,
   type PgPoolLike,
 } from "./accountCredentialStore";
 import {
@@ -39,6 +46,7 @@ import {
   inspectRestrictedKeyMetadata,
   inspectSubaccount1,
   probeAccountCredential,
+  probeSetupManagementCredential,
   restrictedMetadataNextRequirement,
   type AccountSetupNextRequirement,
   type CredentialProbeResult,
@@ -307,119 +315,8 @@ export function accountCredentialControls(
 ) {
   const database = executionDatabase(db);
   const ports = () => createDatabaseAccountCommissioningPorts(database);
-  return {
-    async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
-      if (options.session) {
-        const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
-        if (!stopped.workerStopped) {
-          return {
-            ok: false as const,
-            reason: "worker_still_scheduled",
-            executable: false as const,
-            workerStarted: false as const,
-            executionActive: false as const,
-            view: emptyUserExecutionView(userId),
-          };
-        }
-      }
-      const closed = {
-        ok: false as const,
-        reason: "user_scope_not_migrated",
-        executable: false as const,
-        workerStarted: false as const,
-        executionActive: false as const,
-        view: emptyUserExecutionView(userId),
-      };
-      try {
-        const ready = await db.query(LEASE_TABLE_SQL);
-        if (!ready.rows[0]?.name) {
-          if (action !== "KILL") {
-            if (options.session) {
-              return {
-                ok: true as const,
-                reason: "entries_stopped",
-                executable: false as const,
-                workerStarted: false as const,
-                executionActive: false as const,
-                view: emptyUserExecutionView(userId),
-              };
-            }
-            return closed;
-          }
-          await db.query(
-            "UPDATE v13_production_account SET kill_switch = true WHERE owner_user_id = $1::uuid",
-            [userId],
-          );
-          return {
-            ok: true as const,
-            reason: "account_killed",
-            executable: false as const,
-            workerStarted: false as const,
-            executionActive: false as const,
-            view: emptyUserExecutionView(userId),
-          };
-        }
-        const result = await operateAccountWorker({
-          commissioning: ports(),
-          activity: { async readOwnedAccount() { return null; } },
-          leases: database,
-          safety: {
-            async listAccounts(ownerUserId) {
-              const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
-              return accounts.rows.flatMap((row) => {
-                const executionAccountId = text(row.execution_account_id);
-                const financialAccountId = text(row.financial_account_id);
-                if (!executionAccountId || !financialAccountId) return [];
-                return [{
-                  executionAccountId,
-                  ownerUserId,
-                  financialAccountId,
-                  providerConnectionId: financialAccountId,
-                  keyFingerprint: null,
-                  vaultSecretId: null,
-                  openPositionCount: count(row.open_positions),
-                  unresolvedIntentCount: count(row.unresolved_intents),
-                }];
-              });
-            },
-            async markKilled(ownerUserId, executionAccountId, client) {
-              await (client ?? db).query(
-                `UPDATE v13_production_account SET kill_switch = true
-                 WHERE id = $1 AND owner_user_id = $2::uuid`,
-                [executionAccountId, ownerUserId],
-              );
-            },
-          },
-          async globalKill() {
-            const kill = await db.query("SELECT manual_kill_switch FROM live_execution_config");
-            return kill.rows.length !== 1 || kill.rows[0]?.manual_kill_switch === true;
-          },
-          now: () => Date.now(),
-        }, { authenticatedUserId: userId, holderId: "account-safety", action });
-        return { ...result, view: emptyUserExecutionView(userId) };
-      } catch {
-        return closed;
-      }
-    },
-    async credentialStatus(userId: string) {
-      if (!await credentialTablesReady(db)) {
-        return { ok: false, reason: "credential_migration_missing", executable: false as const, roles: [] };
-      }
-      return listAccountCredentialStatus(database, ports(), userId);
-    },
-    async registerCredential(userId: string, body: unknown) {
-      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
-      const fields = credentialBody(body);
-      if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
-      return registerAccountCredential(database, ports(), { authenticatedUserId: userId, ...fields });
-    },
-    async revokeCredential(userId: string, body: unknown) {
-      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
-      const role = roleOf(body);
-      if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
-      return revokeAccountCredential(database, ports(), { authenticatedUserId: userId, role });
-    },
-    async verifyCredential(userId: string, body: unknown) {
+  async function verifySavedRole(userId: string, body: unknown,
+    expectedStored?: Readonly<{ fingerprint: string; vaultSecretId: string }>) {
       if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
       const role = roleOf(body);
       if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
@@ -430,6 +327,7 @@ export function accountCredentialControls(
         authenticatedUserId: userId,
         role,
         confirmation: body && typeof body === "object" ? (body as Record<string, unknown>).confirmation : null,
+        ...(expectedStored ? { expectedStored } : {}),
         readSecret: (vaultSecretId) => readOwnedSecret(db, userId, vaultSecretId),
         async probe(material, context) {
           const fingerprint = dedicatedSignerFingerprint(material.keyId, material.privateKey);
@@ -488,6 +386,9 @@ export function accountCredentialControls(
               ? credentialProbeResult(true, "credential_verified")
               : credentialProbeResult(false,
                 tier.apiTier ? "advanced_api_tier_required" : "provisioning_api_tier_unproven");
+          } else if (context.executionAccountId === null &&
+              (role === "provisioning" || role === "verification")) {
+            probed = await probeSetupManagementCredential(role, fingerprint, material, getJson);
           } else {
             probed = await probeAccountCredential(
               role,
@@ -535,6 +436,155 @@ export function accountCredentialControls(
           return probed;
         },
       });
+  }
+  const controls = {
+    async safetyControl(userId: string, action: "STOP" | "DISARM" | "KILL") {
+      if (options.session) {
+        const stopped = await options.session.stopOwner(userId, action === "KILL" ? "KILL" : "STOP");
+        if (!stopped.workerStopped) {
+          return {
+            ok: false as const,
+            reason: "worker_still_scheduled",
+            executable: false as const,
+            workerStarted: false as const,
+            executionActive: false as const,
+            view: emptyUserExecutionView(userId),
+          };
+        }
+      }
+      const closed = {
+        ok: false as const,
+        reason: "user_scope_not_migrated",
+        executable: false as const,
+        workerStarted: false as const,
+        executionActive: false as const,
+        view: emptyUserExecutionView(userId),
+      };
+      try {
+        const ready = await db.query(LEASE_TABLE_SQL);
+        if (!ready.rows[0]?.name) {
+          if (action !== "KILL") {
+            if (options.session) {
+              return {
+                ok: true as const,
+                reason: "entries_stopped",
+                executable: false as const,
+                workerStarted: false as const,
+                executionActive: false as const,
+                view: emptyUserExecutionView(userId),
+              };
+            }
+            return closed;
+          }
+          await db.query(
+            "UPDATE v13_production_account SET kill_switch = true, execution_enabled = false WHERE owner_user_id = $1::uuid",
+            [userId],
+          );
+          return {
+            ok: true as const,
+            reason: "account_killed",
+            executable: false as const,
+            workerStarted: false as const,
+            executionActive: false as const,
+            view: emptyUserExecutionView(userId),
+          };
+        }
+        // Discover additive schema without requiring it on older deployments.
+        // An unavailable catalog query is not evidence that the schema is absent.
+        const armSchema=await db.query(`/* owner-arm:schema */ SELECT EXISTS(
+          SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid='public.v13_production_account'::regclass
+            AND attname='owner_control_epoch' AND NOT attisdropped) AS available`);
+        if(armSchema.rows.length!==1||typeof armSchema.rows[0].available!=='boolean')
+          return {...closed,reason:'owner_arm_cancellation_schema_unverified'};
+        const result = await operateAccountWorker({
+          commissioning: ports(),
+          activity: { async readOwnedAccount() { return null; } },
+          leases: database,
+          safety: {
+            ...(armSchema.rows[0].available?{invalidatePreparation:(owner:string,tx:import('./accountCredentialStore').CredentialClient)=>cancelOwnerArmInTransaction(tx,owner)}:{}),
+            async listAccounts(ownerUserId) {
+              const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
+              return accounts.rows.flatMap((row) => {
+                const executionAccountId = text(row.execution_account_id);
+                const financialAccountId = text(row.financial_account_id);
+                if (!executionAccountId || !financialAccountId) return [];
+                return [{
+                  executionAccountId,
+                  ownerUserId,
+                  financialAccountId,
+                  providerConnectionId: financialAccountId,
+                  keyFingerprint: null,
+                  vaultSecretId: null,
+                  openPositionCount: count(row.open_positions),
+                  unresolvedIntentCount: count(row.unresolved_intents),
+                }];
+              });
+            },
+            async markKilled(ownerUserId, executionAccountId, client) {
+              await (client ?? db).query(
+                `UPDATE v13_production_account SET kill_switch = true, execution_enabled = false
+                 WHERE id = $1 AND owner_user_id = $2::uuid`,
+                [executionAccountId, ownerUserId],
+              );
+            },
+          },
+          async globalKill() {
+            const kill = await db.query("SELECT manual_kill_switch FROM live_execution_config");
+            return kill.rows.length !== 1 || kill.rows[0]?.manual_kill_switch === true;
+          },
+          now: () => Date.now(),
+        }, { authenticatedUserId: userId, holderId: "account-safety", action });
+        return { ...result, view: emptyUserExecutionView(userId) };
+      } catch {
+        return closed;
+      }
+    },
+    async credentialStatus(userId: string) {
+      if (!await credentialTablesReady(db)) {
+        return { ok: false, reason: "credential_migration_missing", executable: false as const, roles: [] };
+      }
+      return listAccountCredentialStatus(database, ports(), userId);
+    },
+    async registerCredential(userId: string, body: unknown) {
+      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
+      const fields = credentialBody(body);
+      if (!fields) return { ok: false, reason: "credential_invalid", executable: false as const };
+      const optIn = (body as Record<string, unknown>).verifyAfterSave;
+      const expectedOwnerId = (body as Record<string, unknown>).expectedOwnerId;
+      if ((expectedOwnerId !== undefined && expectedOwnerId !== userId) ||
+          (optIn !== undefined && (optIn !== "VERIFY_ACCOUNT_CREDENTIAL" || expectedOwnerId !== userId))) {
+        return { ok: false, reason: "explicit_authorization_required", executable: false as const };
+      }
+      // Saving and verifying remain separate durable facts. The caller may opt
+      // into both with one action, but a failed/unknown verification MUST NOT
+      // replay registration or rotate the saved key.
+      const saved = await registerAccountCredential(database, ports(), {
+        authenticatedUserId: userId, ...fields, createOnly: optIn !== undefined,
+      });
+      if (optIn === undefined || !saved.ok) return saved;
+      const pending = { ok: false, executable: false as const, role: fields.role,
+        fingerprint: saved.fingerprint, vaultSecretId: null, saved: true as const };
+      if (!saved.fingerprint || !saved.vaultSecretId) {
+        return { ...pending, reason: "saved_binding_unverified", verificationState: "UNKNOWN" as const };
+      }
+      try {
+        const verified = await verifySavedRole(userId, {
+          role: fields.role, confirmation: "VERIFY_ACCOUNT_CREDENTIAL",
+        }, { fingerprint: saved.fingerprint, vaultSecretId: saved.vaultSecretId });
+        return { ...verified, vaultSecretId: null, saved: true as const,
+          verificationState: verified.ok ? "VERIFIED" as const : "REFUSED" as const };
+      } catch {
+        return { ...pending, reason: "saved_verification_unconfirmed", verificationState: "UNKNOWN" as const };
+      }
+    },
+    async revokeCredential(userId: string, body: unknown) {
+      if (!await credentialTablesReady(db)) return { ok: false, reason: "credential_migration_missing", executable: false as const };
+      const role = roleOf(body);
+      if (!role) return { ok: false, reason: "credential_role_rejected", executable: false as const };
+      return revokeAccountCredential(database, ports(), { authenticatedUserId: userId, role });
+    },
+    async verifyCredential(userId: string, body: unknown) {
+      return verifySavedRole(userId, body);
     },
 
     /**
@@ -663,7 +713,19 @@ export function accountCredentialControls(
       }
       return prepareSetupReview(db, database, options.kalshiGet, userId, operation);
     },
-    async executeOperation(userId: string, body: unknown) {
+    async executeOperation(userId: string, body: unknown, claimGuard?: (client:CredentialClient)=>Promise<()=>Promise<void>>) {
+      // This optional port is internal only. HTTP callers cannot supply it.
+      // The first transaction is the existing operation claim; the remaining
+      // transactions must be able to store/reconcile its response even if consent expires.
+      let checked=false;
+      const executionDb:CredentialDatabase=claimGuard?{query:(sql,params)=>database.query(sql,params),
+        transaction:work=>database.transaction(async client=>{
+          if(checked)return work(client);
+          const finalize=await claimGuard(client);checked=true;
+          const result=await work(client);
+          await finalize();
+          return result;
+        })}:database;
       const fields = accountSetupExecutionBody(body);
       if (!fields || !executionConfirmationAllowed(fields.operation, fields.confirmation)) {
         return rejectedCreationExecution("explicit_execution_authorization_required");
@@ -693,7 +755,7 @@ export function accountCredentialControls(
       if (fields.operation === "create_subaccount") {
         return executeSubaccountCreation(
           db,
-          database,
+          executionDb,
           options.kalshiGet,
           options.kalshiCreateSubaccount,
           userId,
@@ -716,7 +778,7 @@ export function accountCredentialControls(
         }
         return executeRestrictedKeyGeneration(
           db,
-          database,
+          executionDb,
           options.kalshiGet,
           options.kalshiGenerateRestrictedKey,
           userId,
@@ -727,7 +789,7 @@ export function accountCredentialControls(
       }
       return executeExecutionAccountProvisioning(
         db,
-        database,
+        executionDb,
         options.kalshiGet,
         userId,
         fields.attemptId,
@@ -866,6 +928,270 @@ export function accountCredentialControls(
               operationPreparations,
             ),
       };
+    },
+  };
+  const admitTechnicalSetup=createTechnicalSetupAdmission(2);
+  const scopeOf=(context:import("./accountCommissioningContext").AccountCommissioningContext)=>JSON.stringify([
+    context.authenticatedUserId,context.financialAccountId,context.providerConnectionId,context.executionAccountId,
+    context.subaccount,context.exchangeIndex,context.executionKeyFingerprint,
+    context.credentials.map(ref=>[ref.role,ref.vaultSecretId,ref.keyFingerprint]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))),
+  ]);
+  const technicalSnapshot=async(userId:string):Promise<TechnicalSetupSnapshot>=>{
+          const p=ports();
+          const before=await resolveAccountCommissioningContext(userId,p);
+          if(!before.ok)throw Error("technical_setup_scope_changed");
+          const status=await listAccountCredentialStatus(database,p,userId);
+          if(!status.ok)throw Error("technical_setup_scope_changed");
+          const after=await resolveAccountCommissioningContext(userId,p);
+          if(!after.ok||scopeOf(before.context)!==scopeOf(after.context))throw Error("technical_setup_scope_changed");
+          const ctx=after.context;
+          const bindings=ctx.credentials.map(ref=>{
+            if(!SETUP_ROLE_ORDER.includes(ref.role as SetupRole)||!ref.keyFingerprint)throw Error("technical_setup_scope_changed");
+            const roles=status.roles.filter(item=>item.role===ref.role&&!item.revoked&&item.fingerprint===ref.keyFingerprint);
+            if(roles.length!==1)throw Error("technical_setup_scope_changed");
+            return {role:ref.role as SetupRole,fingerprint:ref.keyFingerprint,vaultSecretId:ref.vaultSecretId,
+              verified:roles[0]!.verified&&roles[0]!.verificationReason==="credential_verified"};
+          });
+          // Existing accounts are never sent through technical provisioning again.
+          const attempts=ctx.executionAccountId===null
+            ?await listOwnedAccountSetupAttempts(database,userId,ctx.providerConnectionId):[];
+          const unresolved=attempts.find(a=>a.state==="attempted"||a.state==="response_received"||a.state==="uncertain");
+          return {scope:scopeOf(ctx),executionAccountExists:ctx.executionAccountId!==null,bindings,
+            unresolvedAttemptId:unresolved?.attemptId??null,
+            preparedAttempts:attempts.filter(a=>a.state==="prepared").map(a=>({attemptId:a.attemptId,operation:a.operation,state:a.state}))};
+  };
+
+  const advanceOnce=(userId:string,budgetMs=65_000)=>withTechnicalSetupDatabaseAdmission(db as PgPoolLike,userId,checkpoint=>advanceTechnicalSetup({
+    now:()=>performance.now(),
+    snapshot:async()=>{await checkpoint();return technicalSnapshot(userId);},
+    verify:async binding=>{await checkpoint();return verifySavedRole(userId,{role:binding.role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"},
+      {fingerprint:binding.fingerprint,vaultSecretId:binding.vaultSecretId});},
+    status:async()=>{await checkpoint();return controls.commissioningStatus(userId);},
+    prepare:async operation=>{await checkpoint();return controls.authorizeOperation(userId,{operation,confirmation:ACCOUNT_SETUP_CONFIRMATIONS[operation]});},
+  },budgetMs));
+  const scopeContext=async(userId:string,client:CredentialDatabase=database)=>{
+    const resolved=await resolveAccountCommissioningContext(userId,createDatabaseAccountCommissioningPorts(client));
+    if(!resolved.ok)throw Error("technical_setup_scope_changed");return resolved.context;
+  };
+  const confirmationFor=(operation:AccountSetupOperation)=>operation==="create_subaccount"?EXECUTE_SUBACCOUNT_CREATION_CONFIRMATION:
+    operation==="generate_api_key"?EXECUTE_RESTRICTED_KEY_GENERATION_CONFIRMATION:EXECUTE_EXECUTION_ACCOUNT_PROVISIONING_CONFIRMATION;
+  const readPrepared=async(userId:string,attemptId:string,client:CredentialClient=database,lock=false):Promise<ReviewedSetupAttempt|null>=>{
+    if(!UUID.test(attemptId))return null;
+    const r=await client.query("SELECT operation,state,precondition_digest,plan,financial_account_id::text AS financial_account_id,provider_connection_id::text AS provider_connection_id "+
+      "FROM private.kalshi_account_operation_attempts WHERE id=$1::uuid AND owner_user_id=$2::uuid"+(lock?" FOR UPDATE":""),[attemptId,userId]);
+    const row=r.rows[0];if(r.rows.length!==1||!row||row.state!=="prepared"||!isAccountSetupOperationValue(row.operation)||
+      typeof row.precondition_digest!=="string"||typeof row.provider_connection_id!=="string")return null;
+    let storedPlan:unknown=row.plan;if(typeof storedPlan==="string")storedPlan=JSON.parse(storedPlan);
+    if(!storedPlan||typeof storedPlan!=="object"||Array.isArray(storedPlan)||
+       accountSetupPreconditionDigest(storedPlan as Record<string,unknown>)!==accountSetupPreconditionDigest(accountSetupPlan(row.operation,row.provider_connection_id)))return null;
+    const ctx=await scopeContext(userId);
+    if(row.financial_account_id!==ctx.financialAccountId||row.provider_connection_id!==ctx.providerConnectionId||ctx.executionAccountId!==null)return null;
+    return {attemptId,operation:row.operation,preconditionDigest:row.precondition_digest};
+  };
+  const reviewPlan=async(userId:string,attemptId:string):Promise<TechnicalSetupPlan|null>=>{
+    // A separate reviewed migration is required for durable V2 consent records.
+    const ready=await db.query("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='private' AND table_name='kalshi_account_operation_attempts' AND column_name='owner_technical_plan_digest') AS ready");
+    if(ready.rows.length!==1||ready.rows[0]?.ready!==true)return null;
+    const before=await technicalSnapshot(userId),attempt=await readPrepared(userId,attemptId),after=await technicalSnapshot(userId);
+    if(!attempt||before.scope!==after.scope)return null;
+    return buildTechnicalSetupPlan(after,attempt);
+  };
+  const executeReview=async(userId:string,plan:TechnicalSetupPlan)=>executeAuthorizedTechnicalSetup(plan,{
+    now:()=>performance.now(),
+    snapshot:()=>technicalSnapshot(userId),
+    advance:budget=>advanceOnce(userId,budget),
+    async nextAttempt(){
+      const status=await controls.commissioningStatus(userId),next=status.nextAuthorizedAction;
+      if(!next||next.endpoint!=="/api/strata/me/account-operations/execute"||!next.operation||!next.attemptId||
+        next.requiredConfirmation!==confirmationFor(next.operation))return null;
+      return readPrepared(userId,next.attemptId);
+    },
+    async execute(attempt,scope,deadline){
+      const ctx=await scopeContext(userId);
+      if(scopeOf(ctx)!==scope||ctx.executionAccountId!==null)return {ok:false,reason:"technical_setup_scope_changed"};
+      return controls.executeOperation(userId,{operation:attempt.operation,attemptId:attempt.attemptId,confirmation:confirmationFor(attempt.operation)},async client=>{
+        // Short owner-connection lock orders with credential replacement and
+        // provisioning. Do not hold it across the provider operation.
+        const locked=await client.query("SELECT pc.id FROM private.provider_connections pc JOIN public.financial_accounts fa ON fa.id=pc.financial_account_id WHERE pc.id=$1::uuid AND fa.id=$2::uuid AND fa.user_id=$3::uuid AND fa.provider='kalshi' FOR UPDATE OF pc",
+          [ctx.providerConnectionId,ctx.financialAccountId,userId]);
+        if(locked.rows.length!==1)throw Error("technical_setup_scope_changed");
+        await client.query("SELECT id FROM private.kalshi_connection_credentials WHERE provider_connection_id=$1::uuid AND owner_user_id=$2::uuid AND revoked_at IS NULL FOR SHARE",[ctx.providerConnectionId,userId]);
+        const txDb:CredentialDatabase={query:(sql,params)=>client.query(sql,params),transaction:work=>work(client)};
+        const current=await scopeContext(userId,txDb);
+        if(scopeOf(current)!==scope||performance.now()>=deadline)throw Error("technical_setup_scope_changed");
+        // No automatic replacement of any restricted credential, even if a
+        // separately authorized manual recovery path would permit it.
+        if(attempt.operation==="generate_api_key"&&current.credentials.some(c=>c.role==="restricted_execution"))
+          throw Error("technical_setup_rotation_not_authorized");
+        const audited=await client.query("UPDATE private.kalshi_account_operation_attempts SET owner_technical_plan_digest=$1,owner_technical_authorized_at=clock_timestamp() "+
+          "WHERE id=$2::uuid AND owner_user_id=$3::uuid AND financial_account_id=$4::uuid AND provider_connection_id=$5::uuid AND operation=$6 AND state='prepared' AND precondition_digest=$7 AND plan=$8::jsonb RETURNING id",
+          [plan.digest,attempt.attemptId,userId,current.financialAccountId,current.providerConnectionId,attempt.operation,attempt.preconditionDigest,JSON.stringify(accountSetupPlan(attempt.operation,current.providerConnectionId))]);
+        if(audited.rows.length!==1||performance.now()>=deadline)throw Error("technical_setup_plan_changed");
+        return async()=>{
+          // A refused claim must not leave consent on an unclaimed attempt.
+          // Finish inside the same short transaction, before any external IO.
+          if(performance.now()>=deadline)throw Error("technical_setup_plan_changed");
+          await client.query("UPDATE private.kalshi_account_operation_attempts SET owner_technical_plan_digest=NULL,owner_technical_authorized_at=NULL WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='prepared' AND owner_technical_plan_digest=$3",
+            [attempt.attemptId,userId,plan.digest]);
+        };
+      });
+    },
+    async confirmCompleted(attempt,prior){
+      const ctx=await scopeContext(userId);
+      const receipt=await db.query("SELECT state,target_credential_id::text AS target_credential_id,target_fingerprint,planned_execution_account_id,owner_technical_plan_digest "+
+        "FROM private.kalshi_account_operation_attempts WHERE id=$1::uuid AND owner_user_id=$2::uuid AND financial_account_id=$3::uuid AND provider_connection_id=$4::uuid AND operation=$5",
+        [attempt.attemptId,userId,ctx.financialAccountId,ctx.providerConnectionId,attempt.operation]);
+      const row=receipt.rows[0];
+      if(receipt.rows.length!==1||row?.state!=="completed"||row.owner_technical_plan_digest!==plan.digest)return null;
+      if(attempt.operation==="generate_api_key"){
+        const priorWithout=JSON.parse(prior.scope) as unknown[];
+        if(prior.bindings.some(b=>b.role==="restricted_execution")||ctx.executionAccountId!==null)return null;
+        const restricted=ctx.credentials.filter(c=>c.role==="restricted_execution");
+        const without={...ctx,credentials:ctx.credentials.filter(c=>c.role!=="restricted_execution")};
+        if(restricted.length!==1||scopeOf(without)!==JSON.stringify(priorWithout)||restricted[0]!.keyFingerprint!==row.target_fingerprint)return null;
+        const generated=await db.query(GENERATED_ATTEMPT_SECRET_SQL,[attempt.attemptId,userId,ctx.financialAccountId,ctx.providerConnectionId]);
+        if(generated.rows.length!==1||generated.rows[0]?.credential_id!==row.target_credential_id||
+           generated.rows[0]?.vault_secret_id!==restricted[0]!.vaultSecretId||generated.rows[0]?.key_fingerprint!==restricted[0]!.keyFingerprint||
+           generated.rows[0]?.revoked_at!==null)return null;
+      }else if(attempt.operation==="provision_execution_account"){
+        if(ctx.executionAccountId!==row.planned_execution_account_id||ctx.subaccount!==1||ctx.exchangeIndex!==2||
+           ctx.executionKeyFingerprint!==row.target_fingerprint)return null;
+        const original=JSON.parse(prior.scope) as unknown[],current=JSON.parse(scopeOf(ctx)) as unknown[];
+        // The first three identity fields and complete credential set must
+        // remain unchanged; only the intended local execution target appears.
+        if(JSON.stringify(original.slice(0,3))!==JSON.stringify(current.slice(0,3))||JSON.stringify(original[7])!==JSON.stringify(current[7]))return null;
+        const safe=await db.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid AND kalshi_connection_id=$3::uuid AND subaccount=1 AND exchange_index=2 AND key_fingerprint=$4 AND commissioned=false AND execution_enabled=false AND kill_switch=true",
+          [ctx.executionAccountId,userId,ctx.financialAccountId,ctx.executionKeyFingerprint]);
+        if(safe.rows.length!==1)return null;
+      }else if(scopeOf(ctx)!==prior.scope)return null;
+      const snapshot=await technicalSnapshot(userId);
+      if(snapshot.scope!==scopeOf(ctx)||snapshot.unresolvedAttemptId||
+        (attempt.operation==="generate_api_key"&&!snapshot.bindings.some(b=>b.role==="restricted_execution"&&b.verified)))return null;
+      return snapshot;
+    },
+  });
+  /** First-party signed reads and create-only storage; never opens a trading
+   * session. The same technical journal/plan used by the reviewed two-step
+   * flow is used here. No funds, order, risk approval or rotation authority. */
+  const verifyAndCommission=async(userId:string,input:MultiKeyInput)=>{
+    let observed:SetupRole[]=[];
+    const stop=(reason:string,role?:SetupRole)=>technicalSetupResult("BLOCKED",reason,observed,role?"verify_"+role:null);
+    try{
+      // Do not allow a partial request to create a new primary connection.
+      const accounts=await db.query("SELECT id FROM public.financial_accounts WHERE user_id=$1::uuid AND provider='kalshi' LIMIT 2",[userId]);
+      if(accounts.rows.length>1)return stop("owned_connection_ambiguous");
+      if(accounts.rows.length===0){
+        if(!input.primary)return technicalSetupResult("NEEDS_CREDENTIAL","primary_connection_required",[],"register_primary");
+        if(!SETUP_ROLE_ORDER.slice(0,3).every(role=>input.credentials.some(c=>c.role===role)))
+          return stop("required_setup_credentials_missing");
+        if(!options.kalshiGet)return stop("verification_transport_not_enabled");
+        const material={keyId:input.primary.apiKeyId,privateKey:input.primary.privateKey};
+        const inventory=await options.kalshiGet(material,"/trade-api/v2/api_keys","");
+        if(!inventoryContainsKeys(inventory,[material.keyId,...input.credentials.map(c=>c.apiKeyId)]))
+          return stop("credential_account_membership_unverified");
+        const proof=await inspectProvisioningCredential(dedicatedSignerFingerprint(material.keyId,material.privateKey)!,material,options.kalshiGet);
+        if(!proof.ok)return stop("primary_connection_permission_unverified");
+        // The exact unique index is a deployment prerequisite. Legacy account
+        // creation also races against this constraint; never silently rotate.
+        const uniqueness=await db.query("SELECT EXISTS(SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.oid=to_regclass('public.strata_one_kalshi_connection_per_owner') AND i.indisunique AND i.indisvalid AND i.indisready AND pg_get_expr(i.indpred,i.indrelid) IS NOT NULL) AS ready");
+        if(uniqueness.rows[0]?.ready!==true)return stop("primary_connection_uniqueness_migration_required");
+        await database.transaction(async tx=>{
+          await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('strata-primary-onboarding:'||$1::text,0))",[userId]);
+          const existing=await tx.query("SELECT id FROM public.financial_accounts WHERE user_id=$1::uuid AND provider='kalshi' LIMIT 2",[userId]);
+          if(existing.rows.length!==0)throw Error("primary_connection_changed");
+          const saved=await tx.query("SELECT account_id FROM public.register_kalshi_credential($1::uuid,NULL::uuid,$2::text,$3::text,$4::text)",[userId,"Strata Primary",material.keyId,material.privateKey]);
+          if(saved.rows.length!==1)throw Error("primary_connection_unconfirmed");
+        });
+      }else if(input.primary){
+        return stop("existing_primary_connection_preserved");
+      }
+      const context=await scopeContext(userId);
+      // Prove every submitted/saved role belongs to this owner's actual
+      // primary provider inventory before registering or verifying any role.
+      const base=await db.query("SELECT s.decrypted_secret FROM public.financial_accounts f JOIN private.provider_connections p ON p.financial_account_id=f.id JOIN vault.decrypted_secrets s ON s.id=p.vault_secret_id WHERE f.user_id=$1::uuid AND f.id=$2::uuid AND p.id=$3::uuid AND f.provider='kalshi' LIMIT 2",[userId,context.financialAccountId,context.providerConnectionId]);
+      const material=base.rows.length===1?parseSecret(base.rows[0]?.decrypted_secret):null;
+      if(!material||!options.kalshiGet)return stop("primary_connection_unverified");
+      const ids=[material.keyId];
+      for(const ref of context.credentials){
+        const saved=await readOwnedSecret(db,userId,ref.vaultSecretId);
+        if(!saved||dedicatedSignerFingerprint(saved.keyId,saved.privateKey)!==ref.keyFingerprint)return stop("saved_credential_binding_unverified");
+        if(input.credentials.some(c=>c.role===ref.role))return stop("existing_credential_preserved",ref.role as SetupRole);
+        ids.push(saved.keyId);
+      }
+      ids.push(...input.credentials.map(c=>c.apiKeyId));
+      // The primary connection may intentionally reuse an existing read key.
+      // Only the four independent execution roles must be mutually distinct.
+      const roleIds=ids.slice(1);
+      if(new Set(roleIds).size!==roleIds.length)return stop("credential_roles_not_independent");
+      const inventory=await options.kalshiGet(material,"/trade-api/v2/api_keys","");
+      if(!inventoryContainsKeys(inventory,[...new Set(ids)]))return stop("credential_account_membership_unverified");
+      const afterRead=await scopeContext(userId);
+      if(scopeOf(afterRead)!==scopeOf(context))return stop("technical_setup_scope_changed");
+      for(const role of SETUP_ROLE_ORDER){
+        const item=input.credentials.find(c=>c.role===role);
+        const existing=context.credentials.find(c=>c.role===role);
+        if(!item&&!existing){
+          if(role==="restricted_execution"&&!context.executionAccountId)continue;
+          return technicalSetupResult("NEEDS_CREDENTIAL","setup_role_missing",observed,"register_"+role);
+        }
+        if(item){
+          const saved=await controls.registerCredential(userId,{...item,expectedOwnerId:userId,verifyAfterSave:"VERIFY_ACCOUNT_CREDENTIAL"});
+          if(!saved.ok)return stop(saved.reason,role);
+        }else{
+          // No re-registration or rotation of an existing role.
+          const status=await listAccountCredentialStatus(database,ports(),userId);
+          const current=status.roles.filter(c=>c.role===role&&!c.revoked);
+          if(!status.ok||current.length!==1||current[0]?.fingerprint!==existing?.keyFingerprint)return stop("technical_setup_scope_changed",role);
+          if(!current[0]?.verified||current[0]?.verificationReason!=="credential_verified"){
+            const verified=await verifySavedRole(userId,{role,confirmation:"VERIFY_ACCOUNT_CREDENTIAL"});
+            if(!verified.ok)return stop(verified.reason,role);
+          }
+        }
+        observed.push(role);
+      }
+      // Existing account returns EXISTING_ACCOUNT, never re-provisions it.
+      const prepared=await advanceOnce(userId);
+      if((prepared.stage==="PREPARED"||prepared.stage==="NEEDS_OWNER_ACTION")&&prepared.attemptId){
+        const plan=await reviewPlan(userId,prepared.attemptId);
+        if(!plan)return stop("technical_setup_plan_unverified");
+        return executeReview(userId,plan);
+      }
+      return prepared;
+    }catch{return technicalSetupResult("UNKNOWN","technical_setup_outcome_unconfirmed",observed);}
+  };
+  return {
+    ...controls,
+    async advanceTechnicalSetup(userId:string,body:unknown){
+      if(!body||typeof body!=="object"||Array.isArray(body))return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
+      const input=body as Record<string,unknown>,execute=input.confirmation===EXECUTE_TECHNICAL_SETUP_CONFIRMATION;
+      if(input.confirmation===VERIFY_AND_COMMISSION){
+        const parsed=parseMultiKeyInput(body,userId);
+        if(!parsed)return technicalSetupResult("BLOCKED","multi_key_input_invalid");
+        if(!await credentialTablesReady(db))return technicalSetupResult("BLOCKED","credential_migration_missing");
+        if(!("connect" in db)||typeof (db as PgPoolLike).connect!=="function")return technicalSetupResult("BLOCKED","technical_setup_admission_unavailable");
+        return admitTechnicalSetup(userId,()=>verifyAndCommission(userId,parsed));
+      }
+      if(input.expectedOwnerId!==userId||(!execute&&input.confirmation!==TECHNICAL_SETUP_CONFIRMATION)||
+        Object.keys(input).some(key=>!["expectedOwnerId","confirmation",...(execute?["attemptId","planDigest"]:[])].includes(key))||
+        (execute&&(typeof input.attemptId!=="string"||!UUID.test(input.attemptId)||typeof input.planDigest!=="string"||!/^[a-f0-9]{64}$/.test(input.planDigest))))
+        return technicalSetupResult("BLOCKED","explicit_technical_setup_confirmation_required");
+      if(!await credentialTablesReady(db))return technicalSetupResult("BLOCKED","credential_migration_missing");
+      if(!("connect" in db)||typeof (db as PgPoolLike).connect!=="function")return technicalSetupResult("BLOCKED","technical_setup_admission_unavailable");
+      return admitTechnicalSetup(userId,async()=>{
+        try{
+          if(execute){
+            const plan=await reviewPlan(userId,input.attemptId as string);
+            if(!plan||plan.digest!==input.planDigest)return technicalSetupResult("BLOCKED","technical_setup_plan_changed");
+            return executeReview(userId,plan);
+          }
+          const prepared=await advanceOnce(userId);
+          if((prepared.stage==="PREPARED"||prepared.stage==="NEEDS_OWNER_ACTION")&&prepared.attemptId){
+            const plan=await reviewPlan(userId,prepared.attemptId);
+            if(plan)return {...prepared,review:publicTechnicalSetupReview(plan)};
+          }
+          return prepared;
+        }catch{return technicalSetupResult("BLOCKED","technical_setup_unavailable");}
+      });
     },
   };
 }

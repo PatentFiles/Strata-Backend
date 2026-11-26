@@ -6,19 +6,26 @@ import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
  */
 import {pool} from "@workspace/db";
 import {loadedMaterial} from "./inAppProtectiveRelease";
-import {readOwnedKalshiFeeds,personalAccountSnapshot} from "./personalExchangeRead";
+import {readOwnedKalshiFeeds,personalAccountSnapshot,type OwnedKalshiRead} from "./personalExchangeRead";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
 import {inspectWalletV4Readiness} from "./walletV4CommissioningReadiness";
-import type {Identity,Request} from "../v13-production/types";
+import type {Identity,Request,Snapshot} from "../v13-production/types";
+import {dedicatedSignerFingerprint} from "./commissioning";
 
 type Row=Record<string,unknown>;
 type Db={query(sql:string,params?:unknown[]):Promise<{rows:Row[]}>};
+export type MatchingCommissioningEvidence={account:Row;snapshot:Snapshot;feeds:OwnedKalshiRead;historyDigest:string;initialFundingCandidate:boolean};
 type ProofDeps={
  db?:Db;now?:()=>number;
  material?:typeof loadedMaterial;read?:typeof readOwnedKalshiFeeds;
  map?:typeof personalAccountSnapshot;flat?:typeof migrationFlatHistoryCheck;
  feeProbe?:typeof probeCurrentKalshiFeeApi;v4?:typeof inspectWalletV4Readiness;
+ // Internal caller only: a stopped, approved, not-yet-commissioned account
+ // can collect read-only evidence. HTTP callers cannot set this option.
+ allowStoppedUncommissioned?:boolean;
+ /** Internal collector only. No mutation or client-supplied evidence. */
+ captureCommissioningEvidence?:(evidence:MatchingCommissioningEvidence)=>void;
 };
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const digits=(x:unknown)=>typeof x==="string"&&/^(0|[1-9]\d*)$/.test(x);
@@ -45,8 +52,8 @@ export type SignedReleaseProof=ReturnType<typeof no>|{
 // ARM -> DISARM ABA, which does not advance the worker fencing_token.
 export const OWNER_SIGNED_PROOF_ACCOUNT_SQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.kalshi_connection_id,
- a.key_fingerprint,a.commissioned,a.kill_switch,a.blocked_reason,
- a.cash_precision_verified,a.cash_micros,a.reserved_micros,
+ a.key_fingerprint,a.commissioned,a.execution_enabled,a.kill_switch,a.blocked_reason,
+ a.cash_precision_verified,a.cash_micros,a.initial_cash_micros,a.reserved_micros,
  a.policy_id,p.state AS policy_state,p.fee_policy_version,
  jsonb_build_object('account',a.xmin::text,'policy',p.xmin::text,
   'lease',w.xmin::text,'fence',w.fencing_token::text,'holder',w.holder_id,
@@ -98,7 +105,9 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   const a=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
   if(a.rows.length!==1)return no("owned_execution_account_missing_or_ambiguous");
   account=a.rows[0]!;
-  if(account.commissioned!==true||account.policy_state!=="APPROVED")
+  const eligible=account.commissioned===true||(deps.allowStoppedUncommissioned===true&&
+    account.commissioned===false&&account.execution_enabled===false&&account.kill_switch===true);
+  if(!eligible||account.policy_state!=="APPROVED")
    return no("approved_commissioned_account_required");
   if(account.diagnostic_held!==true||!account.hold_revision)
    return no("account_must_be_killed_or_stopped_and_flat_for_diagnostic");
@@ -117,6 +126,8 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  try{creds=await (deps.material??loadedMaterial)(db as never,
   account as never);}catch{return no("restricted_signer_read_unavailable");}
  if(!creds)return no("restricted_signer_not_verified");
+ if(deps.captureCommissioningEvidence&&dedicatedSignerFingerprint(creds.keyId,creds.privateKey)!==account.key_fingerprint)
+  return no("restricted_signer_not_verified");
  const started=clock();
  if(!Number.isSafeInteger(started)||started<=0)
   return no("signed_exchange_clock_invalid");
@@ -139,10 +150,15 @@ export async function inspectOwnerSignedExchangeReleaseProof(
    :(deps.flat??migrationFlatHistoryCheck)(mapped,history!.expectedRequests);
  const cashMatch=digits(read.cashMicros)&&read.cashMicros===String(account.cash_micros);
  const exchangeFlat=flat.ok===true;
+ // Pre-funding zero accounts may collect evidence for the existing registered
+ // initial-funding transition. The collector is not permission to write it.
+ const initialFundingCandidate=account.commissioned===false&&account.execution_enabled===false&&account.kill_switch===true&&
+  String(account.cash_micros)==='0'&&String(account.initial_cash_micros)==='0'&&digits(read.cashMicros)&&BigInt(read.cashMicros)>0n&&
+  history!.rows.length===0&&mapped.orders.length===0&&mapped.fills.length===0&&mapped.positions.length===0&&mapped.settlements.length===0;
  // Kalshi series multiplier alone is never a full issuer monetary authority.
  // Full formula, rounding, exceptions and owner fee authority are separate.
  let feeMetadata=false;
- if(exchangeFlat&&cashMatch){
+ if(!deps.captureCommissioningEvidence&&exchangeFlat&&cashMatch){
   try{
    const f=await (deps.feeProbe??probeCurrentKalshiFeeApi)();
    feeMetadata=f.ok===true;
@@ -150,13 +166,13 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  }
  let exit=false,ownerSha=false;
  try{
-  const v=await (deps.v4??inspectWalletV4Readiness)(ownerId);
-  exit=v.ok&&v.checks.protectiveExitRelease===true;
-  ownerSha=v.ok&&v.checks.ownerShaApproval===true;
+  const v=deps.captureCommissioningEvidence?null:await (deps.v4??inspectWalletV4Readiness)(ownerId);
+  exit=v?.ok===true&&v.checks.protectiveExitRelease===true;
+  ownerSha=v?.ok===true&&v.checks.ownerShaApproval===true;
  }catch{/* remain false; never grant permission */}
  // Final read is after ALL exchange/fee/readiness awaits. No locks span network.
  try{
-  if(history!.neverPosted.length>0){
+  if(history!.neverPosted.length>0||deps.captureCommissioningEvidence){
    const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
    if(finalHistory.historyDigest!==history!.historyDigest)return no("financial_history_changed_during_signed_diagnostic",true);
   }
@@ -168,6 +184,10 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  const completed=clock();
  if(!Number.isSafeInteger(completed)||completed<started||completed-started>45_000)
   return no("signed_exchange_read_stale",true);
+ if(deps.captureCommissioningEvidence&&exchangeFlat&&(cashMatch||initialFundingCandidate)&&
+   account.execution_enabled===false&&account.kill_switch===true&&completed-started<=15000){
+  deps.captureCommissioningEvidence({account:structuredClone(account),snapshot:structuredClone(mapped),feeds:structuredClone(read),historyDigest:history!.historyDigest,initialFundingCandidate:!cashMatch&&initialFundingCandidate});
+ }
  const blockedReasons:string[]=[];
  if(!exchangeFlat)blockedReasons.push(flat.ok?"exchange_flatness_unverified":flat.reason);
  if(!cashMatch)blockedReasons.push("exchange_cash_differs_from_persisted_ledger");
@@ -185,4 +205,16 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   recordPersisted:false,observedAt:new Date(started).toISOString(),
   blockedReasons,
  };
+}
+
+/** Reuse the same authenticated history reader and scope fence without waiting
+ * for unrelated fee/exit reads to consume the 15-second financial evidence
+ * window. The returned evidence stays server-side and has no write authority. */
+export async function collectCommissioningCashEvidence(ownerId:string,deps:ProofDeps={}){
+ const collected:{evidence:MatchingCommissioningEvidence|null}={evidence:null};
+ const proof=await inspectOwnerSignedExchangeReleaseProof(ownerId,{
+  ...deps,allowStoppedUncommissioned:true,
+  captureCommissioningEvidence:e=>{collected.evidence=e;},
+ });
+ return {proof,evidence:collected.evidence};
 }

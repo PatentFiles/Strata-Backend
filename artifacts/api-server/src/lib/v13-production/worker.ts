@@ -1,6 +1,10 @@
+import {IndependentWorkerReplay,type IndependentReplayPorts,type IndependentReplayScope} from './independentWorkerReplay';
 import {signalTraceSourceAgeMs} from "./signalTraceSourceAge";
 import {onCommittedForwardSignal,type CommittedForwardSourceHint} from "../forwardTestSignalWake";
 import { ProductionExecutor } from "./executor";
+import {enqueueLiveDecision,liveAnalyticsFailure} from "./liveDecisionAnalytics";
+import {deployedGitSha,requireIndependentPaperCutover} from "../strata/deployedGitSha";
+import {getOwnedFeeFailureStage} from "../strata/ownedFeeFailureDiagnostic";
 import { consumeOwnedPosition, type ProtectiveExitDispatch } from "./consumer";
 import {sanitizedDecisionReason,type LiveSignalPhase} from "./signalDecisionTrace";
 
@@ -20,12 +24,25 @@ export function nextSequentialPollDelayMs(intervalMs:number,elapsedMs:number):nu
 }
 
 export class ProductionWorker {
+  /** Staging-only assembly with no execution, signing, or paper capabilities.
+   * Existing production factories do not call this entry point. */
+  static createIndependentReplay(scope:IndependentReplayScope,reads:IndependentReplayPorts):IndependentWorkerReplay {
+    if(process.env.NODE_ENV!=='test'||process.env.RAILWAY_ENVIRONMENT_ID||
+      process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_PROJECT_ID)
+      throw new Error('independent_worker_replay_test_only');
+    return new IndependentWorkerReplay(scope,reads);
+  }
+
   /** Trusted same-session recovery only. No route/client can supply this hook.
    * Returning false retains the normal fail-closed scheduler stop. */
   recoverUnreconciledEntry:((error:unknown)=>Promise<boolean>)|null=null;
   heldRecoveryActive:(()=>boolean)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private readonly idleWaiters=new Set<()=>void>();
+  whenIdle():Promise<void>{return this.running?new Promise(resolve=>this.idleWaiters.add(resolve)):Promise.resolve();}
+  private lifecycle = 0;
+  private starting: Promise<void> | null = null;
   private recoveryOnly = false;
   private pendingSourceHint:CommittedForwardSourceHint|undefined;
   private mandatoryReconcileActive=false;
@@ -49,7 +66,8 @@ export class ProductionWorker {
     readonly recoverProtectiveExits: () => Promise<void> = async () => {},
     /** Trusted owner-scoped IOC exit, never obtained from user requests. */
     readonly dispatchProtectiveExit?: ProtectiveExitDispatch,
-    readonly signalTrace: SignalTracePort|null=null) {}
+    readonly signalTrace: SignalTracePort|null=null,
+    readonly independentPaperCutover=requireIndependentPaperCutover()) {}
   private async recordDecision(input:Parameters<SignalTracePort["record"]>[0]):Promise<boolean>{
     return this.signalTrace?this.signalTrace.record(input):true;
   }
@@ -60,7 +78,7 @@ export class ProductionWorker {
    * it cannot submit orders, reopen entries, or schedule a trading tick.
    */
   private scheduleTraceSweep(observedAt: number): void {
-    if (!this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
+    if ((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.independentSourceBound || !this.signalTrace || this.traceSweepsStopped || this.traceSweep ||
         observedAt - this.lastTraceSweepAt < 30_000) return;
     this.lastTraceSweepAt = observedAt;
     const trace = this.signalTrace;
@@ -75,6 +93,7 @@ export class ProductionWorker {
   async tick(origin: "normal" | "committed_signal" = "normal"): Promise<void> {
     if (this.running) return;
     this.running = true;
+    const tickLifecycle=this.lifecycle;
     try {
       // Resolve or retain UNKNOWN protective exits BEFORE ordinary reconciliation
       // and before any chance of a new entry. Failures stop this tick; never POST.
@@ -98,7 +117,72 @@ export class ProductionWorker {
       if(renewal?.technicalRenewal === "deferred")this.technicalRenewalDebt=true;
       else if(renewal?.technicalRenewal === "settled")this.technicalRenewalDebt=false;
       if (this.recoveryOnly) return;
-      await consumeOwnedPosition(this.executor, this.dispatchProtectiveExit);
+      if(this.executor.independentSourceBound){
+        // The independent owner source never reads a paper window, evaluation or wake.
+        const held=await this.executor.ledger.pool.query("SELECT id,market,side,quantity_hundredths::text FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0 ORDER BY id",[this.executor.ledger.accountId]);
+        // Entry authorization is not a protective-exit gate. Existing account
+        // STOP/kill, reconciliation and reduce-only financial gates still apply.
+        if(held.rows.length){
+          for(const pos of held.rows){
+            if(this.lifecycle!==tickLifecycle)return;
+            const sourceId=await this.executor.captureIndependentExit(pos.id);
+            if(!sourceId||this.lifecycle!==tickLifecycle)continue;
+            const account=await this.executor.ledger.readAccount();
+            if(account.minimum_exit_micros===null)throw Error("production_exit_floor_not_approved");
+            if(this.executor.exchange.mode==="LIVE"){
+              if(!this.dispatchProtectiveExit)throw Error("reviewed_protective_exit_worker_not_bound");
+              if(pos.side!=="YES"&&pos.side!=="NO")throw Error("protective_exit_side_unverified");
+              await this.dispatchProtectiveExit({positionId:pos.id,market:pos.market,side:pos.side,
+                quantityHundredths:pos.quantity_hundredths,minimumExitMicros:account.minimum_exit_micros,directHeldId:sourceId});
+            }else{
+              const intent=await this.executor.prepareExit(pos.id,account.minimum_exit_micros/1000000,sourceId);
+              if(this.lifecycle!==tickLifecycle)return;
+              await this.executor.dispatch(intent);
+            }
+          }
+          return;
+        }
+        const audit=(stage:"ENTRY_GATE"|"PREPARE"|"DISPATCH",reasonCode:string,sourceId?:string,error?:unknown)=>{
+          const feeStage=getOwnedFeeFailureStage(error);
+          if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
+            enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
+              ...(feeStage?{reasonDetail:feeStage}:{})});
+        };
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){
+          if(!this.entryHoldReported){this.entryHoldReported=true;audit("ENTRY_GATE","production_entries_not_authorized");}
+          return;
+        }
+        this.entryHoldReported=false;
+        const id=await this.executor.captureIndependentEntry();
+        if(!id)return;
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_after_observation",id);return;}
+        let intent:string;
+        try{intent=await this.executor.prepareEntry(id);}
+        catch(error){audit("PREPARE",liveAnalyticsFailure(error),id,error);throw error;}
+        if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_before_dispatch",id);return;}
+        try{await this.executor.dispatch(intent);}
+        catch(error){audit("DISPATCH",liveAnalyticsFailure(error),id,error);throw error;}
+        // A dispatcher callback returning is not proof of an order or fill.
+        // This is advisory DISPATCH context; a second OBSERVATION would replace
+        // the richer source record used by the analytics normalizer.
+        try{
+          if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
+            enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
+              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
+              reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
+        }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
+        return;
+      }
+      if(!this.independentPaperCutover||this.executor.exchange?.mode!=="LIVE")
+        await consumeOwnedPosition(this.executor,this.dispatchProtectiveExit);
+      if((this.independentPaperCutover&&this.executor.exchange?.mode === "LIVE") || this.executor.liveEntryContained){
+        if(!this.entryHoldReported){
+          this.entryHoldReported=true;
+          this.report(new Error("production_independent_entry_source_unavailable"));
+        }
+        return;
+      }
       if (!this.entriesOpen()) {
         // A healthy reconciliation heartbeat does not prove entries are open.
         // Report this once per suspended interval without attempting an order.
@@ -114,6 +198,10 @@ export class ProductionWorker {
       // 15-second replay window, determines which paper signals remain
       // executable. Newest first: do not spend a slow Kalshi/fee fetch on an
       // older crossing while a newer qualifying entry expires.
+      // A non-PREPARED intent can never dispatch again. Exclude it before the
+      // bounded result limit and provider reads; PREPARED remains eligible for
+      // its original one-use dispatch. The locked duplicate check in prepareEntry
+      // still resolves races and remains the only reservation authority.
       const query = this.executor.accountOwnerUserId
         ? `SELECT e.id,e.evaluated_at FROM forward_test_evaluations e
           JOIN v13_production_account a ON a.id=$1
@@ -123,6 +211,11 @@ export class ProductionWorker {
             AND e.fresh_cross=true AND e.signal IN ('SCOUT','CONFIRM')
             AND e.evaluated_at BETWEEN $2::timestamptz -
               (p.max_quote_age_ms * interval '1 millisecond') AND $2::timestamptz
+            AND NOT EXISTS (SELECT 1 FROM v13_production_intent i
+              WHERE i.account_id=a.id AND i.evaluation_id=e.id AND i.state<>'PREPARED')
+            AND NOT EXISTS (SELECT 1 FROM v13_production_intent i
+              WHERE i.account_id=a.id AND i.kind='ENTRY' AND i.crossing_key=e.crossing_key
+                AND i.state<>'PREPARED')
           ORDER BY e.evaluated_at DESC,e.id DESC LIMIT 100`
         : `SELECT id,evaluated_at FROM forward_test_evaluations
           WHERE evaluation_source='paper' AND qualifying_trigger=true
@@ -187,37 +280,66 @@ export class ProductionWorker {
         // an abort-ignoring adapter cannot start replacement speculative work.
         void metadata?.drained.catch(()=>{});
         this.running = false;
+        for(const resolve of this.idleWaiters)resolve();this.idleWaiters.clear();
       }
     }
   }
-  async start(): Promise<void> {
-    if (this.timer) return;
-    await this.recoverProtectiveExits();
-    await this.executor.reconcile();
-    await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
-    this.recoveryOnly = false;
-    this.schedule();
-  }
-  async startRecovery(): Promise<void> {
-    if (this.timer) return;
-    await this.executor.ledger.readAccount();
-    this.recoveryOnly = true;
-    try { await this.recoverProtectiveExits(); await this.executor.reconcile(); }
-    catch (error) { this.report(error); }
-    this.schedule();
+  start(): Promise<void> { return this.beginStart(false); }
+  startRecovery(): Promise<void> { return this.beginStart(true); }
+  private beginStart(recoveryOnly: boolean): Promise<void> {
+    if (this.timer) return Promise.resolve();
+    // Repeated START cannot install multiple loops or wake subscriptions. STOP
+    // invalidates this generation even before the first timer exists.
+    if (this.starting) return this.starting;
+    const lifecycle = this.lifecycle;
+    const current = () => lifecycle === this.lifecycle;
+    const pending = Promise.resolve().then(async () => {
+      if (!current()) return;
+      if (recoveryOnly) {
+        await this.executor.ledger.readAccount();
+        if (!current()) return;
+        try {
+          await this.recoverProtectiveExits();
+          if (!current()) return;
+          await this.executor.reconcile();
+        } catch (error) {
+          if (current()) this.report(error);
+        }
+      } else {
+        await this.recoverProtectiveExits();
+        if (!current()) return;
+        await this.executor.reconcile();
+        if (!current()) return;
+        // The API must never read a paper position or enable a normal
+        // unbound LIVE worker. UNKNOWN recovery uses startRecovery instead.
+        if(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE"&&!this.executor.independentSourceBound)
+          throw Error("production_independent_entry_source_unavailable");
+        await this.executor.ledger.transaction((tx, a) => this.executor.gate(tx, a, false, null, true));
+      }
+      if (!current()) return;
+      this.recoveryOnly = recoveryOnly;
+      this.schedule();
+    }).catch(error => { if (current()) throw error; })
+      .finally(() => { if (this.starting === pending) this.starting = null; });
+    this.starting = pending;
+    return pending;
   }
   private schedule(): void {
+    const lifecycle = this.lifecycle;
+    const current = () => lifecycle === this.lifecycle;
     this.traceSweepsStopped = false;
     let active=false,pending=false;
     const loop = async (origin: "normal" | "committed_signal" = "normal") => {
+      if (!current() || !this.timer) return;
       active=true;
       const tickStartedAt = Date.now();
       try { await this.tick(origin); } catch (error) {
+        if (!current()) return;
         this.report(error);
         if(this.recoverUnreconciledEntry && (this.heldRecoveryActive?.() ||
           (error instanceof Error && error.message === "personal_exchange_history_unreconciled"))){
-          try{if(!await this.recoverUnreconciledEntry(error))this.stop();}
-          catch(recoveryError){this.report(recoveryError);this.stop();}
+          try{const recovered=await this.recoverUnreconciledEntry(error);if(current()&&!recovered)this.stop();}
+          catch(recoveryError){if(current()){this.report(recoveryError);this.stop();}}
         }else if (error instanceof Error && (error.message === "personal_exchange_history_unreconciled" ||
           error.message === "stale_worker_fence" || error.message === "account_kill_switch")) this.stop();
       }
@@ -227,12 +349,12 @@ export class ProductionWorker {
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
       active=false;
-      if (this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
+      if (current() && this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));
       pending=false;
     };
-    this.detachWake=onCommittedForwardSignal((hint)=>{
-      if(!this.timer||this.recoveryOnly)return;
+    this.detachWake=(this.independentPaperCutover&&this.executor.exchange?.mode==="LIVE")||this.executor.liveEntryContained||this.executor.independentSourceBound?null:onCommittedForwardSignal((hint)=>{
+      if(!current()||!this.timer||this.recoveryOnly)return;
       if(hint){
         this.pendingSourceHint=hint;
         if(this.metadataAttempt&&this.metadataAttempt.source.evaluationId!==hint.evaluationId)
@@ -244,7 +366,7 @@ export class ProductionWorker {
     });
     this.timer = setTimeout(loop, 0);
   }
-  stop(): void { this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  stop(): void {this.lifecycle++;this.starting=null; this.pendingSourceHint=undefined;this.metadataAttempt?.discard("entry_metadata_stopped"); this.traceSweepsStopped = true; this.detachWake?.();this.detachWake=null; if (this.timer) clearTimeout(this.timer); this.timer = null; }
   /** True only after start() has scheduled the loop. Database flags are not a substitute. */
   isScheduled(): boolean { return this.timer !== null; }
 }

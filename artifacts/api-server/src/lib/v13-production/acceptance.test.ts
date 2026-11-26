@@ -1,23 +1,33 @@
+import "./reconciliationEventDigests.test";
+import "./prepareEntryCapacity.test";
+import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
 import "./reconciliationProjection.postgres.test";
 import "./finalAccountProofProjection.test";
 import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
+import {DirectEntrySource} from "./directEntrySource";
+import {AccountScopedExchange} from "../strata/accountProductionSession";
+import {createIndependentProductionFetch} from "./liveEntryContainment";
+import {persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION} from "../strata/personalCashReconciliation";
+import {dedicatedSignerFingerprint} from "../strata/commissioning";
 import {canonicalEntryQuoteEvidenceDigest} from "./entryQuoteEvidence";
 import {digest} from "./types";
 import { readSubaccountSpendableCash } from "../strata/personalMarketAdapter";
 import {createEntryWireClockFetch} from "../strata/entryWireClock";
 import {createGuardedReviewedApiFeeFetch} from "../strata/guardedReviewedApiFeeWire";
 import {annotateFeeFailure} from "../strata/feeFailureDiagnostics";
+import {ownedFeeFailure} from "../strata/ownedFeeFailureDiagnostic";
 import {API_SOURCE_POLICY_VERSION,API_SOURCE_FORMULA_VERSION} from "../strata/apiFeeSourceStage";
 import assert from "node:assert/strict";
+import {setTimeout as wait} from "node:timers/promises";
 import test, { after } from "node:test";
 import { pool } from "@workspace/db";
-import { randomUUID, generateKeyPairSync, createHash } from "node:crypto";
+import { randomUUID, generateKeyPairSync, createHash, createVerify, constants } from "node:crypto";
 import { V13_CHAMPION_PARAMETER_HASH, V13_CHAMPION_PARAMETER_SET,
   V13_ENTRY_POLICY_VERSION } from "@workspace/v13-strategy";
 import { computeV13LiveMoneyPolicyHash, type V13ApprovedLiveMoneyPolicy } from "../v13LiveMoneyRisk";
-import { ProductionLedger, identity, TERMINAL_POSITION_BATCH_SQL } from "./ledger";
+import { ProductionLedger, identity, TERMINAL_POSITION_BATCH_SQL, FINAL_ACCOUNT_PROJECTION_SQL } from "./ledger";
 import { ProductionExecutor } from "./executor";
 import { ProductionWorker } from "./worker";
 import { encodeProductionOrder, KalshiProductionExchange } from "./transport";
@@ -164,6 +174,117 @@ test("a partial parameter identity is rejected without altering an evaluation", 
   assert.equal(row.strategy_parameter_hash, V13_CHAMPION_PARAMETER_HASH);
 });
 
+test("independent market crossing reaches the existing isolated executor without a paper evaluation or window",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-TEST-000";
+ f.exchange.now=open+10000;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ let btc=99999;
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);
+ const worker=new ProductionWorker(f.executor);
+ // No paper worker, history, or window. The first sample is not a crossing.
+ await worker.tick();assert.equal(f.exchange.posts.length,0);
+ f.exchange.now+=1000;btc=100010;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ await worker.tick();
+ assert.equal(f.exchange.posts.length,1);
+ assert.equal(f.exchange.posts[0]!.market,ticker);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_windows")).rows[0].n,0);
+ await assert.rejects(f.executor.prepareEntry(randomUUID()),/production_source_not_qualifying_champion/);
+ const other=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await other.readExact(pool,rows[0].direct_source_id,f.exchange.now),null);
+ assert.equal(await source.readExact(pool,rows[0].direct_source_id,f.exchange.now+5001),null);
+ await f.executor.dispatch(rows[0].id);assert.equal(f.exchange.posts.length,1);
+ // Reconcile real simulator fills, then close only the owned quantity on the
+ // exact held contract, even when new entries are explicitly disallowed.
+ f.exchange.fill(f.exchange.posts[0]!,"200");await f.executor.reconcile();
+ f.exchange.now+=1000;btc=99980;
+ f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;f.exchange.book.fee.verifiedAtMs=f.exchange.now;
+ const heldWorker=new ProductionWorker(f.executor,2500,()=>{},()=>false);
+ await heldWorker.tick();
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal(f.exchange.posts[1]!.market,ticker);assert.equal(f.exchange.posts[1]!.action,"SELL");assert.equal(f.exchange.posts[1]!.reduceOnly,true);
+ f.exchange.fill(f.exchange.posts[1]!,"100");await f.executor.reconcile();
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
+ const exit=(await pool.query("SELECT id,decision FROM v13_production_intent WHERE kind='EXIT'")).rows[0];
+ assert.ok(exit.decision.ownedEvaluation.sourceDirectHeldId);assert.equal(exit.decision.ownedEvaluation.sourcePaperEvaluationId,undefined);
+ await f.executor.dispatch(exit.id);assert.equal(f.exchange.posts.length,2);
+ // A restarted producer cannot reuse the earlier producer's custody or
+ // invent a velocity. Only consecutive new held samples can trigger momentum.
+ const restarted=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readHeldExact(pool,exit.decision.ownedEvaluation.sourceDirectHeldId,rows[0].id,f.exchange.now),null);
+ f.exchange.now+=1000;btc=100030;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ f.exchange.now+=1000;btc=100025;
+ const momentum=await restarted.captureHeld(pool,rows[0].id);assert.ok(momentum);
+ const momentumSource=await restarted.readHeldExact(pool,momentum,rows[0].id,f.exchange.now);
+ assert.equal(momentumSource?.signed_buffer,25);assert.equal(momentumSource?.velocity,-300);
+ // A long gap resets momentum instead of deriving a sell from stale samples.
+ f.exchange.now+=5001;btc=100020;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ // The exact held market's closure cannot become a new order or market.
+ f.exchange.now=close;btc=99980;
+ assert.equal(await restarted.captureHeld(pool,rows[0].id),null);
+ assert.equal(f.exchange.posts.length,2);
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0].quantity_hundredths,"100");
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ await invariant(f.ledger);
+});
+test("owned fee refusal identifies first direct market read without an intent or reservation",async()=>{
+ const f=await fixture();
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-FEE-REFUSAL";
+ f.exchange.now=open+10000;
+ let btc=99999;
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:null},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),
+   yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST",timestampAuthority:"LOCAL_RECEIPT_ONLY",
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ },()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);
+ const invalidPin={ownerId:"10000000-0000-4000-a000-000000000001",releaseSha:"b".repeat(40),
+  holderId:"fixture",fencingToken:"1",credentialFingerprint:"a".repeat(64)};
+ assert.throws(()=>source.assertFirstReadReceiptWorkerPin(invalidPin),/direct_fee_refusal_requires_live_observation/);
+ assert.throws(()=>f.executor.bindFirstReadReceiptWriter({database:pool,pin:invalidPin}),/direct_fee_refusal_writer_binding_invalid/);
+ assert.equal(await f.executor.captureIndependentEntry(),null);
+ f.exchange.now+=1000;btc=100010;
+ const id=await f.executor.captureIndependentEntry();assert.ok(id);
+ const generic=Error("production_event_fee_evidence_unverified");
+ f.exchange.market=async()=>{throw generic};
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===generic);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(generic),undefined);
+ const refusal=ownedFeeFailure("latest_expiration");
+ f.exchange.market=async()=>{throw refusal};
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===refusal);
+ const row=(await pool.query("SELECT crossing_key,evidence_sha256 FROM strata_direct_entry_source WHERE id=$1",[id])).rows[0];
+ assert.equal(await f.executor.recordPinnedFirstReadReceipt(refusal),false);
+ const receipt=ProductionExecutor.readFirstMarketFeeRefusal(refusal);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(refusal),undefined,"first-read receipt is one-use");
+ assert.deepEqual(receipt,{accountId:"test-account",sourceId:id,crossingKey:row.crossing_key,
+  sourceSha256:row.evidence_sha256,failureStage:"latest_expiration"});
+ assert.equal(Object.isFrozen(receipt),true);
+ await assert.rejects(f.executor.prepareEntry(id),error=>error===refusal);
+ assert.equal(ProductionExecutor.readFirstMarketFeeRefusal(refusal),undefined,"one error cannot prove two failed calls");
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM v13_production_intent")).rows[0].n,0);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
+ assert.deepEqual(f.exchange.posts,[]);
+});
 async function invariant(l: ProductionLedger) {
   await l.transaction(async (tx, a) => l.assertConservation(tx, a));
 }
@@ -1026,7 +1147,6 @@ test("approved champion boundary prices remain executable with consistent refere
 
 import {readFileSync} from "node:fs";
 import {dispatchReviewedProtectiveExitOnce} from "../strata/ownerFeeEmergencyExitSignedDispatch";
-import {dedicatedSignerFingerprint} from "../strata/commissioning";
 test("owned no-send finalizer atomically preserves exposure, forbids audit forgery and permits fresh exit identity",async()=>{
  const f=await fixture(),ticker="KXBTC15M-26OCT311315-15",owner="11111111-1111-4111-8111-111111111111";
  const source=await f.source();await pool.query("UPDATE forward_test_evaluations SET market_ticker=$1 WHERE id=$2",[ticker,source]);
@@ -1050,6 +1170,7 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  await pool.query(readFileSync("../../sql/strata_emergency_exit_reservation_private.sql","utf8"));
  await pool.query(readFileSync("../../sql/strata_protective_exit_local_no_send.sql","utf8"));
  await pool.query(readFileSync("../../sql/strata_protective_exit_fractional_quantity.sql","utf8"));
+ await pool.query(readFileSync("../../sql/strata_protective_exit_final_fence_no_send_reason.sql","utf8"));
  const rid=randomUUID(),body=order as unknown as Record<string,unknown>,orderDigest=createHash("sha256").update(JSON.stringify(order)).digest("hex");
  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations
   (reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,reducing_side,quantity_hundredths,order_digest,worker_holder_id,worker_fencing_token)
@@ -1081,10 +1202,9 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  const db={connect:async()=>{const c=await pool.connect(),isFence=++connections===1;
   return {release:()=>c.release(),query:async(sql:string,args?:unknown[])=>{
    if(isFence&&sql.startsWith("SELECT r.reservation_id")){
-    // This test stubs only the final authority read; use the actual producer's
-    // serialized source and an explicit fresh five-second synthetic budget.
-    const row=(await c.query("SELECT decision->'ownedEvaluation' AS owned_evaluation FROM v13_production_intent WHERE id=$1",[exit])).rows[0];
-    return {rows:[{reservation_id:rid,reservation_age_ms:0,heartbeat_age_ms:0,...row,max_quote_age_ms:5000,source_age_ms:0,release_remaining_ms:60000}]};
+    // Explicitly absent final admissibility row. The finalizer still uses
+    // actual native locked state, exact reservation and intent mutations.
+    return {rows:[]};
    }
    if(isFence&&sql.startsWith("SELECT"))return {rows:[]};
    const r=await c.query(sql,args);
@@ -1105,6 +1225,7 @@ test("owned no-send finalizer atomically preserves exposure, forbids audit forge
  const before=(await f.ledger.readAccount()).reserved_micros;
  const result=await run();assert.equal(result.reason,"protective_exit_proven_not_posted_refresh_required");assert.equal(result.postAttempted,false);
  assert.equal(posts,0);assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[rid])).rows[0].state,"VOID");
+ assert.equal((await pool.query("SELECT reason FROM private.strata_protective_exit_local_no_send WHERE reservation_id=$1",[rid])).rows[0].reason,"final_fence_no_exact_row_before_commit");
  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[exit])).rows[0].state,"BLOCKED");
  assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position WHERE id=$1",[parent])).rows[0].quantity_hundredths,"200");
  assert.equal((await f.ledger.readAccount()).reserved_micros,before);
@@ -1177,6 +1298,77 @@ test("LIVE book receipts bind both sides and both champion signals through real 
   await f.executor.dispatch(id);assert.equal(f.exchange.posts.length,1);assert.equal(f.exchange.posts[0]!.side,side==="UP"?"YES":"NO");
  }
 });
+// Real owner-scoped signer and exact final-wire capability. Only provider
+// observations, release approval and the final network transport are isolated.
+// The source label remains SIMULATION, and all financial SQL is real PG.
+for(const variant of ["fresh","changed-body","expired-after-signing"] as const)
+test("independent owner signed entry: "+variant,async()=>{
+ const f=await liveReceiptFixture(),owner=f.executor.accountOwnerUserId!;
+ const ticker="KXBTC15M-TEST-000",pair=generateKeyPairSync("rsa",{modulusLength:2048});
+ const material={keyId:"disposable-signing-key",privateKey:pair.privateKey.export({type:"pkcs8",format:"pem"}).toString()};
+ const fingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
+ assert.ok(fingerprint);
+ await pool.query("UPDATE v13_production_account SET key_fingerprint=$1 WHERE id='test-account'",[fingerprint]);
+ f.exchange.evidence.identity.keyFingerprint=fingerprint;
+ await pool.query("DELETE FROM forward_test_evaluations; DELETE FROM forward_test_windows");
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000;
+ let btc=99999;
+ function clock(at:number){f.exchange.now=at;f.exchange.evidence.observedAtMs=at;f.exchange.book.observedAtMs=at;f.exchange.book.fee.verifiedAtMs=at;}
+ clock(open+10000);
+ const source=DirectEntrySource.isolatedSimulation({accountId:"test-account",ownerId:owner},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]})
+ },()=>f.exchange.now);
+ let posts=0,releaseChecks=0;
+ let wire:typeof fetch;
+ const raw:typeof fetch=async(input,init)=>{
+   posts++;
+   assert.equal(String(input),"https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders");
+   assert.equal(init?.redirect,"error");
+   const headers=new Headers(init?.headers),body=JSON.parse(String(init?.body));
+   assert.equal(headers.get("KALSHI-ACCESS-KEY"),material.keyId);
+   const check=createVerify("sha256");
+   check.update(headers.get("KALSHI-ACCESS-TIMESTAMP")!+"POST"+new URL(String(input)).pathname);check.end();
+   assert.equal(check.verify({key:pair.publicKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},headers.get("KALSHI-ACCESS-SIGNATURE")!,"base64"),true);
+   assert.equal(body.reduce_only,false);assert.equal(body.ticker,ticker);assert.equal(body.subaccount,1);assert.equal(body.exchange_index,2);
+   // A second invocation using the exact same signed bytes cannot send.
+   await assert.rejects(wire(input,init),/direct_entry_wire_authority_missing_or_spent/);
+   return Response.json({synthetic:true},{status:201});
+ };
+ wire=createIndependentProductionFetch(()=>f.ledger,raw);
+ const signedBoundary:typeof fetch=async(input,init)=>{
+   if(variant==="expired-after-signing")clock(f.exchange.now+5001);
+   if(variant==="changed-body"){
+    const changed=JSON.parse(String(init?.body));changed.count="99.00";
+    return wire(input,{...init,body:JSON.stringify(changed)});
+   }
+   return wire(input,init);
+ };
+ const exchange=new AccountScopedExchange({leaseState:"owned",armRequested:true,accountKill:false,globalKill:false,
+  fencingToken:1,presentedToken:1,workerActuallyScheduled:true,authenticatedUserId:owner,ownerUserId:owner,
+  credentialFingerprint:fingerprint,presentedFingerprint:fingerprint,uncertainOrderCount:0,duplicateClientOrder:false,
+  entriesAuthorized:true,liveExecutionEnabled:true},material,async id=>f.exchange.snapshot(id),signedBoundary,null,
+  async()=>f.exchange.market(),()=>true);
+ const executor=new ProductionExecutor(f.ledger,exchange,()=>f.exchange.now);
+ executor.accountOwnerUserId=owner;executor.bindIndependentLiveSource(source);
+ executor.authorizeFinalEntry=async tx=>{assert.equal(f.ledger.currentTransaction(),tx);releaseChecks++;};
+ const worker=new ProductionWorker(executor);
+ await worker.tick();assert.equal(posts,0);
+ btc=100010;clock(f.exchange.now+1000);
+ if(variant==="fresh")await worker.tick();
+ else await assert.rejects(worker.tick(),/direct_entry_wire_authority_missing_or_spent|direct_entry_original_source_expired/);
+ assert.equal(posts,variant==="fresh"?1:0);
+ const rows=(await pool.query("SELECT id,evaluation_id,direct_source_id,state,request,decision FROM v13_production_intent")).rows;
+ assert.equal(rows.length,1);assert.equal(rows[0].evaluation_id,null);assert.ok(rows[0].direct_source_id);
+ assert.equal(rows[0].decision.source.execution_environment,"SIMULATION");assert.ok(releaseChecks>=2);
+ await executor.dispatch(rows[0].id);assert.equal(posts,variant==="fresh"?1:0);
+ assert.equal((await pool.query("SELECT count(*)::int AS n FROM forward_test_evaluations")).rows[0].n,0);
+ await invariant(f.ledger);
+});
+
 test("LIVE missing or inconsistent compact evidence rejects before any reservation and preserves historical NULL",async()=>{
  for(const bad of [null,{}, {...receiptFixture().entry_quote_evidence,evidenceDigest:'f'.repeat(64)}]){
   const f=await liveReceiptFixture();await pool.query("UPDATE forward_test_evaluations SET entry_quote_evidence=$2 WHERE id=$1",[f.id,bad]);
@@ -1752,7 +1944,7 @@ test('batched transaction start preserves complete source-to-wire boundary and r
     runs.push({requests,batches,state:row.state,raw,finalSnapshots,authorizations,wireAge,refusal});
    }
    if(replay){assert.equal(runs[0].wireAge!-runs[1].wireAge!,80);
-    if(effectiveAge===-5421){assert.equal(runs[0].wireAge,5381);assert.equal(runs[1].wireAge,5301);assert.equal(runs[0].raw,0);assert.equal(runs[1].raw,0)}}
+    if(effectiveAge===-5421){assert.equal(runs[0].wireAge,5341);assert.equal(runs[1].wireAge,5261);assert.equal(runs[0].raw,0);assert.equal(runs[1].raw,0)}}
    assert.equal(runs[0].batches,runs[1].batches);assert.ok(runs[1].batches>=4);
    assert.equal(runs[0].requests-runs[1].requests,runs[1].batches);
    console.log('TRANSACTION_START_PIPELINE',JSON.stringify({effectiveAge,replay,perClientQueryDelayMs:replay?20:0,baseline:runs[0],batched:runs[1]}));
@@ -1947,4 +2139,331 @@ test("milliseconds in ts remain future-invalid on real PostgreSQL with UNKNOWN f
  assert.equal((await pool.query("SELECT count(*)::int n FROM v13_production_event")).rows[0].n,0);
  assert.equal(f.exchange.posts.length,1);
  await invariant(f.ledger);
+});
+
+test('final event digest batch preserves native account isolation, complete history and duplicate checks',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ const a=await f.ledger.readAccount(),snapshot=structuredClone(f.exchange.evidence);
+ const fill:Fill={id:'batch-fill',orderId:'local-order',clientOrderId:'local-client',market:'LOCAL-TEST',side:'YES',action:'BUY',quantityHundredths:'100',priceMicros:1,grossMicros:'1',feeMicros:'0',occurredAtMs:f.exchange.now};
+ const settlement={id:'batch-settlement',market:'LOCAL-TEST',side:'YES' as const,result:'YES' as const,quantityHundredths:'100',payoutMicros:'1',feeMicros:'0',occurredAtMs:f.exchange.now};
+ snapshot.fills=[fill];snapshot.settlements=[settlement];
+ // Synthetic proof-method fixtures only, not a claimed venue fill or ledger
+ // accounting replay. No exchange call is made and all cash deltas are zero.
+ await pool.query(`INSERT INTO v13_production_account(id,owner_user_id,subaccount,exchange_index,key_fingerprint,cash_micros,initial_cash_micros) VALUES('batch-foreign',$2,1,2,$1,0,0)`,['f'.repeat(64),randomUUID()]);
+ const insert=async(account:string,event:string,value:unknown)=>pool.query(`INSERT INTO v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at) VALUES($1,$2,$3,$4,$5,$6,0,0,$7)`,[account,event,id,event.startsWith('fill:')?'FILL':'SETTLEMENT',digest(value),value,new Date(f.exchange.now)]);
+ await insert('batch-foreign','fill:batch-fill',fill);
+ await insert('test-account','settlement:batch-settlement',settlement);
+ const run=async(s:Snapshot=snapshot)=>f.ledger.transaction(async(tx,locked)=>{
+  let batches=0;const tracked={query:async(sql:string,args?:unknown[])=>{if(sql===FINAL_ACCOUNT_PROJECTION_SQL){batches++;assert.deepEqual(args?.[0],'test-account');}return tx.query(sql,args);}};
+  try{await f.ledger.finalAccountProof(tracked as unknown as import('@workspace/db').PoolClient,locked,s,f.exchange.now);}finally{assert.equal(batches,1);}
+ });
+ await assert.rejects(run(),/production_final_unreconciled_fill/); // foreign identical ID must not satisfy own proof
+ await insert('test-account','fill:batch-fill',fill);await run();
+ const duplicate=structuredClone(snapshot);duplicate.fills.push({...fill});await run(duplicate);
+ duplicate.fills[1].feeMicros='1';await assert.rejects(run(duplicate),/production_final_unreconciled_fill/);
+ const changed=structuredClone(snapshot);changed.settlements[0].feeMicros='1';await assert.rejects(run(changed),/production_final_unreconciled_settlement/);
+ const missing=structuredClone(snapshot);missing.settlements[0].id='absent';await assert.rejects(run(missing),/production_final_unreconciled_settlement/);
+ await assert.rejects(insert('test-account','fill:batch-fill',fill),/duplicate key/);
+ await assert.rejects(f.ledger.transaction(async(tx,locked)=>{
+  const bad={query:async(sql:string,args?:unknown[])=>{if(sql===FINAL_ACCOUNT_PROJECTION_SQL)throw Error('injected-batch-read-failure');return tx.query(sql,args);}};
+  await f.ledger.finalAccountProof(bad as unknown as import('@workspace/db').PoolClient,locked,snapshot,f.exchange.now);
+ }),/injected-batch-read-failure/);
+ assert.equal(f.exchange.posts.length,0);assert.equal((await f.ledger.readAccount()).cash_micros,a.cash_micros);
+});
+
+function deferredSignal(){let resolve!:()=>void;const promise=new Promise<void>(r=>{resolve=r;});return {promise,resolve};}
+test('opt-in ENTRY final snapshot overlaps market but success waits for both proofs',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ const snapshotEntered=deferredSignal(),marketEntered=deferredSignal();let snapshotFinished=false,marketFinished=false;
+ f.exchange.snapshot=async()=>{assert.equal(f.ledger.currentFinalSnapshotEntry(),id);snapshotEntered.resolve();await marketEntered.promise;
+  await f.ledger.currentTransaction()!.query('SELECT 1');snapshotFinished=true;return structuredClone(f.exchange.evidence);};
+ f.exchange.market=async()=>{await snapshotEntered.promise;assert.equal(f.ledger.currentFinalSnapshotEntry(),null);assert.equal(snapshotFinished,false);marketEntered.resolve();marketFinished=true;return structuredClone(f.exchange.book);};
+ await f.executor.dispatch(id);assert.ok(snapshotFinished&&marketFinished);assert.equal(f.exchange.posts.length,1);
+});
+test('market refusal drains late snapshot DB work before rollback and preserves primary refusal',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ const snapshotEntered=deferredSignal(),releaseSnapshot=deferredSignal(),marketFailed=deferredSignal();let finished=false,settled=false;
+ f.exchange.snapshot=async()=>{snapshotEntered.resolve();await releaseSnapshot.promise;const tx=f.ledger.currentTransaction();assert.ok(tx);await tx.query('SELECT 1');finished=true;return structuredClone(f.exchange.evidence);};
+ f.exchange.market=async()=>{await snapshotEntered.promise;marketFailed.resolve();throw Error('injected-market-refusal');};
+ const dispatch=f.executor.dispatch(id);dispatch.then(()=>{settled=true;},()=>{settled=true;});await marketFailed.promise;
+ await new Promise(r=>setTimeout(r,20));assert.equal(settled,false);assert.equal(f.exchange.posts.length,0);
+ releaseSnapshot.resolve();await assert.rejects(dispatch,/injected-market-refusal/);assert.equal(finished,true);assert.equal(f.exchange.posts.length,0);
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[id])).rows[0].state,'BLOCKED');
+});
+test('snapshot read failure waits for market then refuses without submission',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ const entered=deferredSignal();let marketDone=false;
+ f.exchange.snapshot=async()=>{entered.resolve();throw Error('injected-snapshot-refusal');};
+ f.exchange.market=async()=>{await entered.promise;await new Promise(r=>setTimeout(r,10));marketDone=true;return structuredClone(f.exchange.book);};
+ await assert.rejects(f.executor.dispatch(id),/injected-snapshot-refusal/);assert.equal(marketDone,true);assert.equal(f.exchange.posts.length,0);
+});
+test('overlapped snapshot retains source expiry and rejects after delayed evidence',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ const entered=deferredSignal();f.exchange.snapshot=async()=>{entered.resolve();await new Promise(r=>setTimeout(r,10));f.exchange.now+=20000;return structuredClone(f.exchange.evidence);};
+ f.exchange.market=async()=>{await entered.promise;return structuredClone(f.exchange.book);};
+ await assert.rejects(f.executor.dispatch(id),/production_final_account_changed_or_unproven|production_final_evidence_expired|production_final_source_changed_or_expired/);assert.equal(f.exchange.posts.length,0);
+});
+test('overlap does not bypass final authorization revocation',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ let grants=0;f.executor.authorizeFinalEntry=async()=>{if(++grants===2)throw Error('injected-owner-revocation');};
+ await assert.rejects(f.executor.dispatch(id),/injected-owner-revocation/);assert.equal(grants,2);assert.equal(f.exchange.posts.length,0);
+});
+test('overlap never starts snapshot after a committed STOP/KILL',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;let snapshots=0;
+ f.exchange.snapshot=async()=>{snapshots++;return structuredClone(f.exchange.evidence);};
+ await pool.query("UPDATE v13_production_account SET kill_switch=true,execution_enabled=false WHERE id='test-account'");
+ await assert.rejects(f.executor.dispatch(id),/production_authority_disabled_or_uncommissioned/);assert.equal(snapshots,0);assert.equal(f.exchange.posts.length,0);
+});
+test('overlapped snapshot connection loss cannot escape into a POST or reuse released transaction',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());f.executor.overlapFinalAccountSnapshot=true;
+ const entered=deferredSignal();let lost=false;
+ f.exchange.snapshot=async()=>{const tx=f.ledger.currentTransaction()!;const pid=(await tx.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+  entered.resolve();await pool.query('SELECT pg_terminate_backend($1)',[pid]);
+  try{await tx.query('SELECT 1');}catch(error){lost=true;throw error;}return structuredClone(f.exchange.evidence);};
+ f.exchange.market=async()=>{await entered.promise;return structuredClone(f.exchange.book);};
+ await assert.rejects(f.executor.dispatch(id));assert.equal(lost,true);assert.equal(f.exchange.posts.length,0);
+ // The recovery transaction remains usable only through a different checkout.
+ assert.equal((await pool.query('SELECT state FROM v13_production_intent WHERE id=$1',[id])).rows[0].state,'BLOCKED');
+});
+
+
+test('prepare capacity batch matches prior aggregates, scopes pending reservations, and blocks concurrent different entries',async()=>{
+ const f=await fixture();
+ const day=new Date(new Date(f.exchange.now).toISOString().slice(0,10));
+ await f.ledger.transaction(async(tx,a)=>{
+  const before=(await tx.query(`SELECT
+   (SELECT count(*)::text FROM v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) AS open,
+   (SELECT coalesce(sum(basis_micros),0)::text FROM v13_production_position WHERE account_id=$1) AS basis,
+   (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1) AS total_loss,
+   (SELECT coalesce(sum(-least(pnl_micros,0)),0)::text FROM v13_production_event WHERE account_id=$1 AND occurred_at >= $2) AS daily_loss`,[a.id,day])).rows[0];
+  assert.deepEqual(await readPrepareEntryCapacity((sql,args)=>tx.query(sql,args),a.id,day),before);
+ });
+ const one=await f.source(randomUUID(),'capacity-first'),two=await f.source(randomUUID(),'capacity-second');
+ const results=await Promise.allSettled([f.executor.prepareEntry(one),f.executor.prepareEntry(two)]);
+ assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
+ const rejected=results.find(x=>x.status==='rejected') as PromiseRejectedResult;
+ assert.match(String(rejected.reason),/production_prepared_order_blocks_entry/);
+ assert.equal((await pool.query("SELECT count(*)::text n FROM v13_production_intent WHERE account_id='test-account' AND state='PREPARED'")).rows[0].n,'1');
+ await f.ledger.transaction(async(tx,a)=>{
+  await assert.rejects(readPrepareEntryCapacity((sql,args)=>tx.query(sql,args),a.id,day),/production_prepared_order_blocks_entry/);
+  // The owned pending row must not block another account's aggregate.
+  assert.deepEqual(await readPrepareEntryCapacity((sql,args)=>tx.query(sql,args),'foreign-capacity-account',day),{open:'0',basis:'0',total_loss:'0',daily_loss:'0'});
+ });
+ assert.equal(f.exchange.posts.length,0);
+});
+
+
+test('prepare capacity batch preserves nonzero exposure and realized loss aggregates',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ await f.executor.dispatch(id);f.exchange.fill(f.exchange.posts[0]!);await f.executor.reconcile();
+ const day=new Date(new Date(f.exchange.now).toISOString().slice(0,10));
+ const read=()=>f.ledger.transaction((tx,a)=>readPrepareEntryCapacity((sql,args)=>tx.query(sql,args),a.id,day));
+ const held=await read();assert.equal(held.open,'1');assert.ok(BigInt(held.basis)>0n);assert.equal(held.total_loss,'0');
+ f.exchange.evidence.settlements.push({id:'capacity-loss',market:'TEST-MARKET',side:'YES',result:'NO',quantityHundredths:'200',payoutMicros:'0',feeMicros:'0',occurredAtMs:f.exchange.now});
+ f.exchange.evidence.positions[0]!.quantityHundredths='0';await f.executor.reconcile();
+ const lost=await read();assert.equal(lost.open,'0');assert.equal(lost.basis,'0');assert.ok(BigInt(lost.total_loss)>0n);assert.equal(lost.daily_loss,lost.total_loss);
+ await f.ledger.transaction(async(tx,a)=>{const future=await readPrepareEntryCapacity((sql,args)=>tx.query(sql,args),a.id,new Date(day.getTime()+86400000));assert.equal(future.daily_loss,'0');assert.equal(future.total_loss,lost.total_loss);});
+});
+
+class DigestBatchCountingLedger extends DifferentialConservationLedger {
+ digestReads=0;failInsert=false;afterEventInsert:(()=>void)|null=null;
+ override async transaction<T>(body:(tx:import('@workspace/db').PoolClient,a:import('./ledger').Account)=>Promise<T>):Promise<T>{
+  return super.transaction((tx,a)=>body(new Proxy(tx,{get:(target,key)=>{
+   if(key==='query')return async(sql:string,args?:unknown[])=>{
+    if(typeof sql==='string'&&sql.startsWith('SELECT event_id,digest FROM v13_production_event'))this.digestReads++;
+    if(this.failInsert&&typeof sql==='string'&&sql.includes('INSERT INTO v13_production_event'))throw Error('synthetic_event_insert_failed');
+    const result=await target.query(sql,args);
+    if(typeof sql==='string'&&sql.includes('INSERT INTO v13_production_event'))this.afterEventInsert?.();
+    return result;
+   };const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+  }}),a));
+ }
+}
+async function digestBatchFinance(){
+ return (await pool.query(`SELECT
+  (SELECT jsonb_build_object('cash',cash_micros,'reserved',reserved_micros) FROM v13_production_account WHERE id='test-account') account,
+  (SELECT jsonb_agg(jsonb_build_object('id',id,'quantity',quantity_hundredths,'basis',basis_micros,'pnl',realized_pnl_micros) ORDER BY id) FROM v13_production_position WHERE account_id='test-account') positions,
+  (SELECT count(*)::text FROM v13_production_event WHERE account_id='test-account') events,
+  (SELECT jsonb_agg(jsonb_build_object('id',id,'filled',filled_hundredths,'reserved',reserved_micros,'state',state) ORDER BY id) FROM v13_production_intent WHERE account_id='test-account') intents`)).rows[0];
+}
+async function batchFilledFixture(){
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());await f.executor.dispatch(id);
+ f.exchange.fill(f.exchange.posts[0]!);const ledger=new DigestBatchCountingLedger(pool,'test-account');
+ return {...f,id,counted:ledger};
+}
+test('reconciliation batch indexes existing and newly inserted events once and preserves identical duplicate settlement idempotency',async()=>{
+ const f=await batchFilledFixture();
+ await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);assert.equal(f.counted.digestReads,1);
+ const settlement={id:'batch-identical',market:'TEST-MARKET',side:'YES' as const,result:'NO' as const,quantityHundredths:'200',payoutMicros:'0',feeMicros:'0',occurredAtMs:f.exchange.now};
+ f.exchange.evidence.settlements.push(settlement,{...settlement});f.exchange.evidence.positions[0]!.quantityHundredths='0';
+ f.counted.digestReads=0;await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);assert.equal(f.counted.digestReads,1);
+ const before=await digestBatchFinance();f.counted.digestReads=0;await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);
+ assert.equal(f.counted.digestReads,1);assert.deepEqual(await digestBatchFinance(),before);assert.equal(before.events,'2');await invariant(f.counted);
+});
+test('reconciliation changed duplicate new settlement rolls back its first insert and position mutation',async()=>{
+ const f=await batchFilledFixture();await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);
+ const before=await digestBatchFinance();const settlement={id:'batch-changed',market:'TEST-MARKET',side:'YES' as const,result:'NO' as const,quantityHundredths:'200',payoutMicros:'0',feeMicros:'0',occurredAtMs:f.exchange.now};
+ f.exchange.evidence.settlements.push(settlement,{...settlement,feeMicros:'1'});f.exchange.evidence.positions[0]!.quantityHundredths='0';
+ await assert.rejects(f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now),/production_changed_settlement/);
+ assert.deepEqual(await digestBatchFinance(),before);
+});
+test('reconciliation failed event INSERT and duplicate fill scan never acknowledge or retain partial accounting',async()=>{
+ for(const mode of ['insert_failure','duplicate_fill'] as const){const f=await batchFilledFixture(),before=await digestBatchFinance();
+  if(mode==='insert_failure')f.counted.failInsert=true;else f.exchange.evidence.fills.push({...f.exchange.evidence.fills[0]!});
+  await assert.rejects(f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now),mode==='insert_failure'?/synthetic_event_insert_failed/:/production_duplicate_fill_in_scan/);
+  assert.deepEqual(await digestBatchFinance(),before);assert.equal(f.counted.digestReads,mode==='insert_failure'?1:0);
+ }
+});
+test('reconciliation batch cannot adopt a foreign-account same-ID digest',async()=>{
+ const f=await batchFilledFixture(),fill=f.exchange.evidence.fills[0]!;
+ await pool.query(`INSERT INTO v13_production_account SELECT (jsonb_populate_record(NULL::v13_production_account,to_jsonb(a)||'{"id":"foreign-digest-account","owner_user_id":"11111111-1111-4111-8111-111111111111"}'::jsonb)).* FROM v13_production_account a WHERE id='test-account'`);
+ await pool.query(`INSERT INTO v13_production_intent SELECT (jsonb_populate_record(NULL::v13_production_intent,to_jsonb(i)||jsonb_build_object('id','foreign-digest-intent','account_id','foreign-digest-account','client_order_id','foreign-digest-client'))).* FROM v13_production_intent i WHERE id=$1`,[f.id]);
+ await pool.query(`INSERT INTO v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at) VALUES('foreign-digest-account',$1,'foreign-digest-intent','FILL','foreign-wrong-digest','{}',0,0,$2)`,['fill:'+fill.id,new Date(f.exchange.now)]);
+ await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);
+ assert.equal((await pool.query("SELECT digest FROM v13_production_event WHERE account_id='test-account' AND event_id=$1",['fill:'+fill.id])).rows[0].digest,digest(fill));
+ assert.equal(f.counted.digestReads,1);await invariant(f.counted);
+});
+
+test('held reconciliation event batch rolls back new events and retains prior freeze on final fence rejection',async()=>{
+ const f=await batchFilledFixture();await pool.query("UPDATE v13_production_account SET blocked_reason='retained_hold' WHERE id='test-account'");
+ const before=await digestBatchFinance(),account=await f.counted.readAccount();let atFinal=false;
+ await assert.rejects(f.counted.reconcileHeld(f.exchange.evidence,account.revision,{
+  now:()=>f.exchange.now,deadlineMs:f.exchange.now+10000,
+  lock:async(_tx,a)=>{assert.equal(a.blocked_reason,'retained_hold');},
+  beforeCommit:async(tx,a)=>{atFinal=true;assert.equal(a.blocked_reason,'retained_hold');assert.equal((await tx.query("SELECT count(*)::text n FROM v13_production_event WHERE account_id='test-account'")).rows[0].n,'1');throw Error('synthetic_final_fence_rejected');},
+ }),/synthetic_final_fence_rejected/);
+ assert.equal(atFinal,true);assert.deepEqual(await digestBatchFinance(),before);assert.equal((await f.counted.readAccount()).blocked_reason,'retained_hold');
+});
+
+
+test('reconciliation digest cache pins the exact inserted digest across an asynchronous INSERT',async()=>{
+ const f=await batchFilledFixture();await f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now);
+ const before=await digestBatchFinance();const settlement={id:'batch-mutating',market:'TEST-MARKET',side:'YES' as const,result:'NO' as const,quantityHundredths:'200',payoutMicros:'0',feeMicros:'0',occurredAtMs:f.exchange.now};
+ f.exchange.evidence.settlements.push(settlement,settlement);f.exchange.evidence.positions[0]!.quantityHundredths='0';
+ f.counted.afterEventInsert=()=>{settlement.feeMicros='1';};
+ await assert.rejects(f.counted.reconcile(f.exchange.evidence,(await f.counted.readAccount()).revision,f.exchange.now),/production_changed_settlement/);
+ assert.deepEqual(await digestBatchFinance(),before);
+});
+
+
+test('single final projection preserves native timestamp precision, history floor, positions, own scope and caller rollback',async()=>{
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ // Proof-only DB fixtures: no claimed exchange fill, no money movement.
+ await pool.query("UPDATE v13_production_intent SET created_at='2026-01-01T00:00:00.123456Z',state='BLOCKED',decision='null'::jsonb WHERE id=$1",[id]);
+ const current=(await pool.query('SELECT * FROM v13_production_intent WHERE id=$1',[id])).rows[0];
+ const snapshot=structuredClone(f.exchange.evidence);snapshot.historyFromMs=current.created_at.getTime();
+ const run=(snap:Snapshot=snapshot)=>f.ledger.transaction(async(tx,a)=>f.ledger.finalAccountProof(tx,a,snap,f.exchange.now));
+ await run();const gap=structuredClone(snapshot);gap.historyFromMs++;await assert.rejects(run(gap),/production_final_history_gap/);
+ const badOrder=structuredClone(snapshot);badOrder.orders=[{orderId:'different',request:current.request,terminal:false,filledHundredths:'0'}];
+ await assert.rejects(run(badOrder),/production_final_order_changed/);
+ const before=await f.ledger.readAccount(),beforePositions=(await pool.query('SELECT * FROM v13_production_position WHERE account_id=$1',[f.ledger.accountId])).rows;
+ await assert.rejects(f.ledger.transaction(async(tx,a)=>{
+  await tx.query('UPDATE v13_production_account SET revision=revision+1 WHERE id=$1',[a.id]);
+  await tx.query("UPDATE v13_production_position SET market='PROJECTION-HIGH',side='YES',quantity_hundredths=9007199254740993 WHERE id=$1 AND account_id=$2",[id,a.id]);
+  const exact=structuredClone(snapshot);exact.positions=[{market:'PROJECTION-HIGH',side:'YES',quantityHundredths:'9007199254740993'}];
+  await f.ledger.finalAccountProof(tx,a,exact,f.exchange.now);
+  await assert.rejects(f.ledger.finalAccountProof(tx,a,snapshot,f.exchange.now),/production_final_position_changed/);
+  throw Error('projection-rollback');
+ }),/projection-rollback/);
+ assert.equal((await f.ledger.readAccount()).revision,before.revision);
+ assert.deepEqual((await pool.query('SELECT * FROM v13_production_position WHERE account_id=$1',[before.id])).rows,beforePositions);
+ assert.equal(f.exchange.posts.length,0);
+});
+
+
+test("commissioned cash observation preserves ledger and rejects mismatch, running, stale and foreign owner",async()=>{
+  await fixture();
+  // PostgreSQL resolves every referenced relation even on the commissioned branch.
+  // These isolated fixture tables represent empty funding/repair registries;
+  // actual funding transitions are independently tested in the native suite.
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS private;
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_topups(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.strata_capital_credit_repair(execution_account_id text);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_pilot_transfers(
+      execution_account_id text,owner_user_id uuid,financial_account_id uuid,
+      from_subaccount smallint,to_subaccount smallint,exchange_index smallint,state text,
+      verified_exchange_transfer_id text,verified_at timestamptz,completed_at timestamptz,
+      bot_before_cents bigint,bot_after_cents bigint,amount_cents integer);
+    CREATE TABLE IF NOT EXISTS private.kalshi_owner_historical_funding(
+      execution_account_id text,owner_user_id uuid,exchange_transfer_id text,
+      transfer_created_at timestamptz,verified_at timestamptz,primary_after_cents bigint,bot_after_cents bigint);`);
+  const owner=randomUUID(),at=Date.now();
+  await pool.query("ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN IF NOT EXISTS arm_requested boolean NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS account_kill boolean NOT NULL DEFAULT false");
+  await pool.query("UPDATE v13_production_account SET owner_user_id=$1,execution_enabled=false,kill_switch=true,reconciled_at=$2 WHERE id='test-account'",[owner,new Date(at-5000)]);
+  await pool.query("INSERT INTO private.kalshi_account_worker_lease(execution_account_id,owner_user_id,holder_id,fencing_token,state,credential_fingerprint,arm_requested) SELECT id,owner_user_id,'stopped',1,'released',key_fingerprint,false FROM v13_production_account WHERE id='test-account' ON CONFLICT(execution_account_id) DO UPDATE SET owner_user_id=EXCLUDED.owner_user_id,state='released',credential_fingerprint=EXCLUDED.credential_fingerprint,arm_requested=false");
+  const read=(dollars:string,observedAtMs=at,ownerUserId=owner)=>persistOwnedCashReconciliation(pool,{
+    ownerUserId,executionAccountId:"test-account",confirmation:RECORD_OWNED_CASH_CONFIRMATION,
+    subaccount:1,exchangeIndex:2,observedAtMs,nowMs:at,maxAgeMs:15000,
+    subaccountBalance:{balance_dollars:dollars},primaryBalance:{balance:0},
+  });
+  const ledger=async()=>(await pool.query("SELECT cash_micros::text,initial_cash_micros::text,reconciled_at,execution_enabled,kill_switch FROM v13_production_account WHERE id='test-account'")).rows[0];
+  const before=await ledger();
+  assert.equal((await read("99.0000")).ok,false);
+  assert.equal((await read("100.0000",at-6000)).ok,false);
+  assert.equal((await read("100.0000",at,randomUUID())).ok,false);
+  assert.deepEqual(await ledger(),before);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=true,kill_switch=false WHERE id='test-account'");
+  await pool.query("UPDATE private.kalshi_account_worker_lease SET state='owned' WHERE execution_account_id='test-account'");
+  assert.equal((await read("100.0000")).ok,false);
+  await pool.query("UPDATE private.kalshi_account_worker_lease SET state='released' WHERE execution_account_id='test-account'");
+  assert.equal((await read("100.0000")).ok,true);
+  await pool.query("UPDATE v13_production_account SET execution_enabled=false,kill_switch=true WHERE id='test-account'");
+  const matched=await read("100.0000");assert.equal(matched.ok,true,JSON.stringify(matched));
+  assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
+});
+
+// Last: swaps out incumbent uniqueness only inside this disposable cluster.
+test("orders-off integrated retry preserves one order fence after a typed first fee refusal",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",[p.entryPolicyVersion,p.policyHash]);
+ const migration46=readFileSync("../../lib/db/drizzle/0046_strata_direct_entry_source.sql","utf8");
+ const immutability=migration46.slice(migration46.indexOf("CREATE FUNCTION public.strata_direct_source_immutable"),migration46.indexOf("ALTER TABLE public.v13_production_intent ADD COLUMN"));
+ assert.ok(immutability.includes("CREATE TRIGGER"));
+ await pool.query(immutability);
+ await pool.query(readFileSync("../../docs/strata-retry-rehearsal/retry-candidate.sql","utf8"));
+ await pool.query(readFileSync("../../docs/strata-retry-rehearsal/retry-activate-rehearsal.sql","utf8"));
+ const open=Date.now()-10_000,close=open+900000,ticker="KXBTC15M-ONE-RETRY";
+ let btc=99999;
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),
+    yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+    rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+    yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const source=DirectEntrySource.isolatedRetryRehearsal({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.throws(()=>source.assertExecutorBinding("LIVE",{accountId:"test-account",ownerId:null}),/rehearsal_requires_simulation/);
+ f.executor.bindIndependentSimulationSource(source);
+ const capture=async(price:number)=>{
+  await wait(21);f.exchange.now=Date.now();btc=price;f.exchange.book.observedAtMs=f.exchange.now;
+  f.exchange.book.fee.verifiedAtMs=f.exchange.now;return f.executor.captureIndependentEntry();
+ };
+ assert.equal(await capture(99999),null);
+ const first=await capture(100010);assert.ok(first);
+ const success=f.exchange.market.bind(f.exchange);
+ const refused=ownedFeeFailure("latest_expiration");
+ f.exchange.market=async()=>{throw refused};
+ await assert.rejects(f.executor.prepareEntry(first),error=>error===refused);
+ const receipt=ProductionExecutor.readFirstMarketFeeRefusal(refused);assert.ok(receipt);
+ const persist=async(r:typeof receipt)=>(await pool.query(
+  "SELECT strata_record_first_market_fee_refusal($1,$2,$3,$4) AS recorded",
+  [r.accountId,r.crossingKey,r.sourceId,r.sourceSha256])).rows[0].recorded;
+ assert.equal(await persist(receipt),true);
+ assert.equal(await persist(receipt),false);
+ assert.equal(await source.readExact(pool,first,f.exchange.now),null);
+ const restarted=DirectEntrySource.isolatedRetryRehearsal({accountId:"test-account",ownerId:null},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readExact(pool,first,f.exchange.now),null);
+ assert.equal(await capture(99999),null);
+ const second=await capture(100014);assert.ok(second&&second!==first);
+ assert.equal(await capture(99999),null);
+ assert.equal(await capture(100015),null,"a later fresh crossing cannot create a third immutable source");
+ f.exchange.market=success;
+ const prepared=await f.executor.prepareEntry(second);
+ assert.equal(await f.executor.prepareEntry(second),prepared,"same replacement cannot reserve twice");
+ const intents=(await pool.query("SELECT direct_source_id,state FROM v13_production_intent")).rows;
+ assert.deepEqual(intents,[{direct_source_id:second,state:"PREPARED"}]);
+ assert.deepEqual(f.exchange.posts,[]);
 });

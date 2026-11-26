@@ -166,7 +166,7 @@ for(const finalAge of [4999,5000,5001]){
   // Starting a new book request requires positive time remaining. At exactly
   // 5,000 ms the unchanged reader rejects; its later final check permits 5,000.
   if(finalAge<5000){
-    assert.equal(r.error,null);assert.equal(r.signal,'SCOUT');assert.equal(wakes,1);
+    assert.equal(r.error,null);assert.equal(r.signal,'SCOUT');assert.equal(wakes,0);
     const e=(await db.select().from(forwardTestEvaluationTable).where(eq(forwardTestEvaluationTable.id,r.evaluationId!)))[0]!;
     assert.equal(e.evaluatedAt.getTime(),cycleAt+200);assert.equal(e.btcProviderAgeMs,finalAge);
     assert.equal(current-e.evaluatedAt.getTime()+e.btcProviderAgeMs,finalAge);
@@ -192,8 +192,8 @@ test('diagnostic attempt precedes renewal while original strategy clock follows 
   const attempt=source.indexOf('const attemptedAt = options.now ?? new Date(clock());',start);
   const renew=source.indexOf('await renewWorkerLease(owner, epoch, engineId, LEASE_SECONDS, attemptedAt)',start);
   const finalTransaction=source.indexOf('const result = await withWorkerLeaseTransaction',start);
-  const wake=source.indexOf('notifyCommittedForwardSignal(result.',finalTransaction);
-  assert.ok(start<attempt&&attempt<renew&&renew<clock&&clock<finalTransaction&&finalTransaction<wake);
+  const provenance=source.indexOf('emitCommittedSourceQuote(detailMarket,',finalTransaction);
+  assert.ok(start<attempt&&attempt<renew&&renew<clock&&clock<finalTransaction&&finalTransaction<provenance);
   assert.equal(source.slice(renew,source.indexOf('let btc:',renew)).includes('withWorkerLeaseTransaction'),false);
   assert.match(source,/if\(entryQuote\)\{signal\?\.throwIfAborted\(\);assertEntrySourceFresh\(btc,detailMarket,now\.getTime\(\),entryClock\(\)\);\}/);
   for(const originalAge of ['now.getTime() - btc.providerAt.getTime()','now.getTime() - btc.receivedAt.getTime()'])

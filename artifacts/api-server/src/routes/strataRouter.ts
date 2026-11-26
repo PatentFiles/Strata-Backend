@@ -7,6 +7,7 @@ import { entryPolicyRuntimeState } from "../lib/strata/configuredStake";
 import { deployedGitSha } from "../lib/strata/deployedGitSha";
 import { REVIEWED_RELEASE } from "../lib/strata/reviewedRelease";
 import { sanitizePublic } from "../lib/v13-production/sanitize";
+import { createLiveHistoryRouter } from "./liveHistoryRouter";
 import { createStrataAccess, type StrataAccessDeps } from "../lib/strata/supabaseAuth";
 import { emptySnapshot } from "../lib/strata/commissioning";
 import { createProductionRouter, type ProductionHttpDeps } from "./productionRouter";
@@ -14,6 +15,7 @@ import { createStrataCommissioningRouter, type CommissioningPort } from "./strat
 import { closedUserScopePort, createUserExecutionRouter, type UserScopePort } from "./userExecutionRouter";
 import { createManualProfitWithdrawalRouter } from "./manualProfitWithdrawals";
 import { createProtectiveReleaseRouter } from "./protectiveReleaseRouter";
+import { createStoppedCashDiagnosticRouter } from "./stoppedCashDiagnosticHandler";
 import { readForwardTestBrtiReference } from "./forwardTest";
 import { readTriangulatedMarketStatus } from "../lib/strataResearchMarketObserver";
 import { getV13AdaptiveResearchRecommendation } from "../lib/v13StrategyResearch";
@@ -168,9 +170,13 @@ export function createStrataRouter(deps: StrataHttpDeps): IRouter {
   const access = createStrataAccess(deps);
   const router: IRouter = Router();
   router.use(createProductionRouter(deps, access.requireDeveloper));
+  // All-account financial analytics is ADMIN-only; an authenticated standard
+  // customer can read only their own execution records. No provider calls.
+  router.use(createLiveHistoryRouter(access.requireUser));
   const userScope = deps.userScope ?? closedUserScopePort();
   router.use("/me/unknown-accounting", createOwnerUnknownRecoveryRouter(access.requireUser, deps.unknownAccountingRecovery));
   router.use("/me/profit-withdrawals", createManualProfitWithdrawalRouter(access.requireUser));
+  router.use("/me/release", createStoppedCashDiagnosticRouter(access.requireUser));
   router.use("/me", createUserExecutionRouter(access.requireUser, userScope));
   router.use("/production/protective-release", createProtectiveReleaseRouter(access.requireUser));
   router.post("/production/owned-execution/enable", access.requireDeveloper, async (req, res) => {

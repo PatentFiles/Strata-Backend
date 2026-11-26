@@ -9,7 +9,7 @@ export function feedAbortCause(signal?:AbortSignal):FeedAbortCause {
    name==="ForwardFeedSiblingFailure"?"sibling_failure":"external_abort";
  }catch{return "external_abort";}
 }
-/** One unchanged deadline across parallel and owned-market reads. On failure,
+/** One unchanged deadline across parallel BTC and exact/current-market reads. On failure,
  * abort and settle sibling requests BEFORE another serialized cycle can start.
  * All production readers honor AbortSignal; never reuse observations on error.
  * Optional deadline injection is for deterministic offline tests only. */
@@ -27,14 +27,14 @@ export async function readForwardCycleFeeds(feeds:ForwardTestFeeds,priorTicker:s
   // Promise callbacks also capture a synchronous throw without losing the
   // sibling handle; every started task participates in settlement below.
   const btcRead=Promise.resolve().then(()=>{scope.signal.throwIfAborted();return feeds.btc(scope.signal);});
-  const marketRead=Promise.resolve().then(()=>{scope.signal.throwIfAborted();return feeds.market(undefined,scope.signal);});
+  // A held position already identifies its contract. New-window discovery is
+  // unrelated to its exit/settlement and can be unavailable during rollover.
+  // Read that exact ticker directly; never substitute the new market on failure.
+  const marketRead=Promise.resolve().then(()=>{scope.signal.throwIfAborted();return feeds.market(priorTicker,scope.signal);});
   pending.push(btcRead,marketRead);
-  const [btc,currentMarket]=await Promise.all([btcRead,marketRead]);
+  const [btc,market]=await Promise.all([btcRead,marketRead]);
   scope.signal.throwIfAborted();
-  const market=priorTicker&&priorTicker!==currentMarket.ticker
-   ? await feeds.market(priorTicker,scope.signal):currentMarket;
-  scope.signal.throwIfAborted();
-  return {btc,currentMarket,market};
+  return {btc,market};
  }catch(error){
   if(!scope.signal.aborted)scope.abort(new DOMException("Peer feed failed","ForwardFeedSiblingFailure"));
   await Promise.allSettled(pending);

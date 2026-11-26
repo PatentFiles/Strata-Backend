@@ -1,0 +1,99 @@
+name: Initial funding accounting PostgreSQL
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'artifacts/api-server/src/lib/strata/personalCashReconciliation*'
+      - 'artifacts/api-server/src/lib/strata/personalAccountActivation.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecution.test.ts'
+      - 'artifacts/api-server/src/lib/strata/registeredOpeningCapital*'
+      - 'artifacts/api-server/src/lib/strata/kalshiMemberReadBudget*'
+      - 'artifacts/api-server/src/lib/strata/capitalCreditDiagnostic*'
+      - 'artifacts/api-server/src/lib/kalshiAccountClient.ts'
+      - 'artifacts/api-server/src/lib/strata/ownerCommissioningFinancialChecks*'
+      - 'artifacts/api-server/src/lib/strata/ownerSelfServiceEligibility*'
+      - 'artifacts/api-server/src/lib/v13-production/liveEntryContainment*'
+      - 'artifacts/api-server/src/lib/strata/ownerSignedExchangeReleaseProof*'
+      - '.github/workflows/initial-funding-accounting-postgres.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-accounting:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: strata_setup_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d strata_setup_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/strata_setup_ci
+      NODE_ENV: test
+      CI: "true"
+      STRATA_CREDENTIAL_NATIVE_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Actual opening-basis reconciliation and ledger conservation
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalCashReconciliation.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalCashReconciliation.postgres.test.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/personalCashReconciliation.postgres.test.cjs
+      - name: Registered funding recovery and uncertain-commit regressions
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/registeredOpeningCapitalRecovery.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/registeredOpeningCapitalRecovery.postgres.test.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/registeredOpeningCapitalRecovery.postgres.test.cjs
+      - name: Personal execution and commissioning regressions
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/personalExecution.test.ts --bundle --platform=node --format=cjs --outfile=dist/personalExecution.test.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/personalExecution.test.cjs
+      - name: Owner financial evidence continuation and signed proof safety
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerCommissioningFinancialChecks.test.ts src/lib/strata/ownerSignedExchangeReleaseProof.test.ts --bundle --platform=node --format=cjs --outdir=dist/onboarding-financial --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/onboarding-financial/ownerCommissioningFinancialChecks.test.cjs dist/onboarding-financial/ownerSignedExchangeReleaseProof.test.cjs
+      - name: Two new customers, native owner admission and cross-tenant refusal
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/ownerSelfServiceEligibility.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/public-owner-admission.test.cjs --external:pg-native --external:pdfjs-dist --external:pino --external:pino-pretty
+          node --test dist/public-owner-admission.test.cjs
+      - name: Public issuer collection and explicit owner consent contracts
+        working-directory: artifacts/api-server
+        run: |
+          pnpm exec esbuild src/lib/strata/independentOfficialFeeV5.test.ts src/lib/strata/publicInitialRiskSetup.test.ts src/lib/strata/publicCommissioningRelease.test.ts --bundle --platform=node --format=cjs --outdir=dist/public-commissioning --out-extension:.js=.cjs --external:pg-native --external:pdfjs-dist --external:pdfjs-dist/* --external:pino --external:pino-pretty
+          node --test dist/public-commissioning/*.test.cjs
+      - name: Full workspace typecheck
+        run: pnpm run typecheck
+      - name: Public owner budget binding and unchanged quota fences
+        working-directory: artifacts/api-server
+        run: |
+          pnpm run test:member-read-budget
+          pnpm exec esbuild src/lib/strata/kalshiMemberReadBudget.postgres.test.ts --bundle --platform=node --format=cjs --outfile=dist/kalshiMemberReadBudget.postgres.test.cjs --external:pg-native
+          node --test dist/kalshiMemberReadBudget.postgres.test.cjs

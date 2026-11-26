@@ -2,9 +2,9 @@
 
 ## What the suite proves
 
-The native suite executes all 46 checked-in `lib/db/drizzle/*.sql` files,
+The native suite executes all 47 checked-in `lib/db/drizzle/*.sql` files,
 all 15 root `sql/*.sql` migrations, and the continuous-grant search-path
-hardening SQL. Files are applied verbatim in the explicit 62-file manifest,
+hardening SQL. Files are applied verbatim in the explicit 65-file manifest,
 including both distinct `0043` migrations. Each file's SHA-256 is emitted in
 the run log. A static test fails if a root migration is added but omitted.
 
