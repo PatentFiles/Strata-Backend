@@ -1,6 +1,7 @@
 /** Explicit owner-only economic recovery. This module NEVER submits an order,
  * changes a worker, clears a hold, or manufactures a terminal transport result. */
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {readEconomicHistoryBatch} from './economicRecoveryReadBatch';
 import {canonical,digest,requireProof,type Request} from '../v13-production/types';
 import {deployedGitSha} from './deployedGitSha';
 import {pinOwnerProtectiveHistory} from './ownerProtectiveHistoryPreviewPin';
@@ -26,12 +27,8 @@ const safe=(e:unknown)=>no(e instanceof Error&&/^economic_settlement_[a-z_]+$/.t
 export function economicSettlementEnabled(env=process.env){const sha=deployedGitSha(env);return SHA.test(sha)&&env.STRATA_ECONOMIC_SETTLEMENT_RECOVERY_SHA===sha;}
 
 async function retainedHistory(db:Query,account:string,owner:string,lock=false):Promise<ReconciledReleaseHistory>{
- const h=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner}),suffix=lock?' FOR SHARE':'';
- const read=async(table:string,where:string,key:string,limit:number)=>(await db.query(`SELECT t.*,t.xmin::text AS row_revision FROM ${table} t WHERE ${where}=$1 ORDER BY ${key} LIMIT ${limit+1}${suffix}`,[account])).rows as Row[];
- const events=await read('public.v13_production_event','account_id','event_id',3000);
- const positions=await read('public.v13_production_position','account_id','id',1000);
- const markers=await read('private.strata_emergency_exit_reservations','execution_account_id','reservation_id',1000);
- const receipts=await read('private.strata_protective_exit_reconciliations','execution_account_id','reservation_id',1000);
+ const h=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
+ const {events,positions,markers,receipts}=await readEconomicHistoryBatch(db,account,lock);
  requireProof(events.length<=3000&&positions.length<=1000&&markers.length<=1000&&receipts.length<=1000,'economic_settlement_history_bound_exceeded');
  const accountingOnlyExitClients:string[]=[];
  return {...h,events,positions,markers,receipts,accountingOnlyExitClients,
@@ -41,10 +38,15 @@ async function retainedHistory(db:Query,account:string,owner:string,lock=false):
 /** Account row is locked first by the writer. Every mutable scope row is then
  * locked before reusing evidence. Reads use a short coherent snapshot, not a
  * long database transaction held open while the venue is queried. */
-async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Deps['isScheduled'],lock=false){
- const pin=await pinOwnerProtectiveHistory(db,owner,sha);
+export type EconomicAlreadyLockedScope={account:Row;pin:NonNullable<Awaited<ReturnType<typeof pinOwnerProtectiveHistory>>>};
+async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Deps['isScheduled'],lock=false,alreadyLocked?:EconomicAlreadyLockedScope){
+ // The writer already read and FOR UPDATE locked this exact current account.
+ // Reuse that row, not an earlier preview. The full current identity pin is
+ // still reread after every related lock below and must match the preview.
+ requireProof(!alreadyLocked||(lock&&alreadyLocked.account.owner_user_id===owner&&alreadyLocked.account.id===alreadyLocked.pin.row.account_id),'economic_settlement_locked_account_scope_invalid');
+ const pin=alreadyLocked?.pin??await pinOwnerProtectiveHistory(db,owner,sha);
  requireProof(pin,'economic_settlement_owned_unknown_exit_scope_missing');const id=String(pin.row.account_id);
- const a=(await db.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid',[id,owner])).rows[0] as Row|undefined;
+ const a=alreadyLocked?.account??(await db.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid',[id,owner])).rows[0] as Row|undefined;
  requireProof(a&&!scheduled(owner,id),'economic_settlement_worker_must_be_stopped');
  const workers=(await db.query(`SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
   WHERE execution_account_id=$1 AND owner_user_id=$2::uuid${lock?' FOR UPDATE':''}`,[id,owner])).rows as Row[];
@@ -82,7 +84,7 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
   const finalPin=await pinOwnerProtectiveHistory(db,owner,sha);
   requireProof(finalPin?.digest===pin.digest,'economic_settlement_locked_identity_changed');
  }
- return {pin,account,history,worker,credentialRows,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch)};
+ return {pin,account,history,worker,credentialRows,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch),blockedReason:a.blocked_reason};
 }
 
 export function createEconomicSettlementService(deps:Deps){

@@ -23,7 +23,7 @@ export const PIN_SQL=`
   AND c.role='restricted_execution' AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL
   AND c.verification_reason='credential_verified'
  JOIN private.strata_emergency_exit_reservations r ON r.execution_account_id=a.id AND r.owner_user_id=a.owner_user_id
-  AND r.state='UNKNOWN' AND r.trading_authorized=false${economicExitNotDischarged("r.execution_account_id","r.client_order_id")}
+  AND r.state='UNKNOWN' AND r.trading_authorized=false${economicExitNotDischarged("r.execution_account_id","r.client_order_id",true)}
   AND r.worker_holder_id=w.holder_id AND r.worker_fencing_token=w.fencing_token
  JOIN public.v13_production_intent i ON i.account_id=a.id AND i.client_order_id=r.client_order_id
   AND i.market=r.market_ticker AND i.kind='EXIT' AND i.state IN ('DISPATCHED','UNKNOWN') AND i.terminal=false
@@ -34,7 +34,7 @@ export const PIN_SQL=`
   AND fa.id=w.financial_account_id AND w.arm_requested=false
   AND ((w.state IN ('released','owned') AND w.account_kill=false) OR (w.state='killed' AND w.account_kill=true))
   AND (SELECT count(*) FROM private.strata_emergency_exit_reservations other
-       WHERE other.execution_account_id=a.id AND other.state='UNKNOWN'${economicExitNotDischarged("other.execution_account_id","other.client_order_id")})=1
+       WHERE other.execution_account_id=a.id AND other.state='UNKNOWN'${economicExitNotDischarged("other.execution_account_id","other.client_order_id",true)})=1
  LIMIT 2`;
 export async function pinOwnerProtectiveHistory(db:Db, owner:string, release:string){
  if(!UUID.test(owner)||!BUILD.test(release))return null;

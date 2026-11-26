@@ -49,7 +49,9 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
  requireProof(plan.ownerId===scope.ownerId,'economic_discharge_owner_changed');
  let tx:PoolClient|undefined,committing=false,committed=false,discard=false;let connection:ReturnType<typeof transactionConnectionFence>|undefined;
  try{
-  tx=await db.connect();connection=transactionConnectionFence(tx);await tx.query('BEGIN');await tx.query("SET LOCAL lock_timeout='750ms'; SET LOCAL statement_timeout='4000ms'");
+  tx=await db.connect();connection=transactionConnectionFence(tx);
+  // One round trip installs the same transaction-local lock/statement bounds.
+  await tx.query("BEGIN; SET LOCAL lock_timeout='750ms'; SET LOCAL statement_timeout='4000ms'");
   const accounts=(await tx.query<Account>('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[plan.accountId,scope.ownerId])).rows;
   requireProof(accounts.length===1,'economic_discharge_account_missing');const a=accounts[0]!;
   requireProof(String(a.revision)===plan.expectedRevision&&String((a as unknown as Row).owner_control_epoch)===scope.controlEpoch&&a.blocked_reason===null&&

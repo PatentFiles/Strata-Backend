@@ -3,9 +3,19 @@ type Row=Record<string,unknown>;type Query={query(sql:string,args?:unknown[]):Pr
 /** Rollout only; false retains the original fail-closed UNKNOWN behavior. A
  * missing migration/function with rollout enabled is a DB failure, never zero. */
 export const economicExitFinalityEnabled=()=>process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED==='true';
-export function economicExitNotDischarged(account:string,client:string):string {
+export function economicExitNotDischarged(account:string,client:string,skipAbsentReceipt=false):string {
  for(const value of [account,client])if(!/^(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?[a-zA-Z_][a-zA-Z0-9_]*$/.test(value))throw Error('economic_discharge_sql_identifier_invalid');
- return economicExitFinalityEnabled()?` AND NOT private.strata_has_economic_exit_discharge(${account},${client})`:'';
+ if(!economicExitFinalityEnabled())return '';
+ const proof=`private.strata_has_economic_exit_discharge(${account},${client})`;
+ if(!skipAbsentReceipt)return ` AND NOT ${proof}`;
+ // This narrow PIN read optimization can only skip a proof that would be false.
+ // An absent receipt REMAINS unresolved. An existing receipt always invokes
+ // the full canonical proof. Qualified outer aliases prevent accidental inner
+ // column binding in the EXISTS subquery; default callers retain exact SQL.
+ for(const value of [account,client])if(!/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)||value.startsWith('economic_candidate.'))throw Error('economic_discharge_qualified_outer_alias_required');
+ return ` AND NOT CASE WHEN EXISTS(SELECT 1 FROM private.strata_economic_exit_discharge economic_candidate
+  WHERE economic_candidate.execution_account_id=${account} AND economic_candidate.client_order_id=${client})
+  THEN ${proof} ELSE false END`;
 }
 export async function readEconomicExitDischarges(db:Query,account:string,_lock=false){
  if(!economicExitFinalityEnabled())return [] as Row[];
