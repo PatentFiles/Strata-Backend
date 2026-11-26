@@ -80,3 +80,10 @@ export async function readEconomicPendingMoneyBatch(db:Query,account:string,lock
  const r=await read(db,account,MONEY,lock);
  return MONEY.map(s=>r[s.name]!);
 }
+
+/** Opt-in for the discharge writer. Share locks retain the same order:
+ * immutable history tables first, then the existing pending-money set. */
+export async function readLockedDischargeHistoryAndMoney(db:Query,account:string){
+ const r=await read(db,account,[...HISTORY,...MONEY],true);
+ return {events:r.events!,positions:r.positions!,markers:r.markers!,receipts:r.receipts!,pendingMoney:MONEY.map(s=>r[s.name]!)};
+}

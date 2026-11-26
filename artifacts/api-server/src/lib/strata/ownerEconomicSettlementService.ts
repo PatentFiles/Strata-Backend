@@ -1,7 +1,7 @@
 /** Explicit owner-only economic recovery. This module NEVER submits an order,
  * changes a worker, clears a hold, or manufactures a terminal transport result. */
 import {pool,type Pool,type PoolClient} from '@workspace/db';
-import {readEconomicHistoryBatch} from './economicRecoveryReadBatch';
+import {readEconomicHistoryBatch,readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
 import {canonical,digest,requireProof,type Request} from '../v13-production/types';
 import {deployedGitSha} from './deployedGitSha';
 import {pinOwnerProtectiveHistory} from './ownerProtectiveHistoryPreviewPin';
@@ -26,14 +26,43 @@ const no=(reason:string)=>({ok:false as const,reason,accountingPosted:false,orde
 const safe=(e:unknown)=>no(e instanceof Error&&/^economic_settlement_[a-z_]+$/.test(e.message)?e.message:'economic_settlement_verification_refused');
 export function economicSettlementEnabled(env=process.env){const sha=deployedGitSha(env);return SHA.test(sha)&&env.STRATA_ECONOMIC_SETTLEMENT_RECOVERY_SHA===sha;}
 
-async function retainedHistory(db:Query,account:string,owner:string,lock=false):Promise<ReconciledReleaseHistory>{
+async function retainedHistory(db:Query,account:string,owner:string,lock=false,dischargeBatch=false){
  const h=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
- const {events,positions,markers,receipts}=await readEconomicHistoryBatch(db,account,lock);
+ const batch=dischargeBatch?await readLockedDischargeHistoryAndMoney(db,account):null;
+ const {events,positions,markers,receipts}=batch??await readEconomicHistoryBatch(db,account,lock);
  requireProof(events.length<=3000&&positions.length<=1000&&markers.length<=1000&&receipts.length<=1000,'economic_settlement_history_bound_exceeded');
  const accountingOnlyExitClients:string[]=[];
- return {...h,events,positions,markers,receipts,accountingOnlyExitClients,
+ const history:ReconciledReleaseHistory={...h,events,positions,markers,receipts,accountingOnlyExitClients,
   reconciliationDigest:digest({history:h.historyDigest,events,positions,markers,receipts,accountingOnlyExitClients})};
+ return {history,pendingMoney:batch?.pendingMoney};
 }
+
+const CREDENTIAL_FIELDS=`c.id::text AS id,c.provider_connection_id::text AS provider_connection_id,c.financial_account_id,
+ c.role,c.key_fingerprint,c.vault_secret_id::text AS vault_secret_id,c.xmin::text AS row_revision`;
+/** The caller holds the exact account row. Read the lease with native pg
+ * types; credential JSON contains only the existing textual/UUID fields.
+ * Materialized dependencies preserve lease -> connection -> credential
+ * locking and forbid reading alternate owner or connection credentials. */
+const LOCKED_DISCHARGE_BINDINGS=`WITH lease AS MATERIALIZED (
+ SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
+ WHERE execution_account_id=$1 AND owner_user_id=$2::uuid LIMIT 2 FOR UPDATE OF w
+), owner_connection AS MATERIALIZED (
+ SELECT fa.id,pc.id AS provider_connection_id FROM public.financial_accounts fa
+ JOIN private.provider_connections pc ON pc.financial_account_id=fa.id
+ JOIN lease w ON pc.id=w.provider_connection_id
+ WHERE fa.id=$3 AND fa.user_id=$2::uuid AND fa.provider='kalshi'
+ AND (SELECT count(*) FROM lease)=1 AND NOT w.arm_requested AND
+  (w.state='released' OR (w.state IN ('owned','killed') AND w.heartbeat_at<=$4::timestamptz))
+ FOR UPDATE OF fa,pc
+), credentials AS MATERIALIZED (
+ SELECT ${CREDENTIAL_FIELDS} FROM private.kalshi_connection_credentials c
+ JOIN owner_connection oc ON oc.id=c.financial_account_id AND oc.provider_connection_id=c.provider_connection_id
+ WHERE c.owner_user_id=$2::uuid AND c.role IN ('verification','restricted_execution')
+ AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
+ ORDER BY c.role,c.id LIMIT 3 FOR SHARE OF c
+) SELECT w.*,(SELECT count(*)::int FROM owner_connection) AS __connection_count,
+ coalesce((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.role,c.id) FROM credentials c),'[]'::jsonb) AS __credentials
+ FROM lease w`;
 
 /** Account row is locked first by the writer. Every mutable scope row is then
  * locked before reusing evidence. Reads use a short coherent snapshot, not a
@@ -48,14 +77,16 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
  requireProof(pin,'economic_settlement_owned_unknown_exit_scope_missing');const id=String(pin.row.account_id);
  const a=alreadyLocked?.account??(await db.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid',[id,owner])).rows[0] as Row|undefined;
  requireProof(a&&!scheduled(owner,id),'economic_settlement_worker_must_be_stopped');
- const workers=(await db.query(`SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
+ const combined=lock&&!!alreadyLocked;
+ const workers=combined?(await db.query(LOCKED_DISCHARGE_BINDINGS,[id,owner,a.kalshi_connection_id,new Date(now-30000)])).rows:(await db.query(`SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
   WHERE execution_account_id=$1 AND owner_user_id=$2::uuid${lock?' FOR UPDATE':''}`,[id,owner])).rows as Row[];
  requireProof(workers.length===1,'economic_settlement_worker_scope_ambiguous');const worker=workers[0]!;
  const heartbeat=worker.heartbeat_at instanceof Date?worker.heartbeat_at.getTime():Date.parse(String(worker.heartbeat_at));
  requireProof(worker.arm_requested===false&&['owned','released','killed'].includes(String(worker.state))&&
   (worker.state==='released'||Number.isSafeInteger(heartbeat)&&heartbeat<=now-30000),
   'economic_settlement_worker_not_stale_or_released');
- if(lock){
+ if(combined)requireProof(worker.__connection_count===1,'economic_settlement_connection_changed');
+ if(lock&&!combined){
   // Account -> lease -> owned connection -> credentials -> financial history.
   // Connection/credential replacement must not race the last evidence check.
   const connections=await db.query(`SELECT fa.id FROM public.financial_accounts fa
@@ -64,16 +95,15 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
    [a.kalshi_connection_id,owner,worker.provider_connection_id]);
   requireProof(connections.rows.length===1,'economic_settlement_connection_changed');
  }
- const credentialRows=(await db.query(`SELECT c.id::text,c.provider_connection_id::text,c.financial_account_id,
-  c.role,c.key_fingerprint,c.vault_secret_id::text,c.xmin::text AS row_revision
+ const credentialRows=combined?worker.__credentials as Row[]:(await db.query(`SELECT ${CREDENTIAL_FIELDS}
   FROM private.kalshi_connection_credentials c WHERE c.owner_user_id=$1::uuid AND c.financial_account_id=$2
    AND c.provider_connection_id=$3::uuid AND c.role IN ('verification','restricted_execution')
    AND c.revoked_at IS NULL AND c.verified_at IS NOT NULL AND c.verification_reason='credential_verified'
   ORDER BY c.role,c.id${lock?' FOR SHARE':''}`,[owner,a.kalshi_connection_id,worker.provider_connection_id])).rows as Row[];
- requireProof(credentialRows.length===2&&new Set(credentialRows.map(c=>c.role)).size===2&&
+ requireProof(Array.isArray(credentialRows)&&credentialRows.length===2&&new Set(credentialRows.map(c=>c.role)).size===2&&
   credentialRows.find(c=>c.role==='restricted_execution')?.key_fingerprint===a.key_fingerprint,
   'economic_settlement_current_credential_pair_unverified');
- const history=await retainedHistory(db,id,owner,lock);
+ const {history,pendingMoney}=await retainedHistory(db,id,owner,lock,combined);
  const exit=history.rows.find(i=>i.client_order_id===pin.row.client_order_id);
  requireProof(exit,'economic_settlement_exit_missing');
  const account:EconomicSettlementAccount={id,owner_user_id:owner,subaccount:Number(a.subaccount),exchange_index:Number(a.exchange_index),key_fingerprint:String(a.key_fingerprint),
@@ -84,7 +114,7 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
   const finalPin=await pinOwnerProtectiveHistory(db,owner,sha);
   requireProof(finalPin?.digest===pin.digest,'economic_settlement_locked_identity_changed');
  }
- return {pin,account,history,worker,credentialRows,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch),blockedReason:a.blocked_reason};
+ return {pin,account,history,worker,credentialRows,pendingMoney,exitId:String(exit.id),scopeDigest,controlEpoch:String(a.owner_control_epoch),blockedReason:a.blocked_reason};
 }
 
 export function createEconomicSettlementService(deps:Deps){
