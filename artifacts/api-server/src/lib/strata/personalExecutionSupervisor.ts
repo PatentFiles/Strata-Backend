@@ -42,6 +42,8 @@ import {createGuardedOwnerV3FeeFetch} from "./guardedOwnerV3FeeWire";
 import {verifyOwnerStandingFee} from "./ownerStandingFeeAuthorization";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
 import { createGuardedMonetaryFeeFetch } from "./guardedMonetaryFeeWire";
+import {runtimeSettledExitReceipt} from "./runtimeSettledExitGuard";
+import {settledReserveReadinessEnabled} from "./armSettledReserveScope";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
 import { sealedFinancialProtectiveExitOrder } from "./ownedProtectiveFinancialIntent";
@@ -509,6 +511,10 @@ export function createProductionPersonalSession(
       if(!unresolved.ok)return unresolved;
       if(unresolved.mode==="entries")return {ok:false,reason:"production_independent_entry_source_unavailable"};
     }
+    if(settledReserveReadinessEnabled()){
+      const receipt=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now()});
+      if(receipt)return {ok:false,reason:"production_settled_disposition_exit_not_qualified"};
+    }
     const holderId = `personal-${randomUUID()}`;
     const leaseIds = leaseIdentity(loaded.row);
     if (!leaseIds) return { ok: false, reason: "worker_lease_unavailable" };
@@ -707,7 +713,7 @@ export function createProductionPersonalSession(
           technicalRelease.beginReconciliation();
           // Final authority refresh must never override a different unresolved
           // intent or protective reservation observed at this wire boundary.
-          if(currentEntry)throw new Error("production_other_uncertain_order");
+          if(currentEntry&&!settledReserveReadinessEnabled())throw new Error("production_other_uncertain_order");
         }
         checkRead();
         snapshotTiming.mark("heartbeat");
@@ -750,6 +756,11 @@ export function createProductionPersonalSession(
         snapshotTiming.mark("snapshot_mapping");
         const proven = emptySnapshot(identity, latest, requests);
         if (!("identity" in proven)) throw new Error(proven.reason);
+        if(currentEntry&&unresolvedNow.mode==="recovery"){
+          const receipt=await runtimeSettledExitReceipt(snapshotDb,{accountId:input.accountId,ownerId:input.userId,
+            snapshot:proven,nowMs:now(),currentIntentId:currentEntry,lock:true});
+          if(!receipt)throw new Error("production_other_uncertain_order");
+        }
         // Authority remains closed here. Only committed ledger reconciliation
         // or the final transactional account proof can reopen it.
         // Refresh out of band after exposure proof, never delay protective reconciliation.

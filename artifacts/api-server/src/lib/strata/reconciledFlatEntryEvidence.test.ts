@@ -43,6 +43,10 @@ test("production wiring does not convert ordinary reconciliation or successful e
  assert.doesNotMatch(exit,/executor\.dispatch\(/);
  assert.match(exit,/catch \(error\)[\s\S]*state.entriesAuthorized = false/);
  assert.match(source,/technicalRelease.completeReconciliation\(eligible&&flat\)/);
- assert.match(source,/if\(currentEntry\)throw new Error\("production_other_uncertain_order"\)/);
+ assert.match(source,/if\(currentEntry&&!settledReserveReadinessEnabled\(\)\)throw new Error\("production_other_uncertain_order"\)/);
+ assert.match(source,/if\(currentEntry&&unresolvedNow.mode==="recovery"\)[\s\S]*runtimeSettledExitReceipt[\s\S]*if\(!receipt\)throw new Error\("production_other_uncertain_order"\)/);
+ assert.ok(source.indexOf('if(receipt)return {ok:false,reason:"production_settled_disposition_exit_not_qualified"}')<source.indexOf('const claimed = await claimWorkerLease'));
+ const executor=readFileSync("src/lib/v13-production/executor.ts","utf8");
+ assert.match(executor,/current\?\.receiptDigest===retired.receiptDigest[\s\S]*if\(i.kind==="ENTRY"\)throw new Error\("production_settled_disposition_exit_not_qualified"\)/);
  assert.doesNotMatch(source,/state.entriesAuthorized\s*=\s*true/);
 });

@@ -3,6 +3,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';import {randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {runtimeSettledExitReceipt} from './runtimeSettledExitGuard';
 import {stoppedArmExposure,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 import {disposeSettledExitReserve,readSettledExitReserveOutcome} from './settledExitReserveDisposition';
 import {inspectSettledExitReserve} from './settledExitReserveEvidence';
@@ -86,6 +87,34 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
    const admitted=await stoppedArmExposure(pool,a.id,scope.ownerId,false,true);
    assert.equal(admitted.clear,true);assert.equal(admitted.receipts.length,1);
    const receipt=admitted.receipts[0]!;
+   const oldSha=process.env.RAILWAY_GIT_COMMIT_SHA,oldFlag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+   const restoreFlags=()=>{
+    if(oldSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=oldSha;
+    if(oldFlag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=oldFlag;
+   };
+   try{
+    process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+    const x={accountId:a.id,ownerId:scope.ownerId,snapshot:f.snapshot,nowMs:f.nowMs},guard=(extra:Partial<typeof x>={})=>runtimeSettledExitReceipt(pool,{...x,...extra});
+    assert.equal((await guard())?.exitId,f.exitId);
+    assert.equal(await guard({ownerId:randomUUID()}),null);
+    assert.equal(await guard({nowMs:f.nowMs+5001}),null);
+    assert.equal(await guard({snapshot:{...f.snapshot,complete:false}}),null);
+    assert.equal(await guard({snapshot:{...f.snapshot,identity:{...f.snapshot.identity,keyFingerprint:'b'.repeat(64)}}}),null);
+    assert.equal(await guard({snapshot:{...f.snapshot,settlements:[]}}),null);
+    assert.equal(await guard({snapshot:{...f.snapshot,orders:[...f.snapshot.orders,
+     {orderId:'late',request:f.history.requests[1]!,terminal:true,filledHundredths:'0'}]}}),null);
+    assert.equal((await guard({snapshot:{...f.snapshot,positions:[{market:'KXBTC15M-DIFFERENT',side:'YES',quantityHundredths:'100'}]}}))?.exitId,f.exitId);
+    await pool.query("INSERT INTO public.v13_production_intent(id,account_id,kind,state,terminal,reserved_micros) VALUES('wire-intent',$1,'ENTRY','DISPATCHED',false,0)",[a.id]);
+    assert.equal(await guard(),null);
+    assert.equal((await runtimeSettledExitReceipt(pool,{...x,currentIntentId:'wire-intent'}))?.exitId,f.exitId);
+    await pool.query("UPDATE public.v13_production_intent SET state='UNKNOWN' WHERE id='wire-intent'");
+    assert.equal(await runtimeSettledExitReceipt(pool,{...x,currentIntentId:'wire-intent'}),null);
+    await pool.query("DELETE FROM public.v13_production_intent WHERE id='wire-intent'");
+    const newMarker=randomUUID();
+    await pool.query("INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,state,trading_authorized) VALUES($1,$2,$3,'PREPARED',false)",[newMarker,scope.ownerId,a.id]);
+    assert.equal(await guard(),null);
+    await pool.query("DELETE FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[newMarker]);
+   }finally{restoreFlags();}
    assert.equal(receipt.exitId,f.exitId);assert.equal(receipt.reservationId,f.reservationId);
    assert.doesNotThrow(()=>verifyDisposedExitAgainstSnapshot(receipt,f.snapshot));
    assert.throws(()=>verifyDisposedExitAgainstSnapshot(receipt,{...f.snapshot,settlements:[]}));

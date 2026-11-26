@@ -1,3 +1,5 @@
+import {runtimeSettledExitReceipt} from '../strata/runtimeSettledExitGuard';
+import {settledReserveReadinessEnabled} from '../strata/armSettledReserveScope';
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
 import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
 import {encodeProductionOrder} from "./transport";
@@ -239,7 +241,16 @@ export class ProductionExecutor {
     return { cents, revision };
   }
 
-  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false): Promise<void> {
+  #committedSettlementSnapshot:Snapshot|null=null;
+  private async settledExitGuard(tx:PoolClient,a:Account,currentIntentId:string|null,snapshot=this.#committedSettlementSnapshot){
+    if(!snapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return null;
+    const receipt=await runtimeSettledExitReceipt(tx,{accountId:a.id,ownerId:this.accountOwnerUserId,snapshot,
+      nowMs:this.now(),currentIntentId,lock:true});
+    const age=this.now()-snapshot.observedAtMs;
+    return receipt&&age>=0&&age<=5000?receipt:null;
+  }
+  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false,
+    settledOrderProofAllowed=true): Promise<void> {
     requireProof(a.commissioned && !a.kill_switch && a.execution_enabled &&
       /^[0-9a-f]{64}$/.test(a.commissioning_digest ?? "") &&
       Number(a.subaccount) === 1 && Number(a.exchange_index) === 2, "production_authority_disabled_or_uncommissioned");
@@ -250,8 +261,18 @@ export class ProductionExecutor {
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
     // Preserve each gate boundary and refusal order. Only its independent
     // non-locking reads are batched; locked policy decoding remains separate.
-    const ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
+    let ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
       [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
+    if(ownedGate?.has_uncertain_order===true&&!lifecycle&&settledOrderProofAllowed&&this.accountOwnerUserId){
+      const proved=await this.settledExitGuard(tx,a,ignoreIntentId);
+      if(proved){
+        // Only the signed, exact retired pair was checked. Re-read the
+        // original master and policy gates; lifecycle mode is only a SQL
+        // projection here and never permits skipping any other gate.
+        const facts=(await tx.query(OWNED_GATE_READ_SQL,[a.id,ignoreIntentId,true,this.accountOwnerUserId])).rows[0];
+        if(facts)ownedGate={...facts,has_uncertain_order:false};
+      }
+    }
     const unknown = ownedGate ? null : await tx.query(`SELECT id FROM v13_production_intent WHERE account_id=$1
       AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)`, [a.id, ignoreIntentId]);
     requireProof(lifecycle || (ownedGate ? ownedGate.has_uncertain_order === false : unknown!.rows.length === 0),
@@ -296,6 +317,7 @@ export class ProductionExecutor {
     const done=this.startTiming("reconciliation");
     let schedulingResult:ReconcileSchedulingResult=undefined;
     try {
+      this.#committedSettlementSnapshot=null;
       const { account: a, earliest: floor } = await this.ledger.readReconcileAccount();
       const signed=this.startTiming("signed_snapshot"),feedTiming=new OwnedFeedTimingCapture();
       let snapshot:Snapshot;
@@ -305,6 +327,8 @@ export class ProductionExecutor {
       try {const reconciliationReceipt=this.heldReconcile
           ?await this.heldReconcile(snapshot,a.revision)
           :await this.ledger.reconcile(snapshot,a.revision,this.now());
+        if(!this.heldReconcile&&this.accountOwnerUserId&&this.exchange.mode==="LIVE"&&settledReserveReadinessEnabled())
+          this.#committedSettlementSnapshot=structuredClone(snapshot);
         commit("completed",{reconciliationReceipt});}
       catch(error){commit("rejected",{error});throw error;}
       if(this.afterReconcile&&!this.heldReconcile){
@@ -314,7 +338,7 @@ export class ProductionExecutor {
       }
       done("completed");
       return schedulingResult;
-    }catch(error){done("rejected",{error});throw error;}
+    }catch(error){this.#committedSettlementSnapshot=null;done("rejected",{error});throw error;}
   }
 
   async prepareEntry(evaluationId: string): Promise<string> {
@@ -625,7 +649,9 @@ export class ProductionExecutor {
           if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
-          requireProof(others.rows.length === 0, "production_other_uncertain_order");
+          const retired=others.rows.length?await this.settledExitGuard(tx,a,id):null;
+          requireProof(others.rows.length===0||others.rows.length===1&&others.rows[0]?.id===retired?.exitId,
+            "production_other_uncertain_order");
           await this.gate(tx, a, i.kind === "EXIT", id);
           const p = await this.ledger.policy(tx, a);
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
@@ -723,6 +749,15 @@ export class ProductionExecutor {
           if(pendingSnapshot){const outcome=await pendingSnapshot;if(!outcome.ok)throw outcome.error;snapshot=outcome.snapshot;}
           else snapshot=await readFinalSnapshot(oldest);
           await this.ledger.finalAccountProof(tx, a, snapshot, this.now());
+          if(retired){
+            const current=await this.settledExitGuard(tx,a,id,snapshot);
+            requireProof(current?.receiptDigest===retired.receiptDigest,"production_other_uncertain_order");
+            // The independent protective sender has separate reservation and
+            // wire guards. Never create new exposure until that lane is proven
+            // on this same exact receipt. Orders-off diagnostics may test the
+            // proof above, but it isn't permission to invoke the transport.
+            if(i.kind==="ENTRY")throw new Error("production_settled_disposition_exit_not_qualified");
+          }
           // Network reads above can consume the evidence lifetime. Recheck all
           // clocks immediately before returning to the synchronous signer.
           requireProof(this.now() - book.observedAtMs <= p.maxQuoteAgeMs &&
@@ -871,7 +906,7 @@ export class ProductionExecutor {
       if (i.cancel_attempted) return null;
       // Cancellation of a known uncertain order is allowed, but all OTHER
       // uncertainty, ownership, approval and kill-switch barriers still apply.
-      await this.gate(tx, a, i.kind === "EXIT", id);
+      await this.gate(tx, a, i.kind === "EXIT", id,false,false);
       await this.ledger.policy(tx, a);
       await tx.query("UPDATE v13_production_intent SET cancel_attempted=true,state='UNKNOWN' WHERE id=$1", [id]);
       await this.ledger.persist(tx, a);
@@ -881,7 +916,7 @@ export class ProductionExecutor {
     this.fault("after_cancel_commit");
     await this.ledger.transaction(async (tx, a) => {
       const final = async () => {
-        await this.gate(tx, a, order.kind === "EXIT", id);
+        await this.gate(tx, a, order.kind === "EXIT", id,false,false);
         requireProof(a.execution_enabled && !a.kill_switch && a.commissioned &&
           identity(a).keyFingerprint === (order.decision.identity as { keyFingerprint: string }).keyFingerprint,
         "production_cancel_gate_changed");
