@@ -51,15 +51,25 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
  let tx:PoolClient|undefined,committing=false,committed=false,discard=false;let connection:ReturnType<typeof transactionConnectionFence>|undefined;
  try{
   tx=await db.connect();connection=transactionConnectionFence(tx);
-  // One round trip installs the same transaction-local lock/statement bounds.
-  await tx.query("BEGIN; SET LOCAL lock_timeout='750ms'; SET LOCAL statement_timeout='4000ms'");
-  const accounts=(await tx.query<Account>('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[plan.accountId,scope.ownerId])).rows;
+  // Send the existing ordered statements in one simple-protocol message.
+  // They remain separate PostgreSQL statements, so the cancellation SELECT
+  // takes a fresh snapshot *after* both locks, including a waited-for cancel.
+  // node-postgres escapes all data literals; no identifiers come from input.
+  const account=tx.escapeLiteral(plan.accountId),owner=tx.escapeLiteral(scope.ownerId);
+  const advisory=tx.escapeLiteral('economic-discharge:'+scope.ownerId+':'+scope.requestId);
+  const request=tx.escapeLiteral(scope.requestId);
+  const opened=await tx.query(`BEGIN; SET LOCAL lock_timeout='750ms'; SET LOCAL statement_timeout='4000ms';
+    SELECT * FROM public.v13_production_account WHERE id=${account} AND owner_user_id=${owner}::uuid FOR UPDATE;
+    SELECT pg_advisory_xact_lock(hashtextextended(${advisory},0));
+    SELECT 1 FROM private.strata_economic_exit_discharge_cancel WHERE owner_user_id=${owner}::uuid AND request_id=${request}::uuid`);
+  requireProof(Array.isArray(opened)&&opened.length===6&&opened[3]?.command==='SELECT'&&opened[4]?.command==='SELECT'&&
+   opened[5]?.command==='SELECT'&&opened[4].rows.length===1,'economic_discharge_open_unverified');
+  const accounts=opened[3].rows as Account[];
   requireProof(accounts.length===1,'economic_discharge_account_missing');const a=accounts[0]!;
   requireProof(String(a.revision)===plan.expectedRevision&&String((a as unknown as Row).owner_control_epoch)===scope.controlEpoch&&a.blocked_reason===null&&
    String(a.cash_micros)===plan.cashMicros&&String(a.initial_cash_micros)===plan.initialCashMicros&&String(a.reserved_micros)===plan.releaseReserveMicros,
    'economic_discharge_account_changed');
-  await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['economic-discharge:'+scope.ownerId+':'+scope.requestId]);
-  requireProof((await tx.query('SELECT 1 FROM private.strata_economic_exit_discharge_cancel WHERE owner_user_id=$1::uuid AND request_id=$2::uuid',[scope.ownerId,scope.requestId])).rows.length===0,'economic_discharge_request_canceled');
+  requireProof(opened[5].rows.length===0,'economic_discharge_request_canceled');
   await deps.verifyLocked(tx,a,plan);
   let high=plan.observedAtMs;
   const clock=()=>{const at=now();requireProof(Number.isSafeInteger(at)&&at>=high&&at-plan.observedAtMs<=5000,'economic_discharge_evidence_expired');high=at;connection!.assertLive();};

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {pool} from '@workspace/db';
 import {canonical,digest} from '../v13-production/types';
-import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch,readLockedDischargeHistoryAndMoney,readLockedDischargeFullHistory} from './economicRecoveryReadBatch';
+import {readEconomicHistoryBatch,readEconomicPendingMoneyBatch,readLockedDischargeHistoryAndMoney,readLockedDischargeFullHistory,readLockedBlockedDischargeEvidence} from './economicRecoveryReadBatch';
 assert.equal(process.env.STRATA_ISOLATED_ECONOMIC_TEST,'1');
 assert.ok(process.env.STRATA_ECONOMIC_SOCKET?.startsWith('/tmp/strata-economic-'));
 const account='batch-owner',foreign='foreign-owner';
@@ -82,6 +82,45 @@ test('native lossless recovery batching preserves scope, financial hashes, bound
     await b.query('ROLLBACK');
     await b.query('BEGIN');await b.query("SET LOCAL lock_timeout='60ms'");
     await assert.rejects(b.query('UPDATE public.v13_production_intent SET state=state WHERE account_id=$1',[account]),{code:'55P03'});
+   }finally{await b.query('ROLLBACK');await a.query('ROLLBACK');a.release();b.release();}
+  });
+  await t.test('supplemental batch preserves native evidence and locks for blocked entry and dispatched exit',async()=>{
+   await pool.query(`CREATE TABLE public.v13_production_observation(id text,account_id text,kind text,payload jsonb,digest text,observed_at timestamptz);
+    ALTER TABLE private.strata_emergency_exit_reservations ADD COLUMN client_order_id text,ADD COLUMN market_ticker text,
+     ADD COLUMN reducing_side text,ADD COLUMN order_digest text,ADD COLUMN worker_holder_id text,ADD COLUMN worker_fencing_token bigint;
+    UPDATE private.strata_emergency_exit_reservations SET client_order_id='exit',worker_fencing_token=9007199254740993;
+    CREATE TABLE private.strata_protective_exit_local_no_send(reservation_id uuid,client_order_id text,execution_account_id text,
+     worker_fencing_token bigint,quantity_hundredths integer,limit_micros bigint,evidence jsonb);
+    INSERT INTO public.v13_production_observation VALUES
+     ('a','batch-owner','PROVEN_NOT_POSTED','{"id":"entry"}','digest','2026-11-26T00:00:00.123456Z'),
+     ('b','batch-owner','CANCEL_ATTEMPT','{"id":"exit"}','digest',now()),
+     ('c','foreign-owner','PROVEN_NOT_POSTED','{"id":"exit"}','digest',now()),
+     ('d','batch-owner','UNRELATED','{"id":"exit"}','digest',now());
+    INSERT INTO private.strata_protective_exit_local_no_send VALUES
+     ('11111111-1111-4111-8111-111111111111','exit','batch-owner',9007199254740993,300,400000,'{"ok":true}');`);
+   const a=await pool.connect(),b=await pool.connect();
+   try{
+    await a.query('BEGIN');
+    const out=await readLockedBlockedDischargeEvidence(a,account,['entry','exit'],['exit'],['exit']);
+    const expected=(await a.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
+      FROM public.v13_production_observation WHERE account_id=$1 AND id IN ('a','b') ORDER BY id`,[account])).rows;
+    assert.deepEqual(out.observations,expected);
+    assert.equal(out.events.length,0);
+    const markers=(await a.query(`SELECT reservation_id,owner_user_id::text AS owner_user_id,execution_account_id,client_order_id,
+     state,trading_authorized,market_ticker,reducing_side,quantity_hundredths,order_request_json,order_digest,worker_holder_id,
+     worker_fencing_token::text AS worker_fencing_token,xmin::text AS row_revision FROM private.strata_emergency_exit_reservations`)).rows;
+    const local=(await a.query(`SELECT n.*,worker_fencing_token::text,quantity_hundredths::text,limit_micros::text,
+     n.xmin::text AS row_revision FROM private.strata_protective_exit_local_no_send n`)).rows;
+    assert.deepEqual(out.markers,markers);assert.deepEqual(out.localNoSends,local);
+    const conflict=await readLockedBlockedDischargeEvidence(a,account,['intent'],['exit'],['exit']);
+    assert.equal(conflict.events.length,1);assert.equal(conflict.markers.length,0);assert.equal(conflict.localNoSends.length,0);
+    for(const sql of ["UPDATE public.v13_production_observation SET digest=digest WHERE id='a'",
+     "UPDATE public.v13_production_event SET digest=digest WHERE event_id='b'",
+     "UPDATE private.strata_emergency_exit_reservations SET state=state WHERE client_order_id='exit'",
+     "UPDATE private.strata_protective_exit_local_no_send SET quantity_hundredths=quantity_hundredths WHERE client_order_id='exit'"]){
+     await b.query('BEGIN');await b.query("SET LOCAL lock_timeout='60ms'");
+     await assert.rejects(b.query(sql),{code:'55P03'});await b.query('ROLLBACK');
+    }
    }finally{await b.query('ROLLBACK');await a.query('ROLLBACK');a.release();b.release();}
   });
   await t.test('every original row lock is held until transaction completion',async()=>{

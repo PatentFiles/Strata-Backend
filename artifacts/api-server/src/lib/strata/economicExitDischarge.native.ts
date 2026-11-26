@@ -125,6 +125,24 @@ test('native economic discharge atomicity, original UNKNOWN, cancellation, owner
    const x=await seed(),before=await current();assert.equal((await cancelEconomicDischarge(x.scope.ownerId,x.scope.requestId,pool)).status,'CANCELED');assert.equal((await run(x)).ok,false);assert.deepEqual(await current(),before);
    const y=await seed();assert.equal((await run(y)).ok,true);assert.equal((await cancelEconomicDischarge(y.scope.ownerId,y.scope.requestId,pool)).status,'RECORDED');assert.equal((await current()).receipts,1);
   });
+  await t.test('waited cancellation becomes visible before the reserve writer proceeds',async()=>{
+   const x=await seed(),before=await current(),c=await pool.connect();
+   try{
+    await c.query('BEGIN');
+    await c.query('SELECT id FROM public.v13_production_account WHERE id=$1 FOR UPDATE',[x.f.account.id]);
+    await c.query('INSERT INTO private.strata_economic_exit_discharge_cancel(owner_user_id,request_id) VALUES($1,$2)',
+     [x.scope.ownerId,x.scope.requestId]);
+    const writer=run(x);let waiting=false;
+    for(let i=0;i<30&&!waiting;i++){
+     const r=await pool.query(`SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock'
+       AND query LIKE '%economic-discharge:%' LIMIT 1`);
+     waiting=r.rows.length===1;if(!waiting)await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    await c.query('COMMIT');const result=await writer;
+    assert.equal(waiting,true);assert.equal(result.reason,'economic_discharge_request_canceled');
+    assert.deepEqual(await current(),before);
+   }finally{await c.query('ROLLBACK');c.release();}
+  });
   await t.test('owner isolation and immutable receipts survive direct readback/cancel attempts',async()=>{
    const x=await seed();assert.equal((await run(x)).ok,true);const foreign=randomUUID();await pool.query('INSERT INTO auth.users VALUES($1)',[foreign]);
    assert.equal((await economicDischargeOutcome(foreign,x.scope.requestId,pool)).status,'NOT_RECORDED');assert.equal((await cancelEconomicDischarge(foreign,x.scope.requestId,pool)).status,'CANCELED');assert.equal((await current()).receipts,1);
