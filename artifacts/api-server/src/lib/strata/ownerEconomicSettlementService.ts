@@ -167,3 +167,5 @@ export function createEconomicSettlementService(deps:Deps){
   },
  };
 }
+// Server-internal shared identity/locking proof; never exposed as request evidence.
+export {capture as captureEconomicSettlementScope};

@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 /**
  * PostgreSQL count(*)::text must be exactly one canonical unsigned decimal
  * and fit in JS's safe integer range. Missing/ambiguous evidence is NEVER zero.
@@ -33,12 +34,12 @@ export async function readUnresolvedIntentMode(
     const result = await query(
       `WITH unresolved_intents AS (
          SELECT count(*)::text AS n FROM v13_production_intent
-         WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')
+         WHERE account_id = $1 AND state IN ('DISPATCHED','UNKNOWN')${economicExitNotDischarged("account_id","client_order_id")}
            AND ($2::text IS NULL OR id <> $2 OR kind <> 'ENTRY' OR state <> 'DISPATCHED')
        ), unresolved_exits AS (
          SELECT count(*)::text AS n FROM private.strata_emergency_exit_reservations
          WHERE execution_account_id = $1
-           AND state IN ('PREPARED','DISPATCHED','UNKNOWN')
+           AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}
        )
        SELECT (i.n::bigint + p.n::bigint)::text AS n
        FROM unresolved_intents i CROSS JOIN unresolved_exits p`,

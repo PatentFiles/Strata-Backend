@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import { readSubaccountSpendableCash } from "./personalMarketAdapter";
 
 export const RECORD_OWNED_CASH_CONFIRMATION = "RECORD_OWNED_SUBACCOUNT_CASH";
@@ -93,11 +94,11 @@ const RECORD_SQL = `
       AND NOT EXISTS (
         SELECT 1 FROM public.v13_production_intent i
         WHERE i.account_id = a.id
-          AND (NOT i.terminal OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros <> 0)
+          AND (NOT i.terminal OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros <> 0)${economicExitNotDischarged("i.account_id","i.client_order_id")}
       )
       AND NOT EXISTS (
         SELECT 1 FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=a.id
-        AND x.state IN ('PREPARED','DISPATCHED','UNKNOWN')
+        AND x.state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("x.execution_account_id","x.client_order_id")}
       )
     ))
   RETURNING a.id

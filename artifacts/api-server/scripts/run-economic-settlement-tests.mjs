@@ -4,6 +4,7 @@ import {tmpdir} from 'node:os';import {join,resolve,dirname} from 'node:path';im
 // This runner never inherits database URLs, venue credentials or live flags.
 const api=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const dir=mkdtempSync(join(tmpdir(),'strata-economic-')),socket=join(dir,'socket'),data=join(dir,'pg'),out=join(dir,'out');
+const discharge=process.argv.includes('--discharge');
 const native=process.argv.includes('--native');let pg='',started=false;
 const env={PATH:process.env.PATH,HOME:process.env.HOME,NODE_ENV:'test',TZ:'UTC',NODE_PATH:join(api,'node_modules'),PGUSER:'postgres'};
 const run=(cmd,args,extra={})=>{const r=spawnSync(cmd,args,{cwd:api,env:{...env,...extra},stdio:'inherit',timeout:180000});if(r.status!==0)throw Error(`economic_test_command_failed:${cmd}:${r.status}`);};
@@ -28,10 +29,10 @@ try{
   writeFileSync(join(data,'postgresql.auto.conf'),`listen_addresses = ''\nunix_socket_directories = '${socket}'\nport = 5544\n`);
   run(join(pg,'pg_ctl'),['-D',data,'-l',join(dir,'pg.log'),'start']);started=true;
   run(join(pg,'createdb'),['-h',socket,'-p','5544','-U','postgres','strata_economic_fixture']);
-  const file=join(out,'native.cjs');bundle('src/lib/strata/ownerEconomicSettlement.native.ts',file);
+  const file=join(out,'native.cjs');bundle(discharge?'src/lib/strata/economicExitDischarge.native.ts':'src/lib/strata/ownerEconomicSettlement.native.ts',file);
   run(process.execPath,['--test',file],{DATABASE_URL:`postgresql:///strata_economic_fixture?host=${encodeURIComponent(socket)}&port=5544&user=postgres`,STRATA_ISOLATED_ECONOMIC_TEST:'1',STRATA_ECONOMIC_SOCKET:socket});
  }else{
-  const entries=['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
+  const entries=discharge?['src/lib/strata/economicExitDischargeEvidence.test.ts','src/routes/economicExitDischargeRoute.test.ts']:['src/lib/strata/ownerEconomicSettlementProof.test.ts','src/routes/ownerEconomicSettlementRoute.test.ts'];
   const files=entries.map((p,i)=>{const f=join(out,`${i}.cjs`);bundle(p,f);return f;});
   run(process.execPath,['--test',...files],{DATABASE_URL:'postgres://fixture:fixture@127.0.0.1:1/never_connect'});
  }

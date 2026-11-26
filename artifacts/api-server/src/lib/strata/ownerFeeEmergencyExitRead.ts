@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
 import {readOwnedKalshiFeeds} from "./personalExchangeRead";
@@ -65,7 +66,7 @@ export async function inspectOwnedEmergencyExitRead(
       if(status==="resting"||status==="pending")resting++;
     }
     const unknown=await db.query(
-      "SELECT count(*)::integer AS n FROM public.v13_production_intent WHERE account_id=$1::text AND state IN ('DISPATCHED','UNKNOWN')",
+      "SELECT count(*)::integer AS n FROM public.v13_production_intent WHERE account_id=$1::text AND state IN ('DISPATCHED','UNKNOWN')"+economicExitNotDischarged("account_id","client_order_id"),
       [accountId]);
     // Postgres count(*)::integer should be a real integer. Number(null)=0
     // would silently treat missing/unreadable reconciliation evidence as clear.

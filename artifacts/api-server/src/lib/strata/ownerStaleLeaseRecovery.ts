@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import { randomUUID, createHash } from "node:crypto";
 import { pool } from "@workspace/db";
@@ -79,9 +80,9 @@ const CAS_RELEASE = [
  "AND heartbeat_at=$5::timestamptz AND heartbeat_at<now()-interval '120 seconds'",
  "AND account_kill=false",
  "AND NOT EXISTS(SELECT 1 FROM public.v13_production_position p WHERE p.account_id=$1 AND p.quantity_hundredths<>0)",
- "AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=$1 AND i.state IN ('PREPARED','DISPATCHED','UNKNOWN'))",
+ "AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=$1 AND i.state IN ('PREPARED','DISPATCHED','UNKNOWN')"+economicExitNotDischarged("i.account_id","i.client_order_id")+")",
  "AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations e",
- "WHERE e.execution_account_id=$1 AND e.state IN ('PREPARED','DISPATCHED','UNKNOWN'))",
+ "WHERE e.execution_account_id=$1 AND e.state IN ('PREPARED','DISPATCHED','UNKNOWN')"+economicExitNotDischarged("e.execution_account_id","e.client_order_id")+")",
  "RETURNING fencing_token::text"
 ].join(" ");
 

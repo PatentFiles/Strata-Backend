@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
@@ -174,7 +175,7 @@ export const CONTINUOUS_CURRENT_LEASE_SQL=CONTINUOUS_ENTRY_AUTHORIZATION_SQL.rep
   AND l.expires_at>now()+interval '120 seconds'
   AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations ex
     WHERE ex.execution_account_id=g.execution_account_id
-      AND ex.state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+      AND ex.state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("ex.execution_account_id","ex.client_order_id")})
   LIMIT 2`);
 /** One source-priority tick may reuse an already valid lease. This is only
  * early-rotation scheduling: the locked final >20s authorization is unchanged.
@@ -311,7 +312,7 @@ export async function renewContinuousTechnicalLease(input:{
   // Independent order/exit and fee checks are separate entry gates.
   const hold=await c.query(`
    SELECT 1 FROM private.strata_emergency_exit_reservations
-   WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')
+   WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}
    LIMIT 1`,[input.accountId]);
   if(hold.rows.length)return denied("standing_unresolved_protective_exit");
   // Avoid a write on each 2.5-second heartbeat. Rotate only as the

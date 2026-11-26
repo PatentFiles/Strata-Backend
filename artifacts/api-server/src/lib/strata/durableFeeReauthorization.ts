@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {terminalDisarmedLease} from './terminalWorkerLease';
 import {platformFeeUploadEnabled,isUploadedBaselineId} from './platformFeeUploadMode';
@@ -126,10 +127,10 @@ async function execute(owner:string,b:Row,d:Deps,attemptNumber=0):Promise<Reauth
  if(String(feeds.cashMicros)!==String(locked.m.cash_micros))return no('durable_reauthorization_signed_cash_mismatch');
  const reconciled=new Date(String(locked.m.reconciled_at)).getTime();if(!Number.isFinite(reconciled)||reconciled>now()+10000||now()-reconciled>900000)return no('durable_reauthorization_fresh_reconciliation_required');
  const exposure=await tx.query(`SELECT
- (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
+ (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE${economicExitNotDischarged("account_id","client_order_id")}) intents,
  (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
  (SELECT count(*)::int FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND (state='owned' OR arm_requested IS DISTINCT FROM FALSE)) workers,
- (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN('PREPARED','DISPATCHED','UNKNOWN')) exits`,[b.accountId]);
+ (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) exits`,[b.accountId]);
  if(exposure.rows.length!==1||[exposure.rows[0].intents,exposure.rows[0].positions,exposure.rows[0].workers,exposure.rows[0].exits].some(n=>n!==0))return no('durable_reauthorization_open_exposure');
  if(now()<start||now()-start>45000||performance.now()-signedMono>45000||now()<marketStarted||now()-marketStarted>5000||performance.now()-marketMono>5000)return no('durable_reauthorization_evidence_expired');
  const saved=await tx.query("UPDATE private.strata_durable_fee_release_authorization SET state='RECORDED',reason='explicit_owner_exact_build_reauthorization',resolved_at=clock_timestamp(),signed_deadline=$3::timestamptz,market_deadline=$4::timestamptz WHERE authorization_id=$1 AND owner_user_id=$2 AND state='PENDING' RETURNING authorization_id",[b.authorizationId,owner,new Date(start+45000).toISOString(),new Date(marketStarted+5000).toISOString()]);if(saved.rows.length!==1)return no('durable_reauthorization_write_conflict');

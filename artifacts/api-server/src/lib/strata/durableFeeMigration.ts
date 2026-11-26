@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {platformFeeUploadEnabled,isUploadedBaselineId,UPLOADED_FEE_MIGRATION_CONFIRM,UPLOADED_FEE_PROVENANCE} from "./platformFeeUploadMode";
 import {readActiveUploadedFeeSchedule} from "./platformUploadedFeeSchedule";
@@ -164,12 +165,12 @@ async function executeClaimedDurableFeeMigration(ownerId:string,raw:unknown,deps
   if(lockedHistory.historyDigest!==history!.historyDigest)
     return fail("financial_history_changed_during_migration");
   const exposure=await tx.query(`SELECT
-   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE) intents,
+   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND terminal IS DISTINCT FROM TRUE${economicExitNotDischarged("account_id","client_order_id")}) intents,
    (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
    (SELECT count(*)::int FROM private.kalshi_account_worker_lease
       WHERE execution_account_id=$1 AND (state='owned' OR arm_requested IS DISTINCT FROM FALSE)) workers,
    (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[id]);
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) exits`,[id]);
   const ex=exposure.rows[0];
   if(exposure.rows.length!==1||[ex?.intents,ex?.positions,ex?.workers,ex?.exits].some(n=>n!==0))
    return fail("orders_positions_workers_or_exits_not_proven_empty");

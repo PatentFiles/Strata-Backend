@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {terminalDisarmedLease} from './terminalWorkerLease';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
@@ -205,7 +206,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
     (SELECT count(*)::int FROM public.v13_production_position
       WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
     (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[raw.accountId]);
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) AS exits`,[raw.accountId]);
   if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
    outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
   diagnosticStage='owner_review';

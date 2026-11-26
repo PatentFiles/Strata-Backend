@@ -1,3 +1,4 @@
+import {readEconomicExitDischarges} from './economicExitDischargeScope';
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
 import {validateLocalExitNoSend} from './localExitNoSendEvidence';
@@ -13,6 +14,13 @@ const MAX_HISTORY=1000;
  * string or BLOCKED status on its own is never evidence of non-submission. */
 export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lock=false,
  diagnostic?:{expiredExitOwnerId:string}){
+ const discharges=await readEconomicExitDischarges(db,accountId,lock);
+ const finish=<T extends {expectedRequests:Request[];historyDigest:string}>(h:T):T&{economicDischarges?:Row[]}=>{
+  if(!discharges.length)return h;
+  const clients=new Set(discharges.map(d=>String(d.client_order_id)));
+  return {...h,expectedRequests:h.expectedRequests.filter(r=>!clients.has(r.clientOrderId)),economicDischarges:discharges,
+   historyDigest:digest({history:h.historyDigest,economicDischarges:discharges})};
+ };
  const rows=(await db.query(`SELECT i.*,i.xmin::text AS row_revision FROM public.v13_production_intent i
   WHERE account_id=$1 ORDER BY created_at,id LIMIT 1001 ${lock?'FOR SHARE':''}`,[accountId])).rows;
  if(rows.length>MAX_HISTORY)throw Error('release_history_bound_exceeded');
@@ -24,7 +32,7 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  // history, financial reconciliation, stopped scope and locked revalidation.
  // Default callers retain the existing entry-only contract.
  const candidates=rows.filter(r=>r.state==='BLOCKED'&&(r.kind==='ENTRY'||(diagnostic&&r.kind==='EXIT')));
- if(!candidates.length)return {rows,requests,expectedRequests:requests,neverPosted:[],historyDigest:digest(rows)};
+ if(!candidates.length)return finish({rows,requests,expectedRequests:requests,neverPosted:[],historyDigest:digest(rows)});
  const ids=candidates.map(r=>String(r.id));
  const observations=(await db.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
   FROM public.v13_production_observation WHERE account_id=$1
@@ -72,6 +80,6 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
    capabilityDigest:String(i.capability_digest),observationId:String(receipt.id),observationDigest:String(receipt.digest)});
  }
  const excluded=new Set(neverPosted.map(x=>x.clientOrderId));
- return {rows,requests,expectedRequests:requests.filter(r=>!excluded.has(r.clientOrderId)),neverPosted,
-  historyDigest:exits.length?digest({rows,observations,markers,...(localNoSends.length?{localNoSends}:{})}):digest({rows,observations})};
+ return finish({rows,requests,expectedRequests:requests.filter(r=>!excluded.has(r.clientOrderId)),neverPosted,
+  historyDigest:exits.length?digest({rows,observations,markers,...(localNoSends.length?{localNoSends}:{})}):digest({rows,observations})});
 }

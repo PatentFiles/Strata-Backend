@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {runtimeAuthSql} from './runtimeAuthRelation';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
@@ -823,9 +824,9 @@ export async function authorizeProtectiveRelease(
    (SELECT count(*)::int FROM public.v13_production_position
       WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
    (SELECT count(*)::int FROM public.v13_production_intent
-      WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')) AS intents,
+      WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged("account_id","client_order_id")}) AS intents,
    (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[accountId]);
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) AS exits`,[accountId]);
       if(flat.rows.length!==1 ||
          Number(flat.rows[0]?.positions)!==0 ||
          Number(flat.rows[0]?.intents)!==0 ||
@@ -844,9 +845,9 @@ export async function authorizeProtectiveRelease(
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_position
      WHERE account_id=$1 AND quantity_hundredths<>0)
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent
-     WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED'))
+     WHERE account_id=$1 AND state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged("account_id","client_order_id")})
    AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations
-     WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))
+     WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")})
  RETURNING fencing_token::text AS fencing_token`,
         [accountId,ownerId,lease.fencing_token]);
       if(fenced.rows.length!==1)return deny("release_killed_lease_fence_failed");

@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import type {CredentialClient} from './accountCredentialStore';
 
 /** Call inside a transaction. Match dispatch/reservation lock order: account
@@ -24,8 +25,8 @@ export async function readStopExposure(db:CredentialClient,accountId:string):Pro
  const r=await db.query(`SELECT
  (SELECT count(*) FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths>0) AS positions,
  (SELECT count(*) FROM public.v13_production_intent WHERE account_id=$1 AND exchange_order_id IS NOT NULL AND terminal=false) AS orders,
- ((SELECT count(*) FROM public.v13_production_intent WHERE account_id=$1 AND (state IN ('DISPATCHED','UNKNOWN') OR terminal=false OR reserved_micros<>0))+
-  (SELECT count(*) FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN'))) AS unresolved`,[accountId]);
+ ((SELECT count(*) FROM public.v13_production_intent WHERE account_id=$1 AND (state IN ('DISPATCHED','UNKNOWN') OR terminal=false OR reserved_micros<>0)${economicExitNotDischarged("account_id","client_order_id")})+
+  (SELECT count(*) FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")})) AS unresolved`,[accountId]);
  const c=r.rows.length===1?classifyStopExposureRow(r.rows[0]):{ok:false as const};
  if(!c.ok)throw Error('stop_exposure_unverified');
  return c.managingExposure;

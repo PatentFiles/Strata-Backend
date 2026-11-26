@@ -1,3 +1,4 @@
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
 /**
  * #165: Explicit owner-initiated signed-exchange release diagnostic.
@@ -66,9 +67,9 @@ export const OWNER_SIGNED_PROOF_ACCOUNT_SQL=`
    AND a.reserved_micros=0
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_position pos WHERE pos.account_id=a.id AND pos.quantity_hundredths>0)
    AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=a.id
-     AND (NOT i.terminal OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0))
+     AND (NOT i.terminal OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0)${economicExitNotDischarged("i.account_id","i.client_order_id")})
    AND NOT EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations r WHERE r.execution_account_id=a.id
-     AND r.state IN ('PREPARED','DISPATCHED','UNKNOWN'))) AS diagnostic_held
+     AND r.state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("r.execution_account_id","r.client_order_id")})) AS diagnostic_held
  FROM public.v13_production_account a
  JOIN public.v13_live_money_policy p ON p.id=a.policy_id
   AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
