@@ -36,7 +36,7 @@ jobs:
       - name: Offline signed-evidence and authenticated route regressions
         working-directory: artifacts/api-server
         run: pnpm run test:economic-settlement
-      - name: Install disposable PostgreSQL binaries
+      - name: Install selected isolated PostgreSQL tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y curl ca-certificates postgresql-common
@@ -48,6 +48,11 @@ jobs:
           sudo apt-get install -y postgresql-${{ matrix.postgres }}
           sudo systemctl stop postgresql
           echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+      - name: Verify selected PostgreSQL binary
+        run: |
+          test "$(command -v postgres)" = "/usr/lib/postgresql/${{ matrix.postgres }}/bin/postgres"
+          postgres --version
+          postgres --version | grep -E 'PostgreSQL\) ${{ matrix.postgres }}\.'
       - name: Native transaction, RLS, UNKNOWN, duplication and cancellation races
         working-directory: artifacts/api-server
         env:
