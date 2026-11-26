@@ -1421,7 +1421,7 @@ interface AccountSetupStatus {
   nextRequirement: AccountSetupNextRequirement | null;
 }
 
-async function readVerifiedRoleAuthority(
+export async function readVerifiedRoleAuthority(
   db: UserScopeQuery,
   userId: string,
   providerConnectionId: string,

@@ -111,7 +111,9 @@
     "test:member-read-budget-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/kalshiMemberReadBudget.postgres.test.ts",
     "test:audit-remediation": "node scripts/audit-remediation.test.mjs",
     "test:owner-arm-lifecycle": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerArmPreparation.postgres.test.ts",
-    "test:offline-regression-gaps": "node scripts/run-offline-regression-gaps.mjs"
+    "test:offline-regression-gaps": "node scripts/run-offline-regression-gaps.mjs",
+    "test:economic-settlement": "node scripts/run-economic-settlement-tests.mjs",
+    "test:economic-settlement-native": "node scripts/run-economic-settlement-tests.mjs --native"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",
