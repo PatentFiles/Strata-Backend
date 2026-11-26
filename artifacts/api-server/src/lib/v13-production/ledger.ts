@@ -583,7 +583,13 @@ export class ProductionLedger {
         }
         for (const i of terminalEntries) {
           const pos = terminalPositions.get(i.id)!;
-          const retain = money(pos.quantity_hundredths) > 0n ? money(i.exit_fee_micros) : 0n;
+          // Economic settlement can zero a position while an old EXIT transport
+          // remains UNKNOWN. Financial posting is not authority to release that
+          // exit's retained risk reserve. Only a separate resolved-history path
+          // may discharge it; ordinary reconciliation must keep the hold.
+          const uncertainExit = intents.some(child => child.parent_id === i.id && !child.terminal && child.state !== "BLOCKED");
+          const retain = money(pos.quantity_hundredths) > 0n ? money(i.exit_fee_micros)
+            : uncertainExit ? money(i.reserved_micros) : 0n;
           if (money(i.reserved_micros) < retain) {
             const add = retain - money(i.reserved_micros);
             requireProof(money(a.cash_micros) - money(a.reserved_micros) >= add, "production_exit_reservation_insufficient");

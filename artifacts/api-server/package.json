@@ -110,7 +110,9 @@
     "test:member-read-budget": "esbuild src/lib/strata/kalshiMemberReadBudget.test.ts --bundle --platform=node --format=cjs --outfile=dist/member-read-budget.test.cjs --external:pg-native && node --test dist/member-read-budget.test.cjs && node --test scripts/member-budget-legacy.test.mjs",
     "test:member-read-budget-postgres": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/kalshiMemberReadBudget.postgres.test.ts",
     "test:audit-remediation": "node scripts/audit-remediation.test.mjs",
-    "test:owner-arm-lifecycle": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerArmPreparation.postgres.test.ts"
+    "test:owner-arm-lifecycle": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerArmPreparation.postgres.test.ts",
+    "test:economic-settlement": "node scripts/run-economic-settlement-tests.mjs",
+    "test:economic-settlement-native": "node scripts/run-economic-settlement-tests.mjs --native"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",
