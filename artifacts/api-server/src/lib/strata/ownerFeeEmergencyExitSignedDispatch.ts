@@ -235,10 +235,10 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const standingMode=await hasStandingReviewHistory(c,input.ownerId,input.accountId,sha);
   const standingAllowed=standingMode&&await checkStandingExitReview(c,input.ownerId,input.accountId,sha);
   if(standingMode&&!standingAllowed)return denied("standing_release_denied");
-  const sql=`SELECT r.reservation_id,i.id AS intent_id,
+  const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
  EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
- i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,
+ i.decision->'ownedEvaluation' AS owned_evaluation,p.max_quote_age_ms,i.parent_id AS parent_id,i.id AS economic_target_intent_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-(i.decision#>>'{ownedEvaluation,source,evaluated_at}')::timestamptz))*1000::double precision AS source_age_ms,
  CASE WHEN $14::boolean THEN NULL ELSE
  EXTRACT(EPOCH FROM (code_release.expires_at-clock_timestamp()))*1000::double precision END AS release_remaining_ms
@@ -317,7 +317,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    // transport UNKNOWN. Recheck the immutable discharge and fresh exact signed
    // settlement proof on this real locked final sender, not just on ARM.
    economicObservedAt=await recheckEconomicProtectiveEvidence(c,input.economicEvidence,
-     {ownerId:input.ownerId,accountId:input.accountId,clientId:String(input.order.client_order_id),intentId:String(row.intent_id)},Date.now());
+     {ownerId:input.ownerId,accountId:input.accountId,clientId:String(input.order.client_order_id),intentId:String(row.economic_target_intent_id)},Date.now());
    if(economicObservedAt!==null){
      const left=5000-(Date.now()-economicObservedAt);
      if(left<=0||left>5000)return denied("evidence_clock");

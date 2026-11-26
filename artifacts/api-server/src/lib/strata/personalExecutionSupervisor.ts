@@ -771,9 +771,6 @@ export function createProductionPersonalSession(
                   market,sourceUrl,policyVersion,formulaVersion,digest},{},finalLedger?.currentTransaction()??undefined);
                 feeCheckedAt=clock;
               }else if(apiSource){
-                // Final-market proof runs while the executor owns the account lock.
-                // Standing fee renewal also locks that account: reuse this exact
-                // transaction rather than self-deadlocking through a second pool slot.
                 const checked=await verifyReviewedApiFeeSourceStage(input.userId,"ORDER_ENTRY",
                   sourceUrl,market,{db:finalLedger?.currentTransaction()??undefined,probe:(fetchImpl,clock,ticker)=>
                     feeReads.probe(()=>probeCurrentKalshiFeeApi(fetchImpl,clock,ticker,readMetadata,captureMetadata))});
