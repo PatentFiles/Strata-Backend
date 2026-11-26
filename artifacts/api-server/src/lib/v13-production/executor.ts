@@ -1,3 +1,5 @@
+import {prepareBudgetChoiceFence,recheckBudgetChoiceFence} from "../entryBudgetFinalFence";
+import type {OfflineBudgetPreviewInput} from "../entryBudgetChoice";
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
 import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
 import {encodeProductionOrder} from "./transport";
@@ -69,7 +71,19 @@ export type FirstReadReceiptWriter = Readonly<{
  pin:FirstReadReceiptWorkerPin;
  database:Pick<ProductionLedger["pool"],"query">;
 }>;
+// Staging reference adapter; no production factory can bind this route.
+type SimulationBudgetReader=(tx:PoolClient,account:Readonly<Account>,nowMs:number)=>
+  Promise<(Omit<OfflineBudgetPreviewInput,"preflight">&Readonly<{selectionRevision:number}>)|null>;
+type BudgetChoiceSample={pin:NonNullable<ReturnType<typeof prepareBudgetChoiceFence>>;preflight:OfflineBudgetPreviewInput["preflight"]};
+
 export class ProductionExecutor {
+  #simulationBudgetReader:SimulationBudgetReader|null=null;
+  #simulationBudgetPins=new Map<string,BudgetChoiceSample>();
+  bindSimulationBudgetReader(reader:SimulationBudgetReader):void{
+    requireProof(this.exchange.mode==="SIMULATION"&&!this.#simulationBudgetReader&&typeof reader==="function",
+      "budget_simulation_binding_denied");
+    this.#simulationBudgetReader=reader;
+  }
   static #fences = new WeakSet<() => Promise<void>>();
   static readonly #seenFirstReadErrors = new WeakSet<object>();
   static readonly #ambiguousFirstReadErrors = new WeakSet<object>();
@@ -453,18 +467,31 @@ export class ProductionExecutor {
         realizedTotalLossCents: Math.ceil(Number(money(b.total_loss)) / 10_000),
         configuredStakeCents: stake.cents, requireCashRisk:this.exchange.mode==="LIVE",
       };
-      const pf=preflightV13LiveMoneyEntry(preflightInput);
-      diagnostics.sizing=captureEntrySizingDiagnostics(preflightInput,pf);
+      const selection=this.#simulationBudgetReader?await this.#simulationBudgetReader(tx,a,this.now()):null;
+      if(this.#simulationBudgetReader)requireProof(this.exchange.mode==="SIMULATION"&&selection&&
+        selection.currentScope.accountId===a.id&&(!a.owner_user_id||a.owner_user_id===selection.currentScope.ownerId)&&
+        Number.isSafeInteger(selection.selectionRevision)&&selection.selectionRevision>0&&
+        selection.currentConfiguredGrossCents===stake.cents&&selection.currentScope.stakeRevision===stake.revision,
+        "budget_simulation_selection_unavailable");
+      const selectedInput=selection?{...preflightInput,configuredStakeCents:selection.choice.grossCents,requireCashRisk:true,
+        capitalRemainingCents:Math.min(preflightInput.capitalRemainingCents,selection.choice.allInCents)}:preflightInput;
+      const pf=preflightV13LiveMoneyEntry(selectedInput);
+      diagnostics.sizing=captureEntrySizingDiagnostics(selectedInput,pf);
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
       if(pf.cashRisk)requireProof(book.fee.cashRisk&&book.fee.cashRisk.marketTicker===source.market_ticker&&book.fee.cashRisk.side===side&&
         book.fee.cashRisk.policyHash===p.policyHash,"production_cash_risk_identity_invalid");
       const id = randomUUID(), clientOrderId = `v13p-${id}`;
       const request: Request = { market: source.market_ticker, side, action: "BUY", contracts: pf.plan.contracts,
         limitMicros: Math.round(pf.plan.limitPrice * 1_000_000), timeInForce: "IOC", reduceOnly: false, clientOrderId };
+      const budgetPin=selection?prepareBudgetChoiceFence({...selection,preflight:preflightInput},
+        {plannedGrossCents:pf.plan.worstCaseGrossCents,plannedAllInCents:pf.plannedAllInCents,contracts:pf.plan.contracts,
+         limitMicros:request.limitMicros},this.now()):null;
+      if(selection)requireProof(budgetPin,"budget_simulation_prepare_unproven");
       const preparedBook=pf.selectedFeeEvidence?{...book,fee:pf.selectedFeeEvidence}:book;
       const decision = {
         source, book:preparedBook, preflight: pf, policy: p, identity: identity(a),
         configuredStakeCents: stake.cents, stakeRevision: stake.revision,
+        ...(budgetPin?{simulationBudgetFenceDigest:digest(budgetPin)}:{}),
       };
       const cap = digest({ id, request, decision, policyHash: pf.policyHash, fee: pf.feeEvidenceFingerprint });
       const reservation = BigInt(pf.plannedAllInCents) * 10_000n;
@@ -480,6 +507,11 @@ export class ProductionExecutor {
       this.fault("after_reservation");
       await this.ledger.persist(tx, a);
       await this.ledger.assertConservation(tx, a);
+      if(budgetPin){
+        // Only one held entry under the policy; still bound abandoned simulation pins.
+        if(this.#simulationBudgetPins.size>=128)this.#simulationBudgetPins.clear();
+        this.#simulationBudgetPins.set(id,{pin:budgetPin,preflight:preflightInput});
+      }
       return id;
     });
     const prepared = await prepare();
@@ -623,6 +655,11 @@ export class ProductionExecutor {
           };
           try {
           if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
+        if(i.kind==="ENTRY"&& (i.decision.simulationBudgetFenceDigest!==undefined||this.#simulationBudgetReader)){
+          const sample=this.#simulationBudgetPins.get(id);
+          requireProof(this.exchange.mode==="SIMULATION"&&this.#simulationBudgetReader&&sample&&
+            digest(sample.pin)===i.decision.simulationBudgetFenceDigest,"budget_simulation_pin_unavailable");
+        }
           // This intent itself is the ONLY allowed dispatched identity.
           const others = await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND id<>$2", [a.id, id]);
           requireProof(others.rows.length === 0, "production_other_uncertain_order");
@@ -782,6 +819,24 @@ export class ProductionExecutor {
             // Run after every asynchronous quote/account proof, on the SAME
             // transaction held through signing and sending. No cached grant.
             if (this.authorizeFinalEntry) await this.authorizeFinalEntry(tx);
+            if(i.decision.simulationBudgetFenceDigest!==undefined){
+              const sample=this.#simulationBudgetPins.get(id),reader=this.#simulationBudgetReader;
+              this.#simulationBudgetPins.delete(id);
+              requireProof(this.exchange.mode==="SIMULATION"&&reader&&sample&&
+                digest(sample.pin)===i.decision.simulationBudgetFenceDigest,"budget_simulation_pin_unavailable");
+              const currentStake=await this.readConfiguredStake(tx);
+              const exact={plannedGrossCents:Number((i.decision.preflight as {plan?:{worstCaseGrossCents?:unknown}})?.plan?.worstCaseGrossCents),
+                plannedAllInCents,contracts:i.request.contracts!,limitMicros:i.request.limitMicros};
+              const approved=await recheckBudgetChoiceFence(sample.pin,async()=>{
+                const live=await reader(tx,a,this.now());
+                if(!live||live.currentScope.accountId!==a.id||
+                  (a.owner_user_id&&a.owner_user_id!==live.currentScope.ownerId)||
+                  live.currentScope.stakeRevision!==currentStake.revision||
+                  live.currentConfiguredGrossCents!==currentStake.cents)return null;
+                return {...live,preflight:{...sample.preflight,policy:p,feeEvidence:book.fee}};
+              },exact,this.now);
+              requireProof(approved,"budget_simulation_selection_changed_or_unavailable");
+            }
             // Fee transports perform additional asynchronous verification.
             // Recheck the already pinned evidence synchronously at the actual
             // HTTP send, without repeating network proof or extending its age.

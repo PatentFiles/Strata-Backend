@@ -1,0 +1,21 @@
+# Offline versioned entry budget selector
+
+This is an inactive preview candidate against e17b8a685ccd2ae677ab40b868852b3be92b705e. It adds no endpoint, SQL, deploy, account setting, order sender, or user authorization.
+
+A user-visible choice is a gross ceiling, not a fill target. Each bound revision has a separately approved all-in ceiling and a stable identity across owner, exact account, credential, release SHA, policy hash/revision, stake revision and fee approval. The client may select only a choice ID and revision; all terms, the matched approval and current fee artifact have to be loaded from trusted current account records. The calculator clips the existing planner downward and does not rewrite the approved policy or expose the wire order or its capability. If a $500/$5,000 choice exceeds the controlling saved policy/stake, it is refused even if separately approved; stake policy and durable fee migration are distinct work.
+
+Before this can be mounted: implement immutable/revocable server storage and exact current-scope readers, authenticated owner approval and selection flow, independent native DB and lifecycle coverage including concurrent revocation, compare-and-lock selection in the final transaction, qualified permission/schema and exact build evidence. Show gross, all-in, requested and actual filled separately. Existing exit sizing, slippage, liquidity and staged exit recovery remain separate capacity gates. No order or larger funded policy is authorized by preview.
+
+The tests use synthetic fee evidence, bounded depth, and the repository's actual planner/preflight. Exercise cap and reserve arithmetic, stale inputs, revoked/mismatched approval and drift. They do not prove mounted behavior or production readiness.
+
+## Isolated Wallets integration
+
+The local loopback integration mounts the route factory using the repository's AAL2 auth middleware plus a trusted synthetic reader. The factory serves GET /api/strata/me/wallet/entry-budget-preview?grossCents=<choice> with X-Strata-Read-Intent: preview-entry-budget. It is not in the normal dispatcher. Disabled and production environments return 404 without auth or reading. The allowlisted ladder is $5/$15/$25/$50/$100/$150/$200/$250/$500. Listing a choice does not approve it.
+
+The standalone frontend companion is not mounted in Wallets because that page and endpoint map are in Brit's active paired release. For a qualified private staging pairing, add a GET endpoint at the above path to the existing API client's endpoint map with requireAal2 and rejectRedirects; use its existing token/Review Mode conventions, pass only the gross selector and read-intent header, and validate with isEntryBudgetPreview. Cross-owner or unavailable approvals return generic no data. Production requires the correct immutable server-side resolver and separate review; no manual records, fallback signer, save, or order flow is provided.
+
+## Disposable persistent staging proof
+
+The review-only schema in `docs/qualification/entry-budget-selector.sql` applies only to the disposable test in this checkout. It contains no initial approvals, application role grants, or DDL startup hook. Rival transactions serialize inserts and monotonic revocations on the account row. Newer approved revisions permanently suppress older ones, even after revocation or expiry. The server reader requires current database owner and signer, policy hash/revision, stake revision and exact matching trusted fee approval identity. It rechecks caps and terms digest. This is a per-budget choice record, not a current selection pointer, fee issuance mechanism or authorization to run.
+
+Run `node scripts/run-v13-disposable-postgres.mjs --entry-budget-selector` from the API package with PostgreSQL tools on PATH. The test verifies scoped HTTP preview of an actual persisted record on disposable PostgreSQL including deny-on-revoke, no raw client access, no read-role approval writes, RLS default deny, failed tamper, concurrent revocation ordering and no fallback to old revisions. The HTTP fixture still injects synthetic authenticated login and trusted market/fee context; a hosted staging integration must supply genuine qualified server readers and explicit permissions after review. No exchange or production access.

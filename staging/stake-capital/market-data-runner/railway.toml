@@ -1,0 +1,4 @@
+[deploy]
+startCommand = "node runtime.mjs"
+numReplicas = 1
+restartPolicyType = "NEVER"
