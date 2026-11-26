@@ -1,3 +1,5 @@
+import {requiredTradingCapitalCents} from './cashTransferPolicy';
+import {assertCashTransferSchema} from './ownerCashFlowAccounting';
 import { pool } from "@workspace/db";
 import { processAutoWithdrawalMaintenance } from "./autoWithdrawalMaintenance";
 import { quoteManualSweep, confirmManualSweep, reconcileManualSweep, sweepAvailability, withdrawalTransfersEnabled, CASHIER_SWEEP_CONFIRMATION } from "./manualProfitWithdrawals";
@@ -6,10 +8,10 @@ const R="private.strata_auto_profit_withdrawal_rules", W="private.strata_manual_
 type Obj=Record<string,unknown>;
 const cash=(v:unknown):v is number=>typeof v==="number"&&Number.isSafeInteger(v)&&v>=0&&v<=1e11;
 const live=()=>withdrawalTransfersEnabled()&&process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED==="true";
-export type AutoRule={ok:boolean;reason:string;id:string|null;enabled:boolean;liveExecutionEnabled:boolean;thresholdCents:number;withdrawCents:number;minimumRetainedCents:number;revision:number;latched:boolean;lastAttemptId:string|null};
-const make=(r:Obj|null,reason:string,ok=true):AutoRule=>({ok,reason,id:typeof r?.id==="string"?r.id:null,enabled:r?.enabled===true,liveExecutionEnabled:live(),thresholdCents:Number(r?.trigger_cents??100000),withdrawCents:Number(r?.withdraw_cents??75000),minimumRetainedCents:Number(r?.retain_cents??25000),revision:Number(r?.revision??0),latched:r?.latched===true,lastAttemptId:typeof r?.last_attempt_id==="string"?r.last_attempt_id:null});
+export type AutoRule={ok:boolean;reason:string;id:string|null;enabled:boolean;liveExecutionEnabled:boolean;thresholdCents:number;withdrawCents:number;minimumRetainedCents:number;revision:number;latched:boolean;lastAttemptId:string|null;sweepMode?:'fixed_amount'|'excess'};
+const make=(r:Obj|null,reason:string,ok=true):AutoRule=>({ok,reason,id:typeof r?.id==="string"?r.id:null,enabled:r?.enabled===true,liveExecutionEnabled:live(),thresholdCents:Number(r?.trigger_cents??100000),withdrawCents:Number(r?.withdraw_cents??75000),minimumRetainedCents:Number(r?.retain_cents??25000),revision:Number(r?.revision??0),latched:r?.latched===true,sweepMode:r?.sweep_mode==='excess'?'excess':'fixed_amount',lastAttemptId:typeof r?.last_attempt_id==="string"?r.last_attempt_id:null});
 const account="SELECT id FROM public.v13_production_account WHERE owner_user_id=$1::uuid AND subaccount=1 AND exchange_index=2";
-const read=`SELECT id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text FROM ${R} WHERE owner_user_id=$1::uuid AND execution_account_id=$2`;
+const read=`SELECT id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text  ,COALESCE(to_jsonb(r)->>'sweep_mode','fixed_amount') AS sweep_mode FROM ${R} r WHERE owner_user_id=$1::uuid AND execution_account_id=$2`;
 export async function readAutoRule(owner:string):Promise<AutoRule>{
  try{const a=await pool.query(account,[owner]);if(a.rows.length!==1)return make(null,"execution_account_unavailable",false);
  const r=await pool.query(read,[owner,a.rows[0]!.id]);return r.rows.length<=1?make(r.rows[0]??null,r.rows.length?"rule_loaded":"not_configured"):make(null,"ambiguous_rule",false);}
@@ -17,18 +19,29 @@ export async function readAutoRule(owner:string):Promise<AutoRule>{
 }
 export async function saveAutoRule(owner:string,input:unknown):Promise<AutoRule>{
  if(!input||typeof input!=="object"||Array.isArray(input))return make(null,"invalid_rule",false);
- const v=input as Obj,t=v.thresholdCents,w=v.withdrawCents,k=v.minimumRetainedCents;
- if(!cash(t)||!cash(w)||!cash(k)||!cash(v.expectedRevision)||!t||!w||t<w+k||typeof v.enabled!=="boolean")return make(null,"invalid_values",false);
+ const v=input as Obj,t=v.thresholdCents,w=v.withdrawCents,k=v.minimumRetainedCents,mode=v.sweepMode??'fixed_amount';
+ if(!['fixed_amount','excess'].includes(String(mode)))return make(null,'invalid_sweep_mode',false);
+ if(!cash(v.expectedRevision)||typeof v.enabled!=="boolean"||v.enabled&&(!cash(t)||!cash(w)||!cash(k)||!t||!w||t<(mode==='excess'?k+1:w+k)))return make(null,"invalid_values",false);
  if(v.enabled&&v.confirmation!==AUTO_CONFIRMATION)return make(null,"owner_authorization_required",false);
  const db=await pool.connect();
- try{await db.query("BEGIN");const a=await db.query(account,[owner]);if(a.rows.length!==1){await db.query("ROLLBACK");return make(null,"account_unavailable",false);}
+ try{await assertCashTransferSchema(db);await db.query("BEGIN");const a=await db.query(account,[owner]);if(a.rows.length!==1){await db.query("ROLLBACK");return make(null,"account_unavailable",false);}
  const id=a.rows[0]!.id;await db.query("SELECT id FROM v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[id,owner]);
  const old=await db.query(read+" FOR UPDATE",[owner,id]);if(old.rows.length>1||Number(old.rows[0]?.revision??0)!==v.expectedRevision){await db.query("ROLLBACK");return make(old.rows[0]??null,"revision_changed",false);}
+ if(v.enabled===false&&old.rows.length===1){
+  const disabled=await db.query(`UPDATE ${R} SET enabled=false,revision=revision+1,updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 RETURNING *`,[owner,id]);
+  await db.query(`UPDATE ${W} SET state='expired',updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND origin='automatic' AND state='prepared'`,[owner,id]);
+  await db.query(`UPDATE private.strata_auto_withdrawal_maintenance SET operator_interrupted=true,state='completed',completed_at=now(),changed_at=now(),last_reason='owner_disabled_no_pending_transfer' WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state<>'completed'
+   AND NOT EXISTS(SELECT 1 FROM ${W} WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state IN ('attempted','pending','uncertain'))`,[owner,id]);
+  await db.query('COMMIT');return make(disabled.rows[0],'automatic_withdrawals_disabled');
+ }
+ if(!cash(t)||!cash(w)||!cash(k)||!t||!w){await db.query('ROLLBACK');return make(null,'invalid_values',false);}
  if(v.enabled){const busy=await db.query(`SELECT 1 FROM ${W} WHERE execution_account_id=$1 AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1`,[id]);if(busy.rows.length){await db.query("ROLLBACK");return make(old.rows[0]??null,"withdrawal_unresolved",false);}}
+ if(v.enabled){const st=await db.query('SELECT configured_stake_cents FROM public.strata_configured_stake WHERE execution_account_id=$1 FOR SHARE',[id]);
+ if(st.rows.length!==1||Number(k)<requiredTradingCapitalCents(st.rows[0].configured_stake_cents)){await db.query('ROLLBACK');return make(old.rows[0]??null,'retained_cash_below_saved_stake_requirement',false);}}
  const sql=old.rows.length?
- `UPDATE ${R} SET trigger_cents=$3,withdraw_cents=$4,retain_cents=$5,enabled=$6,revision=revision+1,latched=latched,updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text`:
- `INSERT INTO ${R}(owner_user_id,execution_account_id,trigger_cents,withdraw_cents,retain_cents,enabled) VALUES($1::uuid,$2,$3,$4,$5,$6) RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text`;
- const next=await db.query(sql,[owner,id,t,w,k,v.enabled]);await db.query("COMMIT");return make(next.rows[0]!,"rule_saved");
+ `UPDATE ${R} SET trigger_cents=$3,withdraw_cents=$4,retain_cents=$5,enabled=$6,sweep_mode=$7,revision=revision+1,latched=latched,updated_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text,sweep_mode`:
+ `INSERT INTO ${R}(owner_user_id,execution_account_id,trigger_cents,withdraw_cents,retain_cents,enabled,sweep_mode) VALUES($1::uuid,$2,$3,$4,$5,$6,$7) RETURNING id::text,enabled,trigger_cents,withdraw_cents,retain_cents,revision,latched,last_attempt_id::text,sweep_mode`;
+ const next=await db.query(sql,[owner,id,t,w,k,v.enabled,mode]);await db.query("COMMIT");return make(next.rows[0]!,"rule_saved");
  }catch{await db.query("ROLLBACK").catch(()=>undefined);return make(null,"save_failed",false);}finally{db.release();}
 }
 export async function processAutoRule(owner:string):Promise<string>{

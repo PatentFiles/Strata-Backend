@@ -1,3 +1,8 @@
+import {recordOwnerCashFlow,ownerCashTransfersEnabled,assertCashTransferSchema} from './ownerCashFlowAccounting';
+import type {Account} from '../v13-production/ledger';
+import type {PoolClient} from '@workspace/db';
+import {exactCashMicros} from './cashTransferPolicy';
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {randomUUID} from "node:crypto";
 import {getScopedKalshiJson,postScopedOwnerVariableTopup} from "../kalshiAccountClient";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -49,20 +54,8 @@ const dollarsMicro=(v:unknown):bigint|null=>{
  const [a,b=""]=v.split(".");const n=BigInt(a!)*1000000n+BigInt(b.padEnd(6,"0"));
  return n<=9223372036854775807n?n:null;
 };
-export function exactSignedCash(value:unknown,sub:0|1,shard:0|2):bigint|null{
- if(!value||typeof value!=="object"||Array.isArray(value))return null;
- const root=value as Row;
- const r=root.balance&&typeof root.balance==="object"&&!Array.isArray(root.balance)
-   ?root.balance as Row:root;
- if((r.subaccount!==undefined&&Number(r.subaccount)!==sub)||
-    (r.subaccount_number!==undefined&&Number(r.subaccount_number)!==sub)||
-    (r.exchange_index!==undefined&&Number(r.exchange_index)!==shard))return null;
- // Integer-cents API and fixed-point dollar API are mutually exclusive views.
- const d=r.balance_dollars??r.available_balance_dollars;
- if(d!==undefined)return dollarsMicro(d);
- const n=r.balance??r.available_balance;
- return Number.isSafeInteger(n)&&typeof n==="number"&&n>=0?BigInt(n)*MICROS_PER_CENT:null;
-}
+export const exactSignedCash=exactCashMicros;
+
 type Snapshot={zero:bigint;primary:bigint;bot:bigint};
 async function balances(creds:Creds,get:Get):Promise<Snapshot|null>{
  try {
@@ -82,7 +75,7 @@ const OWNER_SQL=`
    (SELECT count(*)::int FROM public.v13_production_position p
      WHERE p.account_id=a.id AND p.quantity_hundredths>0) AS positions,
    (SELECT count(*)::int FROM public.v13_production_intent i
-     WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED')) AS intents,
+     WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged("i.account_id","i.client_order_id")}) AS intents,
    (SELECT count(*)::int FROM private.kalshi_account_worker_lease l
      WHERE l.execution_account_id=a.id AND l.state='owned') AS workers,
    c.id::text AS credential_id,c.key_fingerprint,
@@ -171,8 +164,7 @@ async function exchangeClear(creds:Creds,expectedBot:bigint,now:number,get:Get):
    const n=r.position_fp??r.position??r.net_position_fp;
    return n===undefined||n===null||!Number.isFinite(Number(n))||Number(n)!==0;
   }))return false;
-  return !f.orders.some(v=>["resting","pending","open","unknown"].includes(
-    str((v as Row).status).toLowerCase()));
+  return f.orders.every(v=>["executed","canceled","cancelled","filled","expired"].includes(str((v as Row).status).toLowerCase()));
  }catch{return false;}
 }
 const insertLeg=(kind:"shard"|"bot",step:number,id:string,topupId:string,amount:number,b:Snapshot)=>
@@ -188,9 +180,10 @@ export async function prepareOwnerTopup(db:Pool,uid:string,amount:number,deps:De
  // A prepare persists a real account maintenance hold. Never allow that
  // irreversible side effect while the corresponding production transfer
  // capability is disabled or the database migration is not commissioned.
- if(process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true" ||
+ if(!ownerCashTransfersEnabled() || process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true" ||
     process.env.KALSHI_API_ENVIRONMENT!=="production")
   return block("variable_topup_not_commissioned");
+ await assertCashTransferSchema(db as never);
  const who=await authority(db,uid);
  if(!who)return block("owner_commissioned_account_not_safely_disarmed");
  const snapshot=await balances(who.creds,deps.get??getScopedKalshiJson);
@@ -298,7 +291,7 @@ export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:De
     !UUID.test(args.attemptId))return block("topup_explicit_owner_consent_required");
  if(!deps.allowTestPost&&
     (process.env.KALSHI_API_ENVIRONMENT!=="production"||
-     process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true"))
+     process.env.STRATA_OWNER_VARIABLE_TOPUP_POST_ENABLED!=="true"||!ownerCashTransfersEnabled()))
   return block("variable_topup_post_not_activated");
  const who=await authority(db,uid,true),p=await readPlan(db,uid);
  if(!who||!p||p.plan_state!=="active"||p.state!=="prepared"||
@@ -338,7 +331,7 @@ export async function executeOwnerTopup(db:Pool,uid:string,input:unknown,deps:De
           AND NOT EXISTS(SELECT 1 FROM public.v13_production_position q
             WHERE q.account_id=a.id AND q.quantity_hundredths>0)
           AND NOT EXISTS(SELECT 1 FROM public.v13_production_intent i
-            WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED')))
+            WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged("i.account_id","i.client_order_id")}) )
       RETURNING l.id`,[args.attemptId,uid]);
   await claim.query("COMMIT");claimed=x.rows.length===1;
  }catch{
@@ -405,6 +398,7 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
  const kind=p.kind==="shard"?"shard":p.kind==="bot"?"bot":null;
  const amount=num(p.amount_cents),secs=num(p.attempted_seconds);
  if(!kind||amount===null||secs===null||secs===0)return output(p,"receipt_identity_invalid");
+ const observedAtMs=Date.now();
  const before=[micros(p.shard_zero_before_micros),micros(p.primary_two_before_micros),
    micros(p.bot_two_before_micros)];
  if(before.some(v=>v===null))return output(p,"topup_baseline_invalid");
@@ -506,12 +500,12 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
      amountCents:amount,transferAttempted:false};
   }else{
    const credit=await client.query(`UPDATE public.v13_production_account
-     SET cash_micros=$3::bigint,reconciled_at=now(),
+     SET reconciled_at=now(),
        blocked_reason=$4
      WHERE id=$1 AND owner_user_id=$2::uuid
        AND blocked_reason='owner_topup_maintenance' AND kill_switch=true
        AND execution_enabled=false AND reserved_micros=0
-       AND cash_micros=$5::bigint RETURNING id`,
+       AND cash_micros=$5::bigint AND $3::bigint>=cash_micros RETURNING id`,
      [who.row.id,uid,String(b.bot),p.prior_blocked_reason??null,String(before[2])]);
    if(credit.rows.length!==1)throw Error("topup_credit_not_reconciled");
    const done=await client.query(`UPDATE private.kalshi_owner_topups
@@ -519,6 +513,9 @@ export async function reconcileOwnerTopup(db:Pool,uid:string,deps:Deps={}):Promi
       WHERE id=$1::uuid AND owner_user_id=$2::uuid AND state='active' RETURNING id`,
       [p.id,uid]);
    if(done.rows.length!==1)throw Error("topup_completion_not_recorded");
+   const account=(await client.query('SELECT * FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[who.row.id,uid])).rows;
+   if(account.length!==1)throw Error('topup_account_missing');
+   await recordOwnerCashFlow(client as unknown as PoolClient,account[0] as unknown as Account,{id:str(p.attempt_id),owner:uid,direction:'TOPUP',providerId:str(p.exchange_transfer_id),beforeMicros:String(before[2]),afterMicros:String(b.bot),observedAtMs,evidence:{planId:p.id,attemptId:p.attempt_id,providerId:p.exchange_transfer_id,amountCents:amount,before:before.map(String),after:{zero:String(b.zero),primary:String(b.primary),bot:String(b.bot)}}});
    result={ok:true,reason:"topup_completed_signed_cash_and_receipt_verified",
     state:"completed",planId:str(p.id),attemptId:str(p.attempt_id),
     kind:"bot",amountCents:amount,transferAttempted:true};

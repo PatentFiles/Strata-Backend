@@ -1,3 +1,5 @@
+import {automaticTransferAmount,automaticTransferTrigger} from './cashTransferPolicy';
+import {economicExitNotDischarged} from './economicExitDischargeScope';
 import { pool } from "@workspace/db";
 import { CASHIER_SWEEP_CONFIRMATION, confirmManualSweep, observeAutomaticSweepCash, quoteManualSweep, reconcileManualSweep, sweepAvailability } from "./manualProfitWithdrawals";
 import { personalTradingControls, personalTradingSession } from "./sharedPersonalTradingControls";
@@ -59,7 +61,7 @@ async function flat(owner:string,account:string):Promise<boolean>{
  WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.reserved_micros=0
  AND a.cash_precision_verified=true
  AND NOT EXISTS(SELECT 1 FROM v13_production_position p WHERE p.account_id=a.id AND p.quantity_hundredths>0)
- AND NOT EXISTS(SELECT 1 FROM v13_production_intent i WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED'))
+ AND NOT EXISTS(SELECT 1 FROM v13_production_intent i WHERE i.account_id=a.id AND i.state NOT IN ('TERMINAL','BLOCKED')${economicExitNotDischarged('i.account_id','i.client_order_id')})
  AND NOT EXISTS(SELECT 1 FROM private.kalshi_account_worker_lease l
  WHERE l.execution_account_id=a.id AND (l.state='owned' OR l.arm_requested=true))`,[account,owner]);
  return q.rows.length===1 && !personalTradingSession.isScheduled(owner,account);
@@ -71,7 +73,7 @@ async function initialize(owner:string,rule:AutoRule):Promise<string>{
  const prior=await read(owner);
  if(prior && prior.state!=="completed")return "maintenance_active";
  if(rule.latched){
-  if(cash.botCashCents<rule.thresholdCents && rule.lastAttemptId){
+  if(cash.botCashCents<automaticTransferTrigger(rule.sweepMode??'fixed_amount',rule.thresholdCents,rule.withdrawCents,Math.max(cash.requiredCapitalCents,rule.minimumRetainedCents)) && rule.lastAttemptId){
    const transfer=await pool.query(`SELECT state FROM ${W} WHERE owner_user_id=$1::uuid AND id=$2::uuid`,[owner,rule.lastAttemptId]);
    if(transfer.rows[0]?.state==="completed")
     await pool.query(`UPDATE ${R} SET latched=false,last_observed_below_at=now(),updated_at=now()
@@ -84,8 +86,8 @@ async function initialize(owner:string,rule:AutoRule):Promise<string>{
  if(!cash.cashPrecisionVerified)return "auto_cash_precision_unverified";
  // Do not pause a running strategy when the requested sweep exceeds the
  // owner's actual withdrawable cash after preserving verified starting capital.
- const requiredFloor=Math.max(cash.initialCapitalCents,rule.minimumRetainedCents);
- if(cash.botCashCents-rule.withdrawCents<requiredFloor)
+ const requiredFloor=Math.max(cash.requiredCapitalCents,rule.minimumRetainedCents);
+ if(automaticTransferAmount(rule.sweepMode??'fixed_amount',rule.withdrawCents,Math.max(0,cash.botCashCents-requiredFloor))<1)
    return "auto_threshold_reached_but_safe_cash_insufficient";
  const running=personalTradingSession.isScheduled(owner,cash.accountId);
  const armed=cash.executionEnabled && !cash.killSwitch;
@@ -93,7 +95,7 @@ async function initialize(owner:string,rule:AutoRule):Promise<string>{
  (execution_account_id,owner_user_id,rule_id,rule_revision,state,was_running,was_armed,initial_kill_switch,last_reason)
  SELECT a.id,$2::uuid,$3::uuid,$4,'pause_requested',$5,$6,$7,'threshold_reached'
  FROM v13_production_account a WHERE a.id=$1 AND a.owner_user_id=$2::uuid
- AND NOT EXISTS(SELECT 1 FROM ${W} w WHERE w.execution_account_id=a.id AND w.state IN ('prepared','attempted','pending','uncertain'))
+ AND NOT EXISTS(SELECT 1 FROM ${W} w WHERE w.execution_account_id=a.id AND (w.state IN ('attempted','pending','uncertain') OR w.state='prepared' AND w.expires_at>clock_timestamp()))
  AND EXISTS(SELECT 1 FROM ${R} r WHERE r.id=$3::uuid AND r.owner_user_id=$2::uuid
    AND r.enabled=true AND NOT r.latched AND r.revision=$4)
  ON CONFLICT(execution_account_id) DO UPDATE SET
@@ -132,10 +134,10 @@ async function submit(owner:string,m:Row,rule:AutoRule):Promise<string>{
  const observed=await observeAutomaticSweepCash(owner);
  if(!observed || observed.botCashCents<rule.thresholdCents)return "threshold_not_verified";
  const avail=await sweepAvailability(owner,rule.minimumRetainedCents,undefined,"automatic");
- if(!avail.ok || avail.maximumCents===null || avail.maximumCents<rule.withdrawCents)
+ if(!avail.ok || avail.maximumCents===null || automaticTransferAmount(rule.sweepMode??'fixed_amount',rule.withdrawCents,avail.maximumCents)<1)
   return "waiting_for_safe_excess_cash";
  const quote=await quoteManualSweep(owner,
-  {amountCents:rule.withdrawCents,minimumRetainedCents:rule.minimumRetainedCents},undefined,"automatic");
+  {amountCents:automaticTransferAmount(rule.sweepMode??'fixed_amount',rule.withdrawCents,avail.maximumCents),minimumRetainedCents:rule.minimumRetainedCents},undefined,"automatic");
  if(!quote.ok||!quote.id)return "quote_failed";
  const db=await pool.connect();let claimed=false;
  try{
@@ -180,16 +182,17 @@ async function reconcile(owner:string,m:Row):Promise<string>{
 }
 async function resume(owner:string,m:Row,rule:AutoRule):Promise<string>{
  if(m.operator_interrupted===true){await change(owner,"blocked","owner_interrupted");return "owner_interrupted";}
- const cash=await reconcileOwnedSubaccountCash(pool,{
-  ownerUserId:owner,confirmation:RECORD_OWNED_CASH_CONFIRMATION,nowMs:Date.now(),
- });
- if(!cash.ok)return "post_transfer_cash_reconciliation_pending";
  const canRestart=automaticResumeAuthorized({
   wasRunning:m.was_running===true,wasArmed:m.was_armed===true,
   initialKillSwitch:m.initial_kill_switch!==false,
   ownerInterrupted:m.operator_interrupted!==false,ruleEnabled:rule.enabled,
   ruleMatches:m.rule_id===rule.id && Number(m.rule_revision)===rule.revision,
  });
+ // A stopped account stays stopped. Its cash was already atomically booked
+ // against the verified provider receipt; no extra startup consent is inferred.
+ if(canRestart){const cash=await reconcileOwnedSubaccountCash(pool,{ownerUserId:owner,confirmation:RECORD_OWNED_CASH_CONFIRMATION,nowMs:Date.now()});
+ if(!cash.ok)return 'post_transfer_cash_reconciliation_pending';}
+
  if(!await change(owner,"completed","verified_auto_withdrawal","resume_requested"))return "maintenance_changed";
  if(!canRestart)return "auto_completed_bot_remains_stopped";
  const result=await personalTradingControls.control(owner,"START");

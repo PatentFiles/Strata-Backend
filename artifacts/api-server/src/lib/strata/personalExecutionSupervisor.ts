@@ -359,10 +359,10 @@ export function createProductionPersonalSession(
     }
     // Independent worker-level guard: outstanding cashier transfers must settle
     // before a live worker can acquire a lease, even if the controller races.
-    if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
+    if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true") {
       try {
         const withdrawals = await db.query(
-          "SELECT id FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1",
+          "SELECT id FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND (state IN ('attempted','pending','uncertain') OR state='prepared' AND expires_at>clock_timestamp()) LIMIT 1",
           [input.accountId, input.userId],
         );
         if (withdrawals.rows.length > 0) return { ok: false, reason: "withdrawal_in_progress" };
@@ -370,7 +370,7 @@ export function createProductionPersonalSession(
         return { ok: false, reason: "withdrawal_safety_unavailable" };
       }
     }
-    if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+    if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true") {
       try {
         const hold=await db.query(
           "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
@@ -727,7 +727,7 @@ export function createProductionPersonalSession(
         // requesting STOP, the next heartbeat still disables new entries.
         // Protective reduce-only exit management is left to the worker.
         snapshotTiming.mark("maintenance");
-        if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+        if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true") {
           try {
             const maintenance=await snapshotDb.query(
               "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",

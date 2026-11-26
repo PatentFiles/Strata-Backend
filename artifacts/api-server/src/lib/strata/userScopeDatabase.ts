@@ -646,7 +646,7 @@ export function createDatabaseUserScopePort(
       if (!account.commissioned) return refused(userId, "user_execution_account_not_commissioned", account);
       // Human STOP/DISARM/KILL overrides any previously scheduled automatic
       // restart. Never let the withdrawal worker undo a deliberate stop.
-      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" &&
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true" &&
           (action === "STOP" || action === "DISARM" || action === "KILL")) {
         await db.query(
           "UPDATE private.strata_auto_withdrawal_maintenance SET operator_interrupted=true,last_reason='manual_stop_or_kill',changed_at=now() WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state NOT IN ('completed','blocked')",
@@ -711,7 +711,7 @@ export function createDatabaseUserScopePort(
       // A durable maintenance hold fences START/ARM independently of the
       // withdrawal quote ledger. It remains active throughout STOP and
       // protective-exit drain, not only after an exchange POST is attempted.
-      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true") {
+      if (process.env.STRATA_AUTOMATIC_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true") {
         try {
           const holds=await db.query(
             "SELECT state FROM private.strata_auto_withdrawal_maintenance WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state <> 'completed' LIMIT 1",
@@ -722,10 +722,10 @@ export function createDatabaseUserScopePort(
       }
       // Do not arm or start while a cash withdrawal is quoted or unreconciled.
       // The legacy trading flow is unchanged while the feature is disabled.
-      if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true") {
+      if (process.env.STRATA_MANUAL_WITHDRAWALS_ENABLED === "true" || process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED === "true") {
         try {
           const withdrawals = await db.query(
-            "SELECT id FROM private.strata_manual_profit_withdrawals WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND state IN ('prepared','attempted','pending','uncertain') LIMIT 1",
+            "SELECT id FROM private.strata_manual_profit_withdrawals WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND (state IN ('attempted','pending','uncertain') OR state='prepared' AND expires_at>clock_timestamp()) LIMIT 1",
             [userId, account.id],
           );
           if (withdrawals.rows.length > 0) return refused(userId, "withdrawal_in_progress", account);

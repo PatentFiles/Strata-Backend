@@ -57,7 +57,7 @@ export const OWNER_ONBOARDING_READ_SQL=[
  " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=f.id",
  " WHERE c.owner_user_id=u.id AND c.revoked_at IS NULL AND c.vault_secret_id IS NOT NULL",
  " AND (a.id IS NULL OR c.financial_account_id=a.kalshi_connection_id)) AS stored_roles,",
- "a.cash_micros::text AS cash_micros,a.initial_cash_micros::text AS initial_cash_micros,",
+ "a.cash_micros::text AS cash_micros,a.initial_cash_micros::text AS initial_cash_micros,COALESCE((to_jsonb(a)->>'net_funding_micros')::bigint,0)::text AS net_funding_micros,",
  "(SELECT COALESCE(SUM(e.cash_delta_micros),0)::text FROM public.v13_production_event e WHERE e.account_id=a.id) AS cash_movement_micros,",
  "(SELECT array_agg(c.role ORDER BY c.role) FROM private.kalshi_connection_credentials c",
  " JOIN private.provider_connections pc ON pc.id=c.provider_connection_id AND pc.financial_account_id=c.financial_account_id",
@@ -125,7 +125,7 @@ export async function inspectOwnerAccountOnboardingReadiness(
   if(r.ownedAccountUnique &&
     [a.cash_micros,a.initial_cash_micros,a.cash_movement_micros].every(v=>typeof v==="string"&&/^-?\d+$/.test(v))){
    const cash=BigInt(String(a.cash_micros)),initial=BigInt(String(a.initial_cash_micros)),movement=BigInt(String(a.cash_movement_micros));
-   const difference=cash-initial-movement;
+   const difference=cash-initial-movement-BigInt(String(a.net_funding_micros??'0'));
    r.openingBasis={cashMicros:String(cash),initialCashMicros:String(initial),cashMovementMicros:String(movement),
     differenceMicros:String(difference),repairCandidate:r.account.commissioned&&r.account.killSwitchOn&&
     r.funding.historicalOrCompletedTransferRecorded&&initial===0n&&movement===0n&&cash>0n};

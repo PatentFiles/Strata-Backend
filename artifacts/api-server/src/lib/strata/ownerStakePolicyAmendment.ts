@@ -85,6 +85,10 @@ export async function amendOwnedStakePolicy(
       WHERE id=$1 AND owner_user_id=$2::uuid AND subaccount=1 AND exchange_index=2 FOR UPDATE`, [accountId,ownerId]);
     if (accountRows.rows.length !== 1) return reject("execution_account_missing");
     const a = accountRows.rows[0]!;
+    if(process.env.STRATA_OWNER_CASH_TRANSFERS_V1_ENABLED==='true'){
+      const financial=await tx.query(`SELECT 1 WHERE EXISTS(SELECT 1 FROM private.strata_manual_profit_withdrawals WHERE execution_account_id=$1 AND (state IN ('attempted','pending','uncertain') OR state='prepared' AND expires_at>clock_timestamp())) OR EXISTS(SELECT 1 FROM private.kalshi_owner_topups WHERE execution_account_id=$1 AND state='active') OR EXISTS(SELECT 1 FROM private.strata_auto_withdrawal_maintenance WHERE execution_account_id=$1 AND state<>'completed')`,[accountId]);
+      if(financial.rows.length)return reject('stake_change_blocked_by_cash_transfer');
+    }
     if (a.commissioned !== true || a.cash_precision_verified !== true || asText(a.policy_id).length===0) {
       return reject("account_not_commissioned");
     }

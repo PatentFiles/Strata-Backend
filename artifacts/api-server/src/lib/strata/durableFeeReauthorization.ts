@@ -50,7 +50,7 @@ async function scopeRow(db:Q,owner:string,account:string,lock=false){
  if(lock&&platformFeeUploadEnabled())await db.query('SELECT pg_advisory_xact_lock_shared(1958371201,1)');
  const r=await db.query(`SELECT m.*,m.effective_date::text AS effective_date_text,s.entry_revoked,s.known_publication_change,
  b.original_bytes,b.content_sha256 AS baseline_digest,a.revision AS account_revision,a.key_fingerprint,a.kalshi_connection_id,
- a.reconciled_at,a.cash_micros,a.reserved_micros,a.initial_cash_micros,a.policy_id,a.execution_enabled,a.kill_switch,a.blocked_reason,a.commissioned,a.cash_precision_verified,
+ a.reconciled_at,a.cash_micros,a.reserved_micros,a.initial_cash_micros,COALESCE((to_jsonb(a)->>'net_funding_micros')::bigint,0)::text AS net_funding_micros,a.policy_id,a.execution_enabled,a.kill_switch,a.blocked_reason,a.commissioned,a.cash_precision_verified,
  a.fee_artifact_digest,to_jsonb(p) AS policy
  FROM private.strata_durable_owner_fee_model m JOIN private.strata_durable_owner_fee_state s USING(model_id)
  JOIN private.strata_durable_historical_baseline b ON b.baseline_id=m.historical_baseline_id
