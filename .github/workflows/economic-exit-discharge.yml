@@ -11,6 +11,8 @@ on:
       - 'artifacts/api-server/src/lib/strata/reconciledReleaseRenewalHistory.ts'
       - 'artifacts/api-server/src/lib/strata/settledCashBracket.ts'
       - 'artifacts/api-server/src/lib/v13-production/ledger.ts'
+      - 'artifacts/api-server/src/lib/v13-production/executor.ts'
+      - 'artifacts/api-server/src/lib/v13-production/ownedGateRead.ts'
       - 'artifacts/api-server/src/routes/ownerEconomicSettlement*'
       - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
       - 'artifacts/api-server/scripts/run-economic-settlement-tests.mjs'

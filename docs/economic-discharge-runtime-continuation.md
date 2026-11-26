@@ -45,3 +45,12 @@ release. Disable the recognition/writer rollout flags to return to fail-closed
 UNKNOWN gates. Pin the last verified compatible release only after checking its
 financial read model. Keep immutable receipts and all canonical ledger events;
 never delete or reverse them to make an old build appear ready.
+
+## Concurrent implementation reconciliation
+
+Brady PR391 is included as a merge parent. Its real STOP/KILL call-order
+regression and centralized ledger final-settlement proof are retained. The
+duplicated full-cycle fixture and SQL-only admission helper are superseded by
+one full-worker test and the stricter fresh-signed-evidence admission guard.
+Both implementations use the sole #387 canonical receipt. No active branch
+was force-pushed, no strategy changed, and no second disposition schema added.

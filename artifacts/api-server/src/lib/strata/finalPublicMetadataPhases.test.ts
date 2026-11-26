@@ -13,6 +13,27 @@ test('held state starts zero reads; hold after start refuses consumption and dra
 test('unknown wire identity cannot take another intent capture',async()=>{const f=fixture(),c=context();f.phases.start('WIRE_FEE',c);assert.throws(()=>f.phases.consumeWire('v13p-22222222-2222-4222-8222-222222222222',market),/intent_mismatch/);f.phases.discardAll();await settle();});
 import {readFileSync} from 'node:fs';
 import {readPublicMetadataPrefetchConfig} from './publicMetadataPrefetchConfig';
-test('final phase rollout is independently exact-true/default-OFF at actual constructor',()=>{for(const value of [undefined,'false','TRUE','1',true,null])assert.equal(readPublicMetadataPrefetchConfig(value).enabled,false);assert.equal(readPublicMetadataPrefetchConfig('true').enabled,true);const source=readFileSync('src/lib/strata/sharedPersonalTradingControls.ts','utf8');assert.match(source,/readPublicMetadataPrefetchConfig\(process\.env\.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED\)/);assert.match(source,/finalPublicMetadataPrefetch:finalPublicMetadataPrefetch\.enabled/);const supervisor=readFileSync('src/lib/strata/personalExecutionSupervisor.ts','utf8');assert.match(supervisor,/\(apiSource\|\|durableSource\)&&options\.finalPublicMetadataPrefetch===true/);assert.match(supervisor,/finalPublicMetadata\?\.discardAll\(\);return disarmWorkerLease/);});
+test('final phase rollout is independently exact-true/default-OFF at actual constructor',()=>{for(const value of [undefined,'false','TRUE','1',true,null])assert.equal(readPublicMetadataPrefetchConfig(value).enabled,false);assert.equal(readPublicMetadataPrefetchConfig('true').enabled,true);const source=readFileSync('src/lib/strata/sharedPersonalTradingControls.ts','utf8');assert.match(source,/readPublicMetadataPrefetchConfig\(process\.env\.STRATA_FINAL_PUBLIC_METADATA_PREFETCH_ENABLED\)/);assert.match(source,/finalPublicMetadataPrefetch:finalPublicMetadataPrefetch\.enabled/);const supervisor=readFileSync('src/lib/strata/personalExecutionSupervisor.ts','utf8');assert.match(supervisor,/\(apiSource\|\|durableSource\)&&options\.finalPublicMetadataPrefetch===true/);});
 
 test('discard retains owning cancellation tombstone: no fresh fallback at either consumer',async()=>{for(const phase of ['FINAL_MARKET','WIRE_FEE'] as const){const f=fixture(),c=context();f.phases.start(phase,c);await settle();const before=f.calls.length;f.phases.discardAll();if(phase==='FINAL_MARKET')await assert.rejects(f.phases.finalMarket(c,async()=>{const data=f.phases.consumeFinalMarket(market);assert.ok(data);await data.read(`/markets/${market}`);}),/cancelled/);else {const data=f.phases.consumeWire('v13p-'+c.intentId,market);assert.ok(data);await assert.rejects(data.read(`/markets/${market}`),/cancelled/);}assert.equal(f.calls.length,before);f.phases.finish(c.intentId,c.invocation);await settle();assert.equal(f.coordinator.diagnostics().accounts,0);}});
+
+// Execute the actual supervisor callback with inert ports. This checks call
+// order and the returned result without depending on statement formatting.
+test('supervisor STOP and KILL discard metadata before disarming the lease',async()=>{
+ const source=readFileSync('src/lib/strata/personalExecutionSupervisor.ts','utf8');
+ const body=source.match(/disarm\s*:\s*\(action\)\s*=>\s*\{([\s\S]*?)\s*\},\s*\};/)?.[1];
+ assert.ok(body,'actual worker disarm callback not found');
+ const makeDisarm=new Function('recoveryAbort','finalPublicMetadata','disarmWorkerLease','db','input','now',
+  'return (action) => {'+body+'}') as (...ports:unknown[])=>(action:'STOP'|'KILL')=>Promise<unknown>;
+ const result={entriesBlocked:true,managingExposure:false};
+ for(const action of ['STOP','KILL'] as const){
+  const calls:string[]=[],db=Object.freeze({}),input={userId:scope.ownerId,accountId:scope.accountId};
+  const disarm=makeDisarm({abort:()=>calls.push('abort')},{discardAll:()=>calls.push('discard')},
+   async(actualDb:unknown,ownerId:string,accountId:string,actualAction:string)=>{
+    assert.equal(actualDb,db);assert.equal(ownerId,input.userId);assert.equal(accountId,input.accountId);
+    assert.equal(actualAction,action);calls.push('disarm');return result;
+   },db,input,()=>1100);
+  assert.equal(await disarm(action),result);
+  assert.deepEqual(calls,action==='KILL'?['abort','discard','disarm']:['discard','disarm']);
+ }
+});
