@@ -2,7 +2,7 @@ import type {Snapshot} from '../v13-production/types';
 import {readStoppedSettledExitDispositions,settledReserveReadinessEnabled,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 export type RuntimeDispositionDb={query(sql:string,params:unknown[]):Promise<{rows:Record<string,unknown>[]}>};
 export type RuntimeDispositionInput={accountId:string;ownerId:string;snapshot:Snapshot;nowMs:number;
- currentIntentId?:string|null;lock?:boolean;protectiveMarker?:{reservationId:string;clientId:string;state:"PREPARED"|"UNKNOWN"}};
+ currentIntentId?:string|null;lock?:boolean;strictOtherIntents?:boolean;protectiveMarker?:{reservationId:string;clientId:string;state:"PREPARED"|"UNKNOWN"}};
 
 /** Returns one exact historical pair only after newer full signed observation.
  * Does not require the whole account to be flat: a later real position must
@@ -35,12 +35,24 @@ export async function runtimeSettledExitReceipt(db:RuntimeDispositionDb,x:Runtim
   }
   const remaining=(await db.query(`SELECT
    EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=$1
-    AND i.state IN ('DISPATCHED','UNKNOWN') AND i.id<>$2
+    AND (i.state IN ('DISPATCHED','UNKNOWN') OR ($6::boolean AND (NOT i.terminal OR i.state='PREPARED'))) AND i.id<>$2
     AND ($3::text IS NULL OR i.id<>$3 OR i.state<>'DISPATCHED')) AS intents,
    EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations m
     WHERE m.execution_account_id=$1 AND m.state IN ('PREPARED','DISPATCHED','UNKNOWN') AND m.reservation_id<>$4::uuid
     AND ($5::uuid IS NULL OR m.reservation_id<>$5::uuid)) AS exits`,
-    [x.accountId,r.exitId,x.currentIntentId??null,r.reservationId,marker?.reservationId??null])).rows;
+    [x.accountId,r.exitId,x.currentIntentId??null,r.reservationId,marker?.reservationId??null,x.strictOtherIntents===true])).rows;
   return remaining.length===1&&remaining[0]!.intents===false&&remaining[0]!.exits===false?r:null;
  }catch{return null;}
+}
+
+/** Continuation is based on the worker's committed signed snapshot. The
+ * exact historical pair is the only exclusion, and the five-second clock
+ * is checked again after database work. Call under the account lock when
+ * granting/renewing a lease; read-only callers do not grant authority. */
+export async function reconciledSettledExitReceipt(db:RuntimeDispositionDb,
+ x:{accountId:string;ownerId:string;snapshot:Snapshot;now:()=>number;lock?:boolean}){
+ const proof=await runtimeSettledExitReceipt(db,{accountId:x.accountId,ownerId:x.ownerId,
+  snapshot:x.snapshot,nowMs:x.now(),lock:x.lock,strictOtherIntents:true});
+ const age=x.now()-x.snapshot.observedAtMs;
+ return proof&&Number.isSafeInteger(age)&&age>=0&&age<=5000?proof:null;
 }

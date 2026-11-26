@@ -1,3 +1,4 @@
+import {reconciledSettledExitReceipt} from "./runtimeSettledExitGuard";
 import type {Snapshot} from "../v13-production/types";
 
 /** Read-only continuation evidence, called only AFTER committed reconciliation.
@@ -6,7 +7,7 @@ import type {Snapshot} from "../v13-production/types";
  */
 export async function reconciledFlatEntryEvidence(
  db:{query(sql:string,params:unknown[]):Promise<{rows:Record<string,unknown>[]}>},
- input:{accountId:string;ownerId:string;snapshot:Snapshot;nowMs:number},
+ input:{accountId:string;ownerId:string;snapshot:Snapshot;nowMs:number;receiptClock?:()=>number},
 ):Promise<boolean>{
  try {
   const s=input.snapshot,age=input.nowMs-s.observedAtMs;
@@ -27,8 +28,11 @@ export async function reconciledFlatEntryEvidence(
    [input.accountId,input.ownerId]);
   if(result.rows.length!==1)return false;
   const r=result.rows[0];
-  return r.reserved_micros==="0"&&r.cash_micros===s.cashMicros&&
-    r.blocked_reason===null&&r.kill_switch===false&&r.execution_enabled===true&&
-    r.unresolved==="0"&&r.exits==="0"&&r.positions==="0";
+  if(r.reserved_micros!=="0"||r.cash_micros!==s.cashMicros||
+     r.blocked_reason!==null||r.kill_switch!==false||r.execution_enabled!==true||r.positions!=="0")return false;
+  if(r.unresolved==="0"&&r.exits==="0")return true;
+  if(r.unresolved!=="1"||r.exits!=="1"||!input.receiptClock)return false;
+  return (await reconciledSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,
+   snapshot:s,now:input.receiptClock}))!==null;
  }catch{return false;}
 }

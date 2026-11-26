@@ -2412,6 +2412,220 @@ test("commissioned cash observation preserves ledger and rejects mismatch, runni
   assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
 });
 
+import {economicSettlementFixture} from '../strata/ownerEconomicSettlementFixture';
+import {reconciledFlatEntryEvidence} from '../strata/reconciledFlatEntryEvidence';
+import {CONTINUOUS_OWNER_CONFIRM, renewContinuousTechnicalLease} from '../strata/continuousExecutionAuthorization';
+import {STANDING_REVIEW_CONFIRM} from '../strata/standingExecutionReview';
+import {reconcileOwnedProtectiveExits} from '../strata/ownerFeeEmergencyExitWorkerRecovery';
+import {economicSettlementPlan,proveEconomicSettlement} from '../strata/ownerEconomicSettlementProof';
+import {commitEconomicSettlement} from '../strata/ownerEconomicSettlementCommit';
+import {disposeSettledExitReserve} from '../strata/settledExitReserveDisposition';
+import {inspectSettledExitReserve} from '../strata/settledExitReserveEvidence';
+
+test("disposable settled-exit receipt: flat checks, technical lease, restart selection, and final entry containment",async()=>{
+ const f=await liveReceiptFixture(),owner=f.executor.accountOwnerUserId!, accountId='test-account';
+ await pool.query(readFileSync('../../sql/strata_protective_exit_request_snapshot_private.sql','utf8'));
+ const held=economicSettlementFixture(f.exchange.now);
+ const material={keyId:'isolated-restart-only',privateKey:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'pem',type:'pkcs8'}).toString()};
+ f.exchange.evidence.identity.keyFingerprint=dedicatedSignerFingerprint(material.keyId,material.privateKey)!;
+ await pool.query("UPDATE v13_production_account SET key_fingerprint=$2 WHERE id=$1",[accountId,f.exchange.evidence.identity.keyFingerprint]);
+ Object.assign(held.account,{id:accountId,owner_user_id:owner,key_fingerprint:f.exchange.evidence.identity.keyFingerprint});
+ held.snapshot.identity.keyFingerprint=held.account.key_fingerprint;
+ for(const i of held.history.rows)i.account_id=accountId;
+ for(const e of held.history.events)e.account_id=accountId;
+ for(const p of held.history.positions)p.account_id=accountId;
+ for(const m of held.history.markers){m.execution_account_id=accountId;m.owner_user_id=owner;}
+ const proof=proveEconomicSettlement(held),plan=economicSettlementPlan(proof);
+ await pool.query("ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS owner_control_epoch bigint NOT NULL DEFAULT 0");
+ await pool.query("ALTER TABLE private.kalshi_account_worker_lease ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz");
+ await pool.query(`CREATE ROLE service_role NOLOGIN; CREATE ROLE strata_api_runtime LOGIN NOINHERIT NOBYPASSRLS; GRANT USAGE ON SCHEMA private,public TO strata_api_runtime`);
+ await pool.query(readFileSync("../../supabase/migrations/20261126004500_economic_settlement_receipt.sql","utf8"));
+ await pool.query(readFileSync("../../supabase/migrations/20261126124100_settled_exit_reserve_disposition.sql","utf8"));
+ await pool.query("INSERT INTO auth.users(id) VALUES($1) ON CONFLICT DO NOTHING",[owner]);
+ await pool.query(`INSERT INTO private.kalshi_account_worker_lease(execution_account_id,owner_user_id,holder_id,fencing_token,state,credential_fingerprint,arm_requested,account_kill,heartbeat_at)
+  VALUES($1,$2,'offline-worker',7,'released',$3,false,false,clock_timestamp()-interval '1 hour')
+  ON CONFLICT(execution_account_id) DO UPDATE SET owner_user_id=$2,holder_id='offline-worker',fencing_token=7,state='released',
+    credential_fingerprint=$3,arm_requested=false,account_kill=false,heartbeat_at=clock_timestamp()-interval '1 hour'`,
+  [accountId,owner,held.account.key_fingerprint]);
+ await pool.query("UPDATE v13_production_account SET cash_micros=$2,reserved_micros=$3,initial_cash_micros=$4,revision=$5 WHERE id=$1",
+  [accountId,held.account.cash_micros,held.account.reserved_micros,held.account.initial_cash_micros,held.account.revision]);
+ const oldSource=await f.source(randomUUID(),"economic-historical");
+ for(const i of held.history.rows)await pool.query(`INSERT INTO public.v13_production_intent(id,account_id,evaluation_id,crossing_key,parent_id,kind,market,side,state,
+  request,decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,exchange_order_id,reserved_micros,exit_fee_micros,
+  filled_hundredths,terminal,dispatch_at,created_at)
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+  [i.id,accountId,i.kind==='ENTRY'?oldSource:null,i.kind==='ENTRY'?'economic-historical':null,i.parent_id,i.kind,i.market,i.side,i.state,
+   JSON.stringify(i.request),JSON.stringify(i.decision),i.policy_hash,i.fee_fingerprint,i.capability_digest,i.client_order_id,i.exchange_order_id,
+   i.reserved_micros,i.exit_fee_micros,i.filled_hundredths,i.terminal,i.dispatch_at,i.created_at]);
+ await pool.query("UPDATE forward_test_evaluations SET qualifying_trigger=false WHERE id=$1",[oldSource]);
+ const position=held.history.positions[0]!;
+ await pool.query("INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros,realized_pnl_micros) VALUES($1,$2,$3,$4,$5,$6,0)",
+  [position.id,accountId,position.market,position.side,position.quantity_hundredths,position.basis_micros]);
+ for(const e of held.history.events)await pool.query(`INSERT INTO public.v13_production_event(account_id,event_id,intent_id,kind,digest,payload,cash_delta_micros,pnl_micros,occurred_at)
+  VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)`,[accountId,e.event_id,e.intent_id,e.kind,e.digest,JSON.stringify(e.payload),e.cash_delta_micros,e.pnl_micros,e.occurred_at]);
+ const m=held.history.markers[0]!;
+ await pool.query(`INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,
+  reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,order_request_json)
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,7,'offline-worker',$9)`,
+  [m.reservation_id,owner,accountId,m.market_ticker,m.client_order_id,m.reducing_side,m.quantity_hundredths,m.order_digest,m.order_request_json]);
+ await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[m.reservation_id]);
+ const scope={requestId:randomUUID(),ownerId:owner,scopeDigest:'b'.repeat(64),releaseSha:'a'.repeat(40),controlEpoch:'0',workerFence:'7'};
+ const verifyLocked=async()=>{};
+ const settle=await commitEconomicSettlement(proof,scope,{db:pool,now:()=>held.nowMs,verifyLocked});assert.equal(settle.ok,true,JSON.stringify(settle));
+ const posted=(await pool.query("SELECT * FROM v13_production_account WHERE id=$1",[accountId])).rows[0];
+ const events=(await pool.query("SELECT * FROM v13_production_event WHERE account_id=$1 ORDER BY event_id",[accountId])).rows;
+ const positions=(await pool.query("SELECT * FROM v13_production_position WHERE account_id=$1",[accountId])).rows;
+ const evidence={...held,account:{...posted,subaccount:Number(posted.subaccount),exchange_index:Number(posted.exchange_index)},history:{...held.history,events,positions}};
+ const stored=(await pool.query("SELECT * FROM private.strata_economic_settlement_receipt WHERE request_id=$1",[scope.requestId])).rows[0];
+ assert.equal(inspectSettledExitReserve(evidence,stored).reserveReleased,false);
+ const release=await disposeSettledExitReserve(evidence,{...scope,requestId:randomUUID()},{db:pool,now:()=>held.nowMs,verifyLocked});
+ assert.equal(release.status,'RECORDED',JSON.stringify(release));
+ f.exchange.evidence=structuredClone(held.snapshot);
+ const sha=process.env.RAILWAY_GIT_COMMIT_SHA,flag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+  const policyRow=(await pool.query("SELECT policy_hash FROM v13_live_money_policy WHERE execution_account_id=$1",[accountId])).rows[0];
+  const reviewer=randomUUID(),qualification=randomUUID(),review=randomUUID(),grant=randomUUID();
+  for(const file of ['sql/strata_in_app_protective_release_approval.sql','sql/strata_owner_sha_approval.sql',
+   'lib/db/drizzle/0043_strata_continuous_execution_grants.sql'])await pool.query(readFileSync('../../'+file,'utf8'));
+  await pool.query("INSERT INTO auth.users(id) VALUES($1)",[reviewer]);
+  await pool.query(`UPDATE private.kalshi_account_worker_lease SET state='owned',arm_requested=true,heartbeat_at=clock_timestamp()
+   WHERE execution_account_id=$1`,[accountId]);
+  await pool.query(`INSERT INTO private.strata_protective_release_qualification(qualification_id,release_commit_sha,owner_user_id,execution_account_id,evidence_digest)
+   VALUES($1,$2,$3,$4,$5)`,[qualification,scope.releaseSha,owner,accountId,'a'.repeat(64)]);
+  await pool.query(`INSERT INTO private.strata_owner_sha_approvals(owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
+   VALUES($1,$2,$3,$4,$5)`,[owner,accountId,scope.releaseSha,qualification,'a'.repeat(64)]);
+  await pool.query(`INSERT INTO private.strata_standing_execution_reviews(release_id,owner_user_id,execution_account_id,release_commit_sha,
+   policy_hash,independent_reviewer_id,qualification_id,evidence_digest,review_url,review_note,confirmation)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,'https://example.invalid/review',$9,$10)`,
+  [review,owner,accountId,scope.releaseSha,policyRow.policy_hash,reviewer,qualification,'a'.repeat(64),
+   'SYNTHETIC DISPOSABLE POSTGRESQL FIXTURE, NOT AN ACTUAL REVIEW OR OWNER APPROVAL. '.repeat(2),STANDING_REVIEW_CONFIRM]);
+  await pool.query(`INSERT INTO private.strata_continuous_execution_grants(grant_id,owner_user_id,execution_account_id,release_commit_sha,
+   policy_hash,reviewed_release_id,independent_reviewer_id,owner_confirmation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+  [grant,owner,accountId,scope.releaseSha,policyRow.policy_hash,review,reviewer,CONTINUOUS_OWNER_CONFIRM]);
+  await pool.query(`GRANT SELECT,UPDATE ON public.v13_production_account,public.v13_production_intent,
+   public.v13_production_position,private.kalshi_account_worker_lease,public.v13_live_money_policy,
+   private.strata_emergency_exit_reservations,private.strata_continuous_execution_grants,
+   private.strata_standing_execution_reviews,private.strata_owner_sha_approvals TO strata_api_runtime;
+   GRANT SELECT ON public.v13_production_event TO strata_api_runtime;
+   GRANT UPDATE(event_id) ON public.v13_production_event TO strata_api_runtime;
+   GRANT SELECT,INSERT,UPDATE ON private.strata_continuous_execution_technical_lease TO strata_api_runtime;
+   GRANT INSERT ON private.strata_continuous_execution_audit TO strata_api_runtime;
+   ALTER TABLE private.strata_emergency_exit_reservations FORCE ROW LEVEL SECURITY;`);
+  for(const relation of ['private.kalshi_account_worker_lease','private.strata_emergency_exit_reservations',
+   'private.strata_continuous_execution_grants','private.strata_standing_execution_reviews','private.strata_owner_sha_approvals',
+   'private.strata_continuous_execution_technical_lease','private.strata_continuous_execution_audit'])
+   await pool.query(`CREATE POLICY incident_disposable_runtime ON ${relation} TO strata_api_runtime USING (true) WITH CHECK (true)`);
+  const runtimeUrl=new URL(url!);runtimeUrl.username='strata_api_runtime';
+  const RuntimePool=pool.constructor as new(config:{connectionString:string;max:number})=>typeof pool;
+  const runtime=new RuntimePool({connectionString:runtimeUrl.toString(),max:2});
+  try{
+   const readback=(await runtime.query(`SELECT current_user AS role,
+    has_table_privilege(current_user,'private.strata_settled_exit_reserve_disposition','UPDATE') AS can_rewrite`)).rows[0];
+   assert.deepEqual(readback,{role:'strata_api_runtime',can_rewrite:false});
+   const snapshot=f.exchange.evidence, clock=()=>f.exchange.now;
+   const flat=(candidate=snapshot,now=clock)=>reconciledFlatEntryEvidence(runtime,
+    {accountId,ownerId:owner,snapshot:candidate,nowMs:now(),receiptClock:now});
+   const renew=(candidate=snapshot,now=clock,committed=true)=>renewContinuousTechnicalLease({
+    ownerId:owner,accountId,releaseSha:scope.releaseSha,policyHash:policyRow.policy_hash,
+    observedAtMs:candidate.observedAtMs,cashMicros:candidate.cashMicros,fencingToken:'7',authenticated:candidate.authenticated,
+    complete:candidate.complete,unexplainedCashActivity:candidate.unexplainedCashActivity,
+    providerEvidence:candidate,...(committed?{committedSnapshot:candidate}:{})
+   },{db:runtime,now});
+   assert.equal(await flat(),true);
+   assert.equal((await renew(snapshot,clock,false)).reason,'standing_unresolved_protective_exit');
+   const renewed=await renew();assert.equal(renewed.ok,true,JSON.stringify(renewed));
+   assert.equal(renewed.reason,'standing_short_technical_lease_renewed');
+   assert.equal((await renew()).reason,'standing_short_technical_lease_current');
+   assert.equal(await flat(snapshot,()=>clock()+5001),false);
+   assert.equal((await renew(snapshot,()=>clock()+5001)).reason,'standing_unresolved_protective_exit');
+   assert.equal(await flat({...snapshot,settlements:[]}),false);
+   assert.equal((await renew({...snapshot,settlements:[]})).reason,'standing_unresolved_protective_exit');
+   const observedConflict={...snapshot,orders:[...snapshot.orders,{...snapshot.orders[0]!,request:{...snapshot.orders[0]!.request,clientOrderId:String(m.client_order_id)}}]};
+   assert.equal(await flat(observedConflict),false);
+   assert.equal((await renew(observedConflict)).reason,'standing_unresolved_protective_exit');
+   assert.equal((await pool.query("SELECT generation FROM private.strata_continuous_execution_technical_lease WHERE grant_id=$1",[grant])).rows[0].generation,'1');
+  }finally{await runtime.end();}
+  const ticker='KXBTC15M-TEST-000',opened=f.exchange.now-10000,ends=opened+900000;
+  let btc=99999;
+  const direct=DirectEntrySource.isolatedSimulation({accountId,ownerId:owner},{
+   btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+   market:async()=>({ticker,target:100000,startsAt:new Date(opened),endsAt:new Date(ends),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,
+    yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+   book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+    rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+    yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]})
+  },()=>f.exchange.now);
+  f.executor.bindIndependentLiveSource(direct);
+  const reports:unknown[]=[];
+  const worker=new ProductionWorker(f.executor,2500,error=>reports.push(error));
+  await worker.tick();assert.equal(f.exchange.posts.length,0);
+  btc=100010;f.exchange.now+=1000;f.exchange.evidence.observedAtMs=f.exchange.now;
+  f.exchange.book.observedAtMs=f.exchange.now;
+  f.exchange.book.fee=entryCashRiskFeeFixture({now:f.exchange.now,market:ticker,side:'YES',price:.5,contracts:10,policyHash:policyRow.policy_hash});
+  await assert.rejects(worker.tick(),/production_settled_disposition_exit_not_qualified/);
+  assert.equal(f.exchange.posts.length,0,"the incident candidate must not reach even the fake wire");
+  assert.equal((await pool.query("SELECT reserved_micros FROM v13_production_account WHERE id=$1",[accountId])).rows[0].reserved_micros,'0');
+  assert.equal((await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[plan.exitId])).rows[0].state,'DISPATCHED');
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM v13_production_event WHERE event_id=$1",[plan.eventId])).rows[0].n,1);
+  // Duplicate the restart boundary as a database state fixture, not as a
+  // claim that this new protective order was produced or sent by the worker.
+  await pool.query("UPDATE public.v13_production_intent SET state='BLOCKED',terminal=true WHERE account_id=$1 AND kind='ENTRY' AND id<>$2",
+    [accountId,plan.parentId]);
+  const nextMarket='KXBTC15M-TEST-SUCCESSOR',nextId=randomUUID(),nextMarker=randomUUID(),newParent=randomUUID();
+  const nextClient='v13p-'+nextId;
+  const body={client_order_id:nextClient,ticker:nextMarket,side:'ask',count:'1.00',price:'0.5000',
+   reduce_only:true,time_in_force:'immediate_or_cancel',post_only:false,subaccount:1,exchange_index:2};
+  const raw=JSON.stringify(body),bodyDigest=createHash('sha256').update(raw).digest('hex');
+  const buy:Request={market:nextMarket,side:'YES',action:'BUY',contracts:1,limitMicros:500000,
+   timeInForce:'IOC',reduceOnly:false,clientOrderId:'v13p-'+newParent};
+  const sell:Request={...buy,action:'SELL',reduceOnly:true,clientOrderId:nextClient};
+  const owned=await f.source(randomUUID(),"new-disposable-restart-parent");
+  await pool.query(`INSERT INTO public.v13_production_intent(id,account_id,evaluation_id,crossing_key,kind,market,side,state,request,
+   decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros,terminal,created_at)
+   VALUES($1,$2,$3,'new-disposable-restart-parent','ENTRY',$4,'YES','TERMINAL',$5,'{}',$6,$7,$7,$8,0,0,true,clock_timestamp())`,
+   [newParent,accountId,owned,nextMarket,JSON.stringify(buy),policyRow.policy_hash,'d'.repeat(64),buy.clientOrderId]);
+  await pool.query(`INSERT INTO public.v13_production_position(id,account_id,market,side,quantity_hundredths,basis_micros)
+    VALUES($1,$2,$3,'YES',100,500000)`,[newParent,accountId,nextMarket]);
+  await pool.query(`INSERT INTO public.v13_production_intent(id,account_id,parent_id,kind,market,side,state,request,
+   decision,policy_hash,fee_fingerprint,capability_digest,client_order_id,reserved_micros,exit_fee_micros,terminal,created_at)
+   VALUES($1,$2,$3,'EXIT',$4,'YES','DISPATCHED',$5,'{}',$6,$7,$7,$8,0,0,false,clock_timestamp())`,
+   [nextId,accountId,newParent,nextMarket,JSON.stringify(sell),policyRow.policy_hash,'d'.repeat(64),nextClient]);
+  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,
+   reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,order_request_json)
+   VALUES($1,$2,$3,$4,$5,'YES',100,$6,7,'offline-worker',$7)`,[nextMarker,owner,accountId,nextMarket,nextClient,bodyDigest,raw]);
+  await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[nextMarker]);
+  let recoverCount=0;
+  const ident={ownerId:owner,accountId,material};
+  const restart=()=>reconcileOwnedProtectiveExits(ident,pool,{
+   recover:async x=>{
+    recoverCount++;assert.equal(x.reservationId,nextMarker);assert.equal(x.order.client_order_id,nextClient);
+    return {state:'RECONCILED',reason:'synthetic signed-read port',mayRetry:false,postAttempted:false};
+   },
+   readFeeds:async(_material,observedAtMs)=>{
+    const o=f.exchange.evidence.orders[0]!,fill=f.exchange.evidence.fills[0]!;
+    return {ok:true,observedAtMs,historicalCoverageComplete:true,cashMicros:'31977500',
+     orders:[{client_order_id:o.request.clientOrderId,ticker:o.request.market,order_id:o.orderId,status:'executed',
+      book_side:'ask',yes_price_dollars:'0.49',initial_count_fp:'3.00',fill_count_fp:'3.00'}],
+     fills:[{trade_id:fill.id,order_id:fill.orderId,ticker:fill.market,count_fp:'3.00',no_price_dollars:'0.49',
+      fee_cost:'0.052500',created_time:new Date(fill.occurredAtMs).toISOString()}],
+     settlements:[held.rawSettlement],positions:[held.rawPosition]};
+   }});
+  const recovered=await restart();assert.equal(recovered.ok,true,JSON.stringify(recovered));
+  assert.equal(recovered.postAttempted,false);assert.equal(recoverCount,1);
+  await pool.query(`INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,market_ticker,client_order_id,
+   reducing_side,quantity_hundredths,order_digest,worker_fencing_token,worker_holder_id,order_request_json)
+   VALUES($1,$2,$3,'KXBTC15M-TEST-CONFLICT',$4,'NO',100,$5,7,'offline-worker',$6)`,
+   [randomUUID(),owner,accountId,'v13p-'+randomUUID(),'e'.repeat(64),raw]);
+  assert.equal((await restart()).ok,false);assert.equal(recoverCount,1);
+  assert.equal((await pool.query("SELECT state FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[m.reservation_id])).rows[0].state,'UNKNOWN');
+  assert.equal(f.exchange.posts.length,0);
+ }finally{
+  if(sha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+  if(flag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=flag;
+ }
+});
+
 // Last: swaps out incumbent uniqueness only inside this disposable cluster.
 test("orders-off integrated retry preserves one order fence after a typed first fee refusal",async()=>{
  const f=await fixture();

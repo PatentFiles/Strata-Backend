@@ -12,6 +12,8 @@ export type StoppedSettledExitDisposition={exitId:string;entryId:string;reservat
 /** Structural receipt reader only. Its results cannot prove that the venue has
  * no contradictory order or fill. The ARM ceremony still needs its signed
  * history and does not grant execution authority from this local read.
+ * Both receipt tables reject UPDATE and DELETE. Lock only mutable proof
+ * inputs; the runtime deliberately lacks UPDATE on the immutable receipts.
  */
 export async function readStoppedSettledExitDispositions(db:Query,account:string,owner:string,lock=false,enabled=settledReserveReadinessEnabled()){
  if(!enabled)return [];
@@ -38,7 +40,7 @@ export async function readStoppedSettledExitDispositions(db:Query,account:string
    AND d.prior_revision=s.posted_revision AND d.control_epoch=s.control_epoch AND d.worker_fencing_token=s.worker_fencing_token
    AND d.released_micros::text=s.payload->>'reservedMicros'
    AND d.transport_outcome='UNKNOWN' AND NOT d.trading_authorized AND s.transport_outcome='UNKNOWN' AND NOT s.trading_authorized
-  ORDER BY d.exit_intent_id LIMIT 2${lock?' FOR SHARE OF d,s,i,j,p,m,e':''}`,[account,owner])).rows;
+  ORDER BY d.exit_intent_id LIMIT 2${lock?' FOR SHARE OF i,j,p,m,e':''}`,[account,owner])).rows;
  requireProof(rows.length<=1,fail);
  return rows.map((r):StoppedSettledExitDisposition=>{
   const p=typeof r.payload==='string'?JSON.parse(r.payload):r.payload;

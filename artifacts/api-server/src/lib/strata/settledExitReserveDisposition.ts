@@ -48,8 +48,9 @@ export async function disposeSettledExitReserve(input:EconomicSettlementInput,sc
   requireProof(String(a.revision)===account.revision&&a.cash_micros===account.cash_micros&&a.reserved_micros===account.reserved_micros&&
    String((a as unknown as Record<string,unknown>).owner_control_epoch)===scope.controlEpoch,fail);
   await deps.verifyLocked(tx,a,scope.scopeDigest);
+  // The immutable receipt has no UPDATE grant; the locked account serializes disposition.
   const receipts=(await tx.query(`SELECT * FROM private.strata_economic_settlement_receipt
-   WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND exit_intent_id=$3 AND reservation_id=$4::uuid FOR SHARE`,
+   WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND exit_intent_id=$3 AND reservation_id=$4::uuid`,
    [scope.ownerId,a.id,exitId,reservationId])).rows;
   requireProof(receipts.length===1,fail);const receipt=receipts[0]!;
   const p=inspectSettledExitReserve({...input,nowMs:now()},receipt);

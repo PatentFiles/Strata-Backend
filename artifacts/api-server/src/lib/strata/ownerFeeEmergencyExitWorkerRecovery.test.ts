@@ -4,7 +4,7 @@ import {createHash} from "node:crypto";
 import {reconcileOwnedProtectiveExits} from "./ownerFeeEmergencyExitWorkerRecovery";
 const ownerId="11111111-1111-4111-8111-111111111111";
 const rid="22222222-2222-4222-8222-222222222222";
-const clientId="v13p-33333333-3333-4333-8333-333333333333";
+const clientId="v13p-55555555-5555-4555-8555-555555555555";
 const order={ticker:"KXBTC15M-26OCT191545-45",client_order_id:clientId,
  side:"ask",count:"2.00",price:"0.5500",reduce_only:true,
  post_only:false,time_in_force:"immediate_or_cancel",
@@ -111,16 +111,21 @@ test("restart verifier recognizes the precise historical receipt without replay"
  const proof={payload:p,payload_digest:ledgerDigest(p),exit_intent_id:p.exitId,entry_intent_id:p.parentId,reservation_id:p.reservationId,
   client_order_id:r.client_order_id,market:p.settlement.market,settlement_event_id:p.eventId,settlement_digest:ledgerDigest(p.settlement),
   occurred_at:new Date(p.settlement.occurredAtMs)};
- let other=false,late=false,recoveries=0,reads=0;
+ let other=false,late=false,addSuccessor=false,successorConflict=false,recoveries=0,reads=0;
  const local={async query(sql:string){
   if(sql.includes("SELECT key_fingerprint,cash_micros"))return {rows:[{key_fingerprint:fp,cash_micros:p.cashAfterMicros}]};
   if(sql.includes("SELECT d.*, s.payload"))return {rows:[proof]};
   if(sql.includes("SELECT request FROM public.v13_production_intent"))return {rows:f.history.requests.map(request=>({request}))};
   if(sql.includes("AS intents,")&&sql.includes("AS exits"))return {rows:[{intents:other,exits:false}]};
-  return {rows:[r]};
+  if(sql.includes("AS conflicting_intents"))return {rows:[{
+   key_fingerprint:fp,matching:true,conflicting_intents:successorConflict,conflicting_markers:false}]};
+  return {rows:addSuccessor?[r,row]:[r]};
  }};
  const run=()=>reconcileOwnedProtectiveExits({ownerId,accountId:a.id,material},local,{
-  recover:async()=>{recoveries++;throw Error('must not replay historical');},
+  recover:async x=>{
+   recoveries++;assert.equal(addSuccessor,true);assert.equal(x.reservationId,rid);assert.deepEqual(x.order,order);
+   return {state:"RECONCILED",reason:"successor_read_only",mayRetry:false,postAttempted:false};
+  },
   readFeeds:async(_material,observedAtMs)=>{
    reads++;const order=f.snapshot.orders[0]!,fill=f.snapshot.fills[0]!;
    const raw={client_order_id:order.request.clientOrderId,ticker:order.request.market,order_id:order.orderId,status:'executed',
@@ -137,6 +142,11 @@ test("restart verifier recognizes the precise historical receipt without replay"
   late=true;assert.equal((await run()).ok,false);
   late=false;other=true;assert.equal((await run()).ok,false);
   assert.equal(reads,3);assert.equal(recoveries,0);
+  other=false;addSuccessor=true;
+  const successor=await run();assert.equal(successor.ok,true,JSON.stringify(successor));assert.equal(successor.attempted,1);assert.equal(successor.postAttempted,false);
+  successorConflict=true;assert.equal((await run()).ok,false);
+  successorConflict=false;late=true;assert.equal((await run()).ok,false);
+  assert.equal(recoveries,1);
  }finally{
   if(sha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=sha;
   if(flag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=flag;

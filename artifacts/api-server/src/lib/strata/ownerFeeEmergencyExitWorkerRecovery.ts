@@ -1,4 +1,4 @@
-import {readStoppedSettledExitDispositions,settledReserveReadinessEnabled} from './armSettledReserveScope';
+import {readStoppedSettledExitDispositions,settledReserveReadinessEnabled,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 import {runtimeSettledExitReceipt} from './runtimeSettledExitGuard';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {personalAccountSnapshot,readOwnedKalshiFeeds} from './personalExchangeRead';
@@ -34,16 +34,17 @@ export async function reconcileOwnedProtectiveExits(input:{
    "SELECT reservation_id::text AS reservation_id,market_ticker,client_order_id,"+
    "order_digest,order_request_json FROM private.strata_emergency_exit_reservations "+
    "WHERE owner_user_id=$1::uuid AND execution_account_id=$2::text "+
-   "AND state='UNKNOWN' ORDER BY created_at,reservation_id LIMIT 2",
+   "AND state='UNKNOWN' ORDER BY created_at,reservation_id LIMIT 3",
    [input.ownerId,input.accountId],
   );
   if(rs.rows.length===0)return {ok:true,reason:"no_unresolved_protective_exits",attempted:0,mayRetry:false,postAttempted:false};
-  if(rs.rows.length!==1)return blocked("multiple_unknown_protective_exits_require_manual_review");
-  const row=rs.rows[0]!;
-  const rid=row.reservation_id;
+  if(rs.rows.length>2)return blocked("multiple_unknown_protective_exits_require_manual_review");
+  let pending=rs.rows;
+  // Receipt recognition here selects a read-only restart target. It must never
+  // permit entry or replay a POST while the successor still needs reconciliation.
   if(settledReserveReadinessEnabled()){
    const receipts=await readStoppedSettledExitDispositions(db,input.accountId,input.ownerId);
-   const retired=receipts.find(r=>r.reservationId===rid&&r.clientOrderId===row.client_order_id);
+   const retired=receipts.find(r=>pending.some(row=>r.reservationId===row.reservation_id&&r.clientOrderId===row.client_order_id));
    if(retired){
     // This is economic closure, not proof the old HTTP request was never
     // sent. Recheck complete signed history; don't retry or rewrite the row.
@@ -57,12 +58,48 @@ export async function reconcileOwnedProtectiveExits(input:{
      return blocked("protective_exit_historical_history_unverified");
     const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:fp},feed,requests);
     if(!("identity" in snapshot))return blocked("protective_exit_historical_history_unverified");
-    const current=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,snapshot,nowMs:Date.now()});
-    if(current?.receiptDigest!==retired.receiptDigest||Date.now()-started>5000||Date.now()<started)
-     return blocked("protective_exit_historical_history_unverified");
-    return {ok:true,reason:"historical_protective_exit_economic_receipt_matches",attempted:0,mayRetry:false,postAttempted:false};
+    if(pending.length===2){
+     const next=pending.filter(row=>row.reservation_id!==retired.reservationId);
+     if(next.length!==1||next[0]!.market_ticker===retired.market||
+        next[0]!.client_order_id===retired.clientOrderId||!snapshot.orders.every(o=>o.terminal))
+      return blocked("multiple_unknown_protective_exits_require_manual_review");
+     // Cash may have legitimately changed due to the successor fill. The
+     // ordinary locked signed recovery and financial reconciliation must prove
+     // that change, not this read-only classification. Ensure the sole other
+     // unresolved marker and financial intent are the exact successor.
+     verifyDisposedExitAgainstSnapshot(retired,snapshot);
+     const successor=(await db.query(`SELECT a.key_fingerprint,
+      EXISTS(SELECT 1 FROM public.v13_production_intent i
+       JOIN public.v13_production_position p ON p.id=i.parent_id AND p.account_id=i.account_id AND p.market=i.market AND p.side=i.side
+       JOIN private.strata_emergency_exit_reservations m ON m.reservation_id=$8::uuid AND m.execution_account_id=i.account_id
+        AND m.owner_user_id=a.owner_user_id AND m.state='UNKNOWN' AND NOT m.trading_authorized
+        AND m.client_order_id=i.client_order_id AND m.market_ticker=i.market AND m.reducing_side=i.side
+       WHERE i.account_id=a.id AND i.kind='EXIT' AND NOT i.terminal
+        AND i.state IN ('DISPATCHED','UNKNOWN') AND i.client_order_id=$4
+        AND i.market=$5 AND i.created_at>to_timestamp($6::double precision/1000)) AS matching,
+      EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=a.id
+        AND (i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR NOT i.terminal)
+        AND i.id<>$3 AND i.client_order_id<>$4) AS conflicting_intents,
+      EXISTS(SELECT 1 FROM private.strata_emergency_exit_reservations m WHERE m.execution_account_id=a.id
+        AND m.state IN ('PREPARED','DISPATCHED','UNKNOWN') AND m.reservation_id NOT IN ($7::uuid,$8::uuid)) AS conflicting_markers
+      FROM public.v13_production_account a WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2`,
+      [input.accountId,input.ownerId,retired.exitId,next[0]!.client_order_id,next[0]!.market_ticker,
+       retired.settledAtMs,retired.reservationId,next[0]!.reservation_id])).rows;
+     const currentAt=Date.now();
+     if(successor.length!==1||successor[0]!.key_fingerprint!==fp||successor[0]!.matching!==true||
+        successor[0]!.conflicting_intents!==false||successor[0]!.conflicting_markers!==false||
+        currentAt<started||currentAt-started>5000)return blocked("protective_exit_historical_history_unverified");
+     pending=next;
+    }else{
+     const current=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,snapshot,nowMs:Date.now()});
+     if(current?.receiptDigest!==retired.receiptDigest||Date.now()-started>5000||Date.now()<started)
+      return blocked("protective_exit_historical_history_unverified");
+     return {ok:true,reason:"historical_protective_exit_economic_receipt_matches",attempted:0,mayRetry:false,postAttempted:false};
+    }
    }
   }
+  if(pending.length!==1)return blocked("multiple_unknown_protective_exits_require_manual_review");
+  const row=pending[0]!,rid=row.reservation_id;
   const raw=row.order_request_json;
   if(typeof rid!=="string"||!UUID.test(rid)||typeof raw!=="string"||raw.length>4096||
      typeof row.order_digest!=="string"||!SHA.test(row.order_digest))

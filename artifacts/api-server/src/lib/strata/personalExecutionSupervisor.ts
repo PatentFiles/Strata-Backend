@@ -953,14 +953,14 @@ export function createProductionPersonalSession(
           observedAtMs:snapshot.observedAtMs,cashMicros:snapshot.cashMicros,
           fencingToken:String(state.fencingToken),authenticated:snapshot.authenticated,
           complete:snapshot.complete,unexplainedCashActivity:snapshot.unexplainedCashActivity,
-          providerEvidence:snapshot,
+          providerEvidence:snapshot,committedSnapshot:snapshot,
           allowEarlyRotationDeferral:scheduling?.origin==="committed_signal"&&scheduling.allowEarlyTechnicalLeaseReuse===true,
         },{db,now});
         if(renewed.ok){technicalRenewal=renewed.earlyRotationDeferred?"deferred":"settled";subtimings?.mark("continuous_eligibility");eligible=await checkContinuousEligibility(db,input.userId,sha);}
       }else {subtimings?.mark("legacy_protective_release");eligible=(await verifyProtectiveExitStartupRelease(db,input.userId)).ok;}
       subtimings?.mark("flat_entry_evidence");
       const flat=await reconciledFlatEntryEvidence(db,{
-        accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),
+        accountId:input.accountId,ownerId:input.userId,snapshot,nowMs:now(),receiptClock:now,
       });
       technicalRelease.completeReconciliation(eligible&&flat);
       return technicalRenewal?{technicalRenewal}:undefined;

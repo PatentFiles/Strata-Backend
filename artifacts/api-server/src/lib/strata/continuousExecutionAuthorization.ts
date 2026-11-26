@@ -1,3 +1,5 @@
+import {reconciledSettledExitReceipt} from "./runtimeSettledExitGuard";
+import type {Snapshot} from "../v13-production/types";
 import {assertOwnerArmFence} from './ownerArmContext';
 import {resolveOwnerSelfScope} from './ownerSelfServiceEligibility';
 import {ownerSelfEnrollmentAllowed,type OwnerSelfEnrollmentScope} from './ownerSelfReviewMode';
@@ -235,6 +237,7 @@ export async function renewContinuousTechnicalLease(input:{
  observedAtMs:number;cashMicros:string;fencingToken:string;
  authenticated:boolean;complete:boolean;unexplainedCashActivity:boolean;
  providerEvidence:unknown;
+ committedSnapshot?:Snapshot;
  allowEarlyRotationDeferral?:boolean;
 },deps:{db?:Db;now?:()=>number}={}){
  if(!UUID.test(input.ownerId)||!SHA.test(input.releaseSha)||
@@ -313,13 +316,28 @@ export async function renewContinuousTechnicalLease(input:{
    SELECT 1 FROM private.strata_emergency_exit_reservations
    WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')
    LIMIT 1`,[input.accountId]);
-  if(hold.rows.length)return denied("standing_unresolved_protective_exit");
+  let receiptDigest:string|undefined;
+  if(hold.rows.length){
+   const snapshot=input.committedSnapshot;
+   if(!snapshot||snapshot!==input.providerEvidence||snapshot.observedAtMs!==input.observedAtMs||
+      snapshot.cashMicros!==input.cashMicros||input.releaseSha!==deployedGitSha())
+     return denied("standing_unresolved_protective_exit");
+   const proof=await reconciledSettledExitReceipt(c,{accountId:input.accountId,ownerId:input.ownerId,
+    snapshot,now:deps.now??Date.now,lock:true});
+   if(!proof)return denied("standing_unresolved_protective_exit");
+   receiptDigest=proof.receiptDigest;
+  }
+  const receiptStillFresh=()=>{
+   const age=(deps.now??Date.now)()-input.observedAtMs;
+   return receiptDigest===undefined||(Number.isSafeInteger(age)&&age>=0&&age<=5000);
+  };
   // Avoid a write on each 2.5-second heartbeat. Rotate only as the
   // five-minute signed technical lease approaches its two-minute margin.
   const existing=await c.query(`
    SELECT expires_at,fencing_token::text AS fencing_token,
     expires_at>clock_timestamp()+interval '120 seconds' AS rotation_not_due FROM private.strata_continuous_execution_technical_lease
    WHERE grant_id=$1 FOR UPDATE`,[v.grant_id]);
+  if(!receiptStillFresh())return denied("standing_signed_exchange_proof_stale");
   if(existing.rows.length>1)return denied("standing_duplicate_technical_lease");
   if(existing.rows.length===1&&
      String(existing.rows[0]?.fencing_token)===input.fencingToken&&
@@ -330,7 +348,7 @@ export async function renewContinuousTechnicalLease(input:{
   }
   const dg=hash({owner:input.ownerId,account:input.accountId,sha:input.releaseSha,
    policy:input.policyHash,observedAtMs:input.observedAtMs,cash:input.cashMicros,
-   token:input.fencingToken,provider:input.providerEvidence});
+   token:input.fencingToken,provider:input.providerEvidence,...(receiptDigest?{receiptDigest}:{})});
   const lease=await c.query(`
    INSERT INTO private.strata_continuous_execution_technical_lease
     (grant_id,execution_account_id,observed_at,expires_at,evidence_digest,fencing_token,generation)
@@ -346,6 +364,7 @@ export async function renewContinuousTechnicalLease(input:{
     (grant_id,execution_account_id,kind,evidence_digest,reason)
    VALUES($1,$2,'LEASE_RENEWED',$3,'signed_owned_reconciliation')`,
     [v.grant_id,input.accountId,dg]);
+  if(!receiptStillFresh())return denied("standing_signed_exchange_proof_stale");
   await c.query("COMMIT");committed=true;
   return {ok:true as const,reason:"standing_short_technical_lease_renewed",earlyRotationDeferred:false,
    ordersSubmitted:false as const,workerStarted:false as const};
