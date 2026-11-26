@@ -51,3 +51,43 @@ for(const [name,change] of [
  ['incomplete mapped history',(f:ReturnType<typeof fixture>)=>{f.snapshot.complete=false;}],
  ['open position',(f:ReturnType<typeof fixture>)=>{f.snapshot.positions=[{market:f.parent.market,side:'YES',quantityHundredths:'1'}];}],
 ] as const)test('reject '+name,()=>{const f=fixture();change(f);assert.throws(()=>verify(f.history,f.snapshot));});
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {economicSettlementPlan,proveEconomicSettlement} from './ownerEconomicSettlementProof';
+import {readReconciledReleaseRenewalHistory} from './reconciledReleaseRenewalHistory';
+
+test('signed release renewal accepts only the exact accounted historical UNKNOWN pair',async()=>{
+ const f=economicSettlementFixture(), p=economicSettlementPlan(proveEconomicSettlement(f)), a=f.account,h=f.history;
+ const exit=h.rows.find(x=>x.id===f.exitId)!, marker=h.markers[0]!;
+ h.rows[0]!.reserved_micros='0';
+ h.events.push({account_id:a.id,event_id:p.eventId,intent_id:p.parentId,kind:'SETTLEMENT',
+  payload:p.settlement,digest:digest(p.settlement),cash_delta_micros:p.cashDeltaMicros,pnl_micros:p.pnlMicros,occurred_at:new Date(p.settlement.occurredAtMs)});
+ Object.assign(h.positions[0]!,{quantity_hundredths:'0',basis_micros:'0',realized_pnl_micros:p.pnlMicros});
+ const rows=[{payload:p,payload_digest:digest(p),exit_intent_id:f.exitId,entry_intent_id:p.parentId,
+  reservation_id:f.reservationId,market:exit.market,client_order_id:exit.client_order_id,settlement_event_id:p.eventId,
+  settlement_digest:digest(p.settlement),occurred_at:new Date(p.settlement.occurredAtMs)}];
+ const db={async query(sql:string){return {rows:sql.includes('SELECT d.*, s.payload')?rows:
+  sql.includes('FROM public.v13_production_intent')?h.rows:
+  sql.includes('FROM public.v13_production_event e')?h.events:
+  sql.includes('FROM public.v13_production_position')?h.positions:
+  sql.includes('FROM private.strata_emergency_exit_reservations')?[marker]:[]};}};
+ const oldSha=process.env.RAILWAY_GIT_COMMIT_SHA,oldFlag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);
+  process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='b'.repeat(40);
+  await assert.rejects(()=>readReconciledReleaseRenewalHistory(db,a.id,a.owner_user_id));
+  process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+  const admitted=await readReconciledReleaseRenewalHistory(db,a.id,a.owner_user_id);
+  assert.equal(admitted.settledDispositions?.length,1);
+  assert.equal(admitted.expectedRequests.length,1);assert.equal(admitted.requests.length,2);
+  assert.equal(admitted.neverPosted.length,0);assert.equal(exit.terminal,false);assert.equal(marker.state,'UNKNOWN');
+  assert.doesNotThrow(()=>verify(admitted,f.snapshot));
+  assert.throws(()=>verify(admitted,{...f.snapshot,orders:[...f.snapshot.orders,
+   {orderId:'late',request:h.requests[1]!,terminal:true,filledHundredths:'0'}]}));
+  assert.throws(()=>verify(admitted,{...f.snapshot,settlements:[]}));
+  h.rows.push({...exit,id:'different',client_order_id:'v13p-different',request:{...h.requests[1]!,clientOrderId:'v13p-different'}});
+  await assert.rejects(()=>readReconciledReleaseRenewalHistory(db,a.id,a.owner_user_id));
+ }finally{
+  if(oldSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=oldSha;
+  if(oldFlag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=oldFlag;
+ }
+});

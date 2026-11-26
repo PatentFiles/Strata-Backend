@@ -7,6 +7,7 @@ import {deployedGitSha} from './deployedGitSha';
 import {INSERT_PUBLIC_STOPPED_LEASE_SQL,publicSelfServiceReleaseQualified,readOwnedSelfServiceScope} from './ownerSelfServiceEligibility';
 import {ownerArmSchemaReady,armNo,requireArm,safeArmReason,UUID,HASH,type ArmDatabase} from './ownerArmStore';
 import {assertOwnerArmFence,type OwnerArmFence} from './ownerArmContext';
+import {settledReserveReadinessEnabled,stoppedArmExposure} from './armSettledReserveScope';
 import {armTransaction} from './ownerArmStore';
 
 export const OWNER_ARM_CONFIRM = 'PREPARE_AND_ARM_MY_SAVED_ACCOUNT_V1';
@@ -16,7 +17,7 @@ const riskNames = ['capital_limit_cents','max_entry_stake_cents','max_entry_all_
 export type OwnerArmScope = {
   ownerId:string;accountId:string;releaseSha:string;policyId:string;policyHash:string;policyVersion:number;
   controlEpoch:string;initialLeaseRequired:boolean;stakeCents:number;feeDigest:string;feeSource:string;feeVersion:string;fingerprint:string;minimumExitMicros:number;
-  limits:Record<typeof riskNames[number],number>;scopeDigest:string;
+  limits:Record<typeof riskNames[number],number>;settledReserveReceiptDigest?:string;scopeDigest:string;
 };
 export function armScopeDigest(scope: Omit<OwnerArmScope,'scopeDigest'>): string {
   return createHash('sha256').update(JSON.stringify(scope)).digest('hex');
@@ -54,7 +55,10 @@ export async function readOwnerArmScope(owner:string):Promise<OwnerArmScope> {
   requireArm(Object.values(limits).every(n=>Number.isSafeInteger(n)&&n>0),'owner_arm_risk_limits_unverified');
   requireArm(Number(p.minimum_exit_micros)===10000,'owner_arm_exit_policy_requires_review');
   requireArm(HASH.test(String(p.fee_artifact_digest))&&p.policy_hash===a.policyHash,'owner_arm_fee_or_policy_unverified');
-  const core={ownerId:owner,accountId:a.accountId,releaseSha:sha,policyId:String(p.policy_id),
+  const incident=settledReserveReadinessEnabled()?await stoppedArmExposure(pool,a.accountId,owner):null;
+  if(incident)requireArm(incident.clear,'owner_arm_open_or_uncertain_exposure');
+  const settledReserveReceiptDigest=incident?.receipts[0]?.receiptDigest;
+  const core={...(settledReserveReceiptDigest?{settledReserveReceiptDigest}:{}),ownerId:owner,accountId:a.accountId,releaseSha:sha,policyId:String(p.policy_id),
     policyHash:a.policyHash,policyVersion:Number(p.version),controlEpoch:String(p.control_epoch),initialLeaseRequired,stakeCents:a.stakeCents,
     feeDigest:String(p.fee_artifact_digest),feeSource:String(p.fee_source_url),
     feeVersion:String(p.fee_policy_version),fingerprint:a.keyFingerprint,minimumExitMicros:10000,limits};
@@ -80,7 +84,7 @@ export async function reviewOwnerArm(owner:string) {
 export function unchangedArmMoney(a:OwnerArmScope,b:OwnerArmScope):boolean {
   return a.ownerId===b.ownerId&&a.accountId===b.accountId&&a.releaseSha===b.releaseSha&&
     a.fingerprint===b.fingerprint&&a.stakeCents===b.stakeCents&&a.feeDigest===b.feeDigest&&
-    a.minimumExitMicros===b.minimumExitMicros&&riskNames.every(k=>a.limits[k]===b.limits[k]);
+    a.minimumExitMicros===b.minimumExitMicros&&a.settledReserveReceiptDigest===b.settledReserveReceiptDigest&&riskNames.every(k=>a.limits[k]===b.limits[k]);
 }
 
 /** Establish a held, disarmed preparation boundary without an emergency KILL

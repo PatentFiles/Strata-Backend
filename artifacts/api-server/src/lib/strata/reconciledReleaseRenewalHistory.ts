@@ -1,3 +1,4 @@
+import {readStoppedSettledExitDispositions,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 import {createHash} from 'node:crypto';
 import {canonical,digest,requireProof,type Snapshot} from '../v13-production/types';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
@@ -30,8 +31,21 @@ export async function readReconciledReleaseRenewalHistory(db:Query,account:strin
  }
  const history=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
  requireProof(history.rows.length>0,fail);
+ const settledDispositions=history.rows.some(i=>i.kind==='EXIT'&&i.terminal===false)?
+  await readStoppedSettledExitDispositions(db,account,owner,lock):[];
+ const settledIds=new Set(settledDispositions.map(r=>r.exitId));
  const excluded=new Set(history.neverPosted.map(x=>x.intentId));
  for(const i of history.rows){
+  if(settledIds.has(String(i.id))){
+   const r=settledDispositions.find(x=>x.exitId===i.id)!;
+   const req=json(i.request),decision=json(i.decision);
+   requireProof(i.account_id===account&&i.kind==='EXIT'&&i.terminal===false&&['DISPATCHED','UNKNOWN'].includes(String(i.state))&&
+    i.parent_id===r.entryId&&i.market===r.market&&i.client_order_id===r.clientOrderId&&i.exchange_order_id===null&&
+    String(i.reserved_micros)==='0'&&String(i.filled_hundredths)==='0'&&object(req)&&object(decision)&&
+    req.clientOrderId===r.clientOrderId&&req.market===r.market&&req.side===i.side&&req.action==='SELL'&&req.reduceOnly===true&&
+    req.timeInForce==='IOC'&&i.capability_digest===digest({id:i.id,request:req,decision,policyHash:i.policy_hash,fee:i.fee_fingerprint}),fail);
+   continue;
+  }
   requireProof(i.account_id===account&&i.terminal===true&&String(i.reserved_micros)==='0'&&
    (excluded.has(String(i.id))?i.state==='BLOCKED':i.state==='TERMINAL'),fail);
   if(excluded.has(String(i.id)))continue;
@@ -49,7 +63,7 @@ export async function readReconciledReleaseRenewalHistory(db:Query,account:strin
    i.capability_digest===digest({id:i.id,request:r,decision:d,policyHash:i.policy_hash,fee:i.fee_fingerprint}),fail);
  }
  const suffix=lock?' FOR SHARE':'';
- const posted=history.rows.filter(i=>!excluded.has(String(i.id)));
+ const posted=history.rows.filter(i=>!excluded.has(String(i.id))&&!settledIds.has(String(i.id)));
  const contradictions=posted.length?(await db.query(`SELECT id FROM public.v13_production_observation WHERE account_id=$1
   AND kind='PROVEN_NOT_POSTED' AND payload->>'id'=ANY($2::text[]) LIMIT 1${suffix}`,[account,posted.map(i=>String(i.id))])).rows:[];
  requireProof(contradictions.length===0,fail);
@@ -60,10 +74,12 @@ export async function readReconciledReleaseRenewalHistory(db:Query,account:strin
  const noSendExitClients=new Set(history.rows.filter(i=>i.kind==='EXIT'&&excluded.has(String(i.id))).map(i=>i.client_order_id));
  const receipts=(await db.query(`SELECT x.*,x.xmin::text AS row_revision FROM private.strata_protective_exit_reconciliations x WHERE execution_account_id=$1 ORDER BY reservation_id LIMIT 1001${suffix}`,[account])).rows;
  requireProof(receipts.length<=1000&&new Set(markers.map(m=>m.client_order_id)).size===markers.length,fail);
+ requireProof(settledDispositions.every(d=>markers.filter(m=>m.reservation_id===d.reservationId&&m.client_order_id===d.clientOrderId&&m.state==='UNKNOWN').length===1&&
+  !receipts.some(r=>r.client_order_id===d.clientOrderId)&&history.rows.some(i=>i.id===d.exitId)),fail);
  const postedExits=posted.filter(i=>i.kind==='EXIT');
  const accountingOnlyExitClients:string[]=[];
  requireProof(markers.every(m=>m.execution_account_id===account&&m.owner_user_id===owner&&m.trading_authorized===false&&
-  (m.state==='VOID'?noSendExitClients.has(m.client_order_id):m.state==='RECONCILED'&&postedExits.some(i=>i.client_order_id===m.client_order_id))),fail);
+  (m.state==='UNKNOWN'?settledDispositions.some(r=>r.reservationId===m.reservation_id&&r.clientOrderId===m.client_order_id):m.state==='VOID'?noSendExitClients.has(m.client_order_id):m.state==='RECONCILED'&&postedExits.some(i=>i.client_order_id===m.client_order_id))),fail);
  for(const i of postedExits){
   const ms=markers.filter(m=>m.client_order_id===i.client_order_id),rs=receipts.filter(x=>x.client_order_id===i.client_order_id);
   // Absence of BOTH modern records is not evidence of historical authorization.
@@ -85,12 +101,18 @@ export async function readReconciledReleaseRenewalHistory(db:Query,account:strin
  requireProof(positions.every(p=>p.account_id===account&&String(p.quantity_hundredths)==='0'&&String(p.basis_micros)==='0'&&signed(p.realized_pnl_micros)&&
   history.rows.some(i=>i.id===p.id&&i.kind==='ENTRY'&&i.market===p.market&&i.side===p.side)),fail);
  requireProof(posted.filter(i=>i.kind==='ENTRY').every(i=>positions.some(p=>p.id===i.id)),fail);
- return {...history,events,positions,markers,receipts,accountingOnlyExitClients,reconciliationDigest:digest({history:history.historyDigest,events,positions,markers,receipts,accountingOnlyExitClients})};
+ const excludedSettledClients=new Set(settledDispositions.map(x=>x.clientOrderId));
+ const expectedRequests=history.expectedRequests.filter(r=>!excludedSettledClients.has(r.clientOrderId));
+ return {...history,expectedRequests,events,positions,markers,receipts,accountingOnlyExitClients,
+  ...(settledDispositions.length?{settledDispositions}:{}),
+  reconciliationDigest:digest({history:history.historyDigest,events,positions,markers,receipts,accountingOnlyExitClients,
+   ...(settledDispositions.length?{settledDispositions}:{})})};
 }
 export type ReconciledReleaseHistory=Awaited<ReturnType<typeof readReconciledReleaseRenewalHistory>>;
 /** Exact two-way correspondence, not merely exchange flatness or a balance
  * match. Every stored financial event must appear in the fresh signed history. */
 export function verifyReconciledReleaseRenewalSnapshot(history:ReconciledReleaseHistory,snapshot:Snapshot){
+ for(const d of history.settledDispositions??[])verifyDisposedExitAgainstSnapshot(d,snapshot);
  const excluded=new Set(history.neverPosted.map(x=>x.clientOrderId));
  requireProof(!snapshot.orders.some(o=>excluded.has(o.request.clientOrderId))&&migrationFlatHistoryCheck(snapshot,history.expectedRequests).ok,fail);
  const clients=new Set(snapshot.orders.map(o=>o.request.clientOrderId));

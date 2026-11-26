@@ -3,6 +3,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';import {randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {stoppedArmExposure,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 import {disposeSettledExitReserve,readSettledExitReserveOutcome} from './settledExitReserveDisposition';
 import {inspectSettledExitReserve} from './settledExitReserveEvidence';
 import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
@@ -25,7 +26,7 @@ const schema=`CREATE SCHEMA auth;CREATE SCHEMA private;
  CREATE TABLE public.v13_production_event(account_id text REFERENCES public.v13_production_account(id),event_id text,intent_id text,
   kind text,digest text,payload jsonb,cash_delta_micros bigint,pnl_micros bigint,occurred_at timestamptz,PRIMARY KEY(account_id,event_id));
  CREATE TABLE private.strata_emergency_exit_reservations(reservation_id uuid PRIMARY KEY,owner_user_id uuid,
-  execution_account_id text REFERENCES public.v13_production_account(id),client_order_id text,state text,trading_authorized boolean);
+  execution_account_id text REFERENCES public.v13_production_account(id),client_order_id text,state text,trading_authorized boolean,market_ticker text);
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY REFERENCES public.v13_production_account(id),owner_user_id uuid,
   state text,arm_requested boolean,fencing_token bigint,heartbeat_at timestamptz);
  CREATE TABLE public.v13_production_observation(id uuid PRIMARY KEY,account_id text,kind text,payload jsonb,digest text);`;
@@ -40,7 +41,7 @@ async function seed(){
   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[i.id,a.id,i.parent_id,i.kind,i.state,i.terminal,i.exchange_order_id,i.filled_hundredths,i.reserved_micros,i.client_order_id]);
  const p=f.history.positions[0]!;await pool.query('INSERT INTO public.v13_production_position VALUES($1,$2,$3,$4,$5,$6,$7)',[p.id,a.id,p.market,p.side,p.quantity_hundredths,p.basis_micros,p.realized_pnl_micros]);
  for(const e of f.history.events)await pool.query('INSERT INTO public.v13_production_event VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[a.id,e.event_id,e.intent_id,e.kind,e.digest,JSON.stringify(e.payload),e.cash_delta_micros,e.pnl_micros,e.occurred_at]);
- const m=f.history.markers[0]!;await pool.query('INSERT INTO private.strata_emergency_exit_reservations VALUES($1,$2,$3,$4,$5,false)',[m.reservation_id,a.owner_user_id,a.id,m.client_order_id,'UNKNOWN']);
+ const m=f.history.markers[0]!;await pool.query('INSERT INTO private.strata_emergency_exit_reservations VALUES($1,$2,$3,$4,$5,false,$6)',[m.reservation_id,a.owner_user_id,a.id,m.client_order_id,'UNKNOWN',m.market_ticker]);
  await pool.query("INSERT INTO private.kalshi_account_worker_lease VALUES($1,$2,'owned',false,61,clock_timestamp()-interval '1 hour')",[a.id,a.owner_user_id]);
  const proof=proveEconomicSettlement(f),scope:EconomicCommitScope={requestId:randomUUID(),ownerId:a.owner_user_id,scopeDigest:'b'.repeat(64),releaseSha:'c'.repeat(40),controlEpoch:'0',workerFence:'61'};
  return {f,proof,scope};
@@ -75,10 +76,31 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
    assert.equal((await pool.query("SELECT reserved_micros FROM public.v13_production_intent WHERE kind='ENTRY'")).rows[0].reserved_micros,'3000000');
    // Two identical callers serialize on the exact account; both see one result.
    assert.equal((await readSettledExitReserveOutcome(pool,scope.ownerId,release.requestId)).status,'NOT_RECORDED');
+   assert.equal((await stoppedArmExposure(pool,a.id,scope.ownerId,false,true)).clear,false);
    const [x,y]=await Promise.all([disposeSettledExitReserve(evidence,release,opts),disposeSettledExitReserve(evidence,release,opts)]);
    assert.equal(x.status,'RECORDED');assert.equal(y.status,'RECORDED');
    assert.equal((await readSettledExitReserveOutcome(pool,scope.ownerId,release.requestId)).status,'RECORDED');
    assert.notEqual((await readSettledExitReserveOutcome(pool,randomUUID(),release.requestId)).status,'RECORDED');
+   assert.equal((await stoppedArmExposure(pool,a.id,scope.ownerId,false,false)).clear,false);
+   assert.equal((await stoppedArmExposure(pool,a.id,randomUUID(),false,true)).clear,false);
+   const admitted=await stoppedArmExposure(pool,a.id,scope.ownerId,false,true);
+   assert.equal(admitted.clear,true);assert.equal(admitted.receipts.length,1);
+   const receipt=admitted.receipts[0]!;
+   assert.equal(receipt.exitId,f.exitId);assert.equal(receipt.reservationId,f.reservationId);
+   assert.doesNotThrow(()=>verifyDisposedExitAgainstSnapshot(receipt,f.snapshot));
+   assert.throws(()=>verifyDisposedExitAgainstSnapshot(receipt,{...f.snapshot,settlements:[]}));
+   assert.throws(()=>verifyDisposedExitAgainstSnapshot(receipt,{...f.snapshot,orders:[...f.snapshot.orders,
+    {orderId:'later-order',request:f.history.requests[1]!,terminal:true,filledHundredths:'0'}]}));
+   assert.throws(()=>verifyDisposedExitAgainstSnapshot(receipt,{...f.snapshot,fills:[...f.snapshot.fills,
+    {...f.snapshot.fills[0]!,id:'later-fill',clientOrderId:f.history.requests[1]!.clientOrderId,action:'SELL'}]}));
+   assert.throws(()=>verifyDisposedExitAgainstSnapshot(receipt,{...f.snapshot,positions:[
+    {market:receipt.market,side:'NO',quantityHundredths:'1'}]}));
+   await pool.query("INSERT INTO public.v13_production_intent(id,account_id,kind,state,terminal,reserved_micros) VALUES('another',$1,'ENTRY','UNKNOWN',false,0)",[a.id]);
+   assert.equal((await stoppedArmExposure(pool,a.id,scope.ownerId,false,true)).clear,false);
+   await pool.query("DELETE FROM public.v13_production_intent WHERE id='another'");
+   await pool.query("INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,state,trading_authorized) VALUES($1,$2,$3,'UNKNOWN',false)",[randomUUID(),scope.ownerId,a.id]);
+   assert.equal((await stoppedArmExposure(pool,a.id,scope.ownerId,false,true)).clear,false);
+   await pool.query('DELETE FROM private.strata_emergency_exit_reservations WHERE reservation_id<>$1',[f.reservationId]);
    assert.equal((await disposeSettledExitReserve(evidence,{...release,requestId:randomUUID()},opts)).status,'REFUSED');
    const after=(await pool.query('SELECT * FROM public.v13_production_account')).rows[0];
    assert.equal(after.cash_micros,a.cash_micros);assert.equal(after.reserved_micros,'0');assert.equal(after.revision,'19');
