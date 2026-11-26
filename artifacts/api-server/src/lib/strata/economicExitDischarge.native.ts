@@ -92,6 +92,15 @@ test('native economic discharge atomicity, original UNKNOWN, cancellation, owner
     const before=await current();assert.equal((await run(x,kind==='stale'?{now:()=>x.f.nowMs+5001}:{})).ok,false);assert.deepEqual(await current(),before);
    }
   });
+  await t.test('a failed worker fence rolls back the earlier guarded parent write',async()=>{
+   const x=await seed();
+   await pool.query('UPDATE private.kalshi_account_worker_lease SET fencing_token=62');
+   const before=(await pool.query("SELECT reserved_micros::text FROM public.v13_production_intent WHERE kind='ENTRY'")).rows;
+   const result=await run(x);assert.equal(result.reason,'economic_discharge_worker_fence_changed');
+   const after=(await pool.query("SELECT reserved_micros::text FROM public.v13_production_intent WHERE kind='ENTRY'")).rows;
+   assert.deepEqual(after,before);assert.equal(after[0]?.reserved_micros,x.f.account.reserved_micros);
+   assert.equal((await current()).receipts,0);
+  });
   await t.test('lost acknowledgement after real COMMIT is UNKNOWN, resolved by exact readback only',async()=>{
    const x=await seed();const db={connect:async()=>{const c=await pool.connect();return new Proxy(c,{get(target,key){if(key==='query')return async(...args:unknown[])=>{const result=await Reflect.apply(target.query,target,args);if(args[0]==='COMMIT')throw Error('synthetic_ack_lost');return result;};const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});}} as unknown as Pool;
    const result=await run(x,{db});assert.equal(result.status,'UNKNOWN');assert.equal(result.reserveReleased,null);assert.equal((await current()).receipts,1);

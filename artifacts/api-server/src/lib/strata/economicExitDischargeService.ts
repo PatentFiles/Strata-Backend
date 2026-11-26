@@ -35,7 +35,7 @@ export async function readEconomicTransferPages(getPage:(cursor:string|undefined
  }
  throw Error('economic_discharge_transfer_history_incomplete');
 }
-const dischargeStages=['priorOutcome','localScope','providerIdentity','openingCut','signedHistory','closingCut','proof','transaction'] as const;
+const dischargeStages=['priorOutcome','localScope','providerIdentity','openingCut','signedHistory','closingCut','proof','lockedScope','transaction'] as const;
 type DischargeStage=typeof dischargeStages[number];
 export type EconomicDischargeTiming=(stage:DischargeStage,ms:number)=>void;
 const measured=(observe?:EconomicDischargeTiming)=>async<T>(stage:DischargeStage,work:()=>T|Promise<T>):Promise<T>=>{
@@ -104,9 +104,9 @@ export function createEconomicDischargeService(deps:Deps){
   const live=()=>{const at=now();requireProof(Number.isSafeInteger(at)&&at>=high&&at-observed<=5000&&!signal.aborted,'economic_discharge_evidence_expired');high=at;};
   const get:typeof getOwnedProductionKalshiJson=(c,p,q,fetchImpl,_host,_owner,inner)=>{live();return getOwnedProductionKalshiJson(c,p,q,fetchImpl,undefined,owner,inner?AbortSignal.any([signal,inner]):signal);};
   await measure('providerIdentity',async()=>{
-  const metadata=await inspectRestrictedKeyMetadata(execution.material.keyId,management,get);
+  const [metadata,inventory]=await readEconomicDischargeCut(
+   ()=>inspectRestrictedKeyMetadata(execution.material.keyId,management,get),()=>inspectSubaccount1(management,get));
   requireProof(metadata.ok,'economic_discharge_current_key_binding_unverified');
-  const inventory=await inspectSubaccount1(management,get);
   requireProof(inventory.ok&&inventory.exists===true&&inventory.exchangeIndex2Exists===true,'economic_discharge_pair_unverified');
   });
   const transfers=async()=>{
@@ -114,8 +114,9 @@ export function createEconomicDischargeService(deps:Deps){
     const response=await get(management.material,path,'?limit='+TRANSFER_LIMIT+(cursor?'&cursor='+encodeURIComponent(cursor):''));
     live();return response;
    });
-   const subaccount=await pages('/trade-api/v2/portfolio/subaccounts/transfers');
-   const crossExchange=await pages('/trade-api/v2/portfolio/intra_exchange_instance_transfers');
+   const [subaccount,crossExchange]=await readEconomicDischargeCut(
+    ()=>pages('/trade-api/v2/portfolio/subaccounts/transfers'),
+    ()=>pages('/trade-api/v2/portfolio/intra_exchange_instance_transfers'));
    return {subaccount,crossExchange,complete:true};
   };
   const marketPath='/trade-api/v2/markets/'+String(first.pin.row.market_ticker);
@@ -163,7 +164,7 @@ export function createEconomicDischargeService(deps:Deps){
     return await measure('transaction',()=>commitEconomicDischarge(proof,{ownerId:owner,requestId:String(input.requestId),scopeDigest:first.dischargeScopeDigest,releaseSha:build,
      controlEpoch:first.controlEpoch,workerFence:String(first.worker.fencing_token)},{db,now,verifyLocked:async(tx,a,p)=>{
       requireProof(check()===build&&a.id===p.accountId,'economic_discharge_release_changed');
-      const locked=await capture(tx,owner,build,true,{account:a as unknown as Row,pin:first.pin});
+      const locked=await measure('lockedScope',()=>capture(tx,owner,build,true,{account:a as unknown as Row,pin:first.pin}));
       requireProof(locked.dischargeScopeDigest===first.dischargeScopeDigest&&digest(locked.history)===p.historyDigest,'economic_discharge_locked_scope_changed');
      }}));
    }catch(e){return refusal(e);}

@@ -63,18 +63,31 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
   let high=plan.observedAtMs;
   const clock=()=>{const at=now();requireProof(Number.isSafeInteger(at)&&at>=high&&at-plan.observedAtMs<=5000,'economic_discharge_evidence_expired');high=at;connection!.assertLive();};
   clock();const ledger=new ProductionLedger(db,a.id);await ledger.assertConservation(tx,a);
-  const parent=await tx.query('UPDATE public.v13_production_intent SET reserved_micros=0 WHERE id=$1 AND account_id=$2 AND kind=\'ENTRY\' AND terminal AND state=\'TERMINAL\' AND reserved_micros=$3 RETURNING id',[plan.parentId,a.id,plan.releaseReserveMicros]);
-  requireProof(parent.rows.length===1,'economic_discharge_parent_changed');
-  const worker=await tx.query(`UPDATE private.kalshi_account_worker_lease SET state=CASE WHEN account_kill THEN 'killed' ELSE 'released' END,
-   arm_requested=false,fencing_token=fencing_token+1,released_at=clock_timestamp(),heartbeat_at=clock_timestamp()
-   WHERE execution_account_id=$1 AND owner_user_id=$2::uuid AND fencing_token=$3::bigint AND NOT arm_requested
-    AND (state='released' OR state IN ('owned','killed') AND heartbeat_at<clock_timestamp()-interval '120 seconds') RETURNING fencing_token::text`,[a.id,scope.ownerId,scope.workerFence]);
-  requireProof(worker.rows.length===1,'economic_discharge_worker_fence_changed');
-  const updated=await tx.query(`UPDATE public.v13_production_account SET reserved_micros=0,execution_enabled=false,kill_switch=true,
-   owner_control_epoch=owner_control_epoch+1,revision=revision+1,reconciled_at=$5,evidence_digest=$6
-   WHERE id=$1 AND owner_user_id=$2::uuid AND revision=$3 AND owner_control_epoch=$4 AND blocked_reason IS NULL
-    RETURNING revision::text,owner_control_epoch::text`,[a.id,scope.ownerId,plan.expectedRevision,scope.controlEpoch,new Date(plan.observedAtMs),plan.evidenceDigest]);
-  requireProof(updated.rows.length===1,'economic_discharge_stop_epoch_changed');
+  // All three guarded rows are already pinned by the locked recheck. Target
+  // separate tables and sequence the conditional writes through RETURNING.
+  // A failed guard still rolls back everything and receives its original reason.
+  const update=(await tx.query(`WITH parent AS (
+    UPDATE public.v13_production_intent SET reserved_micros=0
+    WHERE id=$1 AND account_id=$2 AND kind='ENTRY' AND terminal AND state='TERMINAL' AND reserved_micros=$3
+    RETURNING id
+   ), worker AS (
+    UPDATE private.kalshi_account_worker_lease SET state=CASE WHEN account_kill THEN 'killed' ELSE 'released' END,
+      arm_requested=false,fencing_token=fencing_token+1,released_at=clock_timestamp(),heartbeat_at=clock_timestamp()
+    WHERE execution_account_id=$2 AND owner_user_id=$4::uuid AND fencing_token=$5::bigint AND NOT arm_requested
+     AND (state='released' OR state IN ('owned','killed') AND heartbeat_at<clock_timestamp()-interval '120 seconds')
+     AND (SELECT count(*) FROM parent)=1 RETURNING fencing_token::text
+   ), account AS (
+    UPDATE public.v13_production_account SET reserved_micros=0,execution_enabled=false,kill_switch=true,
+     owner_control_epoch=owner_control_epoch+1,revision=revision+1,reconciled_at=$8,evidence_digest=$9
+    WHERE id=$2 AND owner_user_id=$4::uuid AND revision=$6 AND owner_control_epoch=$7 AND blocked_reason IS NULL
+     AND (SELECT count(*) FROM worker)=1 RETURNING revision::text,owner_control_epoch::text
+   ) SELECT (SELECT count(*)::int FROM parent) AS parents,(SELECT fencing_token FROM worker) AS fencing_token,
+    (SELECT revision FROM account) AS revision,(SELECT owner_control_epoch FROM account) AS owner_control_epoch`,
+   [plan.parentId,a.id,plan.releaseReserveMicros,scope.ownerId,scope.workerFence,plan.expectedRevision,scope.controlEpoch,
+    new Date(plan.observedAtMs),plan.evidenceDigest])).rows[0]!;
+  requireProof(update.parents===1,'economic_discharge_parent_changed');
+  requireProof(typeof update.fencing_token==='string','economic_discharge_worker_fence_changed');
+  requireProof(typeof update.revision==='string'&&typeof update.owner_control_epoch==='string','economic_discharge_stop_epoch_changed');
   await ledger.assertConservation(tx,{...a,reserved_micros:'0'});
   await tx.query(`INSERT INTO private.strata_economic_exit_discharge(request_id,owner_user_id,execution_account_id,booking_request_id,booking_digest,
    entry_intent_id,exit_intent_id,reservation_id,client_order_id,settlement_event_id,settlement_digest,exit_request,exit_capability_digest,exit_dispatch_at,marker_order_digest,
@@ -82,12 +95,12 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
    [scope.requestId,scope.ownerId,a.id,plan.bookingRequestId,plan.bookingDigest,plan.parentId,plan.exitId,plan.reservationId,plan.exitRequest.clientOrderId,
     plan.settlementEventId,plan.settlementDigest,plan.exitRequest,plan.exitCapabilityDigest,new Date(plan.exitDispatchAt),plan.markerOrderDigest,
-    scope.scopeDigest,scope.releaseSha,plan.releaseReserveMicros,plan.expectedRevision,updated.rows[0]!.revision,scope.controlEpoch,updated.rows[0]!.owner_control_epoch,
-    scope.workerFence,worker.rows[0]!.fencing_token,plan,digest(plan)]);
+    scope.scopeDigest,scope.releaseSha,plan.releaseReserveMicros,plan.expectedRevision,update.revision,scope.controlEpoch,update.owner_control_epoch,
+    scope.workerFence,update.fencing_token,plan,digest(plan)]);
   const recognized=await tx.query('SELECT private.strata_has_economic_exit_discharge($1,$2) AS verified',[a.id,plan.exitRequest.clientOrderId]);
   requireProof(recognized.rows.length===1&&recognized.rows[0].verified===true,'economic_discharge_receipt_not_recognized');
   await ledger.observe(tx,'OWNER_ECONOMIC_OBLIGATION_DISCHARGED',{requestId:scope.requestId,bookingRequestId:plan.bookingRequestId,accountId:a.id,
-   releasedReserveMicros:plan.releaseReserveMicros,priorWorkerFence:scope.workerFence,workerFence:worker.rows[0]!.fencing_token,
+   releasedReserveMicros:plan.releaseReserveMicros,priorWorkerFence:scope.workerFence,workerFence:update.fencing_token,
    receiptDigest:digest(plan),cashChanged:false,transportOutcome:'UNKNOWN',tradingAuthorized:false});
   clock();committing=true;await tx.query('COMMIT');committed=true;
  }catch(error){
