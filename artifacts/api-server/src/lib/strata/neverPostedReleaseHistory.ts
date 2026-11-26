@@ -1,4 +1,4 @@
-import {readLockedBlockedDischargeEvidence} from './economicRecoveryReadBatch';
+import {readLockedBlockedDischargeEvidence,type readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
 import {readEconomicExitDischarges,verifyEconomicExitDischargeRows} from './economicExitDischargeScope';
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
@@ -14,7 +14,7 @@ const MAX_HISTORY=1000;
  * account's digest-valid no-send receipt identifies that same intent. A reason
  * string or BLOCKED status on its own is never evidence of non-submission. */
 export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lock=false,
- diagnostic?:{expiredExitOwnerId:string},preloaded?:{intents:Row[];discharges:Row[]}){
+ diagnostic?:{expiredExitOwnerId:string},preloaded?:{intents:Row[];discharges:Row[];downstream:Awaited<ReturnType<typeof readLockedDischargeHistoryAndMoney>>|null}){
  if(preloaded&&!lock)throw Error('release_history_preloaded_rows_require_lock');
  const discharges=preloaded?await verifyEconomicExitDischargeRows(db,accountId,preloaded.discharges):await readEconomicExitDischarges(db,accountId,lock);
  const finish=<T extends {expectedRequests:Request[];historyDigest:string}>(h:T):T&{economicDischarges?:Row[]}=>{
@@ -39,7 +39,7 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  const exits=candidates.filter(i=>i.kind==='EXIT');
  const dispatched=exits.filter(i=>i.dispatch_at!==null);
  const batch=preloaded&&diagnostic?await readLockedBlockedDischargeEvidence(db,accountId,ids,
-  exits.map(i=>String(i.client_order_id)),dispatched.map(i=>String(i.client_order_id))):null;
+  exits.map(i=>String(i.client_order_id)),dispatched.map(i=>String(i.client_order_id)),true):null;
  const observations=batch?.observations??(await db.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
   FROM public.v13_production_observation WHERE account_id=$1
   AND kind IN ('PROVEN_NOT_POSTED','POST_ATTEMPT','POST_UNCERTAIN'${diagnostic?",'CANCEL_ATTEMPT'":''}) AND payload->>'id'=ANY($2::text[])
@@ -83,6 +83,8 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
   neverPosted.push({intentId:String(i.id),clientOrderId:String(i.client_order_id),requestDigest:digest(r),
    capabilityDigest:String(i.capability_digest),observationId:String(receipt.id),observationDigest:String(receipt.digest)});
  }
+ // Reuse only this transaction’s freshly locked evidence, after validation.
+ if(preloaded&&batch?.downstream)preloaded.downstream=batch.downstream;
  const excluded=new Set(neverPosted.map(x=>x.clientOrderId));
  return finish({rows,requests,expectedRequests:requests.filter(r=>!excluded.has(r.clientOrderId)),neverPosted,
   historyDigest:exits.length?digest({rows,observations,markers,...(localNoSends.length?{localNoSends}:{})}):digest({rows,observations})});

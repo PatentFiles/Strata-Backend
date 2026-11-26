@@ -104,27 +104,41 @@ export async function commitEconomicDischarge(proof:EconomicDischargeProof,scope
   // scope verifier). The proof still must match its millisecond projection;
   // a mismatch produces NULL and the NOT NULL/receipt guards refuse it.
   // Neither the historical row nor the trigger comparison is rounded.
-  await tx.query(`INSERT INTO private.strata_economic_exit_discharge(request_id,owner_user_id,execution_account_id,booking_request_id,booking_digest,
+  const insertReceipt=`INSERT INTO private.strata_economic_exit_discharge(request_id,owner_user_id,execution_account_id,booking_request_id,booking_digest,
    entry_intent_id,exit_intent_id,reservation_id,client_order_id,settlement_event_id,settlement_digest,exit_request,exit_capability_digest,exit_dispatch_at,marker_order_digest,
    scope_digest,release_sha,released_reserve_micros,prior_revision,posted_revision,prior_control_epoch,control_epoch,prior_worker_fence,worker_fence,payload,payload_digest)
    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
     (SELECT i.dispatch_at FROM public.v13_production_intent i
       WHERE i.id=$7 AND i.account_id=$3 AND i.capability_digest=$13
       AND date_trunc('milliseconds',i.dispatch_at)=$14::timestamptz),
-    $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
-   [scope.requestId,scope.ownerId,a.id,plan.bookingRequestId,plan.bookingDigest,plan.parentId,plan.exitId,plan.reservationId,plan.exitRequest.clientOrderId,
+    $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`;
+  const receiptArgs=[scope.requestId,scope.ownerId,a.id,plan.bookingRequestId,plan.bookingDigest,plan.parentId,plan.exitId,plan.reservationId,plan.exitRequest.clientOrderId,
     plan.settlementEventId,plan.settlementDigest,plan.exitRequest,plan.exitCapabilityDigest,new Date(plan.exitDispatchAt),plan.markerOrderDigest,
     scope.scopeDigest,scope.releaseSha,plan.releaseReserveMicros,plan.expectedRevision,update.revision,scope.controlEpoch,update.owner_control_epoch,
-    scope.workerFence,update.fencing_token,plan,digest(plan)]);
+    scope.workerFence,update.fencing_token,plan,digest(plan)];
   const observation={requestId:scope.requestId,bookingRequestId:plan.bookingRequestId,accountId:a.id,
    releasedReserveMicros:plan.releaseReserveMicros,priorWorkerFence:scope.workerFence,workerFence:update.fencing_token,
    receiptDigest:digest(plan),cashChanged:false,transportOutcome:'UNKNOWN',tradingAuthorized:false};
   // The receipt already exists in this transaction. An audit row can be
   // inserted only if the same canonical recognition function returns true.
-  const recognized=await tx.query(`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
+  const insertAudit=`INSERT INTO public.v13_production_observation(id,account_id,kind,payload,digest)
    SELECT $1,$2,'OWNER_ECONOMIC_OBLIGATION_DISCHARGED',$3,$4 WHERE private.strata_has_economic_exit_discharge($2,$5) IS TRUE
-   RETURNING id`,[randomUUID(),a.id,JSON.stringify(observation),digest(observation),plan.exitRequest.clientOrderId]);
-  requireProof(recognized.rows.length===1,'economic_discharge_receipt_not_recognized');
+   RETURNING id`;
+  const auditArgs=[randomUUID(),a.id,JSON.stringify(observation),digest(observation),plan.exitRequest.clientOrderId];
+  // Separate statements in one protocol message: the second statement must
+  // see the newly inserted immutable receipt, which a single CTE cannot.
+  // Preserve server type inference and use the driver's literal escaping.
+  const bind=(sql:string,args:unknown[])=>sql.replace(/\$(\d+)/g,(_token,index:string)=>{
+   const value=args[Number(index)-1];
+   requireProof(value!==undefined,'economic_discharge_invalid_statement_binding');
+   if(value===null)return 'NULL';
+   const literal=value instanceof Date?value.toISOString():typeof value==='object'?JSON.stringify(value):String(value);
+   requireProof(!literal.includes('\0'),'economic_discharge_invalid_statement_binding');
+   return tx!.escapeLiteral(literal);
+  });
+  const result=await tx.query(bind(insertReceipt,receiptArgs)+';'+bind(insertAudit,auditArgs));
+  requireProof(Array.isArray(result)&&result.length===2&&result[0].command==='INSERT'&&result[0].rowCount===1&&
+   result[1].command==='INSERT'&&result[1].rows.length===1,'economic_discharge_receipt_not_recognized');
   clock();committing=true;await tx.query('COMMIT');committed=true;
  }catch(error){
   if(committing){discard=true;return {...dischargeNo('economic_discharge_commit_outcome_unverified','UNKNOWN'),requestId:scope.requestId,outcomeUnknown:true,reserveReleased:null,leaseReleased:null};}
