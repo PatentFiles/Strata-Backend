@@ -1,3 +1,4 @@
+import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {runtimeAuthSql} from './runtimeAuthRelation';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
 import {dedicatedSignerFingerprint} from './commissioning';
@@ -340,7 +341,8 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
     if(!verified.ok){
       const reason=/^[a-z][a-z0-9_]{2,95}$/.test(verified.reason)
         ?verified.reason:"fee_source_unavailable";
-      return deny("release_api_fee_"+reason);
+      const feeDiagnostics=getFeeFailureDiagnostics(verified);
+      return {...deny("release_api_fee_"+reason),...(feeDiagnostics?{feeDiagnostics}:{})};
     }
     const nowFee=(deps.now??Date.now)();
     if(verified.identity.grantId!==reviewedApi.grantId||
