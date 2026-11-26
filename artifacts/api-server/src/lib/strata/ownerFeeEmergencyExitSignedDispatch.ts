@@ -1,3 +1,4 @@
+import {hasHeldExitReceipt,heldExitReceiptTimeLeft,recheckHeldExitReceipt} from './protectiveExitSettledCarry';
 import {verifyDurableFeeStage,verifyDurableProtectiveAuthority} from './durableFeeConsumers';
 import {protectiveExitSourceRemainingMs} from "./protectiveExitSourceFreshness";
 import {hasStandingReviewHistory,checkStandingExitReview} from './standingExecutionReview';
@@ -199,16 +200,22 @@ async function refuseNeverSent(input:Input,reason:NeverSentProof["reason"],db:DB
  * The one-use UNKNOWN marker remains durable; DB-relative evidence lifetimes
  * are rechecked synchronously after signing, without borrowing entry authority.
  */
-async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
+async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()=>void)=>Promise<Receipt>,db:DB,monotonicNow:()=>number,evidence:object,feeAuthority?:{fingerprint:string;verify:(ownerId:string,accountId:string,sha:string,db:DBClient)=>Promise<{ok:boolean;authorityFingerprint?:string;validForMs?:number}>;providerFresh:()=>boolean}):
  Promise<{attempted:boolean;receipt:Receipt;expiredBeforeSend?:true;noExactRowBeforeCommit?:true;diagnosticStage?:FinalFenceStage}>{
  let c:DBClient|null=null,committed=false,eligible=false,commitStarted=false;
  const denied=(diagnosticStage:FinalFenceStage)=>({attempted:false,receipt:null,diagnosticStage});
+ let retirementDeadline=Infinity;
  let evidenceStart=NaN,remainingMs=NaN,sourceRemainingMs=NaN,feeAuthorityStart=NaN,feeAuthorityRemainingMs=NaN;
  try{
   c=await db.connect();
   await c.query("BEGIN");
   await c.query("SET LOCAL lock_timeout='750ms'");
   await c.query("SET LOCAL statement_timeout='12000ms'");
+  if(hasHeldExitReceipt(evidence)){
+   const locked=await c.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",
+    [input.accountId,input.ownerId]);
+   if(locked.rows.length!==1)return denied("locked_fence_no_exact_row");
+  }
   if(feeAuthority){
    feeAuthorityStart=monotonicNow();
    if(!Number.isFinite(feeAuthorityStart)||feeAuthorityStart<0)return denied("fee_authority_clock");
@@ -232,6 +239,14 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   const standingMode=await hasStandingReviewHistory(c,input.ownerId,input.accountId,sha);
   const standingAllowed=standingMode&&await checkStandingExitReview(c,input.ownerId,input.accountId,sha);
   if(standingMode&&!standingAllowed)return denied("standing_release_denied");
+  const scope={ownerId:input.ownerId,accountId:input.accountId,clientId:String(input.order.client_order_id)};
+  const retired=hasHeldExitReceipt(evidence)?await recheckHeldExitReceipt(c,evidence,scope,Date.now(),'wire',input.reservationId):null;
+  if(hasHeldExitReceipt(evidence)&&!retired)return denied("locked_fence_no_exact_row");
+  if(retired){
+   const left=heldExitReceiptTimeLeft(evidence,Date.now());
+   if(left===null||left<=0)return denied("evidence_clock");
+   retirementDeadline=monotonicNow()+left;
+  }
   const sql=`SELECT r.reservation_id,
  EXTRACT(EPOCH FROM (clock_timestamp()-r.updated_at))*1000::double precision AS reservation_age_ms,
  EXTRACT(EPOCH FROM (clock_timestamp()-w.heartbeat_at))*1000::double precision AS heartbeat_age_ms,
@@ -294,7 +309,7 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
    AND i.request->>'limitMicros'=$11::text
  AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i
    WHERE i.account_id=a.id AND i.state IN ('DISPATCHED','UNKNOWN')
-   AND i.client_order_id<>r.client_order_id)
+   AND i.client_order_id<>r.client_order_id ${retired?"AND i.id<>$15::text":""})
  FOR SHARE OF r,a,g,w,pos,i,p`;
   // Anchor local elapsed BEFORE the DB read. DB-computed ages avoid comparing
   // host/DB wall clocks; subtracting the full round trip is conservative.
@@ -302,7 +317,8 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
   if(!Number.isFinite(evidenceStart)||evidenceStart<0)return denied("evidence_clock");
   const rows=await c.query(sql,[sha,input.reservationId,input.ownerId,
     input.accountId,input.order.client_order_id,input.order.ticker,side,units,
-    input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed]);
+    input.lease.holderId,input.lease.fencingToken,proceeds,digest,fingerprint,standingAllowed,
+    ...(retired?[retired.exitId]:[])]);
   // Only a successful query with zero rows proves this invocation did not
   // reach FINAL COMMIT or POST. The diagnostic alone also describes ambiguous
   // rows and is never the authorization for clearing the one-use marker.
@@ -359,7 +375,9 @@ async function withFinalReleaseFence(input:Input, sha:string,send:(beforeSend:()
  try{
   const receipt=await send(()=>{
    const current=monotonicNow();
-   if(!Number.isFinite(current)||current<evidenceStart||current-evidenceStart>=remainingMs||current-evidenceStart>sourceRemainingMs||
+   if(!Number.isFinite(current)||current<evidenceStart||current>=retirementDeadline||
+      (hasHeldExitReceipt(evidence)&&!(Number(heldExitReceiptTimeLeft(evidence,Date.now()))>0))||
+      current-evidenceStart>=remainingMs||current-evidenceStart>sourceRemainingMs||
       (feeAuthority&&(current<feeAuthorityStart||current-feeAuthorityStart>=feeAuthorityRemainingMs||!feeAuthority.providerFresh()))){
     expired=true;throw Error("protective_exit_final_evidence_expired");
    }
@@ -459,7 +477,7 @@ export async function dispatchReviewedProtectiveExitOnce(input:Input,ports:Ports
   beforeSend=>{
    if(ports.post){beforeSend();return ports.post(material,order);}
    return signedPost(material,order,beforeSend);
-  },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),
+  },ports.db??(pool as unknown as DB),ports.monotonicNow??(()=>performance.now()),marker,
     enforceFeeAuthority?{fingerprint:initialAuthority as string,
       verify:(ownerDurable?verifyDurableProtectiveAuthority:ownerV3?verifyOwnerV3ProtectiveFeeAuthority:ports.verifyFeeAuthority??verifyReviewedProtectiveExitFeeAuthority),
       providerFresh:isCurrentProviderFee}:undefined);

@@ -1,3 +1,4 @@
+import {hasHeldExitReceipt,heldExitReceiptTimeLeft,recheckHeldExitReceipt} from './protectiveExitSettledCarry';
 import {createHash,randomUUID} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -92,6 +93,9 @@ export async function reserveOwnedEmergencyExitProof(
     // callback must not create a private marker after financial cleanup.
     const accountLock=await client.query("SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE",[accountId,ownerId]);
     if(accountLock.rows.length!==1)return deny("emergency_exit_worker_or_position_lock_unavailable");
+    const scope={ownerId,accountId,clientId:String(order.client_order_id)};
+    const retired=hasHeldExitReceipt(inspected)?await recheckHeldExitReceipt(client,inspected,scope,(deps.now??Date.now)(),'reserve'):null;
+    if(hasHeldExitReceipt(inspected)&&!retired)return deny("emergency_exit_historical_receipt_changed");
     // The active, freshly heartbeating worker lease and existing position
     // are locked together before any reservation can be prepared.
     const locked=await client.query(
@@ -122,11 +126,13 @@ export async function reserveOwnedEmergencyExitProof(
       "AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i " +
       "WHERE i.account_id=a.id AND " +
       "(i.state IN ('DISPATCHED','UNKNOWN') OR " +
-      "(i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
+      "(i.terminal=false AND i.exchange_order_id IS NOT NULL)) " +
+      (retired?"AND i.id<>$11::text) ":") ") +
       "FOR UPDATE OF a,w,pos,fi",
       [accountId,ownerId,order.ticker,side,fingerprint,quantity.toString(),
        lease.holderId,lease.fencingToken,order.client_order_id,
-       order.side==="ask"?Number(String(order.price).slice(2))*100:1_000_000-Number(String(order.price).slice(2))*100],
+       order.side==="ask"?Number(String(order.price).slice(2))*100:1_000_000-Number(String(order.price).slice(2))*100,
+       ...(retired?[retired.exitId]:[])],
     );
     if(locked.rows.length!==1)return deny("emergency_exit_worker_or_position_lock_unavailable");
     // UNIQUE(client_order_id) and partial UNIQUE(account,market) prohibit
@@ -143,6 +149,7 @@ export async function reserveOwnedEmergencyExitProof(
        side,quantity.toString(),bodyHash,lease.fencingToken,lease.holderId,baseline,observed,orderRequestJson],
     );
     if(inserted.rows.length!==1)return deny("emergency_exit_duplicate_or_unresolved_reservation");
+    if(retired&&!(Number(heldExitReceiptTimeLeft(inspected,(deps.now??Date.now)()))>0))return deny("emergency_exit_historical_receipt_expired");
     await client.query("COMMIT");committed=true;
     // A committed reservation is NOT an order, nor permission to transmit one.
     return {ok:false,reason:"emergency_exit_reserved_dispatch_still_disabled",

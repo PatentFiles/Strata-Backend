@@ -97,3 +97,48 @@ test("hosted worker cannot inject fake recovery receipts",async()=>{
   else process.env.RAILWAY_SERVICE_ID=prior;
  }
 });
+import {generateKeyPairSync} from 'node:crypto';
+import {dedicatedSignerFingerprint} from './commissioning';
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {economicSettlementPlan,proveEconomicSettlement} from './ownerEconomicSettlementProof';
+import {digest as ledgerDigest} from '../v13-production/types';
+
+test("restart verifier recognizes the precise historical receipt without replay",async()=>{
+ const f=economicSettlementFixture(Date.now()),p=economicSettlementPlan(proveEconomicSettlement(f));
+ const a=f.account, r={...row,reservation_id:p.reservationId,client_order_id:f.history.requests[1]!.clientOrderId};
+ const key=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'pem',type:'pkcs8'}).toString();
+ const material={keyId:'isolated-test-only',privateKey:key},fp=dedicatedSignerFingerprint(material.keyId,key)!;
+ const proof={payload:p,payload_digest:ledgerDigest(p),exit_intent_id:p.exitId,entry_intent_id:p.parentId,reservation_id:p.reservationId,
+  client_order_id:r.client_order_id,market:p.settlement.market,settlement_event_id:p.eventId,settlement_digest:ledgerDigest(p.settlement),
+  occurred_at:new Date(p.settlement.occurredAtMs)};
+ let other=false,late=false,recoveries=0,reads=0;
+ const local={async query(sql:string){
+  if(sql.includes("SELECT key_fingerprint,cash_micros"))return {rows:[{key_fingerprint:fp,cash_micros:p.cashAfterMicros}]};
+  if(sql.includes("SELECT d.*, s.payload"))return {rows:[proof]};
+  if(sql.includes("SELECT request FROM public.v13_production_intent"))return {rows:f.history.requests.map(request=>({request}))};
+  if(sql.includes("AS intents,")&&sql.includes("AS exits"))return {rows:[{intents:other,exits:false}]};
+  return {rows:[r]};
+ }};
+ const run=()=>reconcileOwnedProtectiveExits({ownerId,accountId:a.id,material},local,{
+  recover:async()=>{recoveries++;throw Error('must not replay historical');},
+  readFeeds:async(_material,observedAtMs)=>{
+   reads++;const order=f.snapshot.orders[0]!,fill=f.snapshot.fills[0]!;
+   const raw={client_order_id:order.request.clientOrderId,ticker:order.request.market,order_id:order.orderId,status:'executed',
+    book_side:'ask',yes_price_dollars:'0.49',initial_count_fp:'3.00',fill_count_fp:'3.00'};
+   return {ok:true,observedAtMs,historicalCoverageComplete:true,cashMicros:p.cashAfterMicros,
+    orders:[raw,...(late?[{...raw,client_order_id:r.client_order_id,order_id:'late',book_side:'bid',yes_price_dollars:'0.90',status:'canceled',fill_count_fp:'0.00'}]:[])],
+    fills:[{trade_id:fill.id,order_id:fill.orderId,ticker:fill.market,count_fp:'3.00',no_price_dollars:'0.49',fee_cost:'0.052500',created_time:new Date(fill.occurredAtMs).toISOString()}],
+    settlements:[f.rawSettlement],positions:[f.rawPosition]} as never;
+  }});
+ const sha=process.env.RAILWAY_GIT_COMMIT_SHA,flag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+  const accepted=await run();assert.equal(accepted.ok,true,JSON.stringify(accepted));assert.equal(accepted.postAttempted,false);
+  late=true;assert.equal((await run()).ok,false);
+  late=false;other=true;assert.equal((await run()).ok,false);
+  assert.equal(reads,3);assert.equal(recoveries,0);
+ }finally{
+  if(sha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+  if(flag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=flag;
+ }
+});

@@ -1,3 +1,7 @@
+import {keepHeldExitReceipt} from './protectiveExitSettledCarry';
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {economicSettlementPlan,proveEconomicSettlement} from './ownerEconomicSettlementProof';
+import {digest as economicDigest} from '../v13-production/types';
 import {verifyReviewedProtectiveExitFee,verifyReviewedProtectiveExitFeeAuthority} from "./reviewedProtectiveExitFee";
 import {V13_CHAMPION_PARAMETER_SET,V13_CHAMPION_PARAMETER_HASH} from "@workspace/v13-strategy";
 import test from "node:test";
@@ -22,7 +26,7 @@ const identity={ownerId:OWNER,accountId:"owner-execution-2",
 function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boolean;
  marker?:boolean;reject?:boolean;badHistory?:boolean;rawSigned?:boolean;
  finalRows?: "wrong_identity"|"duplicate"|"query_error";
- failPersist?:boolean;missingPersistenceProof?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid"}={}){
+ failPersist?:boolean;missingPersistenceProof?:boolean;failCommit?:boolean;commitDelayMs?:number;reservationAgeMs?:number;heartbeatAgeMs?:number;finalize?:boolean;leaseChanged?:boolean;finalizeFail?:string;secondFeeRejected?:boolean;secondFeeThrows?:boolean;clientOrderId?:string;reservationId?:string;initialPosition?:string;sourceAgeMs?:number;releaseRemainingMs?:unknown;standing?:boolean;revokedStanding?:boolean;realFee?:boolean;count?:string;side?:"ask"|"bid";settled?:"valid"|"stale"|"conflict"|"other"}={}){
  const clientId=input.clientOrderId??CID,reservationId=input.reservationId??RES,count=input.count??"2.00",side=input.side??"ask";
  const calls:{fee:number;mark:number;post:number;read:number;releases:number;sql:string[]}={
    fee:0,mark:0,post:0,read:0,releases:0,sql:[],
@@ -32,12 +36,23 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
   fill_count:input.fill??"1.00",remaining_count:
     (Number(count)-Number(input.fill??"1.00")).toFixed(2),
   ts_ms:1792200000000};
- const db={connect:async()=>({query:async (sql:string)=>{
+ const f=economicSettlementFixture(Date.now()),p=economicSettlementPlan(proveEconomicSettlement(f));
+ const payload={...p,accountId:identity.accountId,ownerId:OWNER}, historical={
+  payload,payload_digest:economicDigest(payload),exit_intent_id:p.exitId,entry_intent_id:p.parentId,reservation_id:p.reservationId,
+  market:p.settlement.market,client_order_id:f.history.requests[1]!.clientOrderId,settlement_event_id:p.eventId,
+  settlement_digest:economicDigest(p.settlement),occurred_at:new Date(p.settlement.occurredAtMs)};
+ const db={connect:async()=>({query:async (sql:string,args?:unknown[])=>{
   calls.sql.push(sql);
   if(sql.startsWith("SELECT release_id FROM private.strata_standing_execution_reviews"))return {rows:input.standing?[{release_id:"standing"}]:[]};
   if(sql.startsWith("SELECT r.release_id"))return {rows:input.standing&&!input.revokedStanding?[{release_id:"standing"}]:[]};
   if(sql.includes("AS intent_id"))return {rows:input.finalize?[{reservation_id:reservationId,intent_id:"exit-intent"}]:[]};
-  if(sql.startsWith("SELECT id FROM public.v13_production_account"))return {rows:input.finalize?[{id:identity.accountId}]:[]};
+  if(input.settled&&sql.includes('SELECT key_fingerprint,cash_micros::text AS cash_micros'))
+   return {rows:[{key_fingerprint:f.snapshot.identity.keyFingerprint,cash_micros:f.snapshot.cashMicros}]};
+  if(input.settled&&sql.includes('SELECT d.*, s.payload'))return {rows:[historical]};
+  if(input.settled&&sql.includes('SELECT m.reservation_id FROM private.strata_emergency_exit_reservations m'))
+   return {rows:[{reservation_id:reservationId}]};
+  if(input.settled&&sql.includes('AS intents,')&&sql.includes('AS exits'))return {rows:[{intents:input.settled==="other",exits:false}]};
+  if(sql.startsWith("SELECT id FROM public.v13_production_account"))return {rows:input.finalize||input.settled?[{id:identity.accountId}]:[]};
   if(sql.startsWith("SELECT execution_account_id FROM private.kalshi_account_worker_lease"))return {rows:input.finalize&&!input.leaseChanged?[{execution_account_id:identity.accountId}]:[]};
   if(sql.startsWith("INSERT INTO private.strata_protective_exit_local_no_send")){
    if(input.finalizeFail==="insert")throw Error("audit unavailable");return {rows:[{reservation_id:reservationId}]};
@@ -52,6 +67,10 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
   if(sql==="COMMIT")monotonic+=input.commitDelayMs??0;
   if(sql==="COMMIT"&&input.failCommit)throw Error("commit_acknowledgement_lost");
   if(sql.startsWith("SELECT r.reservation_id")){
+   if(input.settled==="valid"){
+    assert.match(sql,/i.id<>\$15::text/);
+    assert.equal(args?.[14],p.exitId);
+   }
    assert.doesNotMatch(sql,/private\.strata_owner_sha_approvals oa/);
    assert.match(sql,/private\.strata_protective_exit_release v/);
    assert.match(sql,/v\.independent_reviewer_id<>a\.owner_user_id/);
@@ -93,8 +112,14 @@ function harness(input:{fill?:string;receipt?:boolean;denyLock?:boolean;fee?:boo
    mark:(async()=>{calls.mark++;
      if(input.marker===false||consumed)return {unknownRecorded:false};
      consumed=true;
-     return {unknownRecorded:true,clientOrderId:clientId,
-       mayRetry:false,transportAuthorized:false};
+     const saved={unknownRecorded:true,clientOrderId:clientId,mayRetry:false,transportAuthorized:false};
+     if(input.settled){
+      const snapshot=structuredClone(f.snapshot);
+      if(input.settled==="stale")snapshot.observedAtMs-=5001;
+      if(input.settled==="conflict")snapshot.orders.push({orderId:"late",request:f.history.requests[1]!,terminal:true,filledHundredths:"0"});
+      keepHeldExitReceipt(saved,{ownerId:OWNER,accountId:identity.accountId,clientId},snapshot,economicDigest(historical));
+     }
+     return saved;
    }) as never,
    post:input.rawSigned?undefined:async()=>{
      // Kills/revocations must never wait on row locks across network I/O.
@@ -561,5 +586,24 @@ test("final fence diagnostics cannot mint proof for wrong rows, lock errors, or 
   assert.equal(isDurableProtectiveExitNoSend(r,{ownerId:OWNER,accountId:identity.accountId,reservationId:RES}),false);
   assert.equal(h.calls.post,0);assert.equal(h.calls.read,0);
   assert.ok(!h.calls.sql.some(q=>q.startsWith("INSERT INTO private.strata_protective_exit_local_no_send")));
+ }
+});
+
+test("held exit wire accepts just the exact historical receipt and remains no-send on conflict",async()=>{
+ const sha=process.env.RAILWAY_GIT_COMMIT_SHA,flag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA='a'.repeat(40);process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA='a'.repeat(40);
+  const clientOrderId='v13p-55555555-5555-4555-8555-555555555555';
+  const happy=harness({settled:'valid',clientOrderId});
+  const first=await happy.run();assert.equal(first.state,'RECONCILED',JSON.stringify(first));
+  assert.equal(happy.calls.post,1); // local injected callback; no network
+  const duplicate=await happy.run();assert.equal(duplicate.postAttempted,false);assert.equal(happy.calls.post,1);
+  for(const cause of ['stale','conflict','other'] as const){
+   const h=harness({settled:cause,clientOrderId}),r=await h.run();
+   assert.equal(r.postAttempted,false);assert.equal(h.calls.post,0);assert.equal(r.mayRetry,false);
+  }
+ }finally{
+  if(sha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+  if(flag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=flag;
  }
 });

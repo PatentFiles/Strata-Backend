@@ -3,6 +3,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';import {randomUUID} from 'node:crypto';
 import {pool,type Pool,type PoolClient} from '@workspace/db';
+import {hasHeldExitReceipt,heldExitReceiptTimeLeft,keepHeldExitReceipt,moveHeldExitReceipt,recheckHeldExitReceipt} from './protectiveExitSettledCarry';
 import {runtimeSettledExitReceipt} from './runtimeSettledExitGuard';
 import {stoppedArmExposure,verifyDisposedExitAgainstSnapshot} from './armSettledReserveScope';
 import {disposeSettledExitReserve,readSettledExitReserveOutcome} from './settledExitReserveDisposition';
@@ -114,6 +115,30 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
     await pool.query("INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,state,trading_authorized) VALUES($1,$2,$3,'PREPARED',false)",[newMarker,scope.ownerId,a.id]);
     assert.equal(await guard(),null);
     await pool.query("DELETE FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[newMarker]);
+    // Orders-off simulation of the actual actor's durable PREPARED -> UNKNOWN
+    // transition. The old pair remains untouched; no exchange transport exists.
+    const nextExit=randomUUID(),nextReservation=randomUUID(),clientId=`v13p-${nextExit}`;
+    const scopeProof={accountId:a.id,ownerId:scope.ownerId,clientId};
+    const advisory={},committedMarker={};
+    keepHeldExitReceipt(advisory,scopeProof,f.snapshot,receipt.receiptDigest);
+    assert.equal((await recheckHeldExitReceipt(pool,advisory,scopeProof,f.nowMs,'reserve'))?.exitId,f.exitId);
+    assert.equal(await recheckHeldExitReceipt(pool,{...advisory},scopeProof,f.nowMs,'reserve'),null);
+    assert.equal(await recheckHeldExitReceipt(pool,advisory,{...scopeProof,clientId:`v13p-${randomUUID()}`},f.nowMs,'reserve'),null);
+    await pool.query("INSERT INTO public.v13_production_intent(id,account_id,kind,state,terminal,reserved_micros,filled_hundredths,client_order_id) VALUES($1,$2,'EXIT','PREPARED',false,0,0,$3)",[nextExit,a.id,clientId]);
+    await pool.query("INSERT INTO private.strata_emergency_exit_reservations(reservation_id,owner_user_id,execution_account_id,client_order_id,state,trading_authorized) VALUES($1,$2,$3,$4,'PREPARED',false)",[nextReservation,scope.ownerId,a.id,clientId]);
+    assert.equal((await recheckHeldExitReceipt(pool,advisory,scopeProof,f.nowMs,'mark',nextReservation))?.reservationId,f.reservationId);
+    assert.equal(await recheckHeldExitReceipt(pool,advisory,scopeProof,f.nowMs,'mark',f.reservationId),null);
+    assert.equal(await recheckHeldExitReceipt(pool,advisory,scopeProof,f.nowMs,'wire',nextReservation),null);
+    await pool.query("UPDATE public.v13_production_intent SET state='DISPATCHED' WHERE id=$1",[nextExit]);
+    await pool.query("UPDATE private.strata_emergency_exit_reservations SET state='UNKNOWN' WHERE reservation_id=$1",[nextReservation]);
+    moveHeldExitReceipt(advisory,committedMarker);assert.equal(hasHeldExitReceipt(committedMarker),true);
+    assert.equal((await recheckHeldExitReceipt(pool,committedMarker,scopeProof,f.nowMs,'wire',nextReservation))?.exitId,f.exitId);
+    assert.equal(heldExitReceiptTimeLeft(committedMarker,f.nowMs+5001),0);
+    assert.equal(await recheckHeldExitReceipt(pool,committedMarker,scopeProof,f.nowMs+5001,'wire',nextReservation),null);
+    await pool.query("UPDATE public.v13_production_intent SET state='UNKNOWN' WHERE id=$1",[nextExit]);
+    assert.equal(await recheckHeldExitReceipt(pool,committedMarker,scopeProof,f.nowMs,'wire',nextReservation),null);
+    await pool.query("DELETE FROM private.strata_emergency_exit_reservations WHERE reservation_id=$1",[nextReservation]);
+    await pool.query("DELETE FROM public.v13_production_intent WHERE id=$1",[nextExit]);
    }finally{restoreFlags();}
    assert.equal(receipt.exitId,f.exitId);assert.equal(receipt.reservationId,f.reservationId);
    assert.doesNotThrow(()=>verifyDisposedExitAgainstSnapshot(receipt,f.snapshot));

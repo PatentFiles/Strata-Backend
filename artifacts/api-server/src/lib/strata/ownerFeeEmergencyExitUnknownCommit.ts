@@ -1,3 +1,4 @@
+import {hasHeldExitReceipt,heldExitReceiptTimeLeft,moveHeldExitReceipt,recheckHeldExitReceipt} from './protectiveExitSettledCarry';
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
@@ -79,7 +80,7 @@ export async function markOwnedEmergencyExitUnknownForReview(
   let advisory;
   try {
     advisory=await (deps.inspect??inspectOwnedEmergencyExitRead)(
-      ownerId,accountId,material,order,
+      ownerId,accountId,material,order,{currentReservationId:reservationId},
     );
   }catch{
     return deny("emergency_exit_unknown_read_failed");
@@ -113,6 +114,9 @@ export async function markOwnedEmergencyExitUnknownForReview(
     if(accountLock.rows.length!==1)return deny("emergency_exit_unknown_position_or_fence_unavailable");
     // All identities, kills, worker fence and live position are checked under
     // the SAME transaction as the PREPARED -> UNKNOWN transition.
+    const scope={ownerId,accountId,clientId:String(order.client_order_id)};
+    const retired=hasHeldExitReceipt(advisory)?await recheckHeldExitReceipt(client,advisory,scope,(deps.now??Date.now)(),'mark',reservationId):null;
+    if(hasHeldExitReceipt(advisory)&&!retired)return deny("emergency_exit_historical_receipt_changed");
     const eligible=await client.query(
       "SELECT r.reservation_id,r.client_order_id FROM private.strata_emergency_exit_reservations r " +
       "JOIN public.v13_production_account a ON a.id=r.execution_account_id " +
@@ -150,12 +154,14 @@ export async function markOwnedEmergencyExitUnknownForReview(
       "AND w.heartbeat_at > now()-interval '5 seconds' " +
       "AND NOT EXISTS (SELECT 1 FROM public.v13_production_intent i " +
       "WHERE i.account_id=a.id AND (i.state IN ('DISPATCHED','UNKNOWN') " +
-      "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL))) " +
+      "OR (i.terminal=false AND i.exchange_order_id IS NOT NULL)) " +
+      (retired?"AND i.id<>$14::text) ":") ") +
       "FOR UPDATE OF r,a,w,pos,fi",
       [reservationId,ownerId,accountId,digest,order.client_order_id,
        order.ticker,direction,count,lease.holderId,lease.fencingToken,fingerprint,baseline,
        order.side==="ask"?Number((order.price as string).slice(2))*100:
-        1_000_000-Number((order.price as string).slice(2))*100],
+        1_000_000-Number((order.price as string).slice(2))*100,
+       ...(retired?[retired.exitId]:[])],
     );
     if(eligible.rows.length!==1)
       return deny("emergency_exit_unknown_position_or_fence_unavailable");
@@ -189,11 +195,14 @@ export async function markOwnedEmergencyExitUnknownForReview(
     if(financial.rows.length!==1||
        financial.rows[0]!.client_order_id!==order.client_order_id)
       return deny("emergency_exit_financial_intent_transition_not_unique");
+    if(retired&&!(Number(heldExitReceiptTimeLeft(advisory,(deps.now??Date.now)()))>0))return deny("emergency_exit_historical_receipt_expired");
     await client.query("COMMIT");committed=true;
-    return {
+    const result={
       ...deny("emergency_exit_unknown_committed_no_transport_authority"),
       unknownRecorded:true,clientOrderId:order.client_order_id,
     };
+    if(retired)moveHeldExitReceipt(advisory,result);
+    return result;
   }catch{
     // A failed COMMIT acknowledgement can be ambiguous. Never try again.
     return deny("emergency_exit_unknown_persistence_unverified");

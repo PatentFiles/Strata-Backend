@@ -1,3 +1,8 @@
+import {readStoppedSettledExitDispositions,settledReserveReadinessEnabled} from './armSettledReserveScope';
+import {runtimeSettledExitReceipt} from './runtimeSettledExitGuard';
+import {dedicatedSignerFingerprint} from './commissioning';
+import {personalAccountSnapshot,readOwnedKalshiFeeds} from './personalExchangeRead';
+import type {Request} from '../v13-production/types';
 import {createHash} from "node:crypto";
 import {pool} from "@workspace/db";
 import {reconcileUnknownProtectiveExitAfterRestart,type RestartDiagnosticStage} from "./ownerFeeEmergencyExitRestartRecovery";
@@ -18,9 +23,9 @@ const CLIENT=/^v13p-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 const SHA=/^[0-9a-f]{64}$/;
 export async function reconcileOwnedProtectiveExits(input:{
   ownerId:string;accountId:string;material:{keyId:string;privateKey:string};
-},db:Db=pool,deps:{recover?:Recover}={}):Promise<ExitRecoveryPoll>{
+},db:Db=pool,deps:{recover?:Recover;readFeeds?:typeof readOwnedKalshiFeeds}={}):Promise<ExitRecoveryPoll>{
  const hosted=Boolean(process.env.RAILWAY_PROJECT_ID||process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_ENVIRONMENT_ID);
- if(deps.recover&&(process.env.NODE_ENV!=="test"||hosted))
+ if((deps.recover||deps.readFeeds)&&(process.env.NODE_ENV!=="test"||hosted))
   return blocked("protective_exit_test_recovery_forbidden");
  if(!UUID.test(input.ownerId)||!ACCOUNT.test(input.accountId)||!input.material.keyId||!input.material.privateKey)
   return blocked("protective_exit_recovery_identity_unverified");
@@ -36,6 +41,28 @@ export async function reconcileOwnedProtectiveExits(input:{
   if(rs.rows.length!==1)return blocked("multiple_unknown_protective_exits_require_manual_review");
   const row=rs.rows[0]!;
   const rid=row.reservation_id;
+  if(settledReserveReadinessEnabled()){
+   const receipts=await readStoppedSettledExitDispositions(db,input.accountId,input.ownerId);
+   const retired=receipts.find(r=>r.reservationId===rid&&r.clientOrderId===row.client_order_id);
+   if(retired){
+    // This is economic closure, not proof the old HTTP request was never
+    // sent. Recheck complete signed history; don't retry or rewrite the row.
+    const fp=dedicatedSignerFingerprint(input.material.keyId,input.material.privateKey);
+    if(!fp)return blocked("protective_exit_historical_signer_unverified");
+    const found=(await db.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id LIMIT 1001",[input.accountId])).rows;
+    if(found.length>1000)return blocked("protective_exit_historical_history_unverified");
+    const requests=found.map(r=>typeof r.request==="string"?JSON.parse(r.request):r.request) as Request[];
+    const started=Date.now(),feed=await (deps.readFeeds??readOwnedKalshiFeeds)(input.material,started);
+    if(!feed.ok||feed.historicalCoverageComplete!==true||feed.observedAtMs!==started)
+     return blocked("protective_exit_historical_history_unverified");
+    const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:fp},feed,requests);
+    if(!("identity" in snapshot))return blocked("protective_exit_historical_history_unverified");
+    const current=await runtimeSettledExitReceipt(db,{accountId:input.accountId,ownerId:input.ownerId,snapshot,nowMs:Date.now()});
+    if(current?.receiptDigest!==retired.receiptDigest||Date.now()-started>5000||Date.now()<started)
+     return blocked("protective_exit_historical_history_unverified");
+    return {ok:true,reason:"historical_protective_exit_economic_receipt_matches",attempted:0,mayRetry:false,postAttempted:false};
+   }
+  }
   const raw=row.order_request_json;
   if(typeof rid!=="string"||!UUID.test(rid)||typeof raw!=="string"||raw.length>4096||
      typeof row.order_digest!=="string"||!SHA.test(row.order_digest))

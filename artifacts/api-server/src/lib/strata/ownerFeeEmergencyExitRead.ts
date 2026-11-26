@@ -1,6 +1,10 @@
 import {pool} from "@workspace/db";
 import {dedicatedSignerFingerprint} from "./commissioning";
-import {readOwnedKalshiFeeds} from "./personalExchangeRead";
+import {settledReserveReadinessEnabled} from './armSettledReserveScope';
+import {runtimeSettledExitReceipt} from './runtimeSettledExitGuard';
+import {keepHeldExitReceipt} from './protectiveExitSettledCarry';
+import type {Request,Snapshot} from '../v13-production/types';
+import {personalAccountSnapshot,readOwnedKalshiFeeds} from "./personalExchangeRead";
 import {readExactEmergencyFeeEvidence} from "./ownerFeeEmergencyExitMarket";
 import {inspectEmergencyExitCandidate,type EmergencyExitOrder,
   type EmergencyExitDecision,type EmergencyExitEvidence} from "./ownerFeeEmergencyExit";
@@ -26,7 +30,7 @@ export async function inspectOwnedEmergencyExitRead(
   order:EmergencyExitOrder,
   deps:{db?:DB;readFeeds?:typeof readOwnedKalshiFeeds;
     readFees?:typeof readExactEmergencyFeeEvidence;
-    signerFingerprint?:typeof dedicatedSignerFingerprint;now?:()=>number}={},
+    signerFingerprint?:typeof dedicatedSignerFingerprint;now?:()=>number;currentReservationId?:string}={},
 ):Promise<EmergencyExitDecision>{
   if(!UUID.test(ownerId)||!ACCOUNT_ID.test(accountId))return deny("emergency_exit_owner_invalid");
   const db=deps.db??pool;
@@ -73,9 +77,23 @@ export async function inspectOwnedEmergencyExitRead(
     if(unknown.rows.length!==1||typeof pending!=="number"||
        !Number.isSafeInteger(pending)||pending<0)
       return deny("emergency_exit_orders_unreconciled");
+    let settled:{snapshot:Snapshot;receiptDigest:string}|undefined;
+    if(pending===1&&resting===0&&settledReserveReadinessEnabled()&&feeds.historicalCoverageComplete===true){
+     const stored=(await db.query("SELECT request FROM public.v13_production_intent WHERE account_id=$1 ORDER BY created_at,id LIMIT 1001",[accountId])).rows;
+     if(stored.length<=1000){
+      const requests=stored.map(r=>typeof r.request==='string'?JSON.parse(r.request):r.request) as Request[];
+      const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:signer},feeds,requests);
+      if("identity" in snapshot){
+       const receipt=await runtimeSettledExitReceipt(db,{accountId,ownerId,snapshot,nowMs:now(),
+        ...(deps.currentReservationId?{protectiveMarker:{reservationId:deps.currentReservationId,clientId:String(order.client_order_id),state:"PREPARED"}}:{})});
+       if(receipt)settled={snapshot,receiptDigest:receipt.receiptDigest};
+      }
+     }
+    }
     const fee=await (deps.readFees??readExactEmergencyFeeEvidence)(
       String(order.ticker??""),now);
     // No inferred marketOpen, no list-first market, no synthetic fee provenance.
+    if(settled&&(now()<settled.snapshot.observedAtMs||now()-settled.snapshot.observedAtMs>5000))settled=undefined;
     const evidence:EmergencyExitEvidence={
       authenticatedOwnerId:ownerId,accountOwnerId:ownerId,
       accountSubaccount:1,accountExchangeIndex:2,signerVerified:true,
@@ -83,13 +101,16 @@ export async function inspectOwnedEmergencyExitRead(
       globalKillActive:false,accountKillActive:false,executionEnabled:true,
       positionsComplete:true,positionMarket:String(matching[0]!.ticker),
       positionFp,positionsObservedAtMs:feeds.observedAtMs,
-      restingOrderCount:resting,uncertainOrderCount:pending,
+      restingOrderCount:resting,uncertainOrderCount:settled?0:pending,
       kalshiFee:fee.ok&&fee.marketOpen===true&&fee.marketTicker===order.ticker?
         {source:"kalshi_live_api",market:fee.marketTicker,
          fingerprint:fee.fingerprint,observedAtMs:fee.observedAtMs,
          feeType:"quadratic",feeMultiplier:1,
          noUnverifiedOverridesOrChanges:true,marketOpen:fee.marketOpen}:null,
     };
-    return inspectEmergencyExitCandidate(ownerId,order,evidence,now());
+    const decision=inspectEmergencyExitCandidate(ownerId,order,evidence,now());
+    if(settled&&decision.diagnosticEligible)keepHeldExitReceipt(decision,{ownerId,accountId,clientId:String(order.client_order_id)},
+     settled.snapshot,settled.receiptDigest);
+    return decision;
   }catch{return deny("emergency_exit_independent_reads_unavailable");}
 }
