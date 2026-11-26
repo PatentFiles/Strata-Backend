@@ -26,6 +26,7 @@ import { OPERATOR_FEE_SOURCE_POLICY } from "./operatorFeeSourceAuthorization";
 import { verifyReviewedApiFeeSourceStage, parseReviewedApiSource, API_SOURCE_POLICY_VERSION, API_SOURCE_FORMULA_VERSION } from "./apiFeeSourceStage";
 import { PDF_FREE_API_RATE_REVIEW_DECISION_SHA256 } from "./apiFeeRateReference";
 import { verifyMonetaryFeeContract } from "./monetaryFeeContract";
+import { settledReserveReadinessEnabled,stoppedArmExposure } from "./armSettledReserveScope";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import {approvedFromRow} from "./ownerStakePolicyAmendment";
 import {computeV13LiveMoneyPolicyHash} from "../v13LiveMoneyRisk";
@@ -947,7 +948,13 @@ export async function requestOwnedAccountActivation(
   );
   if (!unresolved.ok) return { ok: false, reason: unresolved.reason, ...closed };
   if (unresolved.mode === "recovery") {
-    return { ok: false, reason: "production_uncertain_order_blocks_mutation", ...closed };
+    // This endpoint only registers a request. Independent signed release
+    // qualification and the locked activation still follow and may refuse.
+    if(!settledReserveReadinessEnabled())return {ok:false,reason:"production_uncertain_order_blocks_mutation",...closed};
+    try{
+      const proved=await stoppedArmExposure(db,report.accountId,input.ownerUserId);
+      if(!proved.clear||proved.receipts.length!==1)return {ok:false,reason:"production_uncertain_order_blocks_mutation",...closed};
+    }catch{return {ok:false,reason:"production_uncertain_order_blocks_mutation",...closed};}
   }
   const row = (await db.query(READINESS_SQL, [input.ownerUserId])).rows[0] ?? {};
   const payload = {

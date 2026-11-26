@@ -831,3 +831,68 @@ test("qualification fee diagnostics ignore spoofed details and retain original r
  assert.deepEqual(JSON.parse(JSON.stringify(result)),{ok:false,reason:"release_api_fee_live_api_fee_source_not_verified",ordersSubmitted:false});
  assert.equal(h.executed.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false);
 });
+
+import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
+import {economicSettlementPlan,proveEconomicSettlement} from './ownerEconomicSettlementProof';
+
+test('final qualification takes an exact settled receipt, never another unresolved order',async()=>{
+ const f=economicSettlementFixture(V4_CLOCK),p=economicSettlementPlan(proveEconomicSettlement(f));
+ const {history:h}=f,exit=h.rows[1]!;
+ h.rows[0]!.reserved_micros='0';
+ h.events.push({account_id:f.account.id,event_id:p.eventId,intent_id:p.parentId,kind:'SETTLEMENT',
+  payload:p.settlement,digest:v13Digest(p.settlement),cash_delta_micros:p.cashDeltaMicros,pnl_micros:p.pnlMicros,
+  occurred_at:new Date(p.settlement.occurredAtMs)});
+ Object.assign(h.positions[0]!,{quantity_hundredths:'0',basis_micros:'0',realized_pnl_micros:p.pnlMicros});
+ const parent=h.requests[0]!,fill=f.snapshot.fills[0]!, rawOrder={
+  client_order_id:parent.clientOrderId,ticker:parent.market,order_id:fill.orderId,status:'executed',
+  book_side:'ask',yes_price_dollars:'0.49',initial_count_fp:'3.00',fill_count_fp:'3.00'};
+ const rawFill={trade_id:fill.id,order_id:fill.orderId,ticker:fill.market,no_price_dollars:'0.49',fee_cost:'0.052500',
+  count_fp:'3.00',created_time:new Date(fill.occurredAtMs).toISOString()};
+ const prevSha=process.env.RAILWAY_GIT_COMMIT_SHA,prevFlag=process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA=SHA;process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=SHA;
+  for(const item of ['valid','other','late','missing','stale'] as const){
+   const base=fakeDb();let qualified=0,reads=0;
+   const original=base.db as {query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
+   const db={query:async(sql:string,args?:unknown[])=>{
+    if(sql.includes("WITH unresolved_intents"))return {rows:[{n:item==='other'?'3':'2'}]};
+    if(sql.includes('SELECT d.*, s.payload'))return {rows:[{payload:p,payload_digest:v13Digest(p),
+     exit_intent_id:p.exitId,entry_intent_id:p.parentId,reservation_id:p.reservationId,market:p.settlement.market,
+     client_order_id:exit.client_order_id,settlement_event_id:p.eventId,settlement_digest:v13Digest(p.settlement),
+     occurred_at:new Date(p.settlement.occurredAtMs)}]};
+    if(sql.includes(' AS positions,')&&sql.includes(' AS exits'))return {rows:[{positions:false,intents:item==='other',exits:false}]};
+    if(sql.includes("stake.configured_stake_cents")&&sql.includes("FROM public.v13_production_account a")){
+     const old=await original.query(sql,args);
+     return {rows:old.rows.map((r:Row)=>({...r,id:f.account.id,cash_micros:p.cashAfterMicros}))};
+    }
+    if(sql.includes("FROM public.v13_production_observation o"))return {rows:[{
+     digest:v13Digest({accountId:f.account.id,policyId:String(account.policy_id),feeDigest:String(account.fee_artifact_digest),
+      stakeCents:Number(account.configured_stake_cents),commissioningDigest:String(account.commissioning_digest),
+      minimumExitMicros:Number(account.minimum_exit_micros)})}]};
+    if(sql.includes('SELECT i.*,i.xmin::text AS row_revision'))return {rows:h.rows};
+    if(sql.includes('FROM public.v13_production_event e'))return {rows:h.events};
+    if(sql.includes('FROM public.v13_production_position p'))return {rows:h.positions};
+    if(sql.includes('FROM private.strata_emergency_exit_reservations r'))return {rows:h.markers};
+    if(sql.includes("kind='PROVEN_NOT_POSTED'")||sql.includes('FROM private.strata_protective_exit_reconciliations x'))return {rows:[]};
+    if(sql.includes('SELECT request FROM public.v13_production_intent'))return {rows:h.rows.map(i=>({request:i.request}))};
+    if(sql.includes('INSERT INTO private.strata_protective_release_qualification'))qualified++;
+    return original.query(sql,args);
+   }};
+   const result=await qualifyProtectiveRelease(OWNER,{db:db as never,sha:()=>SHA,
+    now:()=>V4_CLOCK+(item==='stale'&&reads?5001:0),readFeeds:async(_k,observedAtMs)=>{
+     reads++;
+     return {ok:true,observedAtMs,historicalCoverageComplete:true,cashMicros:p.cashAfterMicros,
+      positions:[f.rawPosition],settlements:item==='missing'?[]:[f.rawSettlement],fills:[rawFill],
+      orders:[rawOrder,...(item==='late'?[{...rawOrder,client_order_id:exit.client_order_id,book_side:'bid',
+       order_id:'late',yes_price_dollars:'0.90',fill_count_fp:'0.00',status:'canceled'}]:[])]} as never;
+    },verifyFee:async()=>({ok:true,monetaryFeeAuthorized:true,sourceDigest:DIGEST} as never)});
+   assert.equal(result.ok,item==='valid',JSON.stringify({item,result}));
+   assert.equal(result.ordersSubmitted,false);
+   assert.equal(qualified,item==='valid'?1:0);
+   if(item==='other')assert.equal(reads,0);
+  }
+ }finally{
+  if(prevSha===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;else process.env.RAILWAY_GIT_COMMIT_SHA=prevSha;
+  if(prevFlag===undefined)delete process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA;else process.env.STRATA_SETTLED_EXIT_RESERVE_READINESS_SHA=prevFlag;
+ }
+});

@@ -1,3 +1,4 @@
+import {settledReserveReadinessEnabled,stoppedArmExposure} from './armSettledReserveScope';
 import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {runtimeAuthSql} from './runtimeAuthRelation';
 import {readNeverPostedReleaseHistory} from './neverPostedReleaseHistory';
@@ -208,8 +209,18 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
      account.blocked_reason!=="awaiting_account_commissioning")
     return deny("account_risk_freeze_requires_independent_remediation");
   const unresolved=await readUnresolvedIntentMode((sql,p)=>db.query(sql,p),String(account.id));
-  if(!unresolved.ok||unresolved.mode!=="entries")
+  if(!unresolved.ok)return deny("unresolved_order_prevents_release");
+  const accountId=String(account.id);
+  let settled:Awaited<ReturnType<typeof readReconciledReleaseRenewalHistory>>|undefined;
+  if(unresolved.mode!=="entries"){
+   if(!settledReserveReadinessEnabled()||account.kill_switch!==true||account.execution_enabled!==false)
     return deny("unresolved_order_prevents_release");
+   const local=await stoppedArmExposure(db,accountId,ownerId);
+   if(!local.clear||local.receipts.length!==1)return deny("unresolved_order_prevents_release");
+   settled=await readReconciledReleaseRenewalHistory(db,accountId,ownerId);
+   if(settled.settledDispositions?.[0]?.receiptDigest!==local.receipts[0]!.receiptDigest)
+    return deny("unresolved_order_prevents_release");
+  }
   const material=await loadedMaterial(db,account);
   if(!material)return deny("restricted_production_signer_unavailable");
   const feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,now);
@@ -232,6 +243,11 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   const identity:Identity={subaccount:1,exchangeIndex:2,keyFingerprint:String(account.key_fingerprint)};
   const mapped=personalAccountSnapshot(identity,feeds,requests);
   if(!("identity" in mapped))return deny(mapped.reason);
+  if(settled){
+   if(feeds.historicalCoverageComplete!==true||mapped.cashMicros!==String(account.cash_micros))
+    return deny("unresolved_order_prevents_release");
+   verifyReconciledReleaseRenewalSnapshot(settled,mapped);
+  }
   if(account.blocked_reason==="awaiting_account_commissioning" &&
      (mapped.orders.length>0||mapped.fills.length>0||mapped.positions.length>0||
       mapped.settlements.length>0||requests.length>0))
@@ -373,13 +389,23 @@ export async function qualifyProtectiveRelease(ownerId:string,deps:Deps={}){
   }
   // Qualification binds current fee proof to the same bounded provider read.
   // An expired network journey must not produce a fresh owner release token.
+  if(settled){
+   const latest=await readReleaseOwner(db,ownerId),local=await stoppedArmExposure(db,accountId,ownerId);
+   if(!latest.ok||hash(latest.account)!==hash(account)||!local.clear||local.receipts.length!==1||
+    local.receipts[0]!.receiptDigest!==settled.settledDispositions?.[0]?.receiptDigest)
+    return deny("release_scope_changed_during_signed_read");
+   const history=await readReconciledReleaseRenewalHistory(db,accountId,ownerId);
+   if(history.reconciliationDigest!==settled.reconciliationDigest)
+    return deny("release_history_changed_during_signed_read");
+  }
   const completedAt=(deps.now??Date.now)();
   if(!Number.isSafeInteger(completedAt)||completedAt<now||
-     completedAt-now>45_000)
+     completedAt-now>(settled?5000:45_000))
     return deny("authenticated_production_qualification_stale");
   if(String(feeds.cashMicros)!==String(account.cash_micros))
     return deny("exchange_and_financial_ledger_cash_mismatch");
   const evidence=hash({sha,ownerId,accountId:account.id,observedAtMs:now,
+   ...(settled?{settledReserveHistoryDigest:settled.reconciliationDigest}:{}),
    cash:feeds.cashMicros,orders:feeds.orders,fills:feeds.fills,
    positions:feeds.positions,settlements:feeds.settlements,
    fee:account.fee_artifact_digest,freshFeeDigest,durableModel,durablePolicyHash:durableModel?account.policy_hash:null,v4FeeBinding,reviewedApiGrantId:reviewedApi?.grantId??null,policy:account.policy_id});

@@ -27,6 +27,7 @@ import {DURABLE_FEE_VERSION,isDurableFeeVersion,verifyDurableOwnerFee} from './d
 import {verifyOwnerStandingFee} from './ownerStandingFeeAuthorization';
 import {collectFinalReleaseEvidence,finalReleaseScope,finalReleaseHistory,finalReleaseSnapshot,readReleaseOwner} from './inAppProtectiveRelease';
 import {ProductionLedger,type Account} from '../v13-production/ledger';
+import {stoppedArmExposure} from './armSettledReserveScope';
 import {readUnresolvedIntentMode} from './workerUncertainOrderGate';
 import {digest as auditDigest} from '../v13-production/types';
 import {ownerActivationFailureDiagnostic,type OwnerActivationStage} from './ownerActivationFailureDiagnostic';
@@ -198,16 +199,28 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
     WHERE id='singleton' AND mode='V13_PRODUCTION'
     AND live_execution_enabled=true AND manual_kill_switch=false FOR SHARE`);
   if(global.rows.length!==1)return no('owner_self_global_live_or_kill_not_ready');
-  const unresolved=await readUnresolvedIntentMode((sql,args)=>tx!.query(sql,args),raw.accountId);
-  if(!unresolved.ok||unresolved.mode!=='entries')
-   return no('owner_self_unresolved_exchange_intents');
-  const outstanding=await tx.query(`SELECT
-    (SELECT count(*)::int FROM public.v13_production_position
-      WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
-    (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[raw.accountId]);
-  if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
-   outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
+  const disposition=history.mode==='retained'?history.settledDispositions?.[0]:undefined;
+  if(disposition){
+   // Full fresh history was already matched above under the owner/lease locks.
+   // Independently keep every other pending order, position and reservation
+   // blocking. No identity is taken from the client.
+   const checked=await stoppedArmExposure(tx,raw.accountId,owner,true);
+   const current=now();
+   if(!checked.clear||checked.receipts.length!==1||checked.receipts[0]!.receiptDigest!==disposition.receiptDigest||
+    current<evidence.started||current-evidence.started>5000)
+    return no('owner_self_open_position_or_protective_exit_unknown');
+  }else{
+   const unresolved=await readUnresolvedIntentMode((sql,args)=>tx!.query(sql,args),raw.accountId);
+   if(!unresolved.ok||unresolved.mode!=='entries')
+    return no('owner_self_unresolved_exchange_intents');
+   const outstanding=await tx.query(`SELECT
+     (SELECT count(*)::int FROM public.v13_production_position
+       WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
+     (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
+       WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')) AS exits`,[raw.accountId]);
+   if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
+    outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
+  }
   diagnosticStage='owner_review';
   const review=await tx.query(`SELECT r.release_id,q.evidence_digest
     FROM private.strata_standing_execution_reviews r
@@ -315,6 +328,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   const audit={ownerId:owner,accountId:raw.accountId,sha,
    reviewId:raw.reviewId,qualificationId:raw.qualificationId,approvalId,
    feeAuthorityId:authorityId,feePolicyVersion:account.fee_policy_version,policyHash:raw.policyHash,
+   ...(disposition?{settledReserveReceiptDigest:disposition.receiptDigest}:{}),
    observedAtMs:evidence.started,newWorkerFence:w.rows[0]!.fencing_token,
    note:'Owner-self activation only; ARM/START and execution grant remain separate'};
   const event=async(kind:string,payload:Row)=>{
