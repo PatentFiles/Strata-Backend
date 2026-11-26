@@ -71,3 +71,9 @@ test('protective final sender requires process-local carry for its exact owner, 
  assert.equal(await recheckEconomicProtectiveEvidence(x.db,token,s,x.scope.nowMs),x.scope.snapshot.observedAtMs,'carry owns an immutable clone');
  }finally{if(before===undefined)delete process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED;else process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED=before;}
 });
+
+test('PostgreSQL numeric identity projection matches signed numeric scope without trusting coercible foreign values',()=>{
+ const x=fixture();Object.assign(x.scope.account,{subaccount:'1',exchange_index:'2'});
+ assert(verifyEconomicRuntimeEvidence([x.row],x.scope));
+ Object.assign(x.scope.account,{exchange_index:'3'});assert.throws(()=>verifyEconomicRuntimeEvidence([x.row],x.scope));
+});

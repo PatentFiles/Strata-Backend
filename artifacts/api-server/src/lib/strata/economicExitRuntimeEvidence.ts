@@ -13,7 +13,7 @@ export function verifyEconomicRuntimeEvidence(rows:Row[],scope:Scope){
  const fail='economic_discharge_runtime_evidence_unverified';
  requireProof(rows.length>0&&rows.length<=1000&&a.owner_user_id===ownerId&&
   Number(a.subaccount)===1&&Number(a.exchange_index)===2&&
-  canonical(s.identity)===canonical({subaccount:a.subaccount,exchangeIndex:a.exchange_index,keyFingerprint:a.key_fingerprint})&&s.authenticated&&s.complete&&s.cashExact&&
+  canonical(s.identity)===canonical({subaccount:Number(a.subaccount),exchangeIndex:Number(a.exchange_index),keyFingerprint:a.key_fingerprint})&&s.authenticated&&s.complete&&s.cashExact&&
   !s.unexplainedCashActivity&&Number.isSafeInteger(nowMs)&&Number.isSafeInteger(s.observedAtMs)&&
   s.observedAtMs<=nowMs&&nowMs-s.observedAtMs<=5000&&
   Number.isSafeInteger(s.historyFromMs)&&s.historyFromMs<=s.observedAtMs&&
