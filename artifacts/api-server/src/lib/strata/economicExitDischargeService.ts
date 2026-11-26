@@ -13,6 +13,27 @@ const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i,SHA
 type Row=Record<string,unknown>;const record=(x:unknown):x is Row=>!!x&&typeof x==='object'&&!Array.isArray(x);
 export const ECONOMIC_DISCHARGE_CONFIRM='I_AUTHORIZE_VERIFIED_FINAL_SETTLEMENT_RESERVE_AND_STALE_LEASE_DISCHARGE_KEEP_TRANSPORT_UNKNOWN_AND_TRADING_OFF';
 export function economicDischargeEnabled(env=process.env){const sha=deployedGitSha(env);return env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED==='true'&&SHA.test(sha)&&env.STRATA_ECONOMIC_EXIT_DISCHARGE_SHA===sha;}
+const TRANSFER_LIMIT=200;
+/** Kalshi's terminal transfer page can omit the optional cursor. Never treat a
+ * full page with no cursor, malformed tokens or a paging cycle as exhaustion. */
+export async function readEconomicTransferPages(getPage:(cursor:string|undefined)=>Promise<unknown>):Promise<Row[]>{
+ const rows:Row[]=[],cursors=new Set<string>();let cursor:string|undefined;
+ for(let page=0;page<20;page++){
+  const response=await getPage(cursor);
+  requireProof(record(response)&&Array.isArray(response.transfers)&&response.transfers.length<=TRANSFER_LIMIT&&response.transfers.every(record),'economic_discharge_transfer_page_unverified');
+  rows.push(...response.transfers);
+  const next=response.cursor;
+  if(next===undefined){
+   requireProof(response.transfers.length<TRANSFER_LIMIT,'economic_discharge_transfer_cursor_unverified');
+   return rows;
+  }
+  requireProof(typeof next==='string','economic_discharge_transfer_cursor_unverified');
+  if(next==='')return rows;
+  requireProof(next.length<=1024&&next.trim().length>0&&!/[\u0000-\u001f\u007f]/.test(next)&&!cursors.has(next),'economic_discharge_transfer_cursor_unverified');
+  cursors.add(next);cursor=next;
+ }
+ throw Error('economic_discharge_transfer_history_incomplete');
+}
 type Deps={db?:Pool;now?:()=>number;sha?:()=>string;enabled?:()=>boolean;isScheduled:(owner:string,account:string)=>boolean};
 const refusal=(e:unknown)=>dischargeNo(e instanceof Error&&/^economic_discharge_[a-z_]+$/.test(e.message)?e.message:'economic_discharge_verification_refused');
 /** Other monetary operations are separate obligations. A quiet cash snapshot
@@ -68,18 +89,12 @@ export function createEconomicDischargeService(deps:Deps){
   const inventory=await inspectSubaccount1(management,get);
   requireProof(inventory.ok&&inventory.exists===true&&inventory.exchangeIndex2Exists===true,'economic_discharge_pair_unverified');
   const transfers=async()=>{
-   async function pages(path:string,explicitCursor:boolean){const rows:Row[]=[],cursors=new Set<string>();let cursor:string|undefined;
-    for(let page=0;page<20;page++){
-     const response=await get(management.material,path,'?limit=200'+(cursor?'&cursor='+encodeURIComponent(cursor):''));live();
-     requireProof(record(response)&&Array.isArray(response.transfers)&&response.transfers.length<=200&&response.transfers.every(record),'economic_discharge_transfer_page_unverified');
-     rows.push(...response.transfers);const next=response.cursor;
-     requireProof(typeof next==='string'||!explicitCursor&&next===undefined,'economic_discharge_transfer_cursor_unverified');
-     if(next===undefined||next==='')return rows;
-     requireProof(next.length<=1024&&next.trim().length>0&&!/[\u0000-\u001f\u007f]/.test(next)&&!cursors.has(next),'economic_discharge_transfer_cursor_unverified');cursors.add(next);cursor=next;
-    }throw Error('economic_discharge_transfer_history_incomplete');
-   }
-   const subaccount=await pages('/trade-api/v2/portfolio/subaccounts/transfers',true);
-   const crossExchange=await pages('/trade-api/v2/portfolio/intra_exchange_instance_transfers',false);
+   const pages=(path:string)=>readEconomicTransferPages(async cursor=>{
+    const response=await get(management.material,path,'?limit='+TRANSFER_LIMIT+(cursor?'&cursor='+encodeURIComponent(cursor):''));
+    live();return response;
+   });
+   const subaccount=await pages('/trade-api/v2/portfolio/subaccounts/transfers');
+   const crossExchange=await pages('/trade-api/v2/portfolio/intra_exchange_instance_transfers');
    return {subaccount,crossExchange,complete:true};
   };
   const marketPath='/trade-api/v2/markets/'+String(first.pin.row.market_ticker);

@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import express from 'express';import type {AddressInfo} from 'node:net';
 import {economicDischargeRouter} from './economicExitDischargeRoute';
-import {createEconomicDischargeService,economicDischargeEnabled,ECONOMIC_DISCHARGE_CONFIRM} from '../lib/strata/economicExitDischargeService';
+import {createEconomicDischargeService,economicDischargeEnabled,ECONOMIC_DISCHARGE_CONFIRM,readEconomicTransferPages} from '../lib/strata/economicExitDischargeService';
 const owner='11111111-1111-4111-8111-111111111111',requestId='22222222-2222-4222-8222-222222222222';
 
 test('economic recovery is default-off and exact release bound',()=>{
@@ -42,4 +42,30 @@ test('mounted routes bind authenticated owner, require explicit intent and retai
   assert.equal((await post('/cancel',{requestId,confirmation:'CANCEL_ONLY_THIS_ECONOMIC_DISCHARGE_REQUEST'})).status,200);
   assert.deepEqual(calls,[`preview:${owner}`,`apply:${owner}`,`outcome:${owner}:${requestId}`,`cancel:${owner}:${requestId}`]);
  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
+
+test('transfer reads accept an omitted cursor only on a short terminal page',async()=>{
+ const calls:(string|undefined)[]=[];
+ const row={transfer_id:'fixture'};
+ assert.deepEqual(await readEconomicTransferPages(async cursor=>{
+  calls.push(cursor);
+  return cursor===undefined?{transfers:[],cursor:'next'}:{transfers:[row]};
+ }),[row]);
+ assert.deepEqual(calls,[undefined,'next']);
+ assert.deepEqual(await readEconomicTransferPages(async()=>({transfers:[]})),[]);
+ assert.equal((await readEconomicTransferPages(async()=>({transfers:Array.from({length:200},()=>row),cursor:''}))).length,200);
+ await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers:Array.from({length:200},()=>row)})),/economic_discharge_transfer_cursor_unverified/);
+});
+test('transfer reads reject bad tokens, malformed pages, cursor cycles and a nonterminating list',async()=>{
+ for(const cursor of [null,123,{},' ','line\nbreak','x'.repeat(1025)]){
+  await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers:[],cursor})),/economic_discharge_transfer_cursor_unverified/);
+ }
+ for(const transfers of [null, [null], Array.from({length:201},()=>({}))]){
+  await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers,cursor:''})),/economic_discharge_transfer_page_unverified/);
+ }
+ await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers:[],cursor:'same'})),/economic_discharge_transfer_cursor_unverified/);
+ let pages=0;
+ await assert.rejects(()=>readEconomicTransferPages(async()=>({transfers:[],cursor:String(++pages)})),/economic_discharge_transfer_history_incomplete/);
+ assert.equal(pages,20);
 });
