@@ -1,3 +1,4 @@
+import {fundedCapitalBasis} from './cashTransferPolicy';
 import {createHash} from 'node:crypto';
 import {requestQuantityHundredths} from '../v13-production/requestQuantity';
 import {canonical,digest,requireProof,type Snapshot,type Settlement} from '../v13-production/types';
@@ -5,7 +6,7 @@ import {verifyReconciledReleaseRenewalSnapshot,type ReconciledReleaseHistory} fr
 
 type Row=Record<string,unknown>;
 export type EconomicSettlementAccount={id:string;owner_user_id:string;subaccount:number;exchange_index:number;key_fingerprint:string;
- revision:string;cash_micros:string;initial_cash_micros:string;reserved_micros:string};
+ revision:string;cash_micros:string;initial_cash_micros:string;reserved_micros:string;net_funding_micros?:string};
 export type EconomicSettlementInput={account:EconomicSettlementAccount;history:ReconciledReleaseHistory;snapshot:Snapshot;
  exitId:string;reservationId:string;rawSettlement:Row;rawPosition:Row;nowMs:number};
 const fail='economic_settlement_evidence_unverified';
@@ -90,7 +91,7 @@ export function proveEconomicSettlement(input:EconomicSettlementInput){
   position.position_fp==='0.00'&&dollars(position.total_traded_dollars)===gross,fail);
  // Existing accounting must already conserve. A settlement cannot repair or
  // hide an unrelated capital, reserve, basis, fee or P&L inconsistency.
- const cash=integer(a.cash_micros),initial=integer(a.initial_cash_micros),reserved=integer(a.reserved_micros);
+ const cash=integer(a.cash_micros),initial=fundedCapitalBasis(a),reserved=integer(a.reserved_micros);
  requireProof(cash===initial+sum(h.events,'cash_delta_micros')&&reserved===sum(h.rows,'reserved_micros')&&reserved>=0n&&
   cash+sum(h.positions,'basis_micros')===initial+sum(h.events,'pnl_micros')&&
   sum(h.positions,'realized_pnl_micros')===sum(h.events,'pnl_micros'),fail);

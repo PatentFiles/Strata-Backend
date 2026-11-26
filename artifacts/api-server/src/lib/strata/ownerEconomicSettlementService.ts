@@ -77,7 +77,7 @@ async function capture(db:Query,owner:string,sha:string,now:number,scheduled:Dep
  const exit=history.rows.find(i=>i.client_order_id===pin.row.client_order_id);
  requireProof(exit,'economic_settlement_exit_missing');
  const account:EconomicSettlementAccount={id,owner_user_id:owner,subaccount:Number(a.subaccount),exchange_index:Number(a.exchange_index),key_fingerprint:String(a.key_fingerprint),
-  revision:String(a.revision),cash_micros:String(a.cash_micros),initial_cash_micros:String(a.initial_cash_micros),reserved_micros:String(a.reserved_micros)};
+  revision:String(a.revision),cash_micros:String(a.cash_micros),initial_cash_micros:String(a.initial_cash_micros),net_funding_micros:String(a.net_funding_micros??'0'),reserved_micros:String(a.reserved_micros)};
  const scopeDigest=digest({pin:pin.digest,history:history.reconciliationDigest,credentials:credentialRows,
   controlEpoch:String(a.owner_control_epoch),workerFence:String(worker.fencing_token)});
  if(lock){

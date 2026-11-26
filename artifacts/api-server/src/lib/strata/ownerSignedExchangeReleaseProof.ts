@@ -54,7 +54,7 @@ export type SignedReleaseProof=ReturnType<typeof no>|{
 export const OWNER_SIGNED_PROOF_ACCOUNT_SQL=`
  SELECT a.id,a.owner_user_id::text AS owner_id,a.kalshi_connection_id,
  a.key_fingerprint,a.commissioned,a.execution_enabled,a.kill_switch,a.blocked_reason,
- a.cash_precision_verified,a.cash_micros,a.initial_cash_micros,a.reserved_micros,
+ a.cash_precision_verified,a.cash_micros,a.initial_cash_micros,COALESCE((to_jsonb(a)->>'net_funding_micros')::bigint,0)::text AS net_funding_micros,a.reserved_micros,
  a.policy_id,p.state AS policy_state,p.fee_policy_version,
  jsonb_build_object('account',a.xmin::text,'policy',p.xmin::text,
   'lease',w.xmin::text,'fence',w.fencing_token::text,'holder',w.holder_id,

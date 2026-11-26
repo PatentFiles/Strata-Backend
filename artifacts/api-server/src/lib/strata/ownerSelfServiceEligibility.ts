@@ -28,7 +28,7 @@ export const OWNED_SELF_SERVICE_SCOPE_SQL=runtimeAuthSql(`
         a.cash_precision_verified,a.cash_micros::text AS cash_micros,
         a.reserved_micros::text AS reserved_micros,
         a.reconciled_at,
-        a.cash_micros=a.initial_cash_micros+COALESCE(
+        a.cash_micros=a.initial_cash_micros+COALESCE((to_jsonb(a)->>'net_funding_micros')::bigint,0)+COALESCE(
           (SELECT sum(e.cash_delta_micros) FROM public.v13_production_event e WHERE e.account_id=a.id),0
         ) AS conserved,
         inv.active_count,inv.role_count,inv.key_count,inv.secret_count,inv.restricted_count,
