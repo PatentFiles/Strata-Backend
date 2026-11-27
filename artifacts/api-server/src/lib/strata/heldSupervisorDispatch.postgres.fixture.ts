@@ -476,7 +476,13 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   await installCombinedPlatformShape(setup);
   for(const migration of ['20261125205247_owner_arm_preparation','20261126004500_economic_settlement_receipt','20261126113609_economic_exit_obligation_discharge'])
    await setup.query(readFileSync('../../supabase/migrations/'+migration+'.sql','utf8'));
-  if(priceRetry)await setup.query(readFileSync('../../supabase/migrations/20261127021634_direct_price_refusal_retry.sql','utf8'));
+  if(priceRetry){
+   await setup.query("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_api_runtime') THEN CREATE ROLE strata_api_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_paper_runtime') THEN CREATE ROLE strata_paper_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT USAGE ON SCHEMA private TO strata_api_runtime");
+   await setup.query(readFileSync('../../supabase/migrations/20261127021634_direct_price_refusal_retry.sql','utf8'));
+   const privileges=(await setup.query("SELECT has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','SELECT') api_read,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','INSERT') api_insert,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','UPDATE') api_update,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','DELETE') api_delete,has_table_privilege('anon','private.strata_direct_price_refusal','SELECT') anon_read,has_table_privilege('authenticated','private.strata_direct_price_refusal','INSERT') browser_insert,has_table_privilege('strata_paper_runtime','private.strata_direct_price_refusal','SELECT') paper_read")).rows[0];
+   assert.deepEqual(privileges,{api_read:true,api_insert:true,api_update:false,api_delete:false,anon_read:false,browser_insert:false,paper_read:false});
+   const access=await setup.connect();try{await access.query('SET ROLE strata_api_runtime');assert.equal((await access.query('SELECT count(*)::int n FROM private.strata_direct_price_refusal')).rows[0].n,0);await assert.rejects(access.query('DELETE FROM private.strata_direct_price_refusal'),{code:'42501'});}finally{await access.query('RESET ROLE');access.release();}
+  }
   Object.assign(process.env,{NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,
    ...(priceRetry?{STRATA_DIRECT_PRICE_RETRY_V1_SHA:sha}:{}),
    STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',STRATA_ECONOMIC_EXIT_FINALITY_ENABLED:'true',
@@ -530,6 +536,9 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
    // privileged fixture caller. Financial uniqueness is still the original index.
    const third=await setup.query('INSERT INTO public.strata_direct_entry_source SELECT $2,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256 FROM public.strata_direct_entry_source WHERE id=$1 RETURNING id',[sources[1].id,randomUUID()]);
    assert.equal(third.rows.length,0);
+   // Retiring a source is enforced at the intent boundary even if an old caller
+   // tries to reserve it directly. The failed statement cannot produce an order.
+   await assert.rejects(setup.query("INSERT INTO public.v13_production_intent SELECT (jsonb_populate_record(NULL::public.v13_production_intent,to_jsonb(i)||jsonb_build_object('id',$3::text,'client_order_id',$4::text,'direct_source_id',$2::text))).* FROM public.v13_production_intent i WHERE i.account_id=$1 AND i.market=$5 AND i.kind='ENTRY'",[account,sources[0].id,randomUUID(),'v13p-'+randomUUID(),successor]),/direct_price_refused_source_retired/);
    const index=(await setup.query("SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='v13_production_crossing_unique'")).rows;
    assert.equal(index.length,1);assert.match(index[0].indexdef,/UNIQUE/);
    assert.equal((await setup.query("SELECT count(*)::int n FROM public.v13_production_intent WHERE account_id=$1 AND market=$2 AND kind='ENTRY'",[account,successor])).rows[0].n,1);

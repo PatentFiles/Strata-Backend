@@ -43,5 +43,10 @@ jobs:
         working-directory: artifacts/api-server
         env:
           PG_BIN: /usr/lib/postgresql/${{ matrix.postgres }}/bin
-        run: pnpm run test:direct-price-retry-native && pnpm run test:economic-discharge-cycle
+        run: |
+          export PATH="$PG_BIN:$PATH"
+          test "$(command -v postgres)" = "$PG_BIN/postgres"
+          postgres --version
+          pnpm run test:direct-price-retry-native
+          pnpm run test:economic-discharge-cycle
       - run: pnpm --filter @workspace/api-server run build

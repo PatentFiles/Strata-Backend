@@ -19,6 +19,7 @@ CREATE UNIQUE INDEX strata_direct_price_refusal_one_per_market ON private.strata
 ALTER TABLE private.strata_direct_price_refusal ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.strata_direct_price_refusal FROM PUBLIC,anon,authenticated,service_role;
 DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_paper_runtime') THEN REVOKE ALL ON private.strata_direct_price_refusal FROM strata_paper_runtime; END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_api_runtime') THEN
   GRANT SELECT,INSERT ON private.strata_direct_price_refusal TO strata_api_runtime;
   CREATE POLICY strata_price_refusal_api ON private.strata_direct_price_refusal TO strata_api_runtime USING(true) WITH CHECK(true);
@@ -34,7 +35,8 @@ LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS $$
  JOIN private.kalshi_connection_credentials c ON c.owner_user_id=a.owner_user_id AND c.financial_account_id=a.kalshi_connection_id
   AND c.provider_connection_id=w.provider_connection_id AND c.vault_secret_id=w.vault_secret_id
   AND c.key_fingerprint=w.credential_fingerprint
- WHERE a.id=account AND a.owner_user_id IS NOT NULL AND a.commissioned AND a.cash_precision_verified
+ WHERE a.id=account AND a.owner_user_id IS NOT NULL AND a.subaccount=1 AND a.exchange_index=2
+  AND w.financial_account_id=a.kalshi_connection_id AND a.commissioned AND a.cash_precision_verified
   AND a.execution_enabled AND NOT a.kill_switch AND a.blocked_reason IS NULL AND a.reserved_micros=0
   AND w.state='owned' AND w.arm_requested AND NOT w.account_kill
   AND w.holder_id=pin->>'holderId' AND w.fencing_token::text=pin->>'fencingToken'
@@ -72,6 +74,7 @@ BEGIN
   WHERE a.id=NEW.account_id AND p.execution_account_id=a.id AND p.state='APPROVED'
    AND p.policy_hash=NEW.policy_hash AND p.created_by=NEW.owner_user_id::text AND p.approved_by=NEW.owner_user_id::text) INTO matched;
  IF NOT matched THEN RAISE EXCEPTION 'direct_price_refusal_policy_changed'; END IF;
+ NEW.recorded_at:=clock_timestamp(); -- never accept a caller-backdated refusal
  RETURN NEW;
 END $$;
 CREATE TRIGGER strata_direct_price_refusal_guard BEFORE INSERT OR UPDATE OR DELETE ON private.strata_direct_price_refusal
@@ -101,7 +104,8 @@ BEGIN
   OR EXISTS(SELECT 1 FROM public.v13_production_intent i WHERE i.account_id=NEW.account_id AND i.crossing_key=NEW.crossing_key)
   OR NOT EXISTS(SELECT 1 FROM private.strata_direct_price_refusal r WHERE r.source_id=previous.id
     AND r.account_id=NEW.account_id AND r.source_sha256=previous.evidence_sha256
-    AND r.owner_user_id::text=data->>'owner' AND r.release_sha=data->'source'->'worker_pin'->>'releaseSha')
+    AND r.owner_user_id::text=data->>'owner' AND r.release_sha=data->'source'->'worker_pin'->>'releaseSha'
+    AND r.recorded_at<NEW.oldest_source_at)
  THEN RETURN NULL; END IF;
  RETURN NEW;
 END $$;

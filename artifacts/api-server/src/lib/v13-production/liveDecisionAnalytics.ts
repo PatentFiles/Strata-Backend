@@ -50,6 +50,10 @@ export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
  const facts:Record<string,unknown>={};
  for(const [k,v] of Object.entries(input.facts??{})){
   if(!observedKeys.has(k))continue;
+  if(k==='targetReadiness'){
+   if(typeof v==='string'&&['ready','waiting','invalid','unavailable'].includes(v))facts[k]=v;
+   continue;
+  }
   facts[k]=typeof v==="boolean"?v:numberOrNull(v);
  }
  return {id:randomUUID(),execution_account_id:input.accountId,owner_user_id:input.ownerId,
