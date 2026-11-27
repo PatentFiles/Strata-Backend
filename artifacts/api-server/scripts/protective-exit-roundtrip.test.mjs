@@ -49,8 +49,8 @@ const built=await build({stdin:{contents:entry,resolveDir:base,sourcefile:'offli
  b.onResolve({filter:/.*/},args=>{
   if(args.path==='@workspace/v13-strategy')return {path:base+'/lib/v13-strategy/src/index.ts'};
   if(stubs[args.path]){stubUses.push({importer:args.importer,path:args.path});return {path:args.path,namespace:'offline'};}
-  if(args.path==='./accountProductionSession'&&args.importer===strata+'/personalExecutionSupervisor.ts')return {path:'session-wrapper',namespace:'offline'};
-  if(args.path==='./personalExchangeRead'&&args.importer===strata+'/personalExecutionSupervisor.ts')return {path:'feeds-wrapper',namespace:'offline'};
+  if(args.path==='./accountProductionSession'&&path.normalize(args.importer)===path.normalize(strata+'/personalExecutionSupervisor.ts'))return {path:'session-wrapper',namespace:'offline'};
+  if(args.path==='./personalExchangeRead'&&path.normalize(args.importer)===path.normalize(strata+'/personalExecutionSupervisor.ts'))return {path:'feeds-wrapper',namespace:'offline'};
  });
  b.onLoad({filter:/.*/,namespace:'offline'},args=>({loader:'js',resolveDir:base,contents:args.path==='session-wrapper'?`
   import * as real from ${JSON.stringify(strata+'/accountProductionSession.ts')};
