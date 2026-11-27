@@ -58,6 +58,10 @@ export async function installFullRecoverySchema(db:Query){
    try{await db.query(readFileSync(resolve(schemaRoot,path),'utf8'));}
    catch(error){throw new Error(`full_schema_migration_failed: ${path}`,{cause:error});}
   }
+  // Apply the separate additive owner-bot migration in this disposable schema.
+  // Never give production a missing-table fallback or broaden execution authority.
+  await db.query(readFileSync(resolve(schemaRoot,'lib/db/owner-self-release/009_owner_bot_selection.sql'),'utf8'));
+
  }finally{await db.query('ROLLBACK');await db.query('RESET ROLE');}
  return sourceManifest();
 }
