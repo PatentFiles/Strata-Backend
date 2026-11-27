@@ -1,12 +1,12 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET} from '@workspace/v13-strategy';
-import {readOwnerBotCatalog,selectOwnedBot,qualifiedWarrenRelease,readRuntimeBotChoice,CHAMPION_BOT,WARREN_BOT,WARREN_BOT_HASH} from './ownerBotCatalog';
+import {readOwnerBotCatalog,selectOwnedBot,prepareOwnerBotChange,qualifiedWarrenRelease,readRuntimeBotChoice,CHAMPION_BOT,WARREN_BOT,WARREN_BOT_HASH} from './ownerBotCatalog';
 const owner='10000000-0000-4000-8000-000000000001';
 const policyHash='a'.repeat(64),sha='b'.repeat(40);
 const row={id:'synthetic-owned-account',policy_state:'APPROVED',policy_hash:policyHash,
  strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
  worker_state:'released',arm_requested:false,account_kill:false,kill_switch:false,execution_enabled:true,
- blocked_reason:null,reserved_micros:'0',reconciled_at:new Date(),selected_bot:null,selection_revision:null};
+ blocked_reason:null,reserved_micros:'0',open_positions:0,unresolved_intents:0,pending_exits:0,reconciled_at:new Date(),selected_bot:null,selection_revision:null};
 const db=(rows:Record<string,unknown>[])=>( {query:async(sql:string,args?:unknown[])=>{
  assert.match(sql,/owner_user_id/);assert.deepEqual(args,[owner]);
  assert.doesNotMatch(sql,/\b(UPDATE|INSERT|DELETE)\b/);return {rows};
@@ -19,7 +19,7 @@ test('original champion identity stays owner scoped and selectable only when sto
 });
 test('a running worker, old cash or missing approval cannot save strategy',async()=>{
  for(const patch of [{worker_state:'owned',arm_requested:true},{blocked_reason:'hold'},
-  {reconciled_at:new Date(0)},{policy_state:'DRAFT'},{strategy_parameter_hash:'f'.repeat(64)},
+  {reconciled_at:new Date(0)},{open_positions:1},{unresolved_intents:1},{pending_exits:1},{policy_state:'DRAFT'},{strategy_parameter_hash:'f'.repeat(64)},
    {worker_state:'released',arm_requested:false,account_kill:true},
    {worker_state:'killed',account_kill:true,kill_switch:false,execution_enabled:true}]){
   const r=await readOwnerBotCatalog(owner,db([{...row,...patch}]));
@@ -40,4 +40,32 @@ test('unqualified Warren cannot be enabled or silently substituted',async()=>{
  await assert.rejects(readRuntimeBotChoice({query:async()=>({rows:[{
   bot_id:WARREN_BOT,bot_fingerprint:WARREN_BOT_HASH,policy_hash:policyHash,release_sha:sha}]})},
   owner,'account',policyHash,sha),/bot_warren_release_not_qualified/);
+});
+
+test('cash expiry alone explains why a safely stopped account cannot switch; explicit maintenance renews it',async()=>{
+ const current={...row,reconciled_at:new Date(0)};
+ let cashCalls=0;
+ const result=await prepareOwnerBotChange(owner,{confirmation:'PREPARE_STOPPED_OWNER_BOT_CHANGE_V1'},db([current]),
+  async()=>{cashCalls++;current.reconciled_at=new Date();return {ok:true,reason:'cash_reconciled'};});
+ assert.equal(result.ok,true);assert.equal(cashCalls,1);
+ if(result.ok){assert.equal(result.catalog.selectionEnabled,true);assert.equal(result.ordersSubmitted,false);assert.equal(result.transferAttempted,false);}
+});
+test('preparation cannot reconcile running worker, uncertain order, reserved cash or financial hold',async()=>{
+ for(const patch of [{worker_state:'owned',arm_requested:true},{unresolved_intents:1},
+  {reserved_micros:'50000'},{blocked_reason:'fee_hold'},{open_positions:1},{pending_exits:1}]){
+  let attempts=0;
+  const r=await prepareOwnerBotChange(owner,{confirmation:'PREPARE_STOPPED_OWNER_BOT_CHANGE_V1'},
+   db([{...row,reconciled_at:new Date(0),...patch}]),async()=>{attempts++;return {ok:true,reason:'cash_reconciled'};});
+  assert.equal(r.ok,false);assert.equal(attempts,0);
+ }
+});
+test('preparation rejects unapproved spoofed requests and refuses changed account readback',async()=>{
+ let calls=0;
+ const no=await prepareOwnerBotChange(owner,{confirmation:'wrong'},db([row]),async()=>{calls++;return {ok:true,reason:'cash_reconciled'};});
+ assert.equal(no.ok,false);assert.equal(calls,0);
+ const mutable={...row,reconciled_at:new Date(0),selection_revision:0};
+ const changed=await prepareOwnerBotChange(owner,{confirmation:'PREPARE_STOPPED_OWNER_BOT_CHANGE_V1'},db([mutable]),async()=>{
+  mutable.reconciled_at=new Date();mutable.selection_revision=1;return {ok:true,reason:'cash_reconciled'};
+ });
+ assert.equal(changed.ok,false);
 });

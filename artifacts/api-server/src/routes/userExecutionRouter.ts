@@ -1,5 +1,5 @@
 import {pool} from '@workspace/db';
-import {readOwnerBotCatalog,selectOwnedBot} from '../lib/strategies/ownerBotCatalog';
+import {readOwnerBotCatalog,selectOwnedBot,prepareOwnerBotChange} from '../lib/strategies/ownerBotCatalog';
 import {economicDischargeRouter} from './economicExitDischargeRoute';
 import {createEconomicDischargeService} from '../lib/strata/economicExitDischargeService';
 import {economicSettlementRouter} from './ownerEconomicSettlementRoute';
@@ -351,6 +351,15 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  // Owner-scoped maintenance only: a confirmed STOP/DISARM must precede this.
+  // Never submit an order, alter the risk policy, release holds or START.
+  // An expired cash timestamp is maintenance, not evidence of a running bot.
+  router.post('/bots/prepare-change',async(req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});
+    res.setHeader('Cache-Control','private, no-store');
+    const result=await prepareOwnerBotChange(owner,req.body,pool,(o,b)=>port.reconcileCash(o,b));
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
   router.post('/bots/select',async(req,res)=>{
     const owner=subject(res);if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});
     res.setHeader('Cache-Control','private, no-store');
@@ -454,6 +463,7 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     }
     if (action === "STOP" || action === "DISARM" || action === "KILL") {
       const result = await port.safetyControl(userId, action);
+      // STOP/DISARM/KILL must acknowledge immediately, never wait on Kalshi cash reads.
       return void res.status(result.ok ? 200 : 409).json(sanitizePublic(result));
     }
     if (!await migrated(res)) return;
