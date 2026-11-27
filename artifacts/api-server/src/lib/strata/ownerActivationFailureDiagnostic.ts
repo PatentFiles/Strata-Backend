@@ -12,7 +12,8 @@ const SAFE_FAILURE_CODES = new Set([
  'release_empty_history_signed_activity','release_signed_evidence_stale',
  'production_money_conservation_failed','production_final_account_changed_or_unproven','production_final_history_gap',
  'production_final_order_changed','production_final_unreconciled_fill',
- 'production_final_unreconciled_settlement','production_final_position_changed'
+ 'production_final_unreconciled_settlement','production_final_position_changed',
+ 'economic_discharge_final_snapshot_expired','economic_discharge_final_settlement_unverified','final_release_signed_evidence_expired'
 ]);
 const SAFE_SQLSTATES = new Set(['55P03','57014','40P01','40001','42501','42P01','42703','42883','23503','23505','23514','25P02','08000','08003','08006','08001','08004','08P01']);
 export function ownerActivationFailureDiagnostic(error: unknown, stage: OwnerActivationStage) {

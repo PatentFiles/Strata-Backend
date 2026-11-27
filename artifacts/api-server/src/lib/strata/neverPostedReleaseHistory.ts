@@ -1,4 +1,4 @@
-import {readLockedBlockedDischargeEvidence,type readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
+import {readBlockedDischargeEvidence,type readLockedDischargeHistoryAndMoney} from './economicRecoveryReadBatch';
 import {readEconomicExitDischarges,verifyEconomicExitDischargeRows} from './economicExitDischargeScope';
 import {digest,type Request} from '../v13-production/types';
 import {validateExpiredExitNoSend} from './expiredExitNoSendEvidence';
@@ -14,9 +14,9 @@ const MAX_HISTORY=1000;
  * account's digest-valid no-send receipt identifies that same intent. A reason
  * string or BLOCKED status on its own is never evidence of non-submission. */
 export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lock=false,
- diagnostic?:{expiredExitOwnerId:string},preloaded?:{intents:Row[];discharges:Row[];downstream:Awaited<ReturnType<typeof readLockedDischargeHistoryAndMoney>>|null}){
+ diagnostic?:{expiredExitOwnerId:string;batchDischargeEvidence?:boolean},preloaded?:{intents:Row[];discharges:Row[];downstream:Awaited<ReturnType<typeof readLockedDischargeHistoryAndMoney>>|null}){
  if(preloaded&&!lock)throw Error('release_history_preloaded_rows_require_lock');
- const discharges=preloaded?await verifyEconomicExitDischargeRows(db,accountId,preloaded.discharges):await readEconomicExitDischarges(db,accountId,lock);
+ const discharges=preloaded?await verifyEconomicExitDischargeRows(db,accountId,preloaded.discharges):await readEconomicExitDischarges(db,accountId,lock,diagnostic?.batchDischargeEvidence===true);
  const finish=<T extends {expectedRequests:Request[];historyDigest:string}>(h:T):T&{economicDischarges?:Row[]}=>{
   if(!discharges.length)return h;
   const clients=new Set(discharges.map(d=>String(d.client_order_id)));
@@ -38,8 +38,9 @@ export async function readNeverPostedReleaseHistory(db:Query,accountId:string,lo
  const ids=candidates.map(r=>String(r.id));
  const exits=candidates.filter(i=>i.kind==='EXIT');
  const dispatched=exits.filter(i=>i.dispatch_at!==null);
- const batch=preloaded&&diagnostic?await readLockedBlockedDischargeEvidence(db,accountId,ids,
-  exits.map(i=>String(i.client_order_id)),dispatched.map(i=>String(i.client_order_id)),true):null;
+ const batchEvidence=diagnostic&&(preloaded||(diagnostic.batchDischargeEvidence&&discharges.length>0));
+ const batch=batchEvidence?await readBlockedDischargeEvidence(db,accountId,ids,
+  exits.map(i=>String(i.client_order_id)),dispatched.map(i=>String(i.client_order_id)),lock,Boolean(preloaded)):null;
  const observations=batch?.observations??(await db.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
   FROM public.v13_production_observation WHERE account_id=$1
   AND kind IN ('PROVEN_NOT_POSTED','POST_ATTEMPT','POST_UNCERTAIN'${diagnostic?",'CANCEL_ATTEMPT'":''}) AND payload->>'id'=ANY($2::text[])

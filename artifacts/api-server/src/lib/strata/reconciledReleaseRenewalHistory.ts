@@ -1,3 +1,4 @@
+import {orderedOwnerReads,readEconomicHistoryBatch} from './economicRecoveryReadBatch';
 import {assertNoEconomicExitContradiction} from './economicExitDischargeScope';
 import {createHash} from 'node:crypto';
 import {canonical,digest,requireProof,type Snapshot} from '../v13-production/types';
@@ -16,20 +17,21 @@ const signed=(x:unknown)=>typeof x==='string'&&/^(0|-?[1-9]\d*)$/.test(x);
  * reconciled posted EXITs. Modern protective records, when present, must pair
  * exactly; absent historical records confer accounting evidence, not authority.
  * This reader never changes history or creates execution authority. */
-export async function readReconciledReleaseRenewalHistory(db:Query,account:string,owner:string,lock=false){
+export async function readReconciledReleaseRenewalHistory(db:Query,account:string,owner:string,lock=false,batchLockedDischargeEvidence=false){
  if(lock){
   // Same finalizer transaction only. Parent FOR UPDATE fences absent child INSERTs.
-  requireProof((await db.query('SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[account,owner])).rows.length===1,fail);
-  const fks=await db.query(`SELECT c.conrelid::pg_catalog.regclass::pg_catalog.text AS relation FROM pg_catalog.pg_constraint c
+  const parent=await orderedOwnerReads(db,batchLockedDischargeEvidence,[['SELECT id FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[account,owner]],[`SELECT c.conrelid::pg_catalog.regclass::pg_catalog.text AS relation FROM pg_catalog.pg_constraint c
    WHERE c.conrelid IN ('private.strata_emergency_exit_reservations'::pg_catalog.regclass,'private.strata_protective_exit_reconciliations'::pg_catalog.regclass)
    AND c.confrelid='public.v13_production_account'::pg_catalog.regclass AND c.contype='f' AND c.convalidated AND NOT c.condeferrable
    AND (SELECT pg_catalog.array_agg(a.attname::pg_catalog.text ORDER BY k.n) FROM pg_catalog.unnest(c.conkey) WITH ORDINALITY k(num,n) JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num)=ARRAY['execution_account_id']
    AND (SELECT pg_catalog.array_agg(a.attname::pg_catalog.text ORDER BY k.n) FROM pg_catalog.unnest(c.confkey) WITH ORDINALITY k(num,n) JOIN pg_catalog.pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.num)=ARRAY['id']
    AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t WHERE t.tgconstraint=c.oid AND t.tgisinternal AND t.tgenabled IN ('O','A'))=4
-   AND pg_catalog.current_setting('session_replication_role')='origin'`);
+   AND pg_catalog.current_setting('session_replication_role')='origin'`,[]]]);
+  requireProof((await parent(0)).rows.length===1,fail);
+  const fks=await parent(1);
   requireProof(fks.rows.length===2&&new Set(fks.rows.map(x=>x.relation)).size===2,fail);
  }
- const history=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
+ const history=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner,batchDischargeEvidence:batchLockedDischargeEvidence});
  requireProof(history.rows.length>0,fail);
  const economic=history.economicDischarges??[];
  const discharged=new Map(economic.map(d=>[String(d.exit_intent_id),d]));
@@ -64,12 +66,16 @@ export async function readReconciledReleaseRenewalHistory(db:Query,account:strin
  const contradictions=posted.length?(await db.query(`SELECT id FROM public.v13_production_observation WHERE account_id=$1
   AND kind='PROVEN_NOT_POSTED' AND payload->>'id'=ANY($2::text[]) LIMIT 1${suffix}`,[account,posted.map(i=>String(i.id))])).rows:[];
  requireProof(contradictions.length===0,fail);
- const events=(await db.query(`SELECT e.*,e.xmin::text AS row_revision FROM public.v13_production_event e WHERE account_id=$1 ORDER BY event_id LIMIT 3001${suffix}`,[account])).rows;
- const positions=(await db.query(`SELECT p.*,p.xmin::text AS row_revision FROM public.v13_production_position p WHERE account_id=$1 ORDER BY id LIMIT 1001${suffix}`,[account])).rows;
- const markers=(await db.query(`SELECT r.*,r.xmin::text AS row_revision FROM private.strata_emergency_exit_reservations r WHERE execution_account_id=$1 ORDER BY reservation_id LIMIT 1001${suffix}`,[account])).rows;
+ // The ordered batch acquires the same event, position, marker and receipt
+ // SHARE locks. Its native-type projection keeps the original digest stable.
+ const batch=lock&&batchLockedDischargeEvidence&&economic.length
+  ?await readEconomicHistoryBatch(db,account,true):null;
+ const events=batch?.events??(await db.query(`SELECT e.*,e.xmin::text AS row_revision FROM public.v13_production_event e WHERE account_id=$1 ORDER BY event_id LIMIT 3001${suffix}`,[account])).rows;
+ const positions=batch?.positions??(await db.query(`SELECT p.*,p.xmin::text AS row_revision FROM public.v13_production_position p WHERE account_id=$1 ORDER BY id LIMIT 1001${suffix}`,[account])).rows;
+ const markers=batch?.markers??(await db.query(`SELECT r.*,r.xmin::text AS row_revision FROM private.strata_emergency_exit_reservations r WHERE execution_account_id=$1 ORDER BY reservation_id LIMIT 1001${suffix}`,[account])).rows;
  requireProof(events.length<=3000&&events.every(e=>e.account_id===account)&&positions.length<=1000&&markers.length<=1000,fail);
  const noSendExitClients=new Set(history.rows.filter(i=>i.kind==='EXIT'&&excluded.has(String(i.id))).map(i=>i.client_order_id));
- const receipts=(await db.query(`SELECT x.*,x.xmin::text AS row_revision FROM private.strata_protective_exit_reconciliations x WHERE execution_account_id=$1 ORDER BY reservation_id LIMIT 1001${suffix}`,[account])).rows;
+ const receipts=batch?.receipts??(await db.query(`SELECT x.*,x.xmin::text AS row_revision FROM private.strata_protective_exit_reconciliations x WHERE execution_account_id=$1 ORDER BY reservation_id LIMIT 1001${suffix}`,[account])).rows;
  requireProof(receipts.length<=1000&&new Set(markers.map(m=>m.client_order_id)).size===markers.length,fail);
  const postedExits=posted.filter(i=>i.kind==='EXIT');
  const accountingOnlyExitClients:string[]=[];

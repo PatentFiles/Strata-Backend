@@ -1,3 +1,4 @@
+import {orderedOwnerReads} from './economicRecoveryReadBatch';
 import {AsyncLocalStorage} from 'node:async_hooks';
 
 /** Server-only context. A browser cannot create or override this fence. The
@@ -25,16 +26,13 @@ export const withOwnerArmFence = <T>(fence: OwnerArmFence, work: () => Promise<T
  * attempt, matching begin/cancel/finish lock order. STOP increments the epoch;
  * even a delayed request on another API process then fails before committing.
  * No context means the existing independently-authorized path is unchanged. */
-export async function assertOwnerArmFence(db: ArmQuery, owner: string): Promise<void> {
+export async function assertOwnerArmFence(db: ArmQuery, owner: string, batch = false): Promise<void> {
   const fence = context.getStore();
   if (!fence) return;
   if (fence.ownerId !== owner) throw Error('owner_arm_scope_changed');
-  const account = await db.query(`SELECT owner_control_epoch::text AS epoch
+  const reads = await orderedOwnerReads(db,batch,[[`SELECT owner_control_epoch::text AS epoch
     FROM public.v13_production_account WHERE id=$1 AND owner_user_id=$2::uuid FOR UPDATE`,
-    [fence.accountId, owner]);
-  if (account.rows.length !== 1 || account.rows[0].epoch !== fence.epoch)
-    throw Error('owner_arm_interrupted');
-  const attempt = await db.query(`SELECT request_id FROM private.strata_owner_arm_attempt r
+    [fence.accountId, owner]], [`SELECT request_id FROM private.strata_owner_arm_attempt r
     WHERE request_id=$1::uuid AND owner_user_id=$2::uuid AND execution_account_id=$3
       AND control_epoch=$4::bigint AND release_commit_sha=$5 AND state=$6
       AND expires_at>clock_timestamp()
@@ -47,7 +45,11 @@ export async function assertOwnerArmFence(db: ArmQuery, owner: string): Promise<
           AND p.policy_hash=r.final_policy_hash AND p.state='APPROVED'
           AND s.configured_stake_cents=r.final_stake_cents AND a.execution_enabled=true
           AND a.kill_switch=false AND a.blocked_reason IS NULL)) FOR SHARE`,
-    [fence.requestId, owner, fence.accountId, fence.epoch, fence.sha, fence.phase]);
+    [fence.requestId, owner, fence.accountId, fence.epoch, fence.sha, fence.phase]]]);
+  const account = await reads(0);
+  if (account.rows.length !== 1 || account.rows[0].epoch !== fence.epoch)
+    throw Error('owner_arm_interrupted');
+  const attempt = await reads(1);
   if (attempt.rows.length !== 1) throw Error('owner_arm_expired_or_interrupted');
 }
 
