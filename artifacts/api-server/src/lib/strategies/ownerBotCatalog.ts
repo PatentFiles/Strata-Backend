@@ -56,9 +56,15 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  const requiresReauthorization=Boolean(a.selected_bot&&selectionValid&&
    (a.selected_policy_hash!==a.policy_hash||a.selection_sha!==sha));
  const botId=policyOk&&selectionValid?selected:null;
- const stopped=(a.worker_state===null&&a.kill_switch===true&&a.execution_enabled===false)||
-   (a.worker_state==='released'&&a.arm_requested===false&&a.account_kill===false)||
-   (a.worker_state==='killed'&&a.arm_requested===false&&a.account_kill===true);
+ // A lease state is not sufficient on its own. An inconsistent account/lease pair
+ // must never be presented as safely stopped or eligible to select a live bot.
+ const killed=a.kill_switch===true&&a.execution_enabled===false&&
+   (a.worker_state===null||
+    (a.worker_state==='killed'&&a.arm_requested===false&&a.account_kill===true));
+ const released=a.worker_state==='released'&&a.arm_requested===false&&a.account_kill===false&&
+   ((a.kill_switch===false&&a.execution_enabled===true)||
+    (a.kill_switch===true&&a.execution_enabled===false));
+ const stopped=killed||released;
  const readTime=Date.parse(String(a.reconciled_at??''));
  const fresh=Number.isFinite(readTime)&&readTime<=Date.now()&&Date.now()-readTime<900_000;
  const eligible=policyOk&&selectionValid&&stopped&&a.blocked_reason===null&&
