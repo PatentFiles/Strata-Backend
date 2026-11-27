@@ -20,13 +20,15 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   STRATA_WARREN_BUFFETT_LIVE_SHA:process.env.STRATA_WARREN_BUFFETT_LIVE_SHA};
  try{
   await pool.query('CREATE SCHEMA IF NOT EXISTS auth; CREATE SCHEMA IF NOT EXISTS private');
-  await pool.query("DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$; DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;");
+  await pool.query("DO $ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $; DO $ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $; DO $ BEGIN CREATE ROLE strata_api_runtime NOLOGIN NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $;");
+  await pool.query('GRANT USAGE ON SCHEMA private TO strata_api_runtime');
   await pool.query('CREATE TABLE IF NOT EXISTS auth.users(id uuid primary key)');
   await pool.query('ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS owner_user_id uuid; ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS owner_control_epoch bigint NOT NULL DEFAULT 0');
   await pool.query('CREATE TABLE IF NOT EXISTS private.kalshi_account_worker_lease(execution_account_id text primary key,owner_user_id uuid,state text,arm_requested boolean,account_kill boolean,fencing_token bigint default 1,released_at timestamptz,heartbeat_at timestamptz)');
   await pool.query('CREATE TABLE IF NOT EXISTS private.strata_emergency_exit_reservations(execution_account_id text,state text)');
   const sql=readFileSync('../../lib/db/owner-self-release/009_owner_bot_selection.sql','utf8');
   await pool.query(sql);
+  await pool.query(readFileSync('../../lib/db/owner-self-release/010_owner_bot_api_rls.sql','utf8'));
   await pool.query('INSERT INTO auth.users(id) VALUES($1),($2)',[owner,foreign]);
   await pool.query(`INSERT INTO public.v13_live_money_policy
    (id,version,state,champion_selection_review_id,champion_selection_evidence_hash,champion_selected_by,
@@ -64,6 +66,14 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   const history=(await pool.query('SELECT to_bot_id,bot_fingerprint,policy_hash FROM private.strata_owner_bot_selection_history WHERE execution_account_id=$1',[account])).rows;
   assert.equal(history.length,1);assert.equal(history[0]!.to_bot_id,WARREN_BOT);
   assert.equal(history[0]!.bot_fingerprint,WARREN_BOT_HASH);assert.equal(history[0]!.policy_hash,policyHash);
+  // Restricted production API role needs an RLS policy, not just GRANT.
+  const apiConn=await pool.connect();
+  try{
+   await apiConn.query('SET ROLE strata_api_runtime');
+   assert.equal((await apiConn.query('SELECT count(*)::int n FROM private.strata_owner_bot_selection')).rows[0]!.n,1);
+   assert.equal((await apiConn.query('SELECT count(*)::int n FROM private.strata_owner_bot_selection_history')).rows[0]!.n,1);
+   await assert.rejects(apiConn.query('DELETE FROM private.strata_owner_bot_selection'),{code:'42501'});
+  }finally{await apiConn.query('RESET ROLE');apiConn.release();}
   const replay=await selectOwnedBot(owner,req,pool);assert.equal(replay.ok,true);
   assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_owner_bot_selection_history')).rows[0].n,1);
   const other=await selectOwnedBot(foreign,body(CHAMPION_BOT,1),pool);
