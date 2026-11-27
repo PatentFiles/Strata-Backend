@@ -126,10 +126,18 @@ const BLOCKED_DISCHARGE:readonly ReadSpec[]=[
  {name:'localNoSends',table:'private.strata_protective_exit_local_no_send',scope:'execution_account_id',unscoped:true,
   order:['reservation_id'],limit:1000,extra:"NOT EXISTS(SELECT 1 FROM r1) AND t.client_order_id=ANY($4::text[])"},
 ];
-export async function readLockedBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[]){
- const r=await read(db,account,BLOCKED_DISCHARGE,true,false,[ids,exitClients,dispatchedClients]);
+type DischargeDownstream=Awaited<ReturnType<typeof readLockedDischargeHistoryAndMoney>>;
+export async function readLockedBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[],includeDownstream=false){
+ // Once the supplemental rows have locked, continue in exactly the same
+ // downstream table order. A conflicting event still skips downstream reads.
+ const specs=includeDownstream?[...BLOCKED_DISCHARGE,...[...HISTORY,...MONEY].map(s=>({...s, name:'downstream_'+s.name,
+  extra:'NOT EXISTS(SELECT 1 FROM r1)'}))]:BLOCKED_DISCHARGE;
+ const r=await read(db,account,specs,true,false,[ids,exitClients,dispatchedClients]);
+ const downstream:DischargeDownstream|null=includeDownstream&&r.events!.length===0?{
+  events:r.downstream_events!,positions:r.downstream_positions!,markers:r.downstream_markers!,receipts:r.downstream_receipts!,
+  pendingMoney:MONEY.map(s=>r['downstream_'+s.name]!)}:null;
  const textColumn=(x:unknown)=>x===null?null:String(x);
- return {observations:r.observations!,events:r.events!,
+ return {observations:r.observations!,events:r.events!,downstream,
   markers:r.markers!.map(x=>({...x,worker_fencing_token:textColumn(x.worker_fencing_token)})),
   localNoSends:r.localNoSends!.map(x=>({...x,worker_fencing_token:textColumn(x.worker_fencing_token),
    quantity_hundredths:textColumn(x.quantity_hundredths),limit_micros:textColumn(x.limit_micros)}))};

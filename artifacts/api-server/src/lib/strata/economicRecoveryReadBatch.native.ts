@@ -101,7 +101,7 @@ test('native lossless recovery batching preserves scope, financial hashes, bound
    const a=await pool.connect(),b=await pool.connect();
    try{
     await a.query('BEGIN');
-    const out=await readLockedBlockedDischargeEvidence(a,account,['entry','exit'],['exit'],['exit']);
+    const out=await readLockedBlockedDischargeEvidence(a,account,['entry','exit'],['exit'],['exit'],true);
     const expected=(await a.query(`SELECT id,account_id,kind,payload,digest,observed_at,xmin::text AS row_revision
       FROM public.v13_production_observation WHERE account_id=$1 AND id IN ('a','b') ORDER BY id`,[account])).rows;
     assert.deepEqual(out.observations,expected);
@@ -112,8 +112,9 @@ test('native lossless recovery batching preserves scope, financial hashes, bound
     const local=(await a.query(`SELECT n.*,worker_fencing_token::text,quantity_hundredths::text,limit_micros::text,
      n.xmin::text AS row_revision FROM private.strata_protective_exit_local_no_send n`)).rows;
     assert.deepEqual(out.markers,markers);assert.deepEqual(out.localNoSends,local);
-    const conflict=await readLockedBlockedDischargeEvidence(a,account,['intent'],['exit'],['exit']);
-    assert.equal(conflict.events.length,1);assert.equal(conflict.markers.length,0);assert.equal(conflict.localNoSends.length,0);
+    assert.deepEqual(out.downstream,await readLockedDischargeHistoryAndMoney(a,account));
+    const conflict=await readLockedBlockedDischargeEvidence(a,account,['intent'],['exit'],['exit'],true);
+    assert.equal(conflict.events.length,1);assert.equal(conflict.downstream,null);assert.equal(conflict.markers.length,0);assert.equal(conflict.localNoSends.length,0);
     for(const sql of ["UPDATE public.v13_production_observation SET digest=digest WHERE id='a'",
      "UPDATE public.v13_production_event SET digest=digest WHERE event_id='b'",
      "UPDATE private.strata_emergency_exit_reservations SET state=state WHERE client_order_id='exit'",
