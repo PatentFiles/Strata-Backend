@@ -144,10 +144,22 @@ export class ProductionExecutor {
   private assertDirectBinding(source:DirectEntrySource):void{
     source.assertExecutorBinding(this.exchange.mode,{accountId:this.ledger.accountId,ownerId:this.accountOwnerUserId});
   }
-  private assertLiveSourceQuote(source:unknown):void{
+  private assertLiveSourceQuote(source:unknown, onDirectExpiry?: (ageMs:number)=>void):void{
     if(this.exchange.mode!=="LIVE")return;
-    if(this.#directSource)assertDirectEntryQuoteEvidence(source,this.now());
-    else assertCanonicalEntryQuoteEvidence(source,this.now());
+    const now=this.now();
+    if(!this.#directSource){assertCanonicalEntryQuoteEvidence(source,now);return;}
+    if(!onDirectExpiry){assertDirectEntryQuoteEvidence(source,now);return;}
+    try{assertDirectEntryQuoteEvidence(source,now);}
+    catch(error){
+      try{
+        if(error instanceof Error && error.message==="direct_entry_original_source_expired"){
+          const oldest=(source as Partial<DirectEvaluation>|null)?.original_oldest_ms;
+          if(typeof oldest==="number" && Number.isSafeInteger(oldest) && oldest>=0 &&
+            Number.isSafeInteger(now) && now>=oldest)onDirectExpiry(now-oldest);
+        }
+      }catch{/* Optional diagnostics cannot replace the original guard refusal. */}
+      throw error;
+    }
   }
   async captureIndependentEntry():Promise<string|null>{
     const source=this.#directSource;
@@ -649,6 +661,7 @@ export class ProductionExecutor {
     }
     this.fault("after_dispatch_commit");
     const dispatchTiming=this.startTiming("dispatch",{intentId:id});
+    let preFinalOriginalSourceAgeMs:number|undefined;
     const feeAuthorityTiming={capture:null as FeeAuthorityTimingCapture|null};
     let invoked = false;
     let wireScope:Readonly<object>|null=null;
@@ -670,7 +683,10 @@ export class ProductionExecutor {
           if(this.exchange.mode==="LIVE")requireProof((i.decision.preflight as {cashRisk?:unknown}|undefined)?.cashRisk&&
             (i.decision.book as MarketEvidence).fee.cashRisk,"production_cash_risk_unproven");
           assertChampionSourceReference(i.decision.source);
-          this.assertLiveSourceQuote(i.decision.source);
+          // This is the first post-claim quote check. Capture the guard's own
+          // clock sample only if it refuses, before final reads or transport.
+          this.assertLiveSourceQuote(i.decision.source,this.timingObserver?
+            age=>{preFinalOriginalSourceAgeMs=age;}:undefined);
         }
         if (i.kind === "ENTRY" && this.authorizeFinalEntry)
           await this.authorizeFinalEntry(tx);
@@ -941,7 +957,7 @@ export class ProductionExecutor {
         const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
         if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id) ||
             isReviewedApiFeeWireRefusal(error,failed.client_order_id)||isDurableFeePreTransportRefusal(wireScope,error,failed.client_order_id)) {
-          dispatchTiming("proven_not_posted",{error,feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
+          dispatchTiming("proven_not_posted",{error,preFinalOriginalSourceAgeMs,feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
           const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");
           a.reserved_micros = String(money(a.reserved_micros) - money(i.reserved_micros));
