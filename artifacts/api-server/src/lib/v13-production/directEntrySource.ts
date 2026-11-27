@@ -123,8 +123,9 @@ export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
  * fills, notifications or simulation stake.
  *
  * The seal is process-local custody, NOT an exchange signature. Restart or
- * another producer instance cannot adopt a receipt. A crossing is durably
- * unique even after expiry; a lost commit cannot be retried as a new crossing.
+ * another producer instance cannot adopt a receipt. Financial entry remains
+ * durably unique per market. One separately sealed fresh observation is possible
+ * only after a committed pre-intent price refusal; uncertain orders never retry.
  * The live factory pins the actual owner-worker lease. It never restores custody after restart.
  */
 export class DirectEntrySource{

@@ -172,7 +172,8 @@ export class ProductionExecutor {
       requireProof(this.#directSource&&i.direct_source_id&&i.evaluation_id===null,
         "direct_entry_intent_source_mismatch");
       this.assertDirectBinding(this.#directSource);
-      if(i.decision?.source?.price_retry_of)requireProof(this.#directSource.priceRetryPermitted(),'direct_price_retry_release_disabled');
+      const entrySource=i.decision?.source as Partial<DirectEvaluation>|undefined;
+      if(entrySource?.price_retry_of!==undefined)requireProof(this.#directSource.priceRetryPermitted(),'direct_price_retry_release_disabled');
     }
   }
   containLiveEntries():void { this.independentEntryHold=true; }

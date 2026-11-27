@@ -509,13 +509,30 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
    assert.equal(receipt.reference_micros,'500000');assert.equal(receipt.best_ask_micros,'520000');
    await assert.rejects(setup.query('UPDATE private.strata_direct_price_refusal SET reason=reason WHERE source_id=$1',[receipt.source_id]),/direct_price_refusal_immutable/);
    await assert.rejects(setup.query('DELETE FROM private.strata_direct_price_refusal WHERE source_id=$1',[receipt.source_id]),/direct_price_refusal_immutable/);
-   priceRefusal=false;btc=99990;const before=reads;await until(async()=>reads>=before+2,describe);btc=100020;
+   // A second observation without a new cross cannot reuse the refused source.
+   const steady=reads;await until(async()=>reads>=steady+2,describe);assert.equal(submitted.length,0);
+   const rowsBefore=(await setup.query('SELECT count(*)::int n FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2',[account,successor])).rows[0].n;
+   assert.equal(rowsBefore,1);
+   // Forward-safe rollback: disabling replacement admission preserves the receipt
+   // and refuses even a new crossing. No historical row is removed or modified.
+   delete process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA;
+   priceRefusal=false;btc=99990;let before=reads;await until(async()=>reads>=before+2,describe);btc=100020;
+   before=reads;await until(async()=>reads>=before+2,describe);assert.equal(submitted.length,0);
+   assert.equal((await setup.query('SELECT count(*)::int n FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2',[account,successor])).rows[0].n,1);
+   process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA=sha;
+   btc=99990;before=reads;await until(async()=>reads>=before+2,describe);btc=100020;
   }
   await until(async()=>submitted.length===1&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)>0,describe);
   if(priceRetry){
    const sources=(await setup.query('SELECT id,evidence_bytes::jsonb AS evidence FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2 ORDER BY observed_at',[account,successor])).rows;
    assert.equal(sources.length,2);assert.equal(sources[1].evidence.source.price_retry_of,sources[0].id);
-   assert.equal((await setup.query('SELECT count(*)::int n FROM public.v13_production_intent WHERE account_id=$1 AND market=$2 AND kind='ENTRY'',[account,successor])).rows[0].n,1);
+   // Direct database replay/third-candidate attempts remain refused even for a
+   // privileged fixture caller. Financial uniqueness is still the original index.
+   const third=await setup.query('INSERT INTO public.strata_direct_entry_source SELECT $2,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256 FROM public.strata_direct_entry_source WHERE id=$1 RETURNING id',[sources[1].id,randomUUID()]);
+   assert.equal(third.rows.length,0);
+   const index=(await setup.query("SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='v13_production_crossing_unique'")).rows;
+   assert.equal(index.length,1);assert.match(index[0].indexdef,/UNIQUE/);
+   assert.equal((await setup.query("SELECT count(*)::int n FROM public.v13_production_intent WHERE account_id=$1 AND market=$2 AND kind='ENTRY'",[account,successor])).rows[0].n,1);
   }
   btc=99980;
   await until(async()=>submitted.length===2&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)===0,describe);
