@@ -69,3 +69,31 @@ test('preparation rejects unapproved spoofed requests and refuses changed accoun
  });
  assert.equal(changed.ok,false);
 });
+
+test('only unchanged approved policy can be marked as exact-release-only reauthorization',async()=>{
+ const before=process.env.RAILWAY_GIT_COMMIT_SHA;
+ try{
+  process.env.RAILWAY_GIT_COMMIT_SHA=sha;
+  const common={...row,selected_bot:WARREN_BOT,selected_fingerprint:WARREN_BOT_HASH,
+   selected_policy_hash:policyHash,selection_sha:'c'.repeat(40),selection_revision:7};
+  const rotated=await readOwnerBotCatalog(owner,db([common]));
+  assert.equal(rotated.ok,true);
+  if(rotated.ok){assert.equal(rotated.requiresReauthorization,true);
+   assert.equal(rotated.reason,'owner_bot_requires_exact_release_reauthorization');}
+  const changed=await readOwnerBotCatalog(owner,db([{...common,selected_policy_hash:'d'.repeat(64)}]));
+  assert.equal(changed.ok,true);
+  if(changed.ok){assert.equal(changed.requiresReauthorization,true);
+   assert.equal(changed.reason,'owner_bot_changed_financial_policy_requires_review');}
+  const stale=await readOwnerBotCatalog(owner,db([{...common,reconciled_at:new Date(0)}]));
+  assert.equal(stale.ok,true);
+  if(stale.ok){assert.equal(stale.selectionEnabled,false);
+   assert.equal(stale.reason,'owner_bot_cash_reconciliation_stale');}
+  const unknown=await readOwnerBotCatalog(owner,db([{...common,selected_fingerprint:'f'.repeat(64)}]));
+  assert.equal(unknown.ok,true);
+  if(unknown.ok){assert.equal(unknown.selectionEnabled,false);
+   assert.equal(unknown.reason,'owner_bot_selection_invalid');}
+ }finally{
+  if(before===undefined)delete process.env.RAILWAY_GIT_COMMIT_SHA;
+  else process.env.RAILWAY_GIT_COMMIT_SHA=before;
+ }
+});
