@@ -1,5 +1,5 @@
 import {pool} from '@workspace/db';
-import {readOwnerBotCatalog} from '../lib/strategies/ownerBotCatalog';
+import {readOwnerBotCatalog,selectOwnedBot} from '../lib/strategies/ownerBotCatalog';
 import {economicDischargeRouter} from './economicExitDischargeRoute';
 import {createEconomicDischargeService} from '../lib/strata/economicExitDischargeService';
 import {economicSettlementRouter} from './ownerEconomicSettlementRoute';
@@ -351,6 +351,12 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  router.post('/bots/select',async(req,res)=>{
+    const owner=subject(res);if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});
+    res.setHeader('Cache-Control','private, no-store');
+    const result=await selectOwnedBot(owner,req.body,pool);
+    res.status(result.ok?200:409).json(sanitizePublic(result));
+  });
   router.get('/bots/catalog',async(_req,res)=>{
     const owner=subject(res);
     if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});

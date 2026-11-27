@@ -46,6 +46,7 @@ export class WarrenBuffettResearch {
  private lastClock=0;
  private serial=0;
  private emittedMarket:string|null=null;
+ invalidate():void {this.resetHistory();}
  private resetHistory():void {
   this.previous=null;this.cross=null;this.points=[];this.candidate=null;
   // A feed gap is not permission to emit a second same-market signal.

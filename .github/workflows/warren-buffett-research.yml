@@ -1,14 +1,22 @@
-name: Warren Buffett research isolation
+name: Warren Buffett independent live safety
 on:
   pull_request:
-    paths: ['artifacts/api-server/src/lib/strategies/**','artifacts/api-server/src/routes/userExecutionRouter.ts','artifacts/api-server/package.json','.github/workflows/warren-buffett-research.yml']
+    paths:
+      - 'artifacts/api-server/src/lib/strategies/**'
+      - 'artifacts/api-server/src/lib/v13-production/**'
+      - 'artifacts/api-server/src/lib/strata/ownerArmScope.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/routes/userExecutionRouter.ts'
+      - 'lib/db/owner-self-release/009_owner_bot_selection.sql'
+      - 'artifacts/api-server/package.json'
+      - '.github/workflows/warren-buffett-research.yml'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  candidate-only:
+  qualified-variant-and-owner-selection:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -17,5 +25,13 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm --filter @workspace/api-server run test:warren-buffett
+      - name: Compile exact backend and invariant-preserving strategy
+        run: pnpm --filter @workspace/api-server typecheck
+      - name: Verify variant model and source proofs
+        run: pnpm --filter @workspace/api-server test:warren-buffett
+      - name: Install isolated PostgreSQL 16 binaries
+        run: sudo apt-get update && sudo apt-get install -y postgresql-16
+      - name: Verify owner strategy selection, exact revocation and private RLS on disposable PostgreSQL
+        run: PATH="/usr/lib/postgresql/16/bin:$PATH" pnpm --filter @workspace/api-server test:warren-buffett-native
+      - name: Verify full C52/C53 and Warren Buffett IOC/exit/restart safety on disposable PostgreSQL
+        run: PATH="/usr/lib/postgresql/16/bin:$PATH" pnpm --filter @workspace/api-server test:v13-production-ledger

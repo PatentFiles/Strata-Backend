@@ -1,24 +1,67 @@
-# Warren Buffett v1 — research candidate, not a live release
+# Warren Buffett V1 — independent live-selectable delayed-cross bot
 
-Name supplied by the product owner. Not an endorsement, a representation of Warren Buffett's methods, a trained model, or a profit claim.
+This bot is **not** an edited C52/C53 or a proved profitable system. Brady's immutable
+`v13-champion-2-c52-confirm53` algorithm, parameters, fee and policy hashes remain unchanged.
 
-## Implemented
-- Separate pure stateful classifier. Original lib/v13-strategy files and C52/C53 parameter hash are unchanged.
-- A genuine observed cross opens a 15-second maximum confirmation window. Later fresh observations may reach the unchanged Scout $8–15 or Confirm $20+ band. Expiry, recross, market identity change, data gaps, source staleness and repeated provider time invalidate custody.
-- The remembered cross is not falsely stamped as a new crossing. Each priced candidate retains original crossing time and a separately fresh current observation.
-- Original 52/53-cent ceilings, 30-second velocity calculation and exit classifier retained. No fee, risk, sizing, market feed, or exit-floor relaxation.
-- At most one emitted research signal per market per engine lifetime. Replay/cross-session live deduplication is NOT supplied by this research module.
-- Authenticated read-only /api/strata/me/bots/catalog reports actual approved owner strategy. Missing policy has no invented default. Warren Buffett always reports RESEARCH_ONLY, NOT_LIVE_QUALIFIED and executionAuthority=NONE.
-- Frontend companion draft distinguishes bot identity from allocation/sizing. Experimental selection is deliberately disabled; no strategy POST, approval, localStorage selection, ARM or START is introduced.
+## Strategy
 
-## Qualification observed
-28 backend candidate/catalog tests plus full workspace TypeScript check passed locally. Boundary coverage includes both directions, immediate versus delayed crossing, price ceilings, gap, expiry, restart/rollover, missing/late/wrong-market quotes, clock rollback, candidate forgery, repeated emission and unchanged exits. These are software tests, not performance training or live fills.
+The Warren Buffett adapter uses the existing V1.3 crossing, direction and
+price/fee order planner with a bounded **15-second pending-cross** state.
+If the initial valid BTC crossing occurs too near the Kalshi market target,
+a later *continuous, fresh, same-market, same-side* sample may qualify on the
+original $8–$15 Scout or $20+ Confirm entry bands. An adverse recross,
+target change, feed gap, stale provider timestamp, 15-second expiry,
+new market, restart, or lost velocity invalidates the pending signal. No
+previous observation is falsely labeled a fresh crossing. Quotes and book
+must be newly observed and remain within the original 5-second final-wire
+freshness limit. Scout/Confirm entry offers remain ≤52¢/≤53¢.
 
-## Intentionally outstanding before LIVE strategy selection
-1. Account-scoped immutable strategy revisions and owner consent bound to policy/fee/release grants. A display dropdown is not authority.
-2. Worker source custody, PREPARE reclassification, final wire checks, protective-exit bindings, history provenance and restart tests for the new strategy ID. Do not label a delayed confirmation as a fresh C52/C53 crossing to get past the current gates.
-3. STOP/flat/no UNKNOWN/no pending transfer requirement, versioned selection transaction, stale-tab rejection, and new ARM consent. No hot switching and no implicit START.
-4. Native database and integrated browser/isolated-exchange full cycles for both strategies, no C52/C53 behavior change, then exact-head protected qualification and approved stopped-state deployment.
-5. Prospective quote/depth/latency/fees and realized outcomes. The 15-second window is an initial test hypothesis, not an optimized or statistically validated setting. Existing history lacks quotes for many rejected observations, so it cannot prove hypothetical fills or profits.
+Shared protected V1.3 executor retains exact whole-contract IOC, fees,
+position limits, cash conservation, risk reservations, stop/kill fences,
+duplicate order prevention, UNKNOWN-recovery and authenticated reduce-only
+exits. The clone carries an immutable bot ID/hash and separate sealed
+crossing receipt; the original champion evaluator remains unmodified.
 
-Recovery release #406 remains separate. Do not deploy this draft over a running worker.
+## Account owner flow
+
+`GET /api/strata/me/bots/catalog` lists the saved strategy for the
+authenticated AAL2 account; `POST /api/strata/me/bots/select`
+requires explicit checkbox consent, one-use UUID, current backend release,
+approved-policy hash and selection revision. The account must be stopped,
+disarmed, flat, currently reconciled and free of uncertain operations.
+A selection is recorded in private RLS-backed tables with its own
+immutable audit history; it fences earlier ARM and demands a fresh owner
+ARM followed by an independent deliberate START. Allocation policy
+still controls stake and limits; it is not a strategy selector.
+No frontend field grants order authority or silently updates another user.
+
+Selection of the same bot on a later qualified SHA requires explicit
+fresh owner consent, not implicit reactivation. The full exact-release
+Warren flag `STRATA_WARREN_BUFFETT_LIVE_ENABLED=true` and
+`STRATA_WARREN_BUFFETT_LIVE_SHA=<deployed forty-character SHA>` are
+required for the option to be live-qualified. Otherwise selection fails
+closed. New backend release requires reauthorization even for the same
+selected bot; history remains immutable.
+
+## Evidence, limitations and rollout
+
+- Pure strategy, negative, source-reference, and catalog tests.
+- Native PostgreSQL owner isolation, idempotency, selection history, RLS,
+  wrong revision, live lease and release-rotation tests.
+- Native execution suite: single Scout IOC on delayed cross, filled
+  order, unchanged reduce-only protective exit and restart without replay,
+  plus all original C52/C53 regression tests.
+- Frontend AAL2 request guards and production build.
+- CI must pass on the EXACT merged head. Release must pin existing platform
+  approval SHAs and new Warren SHA before production activation.
+- Deployment requires no fresh live orders, exposure or uncertain intents.
+  Apply additive private-schema migration before deploying code.
+- No claim of trained best parameters, positive expected value, robust
+  fill probabilities or live out-of-sample profit exists yet. Compare future
+  prospective after-fee, after-slippage results with the original champion,
+  ideally in research mode before committing significant capital.
+
+Rollback: stop/disarm the selected account, reconcile all Kalshi order/fill
+and position history, disable the Warren flag and return to C52/C53 by
+explicit owner selection/re-ARM. Never rewrite previous trades, alter
+balances, retry an uncertain order or bypass an exit to switch bots.

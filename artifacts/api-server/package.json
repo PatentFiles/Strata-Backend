@@ -122,7 +122,8 @@
     "test:owner-cash-transfers-native": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/ownerCashTransfers.postgres.test.ts",
     "test:live-readiness-fixes": "esbuild src/lib/v13-production/directTargetReadiness.test.ts --bundle --platform=node --format=cjs --outfile=dist/live-readiness-fixes.cjs --external:pg-native && node --test dist/live-readiness-fixes.cjs && pnpm run test:feed-read-recovery",
     "test:direct-price-retry-native": "node scripts/run-v13-disposable-postgres.mjs src/lib/strata/directPriceRetryFullCycle.postgres.test.ts",
-    "test:warren-buffett": "esbuild src/lib/strategies/*.test.ts --bundle --platform=node --format=cjs --outdir=dist/strategy-candidate --out-extension:.js=.cjs && node --test dist/strategy-candidate/*.cjs"
+    "test:warren-buffett": "esbuild src/lib/strategies/ownerBotCatalog.test.ts src/lib/strategies/warrenBuffett.test.ts src/lib/strategies/warrenBuffettSourceReference.test.ts --bundle --platform=node --format=cjs --outdir=dist/strategy-candidate --out-extension:.js=.cjs && node --test dist/strategy-candidate/*.cjs",
+    "test:warren-buffett-native": "node scripts/run-v13-disposable-postgres.mjs src/lib/strategies/ownerBotSelection.postgres.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.69",

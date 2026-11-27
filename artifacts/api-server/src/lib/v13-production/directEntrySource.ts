@@ -6,7 +6,9 @@ import {createPublicForwardTestFeeds,type ForwardTestFeeds} from "../forwardTest
 import {createPublicBookReader,type ReadonlyResearchBook} from "../forwardTestOrderbookDepth";
 import {emitDirectEntryRolloverGap,publishHeldRolloverDiagnostics} from "../rolloverStrikeDiagnostics";
 import {readForwardCycleFeeds} from "../forwardFeedReadScope";
-import {assertChampionSourceReference} from "./sourceReference";
+import {assertAuthorizedEntrySourceReference} from "./sourceReference";
+import {WarrenBuffettResearch,type WarrenCandidate} from '../strategies/warrenBuffett';
+import {WARREN_BOT,WARREN_BOT_HASH} from '../strategies/warrenBotIdentity';
 import {canonical,requireProof} from "./types";
 import {enqueueLiveDecision,liveAnalyticsFailure,type LiveDecisionPolicy,type LiveDecisionInput} from "./liveDecisionAnalytics";
 
@@ -29,7 +31,8 @@ export type DirectEvaluation={
  evaluated_at:string;original_oldest_ms:number;market_open_ms:number;market_close_ms:number;
  btc_price:number;target:number;signed_buffer:number;velocity:number;previous_side:"UP"|"DOWN"|"AT";
  up_offer:number;down_offer:number;entry_offer:number;signal:"SCOUT"|"CONFIRM";direction:"UP"|"DOWN";
- qualifying_trigger:true;fresh_cross:true;crossing_consumed:true;position_was_open:false;feed_freshness:"current";
+ qualifying_trigger:true;fresh_cross:boolean;crossing_consumed:true;position_was_open:false;feed_freshness:"current";
+ bot_strategy_id?:typeof WARREN_BOT;bot_spec_hash?:string;warren_crossing?:WarrenCandidate['crossing'];
  btc_provider_age_ms:number;btc_receive_age_ms:number;market_age_ms:number;
  account_id:string;owner_user_id:string|null;worker_pin:DirectWorkerPin|null;
  direct_quote_evidence:Quote;
@@ -114,7 +117,7 @@ export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
   now-v.original_oldest_ms<=AGE&&now<v.market_close_ms&&
   [v.btc_provider_age_ms,v.btc_receive_age_ms,v.market_age_ms].every(a=>time(a)&&a+now-evaluated<=AGE),
   "direct_entry_original_source_expired");
- assertChampionSourceReference(v);
+ assertAuthorizedEntrySourceReference(v);
 }
 
 /**
@@ -138,6 +141,8 @@ export class DirectEntrySource{
  readonly #environment:Environment;
  #prior:Prior|null=null;#points:Point[]=[];#running=false;#lastClock=-1;
  #retryRehearsal=false;
+ #selectedBot:string=V13_CHAMPION_PARAMETER_SET.id;#warren:WarrenBuffettResearch|null=null;
+ get strategyId():string{return this.#selectedBot;}
  #priceRetryStorage=false;
  #lastReadyMarket:string|null=null;
  #heldPrior:(Prior&{positionId:string})|null=null;#heldPoints:Point[]=[];
@@ -149,7 +154,8 @@ export class DirectEntrySource{
  }
  get environment(){return this.#environment;}
  matches(scope:DirectScope){return this.#scope.accountId===scope.accountId&&this.#scope.ownerId===scope.ownerId;}
- static marketObservation(scope:DirectScope,auditPolicy:LiveDecisionPolicy={}){
+ static marketObservation(scope:DirectScope,auditPolicy:LiveDecisionPolicy={},botId:string=V13_CHAMPION_PARAMETER_SET.id){
+  requireProof(botId===V13_CHAMPION_PARAMETER_SET.id||botId===WARREN_BOT,'direct_bot_identity_not_qualified');
   requireProof(scope.ownerId&&scope.worker&&/^[A-Za-z0-9._:-]{1,128}$/.test(scope.worker.holderId)&&
    /^[1-9]\d*$/.test(scope.worker.fencingToken)&&HASH.test(scope.worker.credentialFingerprint)&&
    /^[a-f0-9]{40}$/.test(scope.worker.releaseSha)&&scope.worker.releaseSha===process.env.RAILWAY_GIT_COMMIT_SHA,
@@ -160,6 +166,7 @@ export class DirectEntrySource{
    queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
   });
   const source=new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
+  source.#selectedBot=botId;source.#warren=botId===WARREN_BOT?new WarrenBuffettResearch():null;
   source.#priceRetryStorage=process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA===scope.worker.releaseSha;
   return source;
  }
@@ -172,6 +179,11 @@ export class DirectEntrySource{
   const source=this.isolatedSimulation(scope,feeds,clock);
   requireProof(scope.ownerId&&scope.worker,'direct_price_retry_owned_scope_required');
   source.#priceRetryStorage=true;return source;
+ }
+ /** Isolated strategy qualification has no order/transport capabilities. */
+ static isolatedWarrenSimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
+  const source=this.isolatedSimulation(scope,feeds,clock);source.#selectedBot=WARREN_BOT;
+  source.#warren=new WarrenBuffettResearch();return source;
  }
  priceRetryPermitted():boolean{
   if(!this.#priceRetryStorage)return false;
@@ -278,7 +290,7 @@ export class DirectEntrySource{
    if(targetReadiness==='waiting'){
     // Never derive a crossing through a missing target. No quote, source claim,
     // fee request, order or clock extension occurs while initialization waits.
-    this.#prior=null;this.#points=[];
+    this.#prior=null;this.#points=[];this.#warren?.invalidate();
     audit.outcome='PASS';audit.reasonCode='market_target_initializing';
     audit.reasonDetail='Exact market target not published yet; waiting without an order.';
     return null;
@@ -295,6 +307,8 @@ export class DirectEntrySource{
    if(!continuous)this.#points=[];
    this.#points=[...this.#points.filter(p=>received-p.received<=30000),point].slice(-180);
    this.#prior={ticker:market.ticker,target,open,close,point};
+   const warren=this.#warren?.observe({market:market.ticker,target,btc:btc.price,openMs:open,closeMs:close,
+    nowMs:now,providerAtMs:provider,receivedAtMs:received,marketObservedAtMs:fetched});
    facts.continuous=continuous;
    if(!continuous||!prior){
     audit.outcome="PASS";audit.reasonCode="continuous_crossing_history_required";
@@ -305,8 +319,12 @@ export class DirectEntrySource{
    Object.assign(facts,{velocity,previousBuffer});
    const input={marketTicker:market.ticker,btcPrice:btc.price,target,previousBuffer,velocity,
     freshness:"current" as const,position:null};
-   const needsPrice=needsV13EntryPrice(input);
+   const needsPrice=this.#warren?warren?.outcome==='QUOTE_REQUIRED':needsV13EntryPrice(input);
    facts.needsEntryPrice=needsPrice;
+   if(this.#warren&&!needsPrice){
+    audit.outcome=warren?.outcome==='ERROR'?'ERROR':'PASS';audit.reasonCode='warren_'+(warren?.reason??'no_candidate');
+    audit.reasonDetail='Warren pending-cross rules did not authorize a fresh quote.';return null;
+   }
    if(!needsPrice||velocity===null||!this.feeds.book){
     // Preserve the existing no-book-read prefilter. A missing quote is not
     // evidence of repricing or insufficient liquidity.
@@ -328,13 +346,22 @@ export class DirectEntrySource{
    const oldest=Math.min(cycle,provider,received,fetched,quote.started);
    requireProof(observed-oldest<=AGE&&oldest>=open&&observed<close,"direct_entry_original_source_expired");
    const up=(10000-quote.noBid)/10000,down=(10000-quote.yesBid)/10000;
-   const decision=evaluateV13Strategy({...input,upOffer:up,downOffer:down});
+   const baseDecision=evaluateV13Strategy({...input,upOffer:up,downOffer:down});
+   const warrenPriced=this.#warren&&warren?.candidate?this.#warren.price(warren.candidate,
+    {market:market.ticker,requestStartedAtMs:quote.started,receivedAtMs:quote.completed,upOffer:up,downOffer:down},observed):null;
+   const warrenOk=warrenPriced?.outcome==='QUALIFIED'&&warren?.candidate;
+   const decision=this.#warren&&warren?.candidate?{...baseDecision,
+    signal:warrenOk?warren.candidate.signal:'PASS' as const,
+    direction:warren.candidate.direction,qualifyingTrigger:Boolean(warrenOk),
+    freshCross:warren.candidate.freshCrossAtObservation,
+    entrySideOffer:warrenOk?warrenPriced!.referenceOffer??null:null,
+    reason:warrenPriced?.reason??'warren_qualification_refused'}:baseDecision;
    auditAt=observed;audit.signal=decision.signal;audit.direction=decision.direction;
    audit.reasonDetail=decision.reason;
    Object.assign(facts,{upOffer:up,downOffer:down,entryOffer:decision.entrySideOffer,candidateOffer:decision.candidateOffer,
     freshCross:decision.freshCross,separation:decision.separation,qualifyingTrigger:decision.qualifyingTrigger});
    audit.outcome="PASS";audit.reasonCode=decision.signal==="PASS"?"strategy_pass":"strategy_trigger_not_qualified";
-   if(!decision.qualifyingTrigger||!decision.freshCross||decision.entrySideOffer===null||
+   if(!decision.qualifyingTrigger||(!this.#warren&&!decision.freshCross)||decision.entrySideOffer===null||
     (decision.signal!=="SCOUT"&&decision.signal!=="CONFIRM")||(decision.direction!=="UP"&&decision.direction!=="DOWN"))return null;
    const id=randomUUID(),account=this.#scope.accountId,ticker=market.ticker,crossing=ticker+":first";
    let priceRetryOf:string|undefined;
@@ -346,10 +373,12 @@ export class DirectEntrySource{
    const source:DirectEvaluation={id,...(priceRetryOf?{price_retry_of:priceRetryOf}:{}),evaluation_source:this.#environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1",
     execution_environment:this.#environment,market_ticker:ticker,crossing_key:crossing,
     entry_policy_version:V13_ENTRY_POLICY_VERSION,strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,
-    strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_open_ms:open,market_close_ms:close,
+    strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
+    ...(warrenOk?{bot_strategy_id:WARREN_BOT,bot_spec_hash:WARREN_BOT_HASH,warren_crossing:warren.candidate.crossing}:{}),
+    evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_open_ms:open,market_close_ms:close,
     btc_price:btc.price,target,signed_buffer:btc.price-target,velocity,previous_side:previousBuffer>0?"UP":previousBuffer<0?"DOWN":"AT",
     up_offer:up,down_offer:down,entry_offer:decision.entrySideOffer,signal:decision.signal,direction:decision.direction,
-    qualifying_trigger:true,fresh_cross:true,crossing_consumed:true,position_was_open:false,feed_freshness:"current",
+    qualifying_trigger:true,fresh_cross:decision.freshCross,crossing_consumed:true,position_was_open:false,feed_freshness:"current",
     btc_provider_age_ms:observed-provider,btc_receive_age_ms:observed-received,market_age_ms:observed-fetched,
     account_id:account,owner_user_id:this.#scope.ownerId,worker_pin:this.#scope.worker??null,direct_quote_evidence:quote};
    assertDirectEntryQuoteEvidence(source,observed);
@@ -376,7 +405,7 @@ export class DirectEntrySource{
    return exact?id:null;
   }catch(e){
    audit.outcome="ERROR";audit.reasonCode=liveAnalyticsFailure(e);audit.reasonDetail=null;
-   this.#prior=null;this.#points=[];throw e;
+   this.#prior=null;this.#points=[];this.#warren?.invalidate();throw e;
   }finally{
    this.#running=false;
    if(this.#environment==="LIVE_OBSERVATION"&&this.#scope.ownerId&&this.#scope.worker)
@@ -416,7 +445,8 @@ export class DirectEntrySource{
     new Date(row.closes_at).getTime()!==receipt.closesAt||Date.parse(s.evaluated_at)!==receipt.observed||
     s.original_oldest_ms!==receipt.oldest||s.market_close_ms!==receipt.closesAt||s.market_open_ms>receipt.oldest||s.entry_policy_version!==V13_ENTRY_POLICY_VERSION||
     s.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||s.strategy_parameter_set_id!==V13_CHAMPION_PARAMETER_SET.id||
-    !s.qualifying_trigger||!s.fresh_cross||!s.crossing_consumed||s.position_was_open||s.feed_freshness!=="current")return null;
+    (this.#selectedBot===WARREN_BOT?(s.bot_strategy_id!==WARREN_BOT||s.bot_spec_hash!==WARREN_BOT_HASH):s.bot_strategy_id!==undefined)||
+    !s.qualifying_trigger||(!s.fresh_cross&&this.#selectedBot!==WARREN_BOT)||!s.crossing_consumed||s.position_was_open||s.feed_freshness!=="current")return null;
    assertDirectEntryQuoteEvidence(s,now);
    DirectEntrySource.#validatedDigests.set(s,row.evidence_sha256);
    return Object.freeze(s);

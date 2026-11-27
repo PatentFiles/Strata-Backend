@@ -1,4 +1,5 @@
 import {economicExitNotDischarged} from './economicExitDischargeScope';
+import {readOwnerBotCatalog} from '../strategies/ownerBotCatalog';
 import {platformFeeUploadEnabled} from './platformFeeUploadMode';
 import {isDurableFeeVersion} from './durableOwnerFeePolicy';
 import {parseV3FeeSource} from './ownerFeeV3Authority';
@@ -16,6 +17,7 @@ const riskNames = ['capital_limit_cents','max_entry_stake_cents','max_entry_all_
   'max_daily_loss_cents','max_total_loss_cents','max_open_positions','max_quote_age_ms','max_fee_evidence_age_ms'] as const;
 export type OwnerArmScope = {
   ownerId:string;accountId:string;releaseSha:string;policyId:string;policyHash:string;policyVersion:number;
+  botId:string;botRevision:number;botSpecHash:string;
   controlEpoch:string;initialLeaseRequired:boolean;stakeCents:number;feeDigest:string;feeSource:string;feeVersion:string;fingerprint:string;minimumExitMicros:number;
   limits:Record<typeof riskNames[number],number>;scopeDigest:string;
 };
@@ -55,7 +57,12 @@ export async function readOwnerArmScope(owner:string):Promise<OwnerArmScope> {
   requireArm(Object.values(limits).every(n=>Number.isSafeInteger(n)&&n>0),'owner_arm_risk_limits_unverified');
   requireArm(Number(p.minimum_exit_micros)===10000,'owner_arm_exit_policy_requires_review');
   requireArm(HASH.test(String(p.fee_artifact_digest))&&p.policy_hash===a.policyHash,'owner_arm_fee_or_policy_unverified');
+  const bot=await readOwnerBotCatalog(owner,pool);
+  requireArm(bot.ok&&bot.currentPolicyVerified&&!!bot.currentBotId,'owner_arm_bot_selection_unverified');
+  const spec=bot.bots.find(x=>x.id===bot.currentBotId);
+  requireArm(spec&&typeof spec.parameterHash==='string'&&spec.status==='LIVE_QUALIFIED','owner_arm_bot_release_not_qualified');
   const core={ownerId:owner,accountId:a.accountId,releaseSha:sha,policyId:String(p.policy_id),
+    botId:bot.currentBotId!,botRevision:bot.selectionRevision,botSpecHash:spec!.parameterHash!,
     policyHash:a.policyHash,policyVersion:Number(p.version),controlEpoch:String(p.control_epoch),initialLeaseRequired,stakeCents:a.stakeCents,
     feeDigest:String(p.fee_artifact_digest),feeSource:String(p.fee_source_url),
     feeVersion:String(p.fee_policy_version),fingerprint:a.keyFingerprint,minimumExitMicros:10000,limits};
@@ -67,6 +74,7 @@ export async function reviewOwnerArm(owner:string) {
     const scope=await readOwnerArmScope(owner);
     return {ok:true as const,version:'OWNER_ARM_REVIEW_V1' as const,
       review:{ownerId:owner,scopeDigest:scope.scopeDigest,releaseSha:scope.releaseSha,
+        botId:scope.botId,botRevision:scope.botRevision,
         stakeCents:scope.stakeCents,capitalLimitCents:scope.limits.capital_limit_cents,
         maxEntryAllInCents:scope.limits.max_entry_all_in_cents,
         maxDailyLossCents:scope.limits.max_daily_loss_cents,maxTotalLossCents:scope.limits.max_total_loss_cents,
@@ -80,7 +88,8 @@ export async function reviewOwnerArm(owner:string) {
 
 export function unchangedArmMoney(a:OwnerArmScope,b:OwnerArmScope):boolean {
   return a.ownerId===b.ownerId&&a.accountId===b.accountId&&a.releaseSha===b.releaseSha&&
-    a.fingerprint===b.fingerprint&&a.stakeCents===b.stakeCents&&a.feeDigest===b.feeDigest&&
+    a.fingerprint===b.fingerprint&&a.botId===b.botId&&a.botRevision===b.botRevision&&a.botSpecHash===b.botSpecHash&&
+    a.stakeCents===b.stakeCents&&a.feeDigest===b.feeDigest&&
     a.minimumExitMicros===b.minimumExitMicros&&riskNames.every(k=>a.limits[k]===b.limits[k]);
 }
 
