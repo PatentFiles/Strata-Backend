@@ -72,7 +72,8 @@ export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
   policy_hash:input.policyHash&&HASH.test(input.policyHash)?input.policyHash:null,
   policy_revision:positiveInt(input.policyRevision),configured_stake_cents:positiveInt(input.configuredStakeCents),
   allocation_preset:text(input.allocationPreset,120),strategy_version:"V1.3",
-  strategy_parameter_hash:input.botId===WARREN_BOT?WARREN_BOT_HASH:V13_CHAMPION_PARAMETER_HASH,
+  // Preserve the approved V1.3 hash; bot identity is separate immutable evidence.
+  strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
   facts:{...facts,thresholds:V13_CHAMPION_PARAMETER_SET.parameters,
    ...(input.botId?{botId:input.botId,
      botParameterHash:input.botId===WARREN_BOT?WARREN_BOT_HASH:V13_CHAMPION_PARAMETER_HASH}:{} )}};

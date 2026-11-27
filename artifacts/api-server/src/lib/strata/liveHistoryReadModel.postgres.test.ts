@@ -2,6 +2,7 @@ import test,{after,before} from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {pool} from "@workspace/db";
+import {V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {normalizeLiveDecision,writeLiveDecisionBatch,liveAnalyticsFailure,normalizeLinkedLiveDecision,confirmedBatch} from "../v13-production/liveDecisionAnalytics";
 import {readLiveHistory,parseLiveHistoryQuery,LiveHistoryRequestError} from "./liveHistoryReadModel";
 const url=process.env.V13_DISPOSABLE_DATABASE_URL;
@@ -238,7 +239,7 @@ import {attributeBot} from './historyBotAttribution';
 test('live bot identity is immutable on observations and matches both history and CSV export',async()=>{
  const event=normalizeLiveDecision({...base,botId:WARREN_BOT,
   reasonCode:'warren_observation_fixture',observedAtMs:now-1700})!;
- assert.equal(event.strategy_parameter_hash,WARREN_BOT_HASH);
+ assert.equal(event.strategy_parameter_hash,V13_CHAMPION_PARAMETER_HASH);
  assert.equal(event.facts.botId,WARREN_BOT);
  assert.equal(event.facts.botParameterHash,WARREN_BOT_HASH);
  assert.equal(await writeLiveDecisionBatch(pool,[event]),1);
