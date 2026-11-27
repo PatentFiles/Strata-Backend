@@ -186,3 +186,9 @@ test('invalid or regressed response clock never produces a current snapshot',asy
   await assert.rejects(api.market(),/clock invalid/);
  }
 });
+
+test('missing and malformed target responses have distinct non-trading statuses',async()=>{
+ assert.equal((await feeds([market()],market({floor_strike:null})).api.market()).targetStatus,'pending');
+ for(const floor_strike of ['invalid','',0,-1,{},true])assert.equal((await feeds([market()],market({floor_strike})).api.market()).targetStatus,'invalid');
+ assert.equal((await feeds([market()],market()).api.market()).targetStatus,'ready');
+});

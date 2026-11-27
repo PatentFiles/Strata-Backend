@@ -2412,6 +2412,28 @@ test("commissioned cash observation preserves ledger and rejects mismatch, runni
   assert.deepEqual(await ledger(),{...before,reconciled_at:new Date(at)});
 });
 
+// Missing market targets are an explicit, bounded no-entry state. This exercises
+// the real source and database, not just the presentation classifier.
+test('direct target initialization never reads a quote or consumes a crossing; stale/invalid inputs still fail closed',async()=>{
+ const f=await fixture();const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker='KXBTC15M-TARGET-WAIT';
+ f.exchange.now=open+1000;let btc=99999,target:number|null=null,status:'pending'|'ready'|'invalid'='pending',quotes=0,stale=false;
+ const source=DirectEntrySource.isolatedSimulation({accountId:'test-account',ownerId:null},{
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-(stale?5001:10)),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target,targetStatus:status,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:'active',fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>{quotes++;return {ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,rawResponseDigest:'a'.repeat(64),source:'KALSHI_PUBLIC_REST',timestampAuthority:'LOCAL_RECEIPT_ONLY',yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]};},
+ },()=>f.exchange.now);
+ assert.equal(await source.capture(pool),null);f.exchange.now=open+15000;assert.equal(await source.capture(pool),null);assert.equal(quotes,0);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM public.strata_direct_entry_source')).rows[0].n,0);
+ f.exchange.now++;await assert.rejects(source.capture(pool),/direct_entry_target_unavailable/);
+ f.exchange.now++;target=0;status='invalid';await assert.rejects(source.capture(pool),/direct_entry_target_invalid/);
+ f.exchange.now++;target=null;status='pending';stale=true;await assert.rejects(source.capture(pool),/direct_entry_market_or_feed_invalid/);stale=false;
+ f.exchange.now+=1000;target=100000;status='ready';assert.equal(await source.capture(pool),null);
+ f.exchange.now+=1000;target=null;status='pending';await assert.rejects(source.capture(pool),/direct_entry_target_invalid/);
+ f.exchange.now+=1000;target=100000;status='ready';assert.equal(await source.capture(pool),null);
+ f.exchange.now+=1000;btc=100010;assert.ok(await source.capture(pool));assert.equal(quotes,1);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);assert.equal(f.exchange.posts.length,0);
+});
+
 // Last: swaps out incumbent uniqueness only inside this disposable cluster.
 test("orders-off integrated retry preserves one order fence after a typed first fee refusal",async()=>{
  const f=await fixture();

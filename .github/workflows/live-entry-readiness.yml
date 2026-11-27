@@ -1,0 +1,52 @@
+name: Live entry readiness and price retry safety
+on:
+  pull_request:
+    branches: [main]
+    paths: ['artifacts/api-server/src/lib/strata/**','artifacts/api-server/src/lib/v13-production/**','artifacts/api-server/src/lib/forwardTestFeeds*','supabase/migrations/*direct_price_refusal_retry*','artifacts/api-server/package.json','.github/workflows/live-entry-readiness.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-live-readiness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - name: Bounded target initialization and price protection
+        working-directory: artifacts/api-server
+        env:
+          DATABASE_URL: postgres://fixture:fixture@127.0.0.1:1/never_connect
+        run: pnpm run test:live-readiness-fixes
+      - name: Install selected isolated PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates postgresql-common
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}
+          sudo systemctl stop postgresql
+      - name: Native transactions, RLS, receipts, duplication and cancellation races
+        working-directory: artifacts/api-server
+        env:
+          PG_BIN: /usr/lib/postgresql/${{ matrix.postgres }}/bin
+        run: |
+          export PATH="$PG_BIN:$PATH"
+          test "$(command -v postgres)" = "$PG_BIN/postgres"
+          postgres --version
+          pnpm run test:direct-price-retry-native
+          pnpm run test:economic-discharge-cycle
+      - run: pnpm --filter @workspace/api-server run build
