@@ -1,11 +1,13 @@
 import {createHash} from "node:crypto";
+import {attributeHistoryPage} from './historyBotAttribution';
 import {pool,type Pool} from "@workspace/db";
 import {parseLiveHistoryQuery,LiveHistoryRequestError,projectHistoryIntentBatchSql} from "./liveHistoryReadModel";
 
 type Actor={subject:string;role:string|null};
 type Phase="decisions"|"intents";
 type Cursor={phase:Phase;at:string|null;id:string|null;watermark:string;binding:string};
-type ExportRow={row_id:string;observed_at:string;[key:string]:unknown};
+type ExportRow={row_id:string;observed_at:string;account_id:string;record_type:string;
+ reason_code:string|null;details:Record<string,unknown>;[key:string]:unknown};
 function invalid():never{throw new LiveHistoryRequestError(400,"invalid_live_history_export_cursor");}
 const encode=(v:Cursor)=>Buffer.from(JSON.stringify([1,v.phase,v.at,v.id,v.watermark,v.binding])).toString("base64url");
 const validDate=(s:unknown):s is string=>typeof s==="string"&&s.length<=64&&Number.isFinite(Date.parse(s));
@@ -100,9 +102,10 @@ export async function readLiveHistoryExportBatch(actor:Actor,raw:Record<string,u
    const last=candidates.at(-1);
    nextCursor=result.rows.length>q.limit&&last?encode({phase,at:last.at,id:last.id,watermark,binding}):null;
   }
+  const attributed=await attributeHistoryPage(c,rows);
   await c.query("COMMIT");
   return {version:"LIVE_HISTORY_EXPORT_V1" as const,scope:q.scope,from:q.from,to:q.to,recordType:q.recordType,watermark,phase,
-   rows,scannedRows,nextCursor,order:"decisions_then_ledger_desc",
+   rows:attributed,scannedRows,nextCursor,order:"decisions_then_ledger_desc",
    consistency:"Decision journal is bounded by recording cutoff; ledger values are read per batch, not an atomic whole-account snapshot. Missing historical decisions are not reconstructed."};
  }catch(error){try{await c.query('ROLLBACK');}catch{discard=Error('live_history_export_rollback_failed');}throw error;}
  finally{c.release(discard);}
