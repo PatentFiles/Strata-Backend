@@ -1,5 +1,6 @@
 import {rememberHistoryMappingFailure,historyMappingDiagnostic,type HistoryMappingStage} from './personalHistoryMappingDiagnostic';
-import {logger} from '../logger';
+// Do not import the application logger into this read-only mapper. Its bundled
+// development transport starts worker threads even for an isolated parser test.
 import {withMemberHistoryCredits,memberReadBudgetEnabled} from './kalshiMemberReadBudget';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {historyLaneCredentialKey,inBoundedHistoryReadLane} from "./boundedHistoryReadLane";
@@ -308,7 +309,11 @@ export function emptySnapshot(
   if (!('identity' in result)) {
     // Best-effort fixed-category observability must never authorize a snapshot.
     const diagnostic=historyMappingDiagnostic(result);
-    if(diagnostic)try { logger.warn({event:'strata_signed_history_mapping_refused',...diagnostic},'Signed history mapping refused'); } catch { /* accounting result is unchanged */ }
+    if(diagnostic)try {
+      // Only fixed categories and bounded counts leave this boundary. No provider
+      // body, account ID, signer material or caller text can enter this record.
+      console.warn(JSON.stringify({level:40,time:Date.now(),event:'strata_signed_history_mapping_refused',...diagnostic}));
+    } catch { /* Best-effort diagnostics never change the accounting result. */ }
   }
   return result;
 }

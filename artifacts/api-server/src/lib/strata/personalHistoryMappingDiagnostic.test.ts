@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {personalAccountSnapshot,type OwnedKalshiRead} from './personalExchangeRead';
+import {personalAccountSnapshot,emptySnapshot,type OwnedKalshiRead} from './personalExchangeRead';
 import {historyMappingDiagnostic} from './personalHistoryMappingDiagnostic';
 import type {Request} from '../v13-production/types';
 
@@ -68,4 +68,19 @@ test('reduce-only false remains a hard mismatch for a protective request',()=>{
  Object.assign(read.orders[0] as Record<string,unknown>,{book_side:'ask',action:'sell',reduce_only:false});
  const out=personalAccountSnapshot(identity,read,[exit]);assert.deepEqual(out,failed);
  assert.equal(historyMappingDiagnostic(out)?.stage,'order_reduce_only');
+});
+
+test('mapping diagnostics remain bounded and do not start an application logging transport',()=>{
+ const prior=console.warn;const records:string[]=[];
+ try{
+  console.warn=(value:unknown)=>{records.push(String(value));};
+  const read=fixture();(read.orders[0] as Record<string,unknown>).client_order_id='secret-like-untrusted-value';
+  assert.deepEqual(emptySnapshot(identity,read,[request]),failed);
+  assert.equal(records.length,1);const row=JSON.parse(records[0]!);
+  assert.equal(row.stage,'order_request');assert.equal(row.event,'strata_signed_history_mapping_refused');
+  assert.equal(records[0]!.includes('secret-like-untrusted-value'),false);
+  assert.deepEqual(Object.keys(row).sort(),['event','fillRows','level','orderRows','positionRows','settlementRows','stage','time','version']);
+  console.warn=()=>{throw Error('log_sink_unavailable');};
+  assert.deepEqual(emptySnapshot(identity,read,[request]),failed,'logging failure cannot change the refusal');
+ }finally{console.warn=prior;}
 });
