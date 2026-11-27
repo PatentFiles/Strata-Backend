@@ -471,7 +471,7 @@ test("wrong user, credential mismatch, exposure, and kill switches stay isolated
   assert.equal(harness.leases.rows.filter((row) => row.state === "owned").length, 2);
   const exposed = await operateAccountWorker(harness.deps, { authenticatedUserId: USER_B, holderId: "process-b", action: "STOP" });
   assert.equal(exposed.ok, true);
-  assert.equal(exposed.reason, "entries_stopped");
+  assert.equal(exposed.reason, "entries_stopped_protective_management");
   assert.equal(exposed.executionActive, false);
   assert.equal(exposed.armRequested, false);
   assert.equal(harness.leases.rows.find((row) => row.executionAccountId === ACCOUNT_B)?.state, "owned");
@@ -531,7 +531,7 @@ test("stop and kill do not require a working signer", async () => {
     action: "STOP",
   });
   assert.equal(stopped.ok, true);
-  assert.equal(stopped.reason, "entries_stopped");
+  assert.equal(stopped.reason, "entries_stopped_protective_management");
   assert.equal(stopped.executionActive, false);
   assert.equal(stopped.workerStarted, false);
   assert.equal(harness.leases.rows[0]?.state, "owned");
@@ -581,4 +581,25 @@ test("the user execution route and legacy stake path stay unchanged", () => {
   assert.match(migration, /REVIEW ONLY/);
   assert.match(migration, /DROP TABLE IF EXISTS private\.kalshi_account_worker_lease/);
   assert.equal(migration.includes("decrypted_secret"), false);
+});
+
+test('credential-bound DISARM retains unresolved exposure and automatically releases when genuinely flat',async()=>{
+ const h=deps();
+ await operateAccountWorker(h.deps,{authenticatedUserId:USER_B,holderId:'worker-b',action:'ARM'});
+ const started=await operateAccountWorker(h.deps,{authenticatedUserId:USER_B,holderId:'worker-b',action:'START'});
+ assert.equal(started.state,'owned');
+ const held=await operateAccountWorker(h.deps,{authenticatedUserId:USER_B,holderId:'worker-b',action:'DISARM'});
+ assert.equal(held.ok,true,JSON.stringify(held));
+ assert.equal(held.reason,'disarmed_protective_management');
+ assert.equal(h.leases.rows.find(r=>r.executionAccountId===ACCOUNT_B)?.state,'owned');
+ assert.equal(h.leases.rows.find(r=>r.executionAccountId===ACCOUNT_B)?.armRequested,false);
+ const own=await h.deps.activity.readOwnedAccount(USER_B,ACCOUNT_B);
+ assert.ok(own);
+ own.positions.length=0;
+ own.orders.splice(0,own.orders.length,{clientOrderId:'order-b',state:'TERMINAL'});
+ const completed=await operateAccountWorker(h.deps,{authenticatedUserId:USER_B,holderId:'worker-b',action:'DISARM'});
+ assert.equal(completed.ok,true,JSON.stringify(completed));
+ assert.equal(completed.reason,'disarmed');
+ assert.equal(completed.state,'released');
+ assert.equal(h.leases.rows.find(r=>r.executionAccountId===ACCOUNT_B)?.state,'released');
 });

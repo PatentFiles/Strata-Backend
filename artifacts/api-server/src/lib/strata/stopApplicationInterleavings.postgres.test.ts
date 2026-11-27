@@ -185,3 +185,24 @@ test('failed startup cleanup cannot release a replacement worker after STOP and 
  assert.equal((await releaseFailedStartLease(pool,{...original,fencingToken:5})).rows.length,0);
  assert.equal(s.posts.length,0);
 });
+
+test('DISARM reports protective management while a real held position or order is unresolved',async()=>{
+ const f=await protectiveFixture(false);await exactLease(f.evidence.identity.keyFingerprint);
+ const result=await operateAccountWorker(unboundDeps(),{authenticatedUserId:USER,holderId:'ctrl',action:'DISARM'});
+ assert.equal(result.ok,true);
+ assert.equal(result.reason,'disarmed_protective_management');
+ assert.equal(result.state,'owned');
+ assert.equal((await lease()).state,'owned');
+ assert.equal((await lease()).arm_requested,false);
+ assert.equal(f.posts.length,1,'DISARM never POSTs an order or erases the held position');
+});
+test('DISARM automatically releases a flat owned lease with exact database exposure proof',async()=>{
+ const f=await tradingSession(500,[]);await exactLease(f.evidence.identity.keyFingerprint);
+ const result=await operateAccountWorker(unboundDeps(),{authenticatedUserId:USER,holderId:'ctrl',action:'DISARM'});
+ assert.equal(result.ok,true);
+ assert.equal(result.reason,'disarmed');
+ assert.equal(result.state,'released');
+ assert.equal((await lease()).state,'released');
+ assert.equal((await lease()).arm_requested,false);
+ assert.equal(f.posts.length,0,'lease finalization cannot trade');
+});

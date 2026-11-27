@@ -37,6 +37,8 @@ const readRefusalStages=[
  "exit_recovery_order_digest_mismatch",
  "exit_recovery_order_mismatch",
  "exit_recovery_order_not_unique",
+ "exit_recovery_order_not_found",
+ "exit_recovery_multiple_order_candidates",
  "exit_recovery_order_scope_unproven",
  "exit_recovery_order_time_unproven",
  "exit_recovery_original_position_invalid",
@@ -248,7 +250,11 @@ async function readOutcome(
   if(orders.length===0&&diagnosticSink)diagnosticSink(diagnostic("NOT_FOUND",
    feed.settlements.some(x=>object(x).ticker===input.order.ticker)?"PRESENT_UNVERIFIED":"NOT_FOUND",
    observed===0n?"FLAT_ECHO":"UNVERIFIED"));
-  return fail("exit_recovery_order_not_unique");
+  // Refuse both zero and multiple matches. Emit only a bounded classification
+  // so operators can distinguish unavailable history from duplicate evidence
+  // without logging exchange IDs, credentials or untrusted order payloads.
+  return fail("exit_recovery_order_not_unique",orders.length===0?
+   "exit_recovery_order_not_found":"exit_recovery_multiple_order_candidates");
  }
  const order=orders[0]!;
  // Order history must explicitly echo the requested account scope. Filter

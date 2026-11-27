@@ -77,6 +77,9 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
    ((a.kill_switch===false&&a.execution_enabled===true)||
     (a.kill_switch===true&&a.execution_enabled===false));
  const stopped=killed||released;
+ const protectiveStopping=a.worker_state==='owned'&&a.arm_requested===false&&a.account_kill===false;
+ const protectiveExposure=Number(a.open_positions)>0||Number(a.unresolved_intents)>0||
+  Number(a.pending_exits)>0||String(a.reserved_micros)!=='0';
  const readTime=Date.parse(String(a.reconciled_at??''));
  const fresh=Number.isFinite(readTime)&&readTime<=Date.now()&&Date.now()-readTime<900_000;
  const flat=Number(a.open_positions)===0&&Number(a.unresolved_intents)===0&&Number(a.pending_exits)===0;
@@ -88,12 +91,17 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
   selectionRevision:Number(a.selection_revision??0),currentBotId:botId,
   currentPolicyVerified:policyOk&&selectionValid&&!requiresReauthorization,requiresReauthorization,
   releaseOnlyReauthorization,workerMayBeActive:!stopped,
+  openPositions:Number(a.open_positions),unresolvedIntents:Number(a.unresolved_intents),
+  pendingProtectiveExits:Number(a.pending_exits),
+  protectiveManagementPending:protectiveStopping&&protectiveExposure,
   selectionEnabled:eligible,executionAuthority:'ACCOUNT_OWNER_ONLY' as const,
    reason:eligible?(requiresReauthorization?
     (selectionPolicyChanged?'owner_bot_changed_financial_policy_requires_review':'owner_bot_requires_exact_release_reauthorization'):
     'owner_can_review_strategy_change'):
    !policyOk?'owner_bot_policy_not_approved':!selectionValid?'owner_bot_selection_invalid':
-   !stopped?'owner_bot_worker_not_stopped':a.blocked_reason!==null?'owner_bot_financial_hold':
+    !stopped?(protectiveStopping
+     ?(protectiveExposure?'owner_bot_protective_exposure_pending':'owner_bot_worker_releasing')
+     :'owner_bot_worker_not_stopped'):a.blocked_reason!==null?'owner_bot_financial_hold':
    String(a.reserved_micros)!=='0'?'owner_bot_cash_reserved':!flat?'owner_bot_unresolved_exposure':
    !fresh?'owner_bot_cash_reconciliation_stale':'owner_bot_change_not_ready',
   bots:[{id:CHAMPION_BOT,name:'C52/C53',parameterHash:V13_CHAMPION_PARAMETER_HASH,status:'LIVE_QUALIFIED',description:'Brady original: immutable C52/C53.'},
@@ -196,7 +204,7 @@ export async function prepareOwnerBotChange(
  try{
   const before=await readOwnerBotCatalog(owner,db);
   if(!before.ok)return fail(before.reason);
-  if(before.workerMayBeActive)return fail('bot_worker_must_be_stopped');
+  if(before.workerMayBeActive)return fail(before.reason);
   if(!before.policyHash)return fail('bot_policy_not_approved');
   if(!before.selectionEnabled&&before.reason!=='owner_bot_cash_reconciliation_stale')return fail(before.reason);
   const observed=await reconcile(owner,{confirmation:'RECORD_OWNED_SUBACCOUNT_CASH'});
