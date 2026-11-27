@@ -99,6 +99,8 @@ interface RunningWorker {
   worker: SchedulableWorker;
   state?: AccountDispatchState;
   disarm?: (action: LeaseAction) => Promise<{ entriesBlocked: boolean; managingExposure: boolean }>;
+  heldAfterStop?:boolean;
+  finalizeWhenFlat?:()=>Promise<void>;
 }
 
 /**
@@ -287,9 +289,21 @@ export function createOwnedTradingSupervisor(
           opened.worker.stop();
           return { ok: false, reason: "worker_not_scheduled", workerStarted: false };
         }
-        workers.set(input.accountId, {
-          ownerUserId: input.userId, worker: opened.worker, state: opened.state, disarm: opened.disarm,
-        });
+        const registered:RunningWorker={
+          ownerUserId:input.userId,worker:opened.worker,state:opened.state,disarm:opened.disarm,
+          heldAfterStop:false,
+        };
+        let nextProtectedCheck=0;
+        registered.finalizeWhenFlat=async()=>{
+          if(workers.get(input.accountId)!==registered||!registered.heldAfterStop||closing)return;
+          const time=Date.now();
+          if(time<nextProtectedCheck)return;
+          nextProtectedCheck=time+10_000;
+          // Re-enter exactly the same authenticated STOP path: account lock,
+          // lease lock, signed financial exposure proof, then release if flat.
+          await stopAccount(input.userId,input.accountId,'STOP');
+        };
+        workers.set(input.accountId,registered);
         return closing?{ok:false,reason:'worker_process_shutting_down',workerStarted:false}:
           { ok: true, reason: "worker_scheduled", workerStarted: true };
       });
@@ -1079,7 +1093,15 @@ async function stopOne(
   // KILL already halted or unregistered this worker.
   const keepManaging = action === "STOP" && authority.managingExposure &&
     running.state?.accountKill !== true && running.worker.isScheduled() && workers.get(accountId) === running;
-  if (!keepManaging) running.worker.stop();
+  if(keepManaging){
+    running.heldAfterStop=true;
+    if(running.worker.onTickFinished!==undefined)
+      running.worker.onTickFinished=running.finalizeWhenFlat??null;
+  }else{
+    running.heldAfterStop=false;
+    if(running.worker.onTickFinished!==undefined)running.worker.onTickFinished=null;
+    running.worker.stop();
+  }
   if (running.worker.isScheduled() && !keepManaging) return { workerStopped: false, managingExposure: false };
   const registered = workers.get(accountId);
   // Defense in depth: stale cleanup can never erase a different generation,

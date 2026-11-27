@@ -224,6 +224,8 @@ export interface SchedulableWorker {
   startRecovery(): Promise<void>;
   stop(): void;
   whenIdle?(): Promise<void>;
+  /** Optional protected-stop reconciliation only; not an entry callback. */
+  onTickFinished?:(()=>Promise<void>)|null;
 }
 
 /**
