@@ -56,8 +56,9 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  const requiresReauthorization=Boolean(a.selected_bot&&selectionValid&&
    (a.selected_policy_hash!==a.policy_hash||a.selection_sha!==sha));
  const botId=policyOk&&selectionValid?selected:null;
- const stopped=(a.worker_state===null&&a.kill_switch===true&&!a.execution_enabled)||
-   (['released','killed'].includes(String(a.worker_state))&&a.arm_requested===false);
+ const stopped=(a.worker_state===null&&a.kill_switch===true&&a.execution_enabled===false)||
+   (a.worker_state==='released'&&a.arm_requested===false&&a.account_kill===false)||
+   (a.worker_state==='killed'&&a.arm_requested===false&&a.account_kill===true);
  const readTime=Date.parse(String(a.reconciled_at??''));
  const fresh=Number.isFinite(readTime)&&readTime<=Date.now()&&Date.now()-readTime<900_000;
  const eligible=policyOk&&selectionValid&&stopped&&a.blocked_reason===null&&
@@ -97,7 +98,7 @@ export async function selectOwnedBot(owner:string,raw:unknown,db:Db){
   const row=a[0]!;
   if(row.policy_state!=='APPROVED'||row.policy_hash!==b.expectedPolicyHash||
    row.strategy_parameter_set_id!==CHAMPION_BOT||row.strategy_parameter_hash!==V13_CHAMPION_PARAMETER_HASH||
-   row.blocked_reason!==null||String(row.reserved_micros)!=='0'||row.kill_switch!==true||row.execution_enabled!==false)return error('bot_policy_or_financial_hold');
+   row.blocked_reason!==null||String(row.reserved_micros)!=='0')return error('bot_policy_or_financial_hold');
   const prior=(await tx.query('SELECT * FROM private.strata_owner_bot_selection WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[row.id,owner])).rows;
   if(prior.length>1)return error('bot_selection_ambiguous');
   const s=prior[0],old=s?String(s.bot_id):CHAMPION_BOT,revision=s?Number(s.revision):0;
@@ -107,7 +108,18 @@ export async function selectOwnedBot(owner:string,raw:unknown,db:Db){
   if(revision!==b.expectedRevision)return error('bot_review_changed');
   if(old===bot&&!requiresReauth)return {ok:true as const,reason:'already_selected',botId:bot,selectionRevision:revision,workerStarted:false,ordersSubmitted:false};
   const lease=(await tx.query('SELECT state,arm_requested,account_kill FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1 AND owner_user_id=$2::uuid FOR UPDATE',[row.id,owner])).rows;
-  if(lease.length>1||lease.length===1&&(lease[0]!.arm_requested!==false||!['released','killed'].includes(String(lease[0]!.state))))return error('bot_worker_must_be_stopped');
+  // Ordinary STOP leaves execution eligibility enabled without an owned lease.
+  // Accept only a coherent safely stopped lease/account pair; never clear
+  // unknown exposure or treat a stale owned heartbeat as STOP authority.
+  const safeStopped=lease.length===0
+   ? row.kill_switch===true&&row.execution_enabled===false
+   : lease.length===1&&lease[0]!.arm_requested===false&&(
+      (lease[0]!.state==='released'&&lease[0]!.account_kill===false&&
+       ((row.kill_switch===false&&row.execution_enabled===true)||
+        (row.kill_switch===true&&row.execution_enabled===false)))||
+      (lease[0]!.state==='killed'&&lease[0]!.account_kill===true&&
+       row.kill_switch===true&&row.execution_enabled===false));
+  if(!safeStopped)return error('bot_worker_must_be_stopped');
   const fresh=Date.parse(String(row.reconciled_at??'')),now=Date.now();
   if(!Number.isFinite(fresh)||now-fresh<0||now-fresh>900_000)return error('bot_fresh_cash_reconciliation_required');
   const risk=(await tx.query(`SELECT
