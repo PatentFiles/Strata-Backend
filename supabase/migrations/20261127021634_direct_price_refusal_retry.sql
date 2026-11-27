@@ -1,6 +1,10 @@
 -- Preserve every source/intent. One NEW crossing after a proven pre-intent price
 -- refusal; never a wire retry. Deploy only with the matching qualified binary.
 BEGIN;
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='30s';
+ALTER TABLE public.strata_direct_entry_source ADD COLUMN entry_generation smallint NOT NULL DEFAULT 1 CHECK(entry_generation IN (1,2));
+CREATE UNIQUE INDEX strata_direct_entry_source_generation_unique ON public.strata_direct_entry_source(account_id,crossing_key,entry_generation);
 CREATE TABLE private.strata_direct_price_refusal (
  source_id text PRIMARY KEY,
  account_id text NOT NULL,
@@ -60,7 +64,7 @@ BEGIN
  SELECT * INTO STRICT s FROM public.strata_direct_entry_source WHERE id=NEW.source_id AND account_id=NEW.account_id;
  data:=s.evidence_bytes::jsonb;
  IF data->>'priceRetryProtocol' IS DISTINCT FROM 'PRICE_REFUSAL_V1'
-  OR data->'source'->>'price_retry_of' IS NOT NULL
+  OR s.entry_generation<>1 OR data->'source'->>'price_retry_of' IS NOT NULL
   OR s.crossing_key<>NEW.crossing_key OR s.evidence_sha256<>NEW.source_sha256
   OR data->>'owner' IS DISTINCT FROM NEW.owner_user_id::text
   OR data->'source'->'worker_pin'->>'releaseSha' IS DISTINCT FROM NEW.release_sha
@@ -87,7 +91,7 @@ BEGIN
  PERFORM 1 FROM public.v13_production_account WHERE id=NEW.account_id FOR UPDATE;
  IF NOT FOUND THEN RETURN NULL; END IF;
  SELECT count(*) INTO n FROM (SELECT 1 FROM public.strata_direct_entry_source WHERE account_id=NEW.account_id AND crossing_key=NEW.crossing_key LIMIT 2) q;
- IF n=0 THEN RETURN NEW; END IF;
+ IF n=0 THEN NEW.entry_generation:=1; RETURN NEW; END IF;
  IF n<>1 THEN RETURN NULL; END IF;
  SELECT * INTO STRICT previous FROM public.strata_direct_entry_source WHERE account_id=NEW.account_id AND crossing_key=NEW.crossing_key;
  data:=NEW.evidence_bytes::jsonb;old_data:=previous.evidence_bytes::jsonb;
@@ -107,12 +111,13 @@ BEGIN
     AND r.owner_user_id::text=data->>'owner' AND r.release_sha=data->'source'->'worker_pin'->>'releaseSha'
     AND r.recorded_at<NEW.oldest_source_at)
  THEN RETURN NULL; END IF;
+ NEW.entry_generation:=2;
  RETURN NEW;
 END $$;
 -- Observation uniqueness becomes a guarded two-generation admission. The
 -- FINANCIAL account+crossing uniqueness on v13_production_intent is untouched.
 ALTER TABLE public.strata_direct_entry_source DROP CONSTRAINT strata_direct_entry_source_account_id_crossing_key_key;
-CREATE INDEX strata_direct_entry_source_account_crossing ON public.strata_direct_entry_source(account_id,crossing_key);
+-- The generation unique index also covers the account/crossing lookup.
 CREATE TRIGGER strata_direct_price_source_guard BEFORE INSERT ON public.strata_direct_entry_source
  FOR EACH ROW EXECUTE FUNCTION private.strata_direct_price_source_guard();
 CREATE FUNCTION private.strata_direct_price_intent_guard() RETURNS trigger

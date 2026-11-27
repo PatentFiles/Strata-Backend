@@ -530,12 +530,13 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   }
   await until(async()=>submitted.length===1&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)>0,describe);
   if(priceRetry){
-   const sources=(await setup.query('SELECT id,evidence_bytes::jsonb AS evidence FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2 ORDER BY observed_at',[account,successor])).rows;
-   assert.equal(sources.length,2);assert.equal(sources[1].evidence.source.price_retry_of,sources[0].id);
+   const sources=(await setup.query('SELECT id,entry_generation,evidence_bytes::jsonb AS evidence FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2 ORDER BY observed_at',[account,successor])).rows;
+   assert.equal(sources.length,2);assert.deepEqual(sources.map(s=>s.entry_generation),[1,2]);assert.equal(sources[1].evidence.source.price_retry_of,sources[0].id);
    // Direct database replay/third-candidate attempts remain refused even for a
    // privileged fixture caller. Financial uniqueness is still the original index.
-   const third=await setup.query('INSERT INTO public.strata_direct_entry_source SELECT $2,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256 FROM public.strata_direct_entry_source WHERE id=$1 RETURNING id',[sources[1].id,randomUUID()]);
+   const third=await setup.query('INSERT INTO public.strata_direct_entry_source(id,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256) SELECT $2,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256 FROM public.strata_direct_entry_source WHERE id=$1 RETURNING id',[sources[1].id,randomUUID()]);
    assert.equal(third.rows.length,0);
+   assert.equal((await setup.query("SELECT i.indisunique AND i.indisvalid AS ready FROM pg_index i WHERE i.indexrelid=to_regclass('public.strata_direct_entry_source_generation_unique')")).rows[0].ready,true);
    // Retiring a source is enforced at the intent boundary even if an old caller
    // tries to reserve it directly. The failed statement cannot produce an order.
    await assert.rejects(setup.query("INSERT INTO public.v13_production_intent SELECT (jsonb_populate_record(NULL::public.v13_production_intent,to_jsonb(i)||jsonb_build_object('id',$3::text,'client_order_id',$4::text,'direct_source_id',$2::text))).* FROM public.v13_production_intent i WHERE i.account_id=$1 AND i.market=$5 AND i.kind='ENTRY'",[account,sources[0].id,randomUUID(),'v13p-'+randomUUID(),successor]),/direct_price_refused_source_retired/);
