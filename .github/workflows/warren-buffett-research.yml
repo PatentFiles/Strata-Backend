@@ -26,7 +26,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Compile exact backend and invariant-preserving strategy
-        run: pnpm --filter @workspace/api-server typecheck
+        run: pnpm run typecheck
       - name: Verify variant model and source proofs
         run: pnpm --filter @workspace/api-server test:warren-buffett
       - name: Install isolated PostgreSQL 16 binaries
