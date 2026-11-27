@@ -5,7 +5,7 @@ const owner='10000000-0000-4000-8000-000000000001';
 const policyHash='a'.repeat(64),sha='b'.repeat(40);
 const row={id:'synthetic-owned-account',policy_state:'APPROVED',policy_hash:policyHash,
  strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
- worker_state:'released',arm_requested:false,kill_switch:true,execution_enabled:false,
+ worker_state:'released',arm_requested:false,account_kill:false,kill_switch:false,execution_enabled:true,
  blocked_reason:null,reserved_micros:'0',reconciled_at:new Date(),selected_bot:null,selection_revision:null};
 const db=(rows:Record<string,unknown>[])=>( {query:async(sql:string,args?:unknown[])=>{
  assert.match(sql,/owner_user_id/);assert.deepEqual(args,[owner]);
@@ -19,7 +19,9 @@ test('original champion identity stays owner scoped and selectable only when sto
 });
 test('a running worker, old cash or missing approval cannot save strategy',async()=>{
  for(const patch of [{worker_state:'owned',arm_requested:true},{blocked_reason:'hold'},
-  {reconciled_at:new Date(0)},{policy_state:'DRAFT'},{strategy_parameter_hash:'f'.repeat(64)}]){
+  {reconciled_at:new Date(0)},{policy_state:'DRAFT'},{strategy_parameter_hash:'f'.repeat(64)},
+   {worker_state:'released',arm_requested:false,account_kill:true},
+   {worker_state:'killed',account_kill:true,kill_switch:false,execution_enabled:true}]){
   const r=await readOwnerBotCatalog(owner,db([{...row,...patch}]));
   assert.equal(r.ok,true);if(r.ok)assert.equal(r.selectionEnabled,false);
  }
