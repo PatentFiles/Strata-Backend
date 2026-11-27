@@ -1,3 +1,4 @@
+import {observePrepareRead,PrepareReadCapture} from './prepareReadTiming';
 import {captureEconomicProtectiveEvidence} from '../strata/economicExitProtectiveEvidence';
 import {economicExitFinalityEnabled} from '../strata/economicExitDischargeScope';
 import {readEconomicRuntimeEvidence} from '../strata/economicExitRuntimeEvidence';
@@ -253,11 +254,11 @@ export class ProductionExecutor {
     if(!economicExitFinalityEnabled()||!this.#economicReconciledSnapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return undefined;
     return captureEconomicProtectiveEvidence({ownerId:this.accountOwnerUserId,accountId:this.ledger.accountId,clientId},this.#economicReconciledSnapshot);
   }
-  private async economicUnknownProof(tx:PoolClient,a:Account,currentIntentId:string|null,snapshot=this.#economicReconciledSnapshot){
+  private async economicUnknownProof(tx:PoolClient,a:Account,currentIntentId:string|null,snapshot=this.#economicReconciledSnapshot,prepareReads?:PrepareReadCapture){
     if(!economicExitFinalityEnabled()||!snapshot||!this.accountOwnerUserId||this.exchange.mode!=="LIVE")return null;
-    return readEconomicRuntimeEvidence(tx,{account:a,ownerId:this.accountOwnerUserId,snapshot,nowMs:this.now(),currentIntentId});
+    return readEconomicRuntimeEvidence(tx,{account:a,ownerId:this.accountOwnerUserId,snapshot,nowMs:this.now(),currentIntentId},prepareReads);
   }
-  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false, allowEconomicProof=true): Promise<void> {
+  async gate(tx: PoolClient, a: Account, allowBlockedExit = false, ignoreIntentId: string | null = null, lifecycle = false, allowEconomicProof=true,prepareReads?:PrepareReadCapture): Promise<void> {
     requireProof(a.commissioned && !a.kill_switch && a.execution_enabled &&
       /^[0-9a-f]{64}$/.test(a.commissioning_digest ?? "") &&
       Number(a.subaccount) === 1 && Number(a.exchange_index) === 2, "production_authority_disabled_or_uncommissioned");
@@ -268,16 +269,16 @@ export class ProductionExecutor {
       this.now() - a.reconciled_at.getTime() <= 15_000, "production_reconciliation_stale");
     // Preserve each gate boundary and refusal order. Only its independent
     // non-locking reads are batched; locked policy decoding remains separate.
-    let ownedGate = this.accountOwnerUserId ? (await tx.query(OWNED_GATE_READ_SQL,
-      [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId])).rows[0] : null;
+    let ownedGate = this.accountOwnerUserId ? (await observePrepareRead(prepareReads,'initial_authority',()=>tx.query(OWNED_GATE_READ_SQL,
+      [a.id,ignoreIntentId,lifecycle,this.accountOwnerUserId]))).rows[0] : null;
     if(ownedGate?.has_uncertain_order===true&&!lifecycle&&allowEconomicProof){
-      const proof=await this.economicUnknownProof(tx,a,ignoreIntentId);
+      const proof=await this.economicUnknownProof(tx,a,ignoreIntentId,undefined,prepareReads);
       if(proof){
-        const remaining=(await tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)",[a.id,ignoreIntentId])).rows;
+        const remaining=(await observePrepareRead(prepareReads,'remaining_ids',()=>tx.query("SELECT id FROM v13_production_intent WHERE account_id=$1 AND state IN ('DISPATCHED','UNKNOWN') AND ($2::text IS NULL OR id<>$2)",[a.id,ignoreIntentId]))).rows;
         if(remaining.length>0&&remaining.every(r=>proof.exitIds.includes(r.id))){
           // lifecycle=true is only the original SQL projection here. The caller
           // remains a normal order gate and still enforces every authority below.
-          const facts=(await tx.query(OWNED_GATE_READ_SQL,[a.id,ignoreIntentId,true,this.accountOwnerUserId])).rows[0];
+          const facts=(await observePrepareRead(prepareReads,'rechecked_authority',()=>tx.query(OWNED_GATE_READ_SQL,[a.id,ignoreIntentId,true,this.accountOwnerUserId]))).rows[0];
           if(facts)ownedGate={...facts,has_uncertain_order:false};
         }
       }
@@ -353,11 +354,12 @@ export class ProductionExecutor {
   async prepareEntry(evaluationId: string): Promise<string> {
     this.assertEntrySourceAvailable();
     const done=this.startTiming("prepare_entry",{evaluationId});
-    const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings} = {subtimings:new ExecutionSubtimings()};
-    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true)});return id;}
-    catch(error){done("rejected",{error,entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(false)});throw error;}
+    const diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings;prepareReads?:PrepareReadCapture} = {subtimings:new ExecutionSubtimings(),
+      prepareReads:this.timingObserver&&this.#directSource&&this.accountOwnerUserId&&this.exchange.mode==="LIVE"?new PrepareReadCapture():undefined};
+    try{const id=await this.prepareEntryMeasured(evaluationId, diagnostics);done("completed",{entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(true),prepareReadTiming:diagnostics.prepareReads?.snapshot(false)});return id;}
+    catch(error){done("rejected",{error,entryPrice:diagnostics.price,entrySizing:diagnostics.sizing,substageTimings:diagnostics.subtimings.snapshot(false),prepareReadTiming:diagnostics.prepareReads?.snapshot(true)});throw error;}
   }
-  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings}): Promise<string> {
+  private async prepareEntryMeasured(evaluationId: string, diagnostics: {price?: EntryPriceDiagnostics;sizing?:EntrySizingDiagnostics;subtimings:ExecutionSubtimings;prepareReads?:PrepareReadCapture}): Promise<string> {
     const subtimings=diagnostics.subtimings;subtimings.mark("source_read_and_validation");
     const direct=this.#directSource;
     if(direct)this.assertDirectBinding(direct);
@@ -422,9 +424,9 @@ export class ProductionExecutor {
       let handoff:PreparedPublicHandoff|null=null;
       const result=await this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
-      const prior = await tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
+      const prior = await observePrepareRead(diagnostics.prepareReads,'duplicate_lookup',()=>tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]));
       if (prior.rows.length) {this.assertIntentSourceKind(prior.rows[0]!);return prior.rows[0]!.id;} // duplicate event: no new reservation/capability
-      await this.gate(tx, a);
+      await observePrepareRead(diagnostics.prepareReads,'authority_gate',()=>this.gate(tx,a,false,null,false,true,diagnostics.prepareReads));
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
       const sourcePolicy = source.entry_policy_version ?? V13_LEGACY_ENTRY_POLICY;
@@ -528,7 +530,7 @@ export class ProductionExecutor {
           btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms})};
       }
       return id;
-      });
+      },diagnostics.prepareReads?{prepareReads:diagnostics.prepareReads}:undefined);
       if(handoff)this.#preparedPublic=handoff;
       return result;
     };

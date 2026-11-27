@@ -1,3 +1,4 @@
+import type {PrepareReadCapture} from '../v13-production/prepareReadTiming';
 import {canonical,digest,money,requireProof,type Snapshot} from '../v13-production/types';
 import type {Account} from '../v13-production/ledger';
 import {economicExitFinalityEnabled,readEconomicExitDischarges,assertNoEconomicExitContradiction} from './economicExitDischargeScope';
@@ -39,8 +40,8 @@ export function verifyEconomicRuntimeEvidence(rows:Row[],scope:Scope){
  return Object.freeze({exitIds:Object.freeze(ids.sort()),receiptDigest:digest(rows.map(d=>({id:d.request_id,digest:d.payload_digest}))),observedAtMs:s.observedAtMs});
 }
 /** Caller holds the account lock. Immutable receipts need no UPDATE privilege. */
-export async function readEconomicRuntimeEvidence(db:Query,scope:Scope){
+export async function readEconomicRuntimeEvidence(db:Query,scope:Scope,prepareReads?:PrepareReadCapture){
  if(!economicExitFinalityEnabled())return null;
- const rows=await readEconomicExitDischarges(db,scope.account.id,true);
+ const rows=await readEconomicExitDischarges(db,scope.account.id,true,false,prepareReads);
  return rows.length?verifyEconomicRuntimeEvidence(rows,scope):null;
 }
