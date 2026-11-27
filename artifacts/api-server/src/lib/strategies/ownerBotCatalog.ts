@@ -38,6 +38,11 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  let rows:Record<string,unknown>[];
  try{rows=(await db.query(`SELECT a.id,a.kill_switch,a.execution_enabled,a.blocked_reason,a.reserved_micros::text,
  a.reconciled_at,a.policy_id,p.state policy_state,p.policy_hash,p.strategy_parameter_set_id,p.strategy_parameter_hash,
+ (SELECT count(*)::int FROM public.v13_production_position x WHERE x.account_id=a.id AND x.quantity_hundredths<>0) open_positions,
+ (SELECT count(*)::int FROM public.v13_production_intent i WHERE i.account_id=a.id AND
+  (i.terminal IS DISTINCT FROM TRUE OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0)) unresolved_intents,
+ (SELECT count(*)::int FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=a.id AND
+  x.state IN ('PREPARED','DISPATCHED','UNKNOWN')) pending_exits,
  w.state worker_state,w.arm_requested,w.account_kill,
  s.bot_id selected_bot,s.bot_fingerprint selected_fingerprint,s.policy_hash selected_policy_hash,
  s.release_sha selection_sha,s.revision selection_revision
@@ -67,15 +72,20 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  const stopped=killed||released;
  const readTime=Date.parse(String(a.reconciled_at??''));
  const fresh=Number.isFinite(readTime)&&readTime<=Date.now()&&Date.now()-readTime<900_000;
+ const flat=Number(a.open_positions)===0&&Number(a.unresolved_intents)===0&&Number(a.pending_exits)===0;
  const eligible=policyOk&&selectionValid&&stopped&&a.blocked_reason===null&&
-  String(a.reserved_micros)==='0'&&fresh;
+  String(a.reserved_micros)==='0'&&flat&&fresh;
  const warrenLive=qualifiedWarrenRelease(sha);
  return {ok:true as const,version:'OWNER_BOT_CATALOG_V2' as const,accountId:String(a.id),
   releaseSha:sha,policyHash:policyOk?String(a.policy_hash):null,
   selectionRevision:Number(a.selection_revision??0),currentBotId:botId,
   currentPolicyVerified:policyOk&&selectionValid&&!requiresReauthorization,requiresReauthorization,workerMayBeActive:!stopped,
   selectionEnabled:eligible,executionAuthority:'ACCOUNT_OWNER_ONLY' as const,
-  reason:requiresReauthorization?'owner_bot_requires_exact_release_reauthorization':eligible?'owner_can_review_strategy_change':'stop_reconcile_and_complete_owner_setup',
+  reason:eligible?(requiresReauthorization?'owner_bot_requires_exact_release_reauthorization':'owner_can_review_strategy_change'):
+   !policyOk?'owner_bot_policy_not_approved':!selectionValid?'owner_bot_selection_invalid':
+   !stopped?'owner_bot_worker_not_stopped':a.blocked_reason!==null?'owner_bot_financial_hold':
+   String(a.reserved_micros)!=='0'?'owner_bot_cash_reserved':!flat?'owner_bot_unresolved_exposure':
+   !fresh?'owner_bot_cash_reconciliation_stale':'owner_bot_change_not_ready',
   bots:[{id:CHAMPION_BOT,name:'C52/C53',parameterHash:V13_CHAMPION_PARAMETER_HASH,status:'LIVE_QUALIFIED',description:'Brady original: immutable C52/C53.'},
   {id:WARREN_BOT,name:'Warren Buffett',parameterHash:WARREN_BOT_HASH,status:warrenLive?'LIVE_QUALIFIED':'RESEARCH_ONLY',description:'15-second delayed-cross confirmation; original fees, price ceilings and exits.'}]};
 }
@@ -157,4 +167,36 @@ export async function selectOwnedBot(owner:string,raw:unknown,db:Db){
   return {ok:true as const,reason:'bot_selected_requires_new_arm',botId:bot,selectionRevision:newRevision,workerStarted:false,ordersSubmitted:false};
  }catch{return error(commitAttempted?'bot_selection_commit_uncertain_read_outcome':'bot_selection_not_recorded');}
  finally{if(tx){if(!committed&&!commitAttempted)try{await tx.query('ROLLBACK');}catch{/* never retry uncertain transaction */}tx.release(commitAttempted&&!committed?Error('uncertain_bot_selection_commit'):undefined);}}
+}
+
+
+/** Shared for DISARM maintenance and owner-requested change preparation.
+ * Signed Kalshi balance evidence is fetched only via the existing no-transfer
+ * reconciliation port; no strategy, account control, exposure or policy is mutated.
+ * This routine cannot release a hold or make an unsafe state look stopped. */
+export async function prepareOwnerBotChange(
+ owner:string,raw:unknown,db:Q,
+ reconcile:(owner:string,body:{confirmation:string})=>Promise<{ok:boolean;reason:string}>,
+){
+ const fail=(reason:string)=>({ok:false as const,reason,workerStarted:false as const,ordersSubmitted:false as const,transferAttempted:false as const});
+ if(!UUID.test(owner)||!raw||typeof raw!=='object'||Array.isArray(raw)||
+  Object.keys(raw as Record<string,unknown>).join(',')!=='confirmation'||
+  (raw as Record<string,unknown>).confirmation!=='PREPARE_STOPPED_OWNER_BOT_CHANGE_V1')
+  return fail('owner_change_confirmation_required');
+ try{
+  const before=await readOwnerBotCatalog(owner,db);
+  if(!before.ok)return fail(before.reason);
+  if(before.workerMayBeActive)return fail('bot_worker_must_be_stopped');
+  if(!before.policyHash)return fail('bot_policy_not_approved');
+  if(!before.selectionEnabled&&before.reason!=='owner_bot_cash_reconciliation_stale')return fail(before.reason);
+  const observed=await reconcile(owner,{confirmation:'RECORD_OWNED_SUBACCOUNT_CASH'});
+  if(!observed.ok)return fail(observed.reason);
+  const after=await readOwnerBotCatalog(owner,db);
+  if(!after.ok||after.accountId!==before.accountId||after.policyHash!==before.policyHash||
+     after.selectionRevision!==before.selectionRevision||after.currentBotId!==before.currentBotId||
+     after.workerMayBeActive||!after.selectionEnabled)
+   return fail(after.ok?after.reason:'bot_change_readback_unverified');
+  return {ok:true as const,reason:'bot_change_cash_reconciled',catalog:after,
+   workerStarted:false as const,ordersSubmitted:false as const,transferAttempted:false as const};
+ }catch{return fail('bot_change_preparation_unavailable');}
 }
