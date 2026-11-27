@@ -11,6 +11,9 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "start:paper": "node --enable-source-maps ./dist/paperWorkerMain.mjs",
+    "start:telemetry-archive": "node --enable-source-maps ./dist/telemetryArchiveWorkerMain.mjs",
+    "test:telemetry-archive-unit": "esbuild src/lib/telemetryArchive/archiveUnit.test.ts --bundle --platform=node --format=cjs --outfile=dist/telemetry-archive-unit.test.cjs --external:pg-native && node --test dist/telemetry-archive-unit.test.cjs",
+    "test:telemetry-archive-native": "node scripts/run-v13-disposable-postgres.mjs --telemetry-archive",
     "test:paper-process-boundary": "node --test scripts/paperProcessBoundary.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "esbuild src/routes/history.integration.test.ts --bundle --platform=node --format=cjs --outfile=dist/history.integration.test.cjs --external:pg-native --external:drizzle-orm --external:drizzle-orm/* --external:express --external:@clerk/express && node --test dist/history.integration.test.cjs && pnpm run test:forward-test",
@@ -126,6 +129,7 @@
     "test:warren-buffett-native": "node scripts/run-v13-disposable-postgres.mjs src/lib/strategies/ownerBotSelection.postgres.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1179.0",
     "@clerk/express": "^2.1.69",
     "@clerk/shared": "^4.33.0",
     "@workspace/api-zod": "workspace:*",
@@ -138,6 +142,7 @@
     "http-proxy-middleware": "^4.2.0",
     "jose": "^6.2.12",
     "pdfjs-dist": "^6.3.289",
+    "pg": "8.23.0",
     "pino": "^9.14.0",
     "pino-http": "^10.5.0"
   },
@@ -146,6 +151,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "catalog:",
+    "@types/pg": "8.23.1",
     "esbuild": "0.28.2",
     "esbuild-plugin-pino": "^2.3.3",
     "pino-pretty": "^13.1.3",

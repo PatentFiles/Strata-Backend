@@ -19,8 +19,12 @@ import {activatePaperFreeApiRuntime} from "./lib/strata/deployedGitSha";
 import {pool} from '@workspace/db';
 import {personalTradingSession} from './lib/strata/sharedPersonalTradingControls';
 import {flushLiveDecisionAnalytics} from './lib/v13-production/liveDecisionAnalytics';
+import {startTelemetryCaptureHeartbeat} from './lib/telemetryArchive/captureHeartbeat';
 import {createRuntimeShutdown} from './lib/runtimeShutdown';
 activatePaperFreeApiRuntime();
+// Archive/capture monitoring is advisory, disabled by default, and has its own
+// connection pool so a slow observer never consumes an order-critical client.
+const telemetryCaptureHeartbeat=startTelemetryCaptureHeartbeat();
 
 const rawPort = process.env["PORT"];
 
@@ -97,7 +101,8 @@ const server=app.listen(port, "0.0.0.0", (err) => {
 const shutdown=createRuntimeShutdown({
  closeHttp:()=>new Promise<void>((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeIdleConnections();}),
  quiesce:()=>personalTradingSession.quiesce?.()??Promise.resolve({stopped:false,managingExposure:false}),
- flush:()=>flushLiveDecisionAnalytics(5000),closePool:()=>pool.end(),
+ flush:()=>flushLiveDecisionAnalytics(5000),
+ closePool:async()=>{await telemetryCaptureHeartbeat.stop();await pool.end();},
  report:reason=>logger.info({reason},'Backend process drain'),exit:code=>process.exit(code),
 });
 process.once('SIGTERM',()=>{void shutdown();});
