@@ -400,10 +400,11 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
  }
 }
 
-export async function runEconomicDischargeFullCycle(){
+export async function runEconomicDischargeFullCycle(priceRetry=false){
  const setup=new NativePool({connectionString:url!,max:2});
  const controls:PersonalSessionControl[]=[];let control:PersonalSessionControl|undefined;
  const at=Date.now();let btc=99990,cash=0,qty=0,reads=0;
+ let priceRefusal=priceRetry,entryBookReads=0;
  const ticker=request.market, orders:Record<string,unknown>[]=[],fills:Record<string,unknown>[]=[];
  const submitted:Array<{id:string;reduce:boolean;count:number}>=[],httpErrors:string[]=[];
  const open=new Date(at-90000).toISOString(),close=new Date(at+810000).toISOString();
@@ -459,7 +460,7 @@ export async function runEconomicDischargeFullCycle(){
    if(path==='/trade-api/v2/portfolio/positions')return respond({market_positions:submitted.length?[{ticker:successor,
     position_fp:(qty/100).toFixed(2),subaccount_number:1,exchange_index:2}]:[],cursor:''});
    if(path==='/trade-api/v2/portfolio/settlements')return respond({settlements:[held.rawSettlement],cursor:''});
-   if(path.endsWith('/orderbook')){const resp=respond({orderbook_fp:{yes_dollars:[['0.5000','100.00']],no_dollars:[['0.5000','100.00']]}});Object.defineProperty(resp,'url',{value:u.href});return resp;}
+   if(path.endsWith('/orderbook')){entryBookReads++;const noBid=priceRefusal&&entryBookReads>1?'0.4800':'0.5000';const resp=respond({orderbook_fp:{yes_dollars:[['0.5000','100.00']],no_dollars:[[noBid,'100.00']]}});Object.defineProperty(resp,'url',{value:u.href});return resp;}
    if(path==='/trade-api/v2/markets')return respond({markets:[market],cursor:''});
    if(path==='/trade-api/v2/markets/'+successor)return respond({market});
    if(path==='/trade-api/v2/series/KXBTC15M')return respond({series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:'1'}});
@@ -475,7 +476,15 @@ export async function runEconomicDischargeFullCycle(){
   await installCombinedPlatformShape(setup);
   for(const migration of ['20261125205247_owner_arm_preparation','20261126004500_economic_settlement_receipt','20261126113609_economic_exit_obligation_discharge'])
    await setup.query(readFileSync('../../supabase/migrations/'+migration+'.sql','utf8'));
+  if(priceRetry){
+   await setup.query("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_api_runtime') THEN CREATE ROLE strata_api_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='strata_paper_runtime') THEN CREATE ROLE strata_paper_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT USAGE ON SCHEMA private TO strata_api_runtime");
+   await setup.query(readFileSync('../../supabase/migrations/20261127021634_direct_price_refusal_retry.sql','utf8'));
+   const privileges=(await setup.query("SELECT has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','SELECT') api_read,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','INSERT') api_insert,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','UPDATE') api_update,has_table_privilege('strata_api_runtime','private.strata_direct_price_refusal','DELETE') api_delete,has_table_privilege('anon','private.strata_direct_price_refusal','SELECT') anon_read,has_table_privilege('authenticated','private.strata_direct_price_refusal','INSERT') browser_insert,has_table_privilege('strata_paper_runtime','private.strata_direct_price_refusal','SELECT') paper_read")).rows[0];
+   assert.deepEqual(privileges,{api_read:true,api_insert:true,api_update:false,api_delete:false,anon_read:false,browser_insert:false,paper_read:false});
+   const access=await setup.connect();try{await access.query('SET ROLE strata_api_runtime');assert.equal((await access.query('SELECT count(*)::int n FROM private.strata_direct_price_refusal')).rows[0].n,0);await assert.rejects(access.query('DELETE FROM private.strata_direct_price_refusal'),{code:'42501'});}finally{await access.query('RESET ROLE');access.release();}
+  }
   Object.assign(process.env,{NODE_ENV:'production',RAILWAY_GIT_COMMIT_SHA:sha,
+   ...(priceRetry?{STRATA_DIRECT_PRICE_RETRY_V1_SHA:sha}:{}),
    STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE:'true',STRATA_ECONOMIC_EXIT_FINALITY_ENABLED:'true',
    STRATA_INDEPENDENT_LIVE_SOURCE_V1:'true',
    STRATA_INDEPENDENT_LIVE_SOURCE_V1_SCOPES:JSON.stringify([{ownerId:owner,accountId:account,releaseSha:sha}])});
@@ -496,8 +505,45 @@ export async function runEconomicDischargeFullCycle(){
    account:(await setup.query("SELECT blocked_reason,cash_micros,reserved_micros FROM public.v13_production_account WHERE id=$1",[account])).rows,
    decisions:(await setup.query("SELECT stage,outcome,reason_code FROM private.strata_live_decision_log_v1 WHERE execution_account_id=$1 ORDER BY observed_at DESC LIMIT 8",[account])).rows,
    intents:(await setup.query('SELECT state,kind FROM public.v13_production_intent WHERE account_id=$1',[account])).rows});
-  await until(async()=>reads>=1,describe);await pause(250);btc=100020;
+  await until(async()=>reads>=1,describe);await pause(250);entryBookReads=0;btc=100020;
+  if(priceRetry){
+   await until(async()=>(await setup.query('SELECT count(*)::int n FROM private.strata_direct_price_refusal WHERE account_id=$1',[account])).rows[0].n===1,describe);
+   assert.equal(submitted.length,0,'rejected price must create no order');
+   assert.equal((await setup.query('SELECT count(*)::int n FROM public.v13_production_intent WHERE account_id=$1 AND market=$2',[account,successor])).rows[0].n,0);
+   assert.equal((await setup.query('SELECT reserved_micros FROM public.v13_production_account WHERE id=$1',[account])).rows[0].reserved_micros,'0');
+   const receipt=(await setup.query('SELECT * FROM private.strata_direct_price_refusal WHERE account_id=$1',[account])).rows[0];
+   assert.equal(receipt.reference_micros,'500000');assert.equal(receipt.best_ask_micros,'520000');
+   await assert.rejects(setup.query('UPDATE private.strata_direct_price_refusal SET reason=reason WHERE source_id=$1',[receipt.source_id]),/direct_price_refusal_immutable/);
+   await assert.rejects(setup.query('DELETE FROM private.strata_direct_price_refusal WHERE source_id=$1',[receipt.source_id]),/direct_price_refusal_immutable/);
+   // A second observation without a new cross cannot reuse the refused source.
+   const steady=reads;await until(async()=>reads>=steady+2,describe);assert.equal(submitted.length,0);
+   const rowsBefore=(await setup.query('SELECT count(*)::int n FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2',[account,successor])).rows[0].n;
+   assert.equal(rowsBefore,1);
+   // Forward-safe rollback: disabling replacement admission preserves the receipt
+   // and refuses even a new crossing. No historical row is removed or modified.
+   delete process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA;
+   priceRefusal=false;btc=99990;let before=reads;await until(async()=>reads>=before+2,describe);btc=100020;
+   before=reads;await until(async()=>reads>=before+2,describe);assert.equal(submitted.length,0);
+   assert.equal((await setup.query('SELECT count(*)::int n FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2',[account,successor])).rows[0].n,1);
+   process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA=sha;
+   btc=99990;before=reads;await until(async()=>reads>=before+2,describe);btc=100020;
+  }
   await until(async()=>submitted.length===1&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)>0,describe);
+  if(priceRetry){
+   const sources=(await setup.query('SELECT id,entry_generation,evidence_bytes::jsonb AS evidence FROM public.strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2 ORDER BY observed_at',[account,successor])).rows;
+   assert.equal(sources.length,2);assert.deepEqual(sources.map(s=>s.entry_generation),[1,2]);assert.equal(sources[1].evidence.source.price_retry_of,sources[0].id);
+   // Direct database replay/third-candidate attempts remain refused even for a
+   // privileged fixture caller. Financial uniqueness is still the original index.
+   const third=await setup.query('INSERT INTO public.strata_direct_entry_source(id,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256) SELECT $2,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256 FROM public.strata_direct_entry_source WHERE id=$1 RETURNING id',[sources[1].id,randomUUID()]);
+   assert.equal(third.rows.length,0);
+   assert.equal((await setup.query("SELECT i.indisunique AND i.indisvalid AS ready FROM pg_index i WHERE i.indexrelid=to_regclass('public.strata_direct_entry_source_generation_unique')")).rows[0].ready,true);
+   // Retiring a source is enforced at the intent boundary even if an old caller
+   // tries to reserve it directly. The failed statement cannot produce an order.
+   await assert.rejects(setup.query("INSERT INTO public.v13_production_intent SELECT (jsonb_populate_record(NULL::public.v13_production_intent,to_jsonb(i)||jsonb_build_object('id',$3::text,'client_order_id',$4::text,'direct_source_id',$2::text))).* FROM public.v13_production_intent i WHERE i.account_id=$1 AND i.market=$5 AND i.kind='ENTRY'",[account,sources[0].id,randomUUID(),'v13p-'+randomUUID(),successor]),/direct_price_refused_source_retired/);
+   const index=(await setup.query("SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='v13_production_crossing_unique'")).rows;
+   assert.equal(index.length,1);assert.match(index[0].indexdef,/UNIQUE/);
+   assert.equal((await setup.query("SELECT count(*)::int n FROM public.v13_production_intent WHERE account_id=$1 AND market=$2 AND kind='ENTRY'",[account,successor])).rows[0].n,1);
+  }
   btc=99980;
   await until(async()=>submitted.length===2&&Number((await setup.query("SELECT coalesce(sum(quantity_hundredths),0) AS qty FROM public.v13_production_position WHERE account_id=$1",[account])).rows[0].qty)===0,describe);
   assert.deepEqual(submitted.map(x=>x.reduce),[false,true]);assert.equal(submitted[0]!.count,submitted[1]!.count);

@@ -33,10 +33,12 @@ const code=/^[a-z][a-z0-9_]{0,127}$/;
 const numberOrNull=(n:unknown)=>typeof n==="number"&&Number.isFinite(n)?n:null;
 const positiveInt=(n:unknown)=>typeof n==="number"&&Number.isSafeInteger(n)&&n>0&&n<=2147483647?n:null;
 const text=(v:unknown,max:number)=>typeof v==="string"&&v.length>0&&v.length<=max?v:null;
-const observedKeys=new Set(["btcPrice","target","distance","previousBuffer","velocity","separation","upOffer","downOffer","entryOffer","candidateOffer","marketOpenMs","marketCloseMs","btcProviderAgeMs","btcReceiveAgeMs","marketAgeMs","freshCross","qualifyingTrigger","continuous","needsEntryPrice","sourceObservationAtMs"]);
+const observedKeys=new Set(["btcPrice","target","distance","previousBuffer","velocity","separation","upOffer","downOffer","entryOffer","candidateOffer","marketOpenMs","marketCloseMs","btcProviderAgeMs","btcReceiveAgeMs","marketAgeMs","freshCross","qualifyingTrigger","continuous","needsEntryPrice","sourceObservationAtMs","targetReadiness"]);
 /** Fixed code-owned error categories only. Never persist arbitrary exception text. */
 export function liveAnalyticsFailure(error:unknown):string{
  const m=error instanceof Error?error.message:"";
+ // Preserve this fixed, non-sensitive refusal instead of hiding price protection.
+ if(m==="live_money_best_ask_above_signal_ceiling")return m;
  return /^(?:direct_entry_|direct_live_|production_|personal_exchange_|entry_|account_|stale_worker_|durable_fee_)[a-z0-9_]{1,96}$/.test(m)?m:"live_evaluation_or_execution_failed";
 }
 export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
@@ -48,6 +50,10 @@ export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
  const facts:Record<string,unknown>={};
  for(const [k,v] of Object.entries(input.facts??{})){
   if(!observedKeys.has(k))continue;
+  if(k==='targetReadiness'){
+   if(typeof v==='string'&&['ready','waiting','invalid','unavailable'].includes(v))facts[k]=v;
+   continue;
+  }
   facts[k]=typeof v==="boolean"?v:numberOrNull(v);
  }
  return {id:randomUUID(),execution_account_id:input.accountId,owner_user_id:input.ownerId,

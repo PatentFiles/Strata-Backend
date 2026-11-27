@@ -16,6 +16,8 @@ export type BtcObservation = {
 export type MarketObservation = {
   ticker: string;
   target: number | null;
+  /** Exact response status; absence is not malformed data or a substitute target. */
+  targetStatus?: "ready" | "pending" | "invalid";
   startsAt: Date | null;
   endsAt: Date | null;
   yesBid: number | null;
@@ -116,9 +118,11 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
   const noPrice = noBid !== null && noAsk !== null
     ? (noBid + noAsk) / 2 : noAsk ?? noBid ?? (yesPrice === null ? null : 1 - yesPrice);
   const result = firstString(market, ["result", "settlement_result"]);
+  const strike=marketStrikeEvidence(market);
   return {
     ticker,
     target: targetOf(market),
+    targetStatus: strike.valid ? "ready" : strike.fields.every(f=>f.type==="null"||f.type==="missing") ? "pending" : "invalid",
     startsAt: date(firstString(market, ["open_time", "openTime"])),
     endsAt: date(firstString(market, ["close_time", "closeTime", "expiration_time", "expirationTime"])),
     yesBid,
