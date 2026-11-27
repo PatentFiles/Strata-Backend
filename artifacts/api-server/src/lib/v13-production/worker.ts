@@ -154,7 +154,11 @@ export class ProductionWorker {
           return;
         }
         this.entryHoldReported=false;
-        const id=await this.executor.captureIndependentEntry();
+        const prefetch=this.executor.prefetchDirectPublicMetadata;
+        const id=await this.executor.captureIndependentEntry(prefetch?hint=>{
+          if(!this.metadataAttempt&&this.lifecycle===tickLifecycle&&this.entriesOpen())
+            this.metadataAttempt=prefetch(hint);
+        }:undefined);
         if(!id)return;
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_after_observation",id);return;}
         let intent:string;
@@ -336,6 +340,16 @@ export class ProductionWorker {
       try { await this.tick(origin); } catch (error) {
         if (!current()) return;
         this.report(error);
+        if(error instanceof Error && error.message==='personal_exchange_history_unreconciled' &&
+          this.executor.exchange?.mode==='LIVE' && this.executor.accountOwnerUserId) {
+          // Observation counters alone do not cover post-submission failures.
+          // Persist a separate runtime error; it is NOT another signal or order.
+          try { enqueueLiveDecision({accountId:this.executor.ledger.accountId,
+            ownerId:this.executor.accountOwnerUserId,releaseSha:deployedGitSha(),observedAtMs:Date.now(),
+            stage:'ENTRY_GATE',outcome:'ERROR',reasonCode:'personal_exchange_history_unreconciled',
+            reasonDetail:'Signed exchange history could not be reconciled. New entries remain closed; order outcome must be verified.'}); }
+          catch { /* telemetry cannot reopen the entry gate or affect recovery */ }
+        }
         if(this.recoverUnreconciledEntry && (this.heldRecoveryActive?.() ||
           (error instanceof Error && error.message === "personal_exchange_history_unreconciled"))){
           try{const recovered=await this.recoverUnreconciledEntry(error);if(current()&&!recovered)this.stop();}

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, delimiter } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -87,10 +87,11 @@ let started = false;
 try {
   run(executable(bin, "initdb"), ["-D", join(root, "data"), "-U", user, "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync",
     "--set=shared_buffers=16MB"]);
+  // Avoid nested shell quoting in pg_ctl on Windows: put the Unix-socket
+  // setting in PostgreSQL's own config file, as the other disposable runner does.
+  appendFileSync(join(root,'data','postgresql.conf'), "\nunix_socket_directories = ''\n");
   run(executable(bin, "pg_ctl"), ["-D", join(root, "data"), "-l", join(root, "postgres.log"), "-o",
-    // Every test client is pinned to loopback TCP. Do not also require a Unix
-    // socket, which restricted test containers may not permit creating.
-    `-h 127.0.0.1 -p ${port} -c unix_socket_directories=''`, "-w", "start"]);
+    `-h 127.0.0.1 -p ${port}`, "-w", "start"]);
   started = true;
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a

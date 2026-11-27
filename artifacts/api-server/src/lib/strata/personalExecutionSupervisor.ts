@@ -167,6 +167,7 @@ const SIGNER_SQL = `
 
 import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
 import {DirectEntrySource} from "../v13-production/directEntrySource";
+import {CHAMPION_BOT,readRuntimeBotChoice} from "../strategies/ownerBotCatalog";
 import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
 
 /** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
@@ -543,10 +544,11 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
+    const selectedBot=directAllowed?await readRuntimeBotChoice(db,input.userId,input.accountId,policyHash,startupSha):CHAMPION_BOT;
     const directSource=directAllowed
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
-        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
+        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)},selectedBot):null;
     const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{
@@ -829,8 +831,7 @@ export function createProductionPersonalSession(
     else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
-    // A direct ENTRY can overlap public reads only after its immutable intent exists.
-    // Its PREPARE path still owns the independent source and never takes a paper hint.
+    // Direct PREPARE schedules only its own just-committed source. FINAL and WIRE require the later committed intent.
     const finalMetadataEligible = !directSource || session.executor.overlapFinalAccountSnapshot;
     if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true&&finalMetadataEligible){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
@@ -838,8 +839,8 @@ export function createProductionPersonalSession(
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){
-      session.executor.prefetchCommittedPublicMetadata=hint=>{
+    if((apiSource||durableSource)&&options.publicMetadataPrefetch===true){
+      const startPublic:NonNullable<typeof session.executor.prefetchCommittedPublicMetadata>=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
         const attempt=processCommittedPublicMetadata.start(metadataScope(),hint);
@@ -850,6 +851,9 @@ export function createProductionPersonalSession(
           void attempt.drained.then(()=>{if(activeMetadata===attempt)activeMetadata=null;});
         }};
       };
+      if(directSource){
+        session.executor.prefetchDirectPublicMetadata=hint=>directSource.ownsCommittedMetadata(hint)?startPublic(hint):null;
+      }else session.executor.prefetchCommittedPublicMetadata=startPublic;
     }
     // Opt-in, same owning session only. Process loss never reconstitutes this
     // mode: claimWorkerLease still refuses an already-owned lease. KILL remains

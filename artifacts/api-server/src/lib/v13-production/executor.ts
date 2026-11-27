@@ -3,7 +3,7 @@ import {captureEconomicProtectiveEvidence} from '../strata/economicExitProtectiv
 import {economicExitFinalityEnabled} from '../strata/economicExitDischargeScope';
 import {readEconomicRuntimeEvidence} from '../strata/economicExitRuntimeEvidence';
 import {OWNED_GATE_READ_SQL} from "./ownedGateRead";
-import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation} from "./directEntrySource";
+import {DirectEntrySource,assertDirectEntryQuoteEvidence,type DirectEvaluation,type DirectCommittedMetadataSource} from "./directEntrySource";
 import {encodeProductionOrder} from "./transport";
 import {readPrepareEntryCapacity} from "./prepareEntryCapacity";
 import {captureEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
@@ -20,7 +20,9 @@ import {conservativeExitFeeMicros} from "./fractionalExitFee";
 import {requestQuantityHundredths,EXIT_QUANTITY_VERSION} from "./requestQuantity";
 import {planFractionalIocExit} from "./fractionalExitPlanner";
 import {assertCanonicalEntryQuoteEvidence} from "./entryQuoteEvidence";
-import {assertChampionSourceReference} from "./sourceReference";
+import {assertAuthorizedEntrySourceReference as assertChampionSourceReference} from "./sourceReference";
+import {WARREN_BOT} from "../strategies/warrenBotIdentity";
+import {assertOwnedBotAtOrder} from "../strategies/ownerBotCatalog";
 import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
@@ -161,11 +163,11 @@ export class ProductionExecutor {
       throw error;
     }
   }
-  async captureIndependentEntry():Promise<string|null>{
+  async captureIndependentEntry(afterCommit?:(hint:DirectCommittedMetadataSource)=>void):Promise<string|null>{
     const source=this.#directSource;
     requireProof(source,"direct_entry_source_binding_invalid");
     this.assertDirectBinding(source);
-    return source.capture(this.ledger.pool);
+    return source.capture(this.ledger.pool,undefined,afterCommit);
   }
   async captureIndependentExit(parentId:string):Promise<string|null>{
     const source=this.#directSource;
@@ -216,6 +218,7 @@ export class ProductionExecutor {
   prefetchCommittedPublicMetadata: ((hint:CommittedForwardSourceHint)=>{
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
   }|null)|null=null;
+  prefetchDirectPublicMetadata:((hint:DirectCommittedMetadataSource)=>ReturnType<NonNullable<ProductionExecutor["prefetchCommittedPublicMetadata"]>>)|null=null;
   finalPublicMetadata:FinalPublicMetadataHooks|null=null;
   // One bounded handoff of public source coordinates for a newly committed ENTRY.
   #preparedPublic:PreparedPublicHandoff|null=null;
@@ -380,7 +383,7 @@ export class ProductionExecutor {
     requireProof(source && source.evaluation_source === (direct?(direct.environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1"):"paper") &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
-      source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
+      source.qualifying_trigger && (source.fresh_cross || (direct && source.bot_strategy_id===WARREN_BOT)) && !source.position_was_open &&
       source.crossing_key && source.feed_freshness === "current" &&
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
@@ -402,6 +405,7 @@ export class ProductionExecutor {
     subtimings.mark("market_evidence");
     const readBook = () => this.exchange.market(source.market_ticker, side, {
       stage:"prepare",evaluationId,marketTicker:source.market_ticker,
+      ...(direct?.environment==='LIVE_OBSERVATION'?{directSourceSha256:DirectEntrySource.validatedSourceDigest(source),directOldestMs:source.original_oldest_ms}:{}),
       evaluatedAtMs:new Date(source.evaluated_at).getTime(),
       btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
     });
@@ -441,6 +445,8 @@ export class ProductionExecutor {
       await observePrepareRead(diagnostics.prepareReads,'authority_gate',()=>this.gate(tx,a,false,null,false,true,diagnostics.prepareReads));
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
+      if(direct&&direct.environment==='LIVE_OBSERVATION'&&this.accountOwnerUserId&&this.exchange.mode==='LIVE')
+        await assertOwnedBotAtOrder(tx,this.accountOwnerUserId,a.id,p.policyHash!,process.env.RAILWAY_GIT_COMMIT_SHA??'',direct.strategyId);
       const sourcePolicy = source.entry_policy_version ?? V13_LEGACY_ENTRY_POLICY;
       requireProof(
         (sourcePolicy === V13_ENTRY_POLICY_VERSION || sourcePolicy === V13_LEGACY_ENTRY_POLICY) &&
@@ -472,14 +478,9 @@ export class ProductionExecutor {
       // Wider legacy policies may still admit this observation. Release locks
       // before real provider reads, then repeat all authoritative checks below.
       if(book === null) return null;
-      const classified = evaluateV13Strategy({
-        marketTicker: source.market_ticker, btcPrice: source.btc_price, target: source.target,
-        previousBuffer: previousBufferFromSide(source.previous_side),
-        velocity: source.velocity, upOffer: source.up_offer, downOffer: source.down_offer,
-        freshness: "current", position: null,
-      });
+      const classified = assertChampionSourceReference(source);
       requireProof(classified.signal === source.signal && classified.direction === source.direction &&
-        classified.qualifyingTrigger && classified.freshCross &&
+        classified.qualifyingTrigger && (classified.freshCross || (direct && source.bot_strategy_id===WARREN_BOT)) &&
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);

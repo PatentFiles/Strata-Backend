@@ -1,3 +1,6 @@
+import {rememberHistoryMappingFailure,historyMappingDiagnostic,type HistoryMappingStage} from './personalHistoryMappingDiagnostic';
+// Do not import the application logger into this read-only mapper. Its bundled
+// development transport starts worker threads even for an isolated parser test.
 import {withMemberHistoryCredits,memberReadBudgetEnabled} from './kalshiMemberReadBudget';
 import {dedicatedSignerFingerprint} from './commissioning';
 import {historyLaneCredentialKey,inBoundedHistoryReadLane} from "./boundedHistoryReadLane";
@@ -195,31 +198,30 @@ export function personalAccountSnapshot(
   read: OwnedKalshiRead,
   requests: Request[],
 ): Snapshot | { ok: false; reason: string } {
+  let stage:HistoryMappingStage='snapshot_shape';
+  const refused=(at:HistoryMappingStage,reason='personal_exchange_history_unreconciled') =>
+    rememberHistoryMappingFailure({ok:false as const,reason},at,read);
   try {
     // An empty current feed is not proof that unavailable/unknown archival
     // history is empty. Diagnostics may retain such a read, but it cannot
     // become complete financial reconciliation or entry-authority evidence.
-    if (read.historicalCoverageComplete !== true) {
-      return { ok: false, reason: "personal_exchange_history_unreconciled" };
-    }
+    if (read.historicalCoverageComplete !== true) return refused('history_coverage');
     const orders = new Map<string, Snapshot["orders"][number]>();
     for (const row of read.orders) {
+      stage='order_record';
       const record = recordOf(row);
       const request = storedRequest(requests, text(record.client_order_id));
       const status = text(record.status);
-      if (!request || !status || !["executed", "canceled", "cancelled", "resting", "pending"].includes(status)) {
-        return { ok: false, reason: "personal_exchange_history_unreconciled" };
-      }
-      if (text(record.ticker) !== request.market || bookSide(request) !== bookSideOf(record) ||
-          yesPriceMicros(record) !== yesLimit(request) ||
-          countHundredths(record.initial_count_fp ?? record.initial_count) !== requestQuantityHundredths(request) ||
-          (request.reduceOnly && record.reduce_only !== undefined &&
-            record.reduce_only !== true && record.reduce_only !== "true")) {
-        return { ok: false, reason: "personal_exchange_history_unreconciled" };
-      }
+      if (!request) return refused('order_request');
+      if (!status || !["executed", "canceled", "cancelled", "resting", "pending"].includes(status)) return refused('order_status');
+      if (text(record.ticker) !== request.market) return refused('order_market');
+      if (bookSide(request) !== bookSideOf(record)) return refused('order_book_side');
+      if (yesPriceMicros(record) !== yesLimit(request)) return refused('order_limit');
+      if (countHundredths(record.initial_count_fp ?? record.initial_count) !== requestQuantityHundredths(request)) return refused('order_quantity');
+      if (request.reduceOnly && record.reduce_only !== undefined && record.reduce_only !== true && record.reduce_only !== "true") return refused('order_reduce_only');
       const orderId = text(record.order_id);
       const filled = countHundredths(record.fill_count_fp ?? record.fill_count);
-      if (!orderId || filled === null) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      if (!orderId || filled === null) return refused('order_identity');
       const order = {
         orderId,
         request,
@@ -227,12 +229,13 @@ export function personalAccountSnapshot(
         filledHundredths: String(filled),
       };
       const prior = orders.get(orderId);
-      if (prior && canonical(prior) !== canonical(order)) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      if (prior && canonical(prior) !== canonical(order)) return refused('order_conflict');
       orders.set(orderId, order);
     }
     const fills: Snapshot["fills"] = [];
     const seenFills = new Set<string>();
     for (const row of read.fills) {
+      stage='fill_record';
       const record = recordOf(row);
       const order = orders.get(text(record.order_id) ?? "");
       const id = text(record.trade_id) ?? text(record.fill_id);
@@ -240,13 +243,15 @@ export function personalAccountSnapshot(
       const price = rowPriceMicros(record, order?.request.side);
       const fee = feeMicros(record.fee_cost ?? record.fee_cost_dollars);
       const occurredAtMs = fillOccurredAtMs(record);
-      if (!order || !id || seenFills.has(id) || qty === null || qty <= 0n || price === null || fee === null ||
-          !Number.isSafeInteger(occurredAtMs)) {
-        return { ok: false, reason: "personal_exchange_history_unreconciled" };
-      }
-      if (text(record.ticker) !== order.request.market) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      if (!order) return refused('fill_order');
+      if (!id || seenFills.has(id)) return refused('fill_identity');
+      if (qty === null || qty <= 0n) return refused('fill_quantity');
+      if (price === null) return refused('fill_price');
+      if (fee === null) return refused('fill_fee');
+      if (!Number.isSafeInteger(occurredAtMs)) return refused('fill_time');
+      if (text(record.ticker) !== order.request.market) return refused('fill_market');
       const gross = qty * BigInt(price) / 100n;
-      if (qty * BigInt(price) % 100n !== 0n) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      if (qty * BigInt(price) % 100n !== 0n) return refused('fill_gross');
       seenFills.add(id);
       fills.push({
         id, orderId: order.orderId, clientOrderId: order.request.clientOrderId, market: order.request.market,
@@ -256,6 +261,7 @@ export function personalAccountSnapshot(
     }
     const settlements: Snapshot["settlements"] = [];
     for (const row of read.settlements) {
+      stage='settlement_record';
       const record = recordOf(row);
       const yes = countHundredths(record.yes_count_fp);
       const no = countHundredths(record.no_count_fp);
@@ -263,18 +269,17 @@ export function personalAccountSnapshot(
       const id = text(record.ticker);
       const occurredAtMs = Date.parse(text(record.settled_time) ?? "");
       if (yes === null || no === null || (yes > 0n) === (no > 0n) || (result !== "yes" && result !== "no") ||
-          !id || !Number.isSafeInteger(occurredAtMs)) {
-        return { ok: false, reason: "personal_exchange_history_unreconciled" };
-      }
+          !id || !Number.isSafeInteger(occurredAtMs)) return refused('settlement_contract');
       const side = yes > 0n ? "YES" : "NO";
       const payout = payoutMicros(record);
-      if (payout === null) return { ok: false, reason: "personal_exchange_history_unreconciled" };
+      if (payout === null) return refused('settlement_payout');
       settlements.push({
         id: `${id}:${text(record.settled_time)}`, market: id, side, result: result === "yes" ? "YES" : "NO",
         quantityHundredths: String(yes || no), payoutMicros: payout, feeMicros: "0", occurredAtMs,
       });
     }
     const positions = read.positions.flatMap((row) => {
+      stage='position_record';
       const record = recordOf(row);
       const raw = text(record.position_fp) ?? text(record.position);
       if (!raw || !/^-?\d+(?:\.\d+)?$/.test(raw)) throw new Error("personal_exchange_history_unreconciled");
@@ -291,7 +296,7 @@ export function personalAccountSnapshot(
   } catch (error) {
     const reason = error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
       ? error.message : "personal_exchange_history_unreconciled";
-    return { ok: false, reason };
+    return refused(stage,reason);
   }
 }
 
@@ -300,7 +305,17 @@ export function emptySnapshot(
   read: OwnedKalshiRead,
   requests: Request[] = [],
 ): Snapshot | { ok: false; reason: string } {
-  return personalAccountSnapshot(identity, read, requests);
+  const result=personalAccountSnapshot(identity, read, requests);
+  if (!('identity' in result)) {
+    // Best-effort fixed-category observability must never authorize a snapshot.
+    const diagnostic=historyMappingDiagnostic(result);
+    if(diagnostic)try {
+      // Only fixed categories and bounded counts leave this boundary. No provider
+      // body, account ID, signer material or caller text can enter this record.
+      console.warn(JSON.stringify({level:40,time:Date.now(),event:'strata_signed_history_mapping_refused',...diagnostic}));
+    } catch { /* Best-effort diagnostics never change the accounting result. */ }
+  }
+  return result;
 }
 
 type Page = { rows: unknown[]; unavailable: boolean };
