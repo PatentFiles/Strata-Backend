@@ -101,13 +101,15 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   assert.equal(stale.currentPolicyVerified,false);
   assert.equal(stale.requiresReauthorization,true);
   assert.equal(stale.reason,'owner_bot_requires_exact_release_reauthorization');
+  assert.equal(stale.releaseOnlyReauthorization,true);
   // Only a new build with unchanged owner-approved policy permits a one-click
   // ARM renewal. A financial policy revision must require a separate review.
   await pool.query('UPDATE private.strata_owner_bot_selection SET policy_hash=$2 WHERE execution_account_id=$1',
    [account,'f'.repeat(64)]);
   const changedTerms=await readOwnerBotCatalog(owner,pool);
   assert.equal(changedTerms.ok,true);
-  if(changedTerms.ok)assert.equal(changedTerms.reason,'owner_bot_changed_financial_policy_requires_review');
+  if(changedTerms.ok){assert.equal(changedTerms.reason,'owner_bot_changed_financial_policy_requires_review');
+   assert.equal(changedTerms.releaseOnlyReauthorization,false);}
   await pool.query('UPDATE private.strata_owner_bot_selection SET policy_hash=$2 WHERE execution_account_id=$1',
    [account,policyHash]);
   await assert.rejects(readRuntimeBotChoice(pool,owner,account,policyHash,nextSha),/bot_runtime_selection_stale/);

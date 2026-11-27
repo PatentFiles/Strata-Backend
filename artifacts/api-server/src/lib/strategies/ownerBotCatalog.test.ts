@@ -79,10 +79,12 @@ test('only unchanged approved policy can be marked as exact-release-only reautho
   const rotated=await readOwnerBotCatalog(owner,db([common]));
   assert.equal(rotated.ok,true);
   if(rotated.ok){assert.equal(rotated.requiresReauthorization,true);
+   assert.equal(rotated.releaseOnlyReauthorization,true);
    assert.equal(rotated.reason,'owner_bot_requires_exact_release_reauthorization');}
   const changed=await readOwnerBotCatalog(owner,db([{...common,selected_policy_hash:'d'.repeat(64)}]));
   assert.equal(changed.ok,true);
   if(changed.ok){assert.equal(changed.requiresReauthorization,true);
+   assert.equal(changed.releaseOnlyReauthorization,false);
    assert.equal(changed.reason,'owner_bot_changed_financial_policy_requires_review');}
   const stale=await readOwnerBotCatalog(owner,db([{...common,reconciled_at:new Date(0)}]));
   assert.equal(stale.ok,true);
