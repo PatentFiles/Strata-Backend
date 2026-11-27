@@ -410,7 +410,7 @@ export class DirectEntrySource{
    this.#running=false;
    if(this.#environment==="LIVE_OBSERVATION"&&this.#scope.ownerId&&this.#scope.worker)
     enqueueLiveDecision({...audit,...this.auditPolicy,accountId:this.#scope.accountId,ownerId:this.#scope.ownerId,
-     releaseSha:this.#scope.worker.releaseSha,observedAtMs:auditAt,stage:"OBSERVATION"});
+     botId:this.#selectedBot,releaseSha:this.#scope.worker.releaseSha,observedAtMs:auditAt,stage:"OBSERVATION"});
   }
  }
  async readExact(db:Query,id:string,now:number):Promise<DirectEvaluation|null>{

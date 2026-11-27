@@ -146,7 +146,7 @@ export class ProductionWorker {
           const feeStage=getOwnedFeeFailureStage(error);
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
+              botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
               ...(feeStage?{reasonDetail:feeStage}:{})});
         };
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){
@@ -169,7 +169,7 @@ export class ProductionWorker {
         try{
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
+              botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
               reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
         }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
         return;
@@ -341,7 +341,7 @@ export class ProductionWorker {
           // Observation counters alone do not cover post-submission failures.
           // Persist a separate runtime error; it is NOT another signal or order.
           try { enqueueLiveDecision({accountId:this.executor.ledger.accountId,
-            ownerId:this.executor.accountOwnerUserId,releaseSha:deployedGitSha(),observedAtMs:Date.now(),
+            ownerId:this.executor.accountOwnerUserId,botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),
             stage:'ENTRY_GATE',outcome:'ERROR',reasonCode:'personal_exchange_history_unreconciled',
             reasonDetail:'Signed exchange history could not be reconciled. New entries remain closed; order outcome must be verified.'}); }
           catch { /* telemetry cannot reopen the entry gate or affect recovery */ }

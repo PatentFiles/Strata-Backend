@@ -3,8 +3,11 @@ import {randomUUID} from "node:crypto";
 import {pool,type Pool,type PoolClient} from "@workspace/db";
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET} from "@workspace/v13-strategy";
 import {deployedGitSha} from "../strata/deployedGitSha";
+import {WARREN_BOT,WARREN_BOT_HASH} from "../strategies/warrenBotIdentity";
 
 export type LiveDecisionPolicy = {
+ /** Fixed at trusted worker construction; never inferred from current account selection. */
+ botId?:string;
  policyHash?:string|null; policyRevision?:number|null;
  configuredStakeCents?:number|null; allocationPreset?:string|null;
 };
@@ -33,6 +36,8 @@ const code=/^[a-z][a-z0-9_]{0,127}$/;
 const numberOrNull=(n:unknown)=>typeof n==="number"&&Number.isFinite(n)?n:null;
 const positiveInt=(n:unknown)=>typeof n==="number"&&Number.isSafeInteger(n)&&n>0&&n<=2147483647?n:null;
 const text=(v:unknown,max:number)=>typeof v==="string"&&v.length>0&&v.length<=max?v:null;
+const LIVE_CHAMPION_BOT=V13_CHAMPION_PARAMETER_SET.id;
+const allowedBot=(v:unknown)=>v===LIVE_CHAMPION_BOT||v===WARREN_BOT;
 const observedKeys=new Set(["btcPrice","target","distance","previousBuffer","velocity","separation","upOffer","downOffer","entryOffer","candidateOffer","marketOpenMs","marketCloseMs","btcProviderAgeMs","btcReceiveAgeMs","marketAgeMs","freshCross","qualifyingTrigger","continuous","needsEntryPrice","sourceObservationAtMs","targetReadiness"]);
 /** Fixed code-owned error categories only. Never persist arbitrary exception text. */
 export function liveAnalyticsFailure(error:unknown):string{
@@ -46,7 +51,8 @@ export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
     !Number.isSafeInteger(input.observedAtMs)||input.observedAtMs<=0||
     !Number.isFinite(new Date(input.observedAtMs).getTime())||
     !["OBSERVATION","ENTRY_GATE","PREPARE","DISPATCH"].includes(input.stage)||
-    !["PASS","QUALIFIED","BLOCKED","ERROR"].includes(input.outcome)||!code.test(input.reasonCode))return null;
+    !["PASS","QUALIFIED","BLOCKED","ERROR"].includes(input.outcome)||!code.test(input.reasonCode)||
+    (input.botId!==undefined&&!allowedBot(input.botId)))return null;
  const facts:Record<string,unknown>={};
  for(const [k,v] of Object.entries(input.facts??{})){
   if(!observedKeys.has(k))continue;
@@ -66,8 +72,10 @@ export function normalizeLiveDecision(input:LiveDecisionInput):Stored|null{
   policy_hash:input.policyHash&&HASH.test(input.policyHash)?input.policyHash:null,
   policy_revision:positiveInt(input.policyRevision),configured_stake_cents:positiveInt(input.configuredStakeCents),
   allocation_preset:text(input.allocationPreset,120),strategy_version:"V1.3",
-  strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,
-  facts:{...facts,thresholds:V13_CHAMPION_PARAMETER_SET.parameters}};
+  strategy_parameter_hash:input.botId===WARREN_BOT?WARREN_BOT_HASH:V13_CHAMPION_PARAMETER_HASH,
+  facts:{...facts,thresholds:V13_CHAMPION_PARAMETER_SET.parameters,
+   ...(input.botId?{botId:input.botId,
+     botParameterHash:input.botId===WARREN_BOT?WARREN_BOT_HASH:V13_CHAMPION_PARAMETER_HASH}:{} )}};
 }
 type Query=Pick<Pool|PoolClient,"query">;
 export async function writeLiveDecisionBatch(db:Query,rows:Stored[]):Promise<number>{
