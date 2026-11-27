@@ -459,7 +459,15 @@ export async function operateAccountWorker(
   const now = new Date(deps.now()).toISOString();
   const staleBefore = new Date(deps.now() - (deps.leaseTtlMs ?? ACCOUNT_WORKER_LEASE_TTL_MS)).toISOString();
   return deps.leases.transaction(async (client) => {
-    if(safetyAction)await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
+    if(safetyAction){
+    // PostgreSQL requires SET TRANSACTION before *any* other statement.
+    // Invalidation is a real SQL write; keep the same transaction order for
+    // both credential-bound and fallback STOP/DISARM flows.
+    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    await client.query("SET LOCAL lock_timeout='750ms'");
+    await client.query("SET LOCAL statement_timeout='5000ms'");
+    await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
+   }
     return applyLeaseAction(client, {
     action: input.action,
     holderId: input.holderId,
@@ -651,11 +659,7 @@ async function applyLeaseAction(
     staleBefore: string;
   },
 ): Promise<AccountExecutionResult> {
-  if(input.action === "STOP" || input.action === "DISARM"){
-    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-    await client.query("SET LOCAL lock_timeout='750ms'");
-    await client.query("SET LOCAL statement_timeout='5000ms'");
-  }
+  // Bounded isolation and timeouts were already installed at transaction entry.
   let stopExposure:boolean|undefined;
   if(input.action === "STOP" || input.action === "DISARM"){
     await lockStopAccount(client,input.account.ownerUserId,input.account.executionAccountId);
