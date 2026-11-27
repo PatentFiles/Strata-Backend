@@ -13,11 +13,19 @@ import {verifyDurableOwnerFee,DURABLE_FEE_VERSION} from './durableOwnerFeePolicy
 type Tx=Pick<PoolClient,'query'>;
 const HEX=/^[a-f0-9]{64}$/,SHA=/^[a-f0-9]{40}$/,MARKET=/^KXBTC15M-[A-Za-z0-9-]+$/;
 const ORDER_URL='https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders';
+// A witness belongs to one locked executor invocation. Reentry invalidates it.
+const attempts=new WeakMap<object,{clientId:string;crossed:boolean;refusal:Error|null}>();
+export function isDurableFeePreTransportRefusal(scope:Readonly<object>|null,error:unknown,clientId:string):boolean {
+ if(!scope||!(error instanceof Error))return false;
+ const attempt=attempts.get(scope);
+ return !!attempt&&!attempt.crossed&&attempt.clientId===clientId&&attempt.refusal===error;
+}
 export function createGuardedDurableFeeFetch(
  ownerId:string,accountId:string,sourceUrl:string,transport:typeof fetch,
  policyHash:string,keyFingerprint:string,fencingToken:number,holderId:string,feeDigest:string,
  deps:{
   borrowTransaction:()=>Tx|null;
+  wireScope?:()=>Readonly<object>|null;
   consumePublicMetadata?:(clientOrderId:string,ticker:string)=>DurablePhaseMetadata|undefined;
   verifyDurable?:typeof verifyDurableOwnerFee;
   exitReview?:typeof checkStandingExitReview;
@@ -82,6 +90,13 @@ export function createGuardedDurableFeeFetch(
   const tx=deps.borrowTransaction();
   if(!tx)throw Error('owner_v3_fee_final_executor_transaction_required');
   const isEntry=order.reduce_only===false;
+  const scope=isEntry?deps.wireScope?.():null;
+  const attempt={clientId:order.client_order_id as string,crossed:false,refusal:null as Error|null};
+  if(scope){
+   const prior=attempts.get(scope);
+   if(prior)prior.crossed=true;
+   else attempts.set(scope,attempt);
+  }
   // A revoked or expired standing ENTRY grant can never acquire new
   // inventory. Risk-reducing exits retain a separate genuinely verified
   // fee-source path; neither mode is approved by the caller's boolean alone.
@@ -106,10 +121,14 @@ export function createGuardedDurableFeeFetch(
   const proof=await (deps.verifyDurable??verifyDurableOwnerFee)(tx as never,
     {owner:ownerId,account:accountId,sha,policyHash},ticker,isEntry?'ENTRY':'PROTECTIVE_EXIT',{},undefined,phaseMetadata?{phase:'WIRE_FEE',handle:phaseMetadata}:undefined);
   if(!proof.ok||!proof.sourceFresh()||proof.sourceDigest!==feeDigest||proof.marketTicker!==ticker||
-     Date.now()<proof.verifiedAtMs||Date.now()-proof.verifiedAtMs>5000)
-    throw Error('durable_fee_final_fresh_model_unverified');
+     Date.now()<proof.verifiedAtMs||Date.now()-proof.verifiedAtMs>5000){
+    const error=Error('durable_fee_final_fresh_model_unverified');
+    attempt.refusal=error;
+    throw error;
+  }
   // Transport is called exactly once. Any error after invocation is UNKNOWN;
   // the caller's ledger must reconcile it, never blindly resubmit.
+  attempt.crossed=true;
   return transport(request,{...init,redirect:'error'});
  };
 }

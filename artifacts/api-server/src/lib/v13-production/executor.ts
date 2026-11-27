@@ -23,6 +23,7 @@ import {assertChampionSourceReference} from "./sourceReference";
 import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
+import {isDurableFeePreTransportRefusal} from "../strata/guardedDurableFeeWire";
 import {isReviewedApiFeeWireRefusal} from "../strata/guardedReviewedApiFeeWire";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "@workspace/db";
@@ -72,6 +73,7 @@ export type FirstReadReceiptWriter = Readonly<{
  pin:FirstReadReceiptWorkerPin;
  database:Pick<ProductionLedger["pool"],"query">;
 }>;
+type PreparedPublicHandoff=Readonly<{id:string;capability:string;policyHash:string;source:FinalPublicMetadataContext["source"]}>;
 export class ProductionExecutor {
   static #fences = new WeakSet<() => Promise<void>>();
   static readonly #seenFirstReadErrors = new WeakSet<object>();
@@ -202,6 +204,8 @@ export class ProductionExecutor {
     source:CommittedForwardSourceHint;pause?():void;discard(reason?:string):void;drained:Promise<void>;
   }|null)|null=null;
   finalPublicMetadata:FinalPublicMetadataHooks|null=null;
+  // One bounded handoff of public source coordinates for a newly committed ENTRY.
+  #preparedPublic:PreparedPublicHandoff|null=null;
   /** Internal opt-in scheduling only; no client or authority input. */
   overlapFinalAccountSnapshot = false;
   private phaseContext(i:Intent,invocation:symbol|undefined):FinalPublicMetadataContext|null {
@@ -414,7 +418,9 @@ export class ProductionExecutor {
     // Diagnostics are bounded, best-effort, and never feed admission or sizing.
     if(book) diagnostics.price = captureEntryPriceDiagnostics(source, book);
     subtimings.mark("transaction_acquire");
-    const prepare = () => this.ledger.transaction(async (tx, a) => {
+    const prepare = async () => {
+      let handoff:PreparedPublicHandoff|null=null;
+      const result=await this.ledger.transaction(async (tx, a) => {
       subtimings.mark("duplicate_and_authority");
       const prior = await tx.query<Intent>(direct?"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (direct_source_id=$2 OR crossing_key=$3)":"SELECT * FROM v13_production_intent WHERE account_id=$1 AND (evaluation_id=$2 OR crossing_key=$3)", [a.id, evaluationId, source.crossing_key]);
       if (prior.rows.length) {this.assertIntentSourceKind(prior.rows[0]!);return prior.rows[0]!.id;} // duplicate event: no new reservation/capability
@@ -516,8 +522,16 @@ export class ProductionExecutor {
       this.fault("after_reservation");
       await this.ledger.persist(tx, a);
       await this.ledger.assertConservation(tx, a);
+      if(direct&&this.finalPublicMetadata&&this.overlapFinalAccountSnapshot&&this.exchange.mode==="LIVE"&&this.accountOwnerUserId&&this.authorizeFinalEntry){
+        handoff={id,capability:cap,policyHash:pf.policyHash,source:Object.freeze({evaluationId,marketTicker:request.market,
+          evaluatedAtMs:new Date(source.evaluated_at).getTime(),btcProviderAgeMs:source.btc_provider_age_ms,
+          btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms})};
+      }
       return id;
-    });
+      });
+      if(handoff)this.#preparedPublic=handoff;
+      return result;
+    };
     const prepared = await prepare();
     if(prepared !== null){
       if(typeof prepared!=="string")throw Error("live_money_best_ask_above_signal_ceiling");
@@ -598,11 +612,16 @@ export class ProductionExecutor {
     return withoutFeeAuthorityTiming(()=>{
     if(!this.finalPublicMetadata)return this.dispatchWithPhases(id);
     const invocation=Symbol("dispatch-metadata");
-    const operation=()=>this.dispatchWithPhases(id,invocation);
+    const prepared=this.#preparedPublic?.id===id?this.#preparedPublic:null;
+    if(prepared)this.#preparedPublic=null;
+    const operation=()=>{
+      if(prepared)this.finalPublicMetadata?.start("FINAL_MARKET",{intentId:id,invocation,source:prepared.source,policyHash:prepared.policyHash});
+      return this.dispatchWithPhases(id,invocation,prepared);
+    };
     return (this.finalPublicMetadata.dispatch?this.finalPublicMetadata.dispatch(id,invocation,operation):operation()).finally(()=>this.finalPublicMetadata?.finish(id,invocation));
     });
   }
-  private async dispatchWithPhases(id:string,invocation?:symbol):Promise<void> {
+  private async dispatchWithPhases(id:string,invocation?:symbol,prepared?:PreparedPublicHandoff|null):Promise<void> {
     // Precommit dispatch identity BEFORE any network side effect. A crash in
     // the gap is indistinguishable from an uncertain POST, so NEVER replay it.
     const claimed = await this.ledger.transaction(async (tx, a) => {
@@ -612,7 +631,11 @@ export class ProductionExecutor {
       requireProof(!(this.#directSource&&this.exchange.mode==="LIVE"&&i.kind==="EXIT"),"direct_live_exit_requires_signed_protective_dispatch");
       this.assertIntentSourceKind(i);
       if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
-      if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
+      if(prepared){
+        const locked=this.phaseContext(i,invocation);
+        requireProof(i.kind==="ENTRY"&&locked&&i.policy_hash===prepared.policyHash&&i.capability_digest===prepared.capability&&
+          canonical(locked.source)===canonical(prepared.source),"production_prepared_public_source_changed");
+      }else if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("FINAL_MARKET",context);}
       await this.gate(tx, a, i.kind === "EXIT");
       await tx.query("UPDATE v13_production_intent SET state='DISPATCHED',dispatch_at=$2 WHERE id=$1", [id, new Date(this.now())]);
       await this.ledger.persist(tx, a);
@@ -626,6 +649,7 @@ export class ProductionExecutor {
     const dispatchTiming=this.startTiming("dispatch",{intentId:id});
     const feeAuthorityTiming={capture:null as FeeAuthorityTimingCapture|null};
     let invoked = false;
+    let wireScope:Readonly<object>|null=null;
     try {
       await this.ledger.transaction(async (tx, a) => {
         const i = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
@@ -893,6 +917,7 @@ export class ProductionExecutor {
           }
           if(economicProof){const now=this.now();requireProof(now>=snapshot.observedAtMs&&now-snapshot.observedAtMs<=5000,
             "economic_discharge_final_wire_evidence_expired");}
+          if(i.kind==="ENTRY")wireScope=this.ledger.currentWireScopeToken();
           invoked = true;
           finalTiming("completed",{finalMarketReads});
           }catch(error){if(pendingSnapshot)await pendingSnapshot;finalTiming("rejected",{error,finalComparison,finalMarketReads:finalMarketReads??getMarketEvidenceReadTiming(error)});throw error;}
@@ -913,7 +938,7 @@ export class ProductionExecutor {
       await this.ledger.transaction(async (tx, a) => {
         const failed = (await tx.query<Intent>("SELECT * FROM v13_production_intent WHERE id=$1 FOR UPDATE", [id])).rows[0]!;
         if (!invoked || isEntryWireClockRefusal(error,failed.client_order_id) ||
-            isReviewedApiFeeWireRefusal(error,failed.client_order_id)) {
+            isReviewedApiFeeWireRefusal(error,failed.client_order_id)||isDurableFeePreTransportRefusal(wireScope,error,failed.client_order_id)) {
           dispatchTiming("proven_not_posted",{error,feeAuthorityReads:feeAuthorityTiming.capture?.snapshot()});
           const i = failed;
           requireProof(i.state === "DISPATCHED" && money(i.filled_hundredths) === 0n, "production_local_abort_identity_changed");

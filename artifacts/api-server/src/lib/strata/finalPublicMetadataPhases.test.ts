@@ -37,3 +37,11 @@ test('supervisor STOP and KILL discard metadata before disarming the lease',asyn
   assert.deepEqual(calls,action==='KILL'?['abort','discard','disarm']:['discard','disarm']);
  }
 });
+
+test('an early FINAL capture whose prepared policy differs from the worker scope performs no reads',async()=>{
+ const f=fixture(),c=context();
+ f.phases.start('FINAL_MARKET',{...c,policyHash:'c'.repeat(64)});
+ await settle();
+ assert.equal(f.calls.length,0);
+ assert.equal(f.coordinator.diagnostics().accounts,0);
+});

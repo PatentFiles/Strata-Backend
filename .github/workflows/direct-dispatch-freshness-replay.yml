@@ -43,6 +43,7 @@ jobs:
           node "$runner" "$replay" durable/overlap/yes_1523_lock
           node "$runner" "$replay" durable/candidate/yes_1523_lock
           node "$runner" "$replay" reviewed/candidate/yes_1523_lock
+          node "$runner" "$replay" durable/candidate/wire_fee_deadline
           node "$runner" "$replay" durable/candidate/wire_expiry
           node "$runner" "$replay" durable/candidate/revoked
           node "$runner" "$replay" durable/candidate/mismatch

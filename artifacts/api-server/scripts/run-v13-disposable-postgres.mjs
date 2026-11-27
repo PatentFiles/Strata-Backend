@@ -74,7 +74,7 @@ const env = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test",
   ...(renewal ? {V13_RENEWAL_DISPOSABLE_URL:url} : {}) };
 if(process.argv[2]==='src/lib/strata/directDispatchTimingReplay.postgres.test.ts'){
   const scenario=process.argv[3] ?? '';
-  if(!/^(reviewed|durable)\/(serial|overlap|candidate|final_only)(\/(duplicate_latency|wire_expiry|protective_cycle|yes_1523|yes_1523_db|yes_1523_plan|yes_1523_work|yes_1523_lock|mismatch|revoked))?$/.test(scenario))
+  if(!/^(reviewed|durable)\/(serial|overlap|candidate|final_only)(\/(duplicate_latency|wire_expiry|protective_cycle|yes_1523|yes_1523_db|yes_1523_plan|yes_1523_work|yes_1523_lock|mismatch|revoked|wire_fee_deadline))?$/.test(scenario))
     throw Error('Unknown direct dispatch timing scenario');
   env.V13_DIRECT_TIMING_CASE=scenario;
 }

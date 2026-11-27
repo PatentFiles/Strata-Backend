@@ -405,7 +405,7 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
  }
 }
 
-export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "serial"|"overlap"|"candidate"|"final_only", durable=false, adverse?: "duplicate_latency"|"wire_expiry"|"protective_cycle"|"yes_1523"|"yes_1523_db"|"yes_1523_plan"|"yes_1523_work"|"yes_1523_lock"|"mismatch"|"revoked"){
+export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "serial"|"overlap"|"candidate"|"final_only", durable=false, adverse?: "duplicate_latency"|"wire_expiry"|"protective_cycle"|"yes_1523"|"yes_1523_db"|"yes_1523_plan"|"yes_1523_work"|"yes_1523_lock"|"mismatch"|"revoked"|"wire_fee_deadline"){
  const stages:Record<string,number>={}, durations:Record<string,number>={};
  let transportReached=0, mockWireCalls=0, recordedFailure="";
  const originalTiming=ProductionExecutor.prototype.startTiming, originalGate=ProductionExecutor.prototype.gate;
@@ -416,7 +416,7 @@ export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "s
  let providerAt=0,finalGateFinished=0;
  const originalMarket=AccountScopedExchange.prototype.market,originalDispatch=ProductionExecutor.prototype.dispatch;
  const borders:Record<string,number>={};
- const feeReads:Array<{start:number,end:number}>=[];
+ const feeReads:Array<{start:number,end:number,elapsedMs:number}>=[];
  const originalTransaction=ProductionLedger.prototype.transaction, originalWireClock=ProductionLedger.prototype.assertFinalWireClock;
  if(adverse==="wire_expiry")ProductionLedger.prototype.assertFinalWireClock=function(){
   // Isolated test thread only. Delay the synchronous, post-sign wire clock itself.
@@ -560,8 +560,12 @@ export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "s
 
      const start=Date.now();
      // FINAL prefetch may start inside the durable claim, before the dispatch timer.
-     await pause(second?(durations.prepare_entry?1124:493):665);
-     feeReads.push({start,end:Date.now()});
+     const began=performance.now(),minimum=second?(durations.prepare_entry?1124:493):665;
+     const wireFeeDeadline=adverse==="wire_fee_deadline"&&Boolean(durations.prepare_entry)&&
+       feeReads.some(r=>r.start>=stages.prepare_entry!+durations.prepare_entry!);
+     const deadline=began+(wireFeeDeadline?3000:minimum);
+     while(performance.now()<deadline)await pause(Math.ceil(deadline-performance.now()));
+     feeReads.push({start,end:Date.now(),elapsedMs:performance.now()-began});
     }
     if(path.endsWith('/orderbook')&&!stages.dispatch)await pad(stages.prepare_entry,second?493:927);
     if(path.endsWith('/portfolio/settlements')&&stages.final_signed_snapshot){
@@ -675,8 +679,14 @@ export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "s
    if(second&&replay==="candidate"){
     const postPrepare=feeReads.filter(r=>r.start>=stages.prepare_entry!+durations.prepare_entry!&&r.start<=transportReached);
     assert.equal(postPrepare.length,2,'one independent raw FINAL and one raw WIRE fee GET');
-    assert.ok(postPrepare.every(r=>r.end-r.start>=1124),'both raw reads incurred the measured provider latency');
+    assert.ok(postPrepare.every(r=>r.elapsedMs>=1124),'both raw reads incurred the measured provider latency');
     assert.ok(postPrepare[1]!.start>=postPrepare[0]!.end,'WIRE started after its distinct FINAL capture');
+   }
+   if(adverse==="wire_fee_deadline"){
+    const receipt=await setup.query(`SELECT o.kind,o.payload->>'reason' AS reason,i.terminal,i.reserved_micros
+      FROM v13_production_intent i JOIN v13_production_observation o ON o.account_id=i.account_id AND o.payload->>'id'=i.id
+      WHERE i.account_id=$1 AND i.market=$2 AND o.kind IN ('PROVEN_NOT_POSTED','POST_UNCERTAIN')`,[account,successor]);
+    assert.deepEqual(receipt.rows,[{kind:'PROVEN_NOT_POSTED',reason:'durable_fee_final_fresh_model_unverified',terminal:true,reserved_micros:'0'}]);
    }
    assert.equal(httpErrors.length,0);assert.equal(mockWireCalls,expectedWire?1:0);
    if(expectedWire){

@@ -562,7 +562,7 @@ export function createProductionPersonalSession(
       finalLedger.assertFinalWireClock();
       directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,wireScope:()=>finalLedger?.currentWireScopeToken()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       ownerV3Source ? createGuardedOwnerV3FeeFetch(input.userId,input.accountId,sourceUrl,
         clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,
         {borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
