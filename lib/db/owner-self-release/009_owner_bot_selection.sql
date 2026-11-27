@@ -34,4 +34,12 @@ ALTER TABLE private.strata_owner_bot_selection ENABLE ROW LEVEL SECURITY;
 ALTER TABLE private.strata_owner_bot_selection_history ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.strata_owner_bot_selection FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON private.strata_owner_bot_selection_history FROM PUBLIC,anon,authenticated;
+-- The dedicated server runtime needs only these exact new tables; paper and
+-- browser roles retain no access. Disposable tests may not create this role.
+DO $grants$ BEGIN
+ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='strata_api_runtime') THEN
+  EXECUTE 'GRANT SELECT,INSERT,UPDATE ON private.strata_owner_bot_selection TO strata_api_runtime';
+  EXECUTE 'GRANT SELECT,INSERT ON private.strata_owner_bot_selection_history TO strata_api_runtime';
+ END IF;
+END $grants$;
 COMMIT;
