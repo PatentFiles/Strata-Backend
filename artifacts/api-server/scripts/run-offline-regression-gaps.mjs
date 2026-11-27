@@ -63,7 +63,9 @@ function run(command, args) {
 }
 try {
   // Each basename is unique; separate output files preserve test isolation.
-  for (const path of tests) run(join(api, "node_modules/.bin/esbuild"), [
+  // Node's child-process spawn on Windows cannot execute the POSIX .bin shim.
+  // Invoke esbuild's portable JS launcher under the current Node runtime.
+  for (const path of tests) run(process.execPath, [join(api, "node_modules/esbuild/bin/esbuild"),
     path, "--bundle", "--platform=node", "--format=cjs", `--outdir=${root}/out`,
     // Preserve source-relative fixture reads in CommonJS test bundles.
     `--define:import.meta.url=${JSON.stringify(pathToFileURL(resolve(api, path)).href)}`,
