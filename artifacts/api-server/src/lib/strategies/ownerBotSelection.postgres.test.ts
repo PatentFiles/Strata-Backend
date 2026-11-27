@@ -20,7 +20,7 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   STRATA_WARREN_BUFFETT_LIVE_SHA:process.env.STRATA_WARREN_BUFFETT_LIVE_SHA};
  try{
   await pool.query('CREATE SCHEMA IF NOT EXISTS auth; CREATE SCHEMA IF NOT EXISTS private');
-  await pool.query("DO $ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $; DO $ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $; DO $ BEGIN CREATE ROLE strata_api_runtime NOLOGIN NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $;");
+  await pool.query("DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$; DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$; DO $$ BEGIN CREATE ROLE strata_api_runtime NOLOGIN NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;");
   await pool.query('GRANT USAGE ON SCHEMA private TO strata_api_runtime');
   await pool.query('CREATE TABLE IF NOT EXISTS auth.users(id uuid primary key)');
   await pool.query('ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS owner_user_id uuid; ALTER TABLE public.v13_production_account ADD COLUMN IF NOT EXISTS owner_control_epoch bigint NOT NULL DEFAULT 0');
