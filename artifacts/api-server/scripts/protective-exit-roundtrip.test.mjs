@@ -111,6 +111,10 @@ function fixture(value,{api=true,old='false',direct=false}={}){
       fee_formula_version:record.fee_formula_version,
       fee_source_url:record.fee_source_url,policy_hash:record.policy_hash}]};
   }
+  // Historical original-bot fixtures have no stored variant selection; enforce scope.
+  if(sql.startsWith('SELECT bot_id,bot_fingerprint,policy_hash,release_sha FROM private.strata_owner_bot_selection WHERE owner_user_id=$1::uuid AND execution_account_id=$2 LIMIT 2')){
+   assert.equal(args[0],owner);assert.equal(args[1],account);return {rows:[]};
+  }
   if(sql.includes('-- personal-session:signer'))return {rows:[ownedRow(args[1],args[0])]};
   if(sql.includes("FROM live_execution_config WHERE id = 'singleton'"))return {rows:[{live_execution_enabled:true,manual_kill_switch:false}]};
   if(sql==='SELECT request FROM v13_production_intent WHERE account_id = $1')return {rows:[]};
