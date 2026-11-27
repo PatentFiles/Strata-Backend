@@ -110,7 +110,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
  const db=deps.db??pool as unknown as Db,now=deps.clock??Date.now;
  let durableSourceFresh:(()=>boolean)|undefined;
  let tx:Client|null=null,committed=false,commitAttempted=false,discard:Error|undefined;
- let activationObservationId:string|undefined;
+ let dischargeObservationId:string|undefined;
  let diagnosticStage:OwnerActivationStage='outcome_readback';
  try{
   const readback=await ownerSelfActivationOutcome(owner,sha,db);
@@ -346,7 +346,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    if(create)approvalId=randomUUID();
    if(!UUID.test(approvalId))return no('owner_self_prior_sha_revocation_or_ambiguous_approval');
    const [activated,signed]=observations(approvalId,newFence);
-   activationObservationId=activated.id;
+   dischargeObservationId=activated.id;
    diagnosticStage='audit_write';
    // RETURNING chains enforce approval → terminal lease CAS → account CAS →
    // both immutable observations. A missing predecessor produces no successor.
@@ -395,7 +395,6 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    if(enabled.rows.length!==1)return no('owner_self_account_activation_compare_and_set_failed');
    diagnosticStage='audit_write';
    const [activated,signed]=observations(approvalId,w.rows[0]!.fencing_token);
-   activationObservationId=activated.id;
    for(const event of [activated,signed])await tx.query(`INSERT INTO public.v13_production_observation
     (id,account_id,kind,payload,digest) VALUES ($1,$2,$3,$4::jsonb,$5)`,
     [event.id,raw.accountId,event.kind,event.payload,event.digest]);
@@ -413,15 +412,17 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   const diagnostic=ownerActivationFailureDiagnostic(error,diagnosticStage);
   try{console.warn('owner_self_activation_failed',diagnostic);}catch{/* Logging must not alter refusal or rollback. */}
   if(commitAttempted){
-   // An ACK can be lost after PostgreSQL commits. Discard that connection
-   // and read this exact immutable activation once. Neither outcome retries.
+   // A lost acknowledgement never authorizes replay. Legacy callers read
+   // the outcome separately; only the discharged path binds its own receipt.
    discard=Error('owner_self_activation_commit_unknown');
    const uncertainTx=tx;tx=null;
    try{uncertainTx?.release(discard);}catch{/* Read back using a separate connection. */}
+   const unknown={...no('owner_self_activation_commit_outcome_unknown'),outcomeUnknown:true,retryAuthorized:false};
+   if(dischargeObservationId===undefined)return unknown;
    const receipt=await ownerSelfActivationOutcome(owner,sha,db);
-   if(receipt.outcome==='RECORDED'&&receipt.accountId===raw.accountId&&receipt.activationId===activationObservationId)
+   if(receipt.outcome==='RECORDED'&&receipt.accountId===raw.accountId&&receipt.activationId===dischargeObservationId)
     return {...no('owner_self_activation_recorded_use_readback'),outcome:'RECORDED' as const,retryAuthorized:false};
-   return {...no('owner_self_activation_commit_outcome_unknown'),outcomeUnknown:true,retryAuthorized:false,diagnostic};
+   return {...unknown,diagnostic};
   }
   if(diagnostic.failureCode==='economic_discharge_final_snapshot_expired'||
      diagnostic.failureCode==='economic_discharge_final_settlement_unverified')
