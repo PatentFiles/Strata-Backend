@@ -1,3 +1,4 @@
+import {orderedOwnerReads} from './economicRecoveryReadBatch';
 import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {assertOwnerArmFence} from './ownerArmContext';
 import {terminalDisarmedLease} from './terminalWorkerLease';
@@ -28,7 +29,7 @@ import {DURABLE_FEE_VERSION,isDurableFeeVersion,verifyDurableOwnerFee} from './d
 import {verifyOwnerStandingFee} from './ownerStandingFeeAuthorization';
 import {collectFinalReleaseEvidence,finalReleaseScope,finalReleaseHistory,finalReleaseSnapshot,readReleaseOwner} from './inAppProtectiveRelease';
 import {ProductionLedger,type Account} from '../v13-production/ledger';
-import {readUnresolvedIntentMode} from './workerUncertainOrderGate';
+import {readUnresolvedIntentMode,unresolvedIntentModeSql,verifiedUnresolvedIntentMode} from './workerUncertainOrderGate';
 import {digest as auditDigest} from '../v13-production/types';
 import {ownerActivationFailureDiagnostic,type OwnerActivationStage} from './ownerActivationFailureDiagnostic';
 
@@ -109,6 +110,7 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
  const db=deps.db??pool as unknown as Db,now=deps.clock??Date.now;
  let durableSourceFresh:(()=>boolean)|undefined;
  let tx:Client|null=null,committed=false,commitAttempted=false,discard:Error|undefined;
+ let dischargeObservationId:string|undefined;
  let diagnosticStage:OwnerActivationStage='outcome_readback';
  try{
   const readback=await ownerSelfActivationOutcome(owner,sha,db);
@@ -150,29 +152,45 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   // The existing preflight enforces complete signed Kalshi pagination, issuer
   // credential binding, cash parity, retained ledger/exits and 5s freshness.
   diagnosticStage='signed_evidence';
-  const evidence=await(deps.signedEvidence??collectFinalReleaseEvidence)(owner,{db:db as never,now});
+  const evidence=await(deps.signedEvidence??collectFinalReleaseEvidence)(owner,{db:db as never,now},true);
   if(!evidence||evidence.account!==raw.accountId)
    return no('owner_self_signed_exchange_scope_unverified');
   if(now()-evidence.started>5000||now()<evidence.started)
    return no('owner_self_signed_exchange_evidence_expired');
+  const discharge=evidence.history.mode==='retained'&&Boolean(evidence.history.economicDischarges?.length);
   diagnosticStage='transaction_begin';
-  tx=await db.connect();await tx.query('BEGIN');
-  await tx.query("SET LOCAL lock_timeout='1500ms'");
-  await tx.query("SET LOCAL statement_timeout='12000ms'");
-  await assertOwnerArmFence(tx,owner);
-  diagnosticStage='deadline_guard';
-  const guard=await tx.query(`SELECT 1 FROM pg_catalog.pg_trigger t
+  tx=await db.connect();
+  const deadlineGuard=`SELECT 1 FROM pg_catalog.pg_trigger t
     JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
     WHERE t.tgrelid='public.v13_production_observation'::regclass
     AND t.tgname='final_release_signed_deadline' AND t.tgenabled='O'
-    AND t.tgdeferrable AND t.tginitdeferred AND NOT p.prosecdef`);
+    AND t.tgdeferrable AND t.tginitdeferred AND NOT p.prosecdef`;
+  let guard:{rows:Row[]};
+  if(discharge){
+   // Check the installed deferred trigger in the same message as the
+   // transaction setup. No account or worker state is read before the fence.
+   const begun:unknown=await tx.query("BEGIN; SET LOCAL lock_timeout='1500ms'; SET LOCAL statement_timeout='12000ms'; "+deadlineGuard);
+   if(!Array.isArray(begun)||begun.length!==4||begun[0]?.command!=='BEGIN'||begun[1]?.command!=='SET'||
+      begun[2]?.command!=='SET'||begun[3]?.command!=='SELECT'||!Array.isArray(begun[3].rows))
+    return no('owner_self_signed_deadline_migration_missing');
+   guard=begun[3];
+   await assertOwnerArmFence(tx,owner,true);
+  }else{
+   await tx.query('BEGIN');
+   await tx.query("SET LOCAL lock_timeout='1500ms'");
+   await tx.query("SET LOCAL statement_timeout='12000ms'");
+   await assertOwnerArmFence(tx,owner);
+   diagnosticStage='deadline_guard';
+   guard=await tx.query(deadlineGuard);
+  }
+  diagnosticStage='deadline_guard';
   if(guard.rows.length!==1)return no('owner_self_signed_deadline_migration_missing');
   diagnosticStage='locked_scope';
-  const locked=await finalReleaseScope(tx,owner,raw.accountId,true);
+  const locked=await finalReleaseScope(tx,owner,raw.accountId,true,discharge);
   if(fingerprint(locked)!==fingerprint(evidence.scope))
    return no('owner_self_account_policy_credential_or_worker_changed');
   diagnosticStage='locked_owner_scope';
-  const activation=await readReleaseOwner(tx,owner);
+  const activation=await readReleaseOwner(tx,owner,discharge);
   if(!activation.ok||fingerprint(activation.account)!==fingerprint(evidence.activation))
    return no('owner_self_account_authorization_changed');
   const a=activation.account;
@@ -180,37 +198,27 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
    a.fee_artifact_digest!==sourceDigest)
    return no('owner_self_fee_or_approved_policy_changed');
   diagnosticStage='locked_history';
-  const history=await finalReleaseHistory(tx,raw.accountId,owner,true);
+  const history=await finalReleaseHistory(tx,raw.accountId,owner,true,discharge);
   if(history.reconciliationDigest!==evidence.history.reconciliationDigest)
    return no('owner_self_retained_financial_history_changed');
   finalReleaseSnapshot(history,evidence.snapshot);
   diagnosticStage='account_checks';
-  const local=await tx.query(`SELECT a.* FROM public.v13_production_account a
+  const checks=await orderedOwnerReads(tx,discharge,[
+   [`SELECT a.* FROM public.v13_production_account a
    WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.commissioned=true
    AND a.execution_enabled=false AND a.kill_switch=true AND a.blocked_reason IS NULL
    AND a.reserved_micros=0 AND a.cash_precision_verified=true
-   FOR UPDATE`,[raw.accountId,owner]);
-  if(local.rows.length!==1)return no('owner_self_activation_account_state_changed');
-  const stake=Number(a.configured_stake_cents),cash=BigInt(str(local.rows[0]!.cash_micros));
-  if(!Number.isSafeInteger(stake)||stake<500||stake>2500000||
-   stake>Number(a.max_entry_stake_cents)||stake>Number(a.max_entry_all_in_cents)||
-   cash<BigInt(stake)*10000n)return no('owner_self_approved_stake_or_cash_unavailable');
-  const global=await tx.query(`SELECT 1 FROM public.live_execution_config
+   FOR UPDATE`,[raw.accountId,owner]],
+   [`SELECT 1 FROM public.live_execution_config
     WHERE id='singleton' AND mode='V13_PRODUCTION'
-    AND live_execution_enabled=true AND manual_kill_switch=false FOR SHARE`);
-  if(global.rows.length!==1)return no('owner_self_global_live_or_kill_not_ready');
-  const unresolved=await readUnresolvedIntentMode((sql,args)=>tx!.query(sql,args),raw.accountId);
-  if(!unresolved.ok||unresolved.mode!=='entries')
-   return no('owner_self_unresolved_exchange_intents');
-  const outstanding=await tx.query(`SELECT
+    AND live_execution_enabled=true AND manual_kill_switch=false FOR SHARE`,[]],
+   [unresolvedIntentModeSql(),[raw.accountId,null]],
+   [`SELECT
     (SELECT count(*)::int FROM public.v13_production_position
       WHERE account_id=$1 AND quantity_hundredths<>0) AS positions,
     (SELECT count(*)::int FROM private.strata_emergency_exit_reservations
-      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) AS exits`,[raw.accountId]);
-  if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
-   outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
-  diagnosticStage='owner_review';
-  const review=await tx.query(`SELECT r.release_id,q.evidence_digest
+      WHERE execution_account_id=$1 AND state IN ('PREPARED','DISPATCHED','UNKNOWN')${economicExitNotDischarged("execution_account_id","client_order_id")}) AS exits`,[raw.accountId]],
+   [`SELECT r.release_id,q.evidence_digest
     FROM private.strata_standing_execution_reviews r
     JOIN private.strata_protective_release_qualification q
     ON q.qualification_id=r.qualification_id AND q.owner_user_id=r.owner_user_id
@@ -225,7 +233,24 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
       AND q.expires_at>clock_timestamp()+interval '60 seconds'
       AND q.observed_at<=r.created_at AND r.created_at<q.expires_at
     FOR SHARE OF r,q`,[raw.reviewId,owner,raw.accountId,sha,raw.policyHash,
-      raw.qualificationId,OWNER_SELF_REVIEW_CONFIRM]);
+      raw.qualificationId,OWNER_SELF_REVIEW_CONFIRM]]
+  ]);
+  const local=await checks(0);
+  if(local.rows.length!==1)return no('owner_self_activation_account_state_changed');
+  const stake=Number(a.configured_stake_cents),cash=BigInt(str(local.rows[0]!.cash_micros));
+  if(!Number.isSafeInteger(stake)||stake<500||stake>2500000||
+   stake>Number(a.max_entry_stake_cents)||stake>Number(a.max_entry_all_in_cents)||
+   cash<BigInt(stake)*10000n)return no('owner_self_approved_stake_or_cash_unavailable');
+  const global=await checks(1);
+  if(global.rows.length!==1)return no('owner_self_global_live_or_kill_not_ready');
+  const unresolved=discharge?verifiedUnresolvedIntentMode((await checks(2)).rows):await readUnresolvedIntentMode((sql,args)=>tx!.query(sql,args),raw.accountId);
+  if(!unresolved.ok||unresolved.mode!=='entries')
+   return no('owner_self_unresolved_exchange_intents');
+  const outstanding=await checks(3);
+  if(outstanding.rows.length!==1||outstanding.rows[0]!.positions!==0||
+   outstanding.rows[0]!.exits!==0)return no('owner_self_open_position_or_protective_exit_unknown');
+  diagnosticStage='owner_review';
+  const review=await checks(4);
   if(review.rows.length!==1)return no('owner_self_review_or_signed_proof_not_current');
   if(durable){
    // Hold durable policy/model/state locks in the same activation transaction.
@@ -264,68 +289,116 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
   if(fee.rows.length!==1)return no('owner_self_fee_authority_changed_or_expiring');
   }
   diagnosticStage='grant_check';
-  const grants=await tx.query(`SELECT grant_id,revoked_at
+  // Each row is re-read in this transaction. The account and lease are
+  // already locked, and finalAccountProof and conservation only read them.
+  const authorityReads=await orderedOwnerReads(tx,discharge,[
+   [`SELECT grant_id,revoked_at
     FROM private.strata_continuous_execution_grants
     WHERE owner_user_id=$1::uuid AND execution_account_id=$2
-      AND release_commit_sha=$3 FOR UPDATE`,[owner,raw.accountId,sha]);
+      AND release_commit_sha=$3 FOR UPDATE`,[owner,raw.accountId,sha]],
+   [`SELECT approval_id::text,revoked_at FROM private.strata_owner_sha_approvals
+    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
+    ORDER BY confirmed_at DESC FOR UPDATE`,[owner,raw.accountId,sha]],
+   [`SELECT state,account_kill,arm_requested,fencing_token::text
+    FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
+    AND owner_user_id=$2::uuid FOR UPDATE`,[raw.accountId,owner]]
+  ]);
+  const grants=await authorityReads(0);
   if(grants.rows.length>0)return no('owner_self_existing_standing_grant_requires_reconciliation');
   // Same signed, authoritative ledger proof as the legacy final release.
   diagnosticStage='ledger_proof';
   const ledger=new ProductionLedger(db as unknown as Pool,raw.accountId);
-  await ledger.finalAccountProof(tx as unknown as PoolClient,local.rows[0] as unknown as Account,evidence.snapshot,now());
+  await ledger.finalAccountProof(tx as unknown as PoolClient,local.rows[0] as unknown as Account,evidence.snapshot,now(),discharge);
   await ledger.assertConservation(tx as unknown as PoolClient,local.rows[0] as Account);
   diagnosticStage='sha_approval';
-  const approvals=await tx.query(`SELECT approval_id::text,revoked_at FROM private.strata_owner_sha_approvals
-    WHERE owner_user_id=$1::uuid AND execution_account_id=$2 AND release_commit_sha=$3
-    ORDER BY confirmed_at DESC FOR UPDATE`,[owner,raw.accountId,sha]);
+  const approvals=await authorityReads(1);
   if(approvals.rows.length>1||approvals.rows.some(r=>r.revoked_at!==null))
    return no('owner_self_prior_sha_revocation_or_ambiguous_approval');
   let approvalId=approvals.rows.length?str(approvals.rows[0]!.approval_id):'';
-  if(!approvalId){
-   const saved=await tx.query(`INSERT INTO private.strata_owner_sha_approvals
-    (owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
-    VALUES ($1::uuid,$2,$3,$4::uuid,$5) RETURNING approval_id::text`,
-    [owner,raw.accountId,sha,raw.qualificationId,review.rows[0]!.evidence_digest]);
-   if(saved.rows.length!==1)return no('owner_self_sha_approval_insert_failed');
-   approvalId=str(saved.rows[0]!.approval_id);
-  }
-  diagnosticStage='lease_release';
-  const lease=await tx.query(`SELECT state,account_kill,arm_requested,fencing_token::text
-    FROM private.kalshi_account_worker_lease WHERE execution_account_id=$1
-    AND owner_user_id=$2::uuid FOR UPDATE`,[raw.accountId,owner]);
+  const lease=await authorityReads(2);
   if(lease.rows.length!==1||!terminalDisarmedLease(lease.rows[0]))
    return no('owner_self_killed_lease_state_changed');
-  // Move only THIS safely terminated lease to released, not owned or armed.
-  const w=await tx.query(`UPDATE private.kalshi_account_worker_lease
+  const previousFence=lease.rows[0]!.fencing_token;
+  const releaseWorker=`UPDATE private.kalshi_account_worker_lease
     SET state='released',account_kill=false,arm_requested=false,
       fencing_token=fencing_token+1,heartbeat_at=clock_timestamp(),released_at=clock_timestamp()
     WHERE execution_account_id=$1 AND owner_user_id=$2::uuid
       AND arm_requested=false
       AND ((state='killed' AND account_kill=true) OR (state='released' AND account_kill=false))
-      AND fencing_token=$3::bigint RETURNING fencing_token::text`,
-    [raw.accountId,owner,lease.rows[0]!.fencing_token]);
-  if(w.rows.length!==1)return no('owner_self_killed_lease_fence_conflict');
-  diagnosticStage='account_enable';
-  const enabled=await tx.query(`UPDATE public.v13_production_account
+      AND fencing_token=$3::bigint`;
+  const enableAccount=`UPDATE public.v13_production_account
     SET execution_enabled=true,kill_switch=false,revision=revision+1
     WHERE id=$1 AND owner_user_id=$2::uuid AND commissioned=true
     AND execution_enabled=false AND kill_switch=true AND blocked_reason IS NULL
-    AND reserved_micros=0 RETURNING id`,[raw.accountId,owner]);
-  if(enabled.rows.length!==1)return no('owner_self_account_activation_compare_and_set_failed');
-  diagnosticStage='audit_write';
-  const audit={ownerId:owner,accountId:raw.accountId,sha,
-   reviewId:raw.reviewId,qualificationId:raw.qualificationId,approvalId,
-   feeAuthorityId:authorityId,feePolicyVersion:account.fee_policy_version,policyHash:raw.policyHash,
-   observedAtMs:evidence.started,newWorkerFence:w.rows[0]!.fencing_token,
-   note:'Owner-self activation only; ARM/START and execution grant remain separate'};
-  const event=async(kind:string,payload:Row)=>{
-   await tx!.query(`INSERT INTO public.v13_production_observation
-      (id,account_id,kind,payload,digest) VALUES ($1,$2,$3,$4::jsonb,$5)`,
-     [randomUUID(),raw.accountId,kind,JSON.stringify(payload),auditDigest(payload)]);
+    AND reserved_micros=0`;
+  const observations=(approved:string,newFence:unknown)=>{
+   const audit={ownerId:owner,accountId:raw.accountId,sha,reviewId:raw.reviewId,qualificationId:raw.qualificationId,
+    approvalId:approved,feeAuthorityId:authorityId,feePolicyVersion:account.fee_policy_version,policyHash:raw.policyHash,
+    observedAtMs:evidence.started,newWorkerFence:newFence,
+    note:'Owner-self activation only; ARM/START and execution grant remain separate'};
+   const signed={ownerId:owner,accountId:raw.accountId,sha,observedAtMs:evidence.started,qualificationId:raw.qualificationId};
+   const row=(kind:string,payload:Row)=>({id:randomUUID(),kind,payload:JSON.stringify(payload),digest:auditDigest(payload)});
+   return [row('OWNER_SELF_ACCOUNT_ACTIVATED',audit),row('OWNER_RELEASE_SIGNED_RECHECK',signed)] as const;
   };
-  await event('OWNER_SELF_ACCOUNT_ACTIVATED',audit);
-  await event('OWNER_RELEASE_SIGNED_RECHECK',{ownerId:owner,accountId:raw.accountId,
-   sha,observedAtMs:evidence.started,qualificationId:raw.qualificationId});
+  if(discharge){
+   if(typeof previousFence!=='string'||!/^(0|[1-9]\d*)$/.test(previousFence))return no('owner_self_killed_lease_fence_conflict');
+   const newFence=String(BigInt(previousFence)+1n),create=approvals.rows.length===0;
+   if(create)approvalId=randomUUID();
+   if(!UUID.test(approvalId))return no('owner_self_prior_sha_revocation_or_ambiguous_approval');
+   const [activated,signed]=observations(approvalId,newFence);
+   dischargeObservationId=activated.id;
+   diagnosticStage='audit_write';
+   // RETURNING chains enforce approval → terminal lease CAS → account CAS →
+   // both immutable observations. A missing predecessor produces no successor.
+   const saved=await tx.query(`WITH inserted AS (
+    INSERT INTO private.strata_owner_sha_approvals
+     (approval_id,owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
+     SELECT $8::uuid,$2::uuid,$1,$5,$6::uuid,$7 WHERE $9::boolean RETURNING approval_id
+   ), approved AS MATERIALIZED (
+    SELECT approval_id FROM inserted UNION ALL SELECT approval_id FROM private.strata_owner_sha_approvals
+    WHERE NOT $9::boolean AND approval_id=$8::uuid AND owner_user_id=$2::uuid
+      AND execution_account_id=$1 AND release_commit_sha=$5 AND revoked_at IS NULL
+   ), released AS (
+    ${releaseWorker} AND (SELECT count(*) FROM approved)=1 RETURNING fencing_token::text AS fence
+   ), enabled AS (
+    ${enableAccount} AND EXISTS(SELECT 1 FROM released WHERE fence=$4) RETURNING id
+   ), observed AS (
+    INSERT INTO public.v13_production_observation (id,account_id,kind,payload,digest)
+    SELECT e.id,a.id,e.kind,e.payload,e.digest FROM enabled a CROSS JOIN (VALUES
+     ($10::text,'OWNER_SELF_ACCOUNT_ACTIVATED',$11::jsonb,$12::text),
+     ($13::text,'OWNER_RELEASE_SIGNED_RECHECK',$14::jsonb,$15::text)) e(id,kind,payload,digest)
+    RETURNING id::text
+   ) SELECT (SELECT approval_id::text FROM approved) approval_id,(SELECT fence FROM released) fence,
+     (SELECT id FROM enabled) account_id,ARRAY(SELECT id FROM observed) observation_ids`,
+    [raw.accountId,owner,previousFence,newFence,sha,raw.qualificationId,review.rows[0]!.evidence_digest,
+     approvalId,create,activated.id,activated.payload,activated.digest,signed.id,signed.payload,signed.digest]);
+   const result=saved.rows[0];
+   if(saved.rows.length!==1||!result||result.approval_id!==approvalId)return no('owner_self_sha_approval_insert_failed');
+   if(result.fence!==newFence)return no('owner_self_killed_lease_fence_conflict');
+   if(result.account_id!==raw.accountId)return no('owner_self_account_activation_compare_and_set_failed');
+   if(!Array.isArray(result.observation_ids)||result.observation_ids.length!==2||
+    !result.observation_ids.includes(activated.id)||!result.observation_ids.includes(signed.id))return no('owner_self_activation_audit_insert_failed');
+  }else{
+   if(!approvalId){
+    const saved=await tx.query(`INSERT INTO private.strata_owner_sha_approvals
+     (owner_user_id,execution_account_id,release_commit_sha,qualification_id,qualification_digest)
+     VALUES ($1::uuid,$2,$3,$4::uuid,$5) RETURNING approval_id::text`,
+     [owner,raw.accountId,sha,raw.qualificationId,review.rows[0]!.evidence_digest]);
+    if(saved.rows.length!==1)return no('owner_self_sha_approval_insert_failed');
+    approvalId=str(saved.rows[0]!.approval_id);
+   }
+   diagnosticStage='lease_release';
+   const w=await tx.query(releaseWorker+' RETURNING fencing_token::text',[raw.accountId,owner,previousFence]);
+   if(w.rows.length!==1)return no('owner_self_killed_lease_fence_conflict');
+   diagnosticStage='account_enable';
+   const enabled=await tx.query(enableAccount+' RETURNING id',[raw.accountId,owner]);
+   if(enabled.rows.length!==1)return no('owner_self_account_activation_compare_and_set_failed');
+   diagnosticStage='audit_write';
+   const [activated,signed]=observations(approvalId,w.rows[0]!.fencing_token);
+   for(const event of [activated,signed])await tx.query(`INSERT INTO public.v13_production_observation
+    (id,account_id,kind,payload,digest) VALUES ($1,$2,$3,$4::jsonb,$5)`,
+    [event.id,raw.accountId,event.kind,event.payload,event.digest]);
+  }
   // DB COMMIT executes the deferred five-second signed-evidence freshness
   // trigger. If it expires, the whole account+lease+approval change rolls back.
   diagnosticStage='precommit_freshness';
@@ -338,8 +411,22 @@ export async function activateOwnerSelfAccount(owner:string,raw:unknown,deps:Dep
  }catch(error){
   const diagnostic=ownerActivationFailureDiagnostic(error,diagnosticStage);
   try{console.warn('owner_self_activation_failed',diagnostic);}catch{/* Logging must not alter refusal or rollback. */}
-  if(commitAttempted){discard=Error('owner_self_activation_commit_unknown');
-   return {...no('owner_self_activation_commit_outcome_unknown'),outcomeUnknown:true,retryAuthorized:false};}
+  if(commitAttempted){
+   // A lost acknowledgement never authorizes replay. Legacy callers read
+   // the outcome separately; only the discharged path binds its own receipt.
+   discard=Error('owner_self_activation_commit_unknown');
+   const uncertainTx=tx;tx=null;
+   try{uncertainTx?.release(discard);}catch{/* Read back using a separate connection. */}
+   const unknown={...no('owner_self_activation_commit_outcome_unknown'),outcomeUnknown:true,retryAuthorized:false};
+   if(dischargeObservationId===undefined)return unknown;
+   const receipt=await ownerSelfActivationOutcome(owner,sha,db);
+   if(receipt.outcome==='RECORDED'&&receipt.accountId===raw.accountId&&receipt.activationId===dischargeObservationId)
+    return {...no('owner_self_activation_recorded_use_readback'),outcome:'RECORDED' as const,retryAuthorized:false};
+   return {...unknown,diagnostic};
+  }
+  if(diagnostic.failureCode==='economic_discharge_final_snapshot_expired'||
+     diagnostic.failureCode==='economic_discharge_final_settlement_unverified')
+   return {...no(diagnostic.failureCode),diagnostic};
   return {...no('owner_self_activation_unavailable_or_signed_proof_failed'),diagnostic};
  }finally{
   if(tx){if(!committed&&!discard)try{await tx.query('ROLLBACK');}
