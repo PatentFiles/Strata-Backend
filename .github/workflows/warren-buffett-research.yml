@@ -1,0 +1,21 @@
+name: Warren Buffett research isolation
+on:
+  pull_request:
+    paths: ['artifacts/api-server/src/lib/strategies/**','artifacts/api-server/src/routes/userExecutionRouter.ts','artifacts/api-server/package.json','.github/workflows/warren-buffett-research.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  candidate-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server run test:warren-buffett

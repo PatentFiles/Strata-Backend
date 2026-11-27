@@ -1,3 +1,5 @@
+import {pool} from '@workspace/db';
+import {readOwnerBotCatalog} from '../lib/strategies/ownerBotCatalog';
 import {economicDischargeRouter} from './economicExitDischargeRoute';
 import {createEconomicDischargeService} from '../lib/strata/economicExitDischargeService';
 import {economicSettlementRouter} from './ownerEconomicSettlementRoute';
@@ -349,6 +351,13 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
     next();
   });
   router.use(requireUser);
+  router.get('/bots/catalog',async(_req,res)=>{
+    const owner=subject(res);
+    if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});
+    res.setHeader('Cache-Control','private, no-store');
+    try{const result=await readOwnerBotCatalog(owner,pool);res.status(result.ok?200:409).json(result);}
+    catch{res.status(503).json({ok:false,reason:'owner_bot_catalog_unavailable'});}
+  });
   router.get("/release/protective-history-preview",protectiveHistoryPreviewHandler());
   router.use('/release/economic-settlement',economicSettlementRouter(createEconomicSettlementService({isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)})));
   router.use('/release/economic-discharge',economicDischargeRouter(createEconomicDischargeService({isScheduled:(owner,account)=>personalTradingSession.isScheduled(owner,account)})));
