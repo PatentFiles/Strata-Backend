@@ -171,7 +171,8 @@ export class DirectEntrySource{
   const feeds=createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{
    emitDirectEntryRolloverGap(event);
    queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
-  });
+  },undefined,process.env.STRATA_DIRECT_BTC_READ_TIMING_ENABLED==="true"
+    ?{observeDirectBtcTiming:event=>console.info(JSON.stringify(event))}:undefined);
   const source=new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
   source.#selectedBot=botId;source.#warren=botId===WARREN_BOT?new WarrenBuffettResearch():null;
   source.#priceRetryStorage=process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA===scope.worker.releaseSha;

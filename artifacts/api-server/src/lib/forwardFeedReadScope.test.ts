@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readForwardCycleFeeds,feedAbortCause,FORWARD_FEED_DEADLINE_MS} from "./forwardFeedReadScope";
 import {createPublicForwardTestFeeds,type ForwardTestFeeds} from "./forwardTestFeeds";
-import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
+import {BtcFeedDiagnostics,type BtcFeedDiagnostic,type BtcReadTiming} from "./btcFeedDiagnostics";
 import {producerDelayMs} from "./forwardTestCadence";
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 const market={ticker:"KXBTC15M-TEST",target:100000};
@@ -119,4 +119,56 @@ test("malformed BTC never reports recovery and diagnostic observer exceptions ca
  assert.equal(events.filter(x=>x.event==="btc_feed_read_recovered").length,0);
  valid=true;await api.btc();assert.equal(events.at(-1)!.event,"btc_feed_read_recovered");
  const d=new BtcFeedDiagnostics(()=>{throw Error("observer failed");});assert.doesNotThrow(()=>d.finish(d.begin(),false,null));
+});
+
+test("sampled direct BTC timing preserves the reader, signed ages and monotonic HTTP phases",async()=>{
+ const start=Date.UTC(2026,10,27);
+ for(const providerOffset of [-6500,300]){
+  const run=async(enabled:boolean)=>{
+   let wall=start,mono=0,calls=0;
+   const events:BtcReadTiming[]=[];
+   const fetcher:typeof fetch=async(url,init)=>{
+    calls++;assert.equal(url,'https://api.exchange.coinbase.com/products/BTC-USD/ticker');
+    assert.equal(init?.credentials,'omit');assert.equal(init?.redirect,'error');
+    mono+=20;wall+=20;
+    const response=new Response(null,{headers:{Age:'1','Cache-Control':'public,max-age=2','x-secret':'private'}});
+    Object.defineProperty(response,'json',{value:async()=>{mono+=5;wall+=5;return {price:'100',time:new Date(start+providerOffset).toISOString(),secret:'private'};}});
+    return response;
+   };
+   const feed=createPublicForwardTestFeeds(fetcher,()=>new Date(wall),()=>mono,undefined,undefined,
+    enabled?{observeDirectBtcTiming:event=>{events.push(event);throw Error('ignored sink failure');}}:undefined);
+   const result=await feed.btc();
+   assert.equal(events.length,0);
+   await new Promise<void>(resolve=>setImmediate(resolve));
+   return {result,events,calls};
+  };
+  const plain=await run(false),timed=await run(true);
+  assert.deepEqual(timed.result,plain.result);assert.equal(timed.calls,1);assert.equal(plain.calls,1);
+  assert.deepEqual(timed.events,[{event:'direct_btc_read_timing',scope:'owned_direct_reader',provider:'coinbase',endpoint:'btc_ticker',
+   reader:timed.events[0]!.reader,attempt:1,requestStartMs:start,receiptMs:start+25,ageAtRequestMs:-providerOffset,
+   ageAtReceiptMs:25-providerOffset,headersMs:20,bodyMs:5,requestToBodyMs:25,httpAgeSeconds:1,cacheMaxAgeSeconds:2}]);
+  assert.ok(timed.events[0]!.reader>0);
+ }
+});
+
+test("BTC timing samples attempts sparsely and emits nothing for malformed or failed reads",async()=>{
+ let count=0;const seen:number[]=[];
+ const p=Date.UTC(2026,10,27);
+ const feed=createPublicForwardTestFeeds(async()=>{count++;return new Response(JSON.stringify({price:'100',time:new Date(p).toISOString()}));},
+  ()=>new Date(p),()=>100,undefined,undefined,{observeDirectBtcTiming:e=>seen.push(e.attempt)});
+ for(let i=0;i<66;i++){await feed.btc();await new Promise<void>(r=>setImmediate(r));}
+ assert.equal(count,66);assert.deepEqual(seen,[1,65]);
+ for(const mode of ['http','json','timestamp','network']){
+  const messages:string[]=[];
+  for(const enabled of [false,true]){
+   let reads=0,emits=0;
+   const f=createPublicForwardTestFeeds(async()=>{reads++;if(mode==='network')throw Error('failure');
+    if(mode==='http')return new Response(null,{status:429});
+    return new Response(mode==='json'?'{':JSON.stringify({price:1,time:'invalid'}));},
+    ()=>new Date(p),()=>100,undefined,undefined,enabled?{observeDirectBtcTiming:()=>{emits++;}}:undefined);
+   await assert.rejects(f.btc(),(error:Error)=>{messages.push(error.message);return true;});
+   await new Promise<void>(r=>setImmediate(r));assert.equal(reads,1);assert.equal(emits,0);
+  }
+  assert.equal(messages[0],messages[1]);
+ }
 });

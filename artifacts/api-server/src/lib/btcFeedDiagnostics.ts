@@ -28,3 +28,44 @@ export class BtcFeedDiagnostics {
   }catch{/* Diagnostics never affect data eligibility or recovery. */}
  }
 }
+
+/** One serial per direct feed reader in this process. No account identifiers are logged. */
+export type BtcReadTiming = {
+ event:"direct_btc_read_timing"; scope:"owned_direct_reader"; provider:"coinbase"; endpoint:"btc_ticker";
+ reader:number; attempt:number; requestStartMs:number; receiptMs:number; ageAtRequestMs:number; ageAtReceiptMs:number;
+ headersMs:number; bodyMs:number; requestToBodyMs:number; httpAgeSeconds:number|null; cacheMaxAgeSeconds:number|null;
+};
+let readerSequence=0;
+
+export class DirectBtcReadTimings {
+ private readonly reader=++readerSequence;
+ private pending=false;
+ constructor(private readonly emit:(event:BtcReadTiming)=>void) {}
+
+ sample(attempt:number):boolean {
+  return !this.pending && (attempt-1)%64===0;
+ }
+
+ record(attempt:number, requestStartMs:number, providerMs:number, receiptMs:number,
+   headersMs:number|null, body:PublicFeedReadEvidence|null):void {
+  const total=body?.roundTripMs;
+  const ageAtRequestMs=requestStartMs-providerMs;
+  const ageAtReceiptMs=receiptMs-providerMs;
+  if(this.pending || body?.outcome!=="complete" || headersMs===null || total==null || total<headersMs ||
+    ![requestStartMs,receiptMs,ageAtRequestMs,ageAtReceiptMs].every(Number.isSafeInteger))return;
+
+  const event:BtcReadTiming={
+   event:"direct_btc_read_timing",scope:"owned_direct_reader",provider:"coinbase",endpoint:"btc_ticker",
+   reader:this.reader,attempt,requestStartMs,receiptMs,ageAtRequestMs,ageAtReceiptMs,
+   headersMs,bodyMs:Math.round((total-headersMs)*1000)/1000,requestToBodyMs:total,
+   httpAgeSeconds:body.ageSeconds,cacheMaxAgeSeconds:body.cacheMaxAgeSeconds,
+  };
+  this.pending=true;
+  try {
+   setImmediate(()=>{
+    try{this.emit(event);}catch{/* Diagnostic output is best effort. */}
+    finally{this.pending=false;}
+   }).unref();
+  }catch{this.pending=false;}
+ }
+}

@@ -7,6 +7,7 @@ import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
 import {DirectEntrySource} from "./directEntrySource";
+import {createPublicForwardTestFeeds} from "../forwardTestFeeds";
 import {AccountScopedExchange} from "../strata/accountProductionSession";
 import {createIndependentProductionFetch} from "./liveEntryContainment";
 import {persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION} from "../strata/personalCashReconciliation";
@@ -2578,4 +2579,31 @@ test("orders-off integrated retry preserves one order fence after a typed first 
  const intents=(await pool.query("SELECT direct_source_id,state FROM v13_production_intent")).rows;
  assert.deepEqual(intents,[{direct_source_id:second,state:"PREPARED"}]);
  assert.deepEqual(f.exchange.posts,[]);
+});
+
+test("timed BTC observations preserve direct stale and future refusals before book or intent",async()=>{
+ const f=await fixture();
+ const open=Math.floor(f.exchange.now/900000)*900000;
+ const now=open+60_000;
+ for(const timing of [false,true]){
+  for(const offset of [-5001,500]){
+   let requests=0,quotes=0;
+   const feed=createPublicForwardTestFeeds(async()=>{
+    requests++;
+    return new Response(JSON.stringify({price:'100001',time:new Date(now+offset).toISOString()}));
+   },()=>new Date(now),()=>100,undefined,undefined,timing?{observeDirectBtcTiming:()=>{}}:undefined);
+   const source=DirectEntrySource.isolatedSimulation({accountId:'test-account',ownerId:null},{
+    btc:feed.btc,
+    market:async()=>({ticker:'KXBTC15M-TIMING',target:100000,startsAt:new Date(open),endsAt:new Date(open+900000),
+     yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:'active',fetchedAt:new Date(now)}),
+    book:async()=>{quotes++;throw Error('unexpected_book_read');},
+   },()=>now);
+   await assert.rejects(source.capture(pool),/direct_entry_market_or_feed_invalid/);
+   assert.equal(requests,1);
+   assert.equal(quotes,0);
+  }
+ }
+ assert.equal((await pool.query('SELECT count(*)::int n FROM public.strata_direct_entry_source')).rows[0].n,0);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);
+ assert.equal(f.exchange.posts.length,0);
 });
