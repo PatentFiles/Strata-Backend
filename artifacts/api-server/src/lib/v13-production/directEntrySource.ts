@@ -1,3 +1,4 @@
+import {directTargetReadiness} from "./directTargetReadiness";
 import {createHash,createHmac,randomBytes,randomUUID,timingSafeEqual} from "node:crypto";
 import type {Pool,PoolClient} from "@workspace/db";
 import {evaluateV13Strategy,needsV13EntryPrice,V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET,V13_ENTRY_POLICY_VERSION} from "@workspace/v13-strategy";
@@ -32,6 +33,8 @@ export type DirectEvaluation={
  btc_provider_age_ms:number;btc_receive_age_ms:number;market_age_ms:number;
  account_id:string;owner_user_id:string|null;worker_pin:DirectWorkerPin|null;
  direct_quote_evidence:Quote;
+ /** A fresh observation after one committed pre-order price refusal, never a wire replay. */
+ price_retry_of?:string;
 };
 type Point={price:number;provider:number;received:number};
 type Prior={ticker:string;target:number;open:number;close:number;point:Point};
@@ -46,7 +49,7 @@ function observedVelocity(points:Point[]):number|null{
 type Quote={timestampAuthority:"LOCAL_RECEIPT_ONLY";started:number;headers:number;completed:number;
  digest:string;normalizedBookDigest:string;yesBid:number;noBid:number};
 type Unsigned={version:1;account:string;owner:string|null;ticker:string;evaluation:string;oldest:number;observed:number;closesAt:number;
- environment:Environment;source:DirectEvaluation;quote:Quote;};
+ environment:Environment;source:DirectEvaluation;quote:Quote;priceRetryProtocol?:"PRICE_REFUSAL_V1";};
 type Receipt=Unsigned&{producerSeal:string};
 type Query=Pick<Pool|PoolClient,"query">;
 /** A held position has its own market and quantity; current-window discovery
@@ -134,6 +137,8 @@ export class DirectEntrySource{
  readonly #environment:Environment;
  #prior:Prior|null=null;#points:Point[]=[];#running=false;#lastClock=-1;
  #retryRehearsal=false;
+ #priceRetryStorage=false;
+ #lastReadyMarket:string|null=null;
  #heldPrior:(Prior&{positionId:string})|null=null;#heldPoints:Point[]=[];
  #clearHeld(){this.#heldPrior=null;this.#heldPoints=[];}
  private constructor(scope:DirectScope,environment:Environment,private readonly feeds:ForwardTestFeeds,private readonly clock:()=>number,private readonly auditPolicy:LiveDecisionPolicy={}){
@@ -153,11 +158,39 @@ export class DirectEntrySource{
    emitDirectEntryRolloverGap(event);
    queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
   });
-  return new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
+  const source=new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
+  source.#priceRetryStorage=process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA===scope.worker.releaseSha;
+  return source;
  }
  static isolatedSimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
   requireProof(simulationEnvironment(),"direct_entry_simulation_requires_disposable");
   return new DirectEntrySource(scope,"SIMULATION",feeds,clock);
+ }
+ /** Independent native tests still require the canonical disposable boundary. */
+ static isolatedPriceRetrySimulation(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
+  const source=this.isolatedSimulation(scope,feeds,clock);
+  requireProof(scope.ownerId&&scope.worker,'direct_price_retry_owned_scope_required');
+  source.#priceRetryStorage=true;return source;
+ }
+ priceRetryPermitted():boolean{
+  if(!this.#priceRetryStorage)return false;
+  if(this.#environment==='SIMULATION')return simulationEnvironment();
+  return process.env.NODE_ENV==='production'&&process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA===this.#scope.worker?.releaseSha&&
+   process.env.RAILWAY_GIT_COMMIT_SHA===this.#scope.worker?.releaseSha;
+ }
+ /** Record only a code-owned failed preflight inside its existing account transaction.
+  * No intent or reservation has been created at this boundary. Database guards
+  * independently refuse a changed owner, lease, policy, source or financial state. */
+ async recordPriceRefusal(tx:Query,source:DirectEvaluation,policyHash:string,bestAsk:string):Promise<boolean>{
+  if(!this.priceRetryPermitted()||source.price_retry_of||!this.#scope.ownerId||!this.#scope.worker)return false;
+  this.assertExecutorBinding(this.#environment==='SIMULATION'?'SIMULATION':'LIVE',this.#scope);
+  const sourceSha256=DirectEntrySource.validatedSourceDigest(source);
+  requireProof(sourceSha256&&source.account_id===this.#scope.accountId&&source.owner_user_id===this.#scope.ownerId,'direct_price_refusal_source_unverified');
+  const reference=Math.round(source.entry_offer*1000000),ask=Math.round(Number(bestAsk)*1000000);
+  requireProof(Number.isSafeInteger(reference)&&Number.isSafeInteger(ask)&&ask>reference&&ask<1000000,'direct_price_refusal_not_price_change');
+  const result=await tx.query('INSERT INTO private.strata_direct_price_refusal(source_id,account_id,crossing_key,owner_user_id,source_sha256,release_sha,policy_hash,reference_micros,best_ask_micros,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING RETURNING source_id',
+   [source.id,this.#scope.accountId,source.crossing_key,this.#scope.ownerId,sourceSha256,this.#scope.worker.releaseSha,policyHash,reference,ask,'live_money_best_ask_above_signal_ceiling']);
+  return result.rows.length===1;
  }
  /** This exercise cannot be reached from Railway startup or a LIVE worker. */
  static isolatedRetryRehearsal(scope:DirectScope,feeds:ForwardTestFeeds,clock:()=>number){
@@ -236,9 +269,22 @@ export class DirectEntrySource{
     btcReceiveAgeMs:now-received,marketAgeMs:now-fetched});
    requireProof(time(open)&&time(close)&&close-open===900000&&open<=cycle&&now<close&&
     TICKER.test(market.ticker)&&["open","active"].includes(market.status)&&market.result===null&&
-    finite(market.target)&&market.target>0&&finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&
+    finite(btc.price)&&btc.price>0&&time(provider)&&time(received)&&
     provider<=received&&cycle<=received&&cycle<=fetched&&[cycle,provider,received,fetched].every(x=>time(x)&&x<=now&&now-x<=AGE),
     "direct_entry_market_or_feed_invalid");
+   const targetReadiness=directTargetReadiness({target:market.target,status:market.targetStatus,openMs:open,nowMs:now,previouslyReady:this.#lastReadyMarket===market.ticker});
+   facts.targetReadiness=targetReadiness;
+   if(targetReadiness==='waiting'){
+    // Never derive a crossing through a missing target. No quote, source claim,
+    // fee request, order or clock extension occurs while initialization waits.
+    this.#prior=null;this.#points=[];
+    audit.outcome='PASS';audit.reasonCode='market_target_initializing';
+    audit.reasonDetail='Exact market target not published yet; waiting without an order.';
+    return null;
+   }
+   requireProof(targetReadiness==='ready',targetReadiness==='unavailable'?'direct_entry_target_unavailable':'direct_entry_target_invalid');
+   requireProof(finite(market.target)&&market.target>0,'direct_entry_target_invalid');
+   this.#lastReadyMarket=market.ticker;
    const point={price:btc.price,provider,received},prior=this.#prior,target=market.target;
    if(prior&&prior.ticker===market.ticker&&(prior.target!==target||prior.open!==open||prior.close!==close))
     throw Error("direct_entry_market_identity_changed");
@@ -290,7 +336,13 @@ export class DirectEntrySource{
    if(!decision.qualifyingTrigger||!decision.freshCross||decision.entrySideOffer===null||
     (decision.signal!=="SCOUT"&&decision.signal!=="CONFIRM")||(decision.direction!=="UP"&&decision.direction!=="DOWN"))return null;
    const id=randomUUID(),account=this.#scope.accountId,ticker=market.ticker,crossing=ticker+":first";
-   const source:DirectEvaluation={id,evaluation_source:this.#environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1",
+   let priceRetryOf:string|undefined;
+   if(this.priceRetryPermitted()){
+    const previous=await db.query('SELECT s.id FROM public.strata_direct_entry_source s JOIN private.strata_direct_price_refusal r ON r.source_id=s.id AND r.account_id=s.account_id AND r.source_sha256=s.evidence_sha256 WHERE s.account_id=$1 AND s.crossing_key=$2 AND r.owner_user_id=$3::uuid AND r.release_sha=$4 LIMIT 2',
+     [account,crossing,this.#scope.ownerId,this.#scope.worker!.releaseSha]);
+    if(previous.rows.length===1)priceRetryOf=previous.rows[0].id;
+   }
+   const source:DirectEvaluation={id,...(priceRetryOf?{price_retry_of:priceRetryOf}:{}),evaluation_source:this.#environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1",
     execution_environment:this.#environment,market_ticker:ticker,crossing_key:crossing,
     entry_policy_version:V13_ENTRY_POLICY_VERSION,strategy_parameter_set_id:V13_CHAMPION_PARAMETER_SET.id,
     strategy_parameter_hash:V13_CHAMPION_PARAMETER_HASH,evaluated_at:new Date(observed).toISOString(),original_oldest_ms:oldest,market_open_ms:open,market_close_ms:close,
@@ -301,14 +353,14 @@ export class DirectEntrySource{
     account_id:account,owner_user_id:this.#scope.ownerId,worker_pin:this.#scope.worker??null,direct_quote_evidence:quote};
    assertDirectEntryQuoteEvidence(source,observed);
    const unsigned:Unsigned={version:1,account,owner:this.#scope.ownerId,ticker,evaluation:id,oldest,observed,closesAt:close,
-    environment:this.#environment,source,quote};
+    environment:this.#environment,source,quote,...(this.priceRetryPermitted()?{priceRetryProtocol:"PRICE_REFUSAL_V1" as const}:{})};
    const receipt:Receipt={...unsigned,producerSeal:this.#seal(JSON.stringify(unsigned))};
    const bytes=JSON.stringify(receipt);
    const r=await db.query(
     "INSERT INTO public.strata_direct_entry_source (id,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256) "+
     "SELECT $1,a.id,$3,$4,$5,$6,$7,$8,$9 FROM public.v13_production_account a "+
     "WHERE a.id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $10::uuid "+
-    (this.#retryRehearsal?"ON CONFLICT(id) DO NOTHING RETURNING id":"ON CONFLICT(account_id,crossing_key) DO NOTHING RETURNING id"),
+    "ON CONFLICT DO NOTHING RETURNING id",
     [id,account,ticker,crossing,new Date(observed),new Date(oldest),new Date(close),bytes,sha(bytes),this.#scope.ownerId]);
    if(r.rows.length!==1||r.rows[0].id!==id){
     audit.outcome="BLOCKED";audit.reasonCode="crossing_already_consumed";
@@ -338,6 +390,7 @@ export class DirectEntrySource{
    "SELECT s.*,a.owner_user_id::text AS owner_id FROM public.strata_direct_entry_source s "+
    "JOIN public.v13_production_account a ON a.id=s.account_id "+
    "WHERE s.id=$1 AND s.account_id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $3::uuid "+
+   (this.#priceRetryStorage?"AND NOT EXISTS(SELECT 1 FROM private.strata_direct_price_refusal price_refusal WHERE price_refusal.source_id=s.id) ":"")+
    (this.#retryRehearsal?"AND EXISTS(SELECT 1 FROM public.strata_direct_entry_current c WHERE c.source_id=s.id AND c.account_id=s.account_id AND c.crossing_key=s.crossing_key) AND NOT EXISTS(SELECT 1 FROM public.strata_direct_entry_refusal f WHERE f.source_id=s.id) ":"")+
    "FOR SHARE OF s",
    [id,this.#scope.accountId,this.#scope.ownerId]);
@@ -348,6 +401,7 @@ export class DirectEntrySource{
    const receipt=JSON.parse(bytes) as Receipt,{producerSeal,...unsigned}=receipt;
    if(typeof producerSeal!=="string"||!HASH.test(producerSeal)||!timingSafeEqual(Buffer.from(producerSeal,"hex"),Buffer.from(this.#seal(JSON.stringify(unsigned)),"hex")))return null;
    const s=receipt.source;
+   if(s.price_retry_of&&(!UUID.test(s.price_retry_of)||!this.priceRetryPermitted()||receipt.priceRetryProtocol!=="PRICE_REFUSAL_V1"))return null;
    if(JSON.stringify(receipt)!==bytes||receipt.version!==1||receipt.environment!==this.#environment||
     receipt.account!==this.#scope.accountId||receipt.owner!==this.#scope.ownerId||row.owner_id!==this.#scope.ownerId||
     receipt.evaluation!==id||s.id!==id||s.execution_environment!==this.#environment||

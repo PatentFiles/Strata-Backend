@@ -172,6 +172,7 @@ export class ProductionExecutor {
       requireProof(this.#directSource&&i.direct_source_id&&i.evaluation_id===null,
         "direct_entry_intent_source_mismatch");
       this.assertDirectBinding(this.#directSource);
+      if(i.decision?.source?.price_retry_of)requireProof(this.#directSource.priceRetryPermitted(),'direct_price_retry_release_disabled');
     }
   }
   containLiveEntries():void { this.independentEntryHold=true; }
@@ -482,6 +483,13 @@ export class ProductionExecutor {
       };
       const pf=preflightV13LiveMoneyEntry(preflightInput);
       diagnostics.sizing=captureEntrySizingDiagnostics(preflightInput,pf);
+      if(!pf.ok&&pf.reason==='live_money_best_ask_above_signal_ceiling'&&direct&&direct.priceRetryPermitted()){
+        // This branch is BEFORE UUID creation, position/intent INSERT or reserve
+        // mutation. Commit only an immutable no-order receipt; never send or
+        // retry transport here. A later capture needs a genuinely fresh cross.
+        const recorded=await direct.recordPriceRefusal(tx,source as DirectEvaluation,p.policyHash!,book.bestAskDollars);
+        if(recorded)return {priceRefusalRecorded:true as const};
+      }
       requireProof(pf.ok, pf.ok ? "" : pf.reason);
       if(pf.cashRisk)requireProof(book.fee.cashRisk&&book.fee.cashRisk.marketTicker===source.market_ticker&&book.fee.cashRisk.side===side&&
         book.fee.cashRisk.policyHash===p.policyHash,"production_cash_risk_identity_invalid");
@@ -510,13 +518,17 @@ export class ProductionExecutor {
       return id;
     });
     const prepared = await prepare();
-    if(prepared !== null) return prepared;
+    if(prepared !== null){
+      if(typeof prepared!=="string")throw Error("live_money_best_ask_above_signal_ceiling");
+      return prepared;
+    }
     subtimings.mark("market_evidence");
     book = await readBook();
     diagnostics.price = captureEntryPriceDiagnostics(source,book);
     subtimings.mark("transaction_acquire");
     const retried = await prepare();
     requireProof(retried !== null, "production_source_feed_stale_or_changed");
+    if(typeof retried!=="string")throw Error("live_money_best_ask_above_signal_ceiling");
     return retried;
   }
 
