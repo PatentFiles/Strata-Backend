@@ -1,3 +1,5 @@
+import {assertEconomicDischargeSettlements} from './economicExitDischargeScope';
+import {orderedOwnerReads} from './economicRecoveryReadBatch';
 import {economicExitNotDischarged} from './economicExitDischargeScope';
 import {getFeeFailureDiagnostics} from "./feeFailureDiagnostics";
 import {runtimeAuthSql} from './runtimeAuthRelation';
@@ -9,7 +11,7 @@ import type {Pool,PoolClient} from '@workspace/db';
 import { createHash, randomUUID } from "node:crypto";
 import { pool } from "@workspace/db";
 import { deployedGitSha, DEPLOYED_SHA_RUNTIME_UNAVAILABLE } from "./deployedGitSha";
-import { readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
+import { readOwnerDischargeFeeds,readOwnedKalshiFeeds, personalAccountSnapshot } from "./personalExchangeRead";
 import { readUnresolvedIntentMode } from "./workerUncertainOrderGate";
 import { verifyProtectiveReleaseFeePreflight } from "./protectiveReleaseFeePreflight";
 import { observeDynamicKalshiFees, computeDynamicFeeModelDigest, type DynamicFeeResult } from "./dynamicOfficialFeeSchedule";
@@ -52,17 +54,19 @@ const accountSQL=`
   AND p.execution_account_id=a.id AND p.created_by=a.owner_user_id::text
  LEFT JOIN public.strata_configured_stake stake ON stake.execution_account_id=a.id
  WHERE a.owner_user_id=$1::uuid AND a.subaccount=1 AND a.exchange_index=2 LIMIT 2`;
-export async function readReleaseOwner(db:Query,ownerId:string):Promise<{ok:true;account:DbRow}|{ok:false;reason:string}>{
+export async function readReleaseOwner(db:Query,ownerId:string,withActivationRequest=false):Promise<{ok:true;account:DbRow}|{ok:false;reason:string}>{
  if(!valid(ownerId))return {ok:false,reason:"owner_identity_invalid"};
- const a=await db.query(accountSQL,[ownerId]);
+ const a=await db.query(withActivationRequest?`SELECT owned.*,(SELECT o.digest FROM public.v13_production_observation o
+  WHERE o.account_id=owned.id AND o.kind='OWNER_ACTIVATION_REQUEST' ORDER BY o.observed_at DESC LIMIT 1) AS activation_digest
+  FROM (${accountSQL}) owned`:accountSQL,[ownerId]);
  if(a.rows.length!==1)return {ok:false,reason:"owned_account_missing_or_ambiguous"};
- const account=a.rows[0]!;
+ const {activation_digest:activationDigest,...account}=a.rows[0]!;
  if(!truth(account.commissioned)||account.policy_state!=="APPROVED"||
     !truth(account.cash_precision_verified)||Number(account.minimum_exit_micros)!==10000)
    return {ok:false,reason:"account_commissioning_policy_or_floor_unverified"};
  if(!/^[a-f0-9]{64}$/.test(String(account.fee_artifact_digest??"")))
    return {ok:false,reason:"account_fee_digest_unverified"};
- const request=await db.query(`
+ const request=withActivationRequest?{rows:[{digest:activationDigest}]}:await db.query(`
  SELECT o.digest FROM public.v13_production_observation o
  WHERE o.account_id=$1 AND o.kind='OWNER_ACTIVATION_REQUEST'
  ORDER BY o.observed_at DESC LIMIT 1`,[account.id]);
@@ -448,8 +452,8 @@ export async function attestProtectiveReleaseReview(
 // Local candidate: collect outside the transaction, then bind every observed
 // account/credential/history row under locks before an enabling transition.
 // Live technical renewal retains its existing behavior and does not require flatness.
-export async function finalReleaseScope(db:Query,owner:string,account:string,lock=false):Promise<DbRow & {worker:DbRow[]}>{
- const q=await db.query(`SELECT a.xmin::text AS account_revision,p.xmin::text AS policy_revision,
+export async function finalReleaseScope(db:Query,owner:string,account:string,lock=false,batchDischarge=false):Promise<DbRow & {worker:DbRow[]}>{
+ const reads=await orderedOwnerReads(db,lock&&batchDischarge,[[ `SELECT a.xmin::text AS account_revision,p.xmin::text AS policy_revision,
  s.xmin::text AS stake_revision,c.xmin::text AS credential_revision,
  fa.xmin::text AS financial_revision,pc.xmin::text AS provider_revision,
  g.xmin::text AS global_revision,
@@ -466,14 +470,15 @@ export async function finalReleaseScope(db:Query,owner:string,account:string,loc
 
  JOIN public.live_execution_config g ON g.id='singleton'
  WHERE a.id=$1 AND a.owner_user_id=$2::uuid AND a.subaccount=1 AND a.exchange_index=2
- ${lock?'FOR UPDATE OF a FOR SHARE OF p,s,c,fa,pc,g':''}`,[account,owner]);
+ ${lock?'FOR UPDATE OF a FOR SHARE OF p,s,c,fa,pc,g':''}`,[account,owner] ],[ `SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
+ WHERE execution_account_id=$1 ${lock?'FOR UPDATE':''}`,[account] ]]);
+ const q=await reads(0);
  if(q.rows.length!==1)throw Error('release_scope_unverified');
  const row=q.rows[0]!;
  if(String(row.reserved_micros)!=='0')throw Error('release_reserved_cash_unverified');
  // Account FOR UPDATE is already held by the finalizer. A validated immediate
  // FK makes concurrent lease INSERT acquire conflicting parent KEY SHARE.
- const leases=await db.query(`SELECT w.*,w.xmin::text AS row_revision FROM private.kalshi_account_worker_lease w
- WHERE execution_account_id=$1 ${lock?'FOR UPDATE':''}`,[account]);
+ const leases=await reads(1);
  if(leases.rows.length>1)throw Error('release_worker_lease_not_unique');
  if(leases.rows.length){const w=leases.rows[0]!;
   if(w.owner_user_id!==owner||w.financial_account_id!==row.financial_id||w.provider_connection_id!==row.provider_id||w.credential_fingerprint!==row.key_fingerprint||w.vault_secret_id!==row.vault_secret_id)throw Error('release_worker_binding_unverified');
@@ -495,7 +500,10 @@ export async function finalReleaseScope(db:Query,owner:string,account:string,loc
  }
  return {...row,worker:leases.rows};
 }
-export async function finalReleaseHistory(db:Query,account:string,owner:string,lock=false){
+export async function finalReleaseHistory(db:Query,account:string,owner:string,lock=false,batchDischarge=false){
+ // A preflight verified discharge implies retained history. The locked retained
+ // reader independently repeats the canonical proof and rejects an empty set.
+ if(lock&&batchDischarge)return {mode:'retained' as const,...await readReconciledReleaseRenewalHistory(db,account,owner,true,true)};
  const initial=await readNeverPostedReleaseHistory(db,account,lock,{expiredExitOwnerId:owner});
  if(initial.rows.length)return {mode:'retained' as const,...await readReconciledReleaseRenewalHistory(db,account,owner,lock)};
  const suffix=lock?' FOR SHARE':'';
@@ -510,18 +518,22 @@ export function finalReleaseSnapshot(history:Awaited<ReturnType<typeof finalRele
  else if(snapshot.orders.length||snapshot.fills.length||snapshot.positions.length||snapshot.settlements.length)throw Error('release_empty_history_signed_exposure');
 }
 
-export async function collectFinalReleaseEvidence(owner:string,deps:Deps={}){
- const db=deps.db??pool,v=await readReleaseOwner(db,owner);
+export async function collectFinalReleaseEvidence(owner:string,deps:Deps={},forOwnerActivation=false){
+ const db=deps.db??pool,v=await readReleaseOwner(db,owner,forOwnerActivation);
  if(!v.ok)throw Error('release_owner_scope_unverified');
  if(v.account.kill_switch!==true)return null;
  const account=String(v.account.id),scope=await finalReleaseScope(db,owner,account);
  const history=await finalReleaseHistory(db,account,owner);
  const material=await loadedMaterial(db,v.account);
  if(!material||dedicatedSignerFingerprint(material.keyId,material.privateKey)!==scope.key_fingerprint)throw Error('release_signer_unverified');
- const started=(deps.now??Date.now)(),feeds=await(deps.readFeeds??readOwnedKalshiFeeds)(material,started);
+ const started=(deps.now??Date.now)();
+ const feeds=forOwnerActivation&&history.mode==='retained'&&history.economicDischarges?.length
+  ?await readOwnerDischargeFeeds(owner,material,started,deps.readFeeds)
+  :await(deps.readFeeds??readOwnedKalshiFeeds)(material,started);
  if(!feeds.ok||feeds.historicalCoverageComplete!==true||feeds.observedAtMs!==started)throw Error('release_complete_signed_evidence_required');
  const snapshot=personalAccountSnapshot({subaccount:1,exchangeIndex:2,keyFingerprint:String(scope.key_fingerprint)},feeds,history.requests);
  if(!('identity' in snapshot)||!snapshot.authenticated||!snapshot.complete||!snapshot.cashExact||snapshot.unexplainedCashActivity||String(feeds.cashMicros)!==scope.cash_micros)throw Error('release_signed_scope_cash_unverified');
+ if(forOwnerActivation&&history.mode==='retained'&&history.economicDischarges?.length)assertEconomicDischargeSettlements(history.economicDischarges,snapshot);
  finalReleaseSnapshot(history,snapshot);
  if(history.mode==='empty'&&(feeds.orders.length||feeds.fills.length||feeds.positions.length||feeds.settlements.length))throw Error('release_empty_history_signed_activity');
  if((deps.now??Date.now)()-started>5000||(deps.now??Date.now)()<started)throw Error('release_signed_evidence_stale');

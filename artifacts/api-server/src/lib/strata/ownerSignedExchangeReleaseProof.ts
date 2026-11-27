@@ -7,7 +7,7 @@ import {readNeverPostedReleaseHistory} from "./neverPostedReleaseHistory";
  */
 import {pool} from "@workspace/db";
 import {loadedMaterial} from "./inAppProtectiveRelease";
-import {readOwnedKalshiFeeds,personalAccountSnapshot,type OwnedKalshiRead} from "./personalExchangeRead";
+import {readOwnerDischargeFeeds,readOwnedKalshiFeeds,personalAccountSnapshot,type OwnedKalshiRead} from "./personalExchangeRead";
 import {migrationFlatHistoryCheck} from "./ownerApiFeePolicyMigration";
 import {probeCurrentKalshiFeeApi} from "./twoSourceFeeEvidence";
 import {inspectWalletV4Readiness} from "./walletV4CommissioningReadiness";
@@ -16,7 +16,7 @@ import {dedicatedSignerFingerprint} from "./commissioning";
 
 type Row=Record<string,unknown>;
 type Db={query(sql:string,params?:unknown[]):Promise<{rows:Row[]}>};
-export type MatchingCommissioningEvidence={account:Row;snapshot:Snapshot;feeds:OwnedKalshiRead;historyDigest:string;initialFundingCandidate:boolean};
+export type MatchingCommissioningEvidence={account:Row;snapshot:Snapshot;feeds:OwnedKalshiRead;historyDigest:string;verifiedEconomicHistory?:true;initialFundingCandidate:boolean};
 type ProofDeps={
  db?:Db;now?:()=>number;
  material?:typeof loadedMaterial;read?:typeof readOwnedKalshiFeeds;
@@ -133,7 +133,12 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  if(!Number.isSafeInteger(started)||started<=0)
   return no("signed_exchange_clock_invalid");
  let read:Awaited<ReturnType<typeof readOwnedKalshiFeeds>>;
- try{read=await (deps.read??readOwnedKalshiFeeds)(creds,started);}
+ try{
+  const reader=deps.read??readOwnedKalshiFeeds;
+  read=deps.captureCommissioningEvidence&&history.economicDischarges?.length
+   ?await readOwnerDischargeFeeds(ownerId,creds,started,reader)
+   :await reader(creds,started);
+ }
  catch{return no("authenticated_exchange_read_unavailable",true);}
  finally{creds=null;}
  if(!read.ok)return no("authenticated_exchange_"+read.reason,true);
@@ -174,7 +179,8 @@ export async function inspectOwnerSignedExchangeReleaseProof(
  // Final read is after ALL exchange/fee/readiness awaits. No locks span network.
  try{
   if(history!.neverPosted.length>0||deps.captureCommissioningEvidence){
-   const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId});
+   const finalHistory=await readNeverPostedReleaseHistory(db,String(account.id),false,{expiredExitOwnerId:ownerId,
+    batchDischargeEvidence:Boolean(deps.captureCommissioningEvidence&&history!.economicDischarges?.length)});
    if(finalHistory.historyDigest!==history!.historyDigest)return no("financial_history_changed_during_signed_diagnostic",true);
   }
   const final=await db.query(OWNER_SIGNED_PROOF_ACCOUNT_SQL,[ownerId]);
@@ -187,7 +193,7 @@ export async function inspectOwnerSignedExchangeReleaseProof(
   return no("signed_exchange_read_stale",true);
  if(deps.captureCommissioningEvidence&&exchangeFlat&&(cashMatch||initialFundingCandidate)&&
    account.execution_enabled===false&&account.kill_switch===true&&completed-started<=15000){
-  deps.captureCommissioningEvidence({account:structuredClone(account),snapshot:structuredClone(mapped),feeds:structuredClone(read),historyDigest:history!.historyDigest,initialFundingCandidate:!cashMatch&&initialFundingCandidate});
+  deps.captureCommissioningEvidence({account:structuredClone(account),snapshot:structuredClone(mapped),feeds:structuredClone(read),historyDigest:history!.historyDigest,...(history!.economicDischarges?.length?{verifiedEconomicHistory:true as const}:{}),initialFundingCandidate:!cashMatch&&initialFundingCandidate});
  }
  const blockedReasons:string[]=[];
  if(!exchangeFlat)blockedReasons.push(flat.ok?"exchange_flatness_unverified":flat.reason);

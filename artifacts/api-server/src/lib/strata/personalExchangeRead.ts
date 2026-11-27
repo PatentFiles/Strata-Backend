@@ -89,6 +89,15 @@ export interface OwnedKalshiRead {
   settlements: unknown[];
 }
 
+/** Both owner financial proofs take their own original timestamp. Only the
+ * signed, account-scoped GET transport and bounded pagination are shared. */
+export function readOwnerDischargeFeeds(ownerId:string,credentials:Parameters<typeof readOwnedKalshiFeeds>[0],
+ observedAtMs:number,reader:typeof readOwnedKalshiFeeds=readOwnedKalshiFeeds){
+ const get:typeof getOwnedProductionKalshiJson=(material,path,query,fetchImpl,_host,_owner,signal)=>
+  getOwnedProductionKalshiJson(material,path,query,fetchImpl,undefined,ownerId,signal);
+ return reader(credentials,observedAtMs,get,{mode:"bounded_history_reads_v1"});
+}
+
 /** Authenticated Exchange Index 2 reads. A truncated page is a blocker, not an empty account. */
 export type BoundedHistoryReadOptions = {mode:"bounded_history_reads_v1";signal?:AbortSignal};
 export async function readOwnedKalshiFeeds(

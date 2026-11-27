@@ -1,7 +1,31 @@
+import type {PoolClient} from '@workspace/db';
 import {requireProof} from '../v13-production/types';
 
 type Row=Record<string,unknown>;
 type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
+type OwnerRead=readonly [sql:string,values:(string|null)[]];
+
+/** Receives only module-authored read statements. Native clients send each
+ * SELECT in the original lock order in one simple-protocol message. Each gets
+ * its own PostgreSQL snapshot after the preceding statement completes. */
+export async function orderedOwnerReads(tx:Query,batch:boolean,reads:OwnerRead[]){
+ if(!batch)return (index:number)=>tx.query(reads[index]![0],reads[index]![1]);
+ const native=tx as Query&Pick<PoolClient,'escapeLiteral'>;
+ const sql=reads.map(([statement,values])=>{
+  if(!/^\s*(SELECT|WITH)\s/i.test(statement)||statement.includes(';'))throw Error('owner_release_read_set_invalid');
+  return statement.replace(/\$(\d+)/g,(_token,index:string)=>{
+   const value=values[Number(index)-1];
+   if(value===null)return 'NULL';
+   if(typeof value!=='string')throw Error('owner_release_read_set_invalid');
+   return native.escapeLiteral(value);
+  });
+ }).join(';\n');
+ const results:unknown=await native.query(sql);
+ if(!Array.isArray(results)||results.length!==reads.length||
+    !results.every(r=>r?.command==='SELECT'&&Array.isArray(r.rows)))throw Error('owner_release_read_set_invalid');
+ return async(index:number):Promise<{rows:Record<string,unknown>[]}>=>results[index];
+}
+
 type ReadSpec=Readonly<{name:string;table:string;scope:string;order:readonly string[];limit:number;immutable?:boolean;columns?:readonly string[];extra?:string;unscoped?:boolean}>;
 const HISTORY:readonly ReadSpec[]=[
  {name:'events',table:'public.v13_production_event',scope:'account_id',order:['event_id'],limit:3000},
@@ -127,12 +151,16 @@ const BLOCKED_DISCHARGE:readonly ReadSpec[]=[
   order:['reservation_id'],limit:1000,extra:"NOT EXISTS(SELECT 1 FROM r1) AND t.client_order_id=ANY($4::text[])"},
 ];
 type DischargeDownstream=Awaited<ReturnType<typeof readLockedDischargeHistoryAndMoney>>;
-export async function readLockedBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[],includeDownstream=false){
+export function readLockedBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[],includeDownstream=false){
+ return readBlockedDischargeEvidence(db,account,ids,exitClients,dispatchedClients,true,includeDownstream);
+}
+export async function readBlockedDischargeEvidence(db:Query,account:string,ids:string[],exitClients:string[],dispatchedClients:string[],lock:boolean,includeDownstream=false){
+ requireProof(!includeDownstream||lock,FAIL);
  // Once the supplemental rows have locked, continue in exactly the same
  // downstream table order. A conflicting event still skips downstream reads.
  const specs=includeDownstream?[...BLOCKED_DISCHARGE,...[...HISTORY,...MONEY].map(s=>({...s, name:'downstream_'+s.name,
   extra:'NOT EXISTS(SELECT 1 FROM r1)'}))]:BLOCKED_DISCHARGE;
- const r=await read(db,account,specs,true,false,[ids,exitClients,dispatchedClients]);
+ const r=await read(db,account,specs,lock,false,[ids,exitClients,dispatchedClients]);
  const downstream:DischargeDownstream|null=includeDownstream&&r.events!.length===0?{
   events:r.downstream_events!,positions:r.downstream_positions!,markers:r.downstream_markers!,receipts:r.downstream_receipts!,
   pendingMoney:MONEY.map(s=>r['downstream_'+s.name]!)}:null;
