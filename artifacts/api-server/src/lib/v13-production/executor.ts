@@ -661,6 +661,20 @@ export class ProductionExecutor {
               snapshotTiming("completed",{signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});return snapshot;}
             catch(error){snapshotTiming("rejected",{error,signedFeedReads:feedTiming.snapshot(),signedSnapshotPhases:feedTiming.snapshotPhases()});throw error;}
           };
+          const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
+          const readFinalMarket=async()=>phaseContext&&this.finalPublicMetadata
+            ?this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side,undefined,i.kind))
+            :this.exchange.market(i.market, i.side,undefined,i.kind);
+          let earlyMarket:{ok:true;book:MarketEvidence}|{ok:false;error:unknown}|undefined;
+          const directFinalReads=phaseContext!==null&&this.#directSource!==null&&this.exchange.mode==="LIVE"&&
+            this.accountOwnerUserId!==null&&this.authorizeFinalEntry!==null&&this.overlapFinalAccountSnapshot;
+          const startFinalSnapshot=async()=>{
+            snapshotHistoryFloor=(await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1",[a.id])).rows[0].earliest;
+            // Only fresh read-only proof is overlapped. The child snapshot ALS
+            // exemption never reaches the market sibling. Attach both handlers
+            // immediately; every exit below drains before this transaction ends.
+            pendingSnapshot=readFinalSnapshot(snapshotHistoryFloor!).then(snapshot=>({ok:true as const,snapshot}),error=>({ok:false as const,error}));
+          };
           try {
           if(i.kind==="ENTRY")this.assertEntrySourceAvailable();
           // This intent itself is the ONLY allowed dispatched identity.
@@ -668,22 +682,27 @@ export class ProductionExecutor {
           const economicProof=others.rows.length?await this.economicUnknownProof(tx,a,id):null;
           requireProof(others.rows.length===0||economicProof!==null&&others.rows.every(r=>economicProof.exitIds.includes(r.id)),
             "production_other_uncertain_order");
+          // The committed claim, account/intent locks, policy SHARE lock and first final
+          // authorization already exist in this transaction. The remaining gate rereads
+          // authority and the same policy. The snapshot port checks uncertainty and its
+          // lease before starting signed GETs. Drain it even when a sibling gate refuses.
+          if(directFinalReads&&phaseContext){
+            await startFinalSnapshot();
+            try{earlyMarket={ok:true,book:await readFinalMarket()};}
+            catch(error){earlyMarket={ok:false,error};}
+            // The public WIRE observation has its own clock and body captures.
+            // Start it after FINAL verifies, before another SQL gate can occupy
+            // the transaction connection. Its authorization runs at the wire.
+            if(earlyMarket.ok)this.finalPublicMetadata?.start("WIRE_FEE",phaseContext);
+          }
           await this.gate(tx, a, i.kind === "EXIT", id);
           const p = await this.ledger.policy(tx, a);
           requireProof(p.policyHash === i.policy_hash && canonical(identity(a)) === canonical(i.decision.identity) &&
             i.capability_digest === digest({ id: i.id, request: i.request, decision: i.decision, policyHash: i.policy_hash, fee: i.fee_fingerprint }),
           "production_capability_or_policy_changed");
-          if(i.kind==="ENTRY"&&this.overlapFinalAccountSnapshot){
-            snapshotHistoryFloor=(await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1",[a.id])).rows[0].earliest;
-            // Only fresh read-only proof is overlapped. The child snapshot ALS
-            // exemption never reaches the market sibling. Attach both handlers
-            // immediately; every exit below drains before this transaction ends.
-            pendingSnapshot=readFinalSnapshot(snapshotHistoryFloor!).then(snapshot=>({ok:true as const,snapshot}),error=>({ok:false as const,error}));
-          }
-          const phaseContext=i.kind==="ENTRY"&&this.finalPublicMetadata?this.phaseContext(i,invocation):null;
-          const book = phaseContext&&this.finalPublicMetadata
-            ?await this.finalPublicMetadata.finalMarket(phaseContext,()=>this.exchange.market(i.market,i.side,undefined,i.kind))
-            :await this.exchange.market(i.market, i.side,undefined,i.kind);
+          if(i.kind==="ENTRY"&&this.overlapFinalAccountSnapshot&&!earlyMarket)await startFinalSnapshot();
+          if(earlyMarket&&!earlyMarket.ok)throw earlyMarket.error;
+          const book=earlyMarket?earlyMarket.book:await readFinalMarket();
           finalMarketReads=getMarketEvidenceReadTiming(book);
           const stored = i.decision.book as MarketEvidence;
           const pinnedCash=(i.decision.preflight as {cashRisk?:V13EntryCashProof}|undefined)?.cashRisk;
@@ -760,7 +779,7 @@ export class ProductionExecutor {
             "production_final_owned_feed_changed_or_stale");
           }
           const oldest = pendingSnapshot ? snapshotHistoryFloor! : (await tx.query("SELECT min(created_at) earliest FROM v13_production_intent WHERE account_id=$1", [a.id])).rows[0].earliest;
-          if(i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("WIRE_FEE",context);}
+          if(!earlyMarket&&i.kind==="ENTRY"&&this.finalPublicMetadata){const context=this.phaseContext(i,invocation);if(context)this.finalPublicMetadata.start("WIRE_FEE",context);}
           let snapshot:Snapshot;
           if(pendingSnapshot){const outcome=await pendingSnapshot;if(!outcome.ok)throw outcome.error;snapshot=outcome.snapshot;}
           else snapshot=await readFinalSnapshot(oldest);

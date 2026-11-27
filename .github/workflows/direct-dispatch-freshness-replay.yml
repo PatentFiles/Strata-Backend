@@ -1,0 +1,50 @@
+name: Direct dispatch freshness rehearsal
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/direct-dispatch-freshness-replay.yml'
+      - 'artifacts/api-server/src/lib/strata/directDispatchTimingReplay.postgres.test.ts'
+      - 'artifacts/api-server/src/lib/strata/heldSupervisorDispatch.postgres.fixture.ts'
+      - 'artifacts/api-server/src/lib/strata/personalExecutionSupervisor.ts'
+      - 'artifacts/api-server/src/lib/v13-production/executor.ts'
+      - 'supabase/migrations/20261127154500_economic_discharge_join_order.sql'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  orders-off-replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install disposable PostgreSQL tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          sudo systemctl stop postgresql
+          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
+      - name: Reproduce the refusals and test the exact candidate with mock transport
+        working-directory: artifacts/api-server
+        run: |
+          runner=scripts/run-v13-disposable-postgres.mjs
+          replay=src/lib/strata/directDispatchTimingReplay.postgres.test.ts
+          node "$runner" "$replay" durable/serial
+          node "$runner" "$replay" durable/candidate
+          node "$runner" "$replay" durable/overlap/yes_1523_lock
+          node "$runner" "$replay" durable/candidate/yes_1523_lock
+          node "$runner" "$replay" reviewed/candidate/yes_1523_lock
+          node "$runner" "$replay" durable/candidate/wire_expiry
+          node "$runner" "$replay" durable/candidate/revoked
+          node "$runner" "$replay" durable/candidate/mismatch
+          node "$runner" "$replay" durable/candidate/duplicate_latency
+          node "$runner" "$replay" reviewed/candidate/protective_cycle

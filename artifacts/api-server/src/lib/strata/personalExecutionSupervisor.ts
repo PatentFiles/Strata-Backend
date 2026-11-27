@@ -829,7 +829,10 @@ export function createProductionPersonalSession(
     else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
-    if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
+    // A direct ENTRY can overlap public reads only after its immutable intent exists.
+    // Its PREPARE path still owns the independent source and never takes a paper hint.
+    const finalMetadataEligible = !directSource || session.executor.overlapFinalAccountSnapshot;
+    if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true&&finalMetadataEligible){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
