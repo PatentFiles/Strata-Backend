@@ -1,3 +1,4 @@
+import {isPrepareReadTiming,type PrepareReadTiming} from './prepareReadTiming';
 import {isEntrySizingDiagnostics,type EntrySizingDiagnostics} from "./entrySizingDiagnostics";
 import {isFeeAuthorityTiming,type FeeAuthorityTiming} from "../strata/feeAuthorityTiming";
 import {isMarketEvidenceReadTiming,type MarketEvidenceReadTiming} from "../strata/marketEvidenceReadTiming";
@@ -19,7 +20,7 @@ export type StageOutcome = "completed" | "rejected" | "eligible" | "proven_not_p
  "noop_not_prepared" | "post_uncertain" | "reconciliation_required" | "http_response" | "network_error";
 export type StageContext = {accountId:string;mode:"LIVE"|"SIMULATION";evaluationId?:string|null;intentId?:string|null};
 export type StageTiming = StageContext & {stage:ExecutionStage;durationMs:number;outcome:StageOutcome;
- releaseCommitSha:string;signedFeedReads?:OwnedFeedReadTiming;signedSnapshotPhases?:OwnedSnapshotTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;feeAuthorityReads?:FeeAuthorityTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationObservationId?:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;entrySizing?:EntrySizingDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
+ releaseCommitSha:string;signedFeedReads?:OwnedFeedReadTiming;signedSnapshotPhases?:OwnedSnapshotTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;feeAuthorityReads?:FeeAuthorityTiming;prepareReadTiming?:PrepareReadTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationObservationId?:string;finalComparison?:FinalComparisonDiagnostics;feeFailure?:FeeFailureDiagnostics;entryPrice?:EntryPriceDiagnostics;entrySizing?:EntrySizingDiagnostics;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;reason?:string;httpStatus?:number};
 export type TimingObserver = (event:Readonly<StageTiming>)=>void|Promise<void>;
 const safeId=(value:unknown)=>typeof value==="string"&&/^[a-zA-Z0-9:_-]{1,128}$/.test(value)?value:undefined;
 const reasonCode=(error:unknown)=>{
@@ -35,7 +36,7 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
  let started=0;
  try{started=clock();}catch{/* Optional clock instrumentation is not authority. */}
  let ended=false;
- return (outcome:StageOutcome,extra:{signedFeedReads?:OwnedFeedReadTiming;signedSnapshotPhases?:OwnedSnapshotTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;feeAuthorityReads?:FeeAuthorityTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationReceipt?:{accountId:string;observationId:string};finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;entrySizing?:EntrySizingDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
+ return (outcome:StageOutcome,extra:{signedFeedReads?:OwnedFeedReadTiming;signedSnapshotPhases?:OwnedSnapshotTiming;finalMarketReads?:MarketEvidenceReadTiming;feeVerificationReads?:FeeVerificationTiming;feeAuthorityReads?:FeeAuthorityTiming;prepareReadTiming?:PrepareReadTiming;substageTimings?:readonly ExecutionSubtiming[];reconciliationReceipt?:{accountId:string;observationId:string};finalComparison?:FinalComparisonDiagnostics;entryPrice?:EntryPriceDiagnostics;entrySizing?:EntrySizingDiagnostics;error?:unknown;sourceAgeMs?:number;sourceToDecisionAgeMs?:number;httpStatus?:number}={})=>{
   if(ended)return;ended=true;
   if(!observer)return;
   try {
@@ -48,6 +49,7 @@ export function beginExecutionStage(observer:TimingObserver|null,stage:Execution
    if(stage==="fee_verification"&&isFeeVerificationTiming(extra.feeVerificationReads))event.feeVerificationReads=extra.feeVerificationReads;
    if(stage==="dispatch"&&isFeeAuthorityTiming(extra.feeAuthorityReads))event.feeAuthorityReads=extra.feeAuthorityReads;
    const evaluationId=safeId(context.evaluationId),intentId=safeId(context.intentId);
+   if(stage==="prepare_entry"&&isPrepareReadTiming(extra.prepareReadTiming))event.prepareReadTiming=extra.prepareReadTiming;
    if(stage==="prepare_entry"||stage==="after_reconcile"){
      const substageTimings=sanitizeExecutionSubtimings(extra.substageTimings);
      if(substageTimings)event.substageTimings=substageTimings;

@@ -1,3 +1,4 @@
+import {observePrepareRead,type PrepareReadCapture} from '../v13-production/prepareReadTiming';
 import {canonical,digest,requireProof,type Snapshot} from '../v13-production/types';
 type Row=Record<string,unknown>;type Query={query(sql:string,args?:unknown[]):Promise<{rows:Row[]}>};
 /** Rollout only; false retains the original fail-closed UNKNOWN behavior. A
@@ -17,15 +18,15 @@ export function economicExitNotDischarged(account:string,client:string,skipAbsen
   WHERE economic_candidate.execution_account_id=${account} AND economic_candidate.client_order_id=${client})
   THEN ${proof} ELSE false END`;
 }
-export async function readEconomicExitDischarges(db:Query,account:string,_lock=false,projectCanonical=false){
+export async function readEconomicExitDischarges(db:Query,account:string,_lock=false,projectCanonical=false,prepareReads?:PrepareReadCapture){
  if(!economicExitFinalityEnabled())return [] as Row[];
  // Immutable rows need SELECT only; the owning account lock fences new receipt
  // insertion. Never grant UPDATE merely to issue a redundant FOR SHARE.
 
- const result=await db.query(`SELECT d.*,d.xmin::text AS row_revision${projectCanonical?',private.strata_has_economic_exit_discharge($1,d.client_order_id) AS canonical_verified':''}
+ const result=await observePrepareRead(prepareReads,'receipt_rows',()=>db.query(`SELECT d.*,d.xmin::text AS row_revision${projectCanonical?',private.strata_has_economic_exit_discharge($1,d.client_order_id) AS canonical_verified':''}
   FROM private.strata_economic_exit_discharge d
-  WHERE execution_account_id=$1 ORDER BY request_id LIMIT 1001`,[account]);
- if(!projectCanonical)return verifyEconomicExitDischargeRows(db,account,result.rows);
+  WHERE execution_account_id=$1 ORDER BY request_id LIMIT 1001`,[account]));
+ if(!projectCanonical)return verifyEconomicExitDischargeRows(db,account,result.rows,prepareReads);
  requireProof(result.rows.length<=1000,'economic_discharge_history_capacity');
  // One statement re-evaluates every immutable receipt using the canonical
  // SQL function. The financial writer repeats the proof under the owner lock.
@@ -45,11 +46,11 @@ function verifiedReceipt(account:string,d:Row){
    canonical(p.exitRequest)===canonical(d.exit_request)&&p.exitCapabilityDigest===d.exit_capability_digest,
    'economic_discharge_receipt_unverified');
 }
-export async function verifyEconomicExitDischargeRows(db:Query,account:string,rows:Row[]){
+export async function verifyEconomicExitDischargeRows(db:Query,account:string,rows:Row[],prepareReads?:PrepareReadCapture){
  requireProof(rows.length<=1000,'economic_discharge_history_capacity');
  for(const d of rows){
   verifiedReceipt(account,d);
-  const valid=await db.query('SELECT private.strata_has_economic_exit_discharge($1,$2) AS verified',[account,d.client_order_id]);
+  const valid=await observePrepareRead(prepareReads,'canonical_receipt',()=>db.query('SELECT private.strata_has_economic_exit_discharge($1,$2) AS verified',[account,d.client_order_id]));
   requireProof(valid.rows.length===1&&valid.rows[0].verified===true,'economic_discharge_financial_contradiction');
  }
  return rows;

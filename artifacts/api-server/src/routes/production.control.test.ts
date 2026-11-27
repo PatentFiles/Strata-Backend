@@ -275,8 +275,11 @@ test("entry loss recheck and kill switch stay in front of submit without a new o
   const dispatch = executor.slice(executor.indexOf("async dispatch"), executor.indexOf("async cancel"));
   const final = dispatch.slice(dispatch.indexOf("const final = async"));
   const entryRecheck = final.slice(final.indexOf("if (i.kind === \"ENTRY\")"));
-  assert.match(prepareEntry, /gate\(tx, a\)/);
-  assert.equal(prepareEntry.includes("gate(tx, a, true)"), false);
+  const entryGate = /await observePrepareRead\(diagnostics\.prepareReads,'authority_gate',\(\)=>this\.gate\(tx,a,false,null,false,true,diagnostics\.prepareReads\)\)/;
+  assert.match(prepareEntry, entryGate);
+  const gateIndex = prepareEntry.search(entryGate);
+  assert.ok(gateIndex < prepareEntry.indexOf("production_evaluation_stale"));
+  assert.doesNotMatch(prepareEntry, /(?:this\.)?gate\(\s*tx,\s*a,\s*true(?:\s*,|\s*\))/);
   assert.match(prepareExit, /gate\(tx, a, true\)/);
   assert.match(prepareExit, /reduceOnly: true/);
   assert.match(prepareExit, /planFractionalIocExit\(\{ ownedHundredths:qty\.toString\(\)/);

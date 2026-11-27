@@ -1,3 +1,4 @@
+import {observePrepareRead,type PrepareReadCapture} from './prepareReadTiming';
 import {fundedCapitalBasis} from '../strata/cashTransferPolicy';
 import {readEconomicExitDischarges,assertNoEconomicExitContradiction,assertEconomicDischargeSettlements} from '../strata/economicExitDischargeScope';
 import {ReconciliationEventDigests} from "./reconciliationEventDigests";
@@ -177,8 +178,8 @@ export class ProductionLedger {
     return { account, earliest };
   }
   async transaction<T>(body: (tx: PoolClient, account: Account) => Promise<T>,
-    options: { lockTimeoutMs?: number } = {}): Promise<T> {
-    const tx = await this.pool.connect();
+    options: { lockTimeoutMs?: number; prepareReads?:PrepareReadCapture } = {}): Promise<T> {
+    const tx = await observePrepareRead(options.prepareReads,'pool_checkout',()=>this.pool.connect());
     const connection=transactionConnectionFence(tx);
     const wireScope={active:true,check:null as (()=>void)|null,connection,independentEntry:null};
     let discard=false,failed=false;
