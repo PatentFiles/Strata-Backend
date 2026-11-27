@@ -58,6 +58,13 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
    a.strategy_parameter_hash===V13_CHAMPION_PARAMETER_HASH&&HEX.test(String(a.policy_hash));
  const selected=typeof a.selected_bot==='string'?a.selected_bot:CHAMPION_BOT;
  const selectionValid=!a.selected_bot||digest(selected)===a.selected_fingerprint;
+ // Changing approved financial terms requires a fresh *separate* owner review.
+ // Only a release SHA rotation with the exact unchanged policy is eligible
+ // for automatic reauthorization from the owner's deliberate ARM click.
+ const selectionPolicyChanged=Boolean(a.selected_bot&&selectionValid&&a.selected_policy_hash!==a.policy_hash);
+ // Explicit proof for mixed-version frontend/backend rollout: older backends
+ // do not expose this flag and therefore cannot authorize automatic renewal.
+ const releaseOnlyReauthorization=Boolean(policyOk&&a.selected_bot&&selectionValid&&!selectionPolicyChanged&&a.selection_sha!==sha);
  const requiresReauthorization=Boolean(a.selected_bot&&selectionValid&&
    (a.selected_policy_hash!==a.policy_hash||a.selection_sha!==sha));
  const botId=policyOk&&selectionValid?selected:null;
@@ -79,9 +86,12 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  return {ok:true as const,version:'OWNER_BOT_CATALOG_V2' as const,accountId:String(a.id),
   releaseSha:sha,policyHash:policyOk?String(a.policy_hash):null,
   selectionRevision:Number(a.selection_revision??0),currentBotId:botId,
-  currentPolicyVerified:policyOk&&selectionValid&&!requiresReauthorization,requiresReauthorization,workerMayBeActive:!stopped,
+  currentPolicyVerified:policyOk&&selectionValid&&!requiresReauthorization,requiresReauthorization,
+  releaseOnlyReauthorization,workerMayBeActive:!stopped,
   selectionEnabled:eligible,executionAuthority:'ACCOUNT_OWNER_ONLY' as const,
-  reason:eligible?(requiresReauthorization?'owner_bot_requires_exact_release_reauthorization':'owner_can_review_strategy_change'):
+   reason:eligible?(requiresReauthorization?
+    (selectionPolicyChanged?'owner_bot_changed_financial_policy_requires_review':'owner_bot_requires_exact_release_reauthorization'):
+    'owner_can_review_strategy_change'):
    !policyOk?'owner_bot_policy_not_approved':!selectionValid?'owner_bot_selection_invalid':
    !stopped?'owner_bot_worker_not_stopped':a.blocked_reason!==null?'owner_bot_financial_hold':
    String(a.reserved_micros)!=='0'?'owner_bot_cash_reserved':!flat?'owner_bot_unresolved_exposure':
