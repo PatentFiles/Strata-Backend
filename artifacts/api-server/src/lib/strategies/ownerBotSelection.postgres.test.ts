@@ -81,6 +81,8 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_owner_bot_selection_history')).rows[0].n,1);
   // On the next qualified release, the exact same selected bot requires fresh owner consent.
   await pool.query("UPDATE private.kalshi_account_worker_lease SET state='released',arm_requested=false,account_kill=false WHERE execution_account_id=$1",[account]);
+  // Owner pressed normal STOP, not KILL: eligibility remains on, no owned lease.
+  await pool.query("UPDATE public.v13_production_account SET kill_switch=false,execution_enabled=true,reconciled_at=clock_timestamp() WHERE id=$1",[account]);
   const nextSha='c'.repeat(40);
   process.env.RAILWAY_GIT_COMMIT_SHA=nextSha;process.env.STRATA_WARREN_BUFFETT_LIVE_SHA=nextSha;
   const stale=await readOwnerBotCatalog(owner,pool);
@@ -93,6 +95,8 @@ test('native PostgreSQL: owner-only bot selection retains original policy and re
   assert.equal(renewed.ok,true,JSON.stringify(renewed));
   if(!renewed.ok)return;
   assert.equal(renewed.selectionRevision,2);
+  const stopped=(await pool.query('SELECT kill_switch,execution_enabled FROM public.v13_production_account WHERE id=$1',[account])).rows[0];
+  assert.deepEqual(stopped,{kill_switch:true,execution_enabled:false},'switch closes START authority; owner must re-ARM');
   assert.equal(await readRuntimeBotChoice(pool,owner,account,policyHash,nextSha),WARREN_BOT);
   assert.equal((await pool.query('SELECT count(*)::int n FROM private.strata_owner_bot_selection_history')).rows[0].n,2);
   const acl=(await pool.query(`SELECT c.relrowsecurity AS rls,
