@@ -63,7 +63,11 @@ function run(command, args) {
 }
 try {
   // Each basename is unique; separate output files preserve test isolation.
-  for (const path of tests) run(join(api, "node_modules/.bin/esbuild"), [
+  // Windows cannot spawn the POSIX .bin shim; its esbuild package launcher is JS.
+  // Linux uses esbuild's native executable, which must NOT be run through Node.
+  const esbuildCommand = process.platform === 'win32' ? process.execPath : join(api, 'node_modules/.bin/esbuild');
+  const esbuildPrefix = process.platform === 'win32' ? [join(api, 'node_modules/esbuild/bin/esbuild')] : [];
+  for (const path of tests) run(esbuildCommand, [...esbuildPrefix,
     path, "--bundle", "--platform=node", "--format=cjs", `--outdir=${root}/out`,
     // Preserve source-relative fixture reads in CommonJS test bundles.
     `--define:import.meta.url=${JSON.stringify(pathToFileURL(resolve(api, path)).href)}`,

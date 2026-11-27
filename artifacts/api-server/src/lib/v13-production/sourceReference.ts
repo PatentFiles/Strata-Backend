@@ -1,3 +1,5 @@
+import {assertWarrenSourceReference} from '../strategies/warrenBuffettSourceReference';
+import {WARREN_BOT} from '../strategies/warrenBotIdentity';
 import {evaluateV13Strategy,previousBufferFromSide,type V13Decision} from "@workspace/v13-strategy";
 import {requireProof} from "./types";
 
@@ -24,4 +26,12 @@ export function assertChampionSourceReference(value:unknown):V13Decision {
     source.entry_offer===classified.entrySideOffer,
     "production_source_reference_mismatch");
   return classified;
+}
+
+/** Different signal algorithms retain different source proof rules; no fallback. */
+export function assertAuthorizedEntrySourceReference(value:unknown):V13Decision {
+ const id=value&&typeof value==='object'&&!Array.isArray(value)?(value as Record<string,unknown>).bot_strategy_id:undefined;
+ if(id===WARREN_BOT)return assertWarrenSourceReference(value);
+ requireProof(id===undefined||id===null,'production_bot_identity_unsupported');
+ return assertChampionSourceReference(value);
 }

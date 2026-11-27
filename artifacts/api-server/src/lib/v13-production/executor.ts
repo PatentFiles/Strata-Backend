@@ -19,7 +19,9 @@ import {conservativeExitFeeMicros} from "./fractionalExitFee";
 import {requestQuantityHundredths,EXIT_QUANTITY_VERSION} from "./requestQuantity";
 import {planFractionalIocExit} from "./fractionalExitPlanner";
 import {assertCanonicalEntryQuoteEvidence} from "./entryQuoteEvidence";
-import {assertChampionSourceReference} from "./sourceReference";
+import {assertAuthorizedEntrySourceReference as assertChampionSourceReference} from "./sourceReference";
+import {WARREN_BOT} from "../strategies/warrenBotIdentity";
+import {assertOwnedBotAtOrder} from "../strategies/ownerBotCatalog";
 import {captureEntryPriceDiagnostics, type EntryPriceDiagnostics} from "./entryPriceDiagnostics";
 import {beginExecutionStage,type TimingObserver,type ExecutionStage,type StageContext} from "./stageTiming";
 import {isEntryWireClockRefusal} from "../strata/entryWireClock";
@@ -362,7 +364,7 @@ export class ProductionExecutor {
     requireProof(source && source.evaluation_source === (direct?(direct.environment==="SIMULATION"?"direct_simulation_v1":"direct_live_v1"):"paper") &&
       source.strategy_parameter_set_id === V13_CHAMPION_PARAMETER_SET.id &&
       source.strategy_parameter_hash === V13_CHAMPION_PARAMETER_HASH &&
-      source.qualifying_trigger && source.fresh_cross && !source.position_was_open &&
+      source.qualifying_trigger && (source.fresh_cross || (direct && source.bot_strategy_id===WARREN_BOT)) && !source.position_was_open &&
       source.crossing_key && source.feed_freshness === "current" &&
       ["SCOUT", "CONFIRM"].includes(source.signal) && ["UP", "DOWN"].includes(source.direction),
     "production_source_not_qualifying_champion");
@@ -421,6 +423,8 @@ export class ProductionExecutor {
       await this.gate(tx, a);
       subtimings.mark("policy_and_window");
       const p = await this.ledger.policy(tx, a);
+      if(direct&&direct.environment==='LIVE_OBSERVATION'&&this.accountOwnerUserId&&this.exchange.mode==='LIVE')
+        await assertOwnedBotAtOrder(tx,this.accountOwnerUserId,a.id,p.policyHash!,process.env.RAILWAY_GIT_COMMIT_SHA??'',direct.strategyId);
       const sourcePolicy = source.entry_policy_version ?? V13_LEGACY_ENTRY_POLICY;
       requireProof(
         (sourcePolicy === V13_ENTRY_POLICY_VERSION || sourcePolicy === V13_LEGACY_ENTRY_POLICY) &&
@@ -452,14 +456,9 @@ export class ProductionExecutor {
       // Wider legacy policies may still admit this observation. Release locks
       // before real provider reads, then repeat all authoritative checks below.
       if(book === null) return null;
-      const classified = evaluateV13Strategy({
-        marketTicker: source.market_ticker, btcPrice: source.btc_price, target: source.target,
-        previousBuffer: previousBufferFromSide(source.previous_side),
-        velocity: source.velocity, upOffer: source.up_offer, downOffer: source.down_offer,
-        freshness: "current", position: null,
-      });
+      const classified = assertChampionSourceReference(source);
       requireProof(classified.signal === source.signal && classified.direction === source.direction &&
-        classified.qualifyingTrigger && classified.freshCross &&
+        classified.qualifyingTrigger && (classified.freshCross || (direct && source.bot_strategy_id===WARREN_BOT)) &&
         Math.abs(source.signed_buffer - (source.btc_price - source.target)) < 0.00001,
       "production_source_classification_mismatch");
       assertChampionSourceReference(source);

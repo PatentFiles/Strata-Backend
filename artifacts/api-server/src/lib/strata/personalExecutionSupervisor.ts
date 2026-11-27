@@ -167,6 +167,7 @@ const SIGNER_SQL = `
 
 import {containedProductionFetch,createIndependentProductionFetch,independentLiveRolloutAllowed,qualifyPublicIndependentLiveScope} from "../v13-production/liveEntryContainment";
 import {DirectEntrySource} from "../v13-production/directEntrySource";
+import {CHAMPION_BOT,readRuntimeBotChoice} from "../strategies/ownerBotCatalog";
 import {publicSelfServiceRequested} from "./ownerSelfServiceEligibility";
 
 /** Distinct from global fetch, with transitional entry containment at the last HTTP boundary. */
@@ -543,10 +544,11 @@ export function createProductionPersonalSession(
     let finalLedger:import("../v13-production/ledger").ProductionLedger|null=null;
     // Rollout OFF until the replacement has completed signed qualification.
     // The flag is not consent, fee authority or a release approval.
+    const selectedBot=directAllowed?await readRuntimeBotChoice(db,input.userId,input.accountId,policyHash,startupSha):CHAMPION_BOT;
     const directSource=directAllowed
       ?DirectEntrySource.marketObservation({accountId:input.accountId,ownerId:input.userId,worker:{
         holderId,fencingToken:String(claimed.fencingToken),credentialFingerprint:fingerprint,releaseSha:startupSha}},
-        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)}):null;
+        {policyHash,configuredStakeCents:configuredStake,policyRevision:number(loaded.row.risk_policy_revision),allocationPreset:text(loaded.row.risk_preset_id)},selectedBot):null;
     const rawOwnedTransport=directSource?createIndependentProductionFetch(()=>finalLedger,undefined,directRolloutScope,publicAdmission):personalProductionFetch;
     const directRounding=options.directPrecisionSizing===true?createDirectRoundingRuntime(input.accountId,fingerprint,
       createDirectRoundingOwnedAdapters({query:(sql,values)=>{

@@ -2434,6 +2434,54 @@ test('direct target initialization never reads a quote or consumes a crossing; s
  assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);assert.equal(f.exchange.posts.length,0);
 });
 
+test("Warren Buffett delayed-cross: native DB + single IOC + unchanged protective exit + restart",async()=>{
+ const f=await fixture();
+ const p={...policy(),entryPolicyVersion:V13_ENTRY_POLICY_VERSION,maxQuoteAgeMs:5000};
+ p.policyHash=computeV13LiveMoneyPolicyHash(p);
+ await pool.query("UPDATE v13_live_money_policy SET entry_policy_version=$1,max_quote_age_ms=5000,policy_hash=$2",
+  [p.entryPolicyVersion,p.policyHash]);
+ const open=Math.ceil(f.exchange.now/900000)*900000,close=open+900000,ticker="KXBTC15M-WARREN-SIM";
+ f.exchange.now=open+10000;
+ let btc=99999;
+ const sync=()=>{f.exchange.evidence.observedAtMs=f.exchange.now;f.exchange.book.observedAtMs=f.exchange.now;
+  f.exchange.book.fee.verifiedAtMs=f.exchange.now;};
+ const feeds={
+  btc:async()=>({price:btc,providerAt:new Date(f.exchange.now-10),receivedAt:new Date(f.exchange.now)}),
+  market:async()=>({ticker,target:100000,startsAt:new Date(open),endsAt:new Date(close),yesBid:.5,noBid:.5,
+   yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:"active",fetchedAt:new Date(f.exchange.now)}),
+  book:async()=>({ticker,requestStartedAtMs:f.exchange.now,receivedAtMs:f.exchange.now,bodyCompletedAtMs:f.exchange.now,
+   rawResponseDigest:"a".repeat(64),source:"KALSHI_PUBLIC_REST" as const,timestampAuthority:"LOCAL_RECEIPT_ONLY" as const,
+   yesBids:[{priceTicks:5000,contractsHundredths:1000}],noBids:[{priceTicks:5000,contractsHundredths:1000}]}),
+ };
+ const ownerId=(await pool.query("SELECT owner_user_id FROM v13_production_account WHERE id='test-account'")).rows[0]?.owner_user_id??null;
+ f.executor.accountOwnerUserId=ownerId;
+ const source=DirectEntrySource.isolatedWarrenSimulation({accountId:"test-account",ownerId},feeds,()=>f.exchange.now);
+ f.executor.bindIndependentSimulationSource(source);const worker=new ProductionWorker(f.executor);sync();
+ await worker.tick();assert.equal(f.exchange.posts.length,0);
+ f.exchange.now+=1000;btc=100003;sync();await worker.tick();assert.equal(f.exchange.posts.length,0,
+  "champion passes a too-small immediate crossing; Warren may only remember it");
+ f.exchange.now+=1000;btc=100010;sync();await worker.tick();
+ assert.equal(f.exchange.posts.length,1,"delayed cross emits exactly one IOC");
+ assert.equal(f.exchange.posts[0]!.market,ticker);
+ const intents=(await pool.query("SELECT id,direct_source_id,state,decision FROM v13_production_intent")).rows;
+ assert.equal(intents.length,1);assert.equal(intents[0]!.decision.source.bot_strategy_id,"warren-buffett-delayed-cross-v1");
+ assert.equal(intents[0]!.decision.source.fresh_cross,false,"never fabricate champion fresh_cross");
+ assert.ok(intents[0]!.direct_source_id);
+ await f.executor.dispatch(intents[0]!.id);
+ assert.equal(f.exchange.posts.length,1,"duplicate dispatch never resubmits");
+ f.exchange.fill(f.exchange.posts[0]!,"300");await f.executor.reconcile();
+ f.exchange.now+=1000;btc=99980;sync();
+ const held=new ProductionWorker(f.executor,2500,()=>{},()=>false);await held.tick();
+ assert.equal(f.exchange.posts.length,2,"original protective exit still operates on Warren entry");
+ assert.equal(f.exchange.posts[1]!.action,"SELL");assert.equal(f.exchange.posts[1]!.reduceOnly,true);
+ assert.equal(f.exchange.posts[1]!.market,ticker);
+ f.exchange.fill(f.exchange.posts[1]!,"300");await f.executor.reconcile();
+ assert.equal((await pool.query("SELECT quantity_hundredths FROM v13_production_position")).rows[0]?.quantity_hundredths,"0");
+ const restarted=DirectEntrySource.isolatedWarrenSimulation({accountId:"test-account",ownerId},feeds,()=>f.exchange.now);
+ assert.equal(await restarted.readExact(pool,intents[0]!.direct_source_id,f.exchange.now),null);
+ await invariant(f.ledger);
+});
+
 // Last: swaps out incumbent uniqueness only inside this disposable cluster.
 test("orders-off integrated retry preserves one order fence after a typed first fee refusal",async()=>{
  const f=await fixture();

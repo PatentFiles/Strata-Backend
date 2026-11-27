@@ -49,8 +49,8 @@ const built=await build({stdin:{contents:entry,resolveDir:base,sourcefile:'offli
  b.onResolve({filter:/.*/},args=>{
   if(args.path==='@workspace/v13-strategy')return {path:base+'/lib/v13-strategy/src/index.ts'};
   if(stubs[args.path]){stubUses.push({importer:args.importer,path:args.path});return {path:args.path,namespace:'offline'};}
-  if(args.path==='./accountProductionSession'&&args.importer===strata+'/personalExecutionSupervisor.ts')return {path:'session-wrapper',namespace:'offline'};
-  if(args.path==='./personalExchangeRead'&&args.importer===strata+'/personalExecutionSupervisor.ts')return {path:'feeds-wrapper',namespace:'offline'};
+  if(args.path==='./accountProductionSession'&&path.normalize(args.importer)===path.normalize(strata+'/personalExecutionSupervisor.ts'))return {path:'session-wrapper',namespace:'offline'};
+  if(args.path==='./personalExchangeRead'&&path.normalize(args.importer)===path.normalize(strata+'/personalExecutionSupervisor.ts'))return {path:'feeds-wrapper',namespace:'offline'};
  });
  b.onLoad({filter:/.*/,namespace:'offline'},args=>({loader:'js',resolveDir:base,contents:args.path==='session-wrapper'?`
   import * as real from ${JSON.stringify(strata+'/accountProductionSession.ts')};
@@ -110,6 +110,10 @@ function fixture(value,{api=true,old='false',direct=false}={}){
    return {rows:[{fee_policy_version:record.fee_policy_version,
       fee_formula_version:record.fee_formula_version,
       fee_source_url:record.fee_source_url,policy_hash:record.policy_hash}]};
+  }
+  // Historical original-bot fixtures have no stored variant selection; enforce scope.
+  if(sql.startsWith('SELECT bot_id,bot_fingerprint,policy_hash,release_sha FROM private.strata_owner_bot_selection WHERE owner_user_id=$1::uuid AND execution_account_id=$2 LIMIT 2')){
+   assert.equal(args[0],owner);assert.equal(args[1],account);return {rows:[]};
   }
   if(sql.includes('-- personal-session:signer'))return {rows:[ownedRow(args[1],args[0])]};
   if(sql.includes("FROM live_execution_config WHERE id = 'singleton'"))return {rows:[{live_execution_enabled:true,manual_kill_switch:false}]};
