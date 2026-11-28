@@ -1,6 +1,6 @@
 import {tradingSession,protectiveFixture,source,requestOf,fill,policy,USER,ACCOUNT} from './personalExecution.integration.test';
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';import {pool} from '@workspace/db';
-import {operateAccountWorker,SAFETY_EXPOSURE_SQL,type AccountExecutionDeps} from './accountScopedExecution';
+import {operateAccountWorker,safetyExposureSql,type AccountExecutionDeps} from './accountScopedExecution';
 import {createOwnedTradingSupervisor,disarmWorkerLease} from './personalExecutionSupervisor';
 const FIN='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',CON='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',SECRET='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 async function exactLease(fingerprint:string){
@@ -19,7 +19,7 @@ function unboundDeps(beforeTransaction:()=>Promise<void>=async()=>{}):AccountExe
  commissioning:{listOwnedConnections:async()=>[],listCredentialRefs:async()=>[],readExecutionTarget:async()=>null,readSnapshot:async()=>{throw Error('not used');},openCredential:async()=>{throw Error('no credentials');}},
  activity:{readOwnedAccount:async()=>null},globalKill:async()=>false,now:()=>Date.now(),
  leases:{query:pool.query.bind(pool),transaction:async(fn)=>{await beforeTransaction();const c=await pool.connect();try{await c.query('BEGIN');const r=await fn(c);await c.query('COMMIT');return r;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}},
- safety:{listAccounts:async()=>{const rows=(await pool.query(SAFETY_EXPOSURE_SQL,[USER])).rows;return rows.map(r=>({executionAccountId:r.execution_account_id,ownerUserId:USER,financialAccountId:FIN,providerConnectionId:CON,keyFingerprint:null,vaultSecretId:null,openPositionCount:Number(r.open_positions),unresolvedIntentCount:Number(r.unresolved_intents)}));},markKilled:async()=>{throw Error('KILL forbidden in test');}}
+ safety:{listAccounts:async()=>{const rows=(await pool.query(safetyExposureSql(),[USER])).rows;return rows.map(r=>({executionAccountId:r.execution_account_id,ownerUserId:USER,financialAccountId:FIN,providerConnectionId:CON,keyFingerprint:null,vaultSecretId:null,openPositionCount:Number(r.open_positions),unresolvedIntentCount:Number(r.unresolved_intents)}));},markKilled:async()=>{throw Error('KILL forbidden in test');}}
 };}
 function supervisorFor(s:Awaited<ReturnType<typeof tradingSession>>,db=pool){let scheduled=true;return createOwnedTradingSupervisor(async()=>({ok:true,worker:{async start(){scheduled=true;},async startRecovery(){scheduled=true;},stop(){scheduled=false;},isScheduled(){return scheduled;}},state:s.exchange.state,disarm:action=>disarmWorkerLease(db,USER,ACCOUNT,action,new Date(s.now).toISOString())}));}
 

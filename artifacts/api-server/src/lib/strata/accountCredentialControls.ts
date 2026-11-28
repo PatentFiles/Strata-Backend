@@ -61,7 +61,7 @@ import {
   RECORD_FUNDING_EVIDENCE_CONFIRMATION,
   type FutureAccountOperation,
 } from "./accountFunding";
-import { operateAccountWorker, SAFETY_EXPOSURE_SQL, SCOPED_POLICY_SQL } from "./accountScopedExecution";
+import { operateAccountWorker, safetyExposureSql, SCOPED_POLICY_SQL } from "./accountScopedExecution";
 import { predictionsApiTier } from "../kalshiSubaccountInventory";
 import {
   ACCOUNT_SETUP_CONFIRMATIONS,
@@ -503,7 +503,7 @@ export function accountCredentialControls(
           safety: {
             ...(armSchema.rows[0].available?{invalidatePreparation:(owner:string,tx:import('./accountCredentialStore').CredentialClient)=>cancelOwnerArmInTransaction(tx,owner)}:{}),
             async listAccounts(ownerUserId) {
-              const accounts = await db.query(SAFETY_EXPOSURE_SQL, [ownerUserId]);
+              const accounts = await db.query(safetyExposureSql(), [ownerUserId]);
               return accounts.rows.flatMap((row) => {
                 const executionAccountId = text(row.execution_account_id);
                 const financialAccountId = text(row.financial_account_id);

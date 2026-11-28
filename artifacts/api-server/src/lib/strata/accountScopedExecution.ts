@@ -1,4 +1,5 @@
 import {lockStopAccount,lockStopOwnerAccounts,readStopExposure} from "./stopExposure";
+import {unresolvedEconomicExposureSQL} from "./economicExitDischargeScope";
 import {
   computeV13LiveMoneyPolicyHash,
   remainingLossBudgetAllowsEntry,
@@ -292,16 +293,20 @@ export const SCOPED_STAKE_SQL = `
     AND a.owner_user_id = $2::uuid
 `;
 
-export const SAFETY_EXPOSURE_SQL = `
+export function safetyExposureSql():string { return `
   SELECT a.id::text AS execution_account_id,
          a.kalshi_connection_id::text AS financial_account_id,
          (SELECT count(*)::int FROM v13_production_position p
-           WHERE p.account_id = a.id AND p.quantity_hundredths > 0) AS open_positions,
+           WHERE p.account_id = a.id AND p.quantity_hundredths <> 0) AS open_positions,
          (SELECT count(*)::int FROM v13_production_intent i
-           WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL', 'BLOCKED')) AS unresolved_intents
+           WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL', 'BLOCKED')${unresolvedEconomicExposureSQL('i.account_id','i.client_order_id','i.kind')}) AS unresolved_intents
   FROM v13_production_account a
   WHERE a.owner_user_id = $1::uuid
-`;
+`; }
+/** Legacy static projection retained for old test/import consumers. Runtime
+ * callers use safetyExposureSql() so the discharge rollout gate is sampled
+ * with the same process configuration as the owner request. */
+export const SAFETY_EXPOSURE_SQL=safetyExposureSql();
 
 export const SCOPED_POSITIONS_SQL = `
   SELECT p.market, p.side, p.quantity_hundredths
