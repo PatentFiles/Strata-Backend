@@ -13,9 +13,15 @@ const prior=process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED;
 before(async()=>{
  process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED="true";
  await pool.query("CREATE SCHEMA IF NOT EXISTS private");
+ await pool.query(`CREATE TABLE IF NOT EXISTS private.strata_economic_exit_discharge(
+   execution_account_id text NOT NULL,client_order_id text NOT NULL,
+   PRIMARY KEY(execution_account_id,client_order_id))`);
+ await pool.query("INSERT INTO private.strata_economic_exit_discharge VALUES('account-a','verified-exit') ON CONFLICT DO NOTHING");
+ // Deliberately permissive proof stub: the indexed precheck, not this
+ // verifier, must keep all absent/foreign candidates unresolved.
  await pool.query(`CREATE OR REPLACE FUNCTION private.strata_has_economic_exit_discharge(
    account text,client text) RETURNS boolean LANGUAGE SQL IMMUTABLE STRICT
-   AS $$ SELECT account='account-a' AND client='verified-exit' $$`);
+   AS $$ SELECT true $$`);
 });
 after(async()=>{
  if(prior===undefined)delete process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED;
@@ -25,7 +31,7 @@ after(async()=>{
 
 test("only the canonical discharged EXIT is excluded; null and non-EXIT remain unresolved",async()=>{
  const filter=unresolvedEconomicExposureSQL("i.account_id","i.client_order_id","i.kind");
- assert.match(filter,/COALESCE/);
+ assert.match(filter,/CASE WHEN EXISTS/);
  const r=await pool.query(`WITH candidate(account_id,kind,client_order_id) AS (
   VALUES ('account-a'::text,'EXIT'::text,'verified-exit'::text),
          ('account-a','EXIT','missing-exit'),

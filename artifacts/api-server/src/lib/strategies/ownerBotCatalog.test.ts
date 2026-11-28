@@ -116,7 +116,7 @@ test('owner bot catalog keeps the economic discharge projection gated and fail c
    if(enabled){
     assert.match(captured,/i\.kind IS DISTINCT FROM 'EXIT'/);
     assert.match(captured,/x\.execution_account_id,x\.client_order_id/);
-    assert.match(captured,/COALESCE\(private\.strata_has_economic_exit_discharge/);
+    assert.match(captured,/CASE WHEN EXISTS/);
    }else{
     assert.doesNotMatch(captured,/strata_has_economic_exit_discharge/);
    }

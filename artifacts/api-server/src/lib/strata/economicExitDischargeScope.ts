@@ -30,13 +30,17 @@ export function economicExitNotDischarged(account:string,client:string,skipAbsen
  */
 export function unresolvedEconomicExposureSQL(account:string,client:string,kind?:string):string {
  if(!economicExitFinalityEnabled())return '';
- const identifier=/^(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?[a-zA-Z_][a-zA-Z0-9_]*$/;
- for(const value of [account,client,...(kind?[kind]:[])])
-  if(!identifier.test(value))throw Error('economic_discharge_sql_identifier_invalid');
- const verified=`COALESCE(private.strata_has_economic_exit_discharge(${account},${client}),false)`;
- // A discharge can only retire an EXIT. A non-EXIT or NULL kind still blocks.
- return kind?` AND (${kind} IS DISTINCT FROM 'EXIT' OR NOT ${verified})`:
-  ` AND NOT ${verified}`;
+ if(kind&&!/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$/.test(kind))
+  throw Error('economic_discharge_sql_identifier_invalid');
+ // Reuse the already audited indexed-existence shortcut. The canonical
+ // verifier's join plan can be expensive; do not invoke it for every status
+ // read on an intent that has no immutable discharge candidate.
+ const guarded=economicExitNotDischarged(account,client,true);
+ if(!kind)return guarded;
+ if(!guarded.startsWith(' AND NOT CASE WHEN EXISTS'))
+  throw Error('economic_discharge_guard_unverified');
+ // A discharge can only retire an EXIT. ENTRY and NULL kinds still block.
+ return ` AND (${kind} IS DISTINCT FROM 'EXIT' OR (${guarded.slice(5)}))`;
 }
 export async function readEconomicExitDischarges(db:Query,account:string,_lock=false,projectCanonical=false,prepareReads?:PrepareReadCapture){
  if(!economicExitFinalityEnabled())return [] as Row[];
