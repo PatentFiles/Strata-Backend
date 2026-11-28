@@ -28,3 +28,7 @@ Warren Buffett selected, ARM off, owned lease, 3 NO contracts still locally reco
 - **No live merge/deploy** while protected UNKNOWN exposure remains. Public finalized market result alone cannot determine whether the account's protective exit filled. Owner-scoped signed exchange order/fill/settlement/cash proof is required before changing financial records or restarting bots.
 
 No C52/C53 or Warren algorithm, stake, live order or production financial record was altered during analysis.
+
+## Telemetry lock isolation correction (staged, not deployed)
+
+The production Supabase PostgreSQL log has `55P03` for a live-decision journal insert waiting on the financial-account foreign-key row lock. This is a **telemetry loss/latency defect**, not established as the cause of the separate protective EXIT failure. The staged backend now delivers journal observations through a dedicated PostgreSQL pool (maximum one connection; 1,500 ms checkout), with 750 ms FK lock wait bound, 3 s statement budget, up to 12 idempotent attempts on the same UUID, and a finite 4,096-record capacity. No observation wait occupies the main execution pool, and the price/fee/duplicate/exposure gates are unchanged. A disposable PG native test held the real account lock, observed SQLSTATE 55P03 without blocking other financial queries, released the lock, and confirmed replay persisted exactly one event. The expanded queue unit tests preserve finite retry/gap reporting. This remains a bounded *memory* queue; crash loss and overflow are possible and explicitly reported.

@@ -1,6 +1,7 @@
 import {BoundedAnalyticsQueue} from './boundedAnalyticsQueue';
 import {randomUUID} from "node:crypto";
-import {pool,type Pool,type PoolClient} from "@workspace/db";
+import {type Pool,type PoolClient} from "@workspace/db";
+import {dedicatedTelemetryPool,closeTelemetryPool} from './telemetryWriterPool';
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET} from "@workspace/v13-strategy";
 import {deployedGitSha} from "../strata/deployedGitSha";
 import {WARREN_BOT,WARREN_BOT_HASH} from "../strategies/warrenBotIdentity";
@@ -147,16 +148,23 @@ export async function confirmedBatch(client:PoolClient,rows:Stored[]):Promise<nu
 const queue=new BoundedAnalyticsQueue<Stored>(async rows=>{
  let client:PoolClient|undefined,discard:Error|undefined;
  try{
-  client=await pool.connect();await client.query('BEGIN');
-  await client.query("SET LOCAL statement_timeout='1500ms'; SET LOCAL lock_timeout='500ms'");
+  // Dedicated single-connection pool: analytics FK lock waits cannot starve trading.
+  client=await dedicatedTelemetryPool().connect();await client.query('BEGIN');
+  await client.query("SET LOCAL statement_timeout='3000ms'; SET LOCAL lock_timeout='750ms'");
   const confirmed=await confirmedBatch(client,rows);await client.query('COMMIT');return confirmed;
  }catch(error){
   if(client)try{await client.query('ROLLBACK');}catch{discard=Error('live_analytics_rollback_failed');}
   throw error;
  }finally{client?.release(discard);}
-},{onGap:noteGap});
+},{onGap:noteGap,capacity:4096,batchSize:32,maxAttempts:12,delayMs:250});
 export function liveDecisionDeliveryStatus(){return {...queue.snapshot(),invalid,mode:'bounded_retried_async' as const};}
-export const flushLiveDecisionAnalytics=(timeoutMs=5000)=>queue.flush(timeoutMs);
+export async function flushLiveDecisionAnalytics(timeoutMs=5000){
+ const completed=await queue.flush(timeoutMs);
+ // Only a drained queue permits a graceful isolated-pool shutdown; never
+ // hold live order shutdown open on an uncertain advisory telemetry write.
+ if(completed)await closeTelemetryPool();
+ return completed;
+}
 export function liveDecisionAnalyticsEnabled(){
  return process.env.NODE_ENV==='production'&&process.env.STRATA_LIVE_DECISION_ANALYTICS_ENABLED==='true'&&SHA.test(deployedGitSha());
 }
