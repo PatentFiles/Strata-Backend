@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import pg from 'pg';
 import {pool} from '@workspace/db';
-import {telemetryWriterPoolConfig} from './telemetryWriterPool';
+import {telemetryWriterPoolConfig,dedicatedTelemetryPool,closeTelemetryPool} from './telemetryWriterPool';
 import {normalizeLiveDecision,confirmedBatch} from './liveDecisionAnalytics';
 
 const URL=process.env.V13_DISPOSABLE_DATABASE_URL;
@@ -19,13 +19,20 @@ before(async()=>{
  await pool.query(readFileSync('../../lib/db/drizzle/0050_strata_live_decision_history.sql','utf8'));
  writer=new pg.Pool(telemetryWriterPoolConfig(URL!,process.env));
 });
-after(async()=>{await writer?.end();await pool.end();});
+after(async()=>{await closeTelemetryPool();await writer?.end();await pool.end();});
 test('advisory telemetry is restricted to a single separately timed connection',()=>{
  const conf=telemetryWriterPoolConfig(URL!,process.env);
  assert.equal(conf.max,1);
  assert.equal(conf.application_name,'strata_live_telemetry_writer');
  assert.equal(conf.connectionTimeoutMillis,1500);
  assert.equal(conf.idleTimeoutMillis,10_000);
+});
+test('lazy writer initializes one real isolated session only when requested',async()=>{
+ const [first,second]=await Promise.all([dedicatedTelemetryPool(),dedicatedTelemetryPool()]);
+ assert.equal(first,second);
+ assert.equal(first.options.max,1);
+ const answer=await first.query('SELECT 1::int AS result');
+ assert.equal(answer.rows[0]?.result,1);
 });
 test('real account FK lock timeout does not monopolize financial query pool; identical UUID recovers',async()=>{
  const e=normalizeLiveDecision({ownerId:OWNER,accountId:'synthetic-a',releaseSha:'a'.repeat(40),
