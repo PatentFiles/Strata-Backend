@@ -149,7 +149,7 @@ const queue=new BoundedAnalyticsQueue<Stored>(async rows=>{
  let client:PoolClient|undefined,discard:Error|undefined;
  try{
   // Dedicated single-connection pool: analytics FK lock waits cannot starve trading.
-  client=await dedicatedTelemetryPool().connect();await client.query('BEGIN');
+  client=await (await dedicatedTelemetryPool()).connect();await client.query('BEGIN');
   await client.query("SET LOCAL statement_timeout='3000ms'; SET LOCAL lock_timeout='750ms'");
   const confirmed=await confirmedBatch(client,rows);await client.query('COMMIT');return confirmed;
  }catch(error){
