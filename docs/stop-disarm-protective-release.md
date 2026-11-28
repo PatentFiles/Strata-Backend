@@ -34,3 +34,7 @@ Do not merge/deploy backend while the existing account holds a protective lease 
 When flat and the exact tested backend commit qualifies, merge backend and publish the matching frontend. Verify STOP → DISARM → bot change → ARM → START using isolated test accounts before approving new live use. Replay the same stale/unknown protections after rollout.
 
 This patch fixes lifecycle completion and messaging. It does NOT fabricate a terminal exchange outcome or guarantee a currently UNKNOWN order will resolve without valid provider evidence.
+
+## Pre-release verification (2026-11-28)
+
+Authenticated settlement and obligation-discharge receipts resolved the financial exposure while preserving historical transport uncertainty. A bounded production readback showed zero held exposure, unresolved economic obligations, active worker leases or pending ARM. Recheck this state immediately before merge. Keep archive features disabled for this rollout, verify the Railway deployment against the actual merged backend commit, then merge and publish the matching Wallets release. These checks do not authorize ARM or START.
