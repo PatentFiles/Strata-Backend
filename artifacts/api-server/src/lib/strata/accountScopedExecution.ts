@@ -1,4 +1,5 @@
 import {lockStopAccount,lockStopOwnerAccounts,readStopExposure} from "./stopExposure";
+import {unresolvedEconomicExposureSQL} from "./economicExitDischargeScope";
 import {
   computeV13LiveMoneyPolicyHash,
   remainingLossBudgetAllowsEntry,
@@ -292,16 +293,20 @@ export const SCOPED_STAKE_SQL = `
     AND a.owner_user_id = $2::uuid
 `;
 
-export const SAFETY_EXPOSURE_SQL = `
+export function safetyExposureSql():string { return `
   SELECT a.id::text AS execution_account_id,
          a.kalshi_connection_id::text AS financial_account_id,
          (SELECT count(*)::int FROM v13_production_position p
-           WHERE p.account_id = a.id AND p.quantity_hundredths > 0) AS open_positions,
+           WHERE p.account_id = a.id AND p.quantity_hundredths <> 0) AS open_positions,
          (SELECT count(*)::int FROM v13_production_intent i
-           WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL', 'BLOCKED')) AS unresolved_intents
+           WHERE i.account_id = a.id AND i.state NOT IN ('TERMINAL', 'BLOCKED')${unresolvedEconomicExposureSQL('i.account_id','i.client_order_id','i.kind')}) AS unresolved_intents
   FROM v13_production_account a
   WHERE a.owner_user_id = $1::uuid
-`;
+`; }
+/** Legacy static projection retained for old test/import consumers. Runtime
+ * callers use safetyExposureSql() so the discharge rollout gate is sampled
+ * with the same process configuration as the owner request. */
+export const SAFETY_EXPOSURE_SQL=safetyExposureSql();
 
 export const SCOPED_POSITIONS_SQL = `
   SELECT p.market, p.side, p.quantity_hundredths
@@ -459,7 +464,15 @@ export async function operateAccountWorker(
   const now = new Date(deps.now()).toISOString();
   const staleBefore = new Date(deps.now() - (deps.leaseTtlMs ?? ACCOUNT_WORKER_LEASE_TTL_MS)).toISOString();
   return deps.leases.transaction(async (client) => {
-    if(safetyAction)await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
+    if(safetyAction){
+    // PostgreSQL requires SET TRANSACTION before *any* other statement.
+    // Invalidation is a real SQL write; keep the same transaction order for
+    // both credential-bound and fallback STOP/DISARM flows.
+    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    await client.query("SET LOCAL lock_timeout='750ms'");
+    await client.query("SET LOCAL statement_timeout='5000ms'");
+    await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
+   }
     return applyLeaseAction(client, {
     action: input.action,
     holderId: input.holderId,
@@ -509,12 +522,13 @@ async function unboundSafety(
   if (!deps.safety) return refused("credential_unavailable");
   const now = new Date(deps.now()).toISOString();
   return deps.leases.transaction(async (client) => {
-    if(input.action === "STOP" || input.action === "KILL"){
+    if(input.action === "STOP" || input.action === "DISARM" || input.action === "KILL"){
       await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
       await client.query("SET LOCAL lock_timeout='750ms'");
       await client.query("SET LOCAL statement_timeout='5000ms'");
     }
-    const lockedAccounts=(input.action === "STOP" || input.action === "KILL") ? await lockStopOwnerAccounts(client,input.authenticatedUserId) : null;
+    const lockedAccounts=(input.action === "STOP" || input.action === "DISARM" || input.action === "KILL")
+      ? await lockStopOwnerAccounts(client,input.authenticatedUserId) : null;
     // The callback locks accounts before any lease, preserving dispatch order.
     // It also covers a stopped account whose lease fields do not change.
     await deps.safety?.invalidatePreparation?.(input.authenticatedUserId,client);
@@ -552,21 +566,24 @@ async function unboundSafety(
       // Owner accounts were locked before leases. A newly appearing lease whose
       // account was not in that lock set is conservatively retained, never read
       // account-after-lease (which would invert dispatch lock ordering).
-      const exposure = input.action === "STOP"
-        ? !lockedAccounts!.has(String(row.execution_account_id)) || await readStopExposure(client,String(row.execution_account_id))
-        : !account || account.openPositionCount > 0 || account.unresolvedIntentCount > 0;
-      if (input.action === "STOP" && row.state === "owned" && exposure) {
+      // STOP and DISARM obey the same account-first lock and fresh protective
+      // exposure proof. DISARM must never strand a flat owned lease, nor
+      // release an owned worker with a live position or uncertain transport.
+      const exposure = !lockedAccounts!.has(String(row.execution_account_id)) ||
+        await readStopExposure(client,String(row.execution_account_id));
+      if (row.state === "owned" && exposure) {
         await client.query(HOLD_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId]);
         stillOwned = true;
-      } else if (input.action === "STOP" && row.state === "owned") {
+      } else if (row.state === "owned") {
         await client.query(RELEASE_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId, now]);
       } else if (!flag(row.account_kill)) {
         await client.query(DISARM_LEASE_SQL, [row.execution_account_id, input.authenticatedUserId]);
-        if (row.state === "owned") stillOwned = true;
       }
     }
     return held(
-      input.action === "STOP" ? "entries_stopped" : "disarmed",
+      input.action === "STOP"
+        ? (stillOwned ? "entries_stopped_protective_management" : "entries_stopped")
+        : (stillOwned ? "disarmed_protective_management" : "disarmed"),
       null,
       stillOwned ? "owned" : "released",
       false,
@@ -647,13 +664,9 @@ async function applyLeaseAction(
     staleBefore: string;
   },
 ): Promise<AccountExecutionResult> {
-  if(input.action === "STOP"){
-    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-    await client.query("SET LOCAL lock_timeout='750ms'");
-    await client.query("SET LOCAL statement_timeout='5000ms'");
-  }
+  // Bounded isolation and timeouts were already installed at transaction entry.
   let stopExposure:boolean|undefined;
-  if(input.action === "STOP"){
+  if(input.action === "STOP" || input.action === "DISARM"){
     await lockStopAccount(client,input.account.ownerUserId,input.account.executionAccountId);
     stopExposure=await readStopExposure(client,input.account.executionAccountId);
   }
@@ -670,7 +683,7 @@ async function applyLeaseAction(
     return refused("account_kill_switch");
   }
   if (input.action === "ARM") return armLease(client, input, current);
-  if (input.action === "DISARM") return disarmLease(client, input, current);
+  if (input.action === "DISARM") return disarmLease(client, input, current, stopExposure!);
   if (input.action === "STOP") return releaseLease(client, input, current, stopExposure!);
   return acquireLease(client, input, current);
 }
@@ -699,19 +712,34 @@ async function armLease(
 }
 
 async function disarmLease(
-  client: CredentialClient,
-  input: ActionInput,
-  current: Record<string, unknown> | undefined,
+ client: CredentialClient,
+ input: ActionInput,
+ current: Record<string, unknown> | undefined,
+ verifiedExposure: boolean,
 ): Promise<AccountExecutionResult> {
-  if (!current) return refused("worker_absent");
-  if (current.state === "owned") return held("worker_owned", tokenOf(current), "owned", true, false);
-  const disarmed = await client.query(DISARM_LEASE_SQL, [
-    input.account.executionAccountId,
-    input.account.ownerUserId,
+ if (!current) return refused("worker_absent");
+ // Signed-protective STOP and DISARM share the exact account-then-lease lock,
+ // and do not substitute a recent frontend cash timestamp for exposure proof.
+ if (current.state === "owned") {
+  if (verifiedExposure) {
+   const heldLease=await client.query(HOLD_LEASE_SQL,[
+    input.account.executionAccountId,input.account.ownerUserId,
+   ]);
+   if(heldLease.rows.length!==1)return refused("worker_release_failed");
+   return held("disarmed_protective_management",
+    Number(heldLease.rows[0]?.fencing_token),"owned",false,false);
+  }
+  const released=await client.query(RELEASE_LEASE_SQL,[
+   input.account.executionAccountId,input.account.ownerUserId,input.now,
   ]);
-  if (disarmed.rows.length !== 1) return refused("arm_not_recorded");
-  const state = current.state === "owned" ? "owned" : "released";
-  return held("disarmed", Number(disarmed.rows[0]?.fencing_token), state, false, false);
+  if(released.rows.length!==1)return refused("worker_release_failed");
+  return held("disarmed",Number(released.rows[0]?.fencing_token),"released",false,false);
+ }
+ const disarmed = await client.query(DISARM_LEASE_SQL, [
+  input.account.executionAccountId,input.account.ownerUserId,
+ ]);
+ if(disarmed.rows.length!==1)return refused("arm_not_recorded");
+ return held("disarmed",Number(disarmed.rows[0]?.fencing_token),"released",false,false);
 }
 
 async function acquireLease(
@@ -751,7 +779,7 @@ async function releaseLease(
       input.account.ownerUserId,
     ]);
     if (heldLease.rows.length !== 1) return refused("worker_release_failed");
-    return held("entries_stopped", Number(heldLease.rows[0]?.fencing_token), "owned", false, false);
+    return held("entries_stopped_protective_management", Number(heldLease.rows[0]?.fencing_token), "owned", false, false);
   }
   const released = await client.query(RELEASE_LEASE_SQL, [
     input.account.executionAccountId,
@@ -835,6 +863,8 @@ function held(
 ): AccountExecutionResult {
   return {
     ok: reason === "operation_not_enabled" || reason === "entries_stopped" ||
+      reason === "entries_stopped_protective_management" ||
+      reason === "disarmed_protective_management" ||
       reason === "account_killed" || reason === "disarmed" || reason === "safety_recorded",
     reason,
     executable: PHASE3_EXECUTABLE,

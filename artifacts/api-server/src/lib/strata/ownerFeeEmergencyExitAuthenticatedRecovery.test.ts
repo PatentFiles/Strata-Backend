@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {generateKeyPairSync,createHash} from "node:crypto";
-import {readAuthenticatedProtectiveExitOutcome,inspectAuthenticatedProtectiveExitHistory} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
+import {readAuthenticatedProtectiveExitOutcome,inspectAuthenticatedProtectiveExitHistory,protectiveHistoryReadDiagnostic} from "./ownerFeeEmergencyExitAuthenticatedRecovery";
 import {reconcileUnknownProtectiveExitAfterRestart} from "./ownerFeeEmergencyExitRestartRecovery";
 import type {readOwnedKalshiFeeds} from "./personalExchangeRead";
 const NOW=Date.parse("2026-10-19T20:00:00Z");
@@ -343,4 +343,16 @@ test("diagnostic order proof does not depend on a settled position echo or undoc
  const out=await withRestartTestPorts(()=>h.preview(p));
  assert.deepEqual(out,{order:"EXACT_TERMINAL",settlement:"PRESENT_UNVERIFIED",exposure:"FLAT_ECHO",
   readOnly:true,accountingPosted:false,tradingAuthorized:false});
+});
+
+test('signed protective history reports missing versus multiple order candidates without changing UNKNOWN authority',async()=>{
+ for(const [options,stage] of [
+  [{omitOrder:true},'exit_recovery_order_not_found'],
+  [{duplicateOrder:true},'exit_recovery_multiple_order_candidates'],
+ ] as const){
+  let observed:unknown=null;
+  try{await harness(options).run();}catch(e){observed=e;}
+  assert.ok(observed instanceof Error);
+  assert.equal(protectiveHistoryReadDiagnostic(observed),stage);
+ }
 });

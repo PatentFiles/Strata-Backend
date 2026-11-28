@@ -14,6 +14,8 @@ const renewal = process.argv[2] === "--renewal";
 const recovery = ["--recovery","--settled-cash-recovery"].includes(process.argv[2]);
 const stoppedCashDiagnostic = process.argv[2] === "--stopped-cash-diagnostic";
 const liveHistory = process.argv[2] === "--live-decision-history";
+const telemetryArchive = process.argv[2] === "--telemetry-archive";
+const telemetryFkIsolation = process.argv[2] === "--telemetry-fk-isolation";
 const restore = process.argv[2] === "--restore";
 const fullSuite = process.argv[2] === "--full-suite";
 const user = fullSuite ? "postgres" : "v13_test";
@@ -108,7 +110,7 @@ try {
   run(executable(bin, "createdb"), ["-h", "127.0.0.1", "-p", String(port), "-U", user, db]);
   // Only the newly created cluster receives DDL. This is test setup, not a
   // migration runner, publish hook, or application startup behavior.
-  if (!rounding && !recovery && !restore && !renewal && !auditCursor && !stoppedCashDiagnostic && !liveHistory) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  if (!rounding && !recovery && !restore && !renewal && !auditCursor && !stoppedCashDiagnostic && !liveHistory && !telemetryArchive && !telemetryFkIsolation) run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
     ["--filter", "@workspace/db", "exec", "drizzle-kit", "push", "--force"]);
   if (rounding) {
     run(process.execPath, ["scripts/direct-rounding-postgres.cjs"]);
@@ -117,7 +119,7 @@ try {
     // Both workflow callers reserve additional setup and cleanup headroom.
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "test:v13-safety-all"], { timeout: 1_200_000 });
   } else {
-    const testFile = liveHistory ? "src/lib/strata/liveHistoryReadModel.postgres.test.ts" : stoppedCashDiagnostic ? "src/lib/strata/stoppedCashDiagnosticLoader.postgres.test.ts" : auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? (process.argv[2] === "--settled-cash-recovery" ? "src/lib/strata/ownerSettledCashFreezeRecovery.postgres.test.ts" : "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts") : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
+    const testFile = telemetryFkIsolation ? "src/lib/v13-production/telemetryWriterPool.postgres.test.ts" : telemetryArchive ? "src/lib/telemetryArchive/archiveIntegration.postgres.test.ts" : liveHistory ? "src/lib/strata/liveHistoryReadModel.postgres.test.ts" : stoppedCashDiagnostic ? "src/lib/strata/stoppedCashDiagnosticLoader.postgres.test.ts" : auditCursor ? "src/lib/v13-production/signalAuditCursor.postgres.test.ts" : renewal ? "src/lib/strata/ownerNeverPostedReleaseRenewal.postgres.test.ts" : restore ? "src/lib/strata/ownerShaRestore.postgres.test.ts" : recovery ? (process.argv[2] === "--settled-cash-recovery" ? "src/lib/strata/ownerSettledCashFreezeRecovery.postgres.test.ts" : "src/lib/strata/ownerTransientFreezeRecovery.postgres.test.ts") : process.argv[2] ?? "src/lib/v13-production/acceptance.test.ts";
     run(process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["exec", "esbuild", testFile, "--bundle", "--platform=node", "--format=cjs",
     `--outfile=${root}/acceptance.cjs`, "--external:pg-native", "--external:pdfjs-dist",

@@ -37,6 +37,9 @@ export class ProductionWorker {
    * Returning false retains the normal fail-closed scheduler stop. */
   recoverUnreconciledEntry:((error:unknown)=>Promise<boolean>)|null=null;
   heldRecoveryActive:(()=>boolean)|null=null;
+  /** Installed only after a verified STOP retains protective exposure.
+   * All trading workers leave it null; it cannot reopen entry authority. */
+  onTickFinished:(()=>Promise<void>)|null=null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private readonly idleWaiters=new Set<()=>void>();
@@ -146,7 +149,7 @@ export class ProductionWorker {
           const feeStage=getOwnedFeeFailureStage(error);
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
+              botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage,outcome:"BLOCKED",reasonCode,sourceId,
               ...(feeStage?{reasonDetail:feeStage}:{})});
         };
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){
@@ -169,7 +172,7 @@ export class ProductionWorker {
         try{
           if(this.executor.exchange.mode==="LIVE"&&this.executor.accountOwnerUserId)
             enqueueLiveDecision({accountId:this.executor.ledger.accountId,ownerId:this.executor.accountOwnerUserId,
-              releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
+              botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),stage:"DISPATCH",outcome:"QUALIFIED",
               reasonCode:"direct_entry_observed_dispatch_returned",sourceId:id});
         }catch{/* Best-effort analytics cannot change an already-resolved dispatch. */}
         return;
@@ -341,7 +344,7 @@ export class ProductionWorker {
           // Observation counters alone do not cover post-submission failures.
           // Persist a separate runtime error; it is NOT another signal or order.
           try { enqueueLiveDecision({accountId:this.executor.ledger.accountId,
-            ownerId:this.executor.accountOwnerUserId,releaseSha:deployedGitSha(),observedAtMs:Date.now(),
+            ownerId:this.executor.accountOwnerUserId,botId:this.executor.observedBotId??undefined,releaseSha:deployedGitSha(),observedAtMs:Date.now(),
             stage:'ENTRY_GATE',outcome:'ERROR',reasonCode:'personal_exchange_history_unreconciled',
             reasonDetail:'Signed exchange history could not be reconciled. New entries remain closed; order outcome must be verified.'}); }
           catch { /* telemetry cannot reopen the entry gate or affect recovery */ }
@@ -358,6 +361,12 @@ export class ProductionWorker {
       // minimum delay and every recovery/reconciliation/entry gate is unchanged.
       // Schedule by tick START time rather than sleeping a full interval
       // AFTER the signed exchange read. Tick itself serializes all actions.
+      // After a STOP with protective exposure, finish the owned lease once
+      // the real exchange/ledger is flat. Never run this on the entry path.
+      if(current()&&this.timer&&this.onTickFinished){
+        try{await this.onTickFinished();}
+        catch(error){if(current())this.report(error);}
+      }
       active=false;
       if (current() && this.timer) this.timer = setTimeout(pending?()=>loop("committed_signal"):()=>loop("normal"),
         pending?0:nextSequentialPollDelayMs(this.intervalMs, Date.now()-tickStartedAt));

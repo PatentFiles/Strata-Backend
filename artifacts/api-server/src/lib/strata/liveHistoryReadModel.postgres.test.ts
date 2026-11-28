@@ -2,6 +2,7 @@ import test,{after,before} from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {pool} from "@workspace/db";
+import {V13_CHAMPION_PARAMETER_HASH} from '@workspace/v13-strategy';
 import {normalizeLiveDecision,writeLiveDecisionBatch,liveAnalyticsFailure,normalizeLinkedLiveDecision,confirmedBatch} from "../v13-production/liveDecisionAnalytics";
 import {readLiveHistory,parseLiveHistoryQuery,LiveHistoryRequestError} from "./liveHistoryReadModel";
 const url=process.env.V13_DISPOSABLE_DATABASE_URL;
@@ -27,6 +28,12 @@ before(async()=>{
  CREATE TABLE public.v13_production_observation(id text,account_id text,kind text,payload jsonb,observed_at timestamptz);
  CREATE ROLE anon;CREATE ROLE authenticated;CREATE ROLE service_role;`);
  await pool.query(readFileSync("../../lib/db/drizzle/0050_strata_live_decision_history.sql","utf8"));
+ // The exact live-history read model requires historical owner selection evidence.
+ // Disposable fixture creates only the read columns; production migrations own the actual table.
+ await pool.query(`CREATE TABLE private.strata_owner_bot_selection_history(
+  execution_account_id text NOT NULL,owner_user_id uuid NOT NULL,
+  to_bot_id text NOT NULL,approved_at timestamptz NOT NULL,
+  release_sha text NOT NULL,revision bigint NOT NULL)`);
  await pool.query("INSERT INTO public.profiles VALUES($1,'STANDARD','Owner A'),($2,'STANDARD','Owner B'),($3,'ADMIN','Administrator')",[A,B,ADMIN]);
  await pool.query("INSERT INTO public.v13_production_account VALUES('account-a',$1,1,2),('account-b',$2,1,2)",[A,B]);
  const row=normalizeLiveDecision(base)!;
@@ -225,4 +232,36 @@ test('booked settlement and UNKNOWN exit remain separate in the screen and expor
   assert.equal(rows.find(r=>r.row_id==='intent:blocked-exit')?.status,'SUBMISSION_UNCERTAIN');
   assert.equal(rows.find(r=>r.row_id==='intent:entry-1')?.net_pnl_micros,'1477500');
  }finally{await pool.query("UPDATE public.v13_production_intent SET state='BLOCKED',terminal=true WHERE id='blocked-exit'");}
+});
+
+import {WARREN_BOT,WARREN_BOT_HASH} from '../strategies/warrenBotIdentity';
+import {attributeBot} from './historyBotAttribution';
+test('live bot identity is immutable on observations and matches both history and CSV export',async()=>{
+ const event=normalizeLiveDecision({...base,botId:WARREN_BOT,
+  reasonCode:'warren_observation_fixture',observedAtMs:now-1700})!;
+ assert.equal(event.strategy_parameter_hash,V13_CHAMPION_PARAMETER_HASH);
+ assert.equal(event.facts.botId,WARREN_BOT);
+ assert.equal(event.facts.botParameterHash,WARREN_BOT_HASH);
+ assert.equal(await writeLiveDecisionBatch(pool,[event]),1);
+ const screen=await readLiveHistory(owner,{recordType:'LIVE_DECISION',limit:'100'});
+ const found=screen.rows.find(x=>x.row_id==='decision:'+event.id);
+ assert.equal(found?.bot_id,WARREN_BOT);
+ assert.equal(found?.bot_name,'Warren Buffett');
+ assert.equal(found?.bot_source,'RECORDED_OBSERVATION');
+ const first=await readLiveHistoryExportBatch(owner,{recordType:'LIVE_DECISION',limit:'1000'});
+ assert.deepEqual(first.rows.find(x=>x.row_id==='decision:'+event.id),found);
+});
+test('old observations never borrow current bot; historical inference is explicitly flagged',()=>{
+ const row={row_id:'decision:past',observed_at:'2026-11-20T17:00:00Z',account_id:'account-a',
+  record_type:'LIVE_DECISION',reason_code:'no_fresh_cross',details:{facts:{},releaseSha:sha}};
+ const choice={execution_account_id:'account-a',to_bot_id:WARREN_BOT,
+  approved_at:'2026-11-21T00:00:00Z',release_sha:sha};
+ assert.equal(attributeBot(row,[choice]).bot_source,'UNATTRIBUTED');
+ const after=attributeBot({...row,observed_at:'2026-11-22T00:00:00Z'},[choice]);
+ assert.equal(after.bot_source,'SELECTION_HISTORY_INFERRED');
+ assert.equal(after.bot_name,'Warren Buffett');
+ assert.equal(attributeBot({...row,observed_at:'2026-11-22T00:00:00Z',details:{releaseSha:'b'.repeat(40),facts:{}}},[choice]).bot_id,null);
+ assert.equal(attributeBot({...row,reason_code:'warren_market_signal_already_emitted'},[]).bot_source,'WARREN_REASON_INFERRED');
+ const recorded=attributeBot({...row,details:{facts:{botId:WARREN_BOT}}},[]);
+ assert.equal(recorded.bot_source,'RECORDED_OBSERVATION');
 });

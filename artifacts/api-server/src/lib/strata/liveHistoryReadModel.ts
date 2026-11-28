@@ -1,4 +1,5 @@
 import {pool,type Pool} from "@workspace/db";
+import {attributeHistoryPage} from './historyBotAttribution';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY=86400000;
@@ -98,6 +99,7 @@ WITH accounts AS MATERIALIZED (
     'exchangeOrderId',i.exchange_order_id,'evaluationId',i.evaluation_id,'directSourceId',i.direct_source_id,
     'sourceProvenance',CASE WHEN i.direct_source_id IS NOT NULL THEN 'INDEPENDENT_LIVE_SOURCE' ELSE 'HISTORICAL_LEDGER_INTENT' END,
     'side',i.side,'configuredStakeCents',i.decision->>'configuredStakeCents',
+    'botId',i.decision->'source'->>'bot_strategy_id',
     'policyHash',i.policy_hash,'policyRevision',pol.version,
     'strategyParameterHash',pol.strategy_parameter_hash,
     'quotedEntryOffer',i.decision->'source'->>'entry_offer','orderLimitMicros',i.request->>'limitMicros',
@@ -245,8 +247,10 @@ export async function readLiveHistory(actor:Actor,raw:Record<string,unknown>,db:
   const row=r.rows[0];
   if(!row||!Array.isArray(row.rows))throw Error("live_history_projection_unavailable");
   const rows=(row.rows as HistoryPageRow[]).slice(0,q.limit),last=rows.at(-1);
+  const attributed=await attributeHistoryPage(c,rows as (HistoryPageRow&{
+    account_id:string;record_type:string;reason_code:string|null;details:Record<string,unknown>})[]);
   await c.query("COMMIT");
-  return {version:"LIVE_HISTORY_V1",scope:q.scope,recordType:q.recordType,accounts:accounts.rows,rows,summary:row.summary,reasons:row.reasons,
+  return {version:"LIVE_HISTORY_V1",scope:q.scope,recordType:q.recordType,accounts:accounts.rows,rows:attributed,summary:row.summary,reasons:row.reasons,
    from:q.from,to:q.to,nextCursor:last&&row.rows.length>q.limit?Buffer.from(JSON.stringify([last.observed_at,last.row_id])).toString("base64url"):null,
    coverage:{firstRecordedLiveDecisionAt:row.earliest_recorded_live_decision??null,
     historicalPassesBackfilled:false,complete:false,recordingMode:"bounded_retried_async_live_observation",

@@ -18,6 +18,30 @@ export function economicExitNotDischarged(account:string,client:string,skipAbsen
   WHERE economic_candidate.execution_account_id=${account} AND economic_candidate.client_order_id=${client})
   THEN ${proof} ELSE false END`;
 }
+/**
+ * Only a canonical, recorded economic EXIT discharge can be excluded from
+ * owner STOP / bot-change exposure counts. An absent or NULL client ID remains
+ * unresolved. This is a reporting/control projection, never ledger mutation,
+ * never an authority to release cash, and never a substitute for current
+ * positions, reservation balances, or signed exchange evidence.
+ *
+ * The rollout gate is deliberately identical to reconciliation: older schema
+ * installations retain the original conservative checks.
+ */
+export function unresolvedEconomicExposureSQL(account:string,client:string,kind?:string):string {
+ if(!economicExitFinalityEnabled())return '';
+ if(kind&&!/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$/.test(kind))
+  throw Error('economic_discharge_sql_identifier_invalid');
+ // Reuse the already audited indexed-existence shortcut. The canonical
+ // verifier's join plan can be expensive; do not invoke it for every status
+ // read on an intent that has no immutable discharge candidate.
+ const guarded=economicExitNotDischarged(account,client,true);
+ if(!kind)return guarded;
+ if(!guarded.startsWith(' AND NOT CASE WHEN EXISTS'))
+  throw Error('economic_discharge_guard_unverified');
+ // A discharge can only retire an EXIT. ENTRY and NULL kinds still block.
+ return ` AND (${kind} IS DISTINCT FROM 'EXIT' OR (${guarded.slice(5)}))`;
+}
 export async function readEconomicExitDischarges(db:Query,account:string,_lock=false,projectCanonical=false,prepareReads?:PrepareReadCapture){
  if(!economicExitFinalityEnabled())return [] as Row[];
  // Immutable rows need SELECT only; the owning account lock fences new receipt

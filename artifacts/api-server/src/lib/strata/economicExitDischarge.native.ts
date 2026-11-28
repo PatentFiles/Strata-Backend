@@ -30,9 +30,9 @@ const schema=`CREATE SCHEMA auth;CREATE SCHEMA private;
  CREATE TABLE private.kalshi_account_worker_lease(execution_account_id text PRIMARY KEY REFERENCES public.v13_production_account(id),owner_user_id uuid,
  state text,arm_requested boolean,fencing_token bigint,heartbeat_at timestamptz,account_kill boolean DEFAULT false,released_at timestamptz);
  CREATE TABLE public.v13_production_observation(id uuid PRIMARY KEY,account_id text,kind text,payload jsonb,digest text);`;
-async function seed(){
+async function seed(result:'NO_WINS'|'NO_LOSES'='NO_WINS'){
  await pool.query('TRUNCATE public.v13_production_account,auth.users CASCADE');
- const f=economicDischargeFixture(),a=f.account,b=f.booking;
+ const f=economicDischargeFixture(result),a=f.account,b=f.booking;
  // Use current clock while keeping the fixture's exact original financial times.
  const fresh=Date.now();f.snapshot.observedAtMs=fresh;f.nowMs=fresh;
  await pool.query('INSERT INTO auth.users VALUES($1)',[a.owner_user_id]);
@@ -80,6 +80,30 @@ test('native economic discharge atomicity, original UNKNOWN, cancellation, owner
    const receipt=await economicDischargeOutcome(x.scope.ownerId,x.scope.requestId,pool);assert.equal(receipt.ok,true);assert.equal(receipt.status,'RECORDED');
    assert.equal((await run(x)).ok,false);assert.deepEqual(await current(),after);
    assert.deepEqual(await readUnresolvedIntentMode(pool.query.bind(pool),x.f.account.id),{ok:true,mode:'entries'});
+  });
+  await t.test('verified losing NO keeps negative P&L and zero payout while discharging only reserve and stale lease',async()=>{
+   const x=await seed('NO_LOSES');
+   const before=await current();
+   const settlement=(await pool.query("SELECT cash_delta_micros::text,pnl_micros::text FROM public.v13_production_event WHERE kind='SETTLEMENT'")).rows[0]!;
+   assert.deepEqual(settlement,{cash_delta_micros:'0',pnl_micros:'-1522500'});
+   assert.equal(x.f.booking.payload.pnlMicros,'-1522500');
+   assert.equal(x.f.booking.payload.cashDeltaMicros,'0');
+   const result=await run(x);
+   assert.equal(result.ok,true,JSON.stringify(result));
+   const after=await current();
+   assert.equal(after.cash_micros,before.cash_micros,'discharge must never erase the losing trade or add cash');
+   assert.equal(after.reserved_micros,'0','only verified settled reserve is released');
+   assert.equal(after.events,2,'booking is not duplicated');
+   assert.equal(after.lease,'released');
+   assert.equal(after.execution_enabled,false);
+   assert.equal(after.kill_switch,true);
+   assert.equal(after.exit,'DISPATCHED');
+   assert.equal(after.marker,'UNKNOWN');
+   assert.equal(after.receipts,1);
+   assert.deepEqual(await readUnresolvedIntentMode(pool.query.bind(pool),x.f.account.id),{ok:true,mode:'entries'});
+   assert.equal((await economicDischargeOutcome(x.scope.ownerId,x.scope.requestId,pool)).ok,true);
+   assert.equal((await run(x)).ok,false,'no second discharge');
+   assert.deepEqual(await current(),after);
   });
   await t.test('submillisecond original dispatch is copied exactly into the receipt, never rewritten',async()=>{
    const x=await seed(),before=await current();

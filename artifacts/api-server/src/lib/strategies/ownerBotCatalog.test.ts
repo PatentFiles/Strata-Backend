@@ -99,3 +99,30 @@ test('only unchanged approved policy can be marked as exact-release-only reautho
   else process.env.RAILWAY_GIT_COMMIT_SHA=before;
  }
 });
+
+test('owner bot catalog keeps the economic discharge projection gated and fail closed',async()=>{
+ const previous=process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED;
+ try{
+  for(const enabled of [false,true]){
+   process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED=enabled?'true':'false';
+   let captured='';
+   const db={query:async(sql:string,args?:unknown[])=>{
+    captured=sql;
+    assert.deepEqual(args,[owner]);
+    return {rows:[row]};
+   }};
+   const result=await readOwnerBotCatalog(owner,db);
+   assert.equal(result.ok,true);
+   if(enabled){
+    assert.match(captured,/i\.kind IS DISTINCT FROM 'EXIT'/);
+    assert.match(captured,/x\.execution_account_id,x\.client_order_id/);
+    assert.match(captured,/CASE WHEN EXISTS/);
+   }else{
+    assert.doesNotMatch(captured,/strata_has_economic_exit_discharge/);
+   }
+  }
+ }finally{
+  if(previous===undefined)delete process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED;
+  else process.env.STRATA_ECONOMIC_EXIT_FINALITY_ENABLED=previous;
+ }
+});

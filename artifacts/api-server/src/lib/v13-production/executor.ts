@@ -139,6 +139,8 @@ export class ProductionExecutor {
        receipt.crossingKey,receipt.sourceId,receipt.sourceSha256]);
     return result.rows.length===1&&result.rows[0]?.recorded===true;
   }
+  /** Telemetry-only bound source identity; does not grant execution authority. */
+  get observedBotId():string|null{return this.#directSource?.strategyId??null;}
   get independentSourceBound():boolean{return this.#directSource!==null;}
   get independentSimulationBound():boolean{return this.independentSourceBound&&this.exchange.mode==="SIMULATION";}
   private assertDirectBinding(source:DirectEntrySource):void{

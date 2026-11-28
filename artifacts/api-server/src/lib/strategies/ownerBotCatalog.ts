@@ -5,6 +5,7 @@ export {WARREN_BOT,WARREN_BOT_HASH} from './warrenBotIdentity';
 import {V13_CHAMPION_PARAMETER_HASH,V13_CHAMPION_PARAMETER_SET} from '@workspace/v13-strategy';
 import {WARREN_BUFFETT_SPEC} from './warrenBuffett';
 import {deployedGitSha} from '../strata/deployedGitSha';
+import {unresolvedEconomicExposureSQL} from '../strata/economicExitDischargeScope';
 
 export const CHAMPION_BOT=V13_CHAMPION_PARAMETER_SET.id;
 export const BOT_SELECT_CONFIRM='I_SELECT_THIS_EXACT_BOT_FOR_MY_OWN_STOPPED_ACCOUNT_V1';
@@ -40,9 +41,9 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
  a.reconciled_at,a.policy_id,p.state policy_state,p.policy_hash,p.strategy_parameter_set_id,p.strategy_parameter_hash,
  (SELECT count(*)::int FROM public.v13_production_position x WHERE x.account_id=a.id AND x.quantity_hundredths<>0) open_positions,
  (SELECT count(*)::int FROM public.v13_production_intent i WHERE i.account_id=a.id AND
-  (i.terminal IS DISTINCT FROM TRUE OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0)) unresolved_intents,
+  (i.terminal IS DISTINCT FROM TRUE OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0)${unresolvedEconomicExposureSQL('i.account_id','i.client_order_id','i.kind')}) unresolved_intents,
  (SELECT count(*)::int FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=a.id AND
-  x.state IN ('PREPARED','DISPATCHED','UNKNOWN')) pending_exits,
+  x.state IN ('PREPARED','DISPATCHED','UNKNOWN')${unresolvedEconomicExposureSQL('x.execution_account_id','x.client_order_id')}) pending_exits,
  w.state worker_state,w.arm_requested,w.account_kill,
  s.bot_id selected_bot,s.bot_fingerprint selected_fingerprint,s.policy_hash selected_policy_hash,
  s.release_sha selection_sha,s.revision selection_revision
@@ -77,6 +78,9 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
    ((a.kill_switch===false&&a.execution_enabled===true)||
     (a.kill_switch===true&&a.execution_enabled===false));
  const stopped=killed||released;
+ const protectiveStopping=a.worker_state==='owned'&&a.arm_requested===false&&a.account_kill===false;
+ const protectiveExposure=Number(a.open_positions)>0||Number(a.unresolved_intents)>0||
+  Number(a.pending_exits)>0||String(a.reserved_micros)!=='0';
  const readTime=Date.parse(String(a.reconciled_at??''));
  const fresh=Number.isFinite(readTime)&&readTime<=Date.now()&&Date.now()-readTime<900_000;
  const flat=Number(a.open_positions)===0&&Number(a.unresolved_intents)===0&&Number(a.pending_exits)===0;
@@ -88,12 +92,17 @@ export async function readOwnerBotCatalog(owner:string,db:Q){
   selectionRevision:Number(a.selection_revision??0),currentBotId:botId,
   currentPolicyVerified:policyOk&&selectionValid&&!requiresReauthorization,requiresReauthorization,
   releaseOnlyReauthorization,workerMayBeActive:!stopped,
+  openPositions:Number(a.open_positions),unresolvedIntents:Number(a.unresolved_intents),
+  pendingProtectiveExits:Number(a.pending_exits),
+  protectiveManagementPending:protectiveStopping&&protectiveExposure,
   selectionEnabled:eligible,executionAuthority:'ACCOUNT_OWNER_ONLY' as const,
    reason:eligible?(requiresReauthorization?
     (selectionPolicyChanged?'owner_bot_changed_financial_policy_requires_review':'owner_bot_requires_exact_release_reauthorization'):
     'owner_can_review_strategy_change'):
    !policyOk?'owner_bot_policy_not_approved':!selectionValid?'owner_bot_selection_invalid':
-   !stopped?'owner_bot_worker_not_stopped':a.blocked_reason!==null?'owner_bot_financial_hold':
+    !stopped?(protectiveStopping
+     ?(protectiveExposure?'owner_bot_protective_exposure_pending':'owner_bot_worker_releasing')
+     :'owner_bot_worker_not_stopped'):a.blocked_reason!==null?'owner_bot_financial_hold':
    String(a.reserved_micros)!=='0'?'owner_bot_cash_reserved':!flat?'owner_bot_unresolved_exposure':
    !fresh?'owner_bot_cash_reconciliation_stale':'owner_bot_change_not_ready',
   bots:[{id:CHAMPION_BOT,name:'C52/C53',parameterHash:V13_CHAMPION_PARAMETER_HASH,status:'LIVE_QUALIFIED',description:'Brady original: immutable C52/C53.'},
@@ -150,10 +159,10 @@ export async function selectOwnedBot(owner:string,raw:unknown,db:Db){
   if(!Number.isFinite(fresh)||now-fresh<0||now-fresh>900_000)return error('bot_fresh_cash_reconciliation_required');
   const risk=(await tx.query(`SELECT
    (SELECT count(*)::int FROM public.v13_production_position WHERE account_id=$1 AND quantity_hundredths<>0) positions,
-   (SELECT count(*)::int FROM public.v13_production_intent WHERE account_id=$1 AND
-    (terminal IS DISTINCT FROM TRUE OR state IN ('PREPARED','DISPATCHED','UNKNOWN') OR reserved_micros<>0)) intents,
-   (SELECT count(*)::int FROM private.strata_emergency_exit_reservations WHERE execution_account_id=$1 AND
-    state IN ('PREPARED','DISPATCHED','UNKNOWN')) exits`,[row.id])).rows[0]!;
+   (SELECT count(*)::int FROM public.v13_production_intent i WHERE i.account_id=$1 AND
+    (i.terminal IS DISTINCT FROM TRUE OR i.state IN ('PREPARED','DISPATCHED','UNKNOWN') OR i.reserved_micros<>0)${unresolvedEconomicExposureSQL('i.account_id','i.client_order_id','i.kind')}) intents,
+   (SELECT count(*)::int FROM private.strata_emergency_exit_reservations x WHERE x.execution_account_id=$1 AND
+    x.state IN ('PREPARED','DISPATCHED','UNKNOWN')${unresolvedEconomicExposureSQL('x.execution_account_id','x.client_order_id')}) exits`,[row.id])).rows[0]!;
   if(Number(risk.positions)!==0||Number(risk.intents)!==0||Number(risk.exits)!==0)return error('bot_position_or_uncertain_order_present');
   // Explicit selection closes old START authority. ARM later re-verifies signed cash and risk.
   const newRevision=revision+1,requestId=String(b.requestId);
@@ -196,7 +205,7 @@ export async function prepareOwnerBotChange(
  try{
   const before=await readOwnerBotCatalog(owner,db);
   if(!before.ok)return fail(before.reason);
-  if(before.workerMayBeActive)return fail('bot_worker_must_be_stopped');
+  if(before.workerMayBeActive)return fail(before.reason);
   if(!before.policyHash)return fail('bot_policy_not_approved');
   if(!before.selectionEnabled&&before.reason!=='owner_bot_cash_reconciliation_stale')return fail(before.reason);
   const observed=await reconcile(owner,{confirmation:'RECORD_OWNED_SUBACCOUNT_CASH'});

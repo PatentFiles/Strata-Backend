@@ -357,6 +357,23 @@ export function createUserExecutionRouter(requireUser: RequestHandler, port: Use
   router.post('/bots/prepare-change',async(req,res)=>{
     const owner=subject(res);if(!owner)return void res.status(401).json({ok:false,reason:'unauthorized'});
     res.setHeader('Cache-Control','private, no-store');
+    // A worker whose entries are already STOPPED may remain owned while
+    // protecting a position. Never erase that exposure. If authoritative
+    // catalog evidence is flat but the lease is still owned (e.g. after a
+    // missed timer), reuse STOP's locked owner-scoped finalizer once.
+    // Do not perform even an idempotent STOP finalizer for malformed input.
+    // This endpoint is an explicit continuation of owner-issued DISARM.
+    if(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||
+       Object.keys(req.body).length!==1||
+       req.body.confirmation!=='PREPARE_STOPPED_OWNER_BOT_CHANGE_V1')
+      return void res.status(400).json({ok:false,reason:'owner_change_confirmation_required'});
+    const current=await readOwnerBotCatalog(owner,pool);
+    if(current.ok&&current.reason==='owner_bot_worker_releasing'){
+      const stopped=await port.safetyControl(owner,'STOP');
+      if(!stopped.ok)return void res.status(409).json(sanitizePublic({
+       ok:false,reason:stopped.reason,ordersSubmitted:false,workerStarted:false,transferAttempted:false
+      }));
+    }
     const result=await prepareOwnerBotChange(owner,req.body,pool,(o,b)=>port.reconcileCash(o,b));
     res.status(result.ok?200:409).json(sanitizePublic(result));
   });

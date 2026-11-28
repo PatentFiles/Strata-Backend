@@ -33,3 +33,35 @@ test('shutdown timeout does not falsely report successful persistence',async()=>
  assert.equal(await q.flush(10),false);assert.equal(q.snapshot().pending,1);assert.equal(q.snapshot().confirmed,0);
  release(1);await q.drain();assert.equal(q.snapshot().confirmed,1);
 });
+
+test('production telemetry retry budget preserves identical event IDs through repeated transient FK waits',async()=>{
+ let attempts=0;
+ const emitted:string[][]=[];
+ const queue=new BoundedAnalyticsQueue<{id:string}>(async rows=>{
+  emitted.push(rows.map(v=>v.id));attempts++;
+  if(attempts<=8)throw Error('simulated_55P03_observation_fk_wait');
+  return rows.length;
+ },{capacity:4096,batchSize:32,maxAttempts:12,delayMs:250});
+ const ids=['stable-uuid-a','stable-uuid-b'];
+ for(const id of ids)assert.equal(queue.enqueue({id}),true);
+ assert.equal(await queue.flush(),true);
+ assert.equal(attempts,9);
+ assert.equal(queue.snapshot().confirmed,2);
+ assert.equal(queue.snapshot().retryExhausted,0);
+ assert.equal(queue.snapshot().overflow,0);
+ assert.equal(queue.snapshot().retries,16);
+ assert.ok(emitted.every(batch=>JSON.stringify(batch)===JSON.stringify(ids)));
+});
+test('production retry budget still has a finite failure ceiling and explicit gap counters',async()=>{
+ let attempts=0,gaps=0;
+ const q=new BoundedAnalyticsQueue<{id:string}>(async()=>{
+  attempts++;throw Error('permanent_postgres_outage');
+ },{capacity:4096,batchSize:32,maxAttempts:12,delayMs:250,onGap:()=>{gaps++;}});
+ assert.equal(q.enqueue({id:'immutable'}),true);
+ assert.equal(await q.flush(),true);
+ assert.equal(attempts,12);
+ assert.equal(q.snapshot().retryExhausted,1);
+ assert.equal(q.snapshot().confirmed,0);
+ assert.equal(gaps,1);
+ assert.equal(q.snapshot().complete,false);
+});
