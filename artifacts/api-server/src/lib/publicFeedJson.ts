@@ -46,7 +46,7 @@ export function createPublicFeedJsonReader(fetchImpl:typeof fetch=fetch,
   // Fail closed if a supplied clock regresses; normal performance.now is monotonic.
   lastMono=Math.max(lastMono,value);return lastMono;
  };
- return async(provider:Provider,endpoint:Endpoint,url:string,signal?:AbortSignal,observe?:(event:PublicFeedReadEvidence)=>void):Promise<unknown>=>{
+ return async(provider:Provider,endpoint:Endpoint,url:string,signal?:AbortSignal,observe?:(event:PublicFeedReadEvidence)=>void,observeStart?:(utcMs:number)=>void):Promise<unknown>=>{
   const label=`Public market feed provider=${provider} endpoint=${endpoint}`;
   const before=mono(),held=state.get(provider);
   const report=(outcome:PublicFeedReadEvidence['outcome'],response?:Response,remaining:number|null=null)=>{
@@ -64,6 +64,7 @@ export function createPublicFeedJsonReader(fetchImpl:typeof fetch=fetch,
    throw Error(`${label} cooldown remainingMs=${Math.ceil(held.until-before)}`);
   }
   let response:Response;
+  if(observeStart){try{observeStart(wallNow());}catch{/* Optional timing cannot interrupt the GET. */}}
   try{response=await fetchImpl(url,{signal,cache:'no-store',redirect:'error',credentials:'omit',headers:{Accept:'application/json'}});}
   catch{report('request_failed');throw Error(`${label} request_failed${signal?.aborted?' aborted=true':''}`);}
   report('response',response);

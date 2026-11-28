@@ -169,3 +169,22 @@ test("provider refusal is reported without awaiting a slow body cancellation, bu
  let drained=false;void a.drained.then(()=>{drained=true;});await turn();assert.equal(drained,false);
  a.discard();cleanup.resolve();await a.drained;await turn();assert.equal(c.diagnostics().activeRequests,0);
 });
+
+test('direct PREPARE binds the persisted digest and oldest source time and cannot satisfy a final phase',async()=>{
+ const committed={...hint(),directSourceSha256:'c'.repeat(64),directOldestMs:at-250};
+ for(const altered of [{directSourceSha256:'d'.repeat(64)},{directOldestMs:at-249},{directSourceSha256:undefined,directOldestMs:undefined}]){
+  const calls:string[]=[];
+  const coordinator=new CommittedPublicMetadataCoordinator(provider(calls),()=>at,()=>0);
+  const attempt=coordinator.start(scope,committed);assert.ok(attempt);await attempt.drained;
+  await assert.rejects(attempt.consume(scope,{...committed,...altered}).read(mp),/entry_metadata_scope_changed/);
+  assert.throws(()=>attempt.consume(scope,committed),/already_consumed/);assert.equal(calls.length,5);
+ }
+ const calls:string[]=[];let now=at;
+ const coordinator=new CommittedPublicMetadataCoordinator(provider(calls),()=>now,()=>now-at);
+ assert.equal(coordinator.startPhase(scope,committed,{phase:'FINAL_MARKET',intentId:'same-id'}),null);
+ const old={...committed,directOldestMs:at-4950};
+ const attempt=coordinator.start(scope,old);assert.ok(attempt);await attempt.drained;
+ now=at+50;
+ await assert.rejects(attempt.consume(scope,old).read(mp),/expired/);
+ assert.equal(calls.length,5);
+});

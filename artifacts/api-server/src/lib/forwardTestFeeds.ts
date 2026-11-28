@@ -1,7 +1,7 @@
 import {rolloverEventScope,verifiedRolloverEventStrike} from "./rolloverEventStrike";
 import {rolloverReadShapeEvidence} from './rolloverReadShapeEvidence';
 import {beginSourceQuoteRead} from "./sourceQuoteProvenance";
-import {BtcFeedDiagnostics,type BtcFeedDiagnostic} from "./btcFeedDiagnostics";
+import {BtcFeedDiagnostics,DirectBtcReadTimings,type BtcFeedDiagnostic,type BtcReadTiming} from "./btcFeedDiagnostics";
 import {marketStrikeEvidence,RolloverStrikeDiagnostics,type RolloverStrikeEvent} from "./rolloverStrikeDiagnostics";
 import {createPublicFeedJsonReader,type PublicFeedReadEvidence} from "./publicFeedJson";
 import { fetchKalshiPublicBook, type OrderbookRead } from "./forwardTestOrderbookDepth";
@@ -141,10 +141,11 @@ function normalizeMarket(value: unknown, fetchedAt: Date): MarketObservation | n
  * into a current snapshot; refresh the selected exact contract every cycle.
  */
 export function createPublicForwardTestFeeds(fetchImpl:typeof fetch=fetch,clock:()=>Date=()=>new Date(),monotonicClock:()=>number=()=>performance.now(),observe?:(event:RolloverStrikeEvent)=>void,observeBtc?:(event:BtcFeedDiagnostic)=>void,
-  options?:{rolloverEventStrike?: "verified_recovery"}):ForwardTestFeeds {
+  options?:{rolloverEventStrike?: "verified_recovery";observeDirectBtcTiming?:(event:BtcReadTiming)=>void}):ForwardTestFeeds {
 const getJson=createPublicFeedJsonReader(fetchImpl,()=>clock().getTime(),monotonicClock);
 const diagnostics=new RolloverStrikeDiagnostics(observe);
 const btcDiagnostics=new BtcFeedDiagnostics(observeBtc,monotonicClock);
+const timings=options?.observeDirectBtcTiming?new DirectBtcReadTimings(options.observeDirectBtcTiming):undefined;
 // Cache routing identity only, never observations. Canonical 15-minute metadata
 // bounds this hint to one window; every use still performs a fresh exact GET.
 let route: {ticker:string; window:number} | null = null;
@@ -154,9 +155,14 @@ return {
   book: fetchKalshiPublicBook,
   async btc(signal) {
     const attempt=btcDiagnostics.begin();
+    const sampled=timings?.sample(attempt);
+    let requestStartMs=NaN,headersMs:number|null=null;
     let evidence:PublicFeedReadEvidence|null=null;
     try {
-    const raw = await getJson("coinbase","btc_ticker",COINBASE,signal,event=>{evidence=event;});
+    const raw = await getJson("coinbase","btc_ticker",COINBASE,signal,event=>{
+      evidence=event;
+      if(sampled && event.outcome==="response")headersMs=event.roundTripMs;
+    },sampled?at=>{requestStartMs=at;}:undefined);
     if (!raw || typeof raw !== "object") throw new Error("Coinbase returned malformed BTC data");
     const payload = raw as Record<string, unknown>;
     const price = numeric(payload.price);
@@ -165,7 +171,9 @@ return {
       throw new Error("Coinbase BTC price or timestamp is unavailable");
     }
     btcDiagnostics.finish(attempt,true,evidence);
-    return { price, providerAt, receivedAt: clock() };
+    const receivedAt=clock();
+    if(sampled)timings?.record(attempt,requestStartMs,providerAt.getTime(),receivedAt.getTime(),headersMs,evidence);
+    return {price,providerAt,receivedAt};
     }catch(error){btcDiagnostics.finish(attempt,false,evidence);throw error;}
   },
   async market(ticker, signal) {

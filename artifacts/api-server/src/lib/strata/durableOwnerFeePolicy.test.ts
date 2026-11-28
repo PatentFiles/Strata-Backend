@@ -86,9 +86,10 @@ test('invalid observation clocks never start provider reads',async()=>{
  clock:()=>fixtureClock,monotonicNow:()=>invalid,fetcher:async()=>{calls++;throw Error('must not fetch')}});
  assert.equal(result.ok,false);assert.equal(calls,0);}
 });
-import {createGuardedDurableFeeFetch} from './guardedDurableFeeWire';
+import {createGuardedDurableFeeFetch,isDurableFeePreTransportRefusal} from './guardedDurableFeeWire';
 for(const rollback of [false,true])for(const reduceOnly of [false,true])for(const afterVerification of [1000,1001]){
  test(`final ${reduceOnly?'exit':'entry'} wire retains source age across ${afterVerification}ms boundary delay rollback=${rollback}`, async()=>{
+ const token=Object.freeze({}),clientId='v13p-44444444-4444-4444-8444-444444444444';
  const savedNow=Date.now,savedFlag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
  process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';let at=fixtureClock,mono=0,sends=0;
  Date.now=()=>at;
@@ -97,11 +98,22 @@ for(const rollback of [false,true])for(const reduceOnly of [false,true])for(cons
  const feed=kalshiFeed(feeApiPages());const fetcher:typeof fetch=async(...args)=>{const response=await feed(...args);if(String(args[0]).includes('/events/fee_changes?')){at+=4000;mono+=4000;}return response};
  const guarded=createGuardedDurableFeeFetch(scope.owner,scope.account,'strata-durable-owner-fee://33333333-3333-4333-8333-333333333333',
  (async()=>{sends++;return new Response('{}',{status:200})}) as typeof fetch,scope.policyHash,'d'.repeat(64),1,'holder',model.digest,{
- borrowTransaction:()=>tx as never,sha:()=>scope.sha,hasHistory:async()=>true,currentStanding:async()=>true,exitReview:async()=>true,
+ borrowTransaction:()=>tx as never,wireScope:()=>token,sha:()=>scope.sha,hasHistory:async()=>true,currentStanding:async()=>true,exitReview:async()=>true,
  verifyDurable:async()=>{const proof=await verifyDurableOwnerFee(tx,scope,marketTicker,reduceOnly?'PROTECTIVE_EXIT':'ENTRY',{clock:()=>at,monotonicNow:()=>mono,fetcher});at+=rollback?-3000:afterVerification;mono+=afterVerification;return proof;},
  });
  const request=()=>guarded('https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders',{method:'POST',body:JSON.stringify({ticker:marketTicker,subaccount:1,exchange_index:2,reduce_only:reduceOnly,time_in_force:'immediate_or_cancel',self_trade_prevention_type:'taker_at_cross',post_only:false,client_order_id:'v13p-44444444-4444-4444-8444-444444444444',side:'bid',count:'1.00',price:'0.2500'})});
- if(afterVerification>1000)await assert.rejects(request(),/durable_fee_final_fresh_model_unverified/);else assert.equal((await request()).status,200);
+ if(afterVerification>1000){
+  const error=await request().then(()=>assert.fail('expected local refusal'),e=>e);
+  assert.match(error.message,/durable_fee_final_fresh_model_unverified/);
+  assert.equal(isDurableFeePreTransportRefusal(token,error,clientId),!reduceOnly);
+  for(const wrong of [null,{}])assert.equal(isDurableFeePreTransportRefusal(wrong,error,clientId),false);
+  assert.equal(isDurableFeePreTransportRefusal(token,error,clientId+'-other'),false);
+  assert.equal(isDurableFeePreTransportRefusal(token,new Error(error.message),clientId),false);
+  if(!reduceOnly){
+   await assert.rejects(request());
+   assert.equal(isDurableFeePreTransportRefusal(token,error,clientId),false,'ambiguous reuse invalidates earlier proof');
+  }
+ }else assert.equal((await request()).status,200);
  assert.equal(sends,afterVerification>1000?0:1);
  }finally{Date.now=savedNow;if(savedFlag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=savedFlag;}
  });
@@ -260,4 +272,30 @@ test("admin-uploaded durable terms have no recurring PDF age lease",()=>{
   assert.equal(assessDurableFee({...model,entryRevoked:true},scope,"ENTRY",market,now).ok,false);
   assert.equal(assessDurableFee(model,scope,"ENTRY",{...market,verifiedAt:now-5001},now).ok,false);
  }finally{if(old===undefined)delete process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED;else process.env.STRATA_PLATFORM_FEE_UPLOAD_ENABLED=old;}
+});
+
+test('a raw durable send that throws an earlier local refusal stays uncertain',async t=>{
+ const previous=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE='true';
+ t.after(()=>{if(previous===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=previous;});
+ const token=Object.freeze({}),clientId='v13p-44444444-4444-4444-8444-444444444444';
+ let fresh=false,sends=0,prior:Error|undefined;
+ const guard=createGuardedDurableFeeFetch(scope.owner,scope.account,'strata-durable-owner-fee://33333333-3333-4333-8333-333333333333',
+  async()=>{sends++;throw prior;},scope.policyHash,'d'.repeat(64),1,'holder',model.digest,{
+   borrowTransaction:()=>({query:async()=>({rows:[{}]})}) as never,wireScope:()=>token,
+   sha:()=>scope.sha,hasHistory:async()=>true,currentStanding:async()=>true,
+   verifyDurable:async()=>{
+    const now=Date.now(),proof=assessDurableFee(model,scope,'ENTRY',{...live,verifiedAt:now},now);
+    assert.ok(proof.ok);
+    return {...proof,sourceFresh:()=>fresh};
+   }
+  });
+ const send=()=>guard('https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders',{method:'POST',
+  body:JSON.stringify({ticker:marketTicker,subaccount:1,exchange_index:2,reduce_only:false,time_in_force:'immediate_or_cancel',
+   self_trade_prevention_type:'taker_at_cross',post_only:false,client_order_id:clientId,side:'bid',count:'1.00',price:'0.2500'})});
+ await assert.rejects(send(),(error:Error)=>{prior=error;return isDurableFeePreTransportRefusal(token,error,clientId);});
+ assert.equal(sends,0);
+ fresh=true;
+ await assert.rejects(send(),(error:Error)=>error===prior&&!isDurableFeePreTransportRefusal(token,error,clientId));
+ assert.equal(sends,1);
 });

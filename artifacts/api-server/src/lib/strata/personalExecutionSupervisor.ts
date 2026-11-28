@@ -578,7 +578,7 @@ export function createProductionPersonalSession(
       finalLedger.assertFinalWireClock();
       directRounding?.assertWire(finalLedger.currentWireScopeToken()??undefined);
     },raw);
-    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
+    return durableSource ? createGuardedDurableFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,wireScope:()=>finalLedger?.currentWireScopeToken()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeDurableWire(id,ticker)}) : apiSource ? createGuardedReviewedApiFeeFetch(input.userId,input.accountId,sourceUrl,clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,{borrowTransaction:()=>finalLedger?.currentTransaction()??null,consumePublicMetadata:(id,ticker)=>finalPublicMetadata?.consumeWire(id,ticker)}) :
       ownerV3Source ? createGuardedOwnerV3FeeFetch(input.userId,input.accountId,sourceUrl,
         clockCheckedTransport,policyHash,fingerprint,claimed.fencingToken,holderId,digest,
         {borrowTransaction:()=>finalLedger?.currentTransaction()??null}) :
@@ -845,14 +845,16 @@ export function createProductionPersonalSession(
     else { session.executor.containLiveEntries(); if(requireIndependentPaperCutover())state.entriesAuthorized=false; }
     finalLedger=session.executor.ledger;
     session.executor.overlapFinalAccountSnapshot=!!(apiSource||durableSource)&&options.overlapFinalAccountSnapshot===true;
-    if(!directSource&&(apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true){
+    // Direct PREPARE schedules only its own just-committed source. FINAL and WIRE require the later committed intent.
+    const finalMetadataEligible = !directSource || session.executor.overlapFinalAccountSnapshot;
+    if((apiSource||durableSource)&&options.finalPublicMetadataPrefetch===true&&finalMetadataEligible){
       finalPublicMetadata=new FinalPublicMetadataPhases(processCommittedPublicMetadata,metadataScope,
         ()=>state.armRequested===true&&state.entriesAuthorized!==false&&!state.accountKill&&!state.globalKill&&state.presentedToken===state.fencingToken,
         ()=>{activeMetadata?.discard();activeMetadata=null;});
       session.executor.finalPublicMetadata=finalPublicMetadata;
     }
-    if(!directSource&&(apiSource||durableSource)&&options.publicMetadataPrefetch===true){
-      session.executor.prefetchCommittedPublicMetadata=hint=>{
+    if((apiSource||durableSource)&&options.publicMetadataPrefetch===true){
+      const startPublic:NonNullable<typeof session.executor.prefetchCommittedPublicMetadata>=hint=>{
         if(activeMetadata||state.armRequested!==true||state.entriesAuthorized===false||
           state.accountKill||state.globalKill||state.presentedToken!==state.fencingToken)return null;
         const attempt=processCommittedPublicMetadata.start(metadataScope(),hint);
@@ -863,6 +865,9 @@ export function createProductionPersonalSession(
           void attempt.drained.then(()=>{if(activeMetadata===attempt)activeMetadata=null;});
         }};
       };
+      if(directSource){
+        session.executor.prefetchDirectPublicMetadata=hint=>directSource.ownsCommittedMetadata(hint)?startPublic(hint):null;
+      }else session.executor.prefetchCommittedPublicMetadata=startPublic;
     }
     // Opt-in, same owning session only. Process loss never reconstitutes this
     // mode: claimWorkerLease still refuses an already-owned lease. KILL remains

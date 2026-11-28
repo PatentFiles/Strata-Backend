@@ -7,6 +7,7 @@ import {entryCashRiskFeeFixture} from "./entryCashRisk.fixture";
 import {requestQuantityHundredths} from "./requestQuantity";
 import {receiptFixture} from "./entryQuoteEvidence.fixture";
 import {DirectEntrySource} from "./directEntrySource";
+import {createPublicForwardTestFeeds} from "../forwardTestFeeds";
 import {AccountScopedExchange} from "../strata/accountProductionSession";
 import {createIndependentProductionFetch} from "./liveEntryContainment";
 import {persistOwnedCashReconciliation, RECORD_OWNED_CASH_CONFIRMATION} from "../strata/personalCashReconciliation";
@@ -750,6 +751,48 @@ test("transport-boundary refusal is proven not posted and releases its reservati
  assert.equal((await f.ledger.readAccount()).reserved_micros,"0");
  const intent=(await pool.query("SELECT state FROM v13_production_intent WHERE id=$1",[id])).rows[0];
  assert.equal(intent.state,"BLOCKED");
+ await invariant(f.ledger);
+});
+
+test("durable transport rethrow of an authenticated local refusal retains UNKNOWN and its reservation",async t=>{
+ const {createGuardedDurableFeeFetch,isDurableFeePreTransportRefusal}=await import("../strata/guardedDurableFeeWire");
+ const {assessDurableFee,DURABLE_FEE_VERSION}=await import("../strata/durableOwnerFeePolicy");
+ const flag=process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;
+ process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE="true";
+ t.after(()=>{if(flag===undefined)delete process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE;else process.env.STRATA_PROTECTIVE_EXIT_SIGNED_RELEASE=flag;});
+ const f=await fixture(),id=await f.executor.prepareEntry(await f.source());
+ const reserved=(await f.ledger.readAccount()).reserved_micros;
+ assert.ok(BigInt(reserved)>0n);
+ let sends=0;
+ f.exchange.submit=async(request,final)=>{
+  await final();
+  const scope={owner:"fixture-owner",account:"fixture-account",sha:"a".repeat(40),policyHash:"b".repeat(64)};
+  const digest="c".repeat(64),ticker="KXBTC15M-FIXTURE",token=f.ledger.currentWireScopeToken();
+  assert.ok(token);
+  let prior:Error|undefined;
+  const sender=createGuardedDurableFeeFetch(scope.owner,scope.account,"strata-durable-owner-fee://33333333-3333-4333-8333-333333333333",
+   async()=>{sends++;throw prior;},scope.policyHash,"d".repeat(64),1,"holder",digest,{
+    borrowTransaction:()=>({query:async()=>({rows:[{}]})}) as never,wireScope:()=>token,
+    sha:()=>scope.sha,hasHistory:async()=>true,currentStanding:async()=>true,
+    verifyDurable:async()=>{
+     const now=Date.now(),proof=assessDurableFee({...scope,digest,version:DURABLE_FEE_VERSION,formula:"standard-quadratic-0.07-v1",
+      effectiveDate:"2026-07-07",approved:true,entryRevoked:false,integrityValid:true,knownPublicationChange:false,monitorState:"never_checked"},
+      scope,"ENTRY",{ticker,ok:true,verifiedAt:now},now);
+     assert.ok(proof.ok);return {...proof,sourceFresh:()=>prior!==undefined};
+    }});
+  const send=()=>sender("https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",{method:"POST",body:JSON.stringify({
+   ticker,subaccount:1,exchange_index:2,reduce_only:false,time_in_force:"immediate_or_cancel",self_trade_prevention_type:"taker_at_cross",
+   post_only:false,client_order_id:request.clientOrderId,side:"bid",count:"1.00",price:"0.2500"})});
+  await assert.rejects(send(),(error:Error)=>{prior=error;return isDurableFeePreTransportRefusal(token,error,request.clientOrderId);});
+  await send(); // Raw transport enters and rethrows that exact object.
+  throw Error("unreachable");
+ };
+ await assert.rejects(f.executor.dispatch(id),/durable_fee_final_fresh_model_unverified/);
+ await f.executor.dispatch(id);
+ assert.equal(sends,1);
+ assert.equal((await f.ledger.readAccount()).reserved_micros,reserved);
+ const saved=await pool.query("SELECT i.state,o.kind FROM v13_production_intent i JOIN v13_production_observation o ON o.account_id=i.account_id AND o.payload->>'id'=i.id WHERE i.id=$1 AND o.kind IN ('POST_UNCERTAIN','PROVEN_NOT_POSTED')",[id]);
+ assert.deepEqual(saved.rows,[{state:"UNKNOWN",kind:"POST_UNCERTAIN"}]);
  await invariant(f.ledger);
 });
 
@@ -2536,4 +2579,31 @@ test("orders-off integrated retry preserves one order fence after a typed first 
  const intents=(await pool.query("SELECT direct_source_id,state FROM v13_production_intent")).rows;
  assert.deepEqual(intents,[{direct_source_id:second,state:"PREPARED"}]);
  assert.deepEqual(f.exchange.posts,[]);
+});
+
+test("timed BTC observations preserve direct stale and future refusals before book or intent",async()=>{
+ const f=await fixture();
+ const open=Math.floor(f.exchange.now/900000)*900000;
+ const now=open+60_000;
+ for(const timing of [false,true]){
+  for(const offset of [-5001,500]){
+   let requests=0,quotes=0;
+   const feed=createPublicForwardTestFeeds(async()=>{
+    requests++;
+    return new Response(JSON.stringify({price:'100001',time:new Date(now+offset).toISOString()}));
+   },()=>new Date(now),()=>100,undefined,undefined,timing?{observeDirectBtcTiming:()=>{}}:undefined);
+   const source=DirectEntrySource.isolatedSimulation({accountId:'test-account',ownerId:null},{
+    btc:feed.btc,
+    market:async()=>({ticker:'KXBTC15M-TIMING',target:100000,startsAt:new Date(open),endsAt:new Date(open+900000),
+     yesBid:.5,noBid:.5,yesAsk:.5,noAsk:.5,yesPrice:.5,noPrice:.5,result:null,status:'active',fetchedAt:new Date(now)}),
+    book:async()=>{quotes++;throw Error('unexpected_book_read');},
+   },()=>now);
+   await assert.rejects(source.capture(pool),/direct_entry_market_or_feed_invalid/);
+   assert.equal(requests,1);
+   assert.equal(quotes,0);
+  }
+ }
+ assert.equal((await pool.query('SELECT count(*)::int n FROM public.strata_direct_entry_source')).rows[0].n,0);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM v13_production_intent')).rows[0].n,0);
+ assert.equal(f.exchange.posts.length,0);
 });

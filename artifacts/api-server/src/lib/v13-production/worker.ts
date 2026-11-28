@@ -157,7 +157,11 @@ export class ProductionWorker {
           return;
         }
         this.entryHoldReported=false;
-        const id=await this.executor.captureIndependentEntry();
+        const prefetch=this.executor.prefetchDirectPublicMetadata;
+        const id=await this.executor.captureIndependentEntry(prefetch?hint=>{
+          if(!this.metadataAttempt&&this.lifecycle===tickLifecycle&&this.entriesOpen())
+            this.metadataAttempt=prefetch(hint);
+        }:undefined);
         if(!id)return;
         if(!this.entriesOpen()||this.lifecycle!==tickLifecycle){audit("ENTRY_GATE","entry_gate_closed_after_observation",id);return;}
         let intent:string;

@@ -1,3 +1,4 @@
+import type {CommittedForwardSourceHint} from '../forwardTestSignalWake';
 import {directTargetReadiness} from "./directTargetReadiness";
 import {createHash,createHmac,randomBytes,randomUUID,timingSafeEqual} from "node:crypto";
 import type {Pool,PoolClient} from "@workspace/db";
@@ -120,6 +121,10 @@ export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
  assertAuthorizedEntrySourceReference(v);
 }
 
+export type DirectCommittedMetadataSource=CommittedForwardSourceHint & Readonly<{
+ directSourceSha256:string;directOldestMs:number;
+}>;
+
 /**
  * Independent producer and exact committed-source reader for the existing
  * executor. Public provider observations only; no paper ledger, positions,
@@ -132,6 +137,8 @@ export function assertDirectEntryQuoteEvidence(value:unknown,now:number):void{
  * The live factory pins the actual owner-worker lease. It never restores custody after restart.
  */
 export class DirectEntrySource{
+ readonly #committedMetadata=new WeakSet<DirectCommittedMetadataSource>();
+ ownsCommittedMetadata(hint:DirectCommittedMetadataSource):boolean{return this.#committedMetadata.has(hint);}
  static readonly #validatedDigests=new WeakMap<object,string>();
  static validatedSourceDigest(source:unknown):string|undefined{
   return source!==null&&typeof source==="object"?this.#validatedDigests.get(source):undefined;
@@ -164,7 +171,8 @@ export class DirectEntrySource{
   const feeds=createPublicForwardTestFeeds(fetch,()=>new Date(),()=>performance.now(),event=>{
    emitDirectEntryRolloverGap(event);
    queueMicrotask(()=>publishHeldRolloverDiagnostics(event));
-  });
+  },undefined,process.env.STRATA_DIRECT_BTC_READ_TIMING_ENABLED==="true"
+    ?{observeDirectBtcTiming:event=>console.info(JSON.stringify(event))}:undefined);
   const source=new DirectEntrySource(scope,"LIVE_OBSERVATION",{...feeds,book:createPublicBookReader()},Date.now,auditPolicy);
   source.#selectedBot=botId;source.#warren=botId===WARREN_BOT?new WarrenBuffettResearch():null;
   source.#priceRetryStorage=process.env.STRATA_DIRECT_PRICE_RETRY_V1_SHA===scope.worker.releaseSha;
@@ -261,7 +269,7 @@ export class DirectEntrySource{
  }
  #now(){const n=this.clock();requireProof(time(n)&&n>=this.#lastClock,"direct_entry_clock_regressed");this.#lastClock=n;return n;}
  #seal(bytes:string){return createHmac("sha256",this.#secret).update(bytes,"utf8").digest("hex");}
- async capture(db:Query,signal?:AbortSignal):Promise<string|null>{
+ async capture(db:Query,signal?:AbortSignal,afterCommit?:(hint:DirectCommittedMetadataSource)=>void):Promise<string|null>{
   if(this.#running)return null;this.#running=true;
   const audit:Pick<LiveDecisionInput,"outcome"|"reasonCode"|"reasonDetail"|"market"|"direction"|"signal"|"sourceId"|"facts">={
    outcome:"ERROR",reasonCode:"live_evaluation_incomplete",facts:{}
@@ -385,20 +393,30 @@ export class DirectEntrySource{
    const unsigned:Unsigned={version:1,account,owner:this.#scope.ownerId,ticker,evaluation:id,oldest,observed,closesAt:close,
     environment:this.#environment,source,quote,...(this.priceRetryPermitted()?{priceRetryProtocol:"PRICE_REFUSAL_V1" as const}:{})};
    const receipt:Receipt={...unsigned,producerSeal:this.#seal(JSON.stringify(unsigned))};
-   const bytes=JSON.stringify(receipt);
+   const bytes=JSON.stringify(receipt),sourceHash=sha(bytes);
    const r=await db.query(
     "INSERT INTO public.strata_direct_entry_source (id,account_id,market_ticker,crossing_key,observed_at,oldest_source_at,closes_at,evidence_bytes,evidence_sha256) "+
     "SELECT $1,a.id,$3,$4,$5,$6,$7,$8,$9 FROM public.v13_production_account a "+
     "WHERE a.id=$2 AND a.owner_user_id IS NOT DISTINCT FROM $10::uuid "+
     "ON CONFLICT DO NOTHING RETURNING id",
-    [id,account,ticker,crossing,new Date(observed),new Date(oldest),new Date(close),bytes,sha(bytes),this.#scope.ownerId]);
+    [id,account,ticker,crossing,new Date(observed),new Date(oldest),new Date(close),bytes,sourceHash,this.#scope.ownerId]);
    if(r.rows.length!==1||r.rows[0].id!==id){
     audit.outcome="BLOCKED";audit.reasonCode="crossing_already_consumed";
     audit.reasonDetail="Existing immutable entry-source claim prevented a duplicate crossing.";
     return null;
    }
    audit.sourceId=id;
-   const exact=await this.readExact(db,id,this.#now());
+   const committedAt=this.#now();
+   if(afterCommit&&this.#environment==='LIVE_OBSERVATION'){
+    const hint:DirectCommittedMetadataSource=Object.freeze({evaluationId:id,marketTicker:ticker,evaluatedAtMs:observed,
+     btcProviderAgeMs:source.btc_provider_age_ms,btcReceiveAgeMs:source.btc_receive_age_ms,marketAgeMs:source.market_age_ms,
+     qualifyingTrigger:true,committedAtMs:committedAt,directSourceSha256:sourceHash,directOldestMs:oldest});
+    // Only this source object can issue scheduling coordinates after its successful INSERT.
+    // Public metadata cannot replace either subsequent exact custody/source read.
+    this.#committedMetadata.add(hint);
+    try{afterCommit(hint);}catch{/* optional scheduling cannot change the observation */}
+   }
+   const exact=await this.readExact(db,id,committedAt);
    audit.outcome=exact?"QUALIFIED":"BLOCKED";
    audit.reasonCode=exact?"qualifying_live_trigger":"direct_source_readback_unverified";
    if(!exact)audit.reasonDetail="The source did not pass exact readback.";

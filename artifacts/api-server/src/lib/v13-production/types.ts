@@ -30,7 +30,7 @@ export type Request = {
 } & ({contracts:number;quantityVersion?:never;quantityHundredths?:never}|
  {action:"SELL";reduceOnly:true;contracts?:never;quantityVersion:"EXIT_HUNDREDTHS_V1";quantityHundredths:string});
 export type EntryPrepareMarketContext=Readonly<{
- stage:"prepare";evaluationId:string;marketTicker:string;evaluatedAtMs:number;
+ stage:"prepare";evaluationId:string;marketTicker:string;evaluatedAtMs:number;directSourceSha256?:string;directOldestMs?:number;
  btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number;
 }>;
 export type MarketEvidence = {

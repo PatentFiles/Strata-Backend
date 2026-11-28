@@ -1,3 +1,8 @@
+import {AccountScopedExchange} from './accountProductionSession';
+import {processCommittedPublicMetadata} from './committedPublicMetadata';
+import {HISTORICAL_BASELINE_ID,HISTORICAL_BASELINE_SHA256,HISTORICAL_FEE_VERSION,HISTORICAL_SOURCE_KIND} from './historicalOwnerFeeBaseline';
+import {ProductionLedger} from '../v13-production/ledger';
+import {ProductionExecutor} from '../v13-production/executor';
 import {readFileSync} from 'node:fs';
 import {V13_ENTRY_POLICY_VERSION} from '@workspace/v13-strategy';
 import {economicSettlementFixture} from './ownerEconomicSettlementFixture';
@@ -400,10 +405,109 @@ export async function runHeldSupervisorDispatchScenario(scenario:'partial_then_f
  }
 }
 
-export async function runEconomicDischargeFullCycle(priceRetry=false){
+export async function runEconomicDischargeFullCycle(priceRetry=false,replay?: "serial"|"overlap"|"candidate"|"final_only", durable=false, adverse?: "duplicate_latency"|"wire_expiry"|"protective_cycle"|"yes_1523"|"yes_1523_db"|"yes_1523_plan"|"yes_1523_work"|"yes_1523_lock"|"mismatch"|"revoked"|"wire_fee_deadline"){
+ const stages:Record<string,number>={}, durations:Record<string,number>={};
+ let transportReached=0, mockWireCalls=0, recordedFailure="";
+ const originalTiming=ProductionExecutor.prototype.startTiming, originalGate=ProductionExecutor.prototype.gate;
+ const originalProof=ProductionLedger.prototype.finalAccountProof;
+ const fetchDescriptor=Object.getOwnPropertyDescriptor(processCommittedPublicMetadata,'fetchImpl')!;
+ const profiled=replay!==undefined&&adverse!=="protective_cycle";
+ const second=adverse?.startsWith("yes_1523")===true;
+ let providerAt=0,finalGateFinished=0;
+ const originalMarket=AccountScopedExchange.prototype.market,originalDispatch=ProductionExecutor.prototype.dispatch;
+ const borders:Record<string,number>={};
+ const feeReads:Array<{start:number,end:number,elapsedMs:number}>=[];
+ const originalTransaction=ProductionLedger.prototype.transaction, originalWireClock=ProductionLedger.prototype.assertFinalWireClock;
+ if(adverse==="wire_expiry")ProductionLedger.prototype.assertFinalWireClock=function(){
+  // Isolated test thread only. Delay the synchronous, post-sign wire clock itself.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2200);
+  return originalWireClock.call(this);
+ };
+ const transactionTimes:Array<{phase:string,checkoutBeginAccountLockMs:number,queries:Record<string,{count:number,ms:number}>}>=[];
+ if(second)ProductionLedger.prototype.transaction=function(this:ProductionLedger,body,options){
+  const start=performance.now();
+  return originalTransaction.call(this,async(tx,a)=>{
+   if(!stages.prepare_entry)return body(tx,a);
+   const item={phase:stages.dispatch?"final_dispatch":durations.prepare_entry?"claim":"prepare",
+    checkoutBeginAccountLockMs:Math.round(performance.now()-start),queries:{} as Record<string,{count:number,ms:number}>};
+   transactionTimes.push(item);
+   const port=tx as unknown as {query:(...args:unknown[])=>Promise<unknown>};
+   const original=port.query;
+   port.query=function(...args){
+    const sql=String(args[0]),k=sql.includes("fixture_dispatch_gate_contention")||sql.includes("pg_sleep(")?"injected_wait":
+     /FOR (?:UPDATE|SHARE)/i.test(sql)?"locking_sql":/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)?"write_sql":"read_sql";
+    const clock=performance.now(),result=original.apply(this,args);
+    if(result&&typeof result.then==="function"){
+     const done=()=>{const v=item.queries[k]??={count:0,ms:0};v.count++;v.ms+=performance.now()-clock;};
+     void result.then(done,done);
+    }
+    return result;
+   };
+   try{return await body(tx,a);}finally{port.query=original;}
+  },options);
+ } as typeof originalTransaction;
+ const gateTimes:Array<{phase:string,ms:number}>=[];
+ if(profiled){
+  if(second)AccountScopedExchange.prototype.market=async function(...args){
+   if(stages.final_preparation)await pause(234);
+   return originalMarket.apply(this,args);
+  };
+  const proof=originalProof;
+  if(adverse==="duplicate_latency"||second){
+   let injected=false;
+   ProductionExecutor.prototype.gate=async function(...args){
+    const at=Date.now(),phase=stages.final_preparation?"final":stages.dispatch?"dispatch":"prepare";
+    const padPrepare=Boolean(stages.prepare_entry)&&!injected;
+    if(padPrepare)injected=true;
+    if(second&&phase==="dispatch"&&providerAt)await pad(at,465);
+    const dbAt=Date.now();
+    const result=await originalGate.apply(this,args);
+    const sqlMs=Date.now()-dbAt;
+    if(padPrepare)await pad(at,second?762:1918);
+    if(second&&stages.prepare_entry){borders[phase+"GateSqlMs"]=(borders[phase+"GateSqlMs"]??0)+sqlMs;}
+    if(second&&phase==="final"&&!finalGateFinished&&providerAt){
+     // Place the unresolved portion before the private read, at the measured boundary.
+     if(adverse==="yes_1523_lock"){
+      const contender=await setup.connect();await contender.query("BEGIN");
+      try{
+       await contender.query("SELECT id FROM public.fixture_dispatch_gate_contention WHERE id=1 FOR UPDATE");
+       const start=Date.now(),release=pause(1030).then(()=>contender.query("COMMIT"));
+       try{await args[0].query("SELECT id FROM public.fixture_dispatch_gate_contention WHERE id=1 FOR UPDATE");}
+       finally{await release;}
+       borders.injectedRowLockMs=Date.now()-start;
+      }finally{contender.release();}
+     }else if(adverse==="yes_1523_db"||adverse==="yes_1523_plan"||adverse==="yes_1523_work"){
+      const from=Date.now(),remaining=adverse==="yes_1523_work"?1030:Math.max(0,providerAt+4413-from);
+      await args[0].query('SELECT pg_sleep($1)',[remaining/1000]);
+      borders.injectedConnectionWaitMs=Date.now()-from;
+     }else await pad(providerAt,4413);
+     finalGateFinished=Date.now();
+    }
+    if(stages.prepare_entry)gateTimes.push({phase,ms:Date.now()-at});return result;
+   };
+  }
+  ProductionLedger.prototype.finalAccountProof=async function(...args){
+   if(stages.final_preparation)borders.proofStart??=Date.now();
+   await proof.apply(this,args);
+   if(stages.final_preparation)borders.proofEnd??=Date.now();
+   // Unattributed serial work from the observed aggregate, outside either overlapping read.
+   if(stages.final_preparation)await pause(second?60:465);
+  };
+  const original=ProductionExecutor.prototype.startTiming;
+  ProductionExecutor.prototype.startTiming=function(stage,context){
+   const done=original.call(this,stage,context),start=Date.now();stages[stage]=start;
+   return (outcome,details)=>{durations[stage]=Date.now()-start; if(details?.error instanceof Error)recordedFailure=details.error.message; done(outcome,details);};
+  };
+ }
+ const pad=async(start:number,ms:number)=>{if(start)await pause(Math.max(0,start+ms-Date.now()));};
+
  const setup=new NativePool({connectionString:url!,max:2});
+ if(adverse==="revoked")ProductionExecutor.prototype.dispatch=async function(id){
+  await setup.query("UPDATE private.strata_durable_owner_fee_state SET entry_revoked=true");
+  return originalDispatch.call(this,id);
+ };
  const controls:PersonalSessionControl[]=[];let control:PersonalSessionControl|undefined;
- const at=Date.now();let btc=99990,cash=0,qty=0,reads=0;
+ const at=Date.now();let btc=profiled&&!second?100010:99990,cash=0,qty=0,reads=0;
  let priceRefusal=priceRetry,entryBookReads=0;
  const ticker=request.market, orders:Record<string,unknown>[]=[],fills:Record<string,unknown>[]=[];
  const submitted:Array<{id:string;reduce:boolean;count:number}>=[],httpErrors:string[]=[];
@@ -420,11 +524,14 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   const u=new URL(typeof input==='string'?input:input instanceof URL?input.href:input.url);
   const path=u.pathname,method=init?.method??'GET';
   if(u.origin==='https://api.exchange.coinbase.com'&&method==='GET'){
-   reads++;return respond({price:String(btc),time:new Date().toISOString()});
+   reads++;const stamp=Date.now()-(profiled?(second?1348:1449):0);
+   if(second&&btc>100000&&!providerAt)providerAt=stamp;
+   return respond({price:String(btc),time:new Date(stamp).toISOString()});
   }
   try{
    assert.equal(u.origin,'https://external-api.kalshi.com');
    if(method==='POST'){
+    if(profiled){mockWireCalls++;transportReached=Date.now();assert.equal(JSON.parse(String(init?.body)).side,second?'bid':'ask');assert.equal(JSON.parse(String(init?.body)).price,'0.5000');return respond({},503);}
     assert.equal(path,'/trade-api/v2/portfolio/events/orders');
     const h=new Headers(init?.headers),ts=h.get('KALSHI-ACCESS-TIMESTAMP')!;
     assert.equal(h.get('KALSHI-ACCESS-KEY'),material.keyId);
@@ -447,6 +554,25 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
     return respond({order_id:id,client_order_id:b.client_order_id,fill_count:b.count,remaining_count:'0.00',ts_ms:Date.now()},201);
    }
    assert.equal(method,'GET');
+   if(second&&stages.final_signed_snapshot&&path.endsWith('/portfolio/balance'))borders.privateBalanceStart??=Date.now();
+   if(profiled&&stages.prepare_entry){
+    if(path.endsWith('/series/fee_changes')){
+
+     const start=Date.now();
+     // FINAL prefetch may start inside the durable claim, before the dispatch timer.
+     const began=performance.now(),minimum=second?(durations.prepare_entry?1124:493):665;
+     const wireFeeDeadline=adverse==="wire_fee_deadline"&&Boolean(durations.prepare_entry)&&
+       feeReads.some(r=>r.start>=stages.prepare_entry!+durations.prepare_entry!);
+     const deadline=began+(wireFeeDeadline?3000:minimum);
+     while(performance.now()<deadline)await pause(Math.ceil(deadline-performance.now()));
+     feeReads.push({start,end:Date.now(),elapsedMs:performance.now()-began});
+    }
+    if(path.endsWith('/orderbook')&&!stages.dispatch)await pad(stages.prepare_entry,second?493:927);
+    if(path.endsWith('/portfolio/settlements')&&stages.final_signed_snapshot){
+     await pad(stages.final_signed_snapshot,second?1421:866);
+     if(second)borders.privateHistoryEnd??=Date.now();
+    }
+   }
    const o=held.snapshot.orders[0]!,f=held.snapshot.fills[0]!;
    if(path==='/trade-api/v2/portfolio/balance')return respond({balance_dollars:(cash/1000000).toFixed(6),subaccount:1,exchange_index:2});
    if(path.includes('/historical/'))return respond({orders:[],fills:[],cursor:''});
@@ -462,7 +588,7 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
    if(path==='/trade-api/v2/portfolio/settlements')return respond({settlements:[held.rawSettlement],cursor:''});
    if(path.endsWith('/orderbook')){entryBookReads++;const noBid=priceRefusal&&entryBookReads>1?'0.4800':'0.5000';const resp=respond({orderbook_fp:{yes_dollars:[['0.5000','100.00']],no_dollars:[[noBid,'100.00']]}});Object.defineProperty(resp,'url',{value:u.href});return resp;}
    if(path==='/trade-api/v2/markets')return respond({markets:[market],cursor:''});
-   if(path==='/trade-api/v2/markets/'+successor)return respond({market});
+   if(path==='/trade-api/v2/markets/'+successor)return respond({market:adverse==='mismatch'&&durations.prepare_entry?{...market,ticker:successor+'-OTHER'}:market});
    if(path==='/trade-api/v2/series/KXBTC15M')return respond({series:{ticker:'KXBTC15M',exchange_index:2,fee_type:'quadratic',fee_multiplier:'1'}});
    if(path==='/trade-api/v2/events/'+market.event_ticker)return respond({event:{event_ticker:market.event_ticker,series_ticker:'KXBTC15M',exchange_index:2,fee_type_override:null,fee_multiplier_override:null}});
    if(path==='/trade-api/v2/series/fee_changes')return respond({series_fee_change_arr:[],cursor:''});
@@ -471,6 +597,8 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   }catch(e){httpErrors.push(String(e));throw e;}
  };
  try{
+  // The process coordinator captured fetch at module import, before installation of the fixture HTTP port.
+  if(replay==='candidate')Object.defineProperty(processCommittedPublicMetadata,'fetchImpl',{value:globalThis.fetch});
   const admin=await setup.connect();try{await installFullRecoverySchema(admin);}finally{admin.release();}
   await setup.query("CREATE TABLE vault.decrypted_secrets(id uuid PRIMARY KEY REFERENCES vault.secrets(id),decrypted_secret text NOT NULL)");
   await installCombinedPlatformShape(setup);
@@ -493,19 +621,82 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   await reset(fee.reviewCandidateDigest,setup);
   await setup.query("UPDATE public.strata_configured_stake SET configured_stake_cents=500,risk_capital_cents=2500 WHERE execution_account_id=$1",[account]);
   await setup.query("UPDATE public.v13_live_money_policy SET entry_policy_version=$2 WHERE id=$1",[policy,V13_ENTRY_POLICY_VERSION]);
+  const modelId='99999999-9999-4999-8999-999999999999';
+  if(durable){
+   process.env.STRATA_DURABLE_OWNER_FEE_ENABLED='true';process.env.STRATA_DURABLE_HISTORICAL_BASELINE_ENABLED='true';
+   await setup.query("UPDATE public.v13_production_account SET fee_artifact_digest=$1 WHERE id=$2",[HISTORICAL_BASELINE_SHA256,account]);
+   await setup.query("UPDATE public.v13_live_money_policy SET fee_policy_version=$1,fee_source_url=$2,fee_formula_version=$3 WHERE id=$4",[HISTORICAL_FEE_VERSION,'strata-durable-owner-fee://'+modelId,'standard-quadratic-0.07-v1',policy]);
+  }
   policyHash=computeV13LiveMoneyPolicyHash(decodePolicy((await setup.query("SELECT * FROM public.v13_live_money_policy WHERE id=$1",[policy])).rows[0]));
   await setup.query("UPDATE public.v13_live_money_policy SET policy_hash=$2 WHERE id=$1",[policy,policyHash]);
+  if(durable){
+ await setup.query(`CREATE SCHEMA IF NOT EXISTS private;
+ CREATE TABLE private.strata_durable_owner_fee_model(model_id uuid,owner_user_id uuid,execution_account_id text,release_commit_sha text,approved_policy_hash text,official_source_digest text,policy_version text,formula_version text,effective_date date,source_kind text,genuine_source_verified boolean,source_capture_id bigint,historical_baseline_id text);
+ CREATE TABLE private.strata_durable_owner_fee_state(model_id uuid,known_publication_change boolean,monitor_state text,entry_revoked boolean);
+ CREATE TABLE private.strata_durable_historical_baseline(baseline_id text,original_bytes bytea,content_sha256 text);
+ CREATE TABLE private.strata_durable_fee_release_authorization(model_id uuid,owner_user_id uuid,execution_account_id text,original_release_sha text,release_commit_sha text,policy_hash text,source_digest text,state text);`);
+ await setup.query('INSERT INTO private.strata_durable_owner_fee_model VALUES($1,$2,$3,$4,$5,$6,$7,$8,\'2026-07-07\',$9,false,NULL,$10)',[modelId,owner,account,sha,policyHash,HISTORICAL_BASELINE_SHA256,HISTORICAL_FEE_VERSION,'standard-quadratic-0.07-v1',HISTORICAL_SOURCE_KIND,HISTORICAL_BASELINE_ID]);
+ await setup.query("INSERT INTO private.strata_durable_owner_fee_state VALUES($1,false,'never_checked',false)",[modelId]);
+ await setup.query('INSERT INTO private.strata_durable_historical_baseline VALUES($1,$2,$3)',[HISTORICAL_BASELINE_ID,readFileSync('../../attached_assets/0_kalshi-fee-schedule_1790474920034.pdf'),HISTORICAL_BASELINE_SHA256]);
+  }
   await seedCombinedStanding(setup,{owner,reviewer,grant,account,policyHash,sha});
   const retired=await recordEconomicRehearsalReceipt(setup,held);
+  if(adverse==="yes_1523_lock")await setup.query("CREATE TABLE public.fixture_dispatch_gate_contention(id int PRIMARY KEY); INSERT INTO public.fixture_dispatch_gate_contention VALUES(1)");
+  if(replay==="candidate"&&(adverse==="yes_1523_plan"||adverse==="yes_1523_work"||adverse==="yes_1523_lock")){
+   const key=(await setup.query("SELECT client_order_id FROM private.strata_economic_exit_discharge WHERE execution_account_id=$1",[account])).rows[0].client_order_id;
+   const probe=async()=>{const values=[];for(let i=0;i<8;i++){
+    const start=performance.now();const r=await setup.query("SELECT private.strata_has_economic_exit_discharge($1,$2) AS ok",[account,key]);assert.equal(r.rows[0].ok,true);values.push(performance.now()-start);
+   }return values;};
+   const before=await probe();
+   const definition=async()=>(await setup.query("SELECT prosrc,prosecdef,proacl::text FROM pg_proc WHERE oid='private.strata_has_economic_exit_discharge(text,text)'::regprocedure")).rows[0];
+   const original=await definition();
+   const wrong=async()=>(await setup.query("SELECT private.strata_has_economic_exit_discharge($1,$2) AS ok",[account,key+'-other'])).rows[0].ok;
+   assert.equal(await wrong(),false);
+   await setup.query(readFileSync('../../supabase/migrations/20261127154500_economic_discharge_join_order.sql','utf8'));
+   assert.deepEqual(await definition(),original);assert.equal(await wrong(),false);
+   const after=await probe();console.log("DISCHARGE_PLAN",JSON.stringify({before,after}));
+  }else if(replay==="candidate"){
+   await setup.query(readFileSync('../../supabase/migrations/20261127154500_economic_discharge_join_order.sql','utf8'));
+  }
   cash=Number(held.snapshot.cashMicros);
-  control=createProductionPersonalSession(db);controls.push(control);
+  control=createProductionPersonalSession(db,replay?{overlapFinalAccountSnapshot:replay==='candidate'||replay==='overlap',finalPublicMetadataPrefetch:replay==='candidate'||replay==='final_only'}:{});controls.push(control);
   const started=await control.start({userId:owner,accountId:account,action:'START'});
   assert.equal(started.workerStarted,true,JSON.stringify({started,httpErrors}));
   const describe=async()=>({submitted,httpErrors,cash,qty,reads,
    account:(await setup.query("SELECT blocked_reason,cash_micros,reserved_micros FROM public.v13_production_account WHERE id=$1",[account])).rows,
    decisions:(await setup.query("SELECT stage,outcome,reason_code FROM private.strata_live_decision_log_v1 WHERE execution_account_id=$1 ORDER BY observed_at DESC LIMIT 8",[account])).rows,
    intents:(await setup.query('SELECT state,kind FROM public.v13_production_intent WHERE account_id=$1',[account])).rows});
-  await until(async()=>reads>=1,describe);await pause(250);entryBookReads=0;btc=100020;
+  await until(async()=>reads>=1,describe);await pause(250);entryBookReads=0;btc=profiled&&!second?99980:100020;
+  if(profiled){
+   await until(async()=>Boolean(transportReached)||Boolean(recordedFailure)||(await setup.query("SELECT 1 FROM v13_production_intent WHERE account_id=$1 AND market=$2 AND state='BLOCKED'",[account,successor])).rowCount===1,describe);
+   const row=(await setup.query("SELECT oldest_source_at FROM strata_direct_entry_source WHERE account_id=$1 AND market_ticker=$2",[account,successor])).rows[0];
+   const oldest=new Date(row.oldest_source_at).getTime();
+   const expectedWire=(replay==="overlap"||replay==="candidate")&&!adverse||second&&replay==="candidate";
+   await until(async()=>(await setup.query("SELECT 1 FROM v13_production_intent WHERE account_id=$1 AND market=$2 AND state=$3",[account,successor,expectedWire?'UNKNOWN':'BLOCKED'])).rowCount===1,describe);
+   await pause(expectedWire?1200:200);
+   const intentState=(await setup.query("SELECT state FROM v13_production_intent WHERE account_id=$1 AND market=$2",[account,successor])).rows.map(r=>r.state);
+   console.log('DISPATCH_PROFILE',JSON.stringify({replay,durable,adverse,...(second?{feeReads:feeReads.filter(r=>!transportReached||r.start<=transportReached).map(r=>({start:r.start-oldest,end:r.end-oldest})),gateTimes,transactionTimes:transactionTimes.map(t=>({...t,queries:Object.fromEntries(Object.entries(t.queries).map(([k,x])=>[k,{count:x.count,ms:Math.round(x.ms)}]))})),boundaries:Object.fromEntries(Object.entries(borders).map(([k,v])=>[k,k.endsWith("Ms")?v:v-oldest]))}:{}),mockWireCalls,intentState,recordedFailure,durations,at:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,v-oldest])),wireAge:transportReached?transportReached-oldest:null,mockHttpErrors:httpErrors.length}));
+   if(second&&replay==="candidate"){
+    const postPrepare=feeReads.filter(r=>r.start>=stages.prepare_entry!+durations.prepare_entry!&&r.start<=transportReached);
+    assert.equal(postPrepare.length,2,'one independent raw FINAL and one raw WIRE fee GET');
+    assert.ok(postPrepare.every(r=>r.elapsedMs>=1124),'both raw reads incurred the measured provider latency');
+    assert.ok(postPrepare[1]!.start>=postPrepare[0]!.end,'WIRE started after its distinct FINAL capture');
+   }
+   if(adverse==="wire_fee_deadline"){
+    const receipt=await setup.query(`SELECT o.kind,o.payload->>'reason' AS reason,i.terminal,i.reserved_micros
+      FROM v13_production_intent i JOIN v13_production_observation o ON o.account_id=i.account_id AND o.payload->>'id'=i.id
+      WHERE i.account_id=$1 AND i.market=$2 AND o.kind IN ('PROVEN_NOT_POSTED','POST_UNCERTAIN')`,[account,successor]);
+    assert.deepEqual(receipt.rows,[{kind:'PROVEN_NOT_POSTED',reason:'durable_fee_final_fresh_model_unverified',terminal:true,reserved_micros:'0'}]);
+   }
+   assert.equal(httpErrors.length,0);assert.equal(mockWireCalls,expectedWire?1:0);
+   if(expectedWire){
+    assert.deepEqual(intentState,['UNKNOWN']);assert.ok(transportReached-oldest<=5000&&transportReached>=oldest);
+   }else{
+    assert.deepEqual(intentState,['BLOCKED']);
+    assert.match(recordedFailure,/expired|stale|unavailable|unverified|mismatch|market/);
+   }
+   return;
+  }
   if(priceRetry){
    await until(async()=>(await setup.query('SELECT count(*)::int n FROM private.strata_direct_price_refusal WHERE account_id=$1',[account])).rows[0].n===1,describe);
    assert.equal(submitted.length,0,'rejected price must create no order');
@@ -559,7 +750,17 @@ export async function runEconomicDischargeFullCycle(priceRetry=false){
   assert.deepEqual((await setup.query("SELECT i.state,m.state AS marker FROM public.v13_production_intent i JOIN private.strata_emergency_exit_reservations m USING(client_order_id) WHERE i.id=$1",[retired])).rows,[{state:'DISPATCHED',marker:'UNKNOWN'}]);
  }finally{
   try{for(const c of controls)await c.stop({userId:owner,accountId:account,action:'KILL'});}
-  finally{try{await pool.end();}finally{await setup.end();}}
+  finally{
+   ProductionLedger.prototype.assertFinalWireClock=originalWireClock;
+   ProductionLedger.prototype.transaction=originalTransaction;
+   ProductionExecutor.prototype.dispatch=originalDispatch;
+   AccountScopedExchange.prototype.market=originalMarket;
+   ProductionExecutor.prototype.startTiming=originalTiming;
+   ProductionExecutor.prototype.gate=originalGate;
+   ProductionLedger.prototype.finalAccountProof=originalProof;
+   if(replay==='candidate')Object.defineProperty(processCommittedPublicMetadata,'fetchImpl',fetchDescriptor);
+   try{await pool.end();}finally{await setup.end();}
+  }
  }
 }
 

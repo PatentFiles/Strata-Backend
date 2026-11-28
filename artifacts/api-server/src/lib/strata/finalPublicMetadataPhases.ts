@@ -1,7 +1,7 @@
 import {bindDurablePhaseMetadata} from './durablePhaseMetadata';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {CommittedPublicMetadataCoordinator,type MetadataPrefetchScope,type PreparedMetadataSource,type PrefetchedPublicMetadata,type PhaseMetadataAttempt} from './committedPublicMetadata';
-export type FinalPublicMetadataContext=Readonly<{intentId:string;invocation:symbol;source:PreparedMetadataSource}>;
+export type FinalPublicMetadataContext=Readonly<{intentId:string;invocation:symbol;source:PreparedMetadataSource;policyHash?:string}>;
 export interface FinalPublicMetadataHooks {
  dispatch?<T>(intentId:string,invocation:symbol,operation:()=>Promise<T>):Promise<T>;
  start(phase:'FINAL_MARKET'|'WIRE_FEE',context:FinalPublicMetadataContext):void;
@@ -27,7 +27,9 @@ export class FinalPublicMetadataPhases implements FinalPublicMetadataHooks {
   try {
    if(!this.allowed()||this.attempts.has(context.intentId)||this.attempts.size)return;
    if(phase==='FINAL_MARKET')this.releasePrepare();
-   const attempt=this.coordinator.startPhase(this.scope(),context.source,{phase,intentId:context.intentId});
+   const scope=this.scope();
+   if(context.policyHash!==undefined&&scope.policyHash!==context.policyHash)return;
+   const attempt=this.coordinator.startPhase(scope,context.source,{phase,intentId:context.intentId});
    if(attempt)this.attempts.set(context.intentId,{context:Object.freeze({intentId:context.intentId,invocation:context.invocation,source:Object.freeze({...context.source})}),phase,attempt});
   }catch{/* An unstarted advisory attempt leaves the original fresh path. */}
  }

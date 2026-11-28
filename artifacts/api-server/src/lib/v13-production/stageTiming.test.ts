@@ -66,3 +66,20 @@ test("observer code cannot run between final wire clock check and raw send",asyn
  },raw),()=>{sentAt=now;assert.equal(observations,0);return Promise.resolve(new Response())},observer,context);
  await measured(url,init);assert.equal(sentAt,4999);assert.ok(observations>0);
 });
+
+test("post-claim original source age belongs only to that direct refusal",async()=>{
+ const events:StageTiming[]=[];
+ const observe:TimingObserver=event=>{events.push(event);};
+ const refusal=Error("direct_entry_original_source_expired");
+ const record=(age:number,error=refusal)=>beginExecutionStage(observe,"dispatch",context)(
+   "proven_not_posted",{error,preFinalOriginalSourceAgeMs:age});
+ record(5017);
+ for(const invalid of [-1,NaN,Infinity,2.5,Number.MAX_SAFE_INTEGER+1])record(invalid);
+ record(5017,Error("production_final_source_changed_or_expired"));
+ beginExecutionStage(observe,"dispatch",context)("post_uncertain",{error:refusal,preFinalOriginalSourceAgeMs:5017});
+ beginExecutionStage(observe,"evaluation_age_admission",context)("rejected",{error:refusal,sourceAgeMs:2250,preFinalOriginalSourceAgeMs:5017});
+ await Promise.resolve();
+ assert.equal(events[0]?.preFinalOriginalSourceAgeMs,5017);
+ assert.ok(events.slice(1).every(event=>event.preFinalOriginalSourceAgeMs===undefined));
+ assert.equal(events.at(-1)?.sourceAgeMs,2250);
+});

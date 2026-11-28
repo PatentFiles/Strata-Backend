@@ -13,7 +13,7 @@ const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
 const error=(reason="entry_metadata_prefetch_unavailable")=>new Error(reason);
 const freeze=(value:unknown)=>{const pending=[value];while(pending.length){const v=pending.pop();if(v&&typeof v==="object"){pending.push(...Object.values(v));Object.freeze(v);}}};
 export type MetadataPrefetchScope=Readonly<{accountId:string;ownerId:string;releaseSha:string;holderId:string;fence:string;policyHash:string}>;
-export type PreparedMetadataSource=Readonly<{evaluationId:string;marketTicker:string;evaluatedAtMs:number;btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number}>;
+export type PreparedMetadataSource=Readonly<{directSourceSha256?:string;directOldestMs?:number;evaluationId:string;marketTicker:string;evaluatedAtMs:number;btcProviderAgeMs:number;btcReceiveAgeMs:number;marketAgeMs:number}>;
 export type PrefetchedPublicMetadata=Readonly<{read:(path:string)=>Promise<Body>;capture:()=>MetadataCaptureManifest}>;
 // Process-local provenance only: callers cannot forge source clocks or serialize a capability.
 const prepareClocks=new WeakMap<PrefetchedPublicMetadata,{scope:MetadataPrefetchScope;ticker:string;startedAtMs:number;fresh:()=>boolean}>();
@@ -116,7 +116,13 @@ export class CommittedPublicMetadataCoordinator {
         committed.evaluatedAtMs>committed.committedAtMs||committed.committedAtMs>at)return null;
     }
     // Conservative budget only. All existing policy/source/price clocks still run.
-    const expires=hintInput.evaluatedAtMs+5_000-Math.max(...ages);
+    let expires=hintInput.evaluatedAtMs+5_000-Math.max(...ages);
+    const oldest=hintInput.directOldestMs;
+    if(oldest!==undefined||hintInput.directSourceSha256!==undefined){
+      if(phaseInput||typeof oldest!=='number'||!Number.isSafeInteger(oldest)||oldest<0||
+        oldest>hintInput.evaluatedAtMs||!/^[a-f0-9]{64}$/.test(hintInput.directSourceSha256??''))return null;
+      expires=Math.min(expires,oldest+5_000);
+    }
     const key=JSON.stringify(phaseInput?[scopeInput.accountId,hintInput.evaluationId,phaseInput.phase,phaseInput.intentId]:[scopeInput.accountId,hintInput.evaluationId]);
     if(expires<=at||this.accounts.has(scopeInput.accountId)||this.accounts.size>=this.limits.accounts||
       this.seen.has(key)||this.seen.size>=this.limits.seen)return null;
@@ -205,6 +211,7 @@ export class CommittedPublicMetadataCoordinator {
         if(consumed)throw error("entry_metadata_prefetch_already_consumed");consumed=true;
         if((phase?(expectedPhase?.phase!==phase.phase||expectedPhase?.intentId!==phase.intentId):expectedPhase!==undefined)||
           Object.keys(scope).some(k=>scope[k as keyof MetadataPrefetchScope]!==expectedScope[k as keyof MetadataPrefetchScope])||
+          source.directSourceSha256!==hint.directSourceSha256||source.directOldestMs!==hint.directOldestMs||
           source.evaluationId!==hint.evaluationId||source.marketTicker!==hint.marketTicker||source.evaluatedAtMs!==hint.evaluatedAtMs||
           source.btcProviderAgeMs!==hint.btcProviderAgeMs||source.btcReceiveAgeMs!==hint.btcReceiveAgeMs||source.marketAgeMs!==hint.marketAgeMs){
           discard("entry_metadata_scope_changed");
