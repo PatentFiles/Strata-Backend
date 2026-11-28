@@ -28,9 +28,20 @@ const schema=`CREATE SCHEMA auth;CREATE SCHEMA private;
   state text,arm_requested boolean,fencing_token bigint,heartbeat_at timestamptz);
  CREATE TABLE public.v13_production_observation(id uuid PRIMARY KEY,account_id text,kind text,payload jsonb,digest text);`;
 
-async function seed(){
+async function seed(result:'NO_WINS'|'NO_LOSES'='NO_WINS'){
  await pool.query('TRUNCATE public.v13_production_account,auth.users CASCADE');
  const f=economicSettlementFixture(Date.now()),a=f.account;
+ if(result==='NO_LOSES'){
+  // Exact incident-shaped outcome: three NO entry fills, market settles YES,
+  // no payout. Only a signed settlement could authorize these changes.
+  // This is a synthetic fixture; no production order or cash is accessed.
+  f.snapshot.settlements[0]!.result='YES';
+  f.snapshot.settlements[0]!.payoutMicros='0';
+  f.snapshot.cashMicros=a.cash_micros;
+  f.rawSettlement.market_result='yes';
+  f.rawSettlement.revenue=0;
+  f.rawPosition.realized_pnl_dollars='-1.522500';
+ }
  await pool.query('INSERT INTO auth.users VALUES($1)',[a.owner_user_id]);
  await pool.query(`INSERT INTO public.v13_production_account(id,owner_user_id,subaccount,exchange_index,key_fingerprint,revision,cash_micros,reserved_micros,initial_cash_micros)
   VALUES($1,$2,1,2,$3,$4,$5,$6,$7)`,[a.id,a.owner_user_id,a.key_fingerprint,a.revision,a.cash_micros,a.reserved_micros,a.initial_cash_micros]);
@@ -71,6 +82,31 @@ test('native accounting transaction, retained UNKNOWN, idempotency and failure q
    for(const role of ['anon','authenticated','strata_paper_runtime'])for(const action of ['SELECT','INSERT','UPDATE','DELETE'])assert.equal((await pool.query('SELECT has_table_privilege($1,$2,$3) allowed',[role,'private.strata_economic_settlement_receipt',action])).rows[0].allowed,false);
    assert.equal((await pool.query("SELECT has_table_privilege('strata_api_runtime','private.strata_economic_settlement_receipt','INSERT') allowed")).rows[0].allowed,true);
    assert.equal((await economicSettlementOutcome('99999999-9999-4999-8999-999999999999',scope.requestId,pool)).ok,false);
+  });
+  await t.test('losing NO on YES result books zero payout and negative after-fee P&L once; UNKNOWN exit and reserve remain',async()=>{
+   const {f,proof,scope}=await seed('NO_LOSES');
+   const plan=economicSettlementPlan(proof);
+   assert.equal(plan.cashDeltaMicros,'0');
+   assert.equal(plan.pnlMicros,'-1522500');
+   const r=await commitEconomicSettlement(proof,scope,{db:pool,verifyLocked:locked});
+   assert.equal(r.ok,true,JSON.stringify(r));
+   assert.equal(r.accountingPosted,true);
+   const a=(await pool.query('SELECT cash_micros::text, reserved_micros::text, revision::text FROM public.v13_production_account')).rows[0]!;
+   assert.equal(a.cash_micros,f.account.cash_micros,'zero-payout settlement must not credit account cash');
+   assert.equal(a.reserved_micros,'3000000','settlement booking is not a reserve-discharge authority');
+   assert.equal(a.revision,'18');
+   const event=(await pool.query("SELECT cash_delta_micros::text, pnl_micros::text FROM public.v13_production_event WHERE kind='SETTLEMENT'")).rows;
+   assert.deepEqual(event,[{cash_delta_micros:'0',pnl_micros:'-1522500'}]);
+   const position=(await pool.query('SELECT quantity_hundredths::text, basis_micros::text, realized_pnl_micros::text FROM public.v13_production_position')).rows[0]!;
+   assert.deepEqual(position,{quantity_hundredths:'0',basis_micros:'0',realized_pnl_micros:'-1522500'});
+   const exit=(await pool.query('SELECT state,terminal,exchange_order_id FROM public.v13_production_intent WHERE id=$1',[f.exitId])).rows[0]!;
+   assert.deepEqual(exit,{state:'DISPATCHED',terminal:false,exchange_order_id:null});
+   const reservation=(await pool.query('SELECT state,trading_authorized FROM private.strata_emergency_exit_reservations')).rows[0]!;
+   assert.deepEqual(reservation,{state:'UNKNOWN',trading_authorized:false});
+   assert.equal((await economicSettlementOutcome(scope.ownerId,scope.requestId,pool)).ok,true);
+   const replay=await commitEconomicSettlement(proof,scope,{db:pool,verifyLocked:locked});
+   assert.equal(replay.ok,false,'same settlement cannot be credited or recorded twice');
+   assert.equal((await pool.query("SELECT count(*)::int AS n FROM public.v13_production_event WHERE kind='SETTLEMENT'")).rows[0].n,1);
   });
   await t.test('receipt scope refusal rolls back event, position, account and observation together',async()=>{
    const {f,proof,scope}=await seed();const r=await commitEconomicSettlement(proof,{...scope,workerFence:'62'},{db:pool,verifyLocked:locked});assert.equal(r.ok,false);await unchanged(f);
